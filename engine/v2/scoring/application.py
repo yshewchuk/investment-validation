@@ -469,6 +469,80 @@ def _frozen_role_outputs(binding) -> frozenset[str]:
     return frozenset(outputs)
 
 
+def _gate_forecast_producer_ids(gate) -> frozenset[str]:
+    """The release binding ids a gate names as its derived-forecast producer.
+
+    Legacy ``Scorer._forecast_for_gate`` serves a size fold purely to fill the
+    gate's ``pred_abs_move`` feature columns -- it never writes the row's
+    ``result.forecast_abs_move``. The native mirror of that fold lives on the
+    gate block, not the forecast block: the packaged source path resolves it
+    into ``gate.forecast_executor`` (``source_inputs._gate_forecast_members``
+    pops the ``forecast`` recipe away), while a strict trace keeps the JSON
+    ``gate.forecast`` reference and defers resolution to
+    ``checks/phase4_frozen_bridge.with_frozen_gate_forecast``. Reading both
+    shapes from the source-owned ``base.gate`` is what tells a size producer
+    that ONLY the gate asked for it apart from one the score also declared.
+    """
+    if not isinstance(gate, Mapping):
+        return frozenset()
+    ids = set()
+    forecast = gate.get("forecast")
+    if isinstance(forecast, Mapping) and forecast.get("binding_id"):
+        ids.add(str(forecast["binding_id"]))
+    executor = gate.get("forecast_executor")
+    executor_id = getattr(executor, "binding_id", None)
+    if executor is not None and executor_id:
+        ids.add(str(executor_id))
+    return frozenset(ids)
+
+
+def _declares_top_level_size(forecast) -> bool:
+    """Whether the source explicitly declared a top-level size forecast.
+
+    Two shapes declare it. A strict trace carries the union of every captured
+    forecast role in ``forecast.required_roles``; a ``SourceBundle`` carries no
+    ``required_roles`` at all, but ``_forecast_block`` refuses to build a
+    sizing strategy without an explicit ``forecast_abs_move`` producer, so the
+    presence of one in its ``executors`` (a frozen recipe) or ``models`` (an
+    inline recipe) is the declaration. When size is declared top-level a size
+    producer -- even the one the gate also reads -- is a real sizing forecast
+    and must stay in the score output; only an UNdeclared size producer,
+    referenced by nothing but the gate, is gate-only.
+    """
+    if not isinstance(forecast, Mapping):
+        return False
+    raw = forecast.get("required_roles") or ()
+    roles = (raw,) if isinstance(raw, str) else tuple(raw)
+    if any(str(role).split(":", 1)[0] == "size" for role in roles):
+        return True
+    for producers in (forecast.get("executors"), forecast.get("models")):
+        if isinstance(producers, Mapping) and "forecast_abs_move" in producers:
+            return True
+    return False
+
+
+def _gate_only_forecast_ids(gate, forecast, bindings) -> frozenset[str]:
+    """Size binding ids consumed by the gate alone, never by the score.
+
+    A size binding is gate-only exactly when the gate names it as a derived
+    forecast producer AND the top-level forecast does not itself declare a
+    size output. The release enforces one size binding per role, so a declared
+    top-level size is the same artifact the gate reads -- a producer shared by
+    gate and score -- and is preserved here rather than dropped.
+    """
+    producers = _gate_forecast_producer_ids(gate)
+    if not producers or _declares_top_level_size(forecast):
+        return frozenset()
+    ids = set()
+    for binding in bindings:
+        if str(getattr(binding, "role", "")).split(":", 1)[0] != "size":
+            continue
+        binding_id = str(getattr(binding, "binding_id", "") or "")
+        if binding_id and binding_id in producers:
+            ids.add(binding_id)
+    return frozenset(ids)
+
+
 def _without_frozen_recipes(base_forecast, bindings) -> dict[str, Any]:
     owned_forecast = _FROZEN_OUTPUTS | {
         "forecast_p10", "forecast_p90", "forecast_sd",
@@ -526,7 +600,8 @@ def _frozen_result_state(result, binding, inference_request, days):
     )
 
 
-def _collect_frozen_results(results, bindings, inference_requests, days):
+def _collect_frozen_results(results, bindings, inference_requests, days,
+                            gate_only_forecast=frozenset()):
     outputs = {}
     state = {}
     flags = []
@@ -539,13 +614,19 @@ def _collect_frozen_results(results, bindings, inference_requests, days):
         role_name, role_outputs, result_state, role_flags, hashes, current_gate = (
             _frozen_result_state(result, binding, inference_request, days)
         )
-        outputs.update(role_outputs)
+        # A gate-only size producer feeds the gate's ``pred_abs_move`` columns
+        # alone, never ``result.forecast_abs_move`` (legacy
+        # ``_forecast_for_gate``). Keep its provenance/refusal, hold the value
+        # and the ``size`` role out of the top-level score output.
+        if not _is_gate_only_size(binding, gate_only_forecast):
+            outputs.update(role_outputs)
+            if role_name in {"driver", "size", "implied_t1", "runup_move",
+                             "iv_crush"}:
+                required_roles.append(role_name)
         state.update(result_state)
         flags.extend(role_flags)
         flags.extend(getattr(result, "reason_codes", ()) or ())
         artifact_hashes.extend(hashes)
-        if role_name in {"driver", "size", "implied_t1", "runup_move", "iv_crush"}:
-            required_roles.append(role_name)
         if current_gate is not None:
             gate_result = current_gate
     return outputs, state, flags, artifact_hashes, required_roles, gate_result
@@ -638,6 +719,12 @@ def _captured_nonfinite_features(binding, features) -> tuple[str, ...]:
         if not isfinite(value):
             nonfinite.append(name)
     return tuple(nonfinite)
+
+
+def _is_gate_only_size(binding, gate_only_forecast) -> bool:
+    """Whether ``binding`` is one of the withheld gate-only size producers."""
+    return (str(getattr(binding, "role", "")).split(":", 1)[0] == "size"
+            and str(getattr(binding, "binding_id", "") or "") in gate_only_forecast)
 
 
 def _frozen_stage_executors(bindings, inference, release, days,
@@ -756,7 +843,8 @@ def _frozen_driver_name(base, strategy):
 
 def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
                             required_roles, results, inference, release, days,
-                            strategy, executor_bindings=None):
+                            strategy, executor_bindings=None,
+                            gate_only_forecast=frozenset()):
     # Recipe stripping keys on the FULL release bindings, not just the
     # requested ones: an output owned by any binding of the verified release
     # must never be served by a caller-declared local model recipe. Whether
@@ -783,8 +871,20 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
         "driver_name": _frozen_driver_name(base, strategy),
     })
     if inference is not None:
+        # A gate-only size producer never earns a canonical forecast executor:
+        # legacy ``_forecast_for_gate`` serves its fold to the gate's derived
+        # ``pred_abs_move`` columns alone, not to ``result.forecast_abs_move``.
+        # Filtering it here (rather than inside ``_frozen_stage_executors``)
+        # withholds BOTH its mapped executor and its omission refusal, while
+        # ``_without_frozen_recipes`` above still keys on the FULL release, so
+        # a caller-declared local ``forecast_abs_move`` recipe stays stripped.
+        executor_sources = [
+            binding for binding in (
+                bindings if executor_bindings is None else executor_bindings)
+            if not _is_gate_only_size(binding, gate_only_forecast)
+        ]
         executors, executor_owned = _frozen_stage_executors(
-            bindings if executor_bindings is None else executor_bindings,
+            executor_sources,
             inference, release, days,
             frozenset(getattr(item, "binding_id", None) for item in bindings),
             base.features,
@@ -857,6 +957,39 @@ def _frozen_release_id(results, release, request) -> str:
     return getattr(release, "release_id", request.deployment_id)
 
 
+def _frozen_native_blocks(base, fields, request) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The runup-stripped context/features blocks of ``_frozen_native_inputs``:
+    caller-supplied overrides folded over the source-owned blocks, every
+    runup-derived field dropped (the stages re-derive those)."""
+    context_names = ("ticker", "strategy", "event_date",
+                     "entry_date", "exit_date", "expiry",
+                     "spot", "session", "as_of")
+    context = {key: fields[key] for key in context_names if key in fields}
+    context.setdefault("strategy", request.strategy_version)
+    context = {key: value for key, value in {**base.context, **context}.items()
+               if key not in _RUNUP_DERIVED_FIELDS}
+    features = {key: value for key, value in base.features.items()
+                if key not in _RUNUP_DERIVED_FIELDS}
+    features.update({key: fields[key] for key in ("model_inputs", "implied_move", "spot", "pre_iv30")
+                     if key in fields})
+    return context, features
+
+
+def _frozen_gate_only_forecast(base, bindings, executor_bindings) -> frozenset[str]:
+    """Gate-only ownership, determined from the source-owned gate's producer
+    reference and the top-level forecast's explicit declaration BEFORE the
+    collected roles are folded back into the forecast block: a size binding
+    the gate reads for its ``pred_abs_move`` columns alone, but the score
+    never declared, must not surface as ``forecast_abs_move``. Computed over
+    the full executor bindings so an omitted (non-finite-row) gate-only fold
+    is withheld from the canonical executor registration too.
+    """
+    return _gate_only_forecast_ids(
+        base.gate, base.forecast,
+        bindings if executor_bindings is None else executor_bindings,
+    )
+
+
 def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
                           inference_requests, request, release,
                           inference=None, executor_bindings=None
@@ -889,23 +1022,14 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
             "explicitly) and pass it as fields['_native_inputs']"
         )
     base = supplied
-    context_names = ("ticker", "strategy", "event_date",
-                     "entry_date", "exit_date", "expiry",
-                     "spot", "session", "as_of")
-    context = {key: fields[key] for key in context_names if key in fields}
-    context.setdefault("strategy", request.strategy_version)
+    context, features = _frozen_native_blocks(base, fields, request)
     days = _runup_days(request, fields, base)
-    context = {key: value for key, value in {**base.context, **context}.items()
-               if key not in _RUNUP_DERIVED_FIELDS}
-    features = {key: value for key, value in base.features.items()
-                if key not in _RUNUP_DERIVED_FIELDS}
-    features.update({key: fields[key] for key in ("model_inputs", "implied_move", "spot", "pre_iv30")
-                     if key in fields})
     if days is not None:
         features["days_before_print"] = days
-    outputs = {}
+    gate_only_forecast = _frozen_gate_only_forecast(base, bindings, executor_bindings)
     outputs, result_state, flags, artifact_hashes, required_roles, gate_result = (
-        _collect_frozen_results(results, bindings, inference_requests, days)
+        _collect_frozen_results(results, bindings, inference_requests, days,
+                                gate_only_forecast)
     )
     context.update(result_state)
     frozen_interval = {
@@ -919,7 +1043,7 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     forecast = _frozen_forecast_inputs(
         base, bindings, outputs, artifact_hashes, required_roles,
         results, inference, release, days, context.get("strategy"),
-        executor_bindings,
+        executor_bindings, gate_only_forecast,
     )
     gate = _frozen_gate_inputs(
         base, bindings, gate_result, artifact_hashes, inference, release,
