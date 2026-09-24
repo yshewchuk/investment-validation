@@ -75,6 +75,8 @@ def status_of(code: int | None) -> str:
 # environment asks explicitly, or on the one CI shard whose stats step is known
 # to fail. It is read here, not inside sync_workdir, so the run command and the
 # CI job share one source of truth.
+# ops_catalog_state now shares that CI-only default: its clean/stats step
+# failed the same way in CI run 36025664817.
 def stats_debug_enabled(module: str, env: dict[str, str] | None = None) -> bool:
     """Should mutmut's debug (full-run verbosity) be on for this module's run?
 
@@ -83,10 +85,14 @@ def stats_debug_enabled(module: str, env: dict[str, str] | None = None) -> bool:
     explicit value it is on only for the ``ops_legacy`` shard under CI
     (``GITHUB_ACTIONS=true``), the one run whose clean/stats step is known to
     fail; every other CI shard and every local run stays quiet.
+    ``ops_catalog_state`` now shares that CI-only default.
     """
     source = os.environ if env is None else env
     if "MUTATION_PILOT_DEBUG" in source:
         return source["MUTATION_PILOT_DEBUG"].strip().lower() in ("1", "true", "yes", "on")
+    if (source.get("GITHUB_ACTIONS", "").strip().lower() == "true"
+            and module == "ops_catalog_state"):
+        return True
     return (source.get("GITHUB_ACTIONS", "").strip().lower() == "true"
             and module == "ops_legacy")
 
@@ -202,6 +208,7 @@ def mutmut_config_text(defaults: dict, mutate: list[str], tests: list[str],
     run, not just the clean/stats collection step. It is expensive, so it stays
     off unless ``stats_debug_enabled`` opts the run in (an explicit environment
     value, or the ops_legacy CI shard).
+    ops_catalog_state now shares that CI-only default.
     """
     def lines(key: str, values: list[str]) -> str:
         return f"{key} =\n" + "".join(f"    {v}\n" for v in values)
@@ -341,6 +348,8 @@ def cmd_run(cfg: dict, args) -> int:
     # echoes that swallowed pytest trace for the whole run; set
     # MUTATION_PILOT_DEBUG=1 anywhere else to do the same. Either way it is
     # verbosity, not a rerun: the exit code the job gates on is unchanged.
+    # ops_catalog_state now shares that CI-only default, so the same echo
+    # covers its shard too.
     env = os.environ.copy()
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):

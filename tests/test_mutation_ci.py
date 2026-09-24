@@ -347,6 +347,8 @@ def test_expand_is_ordered_and_refuses_dead_patterns():
 # mock tests: they never run mutmut or pytest; they check the config we hand
 # mutmut, that the environment and module name reach the generated ``setup.cfg``,
 # and that ``cmd_run`` keeps the real exit code without rerunning anything.
+# ops_catalog_state now shares that CI-only default; it is covered by separate
+# tests below so the ops_legacy ones above stay untouched.
 
 DIAG_DEFAULTS = {"pytest_args": ["-p", "no:xdist", "-p", "no:cacheprovider"],
                  "deselect": ["tests/test_a.py::gate_needs_git"],
@@ -381,6 +383,29 @@ def test_stats_debug_defaults_on_only_for_ops_legacy_in_ci(monkeypatch):
     assert not pilot.stats_debug_enabled("ops_legacy")
     monkeypatch.setenv("GITHUB_ACTIONS", "false")
     assert not pilot.stats_debug_enabled("ops_legacy")
+
+
+def test_stats_debug_defaults_on_for_ops_catalog_state_in_ci(monkeypatch):
+    monkeypatch.delenv("MUTATION_PILOT_DEBUG", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert pilot.stats_debug_enabled("ops_catalog_state")
+    # an unrelated shard stays quiet even under CI
+    assert not pilot.stats_debug_enabled("pnl_sim")
+    # and ops_catalog_state itself is quiet in every local run
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert not pilot.stats_debug_enabled("ops_catalog_state")
+    monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    assert not pilot.stats_debug_enabled("ops_catalog_state")
+
+
+def test_stats_debug_explicit_off_beats_the_ops_catalog_state_ci_default(monkeypatch):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    for off in ("", "0", "false", "off"):
+        monkeypatch.setenv("MUTATION_PILOT_DEBUG", off)
+        assert not pilot.stats_debug_enabled("ops_catalog_state")
+    for on in ("1", "true", "yes", "on"):
+        monkeypatch.setenv("MUTATION_PILOT_DEBUG", on)
+        assert pilot.stats_debug_enabled("ops_catalog_state")
 
 
 def test_mutmut_config_text_adds_debug_only_when_requested():
@@ -430,6 +455,26 @@ def test_ci_default_enables_debug_only_for_ops_legacy_setup_cfg(tmp_path, monkey
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     ops = pilot.sync_workdir("ops_legacy", cfg, fresh=True)
     assert "debug = true" in (ops / "setup.cfg").read_text()
+    other = pilot.sync_workdir("pnl_sim", cfg, fresh=True)
+    assert "debug = true" not in (other / "setup.cfg").read_text()
+
+
+def test_ci_default_enables_debug_for_ops_catalog_state_setup_cfg(tmp_path, monkeypatch):
+    repo, home = tmp_path / "repo", tmp_path / "home"
+    (repo / "engine").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    (repo / "engine" / "x.py").write_text("x = 1\n")
+    (repo / "tests" / "test_a.py").write_text("def t(): pass\n")
+    mod = {"mutate": ["engine/x.py"], "tests": ["tests/test_a.py"]}
+    cfg = {"defaults": dict(DIAG_DEFAULTS, copy=["engine", "tests"]),
+           "modules": {"ops_catalog_state": dict(mod), "pnl_sim": dict(mod)}}
+    monkeypatch.setattr(pilot, "REPO", repo)
+    monkeypatch.setenv("MUTATION_PILOT_HOME", str(home))
+    monkeypatch.setattr(pilot, "_tracked", lambda paths: ["engine/x.py", "tests/test_a.py"])
+    monkeypatch.delenv("MUTATION_PILOT_DEBUG", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    cat = pilot.sync_workdir("ops_catalog_state", cfg, fresh=True)
+    assert "debug = true" in (cat / "setup.cfg").read_text()
     other = pilot.sync_workdir("pnl_sim", cfg, fresh=True)
     assert "debug = true" not in (other / "setup.cfg").read_text()
 

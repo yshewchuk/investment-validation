@@ -230,6 +230,8 @@ clean test run fails, or the run hits its 330-minute step timeout.
   only: it never reruns a shard and never changes the exit code the job gates
   on. A plain pytest pass over the same selection would only mean the CI failure
   was not reproduced, not a root cause.
+  The `ops_catalog_state` CI shard enables the same debug setting under the
+  same CI-only default (its stats step failed the same way in run 36025664817).
 
 | trigger | mode | state |
 |---|---|---|
