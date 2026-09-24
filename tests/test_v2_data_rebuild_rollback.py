@@ -12,6 +12,7 @@ commit, comparison, promotion, rollback — is the real production code.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import RollbackReceipt  # noqa: E402
+from engine.v2.data import catalog, manifests  # noqa: E402
 from engine.v2.data.documents import decode_document  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.errors import fail as fail_data  # noqa: E402
@@ -47,8 +49,17 @@ from engine.v2.ops.snapshot_promotion import (  # noqa: E402
 from engine.v2.ops.stages import registry  # noqa: E402
 from engine.v2.ops.submission import NamespacePolicy  # noqa: E402
 from engine.v2.ops.supervisor import Service  # noqa: E402
+from tests.data_scan_support import (  # noqa: E402
+    RECEIPT,
+    catalog_and_store,
+    contract_for,
+    contract_ref_for,
+    fake_hash,
+    publish_and_inspect,
+)
 from tests.ops_support import TEST_POLICY  # noqa: E402
 from tests.test_v2_data_import import _run_until_terminal, _submit_and_run, build_legacy_store  # noqa: E402
+from tests.test_v2_data_legacy_materialization import PANEL_ROWS, TIER4_ROWS  # noqa: E402
 
 POLICY = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
 
@@ -301,3 +312,169 @@ def _immutable_row_counts(conn) -> tuple[int, int, int, int]:
         conn.execute("SELECT COUNT(*) FROM data_fragments").fetchone()[0],
         conn.execute("SELECT COUNT(*) FROM data_dataset_versions").fetchone()[0],
         conn.execute("SELECT COUNT(*) FROM data_snapshots").fetchone()[0])
+
+
+# --------------------------------------------------------------------------
+# promote()'s refusal branches (§10 point 4), each proven to leave every
+# scope head exactly where it was. Real committed snapshots throughout —
+# ``data_scan_support``'s publish/inspect/commit pipeline, so
+# ``build_comparison_receipt`` decides from catalog state, not from a
+# hand-written document.
+# --------------------------------------------------------------------------
+
+
+def _reversioned(contract):
+    """A second, genuinely registered contract for the same table: new
+    contract_id, definition_hash recomputed by the real registration recipe
+    (``legacy_mapping``'s own two-pass placeholder), so ``commit_snapshot``'s
+    ``table_contract_hash`` re-verification accepts it."""
+    fields = dataclasses.replace(contract, contract_id=contract.contract_id.replace(".v1", ".v2"),
+                                 semantic_version=contract.semantic_version + ".candidate")
+    placeholder = dataclasses.replace(fields, definition_hash="sha256:" + "0" * 64)
+    return dataclasses.replace(placeholder, definition_hash=manifests.table_contract_hash(placeholder))
+
+
+def _commit(conn, clock, store, *, scope, rows_by_table, contracts, receipt_id, expected_head=None,
+            expected_generation=0):
+    """One real ``catalog.commit_snapshot`` of single-fragment tables, as
+    ``data_scan_support.commit_tables`` does but with an explicit head
+    expectation — so a scope's head can be ADVANCED, not just created."""
+    table_manifests, records, objects = {}, [], []
+    for name, rows in rows_by_table.items():
+        contract = contracts[name]
+        ref = contract_ref_for(contract)
+        record = publish_and_inspect(store, contract, ref, rows, partition_key="all")
+        table_manifests[name] = manifests.dataset_manifest(
+            ref, [record], knowledge_mode="reconstructed", coverage_receipt_refs=(RECEIPT,),
+            availability_evidence_refs=())
+        records.append(record)
+        objects.append(record.object_ref)
+    snap = manifests.snapshot_ref(table_manifests, calendar_version="cal.v1",
+                                  source_priority_version="prio.v1",
+                                  finality_receipt_refs=(RECEIPT,))
+    catalog.commit_snapshot(conn, scope=scope, request_hash=fake_hash(receipt_id),
+                            contracts=list(contracts.values()), objects=objects, records=records,
+                            manifests=list(table_manifests.values()), snapshot=snap,
+                            expected_head_snapshot_id=expected_head,
+                            expected_head_generation=expected_generation, receipt_id=receipt_id,
+                            attempt_id="att-" + receipt_id, fence=1, fence_check=lambda _c: None,
+                            clock=clock, store=store)
+    return snap.snapshot_id
+
+
+def test_promote_refuses_when_candidate_and_target_disagree_on_a_table_contract(tmp_path):
+    """The data behind promote()'s contract_mismatches refusal: identical
+    bytes in both scopes, but the candidate's rebuild re-registered
+    feature_panel under a second contract version. The comparison receipt
+    must flag EXACTLY that one table (tier4_forecasts, identical in data and
+    contract, must not be swept in) and promote() must refuse with the table
+    list preserved — the live target head staying put through it."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    try:
+        panel, tier4 = contract_for("feature_panel"), contract_for("tier4_forecasts")
+        rows = {"feature_panel": PANEL_ROWS[:1], "tier4_forecasts": TIER4_ROWS}
+        target_id = _commit(conn, clock, store, scope="legacy_primary", rows_by_table=rows,
+                            contracts={"feature_panel": panel, "tier4_forecasts": tier4},
+                            receipt_id="r-mismatch-target")
+        candidate_id = _commit(conn, clock, store, scope="candidate:mismatch", rows_by_table=rows,
+                               contracts={"feature_panel": _reversioned(panel),
+                                          "tier4_forecasts": tier4},
+                               receipt_id="r-mismatch-candidate")
+        assert candidate_id != target_id
+
+        receipt = build_comparison_receipt(conn, store, candidate_scope="candidate:mismatch",
+                                           target_scope="legacy_primary", clock=clock)
+        document = json.loads(store.read_verified(artifact_ref(conn, store, receipt.artifact_id)))
+        assert document["contract_mismatches"] == ["feature_panel"]
+
+        with pytest.raises(OpsError) as refusal:
+            promote(conn, store, candidate_scope="candidate:mismatch", target_scope="legacy_primary",
+                    expected_snapshot_id=target_id, expected_generation=1,
+                    comparison_receipt_id=receipt.artifact_id, clock=clock)
+        assert refusal.value.code == "VALIDATION_FAILED"
+        assert refusal.value.problem.message == "candidate and target disagree on a table contract"
+        assert refusal.value.problem.details == {"tables": ["feature_panel"]}
+        assert _head(conn, "legacy_primary") == (target_id, 1)
+        assert _head(conn, "candidate:mismatch") == (candidate_id, 1)
+    finally:
+        conn.close()
+
+
+def test_promote_refuses_a_comparison_receipt_presented_to_the_wrong_promotion(tmp_path):
+    """The receipt pins BOTH scopes it was built for; presenting it to a
+    different pairing — with either position differing while the other
+    matches — must refuse before the catalog heads are even consulted,
+    leaving every head untouched (and never minting an update receipt)."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    try:
+        panel = contract_for("feature_panel")
+        target_id = _commit(conn, clock, store, scope="legacy_primary",
+                            rows_by_table={"feature_panel": PANEL_ROWS[:1]},
+                            contracts={"feature_panel": panel}, receipt_id="r-scope-target")
+        candidate_id = _commit(conn, clock, store, scope="candidate:scope",
+                               rows_by_table={"feature_panel": PANEL_ROWS},
+                               contracts={"feature_panel": panel}, receipt_id="r-scope-candidate")
+        receipt = build_comparison_receipt(conn, store, candidate_scope="candidate:scope",
+                                           target_scope="legacy_primary", clock=clock)
+        for swap in ({"candidate_scope": "legacy_primary", "target_scope": "legacy_primary"},
+                     {"candidate_scope": "candidate:scope", "target_scope": "legacy_replica"}):
+            with pytest.raises(OpsError) as refusal:
+                promote(conn, store, expected_snapshot_id=target_id, expected_generation=1,
+                        comparison_receipt_id=receipt.artifact_id, clock=clock, **swap)
+            assert refusal.value.code == "VALIDATION_FAILED"
+            assert refusal.value.problem.message == "comparison receipt does not match this promotion"
+            assert refusal.value.problem.details == {"comparison_receipt_id": receipt.artifact_id}
+        assert _head(conn, "legacy_primary") == (target_id, 1)
+        assert _head(conn, "candidate:scope") == (candidate_id, 1)
+        assert _head(conn, "legacy_replica") == (None, 0)
+    finally:
+        conn.close()
+
+
+def test_promote_refuses_a_stale_comparison_receipt_and_leaves_the_promoted_head_intact(tmp_path):
+    """The receipt pins the candidate snapshot IT compared. One real
+    promotion (target head -> C1, generation bumped) then a second candidate
+    commit moves the candidate head to C2; re-presenting the C1-pinned
+    receipt must refuse STALE_EXPECTATION — with the just-promoted pointer
+    and generation exactly intact, the generation NOT bumped a third time."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    try:
+        panel = contract_for("feature_panel")
+        target_id = _commit(conn, clock, store, scope="legacy_primary",
+                            rows_by_table={"feature_panel": PANEL_ROWS[:1]},
+                            contracts={"feature_panel": panel}, receipt_id="r-stale-target")
+        c1 = _commit(conn, clock, store, scope="candidate:stale",
+                     rows_by_table={"feature_panel": PANEL_ROWS},
+                     contracts={"feature_panel": panel}, receipt_id="r-stale-c1")
+        receipt = build_comparison_receipt(conn, store, candidate_scope="candidate:stale",
+                                           target_scope="legacy_primary", clock=clock)
+        promoted_ref = promote(conn, store, candidate_scope="candidate:stale",
+                               target_scope="legacy_primary", expected_snapshot_id=target_id,
+                               expected_generation=1, comparison_receipt_id=receipt.artifact_id,
+                               clock=clock)
+        promoted = json.loads(store.read_verified(artifact_ref(conn, store, promoted_ref.artifact_id)))
+        assert promoted["schema_version"] == "snapshot_update_receipt.v1.0"
+        assert promoted["action"] == "promote"
+        assert promoted["scope"] == "legacy_primary"
+        assert promoted["from_snapshot_id"] == target_id
+        assert promoted["to_snapshot_id"] == c1
+        assert promoted["comparison_receipt_ref"] == receipt.artifact_id
+        assert _head(conn, "legacy_primary") == (c1, 2)
+
+        c2 = _commit(conn, clock, store, scope="candidate:stale",
+                     rows_by_table={"feature_panel": PANEL_ROWS[1:]},
+                     contracts={"feature_panel": panel}, receipt_id="r-stale-c2",
+                     expected_head=c1, expected_generation=1)
+        assert _head(conn, "candidate:stale") == (c2, 2)
+
+        with pytest.raises(OpsError) as refusal:
+            promote(conn, store, candidate_scope="candidate:stale", target_scope="legacy_primary",
+                    expected_snapshot_id=c1, expected_generation=2,
+                    comparison_receipt_id=receipt.artifact_id, clock=clock)
+        assert refusal.value.code == "STALE_EXPECTATION"
+        assert refusal.value.problem.message == \
+            "comparison receipt is stale; the candidate head has moved"
+        assert refusal.value.problem.details == {"candidate_scope": "candidate:stale"}
+        assert _head(conn, "legacy_primary") == (c1, 2)
+    finally:
+        conn.close()
