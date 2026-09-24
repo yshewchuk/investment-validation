@@ -27,6 +27,14 @@ timeout->timeout, error->suspicious (a tool error: counted as checked, never
 as a kill), pardoned->excluded (kept out of the score's denominator). The
 gremlins score is ``(zapped + timeout) / (total - pardoned)``.
 
+The pinned plugin records each mutated file by ABSOLUTE path under the checkout,
+so every ``file_path`` is normalized to a repository-relative POSIX path (against
+``--source-root``, default :data:`REPO`) before rows are built and the source is
+looked up; an absolute path that does not resolve beneath that root -- like a
+traversal, a wrong drive or a malformed form -- is refused, never read. The
+normalization is applied to the parsed copy only, so the raw bytes and
+``raw_sha256`` provenance (and the audit ``gremlins.json``) are preserved.
+
 Honesty rules this file enforces: a missing, empty, malformed, stale or
 internally inconsistent raw report is an incomplete artifact and a tool
 failure -- it never produces a 100% score or a fabricated empty measurement
@@ -155,6 +163,35 @@ def path_ok(p) -> bool:
         return False
     parts = PurePosixPath(p).parts
     return bool(parts) and ".." not in parts
+
+
+def normalize_file_path(p, root) -> str | None:
+    """A raw plugin ``file_path`` -> a repository-relative POSIX path, or ``None``.
+
+    ``path_ok`` alone is too strict for the report the pinned 1.9.0 plugin
+    actually writes on a runner: it records each mutated file as an ABSOLUTE
+    path under the checkout (``/home/runner/work/<repo>/<repo>/engine/v2/...``),
+    so every real row was rejected as ``malformed: file_path``. This keeps
+    ``path_ok``'s strict rules for a value that is already repo-relative
+    (returned verbatim) and additionally accepts an absolute path ONLY when it
+    resolves to a location strictly beneath ``root`` -- the ``--source-root`` /
+    checkout, default :data:`REPO` -- rewriting it to the repo-relative form the
+    rows and :class:`SourceIndex` expect. A path outside the root, a traversal
+    that escapes it, a Windows drive or backslash form, and a non-string are all
+    refused with ``None``, so a bad raw still fails validation as
+    ``malformed: file_path`` instead of silently reading outside the checkout.
+    """
+    if path_ok(p):
+        return p
+    if not isinstance(p, str) or not p or "\\" in p or ":" in p:
+        return None
+    if not PurePosixPath(p).is_absolute():
+        return None
+    try:
+        rel = Path(p).resolve().relative_to(Path(root).resolve())
+    except (ValueError, OSError, RuntimeError):
+        return None
+    return rel.as_posix() if rel.parts and ".." not in rel.parts else None
 
 
 _OPTIONAL_CHECKS = {
@@ -391,6 +428,27 @@ def markdown(summary: dict, rows: list[dict], *, limit: int = 40) -> str:
 
 # -- export -----------------------------------------------------------------------------
 
+def normalize_raw_paths(doc, root) -> None:
+    """Rewrite each result's plugin ``file_path`` to repo-relative, IN THE PARSED
+    COPY only, before validation and row building (see :func:`normalize_file_path`).
+
+    ``raw_bytes``/``raw_sha256`` and the audit ``gremlins.json`` still carry the
+    exact bytes the backend wrote -- this edits the object ``json.loads``
+    produced, never the file. A path the checker must not accept is left
+    untouched so :func:`validate_raw` still reports it ``malformed: file_path``.
+    The raw ``files`` map is not consumed here: :func:`export_module` rebuilds its
+    per-file blocks from these normalized rows, so only the results are rewritten.
+    """
+    results = doc.get("results") if isinstance(doc, dict) else None
+    if not isinstance(results, list):
+        return
+    for res in results:
+        if isinstance(res, dict) and "file_path" in res:
+            rel = normalize_file_path(res["file_path"], root)
+            if rel is not None:
+                res["file_path"] = rel
+
+
 def export_module(module: str, raw_path: Path, out: Path, *, mode: str,
                   changed_base: str | None = None, run_exit_code: int | None = None,
                   elapsed: float | None = None, source_root: Path = REPO) -> dict:
@@ -400,6 +458,7 @@ def export_module(module: str, raw_path: Path, out: Path, *, mode: str,
     results = summary = None
     age = None
     if doc is not None:
+        normalize_raw_paths(doc, source_root)  # absolute plugin paths -> repo-relative
         results, summary, extra_fatal, incons = validate_raw(doc)
         fatal += extra_fatal
         try:
