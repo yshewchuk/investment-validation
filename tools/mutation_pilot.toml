@@ -45,8 +45,14 @@ timeout_multiplier = 5.0
 # Parallel mutant workers. Match bounded_run's --cores. CI overrides it with
 # --max-children $(nproc) (4 on a standard GitHub runner).
 max_children = 2
-# Passed to every pytest invocation mutmut makes.
-pytest_args = ["-p", "no:xdist", "-p", "no:cacheprovider"]
+# Passed to every pytest invocation both drivers make (mutmut's per-mutant
+# pytest calls and gremlin_pilot's gremlins run). NEVER disable pytest-xdist
+# here: pytest-gremlins 1.9.0 implements xdist's hooks (pytest_configure_node),
+# so `-p no:xdist` aborts collection with a pluggy PluginValidationError
+# (unknown hook, CI run 36059422920 -- pytest exit 3, no raw report). xdist
+# stays loaded but inert: neither driver passes a pytest `-n`, and gremlins
+# parallelizes with --gremlin-workers.
+pytest_args = ["-p", "no:cacheprovider"]
 # Tests that need data/ or a browser, inside files that are otherwise
 # data-free. Deselected in every mutmut pytest call (harmless where the file is
 # not selected). Each failed with no data/ on 2026-09-19 (FileNotFoundError on
