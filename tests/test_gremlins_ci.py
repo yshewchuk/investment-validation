@@ -1,8 +1,11 @@
-"""pytest-gremlins report adapter: tools/gremlin_results.py (schema 2), plus the
-schema-2 awareness added to tools/mutation_report.py and checks/mutation_ratchet.py.
+"""pytest-gremlins report adapter: tools/gremlin_results.py (schema 2), its merge
+expected-module contract, plus the schema-2 awareness added to
+tools/mutation_report.py and checks/mutation_ratchet.py, and the plan->merge
+wiring in the gremlins workflow candidate.
 
 All synthetic: the raw JSON is written in the pinned 1.9.0 shape and the source
-tree is a string. No gremlins or mutmut execution, no git, no data/.
+tree is a string. No gremlins or mutmut execution, no git, no data/. The
+candidate workflow is parsed as YAML only.
 """
 from __future__ import annotations
 
@@ -13,14 +16,17 @@ import os
 import shutil
 import sys
 import time
+import types
 from collections import Counter
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import gremlin_pilot as gp  # noqa: E402
 import gremlin_results as gr  # noqa: E402
 import mutation_report as rep  # noqa: E402
 import mutation_results as mr  # noqa: E402
@@ -448,6 +454,238 @@ def test_merge_all_agreeing_inputs_still_produce_a_valid_full_measurement(tmp_pa
     assert gr.main(["merge", "--out", str(merged), str(a), str(b)]) == 0
     m = summary_of(merged)
     assert m["complete"] is True and m["tool_error"] is False and m["score"] == 1.0
+
+
+# -- merge: the plan's expected-module contract -------------------------------------------------
+
+CANDIDATE = ROOT / "tools" / "gremlin_workflow_candidate.yml"
+
+
+def alpha_beta(tmp_path, *, beta_mode="full"):
+    """Two exported modules, in exactly the shape the matrix jobs upload."""
+    _, a = export(tmp_path, raw_doc([gremlin("a1", "zapped", 5),
+                                     gremlin("a2", "survived", 12)]), name="alpha")
+    _, b = export(tmp_path, raw_doc([gremlin("b1", "timeout", 5)]), name="beta", mode=beta_mode)
+    return a, b
+
+
+def merge(tmp_path, dirs, *, expected=None, name="merged"):
+    """The report job's merge call: ``--out DIR`` (plus the plan's module list,
+    as the string the plan job publishes) over the dirs that arrived -- none."""
+    out = tmp_path / name
+    argv = ["merge", "--out", str(out)]
+    if expected is not None:
+        argv += ["--expected-modules", expected]
+    return gr.main(argv + [str(d) for d in dirs]), out
+
+
+def contract(out: Path) -> dict:
+    return summary_of(out)["module_contract"]
+
+
+def test_merge_with_the_exact_expected_module_set_stays_a_valid_full_run(tmp_path, ci_env):
+    a, b = alpha_beta(tmp_path)
+    code, out = merge(tmp_path, [a, b], expected=json.dumps(["alpha", "beta"]))
+    assert code == 0
+    m = summary_of(out)
+    assert m["complete"] is True and m["tool_error"] is False and m["failure_reasons"] == []
+    assert (m["total"], m["checked"], m["score"]) == (3, 3, round(2 / 3, 4))
+    assert set(m["modules"]) == {"alpha", "beta"}
+    assert m["expected_modules"] == ["alpha", "beta"]
+    assert contract(out) == {"expected": ["alpha", "beta"], "present": ["alpha", "beta"],
+                             "missing": [], "unexpected": [], "duplicate": {},
+                             "complete_set": True}
+    md = (out / "summary.md").read_text()
+    assert "Expected modules (2): alpha, beta" in md and "Reported modules (2)" in md
+    # a set, not a sequence: the plan's order does not matter
+    assert merge(tmp_path, [b, a], expected=json.dumps(["beta", "alpha"]))[0] == 0
+    # and without a contract the historical behaviour is untouched
+    assert merge(tmp_path, [a, b], name="legacy")[0] == 0
+    assert summary_of(tmp_path / "legacy")["module_contract"] is None
+    assert summary_of(tmp_path / "legacy")["expected_modules"] is None
+
+
+def test_merge_missing_expected_module_is_never_a_valid_full_run(tmp_path, ci_env):
+    """The blocker: one matrix job died before its export/upload, so only a
+    subset arrived. The merged artifact used to claim a complete clean run; it
+    must instead say which module is absent and fail."""
+    a, b = alpha_beta(tmp_path)  # beta's job uploaded nothing
+    code, out = merge(tmp_path, [a], expected=json.dumps(["alpha", "beta"]))
+    assert code == 1  # the report job fails on this rc
+    m = summary_of(out)
+    assert m["complete"] is False and m["tool_error"] is True
+    assert m["score"] is None  # a subset of the plan is not the plan's score
+    assert (m["total"], m["checked"], m["killed"]) == (2, 2, 1)  # what arrived, auditable
+    assert len(gr.read_jsonl(out / "results.jsonl")) == 2
+    assert set(m["modules"]) == {"alpha"}
+    assert contract(out) == {"expected": ["alpha", "beta"], "present": ["alpha"],
+                             "missing": ["beta"], "unexpected": [], "duplicate": {},
+                             "complete_set": False}
+    assert any(r.startswith("MISSING_MODULES") and "beta" in r for r in m["failure_reasons"])
+    md = (out / "summary.md").read_text()
+    assert "MISSING_MODULES" in md and "not a valid full run" in md
+    # the honest partial rows are still there for triage
+    assert [r["mutant_name"] for r in gr.read_jsonl(out / "results.jsonl")] == ["a1", "a2"]
+    # ...and no consumer can read it as the latest completed measurement
+    _, good = merge(tmp_path, [a, b], expected=json.dumps(["alpha", "beta"]), name="good")
+    triage = tmp_path / "none.toml"
+    measured = ratchet.build_measurement(*ratchet.read_report_dir(out), triage_path=triage)
+    baseline = ratchet.build_measurement(*ratchet.read_report_dir(good), triage_path=triage)
+    assert ratchet.compare(measured, baseline)[0]["code"] == "MUTATION_MEASUREMENT_TOOL_ERROR"
+
+
+def test_merge_reports_a_module_the_plan_never_scheduled(tmp_path, ci_env):
+    a, b = alpha_beta(tmp_path)  # an artifact from another plan/week slipped in
+    code, out = merge(tmp_path, [a, b], expected=json.dumps(["alpha", "gamma"]))
+    assert code == 1
+    m = summary_of(out)
+    assert m["complete"] is False and m["tool_error"] is True and m["score"] is None
+    assert contract(out) == {"expected": ["alpha", "gamma"], "present": ["alpha", "beta"],
+                             "missing": ["gamma"], "unexpected": ["beta"], "duplicate": {},
+                             "complete_set": False}
+    reasons = " ".join(m["failure_reasons"])
+    assert "MISSING_MODULES" in reasons and "gamma" in reasons
+    assert "UNEXPECTED_MODULES" in reasons and "beta" in reasons
+    # an empty contract means "nothing was scheduled": every report is unexpected
+    code, out = merge(tmp_path, [a], expected=json.dumps([]), name="empty-contract")
+    assert code == 1
+    assert "UNEXPECTED_MODULES" in " ".join(summary_of(out)["failure_reasons"])
+
+
+def test_merge_duplicate_module_report_against_the_contract_is_a_diagnostic(tmp_path, ci_env):
+    """Two directories claiming one module is not a module set: neither is
+    silently preferred, no aggregate is stated, and every row stays published."""
+    a, b = alpha_beta(tmp_path)
+    twin = tmp_path / "beta-again"
+    shutil.copytree(b, twin)
+    code, out = merge(tmp_path, [a, b, twin], expected=json.dumps(["alpha", "beta"]))
+    assert code == 1
+    m = summary_of(out)
+    assert m["complete"] is False and m["tool_error"] is True
+    assert m["total"] is None and m["checked"] is None and m["score"] is None
+    assert len(gr.read_jsonl(out / "results.jsonl")) == 4  # honest rows, all of them
+    assert set(m["modules"]) == {"alpha"}  # beta double-reported: resolved to neither dir
+    assert contract(out)["duplicate"] == {"beta": sorted([str(b), str(twin)])}
+    assert any(r.startswith("DUPLICATE_MODULES") and "beta" in r for r in m["failure_reasons"])
+    assert "DUPLICATE_MODULES" in (out / "summary.md").read_text()
+    # without the contract the same input is still the old wholesale refusal
+    assert gr.main(["merge", "--out", str(tmp_path / "refused"), str(a), str(b),
+                    str(twin)]) == 2
+    assert not (tmp_path / "refused").exists()
+
+
+def test_merge_with_no_module_directories_still_writes_an_incomplete_diagnostic(tmp_path, ci_env):
+    """Every matrix job died before upload: zero directories is not "nothing to
+    consolidate, pass" -- it is a full run with nothing measured."""
+    code, out = merge(tmp_path, [], expected=json.dumps(["alpha", "beta"]))
+    assert code == 1
+    for name in ("summary.json", "summary.md", "results.jsonl"):
+        assert (out / name).is_file(), name  # a diagnostic artifact exists for triage
+    m = summary_of(out)
+    assert m["complete"] is False and m["tool_error"] is True
+    assert m["total"] is None and m["checked"] is None and m["score"] is None  # never a 0% run
+    assert m["modules"] == {} and m["run_id"] is None and m["mode"] is None
+    assert gr.read_jsonl(out / "results.jsonl") == []
+    assert contract(out)["missing"] == ["alpha", "beta"]
+    assert contract(out)["present"] == [] and contract(out)["complete_set"] is False
+    reasons = m["failure_reasons"]
+    assert any(r.startswith("NO_MODULE_REPORTS") for r in reasons)
+    assert any(r.startswith("MISSING_MODULES") for r in reasons)
+    md = (out / "summary.md").read_text()
+    assert "NO_MODULE_REPORTS" in md and "MISSING_MODULES" in md and "| **all** |" in md
+    # even with no contract at all, an empty input set is not a pass
+    assert merge(tmp_path, [], name="no-contract")[0] == 1
+    assert summary_of(tmp_path / "no-contract")["tool_error"] is True
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "alpha,beta", '{"m": ["alpha"]}', "[1]", '"alpha"',
+                                 '["alpha", "alpha"]', '["alpha", ""]'],
+                         ids=["empty", "blank", "csv", "object", "ints", "string", "dup",
+                              "empty-name"])
+def test_a_malformed_expected_module_list_is_refused_not_treated_as_no_contract(tmp_path,
+                                                                                ci_env, raw):
+    """A broken contract value is a broken plan, not "expect nothing": accepting
+    it would make every arriving report unexpected (or an empty list make a
+    subset look complete). Refuse, write nothing, exit nonzero."""
+    a, _ = alpha_beta(tmp_path)
+    code, out = merge(tmp_path, [a], expected=raw)
+    assert code == 2 and not out.exists()
+
+
+def test_the_contract_never_overrides_provenance_or_identity_refusals(tmp_path, ci_env):
+    """Regression guard: --expected-modules ADDS a gate, it does not soften the
+    existing ones."""
+    a, b = alpha_beta(tmp_path, beta_mode="incremental")
+    code, out = merge(tmp_path, [a, b], expected=json.dumps(["alpha", "beta"]))
+    assert code == 1
+    m = summary_of(out)
+    assert m["complete"] is False and m["tool_error"] is True and m["score"] is None
+    assert any(r.startswith("RUN_PROVENANCE_MISMATCH") and "modes" in r
+               for r in m["failure_reasons"])
+    assert contract(out)["complete_set"] is True  # the set is right; the provenance is not
+
+    tampered = tmp_path / "tampered"
+    shutil.copytree(b, tampered)
+    s = summary_of(tampered)
+    s["policy"]["timeout_seconds"] = 60  # a different scoring policy
+    (tampered / "summary.json").write_text(json.dumps(s))
+    assert gr.main(["merge", "--out", str(tmp_path / "refused"), str(a), str(tampered),
+                    "--expected-modules", json.dumps(["alpha", "beta"])]) == 2
+    assert not (tmp_path / "refused").exists()
+
+    # a module that came back partial is a tool error even when the set matches
+    _, c = export(tmp_path, raw_doc([gremlin("c1", "zapped", 5)]), name="gamma", rc=-1)
+    code, out = merge(tmp_path, [c], expected=json.dumps(["gamma"]), name="partial")
+    assert code == 1
+    m = summary_of(out)
+    assert m["tool_error"] is True and contract(out)["complete_set"] is True
+    assert any(r.startswith("gamma:") and "TIMEOUT_KILL" in r for r in m["failure_reasons"])
+
+
+# -- plan job -> report job wiring ---------------------------------------------------------------
+
+def test_candidate_workflow_hands_the_plan_module_list_to_merge():
+    wf = yaml.safe_load(CANDIDATE.read_text())
+    plan = next(s for s in wf["jobs"]["plan"]["steps"] if s.get("id") == "plan")["run"]
+    assert 'modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY")' in plan
+    assert 'echo "modules=$modules"' in plan
+    assert wf["jobs"]["plan"]["outputs"]["modules"] == "${{ steps.plan.outputs.modules }}"
+    report = wf["jobs"]["report"]
+    assert report["env"]["EXPECTED_MODULES"] == "${{ needs.plan.outputs.modules }}"
+    merge_run = next(s for s in report["steps"]
+                     if s.get("name") == "Merge module reports")["run"]
+    assert '--expected-modules "$EXPECTED_MODULES"' in merge_run   # quoted, never interpolated
+    assert '--expected-modules "${{' not in merge_run              # not injected into the script
+    assert '"${dirs[@]}"' in merge_run
+    assert "exit 0" not in merge_run                               # no early pass on an empty set
+    assert 'echo 0 > "$RUNNER_TEMP/gremlin-merge-rc"' not in merge_run
+    gate = next(s for s in report["steps"]
+                if str(s.get("name", "")).startswith("Fail only on a merge error"))["run"]
+    assert 'rc" != 0' in gate
+    upload = next(s for s in report["steps"]
+                  if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    assert upload["if"] == "always()" and upload["with"]["name"] == "mutation-report"
+
+
+def test_the_plan_matrix_output_is_exactly_the_string_merge_consumes(tmp_path, ci_env, monkeypatch,
+                                                                    capsys):
+    """Producer and consumer of the contract, round-tripped: the plan job
+    publishes ``gremlin_pilot.py matrix``'s stdout and the report job feeds that
+    same string to ``merge --expected-modules``. A matrix job that never
+    uploaded must surface as MISSING_MODULES, not as a smaller valid run."""
+    monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["chooser", "serving"])
+    assert gp.cmd_matrix({}, types.SimpleNamespace(only="")) == 0
+    planned = capsys.readouterr().out.strip()
+    assert gr.parse_expected_modules(planned) == ["chooser", "serving"]
+    _, c = export(tmp_path, raw_doc([gremlin("c1", "zapped", 5)]), name="chooser")
+    _, s = export(tmp_path, raw_doc([gremlin("s1", "survived", 12)]), name="serving")
+    code, out = merge(tmp_path, [c, s], expected=planned)
+    assert code == 0 and summary_of(out)["complete"] is True
+    code, out = merge(tmp_path, [c], expected=planned, name="partial-plan")
+    assert code == 1
+    m = summary_of(out)
+    assert m["complete"] is False and m["tool_error"] is True and m["score"] is None
+    assert m["module_contract"]["missing"] == ["serving"]
 
 
 # -- mutation_report.py over both schemas ---------------------------------------------------------

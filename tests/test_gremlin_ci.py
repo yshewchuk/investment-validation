@@ -632,10 +632,21 @@ def test_candidate_report_captures_merge_rc_instead_of_skipping_the_upload():
     assert at["merge"] < at["upload"] < at["gate"]   # artifact + summary land, THEN the fail
 
 
-def test_candidate_report_still_passes_when_there_is_nothing_to_merge():
+def test_candidate_report_merges_the_expected_set_even_with_no_module_dirs():
+    """Zero module directories used to be a silent pass (``echo 0`` + ``exit 0``):
+    a run in which every matrix job died before its upload published nothing and
+    the job went green. merge is now always called, with the plan's module list,
+    so the empty/partial set becomes an incomplete diagnostic artifact and a
+    nonzero rc the gate step fails on."""
     merge, upload, gate = _report_steps()
-    assert "no module reports to merge" in merge
-    assert 'echo 0 > "$RUNNER_TEMP/gremlin-merge-rc"' in merge   # gate must not see a missing rc
+    assert 'dirs=(modules/mutation-module-*)' in merge
+    assert "no module reports to merge" not in merge
+    assert 'echo 0 > "$RUNNER_TEMP/gremlin-merge-rc"' not in merge   # nothing merged != pass
+    assert "exit 0" not in merge                                     # no early pass path
+    assert '--expected-modules "$EXPECTED_MODULES"' in merge
+    assert '"${dirs[@]}"' in merge                                   # same call, empty or not
+    assert upload["if"] == "always()"
+    assert 'rc" != 0' in gate
 
 
 
