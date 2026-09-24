@@ -677,8 +677,8 @@ ids = ["cli:tools/land.py"]
 reason = "Supervisor merge/gate/push wrapper (hygiene + bounded tests before pushing a branch to main); development tooling, not a board/nightly consumer."
 
 [[excluded]]
-ids = ["cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py"]
-reason = "Phase 4/5/6 migration preparation and inventory tooling."
+ids = ["cli:tools/phase4_targeted_replay.py", "cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py"]
+reason = "Phase 4/5/6 migration preparation, inventory and targeted replay diagnostic tooling; evidence producers, not production consumers."
 
 [[excluded]]
 ids = ["cli:tools/bounded_run.py"]
