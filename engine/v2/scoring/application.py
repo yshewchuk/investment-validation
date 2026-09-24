@@ -54,6 +54,15 @@ _RUNUP_DERIVED_FIELDS = frozenset({
 class _CanonicalFrozenExecutor:
     """Map one verified artifact output into its canonical stage field."""
 
+    #: The verified binding's adapter identity, forwarded by
+    #: ``_frozen_stage_executors`` onto the freshly built wrapper after
+    #: construction, so the forecast stage
+    #: (``stages._execute_forecast_executor``) can tell a Tier-4 fold -- whose
+    #: non-finite row is a silent NaN, not a MISSING_FEATURES refusal -- from a
+    #: champion model. ``None`` (unset, or an adapter-less binding) fails closed
+    #: to champion behaviour, so it never suppresses a real refusal.
+    adapter = None
+
     def __init__(self, executor, source, target, *, scale=1.0, floor_zero=False,
                  role=None, feature_order=()):
         self._executor = executor
@@ -560,6 +569,14 @@ class _FrozenOmissionRefusal:
     features can never turn it into a value.
     """
 
+    #: The verified binding's adapter identity, forwarded by
+    #: ``_frozen_stage_executors`` onto the freshly built refusal before it is
+    #: registered (see ``_CanonicalFrozenExecutor.adapter``). ``None``
+    #: (unresolved or champion) preserves the MISSING_FEATURES refusal;
+    #: ``tier4-serving-fold.v1`` lets the forecast stage undetermine silently
+    #: so sizing declines NO_FORECAST, as legacy's fold NaN does.
+    adapter = None
+
     def __init__(self, role, feature_order, missing_features):
         self.role = str(role)
         self.feature_order = tuple(feature_order)
@@ -631,6 +648,12 @@ def _frozen_stage_executors(bindings, inference, release, days,
         role = str(getattr(binding, "role", "")).split(":", 1)[0]
         if role in _FROZEN_ROLE_OUTPUTS and hasattr(binding, "feature_order"):
             owned.update(_frozen_role_outputs(binding))
+            # Read the verified binding's adapter through the same generic,
+            # fail-closed metadata flow used for role/output_names above: a
+            # binding that does not carry one resolves to ``None`` and keeps
+            # champion behaviour (MISSING_FEATURES preserved), never a
+            # guessed Tier-4 suppression.
+            adapter = getattr(binding, "adapter", None)
             frozen_executor = FrozenStageExecutor(
                 inference=inference,
                 release=release,
@@ -647,6 +670,10 @@ def _frozen_stage_executors(bindings, inference, release, days,
                     role=binding.role,
                     feature_order=binding.feature_order,
                 )
+                # Forward the verified binding's adapter onto the freshly built
+                # wrapper; the class default ``None`` already fails closed to
+                # champion behaviour, so an adapter-less binding is unchanged.
+                executors[target].adapter = adapter
             if features is not None:
                 omitted = (getattr(binding, "binding_id", None)
                            not in served_ids)
@@ -677,9 +704,18 @@ def _frozen_stage_executors(bindings, inference, release, days,
                     for target in _FROZEN_ROLE_OUTPUTS.get(role, ()):
                         if target in planned:
                             continue
+                        # ``had_target`` guards the collision case: an earlier
+                        # binding may already have selected an executor for this
+                        # canonical target, and ``setdefault`` keeps THAT one.
+                        # The adapter is therefore forwarded only onto a refusal
+                        # this iteration actually registers, never overwriting
+                        # an earlier executor's forwarded adapter.
+                        had_target = target in executors
                         executors.setdefault(target, _FrozenOmissionRefusal(
                             binding.role, binding.feature_order, nonfinite,
                         ))
+                        if not had_target:
+                            executors[target].adapter = adapter
     return executors, owned
 
 
