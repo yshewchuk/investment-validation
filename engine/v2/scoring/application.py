@@ -13,7 +13,7 @@ from engine.v2.foundation import from_document, to_document, untag_nonfinite
 from engine.v2.registry import DYNAMIC_MENU, default_registry
 
 from .financial import financial_diagnostics
-from .frozen_executor import FrozenStageExecutor
+from .frozen_executor import FrozenStageExecutor, FrozenStageRefusal
 from .identity import dependency_hash, request_hash, with_score_id
 from .stages import NativeScoreInputs, StageObserver, assemble_native_values, flags_refuse
 
@@ -516,7 +516,89 @@ def _collect_frozen_results(results, bindings, inference_requests, days):
     return outputs, state, flags, artifact_hashes, required_roles, gate_result
 
 
-def _frozen_stage_executors(bindings, inference, release, days):
+class _FrozenOmissionRefusal:
+    """Refusal-only executor for a release binding the bridge omitted.
+
+    The bridge (``checks/phase4_frozen_bridge.py::binding_feature_row``)
+    omits a binding's inference request when its CAPTURED feature row reads
+    non-finite; legacy reads that same row and refuses MISSING_FEATURES
+    (``Scorer._score_model``/``_score_runup_model``). This object stamps
+    exactly that refusal -- and ONLY a refusal. It deliberately never touches
+    ``inference``: a real ``FrozenStageExecutor`` re-derives its row from the
+    runtime-assembled facts at call time (``stages._facts`` layers computed
+    ``values`` over the captured ``model_inputs``), so a cell captured
+    non-finite can read finite by the time the executor runs (the Astra P2: a
+    context horizon replaced the captured NaN and the fallback published an
+    unmapped pre-transformed prediction). The refusal decision belongs to the
+    captured row, so it is fixed here at registration time -- replacing
+    features can never turn it into a value.
+    """
+
+    def __init__(self, role, feature_order, missing_features):
+        self.role = str(role)
+        self.feature_order = tuple(feature_order)
+        self._missing = tuple(missing_features)
+
+    def predict(self, features):
+        raise FrozenStageRefusal(
+            "MISSING_FEATURES",
+            f"non-finite frozen model features: {', '.join(self._missing)}",
+            reason_codes=("MISSING_FEATURES",),
+            missing_features=self._missing,
+        )
+
+    def __str__(self) -> str:
+        return (f"frozen-omission-refusal:{self.role}:"
+                f"{','.join(self._missing)}")
+
+    __repr__ = __str__
+
+
+def _captured_nonfinite_features(binding, features) -> tuple[str, ...]:
+    """Names of ``binding``'s features that read non-finite in its CAPTURED
+    row, or ``()`` when no bridge omission is established -- under the SAME
+    predicate the bridge omits on (``binding_feature_row``: a present,
+    numeric, tagged-or-real non-finite value omits the request; a
+    structurally missing name, ``None`` or a non-numeric value raises there
+    and is never an omission -- so none of those register the refusal
+    fallback either).
+
+    ``score_frozen`` legitimately accepts a SUBSET of the release's
+    inference requests; absence of a request is therefore not by itself
+    proof of omission. Only a verified omission (a non-empty result)
+    registers ``_FrozenOmissionRefusal``; a finite unrequested binding
+    registers nothing and keeps its own absence refusal, never a value.
+    """
+    vectors = features.get("role_model_inputs") if isinstance(features, Mapping) else None
+    vector = None
+    if isinstance(vectors, Mapping):
+        role = str(getattr(binding, "role", ""))
+        vector = vectors.get(role, vectors.get(role.split(":", 1)[0]))
+    elif isinstance(features, Mapping):
+        # Mirrors the bridge's fallback: forecast-family roles read the
+        # merged model_inputs when no per-role rows were captured. (The
+        # refusal registers only for _FROZEN_ROLE_OUTPUTS roles, never the
+        # private gate/chooser vectors whose merged read the bridge refuses.)
+        vector = features.get("model_inputs")
+    if not isinstance(vector, Mapping):
+        return ()
+    nonfinite: list[str] = []
+    for name in tuple(getattr(binding, "feature_order", ()) or ()):
+        if name not in vector:
+            return ()
+        raw = vector[name]
+        decoded = untag_nonfinite(raw) if isinstance(raw, Mapping) else raw
+        try:
+            value = float(decoded)
+        except (TypeError, ValueError):
+            return ()
+        if not isfinite(value):
+            nonfinite.append(name)
+    return tuple(nonfinite)
+
+
+def _frozen_stage_executors(bindings, inference, release, days,
+                            served_ids=frozenset(), features=None):
     executors = {}
     owned = set()
     for binding in bindings:
@@ -528,9 +610,8 @@ def _frozen_stage_executors(bindings, inference, release, days):
                 release=release,
                 binding_id=binding.binding_id,
             )
-            for target, source_name, scale, floor_zero in (
-                _canonical_executor_specs(binding, days)
-            ):
+            specs = _canonical_executor_specs(binding, days)
+            for target, source_name, scale, floor_zero in specs:
                 executors[target] = _CanonicalFrozenExecutor(
                     frozen_executor,
                     source_name,
@@ -540,6 +621,39 @@ def _frozen_stage_executors(bindings, inference, release, days):
                     role=binding.role,
                     feature_order=binding.feature_order,
                 )
+            if features is not None:
+                omitted = (getattr(binding, "binding_id", None)
+                           not in served_ids)
+                nonfinite = (_captured_nonfinite_features(binding, features)
+                             if omitted else ())
+                if nonfinite:
+                    # The bridge omitted THIS binding's request because its
+                    # captured feature row reads non-finite. Legacy flags
+                    # MISSING_FEATURES on that row; where the canonical
+                    # mapping resolved no source at all (e.g. a runup
+                    # binding whose horizon is not derivable), the loop
+                    # above registered nothing, the stage never re-read the
+                    # row, and the refusal was lost (the replay fell through
+                    # to MISSING_FORECAST_INPUT / MISSING_FORECAST_OUTPUT,
+                    # which legacy never stamps on such a row). Register the
+                    # refusal-only executor for the still-unmapped canonical
+                    # outputs -- never a real frozen executor: a real one
+                    # re-reads the runtime-assembled facts, which can
+                    # replace the captured non-finite cell with a finite
+                    # computed value and turn the omission into a published
+                    # prediction (the Astra P2). A finite unrequested
+                    # binding registers nothing (absence refusal preserved),
+                    # and a role with no binding in the release at all is
+                    # untouched -- a genuinely absent binding keeps
+                    # producing legacy's own absence code, never
+                    # MISSING_FEATURES.
+                    planned = {target for target, *_ in specs}
+                    for target in _FROZEN_ROLE_OUTPUTS.get(role, ()):
+                        if target in planned:
+                            continue
+                        executors.setdefault(target, _FrozenOmissionRefusal(
+                            binding.role, binding.feature_order, nonfinite,
+                        ))
     return executors, owned
 
 
@@ -581,7 +695,18 @@ def _frozen_driver_name(base, strategy):
 def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
                             required_roles, results, inference, release, days,
                             strategy, executor_bindings=None):
-    forecast = _without_frozen_recipes(base.forecast, bindings)
+    # Recipe stripping keys on the FULL release bindings, not just the
+    # requested ones: an output owned by any binding of the verified release
+    # must never be served by a caller-declared local model recipe. Whether
+    # such a binding's request was omitted (non-finite captured row) or never
+    # submitted (a legitimate subset of the release's requests), the local
+    # fallback "would compare a DIFFERENT forecast path ... and call it
+    # parity" -- the rule ``stages._execute_local_forecast`` already applies
+    # to unresolved stored refs.
+    forecast = _without_frozen_recipes(
+        base.forecast,
+        bindings if executor_bindings is None else executor_bindings,
+    )
     forecast.update({
         "frozen_outputs": outputs,
         "artifact_hashes": tuple(dict.fromkeys(artifact_hashes)),
@@ -599,6 +724,8 @@ def _frozen_forecast_inputs(base, bindings, outputs, artifact_hashes,
         executors, executor_owned = _frozen_stage_executors(
             bindings if executor_bindings is None else executor_bindings,
             inference, release, days,
+            frozenset(getattr(item, "binding_id", None) for item in bindings),
+            base.features,
         )
         frozen_outputs = {
             name: value for name, value in outputs.items()
