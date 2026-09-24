@@ -1630,10 +1630,12 @@ _NATIVE_INPUT_KEYS = frozenset({
 #: Fields a captured ``model`` block may carry (``_model_block_from_frozen``
 #: / ``engine.v2.scoring.source_inputs._model_block`` shape). An empty block
 #: (``{}``) is the not-applicable case -- a strategy capture never declared
-#: a payoff -- and needs no further checks.
+#: a payoff -- and needs no further checks. ``residual_only`` (stages'
+#: ``RESIDUAL_ONLY_FIELD``) marks an unpriced row's declared-residual-only
+#: block; ``_decode_model_block`` validates it explicitly.
 _MODEL_BLOCK_FIELDS = frozenset({
     "payoff_recipe", "payoff_artifact", "model_residual_artifact_recipe",
-    "model_residual_artifacts", "recalibration_artifact",
+    "model_residual_artifacts", "recalibration_artifact", "residual_only",
 })
 
 
@@ -1646,7 +1648,16 @@ def _decode_model_block(doc: Mapping[str, Any]) -> dict[str, Any]:
     payoff artifact classes are not distinguishable from their document
     shape alone. Every other artifact field has exactly one target class, so
     it decodes directly.
+
+    A ``residual_only`` marker (stages' ``RESIDUAL_ONLY_FIELD``) is restored
+    only as captured: literal boolean ``True``, non-empty residual
+    declarations, and no non-empty ``payoff_recipe`` or ``payoff_artifact``
+    beside it -- an unpriced row's block bands, it does not price. A
+    contradictory or malformed marked block is refused like any other
+    unknown field; an unmarked block decodes exactly as before.
     """
+    from engine.v2.scoring.stages import RESIDUAL_ONLY_FIELD
+
     if not doc:
         return {}
     unknown = sorted(set(doc) - _MODEL_BLOCK_FIELDS)
@@ -1696,6 +1707,29 @@ def _decode_model_block(doc: Mapping[str, Any]) -> dict[str, Any]:
     recal_doc = doc.get("recalibration_artifact")
     if recal_doc is not None:
         block["recalibration_artifact"] = _recalibration_artifact_from_document(recal_doc)
+    if RESIDUAL_ONLY_FIELD in doc:
+        if doc[RESIDUAL_ONLY_FIELD] is not True:
+            raise _TraceError(
+                "input_trace.native_inputs.model.residual_only: must be literal true")
+        if block.get("payoff_recipe"):
+            raise _TraceError(
+                "input_trace.native_inputs.model.residual_only: block also declares "
+                "a payoff recipe")
+        if block.get("payoff_artifact") is not None:
+            raise _TraceError(
+                "input_trace.native_inputs.model.residual_only: block also declares "
+                "a payoff artifact")
+        if not (block.get("model_residual_artifact_recipe")
+                or block.get("model_residual_artifacts")):
+            raise _TraceError(
+                "input_trace.native_inputs.model.residual_only: no residual declarations")
+        block[RESIDUAL_ONLY_FIELD] = True
+        if not block.get("payoff_recipe"):
+            # Restore the executed block's shape (capture never writes an
+            # empty payoff_recipe beside the marker): the model stage
+            # dispatches on the key's presence, so a documented ``{}``
+            # would put a replay back on the priced recipe path.
+            block.pop("payoff_recipe", None)
     return block
 
 
