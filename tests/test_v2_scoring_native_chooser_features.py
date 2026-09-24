@@ -692,3 +692,86 @@ def test_a_strict_capture_without_producer_role_rows_still_scores(
                           legacy_features(legacy_case))
     assert result.chooser_score is not None, result.flags
     assert record.forecasts["chooser_score"] == result.chooser_score
+
+
+def _strict_capture_inputs(frozen, analog, *, primitives=PRIMITIVES, extra_model=None):
+    """The chooser stage's inputs for a strict capture that registers only the
+    sizing fold's row and the 17 primitives (no producer role rows), the shape
+    a forecast-sized menu row actually captures. ``extra_model`` plants columns
+    into the merged ``model_inputs``; ``primitives`` trims the captured row."""
+    spot = 100.0
+    quotes = {("P", float(k), EXPIRY): {"bid": max(spot - k, 0.0) + 0.4,
+                                        "ask": max(spot - k, 0.0) + 0.5}
+              for k in range(70, 131)}
+    case = make_case(9, strategy="TWIN-P", spot=spot, quotes=quotes, entry_date=EVENT)
+    case["features"].update({"iv30": 55.0, "signed_streak": 2.0})
+    source = bundle(frozen, case, analog=analog, table=legacy_n_admissible_table())
+    source = SourceBundle(**{**source.__dict__, "residual_recipe": {
+        "mode": "planned_exit", "pre_iv30": 40.0},
+        "paired_residual_rows": tuple(
+            {"event_date": f"2025-{1 + i % 12:02d}-{1 + i % 27:02d}",
+             "pred_abs_move": 3.0 + i % 9, "err_move": math.sin(i) * 3.0,
+             "err_crush": -5.0 + math.cos(i) * 10.0}
+            for i in range(400))})
+    inputs = build_native_score_inputs(source)
+    inputs.features["role_model_inputs"] = {
+        "size": {name: case["features"][name] for name in FOLD_FEATURES},
+        "chooser": {name: case["features"][name] for name in primitives},
+    }
+    if extra_model:
+        inputs.features["model_inputs"].update(extra_model)
+    spy = _Spy(inputs.chooser["executors"]["chooser_score"])
+    inputs.chooser["executors"]["chooser_score"] = spy
+    return case, inputs, spy
+
+
+# The 2026-09-24 fresh-replay defect, isolated: a strict capture's merged
+# ``model_inputs`` legitimately carries columns under the SAME names the
+# chooser derives (the gate's k-NN ``analog_*``, the sizing ``pred_abs_move``,
+# the geometry block ...). ``FrozenStageExecutor`` serves the champion from the
+# captured role row plus the freshly derived stage columns -- never from the
+# merged ``model_inputs`` -- so suppressing a derived column against a merged
+# name drops it from the champion's view and declines the row with
+# CHOOSER_MISSING_FEATURES while legacy carried a ``chooser_score``.
+
+DERIVED_PLANTED = ("pred_abs_move", "analog_mean", "analog_n", "n_legs",
+                   "tier4_forecast_edge", "quote_repaired")
+
+
+def test_a_model_input_declaring_a_derived_chooser_name_does_not_hide_it(
+        frozen, analog, tmp_path, monkeypatch):
+    """Positive: plant a derived chooser column in the merged ``model_inputs``
+    with a value no native derivation could produce; the champion must still be
+    fed the NATIVELY derived column (not the planted value, not a missing
+    feature) and score."""
+    root, _ = frozen
+    planted = {name: 12345.678 for name in DERIVED_PLANTED}
+    case, inputs, spy = _strict_capture_inputs(frozen, analog, extra_model=planted)
+    record = application.score_one(_request("TWIN-P"), inputs)
+    assert "CHOOSER_MISSING_FEATURES" not in record.reason_codes, record.reason_codes
+    assert spy.seen is not None and record.forecasts["chooser_score"] is not None
+    vector = {name: spy.seen[name] for name in CHOOSER_FEATURES}
+    for name in DERIVED_PLANTED:
+        assert vector[name] != planted[name], name  # the derived value, not the plant
+    legacy_case = _legacy_case_from_record(case, record)
+    scorer = legacy_scorer(tmp_path, monkeypatch, frame=pool_frame())
+    # Every column, including the planted names, matches legacy bit for bit.
+    assert diff(legacy_frame(scorer, legacy_case), vector, CHOOSER_FEATURES) == {}
+
+
+def test_a_genuinely_missing_captured_primitive_still_refuses(frozen, analog):
+    """Negative: the same stage must NOT suppress the refusal. Drop a primitive
+    the captured chooser row was supposed to carry -- it is neither derived nor
+    an owned output -- so the champion still declines with the advisory
+    CHOOSER_MISSING_FEATURES and no score."""
+    _case, inputs, spy = _strict_capture_inputs(
+        frozen, analog, primitives=tuple(p for p in PRIMITIVES if p != "or_implied"))
+    assert "or_implied" not in inputs.features["role_model_inputs"]["chooser"]
+    record = application.score_one(_request("TWIN-P"), inputs)
+    # The stage reached the frozen champion (a genuine missing-feature refusal,
+    # not a skipped chooser): the row declines with the advisory flag and no
+    # score, so the fix must not paper over a column that is neither captured
+    # (the role row dropped it) nor derived (a primitive is never derived).
+    assert spy.seen is not None, record.reason_codes
+    assert "CHOOSER_MISSING_FEATURES" in record.reason_codes, record.reason_codes
+    assert record.forecasts.get("chooser_score") is None
