@@ -527,16 +527,28 @@ def _linear(spec: Mapping[str, Any], facts: Mapping[str, Any],
     return value
 
 
-def _required_forecast_roles(
-    inputs: NativeScoreInputs,
-    strategy: str | None,
-) -> tuple[str, ...]:
+def _forecast_strategy_name(inputs: NativeScoreInputs,
+                            strategy: str | None) -> str:
+    """The strategy identity the forecast stage reasons about.
+
+    Mirrors the resolution ``_strategy_name`` does for the later stages, but
+    tolerates the pre-geometry request path where ``strategy`` may be ``None``
+    and only ``context`` carries the name: capture's request-only bundle for a
+    disabled strategy lands here, and the stage must still recognize it.
+    """
     source = strategy
     if source is None and inputs.geometry is not None:
         source = inputs.geometry.strategy
     if source is None:
         source = inputs.context.get("strategy")
-    name = str(source or "").split("@", 1)[0]
+    return str(source or "").split("@", 1)[0]
+
+
+def _required_forecast_roles(
+    inputs: NativeScoreInputs,
+    strategy: str | None,
+) -> tuple[str, ...]:
+    name = _forecast_strategy_name(inputs, strategy)
     roles = list(_STRATEGY_FORECAST_ROLES.get(name, ()))
     raw = inputs.forecast.get("required_roles") or ()
     declared = [str(raw)] if isinstance(raw, str) else [str(item) for item in raw]
@@ -805,7 +817,24 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
         inputs, output, flags, strategy, invalid_fields,
     )
     if not (frozen_declared or local_declared):
-        _add_flag(flags, "MISSING_FORECAST_INPUT")
+        # Legacy ``Scorer.score`` returns at its disabled-strategy check
+        # (engine/score.py:1779-1798) before ``_crush_forecast``/sizing is ever
+        # reached, flagging only UNVALIDATED_STRUCTURE -- so for a DISABLED
+        # strategy the forecast stage is not a legacy-reachable computation, and
+        # an undeclared forecast there must not be reported as a
+        # MISSING_FORECAST_INPUT the way it is for every strategy that genuinely
+        # consumes one. Keyed off the same ``DISABLED`` registry
+        # ``domain.generation.structures.generate`` uses to refuse geometry and
+        # ``_execute_model`` already uses to withhold NO_PAYOFF_MAP -- not a
+        # ticker/fixture branch, and a strategy disabled later stays covered.
+        # Deliberately NOT "geometry refused for any reason": a forecast-sized
+        # strategy whose geometry refuses for an unrelated capture gap still
+        # reaches legacy's forecast and must still refuse. This suppresses only
+        # the stage-wide absence stamp; ``_validate_forecast_roles`` above still
+        # reports a genuinely required-but-unfilled role (MISSING_FORECAST_OUTPUT),
+        # so it is not a blanket suppression of a real missing-input refusal.
+        if _forecast_strategy_name(inputs, strategy) not in DISABLED:
+            _add_flag(flags, "MISSING_FORECAST_INPUT")
     if "forecast_abs_move" in undetermined and "size" in _required_forecast_roles(
         inputs, strategy,
     ):
