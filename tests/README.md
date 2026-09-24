@@ -307,6 +307,53 @@ killed the run) and `elapsed_seconds`. `score` is (killed + timeout) / checked,
 so `no_tests` counts against it. The merged `summary.json` adds overall totals
 and a `modules` map.
 
+### Backend: pytest-gremlins (`tools/gremlin_results.py`)
+
+The CI migration branch replaces mutmut with **pytest-gremlins 1.9.0**. One
+run per module writes the raw report `coverage/gremlins/gremlins.json`
+(top-level `summary`, `files`, `results`); `tools/gremlin_results.py export`
+converts it into the same `results.jsonl` / `summary.json` / `summary.md`
+files, plus an untouched copy of the raw report (`gremlins.json`) in the
+module directory for audit, and `merge` combines the module artifacts
+(refusing mixed backend/version/policy and mixed schema 1/2). `merge
+--expected-modules JSON` (the plan job's module list) additionally gates
+*completeness*: a missing, extra or duplicated module report — or no module
+directory at all — yields an artifact marked `complete: false` /
+`tool_error: true` with a `MISSING_MODULES` / `UNEXPECTED_MODULES` /
+`DUPLICATE_MODULES` / `NO_MODULE_REPORTS` reason, its score withheld (counts
+null when nothing arrived or one module reported twice), and a nonzero exit, so
+a subset can never be published as the latest completed run. Only the exact
+expected set merges clean.
+
+Schema version 2 rows carry `schema_version: 2`, `backend: pytest-gremlins`,
+`backend_version: 1.9.0` and a stable `policy` fingerprint (operator set as
+observed in the raw report, the pinned 30 s per-gremlin timeout, the score
+formula). Raw statuses map zapped->`killed`, survived->`survived`,
+timeout->`timeout`, error->`suspicious`, pardoned->`excluded`; each row keeps
+the raw `backend_status`, `gremlin_id` (`mutant_name` for query
+compatibility), `operator` and `description`, plus optional `killing_test`,
+`error_output`, `execution_time_ms` and `selected_tests`. `function` is
+derived from the source AST at the reported line (`<module>` marks a
+module-level mutation). Nothing is fabricated from the mutmut era: `diff`,
+`triage`, `mutmut_status` and `retested_this_run` are always null.
+
+The gremlins score is `(zapped + timeout) / (total - pardoned)`: pardoned
+gremlins leave the denominator, errored ones are counted as checked but never
+as killed. A missing, empty, malformed, stale or internally inconsistent raw
+report is an **incomplete artifact and a tool failure** (`complete: false`,
+`tool_error: true`, machine-detectable `failure_reasons`, nonzero exit) — it
+never prints a 100% score and never fabricates an empty measurement (counts
+are null). A nonzero `--run-exit-code` (including the step timeout `-1`) still
+writes an honest partial artifact, flagged. Survivors never fail jobs.
+
+`tools/mutation_report.py` reads both schemas (gremlins rows add the
+`excluded` status; mutmut-only columns render as `--` or empty). The ratchet
+never compares across backends or across scoring policies: a baseline with no
+`backend` is historical mutmut, and a gremlins measurement defaults to its own
+committed baseline, `checks/mutation_ratchet_baseline_gremlins.json` — the new
+reviewed FULL gremlins baseline is committed there, separately; the mutmut
+baseline and `tools/mutation_triage.toml` are not edited or renamed.
+
 ### Triage file
 
 `tools/mutation_triage.toml` has one `[[triage]]` table per reviewed

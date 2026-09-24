@@ -601,7 +601,8 @@ def test_matrix_is_built_from_the_toml(capsys):
             pilot.cmd_matrix(CFG, Args)
 
     plan = " ".join(s.get("run", "") for s in JOBS["plan"]["steps"])
-    assert "tools/mutation_pilot.py matrix" in plan
+    assert "tools/gremlin_pilot.py matrix" in plan
+    assert "tools/mutation_pilot.py" not in plan  # gremlins runner, not the old mutmut one
     assert JOBS["mutate"]["strategy"]["matrix"]["module"] == \
         "${{ fromJSON(needs.plan.outputs.modules) }}"
     assert JOBS["mutate"]["strategy"]["fail-fast"] is False
@@ -612,7 +613,8 @@ def test_workflow_triggers_and_concurrency():
     assert on["push"]["branches"] == ["main"]
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
-    assert WORKFLOW["concurrency"]["group"] == "mutation-${{ github.ref }}"
+    # a NEW group, so an in-flight old mutmut run cannot block the first gremlins run
+    assert WORKFLOW["concurrency"]["group"] == "mutation-gremlins-${{ github.ref }}"
     assert WORKFLOW["permissions"] == {"contents": "read"}
     plan = JOBS["plan"]["steps"][-1]["run"]
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
@@ -634,34 +636,57 @@ def _step(job, predicate):
 
 
 def test_workflow_cache_key_and_restore_policy():
+    assert WORKFLOW["env"]["GREMLINS_CACHE"] == ".gremlins_cache"
     key = _step("mutate", lambda s: s.get("id") == "key")["run"]
-    for part in ("needs.plan.outputs.mutmut", "steps.py.outputs.python-version",
+    for part in ("needs.plan.outputs.gremlins", "steps.py.outputs.python-version",
                  "hashFiles('tools/mutation_pilot.toml')", "matrix.module"):
         assert part in key, part
+    # the FULL tracked-input fingerprint joins the namespace, assigned under
+    # set -e rather than interpolated into the echo (where echo's own exit
+    # status would mask a failed digest and a truncated key go live)
+    assert "set -euo pipefail" in key
+    assert 'fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE")' in key
+    prefix_line = next(ln.strip() for ln in key.splitlines() if "prefix=" in ln)
+    assert "${fp}" in prefix_line and "$(" not in prefix_line
     restore = _step("mutate", lambda s: s.get("uses", "").startswith("actions/cache/restore"))
     save = _step("mutate", lambda s: s.get("uses", "").startswith("actions/cache/save"))
     prefix = "${{ steps.key.outputs.prefix }}"
-    assert restore["with"]["key"] == save["with"]["key"]
-    assert restore["with"]["key"].startswith(prefix + "${{ github.sha }}")
+    exact = prefix + "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert restore["with"]["key"] == exact  # version+python+TOML+module+fingerprint...
+    assert save["with"]["key"] == exact  # ...the SAME full namespace on both sides
     assert restore["with"]["restore-keys"] == prefix  # the same key without the sha
     assert restore["if"] == "needs.plan.outputs.mode == 'incremental'"  # full: no restore
     assert "always()" in save["if"]
     paths = restore["with"]["path"].splitlines()
     assert paths == save["with"]["path"].splitlines()
-    assert all(p.startswith("${{ env.STATE }}/") for p in paths)  # mutmut state only
-    assert "investing-plan-mutation-pilot" in JOBS["mutate"]["env"]["STATE"]
+    assert paths == ["${{ env.GREMLINS_CACHE }}"]  # the gremlins cache directory only
+    # a full run starts from scratch instead: --fresh is what clears .gremlins_cache
+    run = _step("mutate", lambda s: s.get("id") == "run")["run"]
+    assert 'if [ "$MODE" = "full" ]; then FRESH="--fresh"; fi' in run
+    assert 'gremlin_pilot.py run "$MODULE" $FRESH' in run
 
 
 def test_workflow_is_report_only():
     run = _step("mutate", lambda s: s.get("id") == "run")
-    assert "set +e" in run["run"] and "mutation-rc" in run["run"]
+    assert "tools/gremlin_pilot.py run" in run["run"]
+    assert "set +e" in run["run"] and "gremlin-rc" in run["run"]
     gate = _step("mutate", lambda s: s.get("name", "").startswith("Fail only on a tool error"))
     assert 'rc" != 0' in gate["run"] and "score" not in gate["run"]
+    # scores/survivors never fail a job; a TOOL failure always does: a nonzero
+    # pytest/gremlins rc, a missing/malformed current raw JSON, or an ERROR
+    # result -- all gate through the export step, whose rc read defaults to -1
+    # so even a timeout-killed run (no rc file) fails rather than passing empty.
+    export = _step("mutate", lambda s: s.get("name") == "Export report")["run"]
+    assert "tools/gremlin_results.py export" in export
+    assert '--run-exit-code "$rc"' in export
+    assert 'cat "$RUNNER_TEMP/gremlin-rc" 2>/dev/null || echo -1' in export
     uploads = [s for j in JOBS.values() for s in j["steps"]
                if str(s.get("uses", "")).startswith("actions/upload-artifact")]
     assert {u["with"]["retention-days"] for u in uploads} == {90}
-    assert {u["with"]["name"] for u in uploads} == {"mutation-module-${{ matrix.module }}",
+    assert {u["with"]["name"] for u in uploads} == {"gremlin-raw-${{ matrix.module }}",
+                                                    "mutation-module-${{ matrix.module }}",
                                                     "mutation-report"}
+    assert all("always()" in u["if"] for u in uploads)  # raw + module uploads survive failures
     assert "always()" in JOBS["report"]["if"]
     download = _step("report", lambda s: str(s.get("uses", "")).startswith("actions/download"))
     assert download["with"]["pattern"] == "mutation-module-*"  # never the merged artifact

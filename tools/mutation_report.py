@@ -1,5 +1,11 @@
 """Query mutation-testing results: which mutants survive, where, and the trend.
 
+Reads both artifact schemas without fabricating anything: schema 1 rows from
+the mutmut backend (``tools/mutation_results.py``) and schema 2 rows from
+pytest-gremlins (``tools/gremlin_results.py``), whose ``diff``/``triage``/
+``mutmut_status``/``retested_this_run`` are always null, and whose statuses add
+``excluded`` (pardoned) while never carrying ``no_tests``/``skipped``.
+
 By default reads the merged ``mutation-report`` artifact of the latest
 completed run of ``.github/workflows/mutation.yml`` on main, fetched with
 ``gh`` into a cache directory outside the repo
@@ -18,7 +24,8 @@ Sources (pick one; default: latest main run)::
 
 Filters (combine freely): --module, --file, --function (exact, or a glob),
 --status (comma list of killed, survived, no_tests, timeout, suspicious,
-skipped), --untriaged (survived/no_tests with no current triage entry),
+skipped, excluded), --untriaged (survived/no_tests with no current triage
+entry),
 --changed-since SHA (functions changed between SHA and the run's commit, by
 local git).
 
@@ -40,6 +47,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools"))
 
+import gremlin_results as gr  # noqa: E402
 import mutation_results as mr  # noqa: E402
 
 WORKFLOW = "mutation.yml"
@@ -146,9 +154,10 @@ def _split(values: list[str] | None) -> list[str]:
 
 def filter_rows(rows: list[dict], *, modules=(), files=(), functions=(), statuses=(),
                 untriaged: bool = False, changed: set[tuple[str, str]] | None = None) -> list[dict]:
-    bad = [s for s in statuses if s not in mr.STATUSES]
+    known = set(mr.STATUSES) | set(gr.STATUSES)
+    bad = [s for s in statuses if s not in known]
     if bad:
-        raise ValueError(f"unknown status {bad}; known: {', '.join(mr.STATUSES)}")
+        raise ValueError(f"unknown status {bad}; known: {', '.join(sorted(known))}")
     out = []
     for r in rows:
         if modules and r["module"] not in modules:
@@ -182,13 +191,34 @@ def changed_since(rows: list[dict], base: str) -> set[tuple[str, str]]:
 
 # -- history -----------------------------------------------------------------------
 
+def run_identity(summary: dict) -> tuple:
+    """The comparison identity of one artifact: (backend, backend_version,
+    scoring-policy identity). A schema-1 mutmut summary states none of them, so
+    it reads as the historical mutmut identity ``(None, None, None)``; a
+    schema-2 gremlins one carries all three. ``policy_identity`` ignores the
+    operator set *observed* in a run (data, not policy), so two gremlins runs
+    that happened to fire different operators still share an identity -- but a
+    different backend, pinned version or scoring policy does not."""
+    return (summary.get("backend"), summary.get("backend_version"),
+            gr.policy_identity(summary.get("policy")))
+
+
 def merge_history(runs: list[tuple[dict, dict]], modules=()) -> list[dict]:
     """(run metadata, merged summary.json) pairs -> one row per run and module,
-    oldest first, with the score change against the module's previous run."""
+    oldest first, with the score change against the module's previous run.
+
+    mutmut and pytest-gremlins measure different things (operator sets,
+    error/pardon semantics, score denominators), so a numeric delta across two
+    identities is meaningless -- a mutmut 50% followed by a gremlins 80% is NOT
+    a +30pp improvement and must not be shown as one. Each row keeps its
+    backend/version/policy identity, and ``delta`` is computed only against the
+    module's previous run on the SAME identity; across a mismatch it is ``None``
+    (shown as ``--``), exactly as when there is no previous run at all."""
     rows, last = [], {}
     ordered = sorted(runs, key=lambda pair: (pair[0].get("createdAt") or "",
                                             str(pair[0].get("databaseId"))))
     for meta, summary in ordered:
+        identity = run_identity(summary)
         blocks = dict(summary.get("modules", {}))
         blocks["ALL"] = summary
         for name, b in blocks.items():
@@ -196,17 +226,20 @@ def merge_history(runs: list[tuple[dict, dict]], modules=()) -> list[dict]:
                 continue
             prev = last.get(name)
             score = b.get("score")
+            comparable = prev is not None and prev[1] == identity
             rows.append({
                 "created": meta.get("createdAt"), "run_id": meta.get("databaseId", summary.get("run_id")),
                 "sha": summary.get("sha") or meta.get("headSha"), "mode": summary.get("mode"),
-                "module": name, "total": b.get("total"), "killed": b.get("killed"),
+                "module": name, "backend": identity[0], "backend_version": identity[1],
+                "policy_id": identity[2],
+                "total": b.get("total"), "killed": b.get("killed"),
                 "survived": b.get("survived"), "no_tests": b.get("no_tests"),
                 "skipped": b.get("skipped"), "survived_untriaged": b.get("survived_untriaged"),
                 "score": score,
-                "delta": None if score is None or prev is None else round(score - prev, 4),
+                "delta": None if score is None or not comparable else round(score - prev[0], 4),
             })
             if score is not None:
-                last[name] = score
+                last[name] = (score, identity)
     return rows
 
 
@@ -233,6 +266,11 @@ def _pct(v) -> str:
     return "--" if v is None else f"{100 * v:.1f}%"
 
 
+def _pad(v, width: int) -> str:
+    """History columns for a gremlins block: no_tests/skipped are not its vocabulary."""
+    return f"{'--' if v is None else v:>{width}}"
+
+
 def emit(rows: list[dict], fmt: str, *, show_diff: bool, history_rows: bool, out=None) -> None:
     out = out or sys.stdout
     if fmt == "jsonl":
@@ -241,6 +279,8 @@ def emit(rows: list[dict], fmt: str, *, show_diff: bool, history_rows: bool, out
         return
     if fmt == "csv":
         fields = list(rows[0]) if history_rows and rows else CSV_FIELDS
+        if not history_rows and any(r.get("schema_version") == gr.SCHEMA_VERSION for r in rows):
+            fields = fields + [f for f in gr.CSV_EXTRA_FIELDS if f not in fields]
         w = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         w.writeheader()
         for r in rows:
@@ -253,20 +293,29 @@ def emit(rows: list[dict], fmt: str, *, show_diff: bool, history_rows: bool, out
         return
     if history_rows:
         out.write(f"{'created':20s} {'run':>12s} {'sha':10s} {'mode':11s} {'module':22s} "
+                  f"{'backend':>12s} "
                   f"{'total':>6s} {'surv':>5s} {'notest':>6s} {'untri':>5s} {'score':>7s} {'delta':>7s}\n")
         for r in rows:
+            # A delta across incompatible backend/version/policy is None (below),
+            # never a fabricated percentage-point jump; the backend column shows
+            # why a run's delta reads as "--" when its identity changed.
             delta = "--" if r["delta"] is None else f"{100 * r['delta']:+.1f}"
+            backend = r.get("backend") or "mutmut"
             out.write(f"{str(r['created'] or '')[:19]:20s} {str(r['run_id']):>12s} "
                       f"{str(r['sha'] or '')[:10]:10s} {str(r['mode']):11s} {r['module']:22s} "
-                      f"{r['total']:6d} {r['survived']:5d} {r['no_tests']:6d} "
-                      f"{r['survived_untriaged']:5d} {_pct(r['score']):>7s} {delta:>7s}\n")
+                      f"{backend:>12s} "
+                      f"{_pad(r['total'], 6)} {_pad(r['survived'], 5)} {_pad(r['no_tests'], 6)} "
+                      f"{_pad(r['survived_untriaged'], 5)} {_pct(r['score']):>7s} {delta:>7s}\n")
         return
     for r in rows:
         t = r.get("triage")
         tri = "" if not t else f"  [{t['verdict']}{' STALE' if t['stale'] else ''}]"
-        num = r["mutant_name"].rpartition("__mutmut_")[2]
+        if r.get("backend"):  # schema-2 gremlins row: operator, not a mutmut ordinal
+            ident = f"{r.get('operator')} [{r.get('backend_status')}]"
+        else:
+            ident = "#" + r["mutant_name"].rpartition("__mutmut_")[2]
         out.write(f"{r['status']:10s} {r['module']:18s} {r['file']}:{r['line']}  "
-                  f"{r['function']} #{num}{tri}\n")
+                  f"{r['function']} {ident}{tri}\n")
         if show_diff and r.get("diff"):
             body = [ln for ln in r["diff"].splitlines() if not ln.startswith(("---", "+++"))]
             out.write("".join(f"    {ln}\n" for ln in body))
