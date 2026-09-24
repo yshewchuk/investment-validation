@@ -31,7 +31,9 @@ from checks.phase4_stored_forecasts import (  # noqa: E402
     resolve_stored_forecasts,
     with_stored_forecasts,
 )
-from checks.tier0_corpus import load, resolve_corpus  # noqa: E402
+from checks.tier0_corpus import (  # noqa: E402
+    NO_PROGRESS, Progress, load, resolve_corpus,
+)
 from checks.tier0_corpus import run as run_corpus  # noqa: E402
 from engine.analogs import AnalogMatcher  # noqa: E402
 from engine.fills import MID  # noqa: E402
@@ -2622,8 +2624,17 @@ def _plant_structural_defect(record: Mapping[str, Any], native, dimension: str):
     raise ValueError(f"unknown structural defect dimension {dimension!r}")
 
 
-def _native_parity(corpus) -> tuple[dict, dict]:
-    """Compare only complete, hash-verified traces from the saved release."""
+def _native_parity(corpus, progress=NO_PROGRESS) -> tuple[dict, dict]:
+    """Compare only complete, hash-verified traces from the saved release.
+
+    ``progress`` is an optional ``checks.tier0_corpus.Progress`` ticker:
+    the per-fixture loop (verify the trace bundle, replay it natively,
+    run every comparison dimension and both planted-defect control sets)
+    is the ~32-minute silent stretch this reports -- one case per declared
+    or loaded fixture, counted at each ``_counted`` resumption, so an
+    incomparable or excluded row counts as completed just like a compared
+    one. Nothing else about the function's computation changes.
+    """
     rows = []
     native_ids = []
     legacy_ids = []
@@ -2664,7 +2675,8 @@ def _native_parity(corpus) -> tuple[dict, dict]:
     loaded_ids = set(corpus.ordered_ids)
     declared_set = set(declared_ids)
     fixture_ids = sorted(declared_set | loaded_ids)
-    for fixture_id in fixture_ids:
+    progress.begin("fixtures", len(fixture_ids))
+    for fixture_id in _counted(progress, fixture_ids):
         if manifest_bound and fixture_id not in declared_set:
             dispositions["incomparable"] += 1
             rows.append({
@@ -3320,29 +3332,154 @@ def _write_battery_cache_entry(corpus_hash: str | None, implementation_hash: str
         pass
 
 
+#: Fallback per-stage duration profile (seconds) from the last fresh strict
+#: Phase 4 replay (~2h19m wall): the only stage-level estimates available
+#: BEFORE a run has completed enough cases to earn an observed one. Passed
+#: to every long stage's ticker as a shared :class:`_GateEstimate`, so a
+#: ``gate_eta`` (whole-gate remaining time) appears on every heartbeat
+#: from the first load tick to the final native-parity line. Estimates,
+#: not guarantees.
+_STAGE_DURATION_PROFILE_S = {
+    "corpus_load": 107 * 60.0,
+    "native_parity": 32 * 60.0,
+}
+
+
+class _GateEstimate:
+    """Whole-gate remaining time, shared by the long stage tickers.
+
+    ``remaining(ticker, now)`` = the active stage's best estimate + the
+    last run's profile for every tracked stage that has not completed +
+    a small constant for the short control/report stages around them.
+    The active stage's best estimate is the MAXIMUM of the candidates it
+    has, which is what keeps the number honest across the transitions
+    Astra flagged:
+
+    * the profile budget while it stands (``profile - stage elapsed``) --
+      so a quick current phase can never claim the whole stage, and
+      through it the whole run, is seconds from done;
+    * the ticker's observed phase-rate remainder as soon as ONE case
+      lands (the display line only shows that phase-scoped ``phase_eta``
+      from three, but the gate uses the softer bound immediately);
+    * when the budget is overrun, the minutes spent past it count UP
+      instead of the ETA vanishing -- best-effort, still labeled.
+
+    A long first unit that blocks before any case lands still gets a
+    number: the standing budget plus everything still to come.
+    """
+
+    #: The non-profiled short stages around the two long ones, always
+    #: something-until-done: after both, there is still work to run.
+    TAIL_S = 120.0
+
+    def __init__(self, profiles: dict[str, float],
+                 clock=time.monotonic) -> None:
+        self._profiles = dict(profiles)
+        self._clock = clock
+        self._completed: dict[str, float] = {}
+
+    def now(self) -> float:
+        return self._clock()
+
+    def complete(self, stage: str, seconds: float) -> None:
+        self._completed[stage] = float(seconds)
+
+    def remaining(self, ticker, now: float) -> float:
+        stage = ticker.name
+        elapsed = ticker.stage_elapsed(now)
+        candidates = []
+        observed = ticker.phase_eta_seconds(now, min_cases=1)
+        if observed is not None:
+            candidates.append(observed)
+        budget = self._profiles.get(stage)
+        if budget is not None:
+            candidates.append(budget - elapsed if elapsed < budget
+                              else elapsed - budget)
+        if not candidates:
+            candidates.append(0.0)
+        upcoming = sum(seconds for name, seconds in self._profiles.items()
+                       if name != stage and name not in self._completed)
+        return max(candidates) + upcoming + self.TAIL_S
+
+
 class _Stage:
-    """Print start/end markers with elapsed seconds for a coarse phase4_real.py stage."""
+    """Print start/end markers with elapsed seconds for a coarse phase4_real.py stage.
+
+    ``progress()`` extends the same instrumentation for the stages whose
+    innards take minutes to hours, not seconds: the returned
+    ``checks.tier0_corpus.Progress`` ticker prints at most one PROGRESS
+    line per minute to this process's stdout (flushed, so a piped run
+    shows it promptly) while the stage's loop ticks it, and the END/FAILED
+    line then carries that loop's final completed/total count. The ticker
+    it returns runs with its time heartbeat started and stopped by the
+    stage itself -- ``__exit__`` runs on the exception path too, so the
+    daemon timer can never leak past a ``with _Stage(...)`` block, and a
+    single case that blocks for minutes still produces interim lines.
+    A stage that never calls ``progress()`` behaves and prints exactly as
+    before.
+    """
 
     def __init__(self, name: str) -> None:
         self.name = name
+        self._progress: Progress | None = None
+        self._gate: _GateEstimate | None = None
+
+    def progress(self, interval: float = 60.0, heartbeat: bool = True,
+                 gate: _GateEstimate | None = None) -> Progress:
+        self._gate = gate
+        self._progress = Progress(name=self.name, prefix="[phase4_real]",
+                                  stream=sys.stdout, interval=interval,
+                                  stage_seconds=None if gate is not None
+                                  else _STAGE_DURATION_PROFILE_S.get(self.name),
+                                  gate=gate)
+        if heartbeat:
+            self._progress.start_heartbeat()
+        return self._progress
 
     def __enter__(self):
         self._started = time.perf_counter()
-        print(f"[phase4_real] START {self.name}")
+        print(f"[phase4_real] START {self.name}", flush=True)
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        if self._progress is not None:
+            self._progress.stop_heartbeat()
+            if self._gate is not None:
+                self._gate.complete(
+                    self.name, self._progress.stage_elapsed(self._gate.now()))
         elapsed = time.perf_counter() - self._started
         status = "FAILED" if exc_type else "END"
-        print(f"[phase4_real] {status} {self.name} ({elapsed:.1f}s)")
+        counted = self._progress.count_suffix() if self._progress is not None else ""
+        print(f"[phase4_real] {status} {self.name} ({elapsed:.1f}s{counted})",
+              flush=True)
         return False
+
+
+def _counted(progress, fixture_ids):
+    """Yield ``fixture_ids``, ticking ``progress`` once per COMPLETED case.
+
+    The tick happens when the generator resumes -- after the body's last
+    statement, including every early ``continue`` -- so each fixture
+    counts exactly once however its row was dispositioned. A case that
+    raises mid-body never ticks: the FAILED stage line then carries the
+    completed count from before the one that killed the run, which is the
+    honest number an operator needs.
+    """
+    for fixture_id in fixture_ids:
+        yield fixture_id
+        progress.tick()
 
 
 def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
     started = time.perf_counter()
+    # One whole-gate estimate shared by both long stage tickers, so every
+    # heartbeat from the first load tick to the last native-parity line
+    # carries a `gate_eta` for the entire build, not just its own stage.
+    gate = _GateEstimate(_STAGE_DURATION_PROFILE_S)
     with _Stage("corpus_resolve"):
         resolved = resolve_corpus(corpus_root)
-    with _Stage("corpus_load"):
+    with _Stage("corpus_load") as stage:
+        corpus_progress = stage.progress(gate=gate)
         # `run_corpus` runs (and, per 958388f, fully releases its OWN internal
         # `Corpus`) BEFORE this frame's persistent `corpus = load(...)` local is
         # created. Reversed, the two full corpora were resident at once for the
@@ -3369,7 +3506,7 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         if cached_entry is not None:
             print(f"[phase4_real] battery cache HIT corpus_hash={declared_corpus_hash} "
                   f"implementation_hash={implementation_hash}; skipping full battery "
-                  f"(recorded {cached_entry.get('population')})")
+                  f"(recorded {cached_entry.get('population')})", flush=True)
             corpus_verdict = compare_records(
                 {"corpus_hash": declared_corpus_hash, "implementation_hash": implementation_hash},
                 {"corpus_hash": declared_corpus_hash, "implementation_hash": implementation_hash},
@@ -3377,11 +3514,18 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
                 left_ref="cache", right_ref="cache",
             )
         else:
-            corpus_verdict, cases = run_corpus(resolved)
+            # `progress=corpus_progress` threads the per-minute case ticker
+            # through the whole battery: every per-pair loop, the loader and
+            # the fresh-process child (which gets `--progress`, writes its own
+            # lines to the inherited stderr and keeps stdout pipe-captured for
+            # the verdict comparison -- and while it runs, the parent polls and
+            # beats the ticker, so this stage's stdout is never silent for a
+            # minute either).
+            corpus_verdict, cases = run_corpus(resolved, progress=corpus_progress)
             if corpus_verdict.verdict == AGREE:
                 _write_battery_cache_entry(declared_corpus_hash, implementation_hash,
                                            corpus_verdict, cases)
-        corpus = load(resolved)
+        corpus = load(resolved, progress=corpus_progress)
     with _Stage("registry_load"):
         registry = default_registry()
         feature_registry = default_feature_registry()
@@ -3398,8 +3542,9 @@ def build_evidence(corpus_root: Path, artifact_root: Path) -> dict:
         factory_structure_controls = _factory_structure_controls()
     with _Stage("simulation_acceptance"):
         simulation_acceptance = _simulation_acceptance_controls()
-    with _Stage("native_parity"):
-        saved_release_comparison, native_parity = _native_parity(corpus)
+    with _Stage("native_parity") as stage:
+        saved_release_comparison, native_parity = _native_parity(
+            corpus, progress=stage.progress(gate=gate))
     with _Stage("factory_parity"):
         factory_parity = _factory_parity(corpus)
     with _Stage("completion_controls_update"):

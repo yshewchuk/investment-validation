@@ -14,6 +14,7 @@ absent.
 from __future__ import annotations
 
 import copy
+import io
 import json
 import subprocess
 import sys
@@ -270,6 +271,387 @@ def test_the_corpus_is_released_before_the_fresh_process_forks(tmp_path, monkeyp
     assert cases["fresh_process"].verdict == AGREE
     assert report_extra is not None and report_extra["pairs"] == len(standard_pairs())
     assert merged.verdict == AGREE, merged.summary()
+
+
+# --------------------------------------------------------------------------
+# progress: a battery that takes tens of minutes on the real corpus must
+# never go a minute without a line (see checks.tier0_corpus.Progress)
+# --------------------------------------------------------------------------
+
+
+class _FakeClock:
+    def __init__(self, start=100.0):
+        self.now = float(start)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class _Recorder:
+    """Duck-typed ``Progress`` consumer: records begins, counts ticks and
+    beats, prints nothing."""
+
+    def __init__(self):
+        self.begins = []
+        self.ticks = 0
+        self.beats = 0
+
+    def begin(self, phase, total, unit="cases"):
+        self.begins.append((phase, total))
+
+    def tick(self, n=1):
+        self.ticks += n
+
+    def beat(self):
+        self.beats += 1
+
+
+def test_progress_line_reports_completed_total_elapsed_and_flushes():
+    stream = io.StringIO()
+    ticker = t0.Progress(name="corpus_load", prefix="[phase4_real]",
+                         stream=stream, clock=_FakeClock())
+    ticker.begin("load", 20, unit="pairs")
+    ticker.tick()
+    assert stream.getvalue().splitlines() == [
+        "[phase4_real] PROGRESS corpus_load load 1/20 pairs elapsed=0.0s"]
+
+
+def test_progress_lines_are_gated_to_at_most_one_per_interval():
+    clock = _FakeClock()
+    stream = io.StringIO()
+    ticker = t0.Progress(stream=stream, clock=clock, interval=60.0)
+    ticker.begin("digest", 4, unit="pairs")
+    seen_lines = []
+    for _ in range(4):
+        ticker.tick()
+        seen_lines.append(len(stream.getvalue().splitlines()))
+        clock.advance(40.0)
+    assert seen_lines == [1, 1, 2, 2]
+    lines = stream.getvalue().splitlines()
+    assert lines[0].startswith("[tier0] PROGRESS digest 1/4 pairs")
+    assert lines[1].startswith("[tier0] PROGRESS digest 3/4 pairs")
+
+
+def test_eta_appears_only_with_a_known_total_and_enough_completed_cases():
+    stream = io.StringIO()
+    clock = _FakeClock()
+    ticker = t0.Progress(stream=stream, clock=clock, interval=0.0)
+    ticker.begin("fixtures", 6)
+    for _ in range(6):
+        ticker.tick()
+        clock.advance(10.0)
+    # ticks at t=0..50: the done=1/2 lines have too few samples for an
+    # average, the done=3 line extrapolates (20/3)*3=20.0s, and the final
+    # 6/6 line has nothing left to estimate. No stage profile -> no
+    # provisional eta either.
+    lines = stream.getvalue().splitlines()
+    assert "eta=" not in lines[0] and "eta=" not in lines[1]
+    assert "3/6 cases elapsed=20.0s phase_eta=20.0s" in lines[2]
+    assert "6/6 cases" in lines[5] and "eta=" not in lines[5]
+    unknown = io.StringIO()
+    ticker = t0.Progress(stream=unknown, clock=_FakeClock(), interval=0.0)
+    ticker.begin("mystery", 0)
+    for _ in range(4):
+        ticker.tick()
+    lines = unknown.getvalue().splitlines()
+    assert "1/? cases" in lines[0] and "4/? cases" in lines[-1]
+    assert all("eta=" not in line for line in lines)
+
+
+def test_provisional_eta_shows_from_stage_start_then_gives_way_to_observed():
+    clock = _FakeClock()
+    stream = io.StringIO()
+    ticker = t0.Progress(stream=stream, clock=clock, interval=0.0,
+                         stage_seconds=100.0)
+    ticker.begin("fixtures", 6)
+    ticker.tick()
+    assert "eta~=100.0s" in stream.getvalue().splitlines()[-1]
+    clock.advance(10.0)
+    ticker.tick()
+    assert "eta~=90.0s" in stream.getvalue().splitlines()[-1]
+    clock.advance(10.0)
+    ticker.tick()  # done=3: the observed phase estimate takes over
+    last = stream.getvalue().splitlines()[-1]
+    assert "eta~=" not in last and "elapsed=20.0s phase_eta=20.0s" in last
+    clock.advance(1000.0)
+    ticker.begin("phase_two", 3)
+    ticker.tick()
+    # profile overrun with too few samples for a phase estimate: the
+    # provisional now COUNTS UP past the spent budget (best effort, still
+    # labeled) instead of dropping the ETA.
+    last = stream.getvalue().splitlines()[-1]
+    assert "eta~=920.0s" in last and "phase_eta=" not in last
+
+
+def test_gate_eta_rides_every_line_and_beat_beside_the_phase_estimate():
+    clock = _FakeClock()
+    stream = io.StringIO()
+
+    class _StubGate:
+        def __init__(self):
+            self.consulted = []
+
+        def remaining(self, ticker, now):
+            self.consulted.append(ticker.done)
+            return 9999.0
+
+    gate = _StubGate()
+    ticker = t0.Progress(name="native_parity", stream=stream, clock=clock,
+                         interval=0.0, gate=gate, stage_seconds=1234.0)
+    ticker.begin("fixtures", 6)
+    ticker.tick()
+    ticker.tick()
+    ticker.tick()
+    ticker.beat()  # a blocked unit still shows the whole-gate estimate
+    lines = stream.getvalue().splitlines()
+    assert all("gate_eta=9999.0s" in line for line in lines)
+    assert "phase_eta=" not in lines[0] and "phase_eta=" in lines[2]
+    assert gate.consulted == [1, 2, 3, 3]  # every line consults the gate
+    assert not any("eta~=" in line for line in lines)  # the gate wins
+
+
+def test_heartbeat_prints_interim_lines_while_a_single_unit_blocks():
+    """The P1 property: ticks alone cannot bound the silent gap -- one
+    100 MB pair or one heavy native replay can span many minutes. The
+    timer beats regardless, and counts stay honest: every interim line
+    shows the blocked unit NOT yet completed."""
+    stream = io.StringIO()
+    ticker = t0.Progress(stream=stream, interval=0.08)
+    ticker.begin("round_trip", 3, unit="pairs")
+    ticker.start_heartbeat()
+    assert ticker.heartbeat_active()
+    try:
+        time.sleep(0.3)  # one unit spanning many heartbeat checks
+    finally:
+        ticker.stop_heartbeat()
+    lines = stream.getvalue().splitlines()
+    assert len(lines) >= 2, lines
+    assert all("round_trip 0/3 pairs" in line for line in lines)
+    assert not ticker.heartbeat_active()
+    ticker.start_heartbeat()
+    ticker.start_heartbeat()  # double start keeps exactly one timer
+    ticker.stop_heartbeat()
+    ticker.stop_heartbeat()   # and stop is idempotent
+    assert not ticker.heartbeat_active()
+    ticker.tick()
+    assert ticker.done == 1  # counts accurate before/after either timer
+
+
+def test_heartbeat_leaks_no_thread_when_the_owned_block_raises():
+    ticker = t0.Progress(stream=io.StringIO(), interval=0.08)
+    ticker.begin("fixtures", 3)
+    ticker.start_heartbeat()
+    with pytest.raises(RuntimeError, match="body died"):
+        try:
+            raise RuntimeError("body died")
+        finally:
+            ticker.stop_heartbeat()
+    assert not ticker.heartbeat_active()
+
+
+def test_standalone_progress_flag_keeps_stdout_verdict_only(corpus):
+    """`--progress` may run this CLI in the fresh-process CHILD role,
+    where stdout is the parsed verdict: it must stay one clean line even
+    while the heartbeat and the load ticks are active."""
+    script = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from checks import tier0_corpus as t0\n"
+        "raise SystemExit(t0.main(['--corpus', %r, '--emit-verdict', '--progress']))\n"
+    ) % (str(ROOT), str(corpus))
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, cwd=ROOT, check=True, timeout=60)
+    assert proc.stdout.strip().splitlines()[-1] == AGREE
+
+
+def test_fresh_process_reaps_the_child_when_the_parent_wait_raises(monkeypatch,
+                                                                   tmp_path):
+    """P2 regression: if communicate() or a beat raises, the child must be
+    terminated and reaped before the ORIGINAL exception propagates -- an
+    instrumented run must not orphan a corpus-loading process."""
+    events = {}
+
+    class _Child:
+        stdout = io.StringIO()
+
+        def __init__(self, command, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            raise RuntimeError("parent-side wait blew up")
+
+        def terminate(self):
+            events["terminated"] = True
+
+        def kill(self):
+            events["killed"] = True
+
+        def wait(self, timeout=None):
+            events["reaped"] = True
+            return 0
+
+    monkeypatch.setattr(t0.subprocess, "Popen", _Child)
+    with pytest.raises(RuntimeError, match="blew up"):
+        t0.case_fresh_process(tmp_path, AGREE, _Recorder())
+    assert events == {"terminated": True, "reaped": True}
+
+
+def test_fresh_process_escalates_to_kill_when_the_child_ignores_term(monkeypatch,
+                                                                     tmp_path):
+    events = {"waits": 0}
+
+    class _StubbornChild:
+        stdout = io.StringIO()
+
+        def __init__(self, command, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            raise RuntimeError("a beat raised instead")
+
+        def terminate(self):
+            events["terminated"] = True
+
+        def kill(self):
+            events["killed"] = True
+
+        def wait(self, timeout=None):
+            events["waits"] += 1
+            if events["waits"] == 1:
+                raise subprocess.TimeoutExpired("child", timeout)
+            events["reaped"] = True
+            return -9
+
+    monkeypatch.setattr(t0.subprocess, "Popen", _StubbornChild)
+    with pytest.raises(RuntimeError, match="a beat raised instead"):
+        t0.case_fresh_process(tmp_path, AGREE, _Recorder())
+    assert events["terminated"] and events["killed"] and events.get("reaped")
+
+
+def test_beat_keeps_the_line_moving_without_counting_a_case():
+    clock = _FakeClock()
+    stream = io.StringIO()
+    ticker = t0.Progress(stream=stream, clock=clock, interval=60.0)
+    ticker.begin("fresh_process", 1, unit="subprocess")
+    ticker.beat()
+    clock.advance(30.0)
+    ticker.beat()
+    clock.advance(30.0)
+    ticker.beat()
+    lines = stream.getvalue().splitlines()
+    assert len(lines) == 2
+    assert all("fresh_process 0/1 subprocess" in line for line in lines)
+
+
+def test_count_suffix_and_the_no_progress_default():
+    ticker = t0.Progress(stream=io.StringIO(), clock=_FakeClock())
+    assert ticker.count_suffix() == ", 0/? cases"
+    ticker.begin("fixtures", 4)
+    ticker.tick(2)
+    assert ticker.count_suffix() == ", 2/4 cases"
+    t0.NO_PROGRESS.begin("x", 1)
+    t0.NO_PROGRESS.tick()
+    t0.NO_PROGRESS.beat()
+    assert t0.NO_PROGRESS.count_suffix() == ""
+
+
+def test_load_ticks_one_case_per_pair_file(corpus):
+    rec = _Recorder()
+    loaded = t0.load(corpus, progress=rec)
+    assert rec.begins == [("load", len(standard_pairs()))]
+    assert rec.ticks == len(loaded.pairs)
+
+
+def test_per_pair_battery_cases_tick_once_per_pair(corpus):
+    loaded = t0.load(corpus)
+    rec = _Recorder()
+    t0.seeded_controls(loaded, rec)
+    assert rec.begins == [("seeded_controls", len(loaded.pairs))]
+    assert rec.ticks == len(loaded.pairs)
+    rec = _Recorder()
+    t0.derived_uncovered(loaded, rec)
+    assert rec.begins == [("coverage", len(loaded.pairs))]
+    assert rec.ticks == len(loaded.pairs)
+    rec = _Recorder()
+    t0.case_digest(loaded, rec)
+    assert rec.begins == [("digest", len(loaded.pairs))]
+    assert rec.ticks == len(loaded.pairs)
+
+
+def test_fresh_process_without_a_ticker_stays_a_plain_captured_run(monkeypatch,
+                                                                   tmp_path):
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, stdout=f"{AGREE}\n",
+                                           stderr="")
+
+    monkeypatch.setattr(t0.subprocess, "run", fake_run)
+    receipt = t0.case_fresh_process(tmp_path, AGREE)
+    assert receipt.verdict == AGREE
+    assert "--progress" not in seen["command"]
+    assert seen["kwargs"]["capture_output"] is True
+
+
+def test_fresh_process_with_a_ticker_beats_while_the_child_streams(monkeypatch,
+                                                                   tmp_path):
+    """With a ticker the child is launched with ``--progress`` and an
+    INHERITED stderr (it emits its own case lines straight to the
+    operator), while its stdout stays pipe-captured because that last
+    stdout line IS the compared verdict. Each timeout of the parent's
+    poll loop beats the ticker, so the wait is never a silent minute."""
+    calls = {}
+
+    class _Child:
+        stdout = io.StringIO()
+
+        def __init__(self, command, **kwargs):
+            calls["command"] = command
+            calls.update(kwargs)
+            self._timeouts_left = 1
+
+        def communicate(self, timeout=None):
+            if self._timeouts_left:
+                self._timeouts_left -= 1
+                raise subprocess.TimeoutExpired(calls["command"], timeout)
+            return f"{AGREE}\n", None
+
+    monkeypatch.setattr(t0.subprocess, "Popen", _Child)
+    rec = _Recorder()
+    receipt = t0.case_fresh_process(tmp_path, AGREE, rec)
+    assert receipt.verdict == AGREE
+    assert calls["command"][-1] == "--progress"
+    assert calls["stderr"] is None
+    assert calls["stdout"] is subprocess.PIPE
+    assert rec.begins == [("fresh_process", 1)]
+    assert rec.beats == 1 and rec.ticks == 0
+
+
+def test_run_threads_one_ticker_through_every_per_pair_pass(corpus, monkeypatch):
+    def fake_fresh(root, this_verdict, progress=t0.NO_PROGRESS):
+        progress.begin("fresh_process", 1, unit="subprocess")
+        progress.beat()
+        return t0.compare_records(
+            {"verdict": this_verdict}, {"verdict": this_verdict},
+            comparison_kind="tier0_fresh_process",
+            left_ref="this-process", right_ref="subprocess")
+
+    monkeypatch.setattr(t0, "case_fresh_process", fake_fresh)
+    rec = _Recorder()
+    merged, cases = t0.run(corpus, rec)
+    assert merged.verdict == AGREE, merged.summary()
+    assert cases["fresh_process"].verdict == AGREE
+    assert rec.begins[0] == ("load", len(standard_pairs()))
+    phases = [phase for phase, _ in rec.begins]
+    for expected in ("addressing", "digest", "round_trip", "batch_singles",
+                     "coverage", "seeded_controls", "fresh_process"):
+        assert expected in phases, phases
+    assert rec.ticks >= 8 * len(standard_pairs())
+    assert rec.beats == 1
 
 
 # --------------------------------------------------------------------------
