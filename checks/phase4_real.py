@@ -1851,6 +1851,80 @@ def _translation_path(value: Any, label: str) -> tuple[Any, ...]:
     return tuple(path)
 
 
+def _is_logical_leaf(value: Any) -> bool:
+    """Whether ``value`` is an atomic leaf under ``_leaf_values``' walk.
+
+    A scalar (anything that is neither a ``Mapping`` nor a ``list`` -- this
+    includes a raw ``tuple``, which ``_leaf_values`` likewise treats as a single
+    value), an empty ``Mapping``/``list``, or the exact one-key
+    ``{NONFINITE_KEY: <str>}`` tag ``tag_nonfinite``/``canonical_json`` emit for
+    a single nonfinite float. Everything else is a container to descend into.
+    Kept in lockstep with ``_leaf_values`` so path resolution and the recursive
+    leaf count agree on what a leaf is.
+    """
+    if isinstance(value, Mapping):
+        if set(value) == {NONFINITE_KEY} and isinstance(value[NONFINITE_KEY], str):
+            return True
+        return not value
+    if isinstance(value, list):
+        return not value
+    return True
+
+
+def _count_logical_leaves(value: Any) -> int:
+    """Number of leaves ``_leaf_values`` would emit for ``value``.
+
+    Mirrors ``_leaf_values`` exactly (same container/short-circuit order), so
+    ``len(_leaf_values(value))`` == ``_count_logical_leaves(value)`` for every
+    input it would accept, and it raises the same error it raises on non-string
+    object keys -- but without materializing the path->value mapping (the
+    point of this refactor: the caller only needs the count, not the dict).
+    """
+    if isinstance(value, Mapping):
+        if _is_logical_leaf(value):
+            return 1
+        total = 0
+        for key in value:
+            if not isinstance(key, str):
+                raise _TraceError("input_translation: object keys must be strings")
+            total += _count_logical_leaves(value[key])
+        return total
+    if isinstance(value, list):
+        if not value:
+            return 1
+        return sum(_count_logical_leaves(item) for item in value)
+    return 1
+
+
+def _resolve_logical_leaf(document: Any, path: tuple[Any, ...]) -> Any:
+    """Return the leaf ``path`` addresses in ``document`` or raise.
+
+    Direct lookup replaces the full path->value dict walk: a path is valid only
+    if it never descends through a logical leaf, uses a string key on an object
+    / integer index on a list, stays in range, finds every key, and terminates
+    exactly on a leaf. Every failure is collapsed by the caller to one
+    "not a document leaf" meaning, matching the previous ``path not in
+    _leaf_values(document)`` check.
+    """
+    current = document
+    for segment in path:
+        if _is_logical_leaf(current):
+            raise _TraceError("path traverses through a leaf")
+        if isinstance(current, Mapping):
+            if not isinstance(segment, str) or segment not in current:
+                raise _TraceError("path segment missing in object")
+            current = current[segment]
+        elif isinstance(current, list):
+            if type(segment) is not int or segment >= len(current):
+                raise _TraceError("path segment invalid for list")
+            current = current[segment]
+        else:  # pragma: no cover - scalars are leaves, caught above
+            raise _TraceError("path traverses through a leaf")
+    if not _is_logical_leaf(current):
+        raise _TraceError("path ends on a nonleaf")
+    return current
+
+
 def _verified_translation(
     translation: Any,
     shared_inputs: Mapping[str, Any],
@@ -1891,8 +1965,14 @@ def _verified_translation(
             if key != "source_ref"
         },
     }
-    shared_leaves = _leaf_values(shared_inputs)
-    native_leaves = _leaf_values(native_document)
+    # Count leaves instead of building the full path->value dicts. A distinct,
+    # valid leaf path per mapping plus an equal leaf count proves full coverage
+    # (the recorded paths are a subset of the leaves; equal size forces set
+    # equality), and each value is looked up on demand below -- so neither the
+    # dicts nor the two final ``set(dict)`` coverage copies are ever
+    # materialized.
+    shared_leaf_count = _count_logical_leaves(shared_inputs)
+    native_leaf_count = _count_logical_leaves(native_document)
     mappings = translation.get("mappings")
     if not isinstance(mappings, list):
         raise _TraceError("input_translation.mappings: expected list")
@@ -1908,10 +1988,11 @@ def _verified_translation(
         native_path = _translation_path(row["native_path"], f"{label}.native_path")
         if shared_path in shared_paths or native_path in native_paths:
             raise _TraceError(f"{label}: duplicate path")
-        if shared_path not in shared_leaves or native_path not in native_leaves:
-            raise _TraceError(f"{label}: path is not a document leaf")
-        shared_value = shared_leaves[shared_path]
-        native_value = native_leaves[native_path]
+        try:
+            shared_value = _resolve_logical_leaf(shared_inputs, shared_path)
+            native_value = _resolve_logical_leaf(native_document, native_path)
+        except _TraceError as exc:
+            raise _TraceError(f"{label}: path is not a document leaf") from exc
         value_hash = _verify_content(
             shared_value, row.get("value_hash"), f"{label}.value_hash",
         )
@@ -1919,7 +2000,10 @@ def _verified_translation(
             raise _TraceError(f"{label}: translated values differ")
         shared_paths.add(shared_path)
         native_paths.add(native_path)
-    if shared_paths != set(shared_leaves) or native_paths != set(native_leaves):
+    if (
+        len(shared_paths) != shared_leaf_count
+        or len(native_paths) != native_leaf_count
+    ):
         raise _TraceError("input_translation.mappings: leaf coverage mismatch")
 
     expected_derived = [{

@@ -840,3 +840,214 @@ def test_contract_projection_dates_absent_on_both_sides_are_none_not_dropped():
     assert projection["exit_date"] is None
     assert projection["execution_date"] is None
     assert set(projection) == {"legs", "entry_date", "exit_date", "execution_date"}
+
+
+# --------------------------------------------------------------------------
+# Memory reduction: `_verified_translation` now validates/resolves each mapping
+# path directly and proves full coverage with recursive logical-leaf counts
+# instead of materializing the shared/native path->value dicts (and their two
+# final set copies). These tests pin the preserved error meanings against that
+# new path, and one proves the dicts are gone by breaking `_leaf_values`.
+# --------------------------------------------------------------------------
+
+
+def _direct_case():
+    """A self-contained valid translation for a nested document exercising every
+    leaf shape the resolver must reproduce from `_leaf_values`: ordinary
+    mappings, nested mappings, an empty mapping, an empty list (top-level and
+    inside a list), a nested list, and a tagged nonfinite leaf. The shared and
+    native documents are structurally identical (native is an independent deep
+    copy), so a well-formed translation covers every leaf on both sides.
+    """
+    request = {"event_id": "e1", "meta": {"x": 1}}
+    native = {
+        "context": {"strategy": "S"},
+        "forecast": {},
+        "empty_list": [],
+        "series": [1.0, 2.0, [3.0, 4.0], []],
+        "tagged": {phase4_real.NONFINITE_KEY: "inf"},
+        "payload": {"nested": {"deep": [5]}},
+    }
+    shared_inputs = {"request": request, "native_inputs": native}
+    shared_hash = content_hash(shared_inputs)
+    resolved_inputs = copy.deepcopy(native)
+    resolved_inputs["source_ref"] = shared_hash
+    native_hash = content_hash(resolved_inputs)
+    translation = _translation(shared_inputs, resolved_inputs)
+    return {
+        "translation": translation,
+        "shared_inputs": shared_inputs,
+        "shared_hash": shared_hash,
+        "saved_request": shared_inputs["request"],
+        "resolved_inputs": resolved_inputs,
+        "native_hash": native_hash,
+    }
+
+
+def _verify(case, translation):
+    return phase4_real._verified_translation(
+        translation, case["shared_inputs"], case["shared_hash"],
+        case["saved_request"], case["resolved_inputs"], case["native_hash"],
+    )
+
+
+def _resign_translation(translation):
+    body = {key: value for key, value in translation.items()
+            if key != "translation_hash"}
+    translation["translation_hash"] = content_hash(body)
+
+
+def _mapping_for(translation, path):
+    want = list(path)
+    for index, row in enumerate(translation["mappings"]):
+        if row["shared_path"] == want:
+            return index, row
+    raise AssertionError(
+        f"no mapping for {want}; got "
+        f"{[row['shared_path'] for row in translation['mappings']]}"
+    )
+
+
+def test_verified_translation_accepts_complete_nested_coverage():
+    case = _direct_case()
+
+    digest = _verify(case, case["translation"])
+
+    assert digest == case["translation"]["translation_hash"]
+    # Independent-oracle cross-check: the recording helper (`_leaf_values`)
+    # agrees the translation is complete, and it addresses the shapes the
+    # resolver must reproduce -- an empty mapping, a top-level empty list, an
+    # empty list inside a list, and the tagged nonfinite leaf one segment short.
+    leaves = phase4_real._leaf_values(case["shared_inputs"])
+    assert len(case["translation"]["mappings"]) == len(leaves)
+    assert set(case["translation"]["mappings"][0]) == {
+        "shared_path", "native_path", "value_hash",
+    }
+    assert leaves[("native_inputs", "forecast")] == {}
+    assert leaves[("native_inputs", "empty_list")] == []
+    assert leaves[("native_inputs", "series", 3)] == []
+    assert leaves[("native_inputs", "tagged")] == {
+        phase4_real.NONFINITE_KEY: "inf",
+    }
+    assert leaves[("native_inputs", "series", 2, 0)] == 3.0
+    assert leaves[("native_inputs", "payload", "nested", "deep", 0)] == 5
+
+
+@pytest.mark.parametrize(
+    "label,path",
+    (
+        ("int_on_mapping", ["native_inputs", 0, "strategy"]),
+        ("string_on_list", ["native_inputs", "series", "0"]),
+        ("traverses_scalar_leaf", ["request", "event_id", "sub"]),
+        ("traverses_tagged_leaf",
+         ["native_inputs", "tagged", phase4_real.NONFINITE_KEY]),
+        ("traverses_empty_mapping", ["native_inputs", "forecast", "x"]),
+        ("interior_nonleaf_list", ["native_inputs", "series", 2]),
+        ("interior_nonleaf_map", ["native_inputs", "payload", "nested"]),
+        ("missing_key", ["native_inputs", "context", "absent"]),
+        ("out_of_range", ["native_inputs", "series", 99]),
+    ),
+)
+def test_bad_shared_path_is_not_a_document_leaf(label, path):
+    # Each of these must be rejected as a non-leaf; the shared/native documents
+    # are structurally equal, so only a genuinely bad shared path is a leaf
+    # defect (native_path is left addressing the real leaf it replaced).
+    case = _direct_case()
+    translation = case["translation"]
+    _index, row = _mapping_for(translation, ("native_inputs", "context", "strategy"))
+    assert list(row["native_path"]) == [
+        "native_inputs", "context", "strategy",
+    ], "fixture drifted: native side must still hold the real leaf"
+    row["shared_path"] = path
+    _resign_translation(translation)
+
+    with pytest.raises(
+        phase4_real._TraceError,
+        match=r"input_translation\.mappings\[\d+\]: path is not a document leaf",
+    ):
+        _verify(case, translation)
+
+
+def test_missing_mapping_is_leaf_coverage_mismatch():
+    case = _direct_case()
+    translation = case["translation"]
+    translation["mappings"] = translation["mappings"][1:]
+    _resign_translation(translation)
+
+    with pytest.raises(
+        phase4_real._TraceError, match="leaf coverage mismatch",
+    ):
+        _verify(case, translation)
+
+
+def test_duplicate_mapping_is_rejected():
+    case = _direct_case()
+    translation = case["translation"]
+    translation["mappings"].append(dict(translation["mappings"][0]))
+    _resign_translation(translation)
+
+    with pytest.raises(
+        phase4_real._TraceError, match=r"duplicate path",
+    ):
+        _verify(case, translation)
+
+
+def test_tampered_leaf_value_hash_is_rejected():
+    case = _direct_case()
+    translation = case["translation"]
+    _index, row = _mapping_for(translation, ("request", "meta", "x"))
+    row["value_hash"] = content_hash(2)  # real leaf value is 1
+    _resign_translation(translation)
+
+    with pytest.raises(
+        phase4_real._TraceError, match=r"value_hash: content hash mismatch",
+    ):
+        _verify(case, translation)
+
+
+def test_divergent_native_value_is_translated_values_differ():
+    # Shared and native must agree leaf-for-leaf, not merely hash-for-hash: keep
+    # value_hash honest to the shared side but diverge the native document at
+    # the same leaf.
+    case = _direct_case()
+    case["resolved_inputs"]["context"]["strategy"] = "DIFFERENT"
+
+    with pytest.raises(
+        phase4_real._TraceError, match=r"translated values differ",
+    ):
+        _verify(case, case["translation"])
+
+
+def test_inner_mapping_mutation_without_resign_hits_translation_hash():
+    # Proves the outer translation_hash guards inner mapping content: a bad
+    # path that never gets re-hashed is caught at the hash check, before the
+    # resolver would ever see it.
+    case = _direct_case()
+    translation = case["translation"]
+    _index, row = _mapping_for(translation, ("native_inputs", "context", "strategy"))
+    row["shared_path"] = ["native_inputs", "context", "absent"]
+    # deliberately do NOT recompute translation_hash
+
+    with pytest.raises(
+        phase4_real._TraceError,
+        match=r"translation_hash: content hash mismatch",
+    ):
+        _verify(case, translation)
+
+
+def test_verified_translation_does_not_materialize_leaves(tmp_path, monkeypatch):
+    # The memory reduction is real: once a valid trace is built, verification
+    # must never call `_leaf_values` (the independent oracle) again. If it did,
+    # the raised AssertionError would surface as an incomparable pair.
+    pair = _pair(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise AssertionError(
+            "_verified_translation must not materialize leaves via _leaf_values",
+        )
+
+    monkeypatch.setattr(phase4_real, "_leaf_values", boom)
+
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path)
+
+    assert verified["translation_hash"].startswith("sha256:")
