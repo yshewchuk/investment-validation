@@ -197,6 +197,27 @@ _STRATEGY_FORECAST_ROLES = {
     "RAMP7": ("size",),
     "CTR5": ("size",),
 }
+# -- Forecast-sizing reachability (legacy ``Scorer._size_from_forecast``) ----
+# The per-strategy divisor already mirrored in ``domain.generation.generate``
+# and engine/forecast_sizing.py's ``SHORT_VOL_OUTER``/``PLATEAU_CENTRE``; the
+# [WIDTH_MIN, WIDTH_MAX] band is engine/forecast_sizing.py:54. engine/v2 has no
+# dependency on legacy engine/, so they are reproduced as literals and cited,
+# as the other reference constants above. A ``FORECAST_SIZED`` request whose
+# served forecast cannot turn into a width in this band is declined by legacy
+# (NO_FORECAST) BEFORE ``_price_entry`` -- so geometry, pricing and every later
+# stage are never reached and native must not describe their refusals.
+_FORECAST_SIZE_OUTER = {
+    "TWIN-P": 1.5, "TWIN-P5": 1.0, "CND-PS": 2.0, "BFLY-P": 1.0,
+    "BFLY-P5": 3.0, "RAMP7": 3.0, "CTR5": 2.0,
+}
+WIDTH_MIN = 0.005   # engine/forecast_sizing.py:54
+WIDTH_MAX = 0.15    # engine/forecast_sizing.py:54
+#: Control signal set on ``values`` (not the forecast stage's own output) when
+#: the sizing forecast declines, so ``assemble_native_values`` withholds every
+#: downstream stage. Like ``_UNDETERMINED_FIELD``, source-internal.
+_SIZING_DECLINED_FIELD = "forecast_sizing_declined"
+#: The recorded output each withheld stage carries instead of executing it.
+_SIZING_DECLINED_WITHHELD = {"withheld": "NO_FORECAST"}
 _SIM_DRAWS = 4000
 _SIM_MIN_POOL = 250
 _SIM_MIN_VOL = 0.01
@@ -798,6 +819,79 @@ def _execute_forecast_band(block: Mapping[str, Any], output: dict[str, Any]) -> 
         output["forecast_sd"] = float(sd[0])
 
 
+def _forecast_declines_to_size(name: str, forecast: Any) -> bool:
+    """Mirrors ``forecast_sizing.forecast_params`` (engine/forecast_sizing.py:57-147):
+    a strategy sizes only when the served forecast turns into a
+    ``width_moneyness`` inside the registered ``[WIDTH_MIN, WIDTH_MAX]`` band.
+    An absent/NaN/non-positive forecast, or a width outside the band, is a
+    decline -- legacy flags NO_FORECAST and returns before ``_price_entry``."""
+    outer = _FORECAST_SIZE_OUTER.get(name)
+    if outer is None:
+        return False
+    value = _finite(forecast)
+    if value is None or value <= 0.0:
+        return True
+    width_moneyness = (value / 100.0) / outer
+    return not WIDTH_MIN <= width_moneyness <= WIDTH_MAX
+
+
+def _sizing_shape_is_pinned(inputs: NativeScoreInputs,
+                            values: Mapping[str, Any]) -> bool:
+    """Whether the caller (or a capture) already fixed the structure, so legacy
+    would size it with ``size=not request.structure_params`` == False and never
+    decline at the forecast.
+
+    Three source representations of a pinned shape, none of them a
+    ticker/fixture branch:
+    * ``inputs.geometry`` -- a native-captured geometry (the resolved legs
+      already priced for a replayed contract);
+    * ``values["width"]`` -- an explicit continuous width handed to ``generate``;
+    * ``values["requested_structure_params"]`` -- the captured ``ScoreRequest.
+      structure_params`` the native SourceBundle context carries alongside the
+      identity (engine/score.py:1937, scoring/identity.py:105). A caller can pin
+      this on any request, not only a ``FORECAST_SIZED`` one, so its mere
+      presence -- not its contents -- is legacy's ``size=False`` signal."""
+    if inputs.geometry is not None or values.get("width") is not None:
+        return True
+    structure_params = values.get("requested_structure_params")
+    return bool(structure_params)
+
+
+def _forecast_sizing_declines(
+    inputs: NativeScoreInputs, values: Mapping[str, Any],
+    strategy: str | None, output: Mapping[str, Any],
+    undetermined: set[str],
+) -> bool:
+    """Whether a ``FORECAST_SIZED`` request still being sized would decline the
+    width band and so never reach ``_price_entry``.
+
+    This models ONE specific legacy outcome: ``Scorer._size_from_forecast``
+    records the served forecast, and -- only when ``size=True`` (an open shape)
+    -- declines to ``request, None`` (flagging NO_FORECAST, returning before
+    ``_price_entry``) when ``forecast_params`` cannot turn the prediction into a
+    ``width_moneyness`` inside the registered band (engine/score.py:3575). A
+    strategy that is not forecast-sized, or a pinned shape (captured geometry,
+    an explicit width, or a non-empty ``requested_structure_params``), is not
+    declined here: legacy skips only the resizing (``size=False`` returns at
+    3570) and never reaches that band check. For an open shape this guard
+    returns True on a served fold that came back undetermined (a NaN, which
+    native records as no forecast) or a prediction outside the band -- i.e.
+    exactly when a successful prediction would have sized and a failed/absent
+    width would not.
+
+    Scope note: this is the sizing-decline (width-band) semantics only. It does
+    NOT claim parity for other sizing-stage failures -- a missing-features fold
+    (engine/score.py:3553) declines in legacy regardless of ``size``, and a
+    Tier-4 undetermined fold deliberately suppresses native's MISSING_FEATURES
+    (``_execute_forecast_executor``) -- neither is modelled or re-raised here."""
+    name = _forecast_strategy_name(inputs, strategy)
+    if name not in _FORECAST_SIZE_OUTER or _sizing_shape_is_pinned(inputs, values):
+        return False
+    if "forecast_abs_move" in undetermined:
+        return True
+    return _forecast_declines_to_size(name, output.get("forecast_abs_move"))
+
+
 def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
                       flags: list[str], strategy: str | None) -> dict[str, Any]:
     block = inputs.forecast
@@ -835,15 +929,20 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
         # so it is not a blanket suppression of a real missing-input refusal.
         if _forecast_strategy_name(inputs, strategy) not in DISABLED:
             _add_flag(flags, "MISSING_FORECAST_INPUT")
-    if "forecast_abs_move" in undetermined and "size" in _required_forecast_roles(
-        inputs, strategy,
-    ):
-        # Legacy ``_size_from_forecast``: a NaN fold forecast cannot size the
-        # structure, and the row declines NO_FORECAST.
-        _add_flag(flags, "NO_FORECAST")
+    # A FORECAST_SIZED request whose served forecast cannot size a width: legacy
+    # ``Scorer._size_from_forecast`` flags NO_FORECAST and returns before
+    # ``_price_entry``. Only the control marker is set here -- NO_FORECAST itself
+    # is stamped in ``assemble_native_values`` after the context-stage advisory
+    # flags, so the flag order matches legacy (PROJECTED_CALENDAR before
+    # NO_FORECAST) and the refusal is attributed to the stage that owns it.
+    sizing_declined = _forecast_sizing_declines(
+        inputs, values, strategy, output, undetermined,
+    )
     if undetermined:
         output[_UNDETERMINED_FIELD] = tuple(sorted(undetermined))
     values.update(output)
+    if sizing_declined:
+        values[_SIZING_DECLINED_FIELD] = True
     return output
 
 
@@ -2313,6 +2412,47 @@ def _append_late_stages(
             _add_flag(flags, item)
 
 
+def _finalize_native_values(
+    values: dict[str, Any], executed: list[StageReceipt], flags: list[str],
+    inputs: NativeScoreInputs, observer: StageObserver | None,
+) -> dict[str, Any]:
+    """Close out an assembly: publish flags + source ref, emit the final
+    serialization receipt and the ordered stage receipts."""
+    values.update({"flags": tuple(flags), "native_source_ref": inputs.source_ref})
+    _emit_stage(executed, "serialization", values, values, observer)
+    values["native_stage_receipts"] = tuple({"stage": item.stage,
+        "input_hash": item.input_hash, "output_hash": item.output_hash,
+        "owner": item.owner} for item in executed)
+    return values
+
+
+def _withhold_forecast_sizing(
+    inputs: NativeScoreInputs, values: dict[str, Any],
+    executed: list[StageReceipt], flags: list[str],
+    observer: StageObserver | None,
+) -> dict[str, Any]:
+    """The forecast stage declined to size (NO_FORECAST); legacy's
+    ``Scorer._size_from_forecast`` returned before ``_price_entry``, so geometry,
+    pricing and every later layer were never reached. Record a receipt for each
+    of them (so the runtime execution graph stays complete) WITHOUT describing
+    any of their refusals, then merge block flags and finalize exactly as the
+    full pipeline would."""
+    for stage in ("geometry", "pricing", "model", "analogs",
+                  "simulation", "gate", "chooser"):
+        _emit_stage(executed, stage, {"prior": executed[-1].output_hash},
+                    dict(_SIZING_DECLINED_WITHHELD), observer)
+    _emit_stage(
+        executed, "diagnostics", {"prior": executed[-1].output_hash},
+        _merge_diagnostics(values, inputs.diagnostics), observer,
+    )
+    for block in (inputs.context, inputs.features, inputs.forecast, inputs.model,
+                  inputs.analogs, inputs.simulation, inputs.gate, inputs.chooser,
+                  inputs.diagnostics):
+        for item in block.get("flags") or ():
+            _add_flag(flags, item)
+    return _finalize_native_values(values, executed, flags, inputs, observer)
+
+
 def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = None,
                            fill_model: Mapping[str, Any] | None = None,
                            observer: StageObserver | None = None) -> dict[str, Any]:
@@ -2327,6 +2467,16 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     _check_projected_calendar(values, flags)
     _check_stale_quote(values, flags)
     name = _strategy_name(inputs, strategy, values)
+    if values.pop(_SIZING_DECLINED_FIELD, False):
+        # Stamp the refusal here -- after the context-stage advisory flags, so
+        # its position matches legacy -- and withhold every stage legacy's
+        # ``forecast sizing refused`` return never reached (geometry, pricing and
+        # the model/analog/simulation/gate/chooser layers) instead of describing
+        # their refusals for a computation legacy never ran.
+        _add_flag(flags, "NO_FORECAST")
+        return _withhold_forecast_sizing(
+            inputs, values, executed, flags, observer,
+        )
     geometry_inputs, geometry = _resolve_geometry(inputs, name, values)
     _emit_stage(executed, "geometry", geometry_inputs, geometry, observer)
     alpha = _finite((fill_model or {}).get("alpha", 0.5))
@@ -2371,13 +2521,7 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
         if refusal:
             _add_flag(flags, refusal)
     _publish_pricing(values, geometry, pricing, alpha)
-    values.update({"flags": tuple(flags),
-                   "native_source_ref": inputs.source_ref})
-    _emit_stage(executed, "serialization", values, values, observer)
-    values["native_stage_receipts"] = tuple({"stage": item.stage,
-        "input_hash": item.input_hash, "output_hash": item.output_hash,
-        "owner": item.owner} for item in executed)
-    return values
+    return _finalize_native_values(values, executed, flags, inputs, observer)
 
 
 __all__ = [
