@@ -1,4 +1,4 @@
-"""Small subprocess and checkpoint fault tests."""
+"""Small subprocess, checkpoint fault and plan-to-request submission tests."""
 import json
 import os
 from dataclasses import replace
@@ -17,6 +17,7 @@ from engine.v2.ops.fingerprints import (
     source_closure,
     worker_source_manifest,
 )
+from engine.v2.ops.plans import check_plan, nightly_plan, request_from_plan
 from engine.v2.ops.profiles import DEFAULT_POLICY
 from engine.v2.ops.provider_budget import before_request, configure_account, record_response, reserve
 from engine.v2.ops.stages import registry
@@ -178,3 +179,78 @@ def test_live_window_admission_is_conservative_about_unknown_durations():
     assert live_window_reason(policy, unknown_heavy, after) is None
     broken = replace(policy, live_windows=(replace(window, start_utc="99:99"),))
     assert live_window_reason(broken, short, before).code == "INVALID_LIVE_WINDOW"
+
+
+# ---------------------------------------------------------------------------
+# plans.request_from_plan: the boundary where a saved plan document becomes a
+# submission command. Its only caller is ``ops submit`` for non-nightly plans
+# (cli._submit_command); no test built a request from a real plan document
+# before these.
+# ---------------------------------------------------------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module")
+def artifact_check_document():
+    """A real artifact_check plan; check_plan() pins the source and
+    environment refs itself, exactly as the ``ops plan check`` CLI does."""
+    return check_plan(str(REPO), ("art_a", "art_b"))
+
+
+def test_request_from_plan_admits_a_real_check_plan_to_the_catalog(tmp_path, artifact_check_document):
+    command = request_from_plan(artifact_check_document, "artifact_check_1")
+    assert (command.namespace, command.idempotency_key, command.principal) == \
+        ("shadow", "artifact_check_1", "operator")
+    job = command.job
+    assert (job.kind, job.resource_class, job.spec_hash, job.input_refs) == \
+        ("artifact_check", "delivery", None, ())
+    assert job.implementation_ref == artifact_check_document["implementation_ref"]
+    assert job.environment_ref == artifact_check_document["environment_ref"]
+    assert job.parameters == {"expected_ids": ["art_a", "art_b"]}
+    assert (job.output_namespace, job.retry_policy_ref, job.checkpoint_contract_ref) == \
+        ("shadow", "bounded", "receipt.v1.0")
+    # Observable acceptance, not just field copying: the server-owned kind
+    # registry and namespace policy admit the constructed command.
+    conn, clock, _ = catalog(tmp_path)
+    receipt = submit(conn, registry(), POLICY, command, clock=clock)
+    assert (receipt.kind, receipt.state, receipt.idempotency_key, receipt.spec_hash) == \
+        ("artifact_check", "queued", "artifact_check_1", None)
+
+
+def test_request_from_plan_refuses_a_nightly_kind_even_when_only_kind_differs(
+        artifact_check_document):
+    # A valid check-plan copy with ONLY ``kind`` changed: schema, blocked
+    # prerequisites and effects all still pass, so the kind restriction is
+    # the sole condition that can refuse here.
+    kind_only = dict(artifact_check_document, kind="nightly")
+    with pytest.raises(OpsError) as raised:
+        request_from_plan(kind_only, "kind_only_nightly")
+    assert raised.value.code == "INVALID_REQUEST"
+    assert raised.value.problem.category == "validation"
+    assert "not enabled for submission" in raised.value.problem.message
+    # A real fully-unblocked nightly plan refuses the same way (its effects
+    # also differ, so this case does not isolate the kind gate by itself).
+    plan = nightly_plan(str(REPO), "2026-09-12", manifest_ref="art_x",
+                        expected_population=("FAKE|TWIN-P|2026-09-12",))
+    assert plan["blocked_prerequisites"] == []  # so the refusal below is no block
+    with pytest.raises(OpsError, match="not enabled for submission"):
+        request_from_plan(plan, "nightly_direct")
+
+
+def test_request_from_plan_refuses_blocked_or_foreign_schema_plans(artifact_check_document):
+    blocked = nightly_plan(str(REPO), "2026-09-12")  # no manifest_ref, no planned population
+    assert blocked["blocked_prerequisites"]
+    foreign = dict(artifact_check_document, schema_version="operations_plan.v9.9")
+    for plan in (blocked, foreign):
+        with pytest.raises(OpsError, match="unsupported schema or blocked prerequisites") as raised:
+            request_from_plan(plan, "any_key")
+        assert raised.value.code == "INVALID_REQUEST"
+
+
+def test_request_from_plan_refuses_a_check_plan_outside_the_private_artifacts_effect_scope(
+        artifact_check_document):
+    for effects in (["private_artifacts", "external_delivery"], ["private_shadow_artifacts"], []):
+        forged = dict(artifact_check_document, effects=effects)
+        with pytest.raises(OpsError, match="not enabled for submission"):
+            request_from_plan(forged, "artifact_check_forged")
