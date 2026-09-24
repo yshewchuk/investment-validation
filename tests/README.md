@@ -214,6 +214,23 @@ module, with `--max-children $(nproc)` (4 on a standard runner). It only
 reports. Scores never fail a job. A job fails only when the tool does: mutmut's
 clean test run fails, or the run hits its 330-minute step timeout.
 
+- **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
+  prints only `failed to collect stats. runner returned 1` and swallows the
+  child pytest output that explains it. The remedy is mutmut's supported
+  `debug = true`, which the driver adds to the generated `setup.cfg [mutmut]`.
+  Be honest about what it does: `debug` is **full-run verbosity**, not a
+  stats-only hook -- with it on, mutmut echoes every mutant's child pytest
+  output for the whole run, so the log grows large. Because that is expensive,
+  the driver enables it only where it is warranted: automatically on the
+  `ops_legacy` CI shard (its stats step is the one known to fail), and on any
+  other run only when `MUTATION_PILOT_DEBUG` is set explicitly (`1/true/yes/on`
+  turn it on; any other value, including `0/false/off`, turns it off and always
+  wins over the CI default). Set `MUTATION_PILOT_DEBUG` in the `mutate` job's
+  `env:` to force it on or off for one module or a dispatch. This is diagnostic
+  only: it never reruns a shard and never changes the exit code the job gates
+  on. A plain pytest pass over the same selection would only mean the CI failure
+  was not reproduced, not a root cause.
+
 | trigger | mode | state |
 |---|---|---|
 | push to main | incremental | restores the module's newest cached mutmut state |
