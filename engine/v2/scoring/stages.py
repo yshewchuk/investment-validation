@@ -2109,12 +2109,17 @@ def _execute_gate(inputs: NativeScoreInputs, name: str,
         return {}
     if block.get("mode") == "entry_rule":
         # Legacy ``_apply_entry_rule``: reached with no gate champion, before
-        # (and without) the model gate's domain check. An unpriced row never
-        # reaches legacy's gate, so it gets no verdict and no flag here.
+        # (and without) the model gate's domain check, for EVERY row that did
+        # not exit BAD_QUOTE -- priced or not. An unpriced row still reaches it
+        # with no priced legs, so ``rel_spread`` (and usually the simulated
+        # expectation) is undetermined, the verdict is ``None`` and legacy
+        # flags ``MISSING_FEATURES`` (engine/score.py:3618-3620; the "we could
+        # not tell" case is deliberately not rendered as a decline -- see
+        # tests/test_score.py::TestArithmeticEntryRule). A BAD_QUOTE row never
+        # gets here at all: the withhold branch above runs before this stage.
+        # So the rule is reached exactly when legacy reaches it; a missing
+        # verdict is the finding, not a reason to skip the gate.
         from engine.v2.scoring.native_entry_rule import execute_entry_rule
-
-        if values.get("entry_cost") is None:
-            return {}
 
         rule_flags: list[str] = []
         output = execute_entry_rule(
