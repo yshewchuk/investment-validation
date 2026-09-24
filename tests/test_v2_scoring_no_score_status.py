@@ -120,6 +120,16 @@ def test_quote_date_present_iff_pricing_ran():
     # the quote a price came from: with no price there is no quote date, so
     # the key must be ABSENT from entry_exit_plan/quote_provenance, not
     # present-with-None (the entry_cost convention _record_payload follows).
+    # NOTE (2026-09-24 Phase 4 parity revision): "no price there is no
+    # quote date" states the NEVER-RAN half of the convention; a row whose
+    # pricing stage RAN and then refused now KEEPS its genuinely observed
+    # date (legacy stamps ``result.quote_date`` on the first line of
+    # ``_price_entry``, engine/score.py:2287 -- see the addendum in
+    # application._pricing_dependent_fields, and the positive cases in
+    # tests/test_v2_scoring_unpriced_quote_date.py). The refused setup
+    # below is therefore adjusted to a legitimate NO-DATE refusal
+    # (``quote_date`` None in the row's own fields): nothing observed,
+    # the key stays absent exactly as this comment requires.
     fields = {**_fields(), "quote_date": "2026-09-16"}
     # Compatibility input with no quotes: _resolve_pricing returns the
     # fields' own entry_cost (5.0) with refusal=None, so pricing ran.
@@ -132,6 +142,10 @@ def test_quote_date_present_iff_pricing_ran():
     # spot=None is the missing essential _resolve_geometry refuses on
     # (MISSING_SPOT) before pricing: entry_cost ends up None and the
     # quote_date key must not appear in either dict at all.
+    # Local rebinding to the NO-DATE fixture named in the NOTE above:
+    # the priced assertions have already run, so the original refused
+    # call stays verbatim and exercises the nothing-observed branch.
+    fields = {**fields, "quote_date": None}
     refused = _score({**fields, "spot": None})
 
     assert refused.resolved_request["entry_cost"] is None

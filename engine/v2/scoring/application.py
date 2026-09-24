@@ -115,6 +115,32 @@ def _pricing_dependent_fields(values: Mapping[str, Any],
     present-as-None. Lives out here because ``_record_payload`` already
     sits at the complexity budget (checks/code_budgets.py)."""
     fields = _value_fields(values, names)
+    # PARITY ADDENDUM (2026-09-24, Phase 4 observational replay 13): the
+    # docstring above states the NEVER-RAN half of the convention; "did
+    # not run (or refused)" is not one fact. Legacy stamps
+    # ``result.quote_date`` on the first line of ``_price_entry``
+    # (engine/score.py:2287), before any chain lookup, so a row that
+    # reached pricing and then refused (NO_CHAIN, COARSE_LADDER, an empty
+    # quote domain) still RETAINS its observed date and the contract's
+    # ``execution_date`` must mirror that; only a row whose pricing stage
+    # never ran -- a FORECAST_SIZED decline returns at
+    # engine/score.py:1921-1922, before ``_price_entry`` -- has none.
+    # ``values`` carries the same run/never-ran distinction as KEY
+    # presence: ``stages._publish_pricing`` writes the ``entry_cost`` key
+    # whenever pricing ran (value ``None`` exactly on its refusals) and
+    # never at all when the sizing withhold skips the stage, since
+    # ``_merge_stage`` excludes owned outputs -- the key-absence-is-a-
+    # stage-that-never-wrote convention documented by
+    # checks/phase4_real.py's ``_DECISION_KEY_FIELDS``. So the early
+    # return below preserves a GENUINELY OBSERVED (never synthesized:
+    # legacy's ``or result.entry_date`` fallback needs the calendar a
+    # bounded bundle does not carry) date on a pricing-refused row; every
+    # other unpriced row -- stage never ran, or ran with nothing
+    # observed -- still falls through to the original pop, and priced
+    # rows keep behaving exactly as before.
+    if ("entry_cost" in values and values.get("entry_cost") is None
+            and fields.get("quote_date") is not None):
+        return fields
     if values.get("entry_cost") is None:
         fields.pop("quote_date", None)
     return fields
