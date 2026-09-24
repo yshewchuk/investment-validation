@@ -210,16 +210,52 @@ def binding_feature_row(
     A structurally missing feature name (the key never captured at all) or
     a genuinely non-numeric value (a string, not a nonfinite tag) both still
     raise ``FrozenBridgeError`` -- those are not an omission either side
-    should make silently.
+    should make silently. The one exception: a GATE-role binding whose ONLY
+    absent names are the derived forecast/analog columns (``native_gate_
+    features.GATE_FORECAST_COLUMNS | GATE_ANALOG_COLUMNS``) is a legacy row
+    whose base frame predates the gate feature extension -- defer eager
+    inference (``None``) rather than raise; the native gate stage derives
+    those columns at its own executor.
     """
     from engine.v2.foundation import untag_nonfinite
+    from engine.v2.scoring.native_gate_features import (
+        GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS,
+    )
 
-    row: list[float] = []
-    for name in binding.feature_order:
-        if name not in vector:
+    feature_order = tuple(binding.feature_order)
+    missing = [name for name in feature_order if name not in vector]
+
+    # Classify EVERY absent name before touching a single present cell: an
+    # unknown missing base feature is a hard error no matter what the captured
+    # cells happen to hold, so it must be rejected here -- not shadowed by an
+    # early return below the moment a present cell reads non-finite. The only
+    # legal omission is a GATE-role row whose absent names are ALL the derived
+    # forecast/analog columns: a legacy base frame that predates the gate
+    # feature extension, which the native gate stage reconstructs at its own
+    # executor. Mark it for deferral rather than returning, so the present
+    # cells are still validated -- a legal (or illegal) omission must never
+    # hide a malformed captured string.
+    defer = False
+    if missing:
+        base_role = str(binding.role).split(":", 1)[0]
+        derived = set(GATE_FORECAST_COLUMNS) | set(GATE_ANALOG_COLUMNS)
+        if base_role == "gate" and set(missing) <= derived:
+            defer = True
+        else:
             raise FrozenBridgeError(
-                f"binding {binding.binding_id}: missing feature {name}"
+                f"binding {binding.binding_id}: missing feature {missing[0]}"
             )
+
+    # Validate every cell the vector DID capture. A malformed (non-numeric,
+    # untagged) value is a hard error on either side, never an omission. A
+    # genuinely non-finite captured value omits the binding exactly as a
+    # complete row would -- but accumulate that flag rather than returning
+    # early, so an earlier NaN cannot mask a later malformed cell.
+    values: dict[str, float] = {}
+    nonfinite = False
+    for name in feature_order:
+        if name not in vector:
+            continue
         raw = vector[name]
         decoded = untag_nonfinite(raw) if isinstance(raw, Mapping) else raw
         try:
@@ -229,9 +265,13 @@ def binding_feature_row(
                 f"binding {binding.binding_id}: nonnumeric feature {name}"
             ) from exc
         if not isfinite(value):
-            return None
-        row.append(value)
-    return tuple(row)
+            nonfinite = True
+            continue
+        values[name] = value
+
+    if defer or nonfinite:
+        return None
+    return tuple(values[name] for name in feature_order)
 
 
 def _feature_rows(
@@ -566,6 +606,59 @@ def with_frozen_chooser(
     return replace(inputs, chooser=dict(plan.block))
 
 
+def with_frozen_gate_forecast(
+    inputs: NativeScoreInputs, *, release_root: Path, release: ModelRelease,
+) -> NativeScoreInputs:
+    """The gate's derived-forecast executor, resolved from the verified release.
+
+    A packaged declared gate (``tools.capture_tier0_corpus.frozen_gate_packaging``)
+    carries its forecast producer fold as a REFERENCE -- ``forecast`` naming the
+    size-fold binding of THIS release plus ``forecast_pool``, exactly the shape
+    ``engine.v2.scoring.source_inputs._gate_block`` pops into a
+    ``forecast_executor`` on the SourceBundle path. Strict traces hold JSON, so
+    the resolution happens at execution instead: capture
+    (``strict_trace_one``) and replay (``checks/phase4_real.py``) call this over
+    the same hash-verified release, so both sides run the fold the declaration
+    names and neither can substitute another model. A block without a declared
+    forecast is returned unchanged; a reference that is not exactly one binding
+    of this release (or names an output it does not produce) is refused.
+    """
+    block = inputs.gate
+    forecast = block.get("forecast") if isinstance(block, Mapping) else None
+    if forecast is None or block.get("forecast_executor") is not None:
+        return inputs
+    from engine.v2.scoring.frozen_executor import (
+        FrozenRecipeExecutor,
+        FrozenStageExecutor,
+    )
+
+    forecast = _object(forecast, "gate.forecast")
+    binding_id = _nonempty(forecast.get("binding_id"), "gate.forecast.binding_id")
+    output = _nonempty(forecast.get("output"), "gate.forecast.output")
+    matches = [b for b in release.bindings if b.binding_id == binding_id]
+    if len(matches) != 1:
+        raise FrozenBridgeError(
+            f"gate.forecast binding {binding_id} is not exactly one binding "
+            "of the verified release")
+    binding = matches[0]
+    if str(binding.role).split(":", 1)[0] != "size":
+        raise FrozenBridgeError(
+            f"gate.forecast binding {binding_id} serves role {binding.role!r}, not size")
+    if output not in tuple(binding.output_names):
+        raise FrozenBridgeError(
+            f"gate.forecast output {output} is not an output of binding {binding_id}")
+    executor = FrozenRecipeExecutor(
+        target="pred_abs_move", binding_id=binding_id, source=output,
+        executor=FrozenStageExecutor(
+            inference=FrozenInference(Path(release_root)), release=release,
+            binding_id=binding_id),
+        binding=binding,
+    )
+    return replace(inputs, gate={
+        **block, "forecast_executor": executor, "forecast_recipe": str(executor),
+    })
+
+
 __all__ = [
     "FROZEN_CHOOSER_FIELD",
     "FROZEN_CHOOSER_SCHEMA",
@@ -577,4 +670,5 @@ __all__ = [
     "prepare_frozen_chooser",
     "prepare_frozen_replay",
     "with_frozen_chooser",
+    "with_frozen_gate_forecast",
 ]

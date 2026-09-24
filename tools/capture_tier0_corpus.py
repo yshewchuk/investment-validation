@@ -90,6 +90,7 @@ from checks.phase4_frozen_bridge import (  # noqa: E402
     binding_feature_row,
     prepare_frozen_chooser,
     with_frozen_chooser,
+    with_frozen_gate_forecast,
 )
 from checks.phase4_stored_forecasts import (  # noqa: E402
     resolve_stored_forecasts,
@@ -126,7 +127,9 @@ from engine.v2.scoring.stages import (  # noqa: E402
 from tools.capture_heartbeat import CaptureHeartbeat  # noqa: E402
 from tools.phase4_checkpoint_sink import DiskCheckpointSink  # noqa: E402
 from tools.phase4_frozen_resources import (  # noqa: E402
+    FrozenResourceError,
     FrozenResourcePackage,
+    _normalized_binding,
     package_frozen_resources,
 )
 from tools.phase4_release_assembler import (  # noqa: E402
@@ -535,6 +538,46 @@ _LEGACY_ROLE_ALIASES = {
     "forecast_sizing": "size",
 }
 
+#: The identity ``tools/phase4_frozen_resources.py`` derives a binding id from
+#: (``package_frozen_resources``' ``identity`` dict): exactly the normalized
+#: binding fields, the SOURCE FILESYSTEM PATH excluded. Two same-role bindings
+#: that agree on these are the SAME artifact for packaging purposes even when
+#: they name it through different captured paths, so an existing checkpoint
+#: binding may stand for a declared gate/forecast binding only on this equality
+#: (see :func:`_gate_packaged_bindings`).
+_BINDING_IDENTITY_FIELDS = (
+    "model_id", "role", "strategy_id", "decision_clock_id", "adapter",
+    "feature_order", "output_names", "artifact_sha256",
+)
+
+
+def _binding_identity(raw: Mapping[str, Any], *, source_root: Path,
+                      label: str) -> dict[str, Any]:
+    """The normalized identity (source path excluded) of one binding row.
+
+    Reuses :func:`tools.phase4_frozen_resources._normalized_binding` -- the
+    SAME canonicalization ``package_frozen_resources`` derives a binding id
+    from -- so a captured binding and a frozen-declared binding of one artifact
+    compare equal here exactly when they would collide on one binding id
+    there. A row that cannot even be normalized (no artifact, a bad digest) is
+    refused: an unverifiable binding may not stand in for a declared one.
+    """
+    try:
+        normalized = _normalized_binding(raw, index=0, source_root=source_root)
+    except FrozenResourceError as exc:
+        raise StrictTraceCaptureError(
+            f"{label} binding cannot be normalized for identity matching: {exc}"
+        ) from exc
+    return {key: normalized[key] for key in _BINDING_IDENTITY_FIELDS}
+
+
+def _binding_output_names(binding: Mapping[str, Any]) -> list[str]:
+    """A captured binding row's declared output names as plain strings."""
+    names = binding.get("output_names")
+    return [str(name) for name in names] if isinstance(
+        names, (list, tuple)) else []
+
+
 #: ``engine.features.daily_state_frame`` creates EVERY one of these columns
 #: for every row up front (``out[column] = np.nan``) and fills them where
 #: coverage exists, so a captured ``None`` here is a genuinely-unquoted value
@@ -630,16 +673,22 @@ def _role_feature_vectors(candidate: Mapping[str, Any]) -> dict[str, dict[str, f
     """
     vectors: dict[str, dict[str, float]] = {}
 
-    def _add(role: str, raw_vector: Mapping[str, Any]) -> None:
-        coerced = {
-            str(name): _coerce_feature_value(role, str(name), raw)
-            for name, raw in raw_vector.items()
-        }
+    def _merge(role: str, coerced: dict[str, float]) -> None:
+        """One role's vector, through the NaN-safe conflict check. A role the
+        capture recorded twice with DIFFERENT values is a row one binding never
+        had, and is refused -- never silently resolved to whichever vector
+        arrived first."""
         if role in vectors and not _dicts_match_nan_safe(vectors[role], coerced):
             raise StrictTraceCaptureError(
                 f"feature role {role} captured twice with different values"
             )
-        vectors[role] = coerced
+        vectors.setdefault(role, coerced)
+
+    def _add(role: str, raw_vector: Mapping[str, Any]) -> None:
+        _merge(role, {
+            str(name): _coerce_feature_value(role, str(name), raw)
+            for name, raw in raw_vector.items()
+        })
 
     features = _checkpoint_value(candidate, "features")
     role_vectors = features.get("feature_vector")
@@ -677,6 +726,30 @@ def _role_feature_vectors(candidate: Mapping[str, Any]) -> dict[str, dict[str, f
                 if name in chooser_vector
                 and _finite_or_none(chooser_vector[name]) is not None
             })
+
+    source = _checkpoint_value_optional(candidate, "source_inputs")
+    if source is not None:
+        # A gate legacy DECLINED never reached `capture_gate_inputs`, so its
+        # per-role vector lives in the frozen declaration instead: the row
+        # the declaring call site recorded IS the row legacy fed the
+        # binding before declining. Only roles the packaging actually adds
+        # to the release get a vector, and only where the scored-path
+        # checkpoints recorded none (the checkpoint vector stays the
+        # success path's, unchanged).
+        packaging = frozen_gate_packaging(source)
+        if packaging is not None:
+            # Feed the declared rows through the SAME conflict check the
+            # scored-path vectors used above: the frozen row is now a second
+            # reading of a role, so a role already captured (a gate that
+            # reached ``capture_gate_inputs`` before declining, or a fold also
+            # registered for sizing) must AGREE or be refused -- never
+            # silently keep the first row while packaging a binding off the
+            # other.
+            if packaging["gate_binding"] is not None:
+                _merge("gate", dict(packaging["gate_row"]))
+            if packaging["forecast_binding"] is not None:
+                _merge(str(packaging["forecast_role"]), dict(packaging["forecast_row"]))
+
 
     return vectors
 
@@ -756,12 +829,17 @@ def native_inputs_from_capture(
     request: V2ScoreRequest,
     *,
     frozen_chooser: Mapping[str, Any] | None = None,
+    gate_recipe: Mapping[str, Any] | None = None,
 ) -> tuple[NativeScoreInputs, dict[str, Any]]:
     """Build executable native inputs only from source-owned captured material.
 
     ``frozen_chooser``: the row's frozen chooser declaration
     (:func:`frozen_chooser_declaration`); it becomes the chooser block, and the
     rows the chooser consumed join ``model_inputs``.
+    ``gate_recipe``: the gate block derived from the row's frozen gate
+    declaration (:func:`frozen_gate_packaging` via :func:`strict_trace_one`)
+    for a row the strict recipe path packaged no gate for; ``None`` keeps the
+    existing behavior, including the genuinely-ungated ``not_applicable``.
     """
     request_only = _request_only_source(candidate)
     if request_only is not None:
@@ -771,7 +849,7 @@ def native_inputs_from_capture(
             )
         blocks = _request_only_inputs(request_only, request)
     else:
-        blocks = _captured_blocks(candidate, request, frozen_chooser)
+        blocks = _captured_blocks(candidate, request, frozen_chooser, gate_recipe)
     request_doc = to_document(request)
     # `shared_blocks`: a shallow copy of ``blocks`` with "model" replaced by
     # its JSON-documented form (:func:`_model_document`, the exact function
@@ -1049,9 +1127,295 @@ def _model_document(block: Mapping[str, Any]) -> dict[str, Any]:
     return doc
 
 
+def _frozen_gate_row(raw: Any, *, where: str) -> dict[str, float]:
+    """One frozen input row as a gate/forecast feature vector.
+
+    Values are decoded the way ``binding_feature_row`` decodes them (a tagged
+    non-finite cell is that cell's REAL NaN, kept as NaN, not dropped -- the
+    frozen executor refuses on it exactly as legacy's ``np.isfinite`` check
+    refused); a non-numeric cell is refused, never coerced.
+    """
+    from engine.v2.foundation.canonical import untag_nonfinite
+
+    if not isinstance(raw, Mapping):
+        raise StrictTraceCaptureError(f"declared gate input row {where} was not recorded")
+    row: dict[str, float] = {}
+    for name, value in raw.items():
+        decoded = untag_nonfinite(value)
+        if decoded is None:
+            row[str(name)] = float("nan")
+            continue
+        try:
+            row[str(name)] = float(decoded)
+        except (TypeError, ValueError) as exc:
+            raise StrictTraceCaptureError(
+                f"declared gate feature {where}.{name} is nonnumeric") from exc
+    return row
+
+
+def frozen_gate_packaging(source: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What ``source_inputs.frozen`` says the model gate was, when the strict
+    recipe path packages no gate.
+
+    ``Scorer._score_gate`` declares its binding through ``capture_frozen``
+    BEFORE the domain check and before the missing-feature declines
+    (engine/score.py), but it only feeds that binding to
+    ``capture_source_bundle`` -- the accumulator of ``model_bindings`` and
+    ``native_recipes.gate`` -- on a row it actually scored. A declined row
+    therefore carries the declaration, the binding and the base-frame row
+    legacy read under ``frozen``, and nothing under ``native_recipes``: the
+    packaging gap that made fixtures 008/017 (declared domain-refused
+    STR-THRU gates) package as ``not_applicable``, skipping the gate stage
+    before ``_execute_gate``'s own domain check could flag ``OUT_OF_DOMAIN``.
+
+    Returns ``None`` when there is nothing to derive (no gate declaration --
+    a genuinely ungated row --, a ``native_recipes.gate`` recipe -- the
+    scored-row path, unchanged --, or a recorded-but-broken frozen block,
+    which ``_captured_blocks`` refuses downstream). Anything DECLARED and
+    inconsistent with its own recording is refused with
+    :class:`StrictTraceCaptureError` -- a declared binding that was never
+    recorded fails closed; it is never repackaged as no-gate.
+
+    The result describes what CAN be packaged honestly:
+
+    * ``threshold``: the declared decision threshold (``None`` = none);
+    * ``gate_slot``/``gate_binding``/``gate_row``: the declared binding and
+      the input row the declaration's site names. The declared binding is
+      always retained (never dropped for a row it cannot eagerly feed): a
+      forecast-analog gate's recorded ``gate_row`` is the base frame only, and
+      its eight derived columns (``native_gate_features.GATE_FORECAST_COLUMNS``
+      / ``GATE_ANALOG_COLUMNS``) are computed by the native gate stage, so
+      their absence defers EAGER inference (see
+      :func:`checks.phase4_frozen_bridge.binding_feature_row`) rather than
+      forfeiting the declared artifact. ``gate_row`` is exactly what was
+      recorded -- never padded to the binding's ``feature_order``;
+    * ``forecast``/``forecast_slot``/``forecast_binding``/``forecast_row``/
+      ``forecast_pool``: the optional ``gate_forecast`` producer fold (R4-20
+      gap 3) and its recorded pool, retained under the same rule -- a declared
+      and recorded fold is packaged even when its own row cannot eagerly feed
+      the binding.
+    """
+    from engine.v2.scoring.source_inputs import fold_pool
+
+    recipes = source.get("native_recipes")
+    if isinstance(recipes, Mapping) and "gate" in recipes:
+        return None
+    frozen = source.get("frozen")
+    if not isinstance(frozen, Mapping):
+        return None
+    conflicts = list(frozen.get("conflicts") or ())
+    if conflicts:
+        raise StrictTraceCaptureError(
+            f"legacy recorded different values for {sorted(conflicts)}")
+    declarations = frozen.get("declarations") or {}
+    entry = declarations.get("gate") if isinstance(declarations, Mapping) else None
+    if entry is None:
+        return None
+    if not isinstance(entry, Mapping) or not isinstance(entry.get("binding"), str) \
+            or not entry["binding"].strip() or entry.get("output") != "gate_score" \
+            or not isinstance(entry.get("site"), str) or not entry["site"].strip():
+        raise StrictTraceCaptureError("malformed frozen gate declaration")
+    slot = entry["binding"].strip()
+    bindings = frozen.get("bindings") or {}
+    binding = bindings.get(slot) if isinstance(bindings, Mapping) else None
+    if not isinstance(binding, Mapping):
+        raise StrictTraceCaptureError(
+            f"declared gate binding {slot} was not recorded; recapture with "
+            "the current engine/score.py::_score_gate")
+    role = _LEGACY_ROLE_ALIASES.get(str(binding.get("role", "")),
+                                    str(binding.get("role", "")))
+    if role != "gate":
+        raise StrictTraceCaptureError(
+            f"declared gate binding {slot} serves role {binding.get('role')!r}")
+    if "gate_score" not in [str(name) for name in _binding_output_names(binding)]:
+        raise StrictTraceCaptureError(
+            f"declared gate binding {slot} does not output gate_score")
+    threshold = entry.get("threshold")
+    if threshold is not None:
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError) as exc:
+            raise StrictTraceCaptureError("declared gate threshold is nonnumeric") from exc
+        if not math.isfinite(threshold):
+            raise StrictTraceCaptureError("declared gate threshold is nonfinite")
+    inputs = frozen.get("inputs") or {}
+    row = inputs.get(f"{slot}@{entry['site']}") if isinstance(inputs, Mapping) else None
+    gate_row = _frozen_gate_row(row, where=f"{slot}@{entry['site']}")
+
+    forecast_slot = forecast_role = forecast_output = None
+    forecast_binding: Mapping[str, Any] | None = None
+    forecast_row: dict[str, float] | None = None
+    pool_document: dict[str, Any] | None = None
+    declared_forecast = declarations.get("gate_forecast") if isinstance(
+        declarations, Mapping) else None
+    if declared_forecast is not None:
+        if not isinstance(declared_forecast, Mapping) \
+                or not isinstance(declared_forecast.get("binding"), str) \
+                or not declared_forecast["binding"].strip() \
+                or not isinstance(declared_forecast.get("output"), str) \
+                or not declared_forecast["output"].strip() \
+                or not isinstance(declared_forecast.get("pool"), str) \
+                or not declared_forecast["pool"].strip() \
+                or not isinstance(declared_forecast.get("site"), str) \
+                or not declared_forecast["site"].strip():
+            raise StrictTraceCaptureError("malformed frozen gate_forecast declaration")
+        forecast_slot = declared_forecast["binding"].strip()
+        forecast_output = declared_forecast["output"].strip()
+        forecast_bindings = frozen.get("bindings") or {}
+        candidate_binding = forecast_bindings.get(forecast_slot) \
+            if isinstance(forecast_bindings, Mapping) else None
+        if not isinstance(candidate_binding, Mapping):
+            raise StrictTraceCaptureError(
+                f"declared gate forecast binding {forecast_slot} was not recorded")
+        forecast_role = _LEGACY_ROLE_ALIASES.get(
+            str(candidate_binding.get("role", "")), str(candidate_binding.get("role", "")))
+        # The gate forecast is the size fold, always: a fold serving another
+        # role cannot be the forecast a gate's derived forecast columns read,
+        # and the declaration's own output must be one the binding actually
+        # produces (never a name the binding has no output for).
+        if forecast_role != "size":
+            raise StrictTraceCaptureError(
+                f"declared gate forecast binding {forecast_slot} serves role "
+                f"{candidate_binding.get('role')!r}, expected size")
+        if forecast_output not in _binding_output_names(candidate_binding):
+            raise StrictTraceCaptureError(
+                f"declared gate forecast output {forecast_output} is not an "
+                f"output of binding {forecast_slot}")
+        # Select the recorded pool by the DECLARATION's named pool, never by
+        # the forecast output: the two usually agree but are distinct facts, and
+        # an output-named pool must not stand in for a named pool that was
+        # never recorded.
+        pool_name = declared_forecast["pool"].strip()
+        pools = frozen.get("fold_pools") or {}
+        if pool_name not in pools:
+            raise StrictTraceCaptureError(
+                f"declared gate forecast pool {pool_name} was not recorded")
+        try:
+            from engine.v2.foundation.canonical import untag_nonfinite
+
+            pool_document = fold_pool(
+                "gate_forecast_pool", untag_nonfinite(pools[pool_name]))
+        except ValueError as exc:
+            raise StrictTraceCaptureError(
+                f"malformed gate forecast pool: {exc}") from exc
+        forecast_inputs = frozen.get("inputs") or {}
+        forecast_row = _frozen_gate_row(
+            forecast_inputs.get(f"{forecast_slot}@{declared_forecast['site']}")
+            if isinstance(forecast_inputs, Mapping) else None,
+            where=f"{forecast_slot}@{declared_forecast['site']}")
+        # Retain the declared and recorded fold binding unconditionally: a row
+        # that cannot eagerly feed it defers eager inference downstream, it is
+        # never a reason to drop a declared artifact from the release.
+        forecast_binding = candidate_binding
+
+
+    return {
+        "threshold": threshold,
+        "gate_slot": slot,
+        "gate_binding": dict(binding),
+        "gate_row": gate_row,
+        "forecast": declared_forecast is not None,
+        "forecast_slot": forecast_slot,
+        "forecast_role": forecast_role,
+        "forecast_output": forecast_output,
+        "forecast_binding": dict(forecast_binding) if forecast_binding else None,
+        "forecast_row": forecast_row or {},
+        "forecast_pool": pool_document or {},
+    }
+
+
+def _gate_packaged_bindings(source: Mapping[str, Any], bindings: Sequence[Any],
+                            packaging: Mapping[str, Any] | None, *,
+                            source_root: Path | None = None) -> list[Mapping[str, Any]]:
+    """The frozen gate/forecast bindings the strict release must gain.
+
+    A declared gate whose ``native_recipes`` never saw it contributes its
+    binding to the packaged release -- unless the checkpoint already carries
+    that role (a scored row, or the same fold registered for sizing), which
+    is deduplicated by role exactly once ONLY when the standing binding IS the
+    same artifact the declaration names, compared on the exact normalized
+    identity ``package_frozen_resources`` derives a binding id from (source
+    path excluded). A same-role binding of a DIFFERENT artifact is a real
+    contradiction between what the declaration says served this gate and what
+    the checkpoint says was fed to the release: it is refused, never resolved
+    by letting one of them stand. A recorded row that cannot eagerly feed the
+    binding's derived features no longer drops it: the declared artifact is
+    packaged and :func:`checks.phase4_frozen_bridge.binding_feature_row` defers
+    eager inference for it (the native gate stage derives those columns).
+    """
+    if packaging is None:
+        return []
+    if source_root is None:
+        source_root = _artifact_source_root()
+    source_root = Path(source_root)
+    standing: dict[str, Mapping[str, Any]] = {}
+    for row in bindings:
+        if not isinstance(row, Mapping):
+            continue
+        base = str(row.get("role", "")).split(":", 1)[0]
+        standing.setdefault(_LEGACY_ROLE_ALIASES.get(base, base), row)
+    declared: list[tuple[str, Mapping[str, Any]]] = []
+    if packaging["gate_binding"] is not None:
+        declared.append(("gate", packaging["gate_binding"]))
+    if packaging.get("forecast") and packaging["forecast_binding"] is not None:
+        declared.append((str(packaging["forecast_role"]),
+                         packaging["forecast_binding"]))
+    extra: list[Mapping[str, Any]] = []
+    for role, binding in declared:
+        held = standing.get(role)
+        if held is None:
+            extra.append(binding)
+            standing[role] = binding
+        elif _binding_identity(held, source_root=source_root,
+                               label=f"captured {role}") != \
+                _binding_identity(binding, source_root=source_root,
+                                  label=f"declared {role}"):
+            raise StrictTraceCaptureError(
+                f"a captured {role} binding is already held but is not the "
+                "artifact the frozen gate declares; refusing rather than "
+                "packaging two different same-role artifacts")
+    return extra
+
+
+
+def _packaged_gate_recipe(packaging: Mapping[str, Any] | None,
+                          package: FrozenResourcePackage | None) -> dict[str, Any] | None:
+    """The JSON gate block for a derived gate, over the packaged release.
+
+    Same shape ``capture_source_bundle`` gives ``native_recipes.gate``
+    (threshold only) plus the forecast binding reference and recorded pool
+    ``frozen_source_declarations`` gives a ``gate_recipe`` -- as source-owned
+    declarations, never executors: :func:`checks.phase4_frozen_bridge.with_frozen_gate_forecast`
+    resolves the executor on both the capture and the replay side from the
+    verified release, and ``application._frozen_gate_inputs`` injects the
+    score executor from the packaged gate binding, exactly as a scored row's
+    trace does.
+    """
+    if packaging is None:
+        return None
+    recipe: dict[str, Any] = {}
+    if packaging["threshold"] is not None:
+        recipe["threshold"] = packaging["threshold"]
+    by_role = ({row["role"]: row["binding_id"]
+                for row in package.sidecar_document["bindings"]}
+               if package is not None else {})
+    if packaging["forecast"] and packaging["forecast_binding"] is not None:
+        # The fold's role is in the packaged release exactly when its binding
+        # was added (or the checkpoint's own binding for that role stands --
+        # the same release the stage and the replay run against).
+        binding_id = by_role.get(str(packaging["forecast_role"]))
+        if binding_id is not None:
+            recipe["forecast"] = {"binding_id": binding_id,
+                                  "output": packaging["forecast_output"]}
+            if packaging["forecast_pool"]:
+                recipe["forecast_pool"] = packaging["forecast_pool"]
+    return recipe
+
+
 def _captured_blocks(candidate: Mapping[str, Any],
                      request: V2ScoreRequest,
-                     frozen_chooser: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                     frozen_chooser: Mapping[str, Any] | None = None,
+                     gate_recipe: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Native blocks from a scored row's captured source bundle."""
     source = _checkpoint_value(candidate, "source_inputs")
     recipes = source.get("native_recipes")
@@ -1096,6 +1460,14 @@ def _captured_blocks(candidate: Mapping[str, Any],
         recipes["gate"] = entry_rule
     recipes.setdefault("analogs", {"mode": "not_applicable"})
     recipes.setdefault("simulation", {"mode": "not_applicable"})
+    if entry_rule is None and "gate" not in recipes and gate_recipe is not None:
+        # A gate DECLARED in the frozen record that the strict recipe path
+        # never packaged (legacy declined it before feeding the binding to
+        # ``capture_source_bundle``): the block still says WHICH gate legacy
+        # evaluated and on what threshold, so ``_execute_gate`` reaches its
+        # own domain check and declines the way legacy did, instead of the
+        # row being packaged as if no gate existed.
+        recipes["gate"] = dict(gate_recipe)
     recipes.setdefault("gate", {"mode": "not_applicable"})
     recipes["forecast"] = _with_stored_crush(dict(recipes["forecast"]), source)
     frozen = source.get("frozen") or {}
@@ -1161,11 +1533,13 @@ def _captured_blocks(candidate: Mapping[str, Any],
         "model_inputs": model_inputs,
         "source_features": source_features,
     }
-    if source.get("model_bindings"):
+    if source.get("model_bindings") or gate_recipe is not None:
         # The row each frozen binding is fed, per role (the gate's own
         # vector is not in the merged ``model_inputs``). Kept in the
         # source-bound features block so the replay
         # (checks/phase4_frozen_bridge.py) feeds every binding this row.
+        # A derived-gate row needs it even with no checkpoint bindings at
+        # all: the packaged gate binding must find its declared row here.
         features["role_model_inputs"] = _role_feature_vectors(candidate)
     return {
         "context": context,
@@ -3297,6 +3671,17 @@ def strict_trace_one(
     source = (None if _request_only_source(candidate) is not None
               else _checkpoint_value(candidate, "source_inputs"))
     bindings = (source or {}).get("model_bindings") or ()
+    # A gate DECLARED in the frozen record that ``native_recipes.gate`` never
+    # saw (legacy declined it before feeding its binding to
+    # ``capture_source_bundle``): the declared bindings join the packaged
+    # release, so the same verified artifacts stand behind the gate in the
+    # capture execution, the trace and the replay. No declaration keeps
+    # ``packaging`` None and the row's genuinely-ungated ``not_applicable``;
+    # a declared binding whose recording is broken fails closed inside
+    # :func:`frozen_gate_packaging`, never repackaged as no-gate.
+    packaging = frozen_gate_packaging(source) if source is not None else None
+    bindings = (*bindings,
+                *_gate_packaged_bindings(source or {}, bindings, packaging))
     package = None
     if bindings:
         package = package_frozen_resources(
@@ -3305,6 +3690,7 @@ def strict_trace_one(
             release_root=release_root,
             source_root=_artifact_source_root(),
         )
+    gate_recipe = _packaged_gate_recipe(packaging, package)
     chooser = (frozen_chooser_declaration(
         candidate, deployment_id=request.deployment_id, release_root=release_root)
         if source is not None else None)
@@ -3314,6 +3700,7 @@ def strict_trace_one(
         request = replace(request, model_artifact_refs=tuple(dict.fromkeys(refs)))
     inputs, shared_inputs = native_inputs_from_capture(
         candidate, request, frozen_chooser=chooser[0] if chooser else None,
+        gate_recipe=gate_recipe,
     )
     resources = _merged_resources(
         _package_resources(package) if package else (),
@@ -3343,6 +3730,18 @@ def strict_trace_one(
         _frozen_runtime(package, release_root, request, inputs, candidate)
         if package else None
     )
+    if runtime is not None:
+        # A declared gate forecast REFERENCE executes as the fold its
+        # binding_id names in THIS verified release -- resolved here on
+        # capture and by the same function in ``checks/phase4_real.py`` on
+        # replay, over the same hash-verified sidecar, so neither pass can
+        # score the gate on another model's forecast. The declared (stored)
+        # inputs keep the reference only.
+        gate_base = execution_inputs if execution_inputs is not None else inputs
+        gate_resolved = with_frozen_gate_forecast(
+            gate_base, release_root=Path(release_root), release=runtime[1])
+        if gate_resolved is not gate_base:
+            execution_inputs = gate_resolved
     return package_strict_trace(
         request, inputs, shared_inputs,
         resources=resources,

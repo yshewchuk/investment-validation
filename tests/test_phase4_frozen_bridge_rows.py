@@ -18,8 +18,13 @@ from types import SimpleNamespace
 import pytest
 
 from checks import phase4_real
-from checks.phase4_frozen_bridge import FrozenBridgeError, _feature_rows
+from checks.phase4_frozen_bridge import (
+    FrozenBridgeError, _feature_rows, binding_feature_row,
+)
 from engine.v2.foundation import content_hash
+from engine.v2.scoring.native_gate_features import (
+    GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS,
+)
 from engine.v2.models import ModelBinding
 from engine.v2.models.contracts import ArtifactMember
 from engine.v2.scoring import application
@@ -312,3 +317,68 @@ def test_a_missing_feature_name_still_raises_not_omitted():
     inputs = _inputs({"model_inputs": {"n_prior": 5.0}})
     with pytest.raises(FrozenBridgeError, match="missing feature x"):
         _feature_rows(inputs, (_binding("driver", ("x",)),), "release")
+
+
+# ---------------------------------------------------------------------------
+# ``binding_feature_row`` classification order (Astra blocker-1 follow-up).
+# The gate-deferral exception (a GATE row whose ONLY absent names are the
+# derived forecast/analog columns) must not let a present non-finite cell
+# mask an ILLEGAL omission, and a non-finite cell must not mask a later
+# malformed one. Absent names are classified FIRST; every present cell is
+# then validated (accumulating non-finite, never early-returning); only at the
+# end do we yield ``None`` for a legitimate deferral or a non-finite row.
+# ---------------------------------------------------------------------------
+
+def test_unknown_missing_name_raises_even_with_a_present_nonfinite_cell():
+    """Reproducer (driver role): ``feature_order=("missing_base","im")``,
+    ``vector={"im": nan}``. The present NaN used to return ``None`` before the
+    absent ``missing_base`` was ever checked, silently omitting a binding that
+    legacy would hard-refuse. Missing names are classified first now, so the
+    illegal omission raises regardless of the captured NaN."""
+    binding = _binding("driver", ("missing_base", "im"))
+    with pytest.raises(FrozenBridgeError, match="missing feature missing_base"):
+        binding_feature_row(binding, {"im": float("nan")})
+
+
+def test_unknown_missing_name_raises_for_gate_role_too():
+    """Same reproducer on the GATE role: ``missing_base`` is not one of the
+    derived forecast/analog columns, so the gate deferral does not apply and
+    the illegal omission raises even though a present cell is non-finite."""
+    binding = _binding("gate", ("missing_base", "im"))
+    with pytest.raises(FrozenBridgeError, match="missing feature missing_base"):
+        binding_feature_row(binding, {"im": float("nan")})
+
+
+def test_nonfinite_cell_does_not_mask_a_later_malformed_cell():
+    """A NaN earlier in ``feature_order`` used to return ``None`` before the
+    loop reached a later malformed string. Every present cell is now validated
+    (non-finite accumulated, not early-returned), so the genuinely non-numeric
+    value is still rejected loudly."""
+    binding = _binding("driver", ("x", "y"))
+    with pytest.raises(FrozenBridgeError, match="nonnumeric feature y"):
+        binding_feature_row(binding, {"x": float("nan"), "y": "not-a-number"})
+
+
+def test_gate_derived_omission_defers_when_present_cells_are_finite():
+    """The legal gate deferral still works: a GATE row whose ONLY absent names
+    are derived forecast/analog columns, with every present cell finite, is a
+    pre-extension base frame -- omit eager inference (``None``), never raise."""
+    derived = [GATE_FORECAST_COLUMNS[0], GATE_ANALOG_COLUMNS[0]]
+    binding = _binding("gate", ("n_prior", "x", *derived))
+    assert binding_feature_row(binding, {"n_prior": 5.0, "x": 9.0}) is None
+
+
+def test_gate_derived_omission_still_rejects_a_malformed_present_cell():
+    """Deferral is not a license to skip validation: a legal gate deferral plus
+    a captured malformed string must still raise (validate before yielding)."""
+    derived = [GATE_FORECAST_COLUMNS[0], GATE_ANALOG_COLUMNS[0]]
+    binding = _binding("gate", ("n_prior", "x", *derived))
+    with pytest.raises(FrozenBridgeError, match="nonnumeric feature x"):
+        binding_feature_row(binding, {"n_prior": 5.0, "x": "not-a-number"})
+
+
+def test_complete_finite_row_still_returns_its_values():
+    """Unchanged happy path: a fully present, finite row is a plain tuple in
+    ``feature_order`` -- not ``None``, not a raise."""
+    binding = _binding("driver", ("n_prior", "x"))
+    assert binding_feature_row(binding, {"x": 9.0, "n_prior": 5.0}) == (5.0, 9.0)

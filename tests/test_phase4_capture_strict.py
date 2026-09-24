@@ -21,12 +21,15 @@ from tools.capture_tier0_corpus import (
     StrictTraceCaptureError,
     _captured_blocks,
     _frozen_runtime,
+    _gate_packaged_bindings,
     _hydrate_trace,
     _merged_model_inputs,
+    _packaged_gate_recipe,
     _role_feature_vectors,
     _SpilledTrace,
     attach_strict_probe,
     canonical_v2_request,
+    frozen_gate_packaging,
     main,
     make_pair,
     native_inputs_from_capture,
@@ -1248,6 +1251,176 @@ def test_gate_capture_declares_the_decline_too(gate_root, tmp_path):
     assert "MISSING_FEATURES" in record.reason_codes
 
 
+# -- a DECLARED gate the strict recipe path never packaged (fixtures 008/017) ----
+
+
+def _source_of(candidate: dict) -> dict:
+    return candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+
+
+def _synth_gate_source(declarations=None, bindings=None, inputs=None):
+    """A minimal ``source_inputs`` block: no ``native_recipes.gate``, frozen
+    declarations as ``Scorer._score_gate``'s ``capture_frozen`` records them
+    on a row it DECLINED before ever feeding ``capture_source_bundle``."""
+    if declarations is None:
+        declarations = {"gate": {"binding": "gate", "output": "gate_score",
+                                 "threshold": 0.5, "site": "gate"}}
+    return {
+        "native_recipes": {"forecast": {"binding": "fold:size"}},
+        "model_bindings": [],
+        "frozen": {
+            "declarations": declarations,
+            "bindings": ({"gate": {"role": "gate", "feature_order": ["im"],
+                                   "output_names": ["gate_score"]}}
+                         if bindings is None else bindings),
+            "inputs": ({"gate@gate": {"im": 5.5}} if inputs is None else inputs),
+        },
+    }
+
+
+def test_packaging_none_for_scored_and_ungated_rows():
+    # A scored row: ``native_recipes.gate`` exists -- the strict recipe path
+    # owns the gate and the derived packaging must not touch it.
+    scored = _synth_gate_source()
+    scored["native_recipes"]["gate"] = {"threshold": 0.5}
+    assert frozen_gate_packaging(scored) is None
+    # A genuinely ungated row: nothing declared -- the row keeps its
+    # ``not_applicable`` gate block.
+    assert frozen_gate_packaging(_synth_gate_source(declarations={})) is None
+    assert frozen_gate_packaging({"native_recipes": {"forecast": {}}}) is None
+
+
+def test_packaging_declared_missing_or_mismatched_artifacts_fail_closed():
+    # Declared but never recorded: refused, never repackaged as no-gate.
+    with pytest.raises(StrictTraceCaptureError, match="not recorded"):
+        frozen_gate_packaging(_synth_gate_source(bindings={}))
+    # Malformed declaration (output is not the gate's own).
+    with pytest.raises(StrictTraceCaptureError, match="malformed frozen gate"):
+        frozen_gate_packaging(_synth_gate_source(
+            declarations={"gate": {"binding": "gate", "output": "gate_pass",
+                                   "threshold": 0.5, "site": "gate"}}))
+    # A binding of another role cannot serve the gate.
+    with pytest.raises(StrictTraceCaptureError, match="serves role"):
+        frozen_gate_packaging(_synth_gate_source(
+            bindings={"gate": {"role": "size", "feature_order": ["im"],
+                               "output_names": ["pred_abs_move"]}}))
+    # A declared row that names a nonnumeric feature is refused.
+    with pytest.raises(StrictTraceCaptureError, match="nonnumeric"):
+        frozen_gate_packaging(_synth_gate_source(inputs={"gate@gate": {"im": "x"}}))
+
+
+def test_packaged_gate_from_a_real_declined_gate_record(gate_root):
+    # The legacy scorer's own recording, with the scored-row ``native_recipes``
+    # gate entry REMOVED: exactly the gap a row declined before
+    # ``capture_source_bundle`` lands in.
+    _result, candidate = _captured_gate(gate_root[0], gate_root[1], r4.ROW)
+    source = copy.deepcopy(_source_of(candidate))
+    recipes = source.get("native_recipes")
+    assert isinstance(recipes, dict) and recipes.pop("gate", None) is not None
+
+    packaging = frozen_gate_packaging(source)
+    assert packaging is not None and packaging["threshold"] == 0.5
+    # The recorded gate row is the base frame only (the eight derived
+    # forecast/analog columns are computed natively). The declared binding is
+    # ALWAYS retained -- never dropped because the row cannot eagerly feed it;
+    # the only names its feature_order has beyond the recorded row are the
+    # derived ones eager inference defers on.
+    from engine.v2.scoring.native_gate_features import (
+        GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS,
+    )
+    derived = set(GATE_FORECAST_COLUMNS) | set(GATE_ANALOG_COLUMNS)
+    assert packaging["gate_binding"] is not None
+    assert set(packaging["gate_binding"]["feature_order"]) - set(packaging["gate_row"]) <= derived
+    assert packaging["forecast"] is True
+    assert packaging["forecast_output"] == "pred_abs_move"
+    assert packaging["forecast_binding"] is None or all(
+        name in packaging["forecast_row"]
+        for name in packaging["forecast_binding"]["feature_order"])
+
+    source_root = gate_root[0]
+    extra = _gate_packaged_bindings(source, (), packaging, source_root=source_root)
+    roles = [row["role"].split(":", 1)[0] for row in extra]
+    assert "size" in roles or packaging["forecast_binding"] is None
+    # Roles the checkpoint already carries are never added twice -- but ONLY
+    # when the standing binding IS the declared artifact (equal normalized
+    # identity, source path excluded), never because a role name collides.
+    held = [packaging["gate_binding"]]
+    if packaging["forecast_binding"] is not None:
+        held.append(packaging["forecast_binding"])
+    assert _gate_packaged_bindings(source, held, packaging,
+                                   source_root=source_root) == []
+
+    # Planted: a same-role binding naming a DIFFERENT artifact digest cannot
+    # stand in for the declared gate -- refuse, never resolve by role alone.
+    swapped = dict(packaging["gate_binding"])
+    swapped["artifact_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(StrictTraceCaptureError, match="same-role"):
+        _gate_packaged_bindings(source, [swapped], packaging,
+                                source_root=source_root)
+
+    from types import SimpleNamespace
+
+    sidecar = [{"role": "gate", "binding_id": "b-gate"}]
+    if packaging["forecast_binding"] is not None:
+        sidecar.append({"role": "size", "binding_id": "b-size"})
+    recipe = _packaged_gate_recipe(
+        packaging, SimpleNamespace(sidecar_document={"bindings": sidecar}))
+    assert recipe["threshold"] == 0.5
+    if packaging["forecast_binding"] is not None:
+        assert recipe["forecast"] == {"binding_id": "b-size",
+                                      "output": "pred_abs_move"}
+        assert recipe["forecast_pool"]["predictions"]
+    # With no release at all only the threshold survives -- never a
+    # reference to a binding that was not packaged.
+    assert _packaged_gate_recipe(packaging, None) == {"threshold": 0.5}
+    assert _packaged_gate_recipe(None, None) is None
+
+
+def test_declared_gate_forecast_named_pool_missing_fails_closed(gate_root):
+    """A gate forecast is declared with BOTH an ``output`` and a named ``pool``.
+    The two usually agree but are distinct facts: the pool is selected by the
+    declaration's OWN name, never by the output. Here the recorded fold_pools
+    still carry the output-named pool, but the declaration is renamed to a pool
+    that was never recorded -- packaging must fail closed on that name, not
+    silently fall back to the output-named pool that happens to exist.
+    """
+    root, pool = gate_root
+    _result, candidate = _captured_gate(root, pool, {**r4.ROW, "im": float("nan")})
+    source = copy.deepcopy(_source_of(candidate))
+    declared = source["frozen"]["declarations"]["gate_forecast"]
+    assert declared["output"] == declared["pool"] == "pred_abs_move"
+    assert "pred_abs_move" in source["frozen"]["fold_pools"]  # output-named exists
+    declared["pool"] = "pred_abs_move_named_only"            # ... this one does not
+    with pytest.raises(StrictTraceCaptureError,
+                       match=r"declared gate forecast pool .* was not recorded"):
+        frozen_gate_packaging(source)
+
+
+def test_same_role_captured_gate_row_conflict_refuses_not_dedupes(tmp_path):
+    """A gate that reached ``capture_gate_inputs`` (scored-path checkpoint) and
+    ALSO carries a frozen gate DECLINE row is the same role read twice. If the
+    two readings disagree, that is a row no single binding ever had -- it must be
+    refused, never resolved to whichever vector was seen first. The scored-path
+    gate vector is added first, then the frozen decline's row is merged through
+    the SAME conflict check; a differing shared column trips it."""
+    path, digest = _artifact(tmp_path)
+    candidate = {"legacy_trace": _legacy_trace(
+        driver_role="abs_move", driver_vector={"x": 2.0},
+        gate_vector={"mean_prior_abs_move": 6.2, "iv30": 55.0},
+    )}
+    # The frozen decline's own base row: same role "gate", iv30 at ANOTHER value.
+    source = _synth_gate_source(
+        inputs={"gate@gate": {"mean_prior_abs_move": 6.2, "iv30": 99.0}})
+    candidate["legacy_trace"]["checkpoints"]["source_inputs"] = {
+        "value": source, "content_hash": content_hash(source),
+    }
+    with pytest.raises(
+        StrictTraceCaptureError,
+        match=r"role gate captured twice with different values",
+    ):
+        _role_feature_vectors(candidate)
+
+
 # -- the size fold: its binding, forecast declaration and pool --------------------
 
 
@@ -1409,6 +1582,145 @@ def test_sizing_band_survives_strict_capture_verified_replay_and_record(gate_roo
         ["forecast_pool"]["residuals"][0] += 1.0
     with pytest.raises(phase4_real._TraceError, match="trace_hash"):
         phase4_real._verified_trace_bundle(changed, tmp_path / "release")
+
+
+def test_declined_gate_survives_strict_capture_verified_replay_and_record(
+        gate_root, tmp_path, monkeypatch):
+    """A real legacy MISSING_FEATURES gate DECLINE (fixtures 008/017) must
+    package, verify and replay as the same gate it was, end to end.
+
+    The base row omits the eight derived forecast/analog columns the gate's
+    ``feature_order`` names and carries a non-finite ``im`` the gate needs.
+    Legacy declares its binding, records the base-frame row it read and then
+    declines -- it never feeds the binding to ``capture_source_bundle``, so
+    ``native_recipes`` has no gate for the strict recipe path to package. The
+    only gate evidence is the frozen declaration, which
+    :func:`frozen_gate_packaging` turns into a real release binding. The gate
+    row can never EAGERLY feed that binding (the derived columns are computed by
+    the native gate stage), so eager inference is omitted -- on capture AND
+    replay, the same predicate, over the same recorded ``role_model_inputs`` --
+    while the declared artifact still stands behind the gate and the native gate
+    stage declines it the way legacy did.
+    """
+    from engine.v2.scoring.native_gate_features import (
+        GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS,
+    )
+    root, pool = gate_root
+    declined_row = {**r4.ROW, "im": float("nan")}
+    _legacy_result, candidate = _captured_gate(root, pool, declined_row)
+    # The real legacy decline: a MISSING_FEATURES gate, before eager inference.
+    assert _legacy_result.gate_score is None and "MISSING_FEATURES" in _legacy_result.flags
+    real_frozen = copy.deepcopy(_frozen(candidate))
+
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    path, digest = _artifact(tmp_path)
+    traced = _full_strict_candidate(
+        fixture_id="case-declined-gate", ticker="AAA",
+        driver_vector={"x": 2.0}, gate_vector={},  # empty: no scored-path gate
+        path=path, digest=digest,
+    )
+    checkpoint = traced["legacy_trace"]["checkpoints"]["source_inputs"]
+    source = checkpoint["value"]
+    # Drop the synthetic gate binding AND its empty gate_inputs checkpoint: the
+    # only gate this row now knows about is the real frozen declaration grafted
+    # in from a genuine legacy decline.
+    source["model_bindings"] = [
+        b for b in source["model_bindings"] if b["role"] != "gate"]
+    assert len(source["model_bindings"]) == 1  # the driver survives
+    traced["legacy_trace"]["checkpoints"].pop("gate_inputs")
+    source["frozen"] = real_frozen
+    # The base frame legacy actually read (a non-finite im is tagged by the
+    # collector, untagged by ``frozen_gate_packaging`` back to a real NaN).
+    source["features"] = dict(declined_row)
+    # Legacy records its clock from a null decision_offset; match the canonical
+    # request the frozen replay's clock check reads.
+    for binding in source["model_bindings"]:
+        binding["decision_clock"] = "legacy.decision_offset.0"
+    checkpoint["content_hash"] = content_hash(source)
+
+    trace, captured_native = strict_trace_one(
+        traced, "snapshot-1", tmp_path / "release")
+
+    # `strict_trace_one` returns the in-memory trace; every Phase 4 check reads
+    # it back only after `write()` + the corpus loader put it through the JSON
+    # round trip -- tuples become arrays, non-finite floats become
+    # {"__nonfinite__": repr} tags. The packaged gate forecast pool comes from
+    # `fold_pool`, which hands back TUPLES, so verifying the bare in-memory
+    # trace here would exercise a shape (`checks/phase4_real._leaf_values`
+    # walks lists only, while the assembler's `_leaves` walked both) that never
+    # reaches the checker in production. Normalize to the stored form -- the
+    # exact bytes the loader hands `_verified_trace_bundle` -- first.
+    from engine.v2.foundation import tag_nonfinite
+
+    stored_trace = json.loads(json.dumps(tag_nonfinite(trace), allow_nan=False))
+    pair = {"payload": {"request": traced["request"], "record": {},
+                        "legacy_input_hash": stored_trace["shared_input_hash"],
+                        "input_trace": stored_trace,
+                        "input_trace_hash": stored_trace["trace_hash"]}}
+    verified = phase4_real._verified_trace_bundle(pair, tmp_path / "release")
+    replayed_native, runtime_receipts, _identities = phase4_real._replayed_member(
+        verified)
+
+    release = verified["frozen_replay"].release
+    roles_by_binding = {b.binding_id: b.role for b in release.bindings}
+
+    # (1) The release RETAINS the declared gate as a real binding, backed by the
+    # verified artifact legacy actually used (never dropped because the row
+    # cannot eagerly feed it).
+    gate_bindings = [b for b in release.bindings if b.role == "gate"]
+    assert len(gate_bindings) == 1
+    gate_binding = gate_bindings[0]
+    gate_sha = _sha(root / "gate.joblib")
+    assert gate_binding.members[0].content_hash == gate_sha
+    assert gate_binding.feature_order == tuple(r4.GATE_FEATURES)
+    # The forecast fold that feeds the gate's derived columns is retained too.
+    assert "size" in set(roles_by_binding.values())
+
+    # (2) Eager gate inference is OMITTED in replay (the gate row is base-frame
+    # only) while the driver/size eager rows run -- and capture's own
+    # resolve_context receipt agrees, or _replayed_member above would have
+    # raised. This is the shared-predicate guarantee (binding_feature_row).
+    replayed_binding_ids = {item.binding_id for item in verified["frozen_replay"].requests}
+    assert gate_binding.binding_id not in replayed_binding_ids
+    driver_binding_id = next(b for b, role in roles_by_binding.items() if role == "driver")
+    assert driver_binding_id in replayed_binding_ids
+
+    # (3) The captured gate row is still the base frame: it lacks every derived
+    # forecast/analog column the declared binding's feature_order names.
+    gate_row = verified["inputs"].features["role_model_inputs"]["gate"]
+    derived = set(GATE_FORECAST_COLUMNS) | set(GATE_ANALOG_COLUMNS)
+    assert derived.isdisjoint(gate_row)
+    assert "im" in gate_row  # the non-finite column that caused the decline
+
+    # (4) Both passes (capture's own execution and the replay) decline the gate
+    # exactly as legacy did: MISSING_FEATURES, never a packaging/eligibility
+    # refusal, and never a fabricated gate score.
+    for native in (captured_native, replayed_native):
+        codes = tuple(native.reason_codes or ())
+        assert "MISSING_FEATURES" in codes, codes
+        assert "OUT_OF_DOMAIN" not in codes, codes
+        assert not any(code.startswith("MISSING_GATE_INPUT") for code in codes), codes
+        assert native.resolved_request.get("gate_score") is None
+
+    # (5) The runtime receipts the replay re-derived match the captured ones.
+    assert runtime_receipts[-1]["stage"] == "serialization"
+    captured_stages = {row["stage"] for row in verified["captured_receipts"]}
+    assert "gate" in captured_stages
+
+    # Planted defect: strip the frozen gate declaration and the whole gate story
+    # disappears -- the row packages as ungated (not_applicable), the release
+    # loses the gate binding, and NOTHING reaches MISSING_FEATURES. The
+    # assertions above are load-bearing on the DECLARED gate, not incidental.
+    dropped = copy.deepcopy(traced)
+    dropped_source = dropped["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    dropped_source["frozen"] = {"declarations": {}, "bindings": {}, "inputs": {},
+                                "fold_pools": {}}
+    dropped["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = \
+        content_hash(dropped_source)
+    dropped_trace, dropped_native = strict_trace_one(
+        dropped, "snapshot-1", tmp_path / "drop-release")
+    assert dropped_trace["native_inputs"]["gate"] == {"mode": "not_applicable"}
+    assert "MISSING_FEATURES" not in (dropped_native.reason_codes or ())
 
 
 # -- the chooser: champion, producers, fold pools, keys and primitives -------------
