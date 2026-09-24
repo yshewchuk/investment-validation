@@ -77,6 +77,29 @@ run always covers every enabled module (``mutation.yml``'s `plan` job skips
 `mutate`/`report` entirely when its module list is empty), so an empty
 measurement means a broken or truncated artifact, never a legitimately
 narrow one.
+
+Backends and policies (mutmut -> pytest-gremlins migration)
+-----------------------------------------------------------
+A measurement carries ``backend``/``backend_version``/``policy_id`` from the
+report's ``summary.json``; schema-1 (mutmut) artifacts carry none, and a
+baseline with no ``backend`` is read as historical mutmut. mutmut and
+pytest-gremlins measure different things (operator sets, error/pardon
+semantics, score denominators), so ``compare()`` short-circuits on
+``MUTATION_BACKEND_MISMATCH`` (backend or pinned version differs) and, for two
+gremlins sides, ``MUTATION_POLICY_MISMATCH`` (the scoring policy differs --
+timeout or score formula; the operator set *observed* in one artifact is data,
+not policy, and never triggers it). A new reviewed FULL gremlins baseline is
+committed separately: with ``--baseline`` absent, a gremlins measurement reads
+``checks/mutation_ratchet_baseline_gremlins.json`` (``MUTATION_BASELINE_MISSING``
+until that file exists) and a mutmut one reads the historical
+``checks/mutation_ratchet_baseline.json``; the old baseline is never edited or
+renamed for this. An incomplete or tool-errored gremlins measurement
+(``complete: false`` / ``tool_error: true``, e.g. a nonzero run exit code, a
+timeout kill, or raw error results) is refused outright --
+``MUTATION_MEASUREMENT_INCOMPLETE`` / ``MUTATION_MEASUREMENT_TOOL_ERROR`` --
+never compared or passed. In ``module_counts``, an ``excluded`` (pardoned)
+mutant leaves the ratio like a ``skipped`` one does; a ``suspicious`` (error)
+mutant stays in ``checked_effective`` and can never count as killed.
 """
 from __future__ import annotations
 
@@ -87,9 +110,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import gremlin_results as gr  # noqa: E402
 import mutation_results as mr  # noqa: E402
 
 BASELINE = ROOT / "checks/mutation_ratchet_baseline.json"
+BASELINE_GREMLINS = ROOT / "checks/mutation_ratchet_baseline_gremlins.json"
 SCHEMA_VERSION = "mutation_ratchet.v1"
 
 
@@ -109,7 +134,7 @@ def module_counts(rows: list[dict], triage: dict[str, dict]) -> dict[str, dict]:
             "total": 0, "checked_effective": 0, "killed_effective": 0,
             "survived_untriaged": 0, "triaged": 0})
         bucket["total"] += 1
-        if row["status"] == "skipped":
+        if row["status"] in ("skipped", "excluded"):  # never ran / pardoned: out of the ratio
             continue
         current = mr.triage_for(row["mutant_name"], row.get("diff"), triage)
         if current is not None and not current["stale"]:
@@ -125,12 +150,20 @@ def module_counts(rows: list[dict], triage: dict[str, dict]) -> dict[str, dict]:
 
 def build_measurement(rows: list[dict], summary: dict, *,
                       triage_path: Path = mr.TRIAGE_FILE) -> dict:
+    """Per-module effective counts plus the artifact's backend identity. A
+    schema-1 (mutmut) summary carries none of the gremlins keys, and they stay
+    null here -- ``compare`` reads that as the historical mutmut side."""
     triage = mr.load_triage(triage_path)
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": summary.get("mode"),
         "run_id": summary.get("run_id"),
         "sha": summary.get("sha"),
+        "backend": summary.get("backend"),
+        "backend_version": summary.get("backend_version"),
+        "policy_id": gr.policy_identity(summary["policy"]) if summary.get("policy") else None,
+        "complete": summary.get("complete", True),
+        "tool_error": bool(summary.get("tool_error", False)),
         "modules": module_counts(rows, triage),
     }
 
@@ -151,6 +184,36 @@ def compare(measured: dict, baseline: dict) -> list[dict]:
         # would compare different mutant subsets and cannot be trusted either
         # direction. Report only the mode problem, not noise on top of it.
         return failures
+    backend_measured = measured.get("backend") or "mutmut"  # schema 1: historical mutmut
+    backend_baseline = baseline.get("backend") or "mutmut"
+    if backend_measured != backend_baseline:
+        return [{"code": "MUTATION_BACKEND_MISMATCH", "measured_backend": backend_measured,
+                 "baseline_backend": backend_baseline}]
+    ver_m, ver_b = measured.get("backend_version"), baseline.get("backend_version")
+    pol_m, pol_b = measured.get("policy_id"), baseline.get("policy_id")
+    if backend_measured == gr.BACKEND:
+        # A gremlins measurement is only comparable to a gremlins baseline that
+        # states the SAME pinned backend_version and scoring policy. Absent or
+        # differing identity fields must not pass -- the old "only compare when
+        # both present" guard let a gremlins measurement that dropped
+        # policy_id/backend_version through against a baseline that carried them.
+        if not ver_m or not ver_b or ver_m != ver_b:
+            return [{"code": "MUTATION_BACKEND_MISMATCH", "field": "backend_version",
+                     "measured": ver_m, "baseline": ver_b}]
+        if not pol_m or not pol_b or pol_m != pol_b:
+            return [{"code": "MUTATION_POLICY_MISMATCH", "measured": pol_m, "baseline": pol_b}]
+    else:
+        # Historical mutmut schema 1 carries none of these; their absence stays
+        # supported and is only ever compared when present on both sides.
+        if ver_m and ver_b and ver_m != ver_b:
+            return [{"code": "MUTATION_BACKEND_MISMATCH", "field": "backend_version",
+                     "measured": ver_m, "baseline": ver_b}]
+        if pol_m and pol_b and pol_m != pol_b:
+            return [{"code": "MUTATION_POLICY_MISMATCH", "measured": pol_m, "baseline": pol_b}]
+    if measured.get("tool_error"):
+        return [{"code": "MUTATION_MEASUREMENT_TOOL_ERROR"}]
+    if measured.get("complete") is False:
+        return [{"code": "MUTATION_MEASUREMENT_INCOMPLETE"}]
     measured_modules = measured.get("modules") or {}
     if not measured_modules:
         # A real full run always covers every enabled module (mutation.yml's
@@ -193,7 +256,11 @@ def main(argv=None) -> int:
                         help="a measurement previously written with --output, instead of --dir")
     parser.add_argument("--triage", type=Path, default=mr.TRIAGE_FILE)
     parser.add_argument("--output", type=Path, help="write the measurement (never the baseline)")
-    parser.add_argument("--baseline", type=Path, default=BASELINE)
+    parser.add_argument("--baseline", type=Path, default=None,
+                        help="baseline file; by backend: the historical mutmut baseline for "
+                             "schema-1 measurements, checks/mutation_ratchet_baseline_gremlins."
+                             "json for pytest-gremlins ones (committed separately, by hand, "
+                             "after review)")
     args = parser.parse_args(argv)
 
     if bool(args.dir) == bool(args.input):
@@ -208,10 +275,12 @@ def main(argv=None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(measured, indent=2, sort_keys=True) + "\n")
 
-    if not args.baseline.exists():
+    baseline_path = args.baseline or (BASELINE_GREMLINS
+                                      if measured.get("backend") == gr.BACKEND else BASELINE)
+    if not baseline_path.exists():
         failures = [{"code": "MUTATION_BASELINE_MISSING"}]
     else:
-        failures = compare(measured, json.loads(args.baseline.read_text()))
+        failures = compare(measured, json.loads(baseline_path.read_text()))
     print(json.dumps({"ok": not failures, "findings": failures}, indent=2))
     return int(bool(failures))
 
