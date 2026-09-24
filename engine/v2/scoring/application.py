@@ -55,7 +55,7 @@ class _CanonicalFrozenExecutor:
     """Map one verified artifact output into its canonical stage field."""
 
     def __init__(self, executor, source, target, *, scale=1.0, floor_zero=False,
-                 role=None, feature_order=()):
+                 role=None, feature_order=(), adapter=None):
         self._executor = executor
         self._source = source
         self._target = target
@@ -63,6 +63,13 @@ class _CanonicalFrozenExecutor:
         self._floor_zero = floor_zero
         self.role = role
         self.feature_order = tuple(feature_order)
+        # The verified binding's adapter identity, carried through so the
+        # forecast stage (``stages._execute_forecast_executor``) can tell a
+        # Tier-4 fold -- whose non-finite row is a silent NaN, not a
+        # MISSING_FEATURES refusal -- from a champion model. Defaults to
+        # ``None`` (champion behaviour) whenever the caller does not supply
+        # the binding's adapter, so this never suppresses a real refusal.
+        self.adapter = adapter
 
     def predict(self, features):
         outputs = self._executor.predict(features)
@@ -560,10 +567,16 @@ class _FrozenOmissionRefusal:
     features can never turn it into a value.
     """
 
-    def __init__(self, role, feature_order, missing_features):
+    def __init__(self, role, feature_order, missing_features, adapter=None):
         self.role = str(role)
         self.feature_order = tuple(feature_order)
         self._missing = tuple(missing_features)
+        # The verified binding's adapter identity, carried through exactly as
+        # on ``_CanonicalFrozenExecutor``: a Tier-4 fold's non-finite captured
+        # row is a silent undetermined forecast downstream (sizing declines
+        # NO_FORECAST), while a champion model's is a MISSING_FEATURES refusal.
+        # ``None`` (unresolved / champion) preserves the refusal.
+        self.adapter = adapter
 
     def predict(self, features):
         raise FrozenStageRefusal(
@@ -631,6 +644,12 @@ def _frozen_stage_executors(bindings, inference, release, days,
         role = str(getattr(binding, "role", "")).split(":", 1)[0]
         if role in _FROZEN_ROLE_OUTPUTS and hasattr(binding, "feature_order"):
             owned.update(_frozen_role_outputs(binding))
+            # Read the verified binding's adapter through the same generic,
+            # fail-closed metadata flow used for role/output_names above: a
+            # binding that does not carry one resolves to ``None`` and keeps
+            # champion behaviour (MISSING_FEATURES preserved), never a
+            # guessed Tier-4 suppression.
+            adapter = getattr(binding, "adapter", None)
             frozen_executor = FrozenStageExecutor(
                 inference=inference,
                 release=release,
@@ -646,6 +665,7 @@ def _frozen_stage_executors(bindings, inference, release, days,
                     floor_zero=floor_zero,
                     role=binding.role,
                     feature_order=binding.feature_order,
+                    adapter=adapter,
                 )
             if features is not None:
                 omitted = (getattr(binding, "binding_id", None)
@@ -679,6 +699,7 @@ def _frozen_stage_executors(bindings, inference, release, days,
                             continue
                         executors.setdefault(target, _FrozenOmissionRefusal(
                             binding.role, binding.feature_order, nonfinite,
+                            adapter=adapter,
                         ))
     return executors, owned
 
