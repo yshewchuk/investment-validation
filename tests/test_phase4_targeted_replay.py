@@ -1092,8 +1092,8 @@ def test_eligible_runtime_mismatch_falls_back_to_observational_evidence(tmp_path
         tmp_path, monkeypatch, record,
         strict_exc=phase4_real._TraceError(_ELIGIBLE_MSG), native=diverging)
 
-    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink(),
-                                   observational=True)
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
     row = report["rows"][0]
 
     assert row["disposition"] == "observational"
@@ -1154,8 +1154,8 @@ def test_unverified_trace_or_resources_never_fall_back(tmp_path, monkeypatch, re
                         _raising_bundle(phase4_real._TraceError(reason)))
     monkeypatch.setattr(phase4_real.application, "score_one", _explode)
 
-    out = targeted.run_targeted(root, ["a"], progress_stream=_Sink(),
-                                observational=True)["rows"][0]
+    out = targeted.run_targeted_observational(root, ["a"],
+                                              progress_stream=_Sink())["rows"][0]
     assert out["disposition"] == "incomparable"
     assert out["trace_verified"] is False
     assert reason in out["reason"]
@@ -1169,8 +1169,8 @@ def test_corrupt_manifest_bound_row_never_falls_back(tmp_path):
                     "record_kind": "score_result", "covers": []}
     root = _write_corpus(tmp_path / "corpus", [doc], declared={"m": declared_row})
 
-    out = targeted.run_targeted(root, ["m"], progress_stream=_Sink(),
-                                observational=True)["rows"][0]
+    out = targeted.run_targeted_observational(root, ["m"],
+                                              progress_stream=_Sink())["rows"][0]
     assert out["payload_verified"] is False
     assert out["disposition"] == "incomparable"
     assert "request_hash" in out["reason"]
@@ -1191,8 +1191,8 @@ def test_only_the_one_message_may_trigger_the_fallback(tmp_path, monkeypatch, me
         strict_exc=phase4_real._TraceError(message))
     monkeypatch.setattr(phase4_real.application, "score_one", _explode)
 
-    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink(),
-                                   observational=True)
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
     row = report["rows"][0]
     assert row["disposition"] == "incomparable"
     assert message in row["reason"]
@@ -1209,8 +1209,8 @@ def test_foreign_exception_type_with_the_right_words_stays_incomparable(tmp_path
         strict_exc=ValueError(_ELIGIBLE_MSG))
     monkeypatch.setattr(phase4_real.application, "score_one", _explode)
 
-    out = targeted.run_targeted(root, ["a"], progress_stream=_Sink(),
-                                observational=True)["rows"][0]
+    out = targeted.run_targeted_observational(root, ["a"],
+                                              progress_stream=_Sink())["rows"][0]
     assert out["disposition"] == "incomparable"
     assert "ValueError" in out["reason"]
 
@@ -1239,8 +1239,8 @@ def test_refused_rescore_keeps_the_strict_incomparability(tmp_path, monkeypatch,
                 raise RuntimeError("double without resolved_request")
             monkeypatch.setattr(phase4_real, "_verified_runtime_receipts", broken)
 
-    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink(),
-                                   observational=True)
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
     row = report["rows"][0]
     assert row["disposition"] == "incomparable"
     assert _ELIGIBLE_MSG in row["reason"]
@@ -1262,8 +1262,8 @@ def test_captured_stage_order_mismatch_refuses_the_fallback(tmp_path, monkeypatc
         strict_exc=phase4_real._TraceError(_ELIGIBLE_MSG),
         captured_stages=swapped)
 
-    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink(),
-                                   observational=True)
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
     row = report["rows"][0]
     assert row["disposition"] == "incomparable"
     assert _ELIGIBLE_MSG in row["reason"]
@@ -1331,8 +1331,8 @@ def test_chooser_observational_fallback_keeps_original_member_indices(tmp_path, 
         _raising_bundle(phase4_real._TraceError(
             "chooser member 1: execution.gate.input_hash: captured runtime mismatch")))
 
-    report = targeted.run_targeted(root, ["chooser"], progress_stream=_Sink(),
-                                   observational=True)
+    report = targeted.run_targeted_observational(root, ["chooser"],
+                                                 progress_stream=_Sink())
     row = report["rows"][0]
 
     assert row["disposition"] == "observational"
@@ -1367,8 +1367,8 @@ def test_chooser_rows_not_matching_the_one_message_stay_incomparable(
         _raising_bundle(phase4_real._TraceError(message)))
     monkeypatch.setattr(phase4_real, "_chooser_members", _explode)
 
-    out = targeted.run_targeted(root, ["chooser"], progress_stream=_Sink(),
-                                observational=True)["rows"][0]
+    out = targeted.run_targeted_observational(root, ["chooser"],
+                                              progress_stream=_Sink())["rows"][0]
     assert out["disposition"] == "incomparable"
     assert out["trace_verified"] is None
     assert message in out["reason"]
@@ -1386,8 +1386,8 @@ def test_chooser_refused_rescore_keeps_the_strict_incomparability(tmp_path, monk
         raise phase4_real._TraceError("chooser member 1: input_trace: missing")
     monkeypatch.setattr(phase4_real, "_chooser_members", corrupt)
 
-    report = targeted.run_targeted(root, ["chooser"], progress_stream=_Sink(),
-                                   observational=True)
+    report = targeted.run_targeted_observational(root, ["chooser"],
+                                                 progress_stream=_Sink())
     row = report["rows"][0]
     assert row["disposition"] == "incomparable"
     assert "captured runtime mismatch" in row["reason"]
@@ -1411,8 +1411,8 @@ def test_chooser_second_member_stage_order_refuses_the_fallback(tmp_path, monkey
             "chooser member 0: execution.simulation.output_hash: "
             "captured runtime mismatch")))
 
-    report = targeted.run_targeted(root, ["chooser"], progress_stream=_Sink(),
-                                   observational=True)
+    report = targeted.run_targeted_observational(root, ["chooser"],
+                                                 progress_stream=_Sink())
     row = report["rows"][0]
     assert row["disposition"] == "incomparable"
     assert "captured runtime mismatch" in row["reason"]
@@ -1449,8 +1449,8 @@ def test_mixed_run_never_inflates_counts_or_sign_off(tmp_path, monkeypatch):
         lambda *_a, **_k: _observational_native(
             record, reason_codes=("NO_SCORE",)))
 
-    report = targeted.run_targeted(root, ["ok", "obs", "bad"],
-                                   progress_stream=_Sink(), observational=True)
+    report = targeted.run_targeted_observational(root, ["ok", "obs", "bad"],
+                                                 progress_stream=_Sink())
     counts = report["summary"]["counts"]
     assert counts == {"compared": 1, "excluded": 0, "incomparable": 1,
                       "observational": 1}
