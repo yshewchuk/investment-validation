@@ -243,6 +243,14 @@ GATE_MCAP_FLOOR = 1e9       # engine/score.py:199
 # from its dict.
 _PAYOFF_DRIVER_STRATEGIES = frozenset({"STR-THRU", "STR-RUNUP"})
 _PAYOFF_DRIVER_FIELD = {"STR-THRU": "driver_prediction"}
+#: Marker on a model block that legitimately declares driver/runup residual
+#: pools WITHOUT any payoff recipe/source rows/artifact. Legacy takes the
+#: chain-independent ``driver_p10``/``driver_p90`` (and STR-RUNUP's
+#: ``runup_move_p10``/``runup_move_p90``) BEFORE the entry-cost / payoff
+#: guards (engine/score.py:2976-2982 / :3142-3163), so such a row must still
+#: carry its bands even with no premium, strike or payoff surface; only the
+#: P&L fields stay withheld. Emitted by ``source_inputs._compatibility_model_block``.
+RESIDUAL_ONLY_FIELD = "residual_only"
 
 # -- Advisory-vs-refusal flag taxonomy ---------------------------------------
 # Whether a reason code the scorer emits merely ANNOTATES a row that still
@@ -1916,6 +1924,152 @@ def _quantile_band(draws: np.ndarray, prefix: str) -> dict[str, float]:
     }
 
 
+def _execute_model_without_recipe(
+    inputs: NativeScoreInputs,
+    name: str,
+    block: Mapping[str, Any],
+    values: dict[str, Any],
+    flags: list[str],
+) -> dict[str, Any]:
+    """The model layer when no payoff recipe was declared.
+
+    A legitimate residual-only block (driver/runup pools declared, no payoff
+    recipe/source rows/artifact) still earns its chain-independent bands --
+    legacy takes them BEFORE the entry-cost/payoff guards. Every other
+    no-recipe row behaves exactly as before: a strategy with no registered
+    payoff driver refuses NO_PAYOFF_MAP, and a block that smuggled in a model
+    output is the UNOWNED_MODEL_OUTPUT anomaly.
+    """
+    if block.get(RESIDUAL_ONLY_FIELD) and name in _PAYOFF_DRIVER_STRATEGIES:
+        if any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
+            _add_flag(flags, "UNOWNED_MODEL_OUTPUT")
+            return {}
+        return _residual_only_bands(inputs, name, block, values, flags)
+    if name not in _PAYOFF_DRIVER_STRATEGIES and name not in DISABLED:
+        # Legacy's site-1 NO_PAYOFF_MAP (engine/score.py:2799,
+        # ``PAYOFF_DRIVER.get(strategy) is None``): a strategy with no
+        # registered payoff driver never reaches the rest of the model
+        # stage, so capture never records a ``payoff_recipe`` for it
+        # either. This must fire from the strategy's identity alone,
+        # before any output-anomaly check, exactly as legacy does --
+        # never reachable via ``_model_driver_and_cost``, since that path
+        # requires a recipe to have been declared at all.
+        #
+        # ``name not in DISABLED``: a SEPARATE, narrower legacy gate.
+        # DISABLED_STRATEGIES (engine/score.py:117-127) returns from
+        # Scorer.score before site-1 (or _price_entry/_score_model) ever
+        # runs, flagging only UNVALIDATED_STRUCTURE. ``DISABLED`` is the
+        # same registry domain.generation.structures already uses to
+        # refuse geometry for these strategies -- reused by reference, not
+        # a new list. Deliberately NOT "geometry refused for any reason": a
+        # FORECAST_SIZED strategy whose geometry refuses for an unrelated
+        # capture gap still reaches _score_model in legacy and DOES get
+        # NO_PAYOFF_MAP there (see the commit that added this line).
+        _add_flag(flags, "NO_PAYOFF_MAP")
+    elif any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
+        _add_flag(flags, "UNOWNED_MODEL_OUTPUT")
+    return {}
+
+
+def _residual_only_bands(
+    inputs: NativeScoreInputs,
+    name: str,
+    block: Mapping[str, Any],
+    values: dict[str, Any],
+    flags: list[str],
+) -> dict[str, Any]:
+    """Compute the driver/runup bands for a residual-only block, using the
+    request's own derived seed and legacy's MODEL_DRAWS -- the same seed and
+    draw count the priced path would use when its recipe names neither. The
+    bands never consult spot/strike/entry_cost or a payoff surface, so a row
+    legacy refused for the missing chain keeps them (engine/score.py:2976-2982
+    / :3142-3163); only exp_pnl_model/win_model/payoff stay withheld.
+    """
+    from engine.v2.scoring import native_payoff
+
+    seed = _model_seed(inputs, values)
+    draws = native_payoff.MODEL_DRAWS
+    if name == "STR-RUNUP":
+        return _runup_residual_bands(inputs, block, values, flags, seed, draws)
+    return _thru_residual_bands(block, values, flags, seed, draws)
+
+
+def _thru_residual_bands(
+    block: Mapping[str, Any],
+    values: dict[str, Any],
+    flags: list[str],
+    seed: int,
+    draws: int,
+) -> dict[str, Any]:
+    """STR-THRU's single-driver ``driver_p10``/``driver_p90`` band, drawn the
+    same way (and unclipped, as legacy) as the priced path's first draw -- so
+    a priced row's band and this unpriced row's band are identical for the
+    same pool/point/seed (engine/score.py:2979)."""
+    from engine.v2.scoring import native_payoff
+
+    driver = _finite(values.get("driver_prediction"))
+    if driver is None:
+        _add_flag(flags, "MISSING_MODEL_INPUT:driver_prediction")
+        return {}
+    pool = _driver_pool(block, "driver", "model_residual_rows", driver, flags)
+    if pool is None:
+        return {}
+    model_draws = native_payoff.driver_draws(
+        driver, pool, draws, np.random.default_rng(seed),
+    )
+    output = _quantile_band(model_draws, "driver")
+    values.update(output)
+    return output
+
+
+def _runup_residual_bands(
+    inputs: NativeScoreInputs,
+    block: Mapping[str, Any],
+    values: dict[str, Any],
+    flags: list[str],
+    seed: int,
+    draws: int,
+) -> dict[str, Any]:
+    """STR-RUNUP's two chain-independent bands, drawn implied-then-move from
+    the SAME seed and in the SAME order as the priced path's first two draws
+    (``native_payoff.runup_residual_draws``), so a priced row's bands and this
+    unpriced row's bands coincide (engine/score.py:3143-3163)."""
+    from engine.v2.scoring import native_payoff
+
+    point_implied = _finite(values.get("driver_prediction"))
+    point_move_d14 = _finite(values.get("runup_move_prediction"))
+    days = _finite(_facts(inputs, values).get("days_before_print"))
+    if point_implied is None:
+        _add_flag(flags, "MISSING_MODEL_INPUT:driver_prediction")
+        return {}
+    if point_move_d14 is None:
+        _add_flag(flags, "MISSING_MODEL_INPUT:runup_move_prediction")
+        return {}
+    if days is None or days < 0.0:
+        _add_flag(flags, "MISSING_MODEL_INPUT:days_before_print")
+        return {}
+    implied_pool = _driver_pool(
+        block, "driver", "model_residual_rows", point_implied, flags,
+    )
+    if implied_pool is None:
+        return {}
+    move_pool = _driver_pool(
+        block, "runup_move", "runup_move_residual_rows", point_move_d14, flags,
+    )
+    if move_pool is None:
+        return {}
+    implied_draws, move_draws = native_payoff.runup_residual_draws(
+        point_implied, point_move_d14, implied_pool, move_pool, days, draws,
+        np.random.default_rng(seed),
+    )
+    output = {
+        **_quantile_band(implied_draws, "driver"),
+        **_quantile_band(move_draws, "runup_move"),
+    }
+    values.update(output)
+    return output
+
+
 def _execute_model(
     inputs: NativeScoreInputs,
     name: str,
@@ -1941,31 +2095,7 @@ def _execute_model(
     block = inputs.model
     recipe = block.get("payoff_recipe")
     if recipe is None:
-        if name not in _PAYOFF_DRIVER_STRATEGIES and name not in DISABLED:
-            # Legacy's site-1 NO_PAYOFF_MAP (engine/score.py:2799,
-            # ``PAYOFF_DRIVER.get(strategy) is None``): a strategy with no
-            # registered payoff driver never reaches the rest of the model
-            # stage, so capture never records a ``payoff_recipe`` for it
-            # either. This must fire from the strategy's identity alone,
-            # before any output-anomaly check, exactly as legacy does --
-            # never reachable via ``_model_driver_and_cost`` below, since
-            # that path requires a recipe to have been declared at all.
-            #
-            # ``name not in DISABLED``: a SEPARATE, narrower legacy gate.
-            # DISABLED_STRATEGIES (engine/score.py:117-127) returns from
-            # Scorer.score before site-1 (or _price_entry/_score_model) ever
-            # runs, flagging only UNVALIDATED_STRUCTURE. ``DISABLED`` is the
-            # same registry domain.generation.structures already uses to
-            # refuse geometry for these strategies -- reused by reference,
-            # not a new list. Deliberately NOT "geometry refused for any
-            # reason": a FORECAST_SIZED strategy whose geometry refuses for
-            # an unrelated capture gap still reaches _score_model in legacy
-            # and DOES get NO_PAYOFF_MAP there (see the commit that added
-            # this line for the measurement).
-            _add_flag(flags, "NO_PAYOFF_MAP")
-        elif any(block.get(field_name) is not None for field_name in _MODEL_OUTPUTS):
-            _add_flag(flags, "UNOWNED_MODEL_OUTPUT")
-        return {}
+        return _execute_model_without_recipe(inputs, name, block, values, flags)
     if not isinstance(recipe, Mapping):
         _add_flag(flags, "INVALID_PAYOFF_RECIPE")
         return {}

@@ -63,9 +63,10 @@ __all__ = [
     "MODEL_DRAWS", "RUNUP_TERMS", "RUNUP_BASE_DAYS",
     "fit_payoff_line", "cap_residuals", "bucket_residual_pool",
     "residual_pool_for", "driver_residual_pool", "payoff_exit_value",
-    "simulate_model_returns",
+    "simulate_model_returns", "driver_draws",
     "scale_runup_move", "runup_payoff_design", "fit_runup_payoff_surface",
-    "runup_exit_value_per_spot", "simulate_runup_model_returns",
+    "runup_exit_value_per_spot", "runup_residual_draws",
+    "simulate_runup_model_returns",
 ]
 
 #: engine/payoff.py:285
@@ -298,6 +299,24 @@ def payoff_exit_value(
     return np.maximum(0.0, (intercept + slope * values) * float(spot))
 
 
+def driver_draws(
+    driver: float, driver_pool: Sequence[float], draws: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """engine/score.py:2979 -- the single driver's own Monte Carlo band draws
+    (``point + residual pool``), UNCLIPPED. Shared verbatim by
+    :func:`simulate_model_returns` (whose payoff transform consumes the SAME
+    rng immediately after this draw, so the draw ORDER -- driver pool first --
+    is fixed) and by the unpriced residual-only band path, where nothing
+    downstream draws from ``rng``. A row with no entry cost still gets this
+    band (the driver column exists to serve it), so it must be derivable with
+    no spot/cost/payoff present.
+    """
+    return float(driver) + rng.choice(
+        np.asarray(driver_pool, dtype=float), size=int(draws), replace=True,
+    )
+
+
 def simulate_model_returns(
     driver: float,
     driver_pool: Sequence[float],
@@ -320,9 +339,7 @@ def simulate_model_returns(
     Monte Carlo draws (point + residual pool), engine/score.py's
     ``driver_p10``/``driver_p90`` band, taken before the payoff transform.
     """
-    model_draws = float(driver) + rng.choice(
-        np.asarray(driver_pool, dtype=float), size=int(draws), replace=True,
-    )
+    model_draws = driver_draws(driver, driver_pool, draws, rng)
     noise = rng.choice(
         np.asarray(payoff_residuals, dtype=float), size=int(draws), replace=True,
     )
@@ -475,6 +492,35 @@ def runup_exit_value_per_spot(
     return value_per_spot.reshape(implied.shape)
 
 
+def runup_residual_draws(
+    point_implied: float,
+    point_move_d14: float,
+    implied_pool: Sequence[float],
+    move_pool: Sequence[float],
+    days_before_print: float,
+    draws: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """engine/score.py:3143-3157 -- STR-RUNUP's two chain-independent driver
+    bands, drawn FIRST (implied-move pool) and SECOND (runup-move pool) from
+    ``rng``, non-negative clipped and horizon-scaled. This is exactly the
+    first two draws :func:`simulate_runup_model_returns` consumes, factored
+    out so the same rng order produces byte-identical ``implied_draws``/
+    ``move_draws`` whether or not a payoff surface / entry cost is present: a
+    row with no chain still gets its bands (legacy takes them before the
+    entry-cost guard at engine/score.py:3165-3173).
+    """
+    implied_draws = float(point_implied) + rng.choice(
+        np.asarray(implied_pool, dtype=float), size=int(draws), replace=True,
+    )
+    implied_draws = np.maximum(implied_draws, 0.0)
+    move_draws_d14 = float(point_move_d14) + rng.choice(
+        np.asarray(move_pool, dtype=float), size=int(draws), replace=True,
+    )
+    move_draws = scale_runup_move(np.maximum(move_draws_d14, 0.0), days_before_print)
+    return implied_draws, move_draws
+
+
 def simulate_runup_model_returns(
     point_implied: float,
     point_move_d14: float,
@@ -502,15 +548,9 @@ def simulate_runup_model_returns(
     ``runup_move_p10``/``runup_move_p90`` (from ``move_draws``, already at its
     scaled horizon).
     """
-    implied_draws = float(point_implied) + rng.choice(
-        np.asarray(implied_pool, dtype=float), size=int(draws), replace=True,
-    )
-    implied_draws = np.maximum(implied_draws, 0.0)
-    move_draws_d14 = float(point_move_d14) + rng.choice(
-        np.asarray(move_pool, dtype=float), size=int(draws), replace=True,
-    )
-    move_draws = scale_runup_move(
-        np.maximum(move_draws_d14, 0.0), days_before_print,
+    implied_draws, move_draws = runup_residual_draws(
+        point_implied, point_move_d14, implied_pool, move_pool,
+        days_before_print, draws, rng,
     )
     signed_moves = rng.choice((-1.0, 1.0), size=int(draws)) * move_draws
     noise = rng.choice(

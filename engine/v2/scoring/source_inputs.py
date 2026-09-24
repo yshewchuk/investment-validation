@@ -27,6 +27,7 @@ from engine.v2.scoring.native_analog import (
     bucket_population_hash,
 )
 from engine.v2.scoring.stages import (
+    RESIDUAL_ONLY_FIELD,
     NativeScoreInputs,
     StageReceipt,
     receipt,
@@ -794,23 +795,37 @@ def _artifact_model_block(
 
 def _compatibility_model_block(bundle: SourceBundle, recipe: Mapping[str, Any]) -> dict[str, Any]:
     """The source-rows compatibility branch of ``_model_block``, unchanged
-    from before the P5-4 artifact path existed (Phase 4 captures)."""
+    from before the P5-4 artifact path existed (Phase 4 captures).
+
+    A declared ``payoff_recipe`` fits the payoff inline at execution. Its
+    ABSENCE is only malformed when the bundle also supplies payoff source
+    rows (a fit with no recipe); a bundle that carries residual pools but no
+    payoff at all is a legitimate RESIDUAL-ONLY request -- legacy computes the
+    chain-independent driver/runup bands before any payoff/entry-cost guard
+    (engine/score.py:2976-2982 / :3142-3163) -- so it is carried as a block
+    flagged ``residual_only`` for the model stage to band (and to withhold
+    every P&L field from), never dropped back to not-applicable.
+    """
     if not recipe:
-        if (bundle.payoff_source_rows or bundle.model_residual_rows
-                or bundle.model_residual_recipe
-                or bundle.runup_move_residual_rows
-                or _driver_artifacts_declared(bundle)):
-            raise ValueError(
-                "payoff_source_rows/model_residual_*/runup_move_residual_rows "
-                "supplied without a payoff_recipe"
-            )
-        return {}
+        if bundle.payoff_source_rows:
+            raise ValueError("payoff_source_rows supplied without a payoff_recipe")
+        if not _residual_inputs_declared(bundle):
+            return {}
+        return {RESIDUAL_ONLY_FIELD: True, **_residual_members(bundle)}
     _reject_answers("payoff_source_rows", bundle.payoff_source_rows)
     return {
         "payoff_recipe": recipe,
         "payoff_source_rows": [dict(row) for row in bundle.payoff_source_rows],
         **_residual_members(bundle),
     }
+
+
+def _residual_inputs_declared(bundle: SourceBundle) -> bool:
+    """Any driver/runup residual population the model stage can band from --
+    request-supplied rows, a bucketing recipe, or frozen artifact
+    declarations -- independent of a payoff."""
+    return bool(bundle.model_residual_rows or bundle.runup_move_residual_rows
+                or bundle.model_residual_recipe or _driver_artifacts_declared(bundle))
 
 
 def _driver_artifacts_declared(bundle: SourceBundle) -> bool:
