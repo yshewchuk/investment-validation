@@ -19,6 +19,16 @@ structural subject of the contracts check, not the numeric parity values the
 rest of the evidence keeps value-free; a multi-member DYN-SV row indexes each
 difference by member.
 
+**Bounded failure diagnostics.** A row that did compare (or, under
+``--observational``, rescored) and failed any check also gets the full gate's
+own bounded ``checks.phase4_real._row_diagnostics`` section — per failing
+member the failed check names plus bounded legacy/native values for
+contracts/numeric/flags, and for a DYN-SV row the row-level chooser triple
+(replaying the combined native choice for exactly that). Like the gate, it
+lives OUTSIDE the value-free rows: the report carries a top-level
+``row_diagnostics`` map keyed by fixture id, and an incomparable or excluded
+row is never diagnosed.
+
 **This never claims sign-off.** It runs no acceptance battery, computes no
 overall Phase 4 status, writes no final evidence artifact, and modifies nothing
 under the corpus. The full ``checks/phase4_real.py`` gate remains the only
@@ -412,6 +422,43 @@ def _row_contract_diffs(members):
     return entries or None
 
 
+#: Private staging key: the builders attach the gate's bounded diagnostics
+#: section under it and the runners move it OUT of the value-free ``row`` into
+#: the report-level ``row_diagnostics`` map, mirroring how ``_native_parity``
+#: computes diagnostics in parallel to (never inside) the evidence rows.
+_ROW_DIAGNOSTICS_KEY = "_row_diagnostics"
+
+
+def _diagnostics_section(members, row_checks, record, native, selection):
+    """One failing row's diagnostics, computed by the EXACT
+    ``phase4_real._row_diagnostics`` (never a weakened copy). The internal
+    member rows already carry ``record``/``native``/``checks``/``numeric``,
+    which fold into the helper's ``(record, placeholder, native)`` tuples,
+    per-member check dicts and per-member ``dimension -> finding_fields``
+    maps exactly as ``_native_parity`` builds them. ``native`` is the
+    row-level native (the combined DYN-SV choice whose ``chooser_selection``
+    feeds the chooser section) and ``selection`` is ``None`` for a regular
+    row, so only a failing ``chooser`` verdict produces that section."""
+    return phase4_real._row_diagnostics(
+        [(m["record"], None, m["native"]) for m in members],
+        [m["checks"] for m in members],
+        [{name: result["finding_fields"]
+          for name, result in m["numeric"].items()} for m in members],
+        row_checks, record, native, selection,
+    )
+
+
+def _split_row_diagnostics(rows):
+    """Strip each row's staged private diagnostics into a fixture-keyed map
+    (ascending build order) so the emitted rows stay value-free."""
+    diagnostics: dict[str, Any] = {}
+    for row in rows:
+        staged = row.pop(_ROW_DIAGNOSTICS_KEY, None)
+        if staged is not None:
+            diagnostics[row["fixture_id"]] = staged
+    return diagnostics
+
+
 def _replay_regular_member(record, verified):
     """Native-replay one verified (non-chooser) trace and run the full gate's
     per-record comparison. Raises whatever the repository replay/verify code
@@ -457,6 +504,9 @@ def _replay_chooser_members(pair, corpus_root: Path):
             "trace_verified": True,
             "trace_hash": verified["trace_hash"],
             "runtime_stages": len(receipts),
+            # Internal-only retention of the COMBINED native: the chooser
+            # diagnostics section reads row-level chooser details off it.
+            "choice": choice,
         })
     selection = phase4_real._chooser_selection_checks(summary_record, choice)
     return rows, selection
@@ -610,6 +660,9 @@ def _observational_chooser_members(pair, corpus_root: Path):
             first_request = verified["request"]
     choice = phase4_real.application._choose_dynamic(
         replace(first_request, strategy_version="DYN-SV"), tuple(natives))
+    for row in rows:
+        # Same internal-only combined-native retention as the strict path.
+        row["choice"] = choice
     selection = phase4_real._chooser_selection_checks(
         pair["payload"]["record"], choice)
     return rows, selection
@@ -707,6 +760,15 @@ def _build_row_observational(corpus, declared, fixture_id: str) -> dict[str, Any
             result["contract_differences"] = contract_diffs
     if chooser:
         result["chooser_findings"] = sorted(n for n, ok in selection.items() if not ok)
+    if not all(checks.values()):
+        # The same bounded section the full gate attaches to a failing
+        # compared row, now computed over the observational members; staged
+        # privately and moved out of the row by the runner.
+        result[_ROW_DIAGNOSTICS_KEY] = _diagnostics_section(
+            members, checks, pair["payload"]["record"],
+            members[0]["choice"] if chooser else members[0]["native"],
+            selection,
+        )
     return result
 
 
@@ -818,6 +880,14 @@ def _build_row(corpus, declared, fixture_id: str) -> dict[str, Any]:
             result["contract_differences"] = contract_diffs
     if chooser:
         result["chooser_findings"] = sorted(n for n, ok in selection.items() if not ok)
+    if not all(checks.values()):
+        # The full gate's bounded diagnostics for a failing compared row,
+        # staged privately and moved out of the value-free row by the runner.
+        result[_ROW_DIAGNOSTICS_KEY] = _diagnostics_section(
+            members, checks, pair["payload"]["record"],
+            members[0]["choice"] if chooser else members[0]["native"],
+            selection,
+        )
     return result
 
 
@@ -912,6 +982,9 @@ def run_targeted(corpus_root: Path, fixture_ids, *, output=None,
             progress.end_row(fixture_id, time.perf_counter() - started)
 
     manifest_bound = declared is not None
+    # Move the builders' staged diagnostics out of the value-free rows into
+    # the report-level map (the gate's own ``row_diagnostics`` shape).
+    row_diagnostics = _split_row_diagnostics(rows)
     return {
         "schema_version": SCHEMA_VERSION,
         "diagnostic": "phase4_targeted_replay",
@@ -939,6 +1012,7 @@ def run_targeted(corpus_root: Path, fixture_ids, *, output=None,
         "requested": requested,
         "rows": rows,
         "summary": _summary(rows),
+        "row_diagnostics": row_diagnostics,
     }
 
 
@@ -992,6 +1066,9 @@ def run_targeted_observational(corpus_root: Path, fixture_ids, *, output=None,
             progress.end_row(fixture_id, time.perf_counter() - started)
 
     manifest_bound = declared is not None
+    # Same split as the strict runner: an observational (or strict-success)
+    # row's staged diagnostics live in the report map, never in the row.
+    row_diagnostics = _split_row_diagnostics(rows)
     return {
         "schema_version": SCHEMA_VERSION,
         "diagnostic": "phase4_targeted_replay",
@@ -1019,6 +1096,7 @@ def run_targeted_observational(corpus_root: Path, fixture_ids, *, output=None,
         "requested": requested,
         "rows": rows,
         "summary": _observational_summary(rows),
+        "row_diagnostics": row_diagnostics,
         "observational_mode": True,
         "observational_note": (
             "Rows with disposition=observational re-scored the verified "

@@ -1490,4 +1490,90 @@ def test_cli_observational_flag_toggles_the_mode(tmp_path, monkeypatch, capsys):
     assert obs["summary"]["counts"]["observational"] == 1
 
 
+# ---------------------------------------------------------------------------
+# bounded gate diagnostics for failing compared/observational rows
+# ---------------------------------------------------------------------------
+
+
+def test_failing_compared_row_gets_gate_diagnostics_outside_the_row(tmp_path, monkeypatch):
+    record = _clean_record()
+    diverging = _native_with_leg(_native_record(record), strike=105.0)
+    root = _stub_corpus(tmp_path, monkeypatch, {"a": record}, {"a": diverging})
+
+    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink())
+    row = report["rows"][0]
+
+    assert "contracts" in row["checks_failed"]
+    # The row itself keeps its existing evidence (including the projected
+    # contract_differences) and gains nothing: the new section lives at the
+    # report level, outside the row, exactly as in the full gate.
+    assert "row_diagnostics" not in row and "_row_diagnostics" not in row
+    # The gate's own bounded section names the member, its failed checks and
+    # BOTH sides of the drift, keyed by fixture id at the report level.
+    entry = report["row_diagnostics"]["a"]["members"]["0"]
+    assert "contracts" in entry["failed_checks"]
+    assert entry["contracts"]["legs"]["entries"] == [
+        {"leg": 0, "attribute": "strike", "native": 105.0, "legacy": 100.0},
+    ]
+
+
+def test_agreeing_and_incomparable_rows_are_never_diagnosed(tmp_path, monkeypatch):
+    record = _clean_record()
+    root = _stub_corpus(tmp_path, monkeypatch, {"a": record}, {})
+    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink())
+    assert report["row_diagnostics"] == {}
+
+    def raising(pair, _root):
+        raise phase4_real._TraceError("input_trace: missing")
+    monkeypatch.setattr(phase4_real, "_verified_trace_bundle", raising)
+    out = targeted.run_targeted(root, ["a"], progress_stream=_Sink())
+    assert out["rows"][0]["disposition"] == "incomparable"
+    assert out["row_diagnostics"] == {}
+
+
+def test_failing_chooser_diagnostics_keep_member_index_and_choice(tmp_path, monkeypatch):
+    summary = _summary_record()
+    root = _chooser_corpus(tmp_path, summary)
+    member = _clean_record()
+    clean = _native_record(member)
+    bad = _native_with_leg(clean, expiry="2026-10-16")
+    # Member 1's contract drifts AND the combined choice disagrees on margin.
+    choice = replace(_native_record(summary), chooser_selection={
+        "strategy": "STR-THRU", "menu_size": 2, "margin": 0.99})
+    monkeypatch.setattr(phase4_real, "_replayed_chooser",
+                        _chooser_stub([(member, clean), (member, bad)], choice))
+
+    report = targeted.run_targeted(root, ["chooser"], progress_stream=_Sink())
+    diagnostics = report["row_diagnostics"]["chooser"]
+    # Sparse failure: only the drifting member's ORIGINAL frame index is named.
+    assert list(diagnostics["members"]) == ["1"]
+    assert "contracts" in diagnostics["members"]["1"]["failed_checks"]
+    # The row-level chooser triple reads the retained combined native choice.
+    assert diagnostics["chooser"]["failed"] == ["chosen_margin"]
+    assert diagnostics["chooser"]["legacy"]["margin"] == 0.05
+    assert diagnostics["chooser"]["native"]["margin"] == 0.99
+
+
+def test_observational_failing_row_is_diagnosed_like_a_compared_one(tmp_path, monkeypatch):
+    record = _clean_record(flags=("FLAG_A",))
+    diverging = _observational_native(
+        record,
+        forecasts={**_native_record(record).forecasts, "exp_pnl_sim": 0.987654321},
+        reason_codes=("NO_SCORE",))
+    root = _observational_corpus(
+        tmp_path, monkeypatch, record,
+        strict_exc=phase4_real._TraceError(_ELIGIBLE_MSG), native=diverging)
+
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+
+    assert row["disposition"] == "observational"
+    assert "row_diagnostics" not in row
+    entry = report["row_diagnostics"]["a"]["members"]["0"]
+    assert set(entry["failed_checks"]) >= {"simulation", "flags"}
+    assert "exp_pnl_sim" in [field["field"]
+                             for field in entry["numeric"]["simulation"]["fields"]]
+
+
 
