@@ -1,15 +1,18 @@
 """O01-O05, O08-O10, O19 transaction kernel and O32 migrations."""
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 import sqlite3
 
 import pytest
 
 from engine.v2.contracts import CapacitySample
+from engine.v2.foundation import parse_timestamp
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import backup_to, integrity_errors, transaction
 from engine.v2.ops.errors import OpsError, make_problem
-from engine.v2.ops.lifecycle import Outcome, commit_attempt, complete_cancel, request_cancel
+from engine.v2.ops.lifecycle import (Outcome, commit_attempt, complete_cancel, request_cancel,
+                                     verify_fence)
 from engine.v2.ops.migrations import Migration, migrate
 from engine.v2.ops.profiles import DEFAULT_POLICY, GIB, profile_named
 from engine.v2.ops.recovery import expire_leases, reconcile_attempt
@@ -353,3 +356,180 @@ def test_backup_to_refuses_a_catalog_with_an_orphaned_dependency(tmp_path):
     assert err.value.problem.details == {"first_problem": _ORPHAN_FINDING}
     with sqlite3.connect(tmp_path / "refused.sqlite") as refused:
         assert integrity_errors(refused) == [_ORPHAN_FINDING]
+
+
+# -- O08 fence gate: ``verify_fence`` direct behavior (mutation-sensitive) ----
+#
+# Every fenced write (``record_launch``, ``heartbeat``, ``commit_attempt``)
+# runs through :func:`verify_fence`, yet until here nothing exercised the gate
+# itself: the existing catalog tests only reached it sideways through a
+# lease-expiry (``test_o08_o09``) and never asserted the returned rows, the
+# exact refusal code behind each condition, or that the check is read-only.
+# These tests call it directly on a real SQLite catalog so a change to the
+# fence arithmetic -- each comparison in ``job.fence == fence == attempt.fence``
+# pinned independently (presented, stored-job, stored-attempt divergence), the
+# ``>=`` lease boundary, the ``cancelling``-before-live ordering, the
+# ``(job, attempt)`` return -- has to break something here.
+#
+# The read-only assertions are made INSIDE the still-open transaction that
+# ``verify_fence`` expects to run within. A refusal snapshot taken only after
+# ``transaction()`` rolls back would hide a write that happened and then threw
+# -- ``_fence_state`` is therefore read (and compared) before leaving the
+# transaction, where an illicit write is still visible.
+
+
+def _fence_state(conn, job_id, attempt_id):
+    """Immutable snapshot of everything ``verify_fence`` must NOT disturb: the
+    job's moveable state, the attempt's, and whether its reservation is still
+    held. Returned as plain tuples so equality is exact."""
+    job = conn.execute(
+        "SELECT state, fence, active_attempt_id, attempt_count, next_eligible_at, "
+        "queue_reason_json, failure_json FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    attempt = conn.execute(
+        "SELECT state, process_state, fence, heartbeat_at, lease_expires_at, ended_at, "
+        "exit_code, failure_json FROM attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
+    held = conn.execute(
+        "SELECT COUNT(*) FROM resource_reservations WHERE attempt_id = ? AND released_at IS NULL",
+        (attempt_id,)).fetchone()[0]
+    return (tuple(job), tuple(attempt), held)
+
+
+def _set_fences(conn, job_id, attempt_id, *, job_fence, attempt_fence):
+    """Force a stored (job.fence, attempt.fence) pair the public API would not
+    produce together, leaving every OTHER liveness condition true. Only the
+    gate's own fence arithmetic can then decide the outcome -- this is what
+    isolates the two comparisons in ``job.fence == fence == attempt.fence``."""
+    with transaction(conn):
+        conn.execute("UPDATE jobs SET fence = ? WHERE job_id = ?", (job_fence, job_id))
+        conn.execute("UPDATE attempts SET fence = ? WHERE attempt_id = ?", (attempt_fence,
+                                                                            attempt_id))
+
+
+def test_fence_live_attempt_may_commit_and_reads_current_rows(tmp_path):
+    """A freshly claimed attempt holds the job's fence: the gate returns the
+    live ``(job, attempt)`` rows in that order -- a reversed return or any
+    flipped liveness predicate turns a commit-able attempt into a refusal or
+    vice-versa -- and touches nothing. ``now`` is pinned just short of and
+    exactly at ``lease_expires_at`` so the lease test is ``>=`` (expired at the
+    boundary), not ``>`` (a worker alive for one more microsecond) and not a
+    bare ``<``/``<=`` that would reject a fresh lease outright."""
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    before = _fence_state(conn, claim.job_id, claim.attempt_id)
+    expires = parse_timestamp(claim.lease_expires_at)
+
+    with transaction(conn):
+        job, attempt = verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
+        # Returned in ``(job, attempt)`` order and drawn from the right tables:
+        # ``attempt_count`` is a jobs-only column, ``attempt_number``
+        # attempts-only, so a swapped return raises rather than passes.
+        assert job["attempt_count"] == 1 and job["state"] == "running"
+        assert job["active_attempt_id"] == claim.attempt_id and job["fence"] == claim.fence
+        assert attempt["attempt_number"] == 1 and attempt["state"] == "starting"
+        assert (attempt["fence"] == claim.fence
+                and attempt["lease_expires_at"] == claim.lease_expires_at)
+        assert _fence_state(conn, claim.job_id, claim.attempt_id) == before  # read-only, in-txn
+
+    with transaction(conn):  # one microsecond short of expiry: still live
+        assert verify_fence(conn, claim.attempt_id, claim.fence,
+                            expires - timedelta(microseconds=1))[1]["state"] == "starting"
+
+    with transaction(conn):
+        with pytest.raises(OpsError) as err:  # at the boundary: ``>=`` fires
+            verify_fence(conn, claim.attempt_id, claim.fence, expires)
+        assert err.value.code == "LEASE_LOST"
+        assert err.value.problem.message == "the attempt's lease has expired"
+        assert err.value.problem.details == {"attempt_id": claim.attempt_id,
+                                             "fence": claim.fence, "current_fence": claim.fence}
+        assert _fence_state(conn, claim.job_id, claim.attempt_id) == before  # refusal wrote nothing
+
+
+def test_fence_requires_presented_fence_to_match_job_and_attempt_fences(tmp_path):
+    """The gate's liveness test compares THREE fence values, not one: the
+    presented argument, the stored job fence and the stored attempt fence, via
+    ``job.fence == fence == attempt.fence``. Moving only the presented number
+    leaves both comparisons false together and so proves nothing about either
+    one on its own. These cases independently exercise each half of that
+    conjunction, in both mismatch directions, by forcing the stored pair apart
+    (via :func:`_set_fences`) while every other liveness condition still holds:
+
+    * stored JOB fence alone wrong (attempt == presented) -- the left ``==``;
+    * stored ATTEMPT fence alone wrong (job == presented) -- the right ``==``;
+
+    each with the diverging column both ABOVE and BELOW the anchor, so an
+    ``==`` loosened to ``!=``/``<``/``<=``/``>``/``>=`` on EITHER comparison --
+    or the two collapsing to ``or`` -- turns a refusal into a silent success and
+    fails. A displaced holder presents an OLDER fence than the one the job now
+    carries, which the first case mirrors (still refused)."""
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    job_id, attempt_id = claim.job_id, claim.attempt_id
+    anchor = 5  # a fence both stored rows start on; only one is moved per case
+
+    _set_fences(conn, job_id, attempt_id, job_fence=anchor, attempt_fence=anchor)
+    live = _fence_state(conn, job_id, attempt_id)
+    with transaction(conn):  # control: presented == job == attempt -> live
+        assert verify_fence(conn, attempt_id, anchor, clock.now())[0]["state"] == "running"
+        assert _fence_state(conn, job_id, attempt_id) == live
+
+    with transaction(conn):  # displaced holder presents an OLDER fence (job==attempt==anchor)
+        with pytest.raises(OpsError) as err:
+            verify_fence(conn, attempt_id, anchor - 2, clock.now())
+        assert err.value.code == "LEASE_LOST"
+        assert err.value.problem.details == {"attempt_id": attempt_id,
+                                             "fence": anchor - 2, "current_fence": anchor}
+        assert _fence_state(conn, job_id, attempt_id) == live
+
+    for job_fence in (anchor + 4, anchor - 3):  # only the stored JOB fence is wrong
+        _set_fences(conn, job_id, attempt_id, job_fence=job_fence, attempt_fence=anchor)
+        before = _fence_state(conn, job_id, attempt_id)
+        with transaction(conn):  # present the attempt's (== real) fence
+            with pytest.raises(OpsError) as err:
+                verify_fence(conn, attempt_id, anchor, clock.now())
+            assert err.value.code == "LEASE_LOST"
+            assert err.value.problem.message == "the attempt no longer holds the job's fence"
+            assert err.value.problem.details == {"attempt_id": attempt_id,
+                                                 "fence": anchor, "current_fence": job_fence}
+            assert _fence_state(conn, job_id, attempt_id) == before
+
+    for attempt_fence in (anchor + 4, anchor - 3):  # only the stored ATTEMPT fence is wrong
+        _set_fences(conn, job_id, attempt_id, job_fence=anchor, attempt_fence=attempt_fence)
+        before = _fence_state(conn, job_id, attempt_id)
+        with transaction(conn):  # present the job's (== anchor) fence
+            with pytest.raises(OpsError) as err:
+                verify_fence(conn, attempt_id, anchor, clock.now())
+            assert err.value.code == "LEASE_LOST"
+            assert err.value.problem.message == "the attempt no longer holds the job's fence"
+            assert err.value.problem.details == {"attempt_id": attempt_id,
+                                                 "fence": anchor, "current_fence": anchor}
+            assert _fence_state(conn, job_id, attempt_id) == before
+
+
+def test_fence_cancelling_job_is_void_not_lease_lost(tmp_path):
+    """Cancellation invalidates the fence *first* (``request_cancel`` bumps the
+    job's fence and marks the attempt ``cancelling``). While the job is
+    ``cancelling``, :func:`verify_fence` must report ``CANCELLED`` -- a
+    non-retryable ``internal`` problem, distinct from the retryable ``LEASE_LOST``
+    a plain stale attempt earns -- and it must do so even for the *current*
+    fence and even though the attempt is no longer ``starting``/``running``.
+    This pins the cancelling check ahead of the liveness evaluation: reorder
+    them and the void-fence attempt downgrades to ``LEASE_LOST`` (retryable),
+    the exact confusion ``_FENCE_LOST_CODES`` elsewhere relies on not happening.
+    """
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    receipt = request_cancel(conn, claim.job_id, claim.attempt_id, clock=clock)
+    assert receipt.state == "cancelling" and receipt.fence == claim.fence + 1
+    before = _fence_state(conn, claim.job_id, claim.attempt_id)
+
+    with transaction(conn):
+        with pytest.raises(OpsError) as err:
+            # The *current* job fence: matching it does not revive a void fence.
+            verify_fence(conn, claim.attempt_id, receipt.fence, clock.now())
+        problem = err.value.problem
+        assert err.value.code == "CANCELLED" and problem.code == "CANCELLED"
+        assert problem.category == "internal" and problem.retryable is False
+        assert problem.message == "the job is being cancelled; this fence is void"
+        assert problem.details == {"attempt_id": claim.attempt_id,
+                                   "fence": receipt.fence, "current_fence": receipt.fence}
+        assert _fence_state(conn, claim.job_id, claim.attempt_id) == before  # refusal wrote nothing
