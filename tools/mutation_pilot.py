@@ -65,6 +65,32 @@ def status_of(code: int | None) -> str:
     return _STATUS.get(code, "suspicious")
 
 
+# mutmut's supported ``debug = true`` setting is full-run verbosity, not a
+# stats-only hook: with it on, mutmut echoes every mutant's child pytest output
+# for the whole run instead of swallowing it (CI run 36001042208 logged only
+# "failed to collect stats. runner returned 1" and hid the traceback). That echo
+# is what makes the failure diagnosable, but it floods the log for every mutant,
+# so it is not free and it never reruns anything or changes the exit code the job
+# gates on. The driver turns it on only where it is warranted: when the
+# environment asks explicitly, or on the one CI shard whose stats step is known
+# to fail. It is read here, not inside sync_workdir, so the run command and the
+# CI job share one source of truth.
+def stats_debug_enabled(module: str, env: dict[str, str] | None = None) -> bool:
+    """Should mutmut's debug (full-run verbosity) be on for this module's run?
+
+    An explicit ``MUTATION_PILOT_DEBUG`` always wins -- ``1/true/yes/on`` turn
+    it on, anything else (``0/false/off``, even empty) turns it off. With no
+    explicit value it is on only for the ``ops_legacy`` shard under CI
+    (``GITHUB_ACTIONS=true``), the one run whose clean/stats step is known to
+    fail; every other CI shard and every local run stays quiet.
+    """
+    source = os.environ if env is None else env
+    if "MUTATION_PILOT_DEBUG" in source:
+        return source["MUTATION_PILOT_DEBUG"].strip().lower() in ("1", "true", "yes", "on")
+    return (source.get("GITHUB_ACTIONS", "").strip().lower() == "true"
+            and module == "ops_legacy")
+
+
 def load_config() -> dict:
     with CONFIG.open("rb") as fh:
         return tomllib.load(fh)
@@ -160,6 +186,23 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
                     and str(path.relative_to(work)) not in tracked:
                 path.unlink()
 
+    also_copy = [t for t in tops if t not in ("engine", "tests")] or ["tests"]
+    setup = mutmut_config_text(defaults, mutate, tests, also_copy,
+                               debug=stats_debug_enabled(name))
+    (work / "setup.cfg").write_text(setup)
+    return work
+
+
+def mutmut_config_text(defaults: dict, mutate: list[str], tests: list[str],
+                       also_copy: list[str], *, debug: bool = False) -> str:
+    """The generated ``[mutmut]`` section for a module's work copy.
+
+    ``debug`` is mutmut's supported setting, and it means full-run verbosity:
+    when true, mutmut echoes every mutant's child pytest output for the whole
+    run, not just the clean/stats collection step. It is expensive, so it stays
+    off unless ``stats_debug_enabled`` opts the run in (an explicit environment
+    value, or the ops_legacy CI shard).
+    """
     def lines(key: str, values: list[str]) -> str:
         return f"{key} =\n" + "".join(f"    {v}\n" for v in values)
 
@@ -168,7 +211,7 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
              + lines("only_mutate", mutate)
              # mutmut copies source_paths and tests/ into mutants/ by itself;
              # every other copied tree must be listed to be importable there.
-             + lines("also_copy", [t for t in tops if t not in ("engine", "tests")] or ["tests"])
+             + lines("also_copy", also_copy)
              + lines("pytest_add_cli_args_test_selection", tests)
              + lines("pytest_add_cli_args", defaults["pytest_args"]
                      + [f"--deselect={d}" for d in defaults.get("deselect", [])])
@@ -182,8 +225,9 @@ def sync_workdir(name: str, cfg: dict, *, fresh: bool) -> Path:
              # mutant: the smoke run scored a killable mutant as survived.
              # "forkserver" forks from a process that has only collected tests.
              + "process_isolation = forkserver\n")
-    (work / "setup.cfg").write_text(setup)
-    return work
+    if debug:
+        setup += "debug = true\n"
+    return setup
 
 
 # -- commands ----------------------------------------------------------------
@@ -288,8 +332,16 @@ def cmd_run(cfg: dict, args) -> int:
     # the tests. A BLAS/OpenMP thread pool started before the fork deadlocks
     # the child, which then reads as a false "timeout" (seen in the smoke run
     # on tests that import sklearn). Single-threaded native libraries avoid it,
-    # and --max-children is the parallelism anyway.
-    env = dict(os.environ)
+    # and --max-children is the parallelism anyway. The environment mutmut's
+    # pytest child inherits is left as-is: mutmut sets MUTANT_UNDER_TEST itself,
+    # and pytest sets PYTEST_CURRENT_TEST, so filtering the parent here would
+    # not stop a child from inheriting them -- and doing so has no supported
+    # basis. When the ops_legacy CI shard's stats step fails, the driver has
+    # already enabled mutmut's debug setting (see stats_debug_enabled), which
+    # echoes that swallowed pytest trace for the whole run; set
+    # MUTATION_PILOT_DEBUG=1 anywhere else to do the same. Either way it is
+    # verbosity, not a rerun: the exit code the job gates on is unchanged.
+    env = os.environ.copy()
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         env[var] = "1"
@@ -297,43 +349,7 @@ def cmd_run(cfg: dict, args) -> int:
     # On a first run mutants/ did not exist before mutmut; record the digest now
     # so the next run compares against this one.
     reset_on_test_change(work, [], digest)
-    if rc != 0:
-        diagnose(work, cfg, args.module, env)
     return rc
-
-
-def diagnose(work: Path, cfg: dict, name: str, env: dict) -> int:
-    """After a failed mutmut run, rerun the module's tests in plain pytest.
-
-    mutmut swallows pytest's output when its clean/stats run fails ("failed to
-    collect stats. runner returned 1" and nothing else). This reruns the same
-    selection with the same pytest args, from the same directory (mutants/,
-    trampolined code, unmutated), without -x, and prints the failing test ids
-    with short tracebacks. If it passes, the failure only happens inside mutmut
-    (state it leaves in the process), and the message says so.
-    """
-    defaults = cfg["defaults"]
-    cwd = work / "mutants" if (work / "mutants").is_dir() else work
-    cmd = [sys.executable, "-m", "pytest", "--rootdir=.", "-q", "-rfE", "--tb=short",
-           "-p", "no:randomly", "-p", "no:random-order", *defaults["pytest_args"],
-           *[f"--deselect={d}" for d in defaults.get("deselect", [])],
-           *test_files(cfg, name)]
-    denv = dict(env, MUTANT_UNDER_TEST="")
-    print(f"\n[mutation_pilot] diagnose {name}: plain pytest of the selected tests in "
-          f"{cwd}", flush=True)
-    try:
-        proc = subprocess.run(cmd, cwd=cwd, env=denv, capture_output=True, text=True,
-                              timeout=1500)
-    except subprocess.TimeoutExpired:
-        print("[mutation_pilot] diagnose: pytest did not finish in 1500 s", flush=True)
-        return -1
-    lines = (proc.stdout + proc.stderr).splitlines()
-    print("\n".join(lines[-250:]), flush=True)
-    verdict = ("tests fail outside mutmut too: see above" if proc.returncode else
-               "tests PASS outside mutmut: the failure depends on mutmut's in-process run")
-    print(f"[mutation_pilot] diagnose {name}: pytest exited {proc.returncode}; {verdict}",
-          flush=True)
-    return proc.returncode
 
 
 def _function_span(source: str, func: str, cls: str | None) -> tuple[int, int] | None:

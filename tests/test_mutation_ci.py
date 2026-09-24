@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import types
 from pathlib import Path
 
 import pytest
@@ -334,6 +335,150 @@ def test_expand_is_ordered_and_refuses_dead_patterns():
     assert pilot.expand(["engine/v2/a/*.py"], tracked, skip=["*/y.py"]) == ["engine/v2/a/x.py"]
     with pytest.raises(SystemExit):
         pilot.expand(["engine/v2/c/*.py"], tracked)
+
+
+# -- mutmut diagnostics on the ops_legacy CI shard (run 36001042208) ---------
+#
+# mutmut only logs "failed to collect stats. runner returned 1" and swallows the
+# child pytest output that explains it. The driver's remedy is mutmut's own
+# supported ``debug = true`` config (``mutmut_config_text``): it is full-run
+# verbosity, so it is on only when the environment opts in through
+# ``MUTATION_PILOT_DEBUG`` or on the ops_legacy CI shard by default. These are
+# mock tests: they never run mutmut or pytest; they check the config we hand
+# mutmut, that the environment and module name reach the generated ``setup.cfg``,
+# and that ``cmd_run`` keeps the real exit code without rerunning anything.
+
+DIAG_DEFAULTS = {"pytest_args": ["-p", "no:xdist", "-p", "no:cacheprovider"],
+                 "deselect": ["tests/test_a.py::gate_needs_git"],
+                 "timeout_constant": 2.0, "timeout_multiplier": 5.0, "max_children": 2}
+
+
+def test_stats_debug_honors_an_explicit_value_over_the_ci_default(monkeypatch):
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    for on in ("1", "true", "TRUE", " yes ", "on"):
+        monkeypatch.setenv("MUTATION_PILOT_DEBUG", on)
+        assert pilot.stats_debug_enabled("ops_legacy")
+        assert pilot.stats_debug_enabled("pnl_sim")
+    for off in ("", "0", "false", "nope", "off"):
+        monkeypatch.setenv("MUTATION_PILOT_DEBUG", off)
+        assert not pilot.stats_debug_enabled("ops_legacy")
+        assert not pilot.stats_debug_enabled("pnl_sim")
+    # an explicit off wins even on the CI shard that would otherwise default on
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    for off in ("0", "false", "off"):
+        monkeypatch.setenv("MUTATION_PILOT_DEBUG", off)
+        assert not pilot.stats_debug_enabled("ops_legacy")
+
+
+def test_stats_debug_defaults_on_only_for_ops_legacy_in_ci(monkeypatch):
+    monkeypatch.delenv("MUTATION_PILOT_DEBUG", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert pilot.stats_debug_enabled("ops_legacy")
+    assert not pilot.stats_debug_enabled("pnl_sim")
+    assert not pilot.stats_debug_enabled("toy")
+    # every other shard, and every local run, stays quiet
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert not pilot.stats_debug_enabled("ops_legacy")
+    monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    assert not pilot.stats_debug_enabled("ops_legacy")
+
+
+def test_mutmut_config_text_adds_debug_only_when_requested():
+    off = pilot.mutmut_config_text(DIAG_DEFAULTS, ["engine/x.py"], ["tests/test_a.py"],
+                                   ["tests"], debug=False)
+    assert "debug" not in off
+    assert "process_isolation = forkserver" in off  # the load-bearing keys survive
+    assert "--deselect=tests/test_a.py::gate_needs_git" in off
+    on = pilot.mutmut_config_text(DIAG_DEFAULTS, ["engine/x.py"], ["tests/test_a.py"],
+                                  ["tests"], debug=True)
+    assert on.startswith(off) and on.endswith("debug = true\n")
+
+
+def test_the_env_opt_in_reaches_the_generated_setup_cfg(tmp_path, monkeypatch):
+    repo, home = tmp_path / "repo", tmp_path / "home"
+    (repo / "engine").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    (repo / "engine" / "x.py").write_text("x = 1\n")
+    (repo / "tests" / "test_a.py").write_text("def t(): pass\n")
+    cfg = {"defaults": dict(DIAG_DEFAULTS, copy=["engine", "tests"]),
+           "modules": {"toy": {"mutate": ["engine/x.py"], "tests": ["tests/test_a.py"]}}}
+    monkeypatch.setattr(pilot, "REPO", repo)
+    monkeypatch.setenv("MUTATION_PILOT_HOME", str(home))
+    monkeypatch.setattr(pilot, "_tracked", lambda paths: ["engine/x.py", "tests/test_a.py"])
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("MUTATION_PILOT_DEBUG", raising=False)
+    work = pilot.sync_workdir("toy", cfg, fresh=True)
+    assert "debug = true" not in (work / "setup.cfg").read_text()
+    monkeypatch.setenv("MUTATION_PILOT_DEBUG", "1")
+    work = pilot.sync_workdir("toy", cfg, fresh=True)
+    assert "debug = true" in (work / "setup.cfg").read_text()
+
+
+def test_ci_default_enables_debug_only_for_ops_legacy_setup_cfg(tmp_path, monkeypatch):
+    repo, home = tmp_path / "repo", tmp_path / "home"
+    (repo / "engine").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    (repo / "engine" / "x.py").write_text("x = 1\n")
+    (repo / "tests" / "test_a.py").write_text("def t(): pass\n")
+    mod = {"mutate": ["engine/x.py"], "tests": ["tests/test_a.py"]}
+    cfg = {"defaults": dict(DIAG_DEFAULTS, copy=["engine", "tests"]),
+           "modules": {"ops_legacy": dict(mod), "pnl_sim": dict(mod)}}
+    monkeypatch.setattr(pilot, "REPO", repo)
+    monkeypatch.setenv("MUTATION_PILOT_HOME", str(home))
+    monkeypatch.setattr(pilot, "_tracked", lambda paths: ["engine/x.py", "tests/test_a.py"])
+    monkeypatch.delenv("MUTATION_PILOT_DEBUG", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    ops = pilot.sync_workdir("ops_legacy", cfg, fresh=True)
+    assert "debug = true" in (ops / "setup.cfg").read_text()
+    other = pilot.sync_workdir("pnl_sim", cfg, fresh=True)
+    assert "debug = true" not in (other / "setup.cfg").read_text()
+
+
+def _cmd_run(monkeypatch, tmp_path, rc):
+    """Run cmd_run with mutmut's subprocess stubbed; return (rc_out, calls)."""
+    work = tmp_path / "work"
+    (work / "mutants").mkdir(parents=True)
+    monkeypatch.setattr(pilot, "sync_workdir", lambda *a, **k: work)
+    monkeypatch.setattr(pilot, "mutate_files", lambda cfg, name, tracked=None: ["engine/x.py"])
+    monkeypatch.setattr(pilot, "test_files", lambda cfg, name, tracked=None: ["tests/test_a.py"])
+    monkeypatch.setattr(pilot, "tests_digest", lambda *a: "digest")
+    monkeypatch.setattr(pilot, "reset_on_test_change", lambda *a, **k: 0)
+    monkeypatch.setattr(mr, "snapshot", lambda *a, **k: {})
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        return types.SimpleNamespace(returncode=rc)
+
+    monkeypatch.setattr(pilot.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(module="toy", fresh=False, max_children=None, globs=[])
+    return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {"toy": {}}}, args), calls
+
+
+def test_cmd_run_preserves_the_exit_code_without_rerunning(monkeypatch, tmp_path):
+    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=1)
+    assert rc == 1  # the tool error still fails the job; scores are never silenced
+    assert len(calls) == 1  # exactly one subprocess: no automatic pytest/mutmut rerun
+    cmd, kw = calls[0]
+    assert cmd[:5] == [sys.executable, "-u", "-m", "mutmut", "run"]
+    assert "pytest" not in " ".join(cmd)
+    assert kw["cwd"] == tmp_path / "work"
+
+
+def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
+    # mutmut sets MUTANT_UNDER_TEST itself after launch and pytest sets
+    # PYTEST_CURRENT_TEST, so filtering the parent environment cannot prevent a
+    # child from inheriting them -- and had no supported basis. The only pinned
+    # vars are the BLAS/OpenMP thread caps.
+    monkeypatch.setenv("MUTANT_UNDER_TEST", "stats")
+    monkeypatch.setenv("COVERAGE_PROCESS_START", "/rc")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "t::u (call)")
+    _, calls = _cmd_run(monkeypatch, tmp_path, rc=0)
+    env = calls[0][1]["env"]
+    assert env["MUTANT_UNDER_TEST"] == "stats"
+    assert env["COVERAGE_PROCESS_START"] == "/rc"
+    assert env["PYTEST_CURRENT_TEST"] == "t::u (call)"
+    assert env["OMP_NUM_THREADS"] == "1"  # the thread pin is still applied
 
 
 # -- config and workflow shape ----------------------------------------------------------
