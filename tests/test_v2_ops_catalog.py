@@ -303,17 +303,25 @@ def _plant_orphaned_dependency(conn, child_job_id):
 def test_backup_to_carries_rows_committed_while_only_in_wal(tmp_path):
     """§6.1: the backup is made through the online backup API, so rows that
     were committed while still living only in the WAL are present in the
-    copy, and a sound copy reports no integrity findings. An existing
-    destination is refused outright — never overwritten — and the refusal
-    names the destination the caller asked for."""
+    copy, and a sound copy reports no integrity findings."""
     conn, clock, _ = catalog(tmp_path)
     ids = {submit(conn, REGISTRY, POLICY, request(key), clock=clock).job_id
            for key in ("one", "two")}
-    dest = tmp_path / "backup-copy.sqlite"
-    backup_to(conn, dest)
-    with sqlite3.connect(dest) as restored:
+    backup_to(conn, tmp_path / "backup-copy.sqlite")
+    with sqlite3.connect(tmp_path / "backup-copy.sqlite") as restored:
         assert integrity_errors(restored) == []
         assert {row[0] for row in restored.execute("SELECT job_id FROM jobs")} == ids
+
+
+def test_backup_to_refuses_an_existing_destination_naming_it(tmp_path):
+    """Never overwrite: a second backup onto a path that already exists is
+    refused with a FileExistsError that names the requested destination,
+    and the refusal leaves the existing backup file untouched."""
+    conn, clock, _ = catalog(tmp_path)
+    ids = {submit(conn, REGISTRY, POLICY, request(key), clock=clock).job_id
+           for key in ("one", "two")}
+    dest = tmp_path / "existing-backup.sqlite"
+    backup_to(conn, dest)
     with pytest.raises(FileExistsError) as err:
         backup_to(conn, dest)
     assert str(dest) in str(err.value)
