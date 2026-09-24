@@ -2326,6 +2326,48 @@ def _frozen_receipt(verified: Mapping[str, Any]) -> str | None:
     return frozen_replay.receipt if frozen_replay is not None else None
 
 
+def _normalized_semantic_flags(
+    record: Mapping[str, Any], native,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The comparator's OWN ordered semantic flag tuples, both sides.
+
+    ``_record_checks`` decides ``flags`` by comparing these tuples for
+    equality -- order AND multiplicity matter, not just set membership --
+    and the flag diagnostics report them through this same function, so
+    what a diagnostic shows can never contradict the verdict it explains.
+    The legacy side carries two documented translations, applied here in
+    their required order:
+
+    1. CAL-P/CND-P: a legacy record whose strategy is disabled expects the
+       ``UNVALIDATED_STRUCTURE`` refusal even if its captured flags omit it.
+    2. NO_SCORE parity translation (user decision 2026-09-23): native stamps
+       the native-only NO_SCORE when neither score number is finite and no
+       flag already refuses (engine/v2/scoring/application.py:183-190);
+       legacy has no such code, so on the SAME conditions evaluated against
+       the LEGACY record alone -- unscored by legacy's own rule
+       (engine/score.py:1335: exp_pnl_model/exp_pnl_analog only, never
+       exp_pnl_sim) and refusing nothing (flags_refuse) -- expect exactly
+       one appended NO_SCORE before comparing, decided against the flag
+       tuple AFTER the CAL-P/CND-P UNVALIDATED_STRUCTURE translation so a
+       synthetic refusal suppresses the expectation the same way a real one
+       does. Never derived from the native record, and NO_SCORE stays
+       refusing in production: a native NO_SCORE on a scored or
+       already-refused legacy row remains a real finding.
+    """
+    native_flags = _semantic_flags({"flags": native.reason_codes})
+    legacy_flags = _semantic_flags(record)
+    if record.get("strategy") in {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in legacy_flags:
+        legacy_flags = legacy_flags + ("UNVALIDATED_STRUCTURE",)
+    legacy_expects_no_score = (
+        record.get("exp_pnl_model") is None
+        and record.get("exp_pnl_analog") is None
+        and not flags_refuse(legacy_flags)
+    )
+    if legacy_expects_no_score:
+        legacy_flags = legacy_flags + ("NO_SCORE",)
+    return native_flags, legacy_flags
+
+
 def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]:
     """The per-record comparison of one legacy record with its native one.
 
@@ -2362,32 +2404,12 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     native_only = sorted(native_keys_for_comparison - expected_keys)
     legacy_only = sorted(expected_keys - native_keys_for_comparison)
 
-    # Compute flag differences
-    native_flags = _semantic_flags({"flags": native.reason_codes})
-    legacy_flags = _semantic_flags(record)
-    if record.get("strategy") in {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in legacy_flags:
-        legacy_flags = legacy_flags + ("UNVALIDATED_STRUCTURE",)
-    # NO_SCORE parity translation (user decision 2026-09-23): native stamps
-    # the native-only NO_SCORE when neither score number is finite and no
-    # flag already refuses (engine/v2/scoring/application.py:183-190);
-    # legacy has no such code, so on the SAME conditions evaluated against
-    # the LEGACY record alone -- unscored by legacy's own rule
-    # (engine/score.py:1335: exp_pnl_model/exp_pnl_analog only, never
-    # exp_pnl_sim) and refusing nothing (flags_refuse) -- expect exactly one
-    # appended NO_SCORE before comparing, decided against the flag tuple
-    # AFTER the CAL-P/CND-P UNVALIDATED_STRUCTURE translation so a synthetic
-    # refusal suppresses the expectation the same way a real one does. Never
-    # derived from the native record, and NO_SCORE stays refusing in
-    # production: a native NO_SCORE on a scored or already-refused legacy
-    # row remains a real finding.
-    legacy_expects_no_score = (
-        record.get("exp_pnl_model") is None
-        and record.get("exp_pnl_analog") is None
-        and not flags_refuse(legacy_flags)
-    )
-    if legacy_expects_no_score:
-        legacy_flags = legacy_flags + ("NO_SCORE",)
-
+    # Compute flag differences. The symmetric set differences named below
+    # explain membership only; when the compared ORDERED tuples disagree
+    # while both sets match (an order-only or duplicate-count mismatch),
+    # the exact sequences the comparator used are reported by
+    # ``_diagnostic_flag_context`` in ``row_diagnostics``.
+    native_flags, legacy_flags = _normalized_semantic_flags(record, native)
     flags_agree = native_flags == legacy_flags
     flags_in_native_only = sorted(set(native_flags) - set(legacy_flags))
     flags_in_legacy_only = sorted(set(legacy_flags) - set(native_flags))
@@ -2656,10 +2678,12 @@ _DIAGNOSTIC_TIMELINE_ATTRIBUTES = ("entry_date", "exit_date", "execution_date")
 #: Caps. Member entries per row (the DYN-SV menu is 7; the cap exists so no
 #: future widening of a row's membership can un-bound the report), differing
 #: leg attributes per member, scalar-valued fields per numeric dimension,
-#: warnings per flag failure, and characters per free-text excerpt.
+#: ordered flag names per side in a flag failure, warnings per flag failure,
+#: and characters per free-text excerpt.
 _DIAGNOSTIC_MEMBER_CAP = 12
 _DIAGNOSTIC_LEG_DIFF_CAP = 12
 _DIAGNOSTIC_NUMERIC_FIELD_CAP = 24
+_DIAGNOSTIC_FLAG_SEQ_CAP = 24
 _DIAGNOSTIC_WARNING_CAP = 8
 _DIAGNOSTIC_TEXT_CHARS = 240
 
@@ -2817,12 +2841,35 @@ def _diagnostic_numeric_diff(
 def _diagnostic_flag_context(
     record: Mapping[str, Any], native,
 ) -> dict[str, Any]:
-    """Bounded refusal context for a failed ``flags`` check, when available:
-    the legacy record's own human-readable ``detail`` excerpt and the native
-    record's ``warnings``. The flag NAME sets are already value-free evidence
-    in ``row_flag_differences``; these two fields say WHY each side flagged
-    what it did."""
+    """Bounded context for a failed ``flags`` check.
+
+    ALWAYS names both compared sequences: the exact ordered legacy/native
+    semantic flag tuples ``_normalized_semantic_flags`` handed the
+    comparator (advisory strip and the CAL-P/CND-P and NO_SCORE
+    translations included), so an order-only or duplicate-count mismatch --
+    invisible to the value-free symmetric set diff in
+    ``row_flag_differences``, which can report two empty lists for a failed
+    check -- is explained here. Because the sequences come from the same
+    function the verdict was decided with, they can never contradict it.
+    Each sequence is capped at ``_DIAGNOSTIC_FLAG_SEQ_CAP`` entries in
+    order, the omitted tail counted rather than silently dropped. When
+    available, the legacy record's own human-readable ``detail`` excerpt
+    and the native record's ``warnings`` say WHY each side flagged what it
+    did."""
     context: dict[str, Any] = {}
+    native_flags, legacy_flags = _normalized_semantic_flags(record, native)
+    context["legacy_flags"] = [
+        _diagnostic_scalar(flag) for flag in legacy_flags[:_DIAGNOSTIC_FLAG_SEQ_CAP]
+    ]
+    if len(legacy_flags) > _DIAGNOSTIC_FLAG_SEQ_CAP:
+        context["legacy_flags_omitted"] = (
+            len(legacy_flags) - _DIAGNOSTIC_FLAG_SEQ_CAP)
+    context["native_flags"] = [
+        _diagnostic_scalar(flag) for flag in native_flags[:_DIAGNOSTIC_FLAG_SEQ_CAP]
+    ]
+    if len(native_flags) > _DIAGNOSTIC_FLAG_SEQ_CAP:
+        context["native_flags_omitted"] = (
+            len(native_flags) - _DIAGNOSTIC_FLAG_SEQ_CAP)
     detail = record.get("detail") if isinstance(record, Mapping) else None
     if isinstance(detail, str) and detail.strip():
         context["legacy_detail"] = _diagnostic_text(detail)
@@ -3210,7 +3257,10 @@ def _native_parity(corpus, progress=NO_PROGRESS) -> tuple[dict, dict]:
     #: their respective checks fail. For multi-member (chooser) rows, each
     #: entry is a list of per-member dicts; for regular rows, it's a single
     #: dict. When a check passes, the entry is omitted. Field and flag
-    #: NAMES only -- never values.
+    #: NAMES only -- never values. For ``flags`` the check compares ORDERED
+    #: tuples, so a set-symmetric diff (both lists empty) can accompany a
+    #: failed check when only order or duplicate counts differ; the exact
+    #: compared sequences live in ``row_diagnostics`` for that case.
     row_key_differences = {}
     row_flag_differences = {}
     row_null_mask_differences = {}

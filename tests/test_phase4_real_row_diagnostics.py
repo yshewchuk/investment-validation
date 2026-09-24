@@ -6,7 +6,10 @@ not previously root-cause the few fields that disagreed. ``row_diagnostics``
 adds the missing values -- contract leg/timeline diffs through the checker's
 own ``_contract_projection``, failed numeric field names paired with the
 legacy/native scalars from ``_numeric_views`` (including ``None``), the
-chooser selection triple both sides, and bounded flag context -- but ONLY as
+chooser selection triple both sides, and bounded flag context including the
+exact ORDERED normalized legacy/native flag sequences the comparator
+compared (the symmetric set diff alone cannot show an order-only or
+duplicate-count mismatch) -- but ONLY as
 a separate map in ``saved_release_comparison``, never inside the ``rows``
 whose ``content_hash`` IS ``comparison_receipt``, and never where any check,
 control or gate decision reads it.
@@ -236,8 +239,11 @@ def test_flag_failure_diagnostics_carry_bounded_detail_and_warnings(tmp_path, mo
     assert flags["native_warnings_omitted"] == 4
 
 
-def test_flag_failure_without_detail_or_warnings_adds_no_flag_section(
+def test_flag_failure_without_detail_or_warnings_still_names_both_sequences(
         tmp_path, monkeypatch):
+    """The flag section is never empty on a failed check any more: even with
+    no ``detail`` and no ``warnings`` to quote, both compared ORDERED
+    sequences are reported, so a flags failure is always explainable."""
     record = _clean_record(flags=("BAD_QUOTE",))
     native = replace(_native_record(record), reason_codes=("OTHER_REFUSAL",))
     release, _parity = _run(
@@ -245,7 +251,108 @@ def test_flag_failure_without_detail_or_warnings_adds_no_flag_section(
     )
     entry = _member_entry(release, "a")
     assert "flags" in entry["failed_checks"]
-    assert "flags" not in entry  # nothing available to report, nothing invented
+    flags = entry["flags"]
+    assert flags["legacy_flags"] == ["BAD_QUOTE"]
+    assert flags["native_flags"] == ["OTHER_REFUSAL"]
+    # Nothing is invented: the absent context fields simply do not appear.
+    assert "legacy_detail" not in flags
+    assert "native_warnings" not in flags
+
+
+def test_flag_sequence_diagnostics_explain_a_same_set_different_order_failure(
+        tmp_path, monkeypatch):
+    """The observability gap this fixes: the comparator compares ORDERED
+    tuples while ``row_flag_differences`` is a symmetric SET diff, so an
+    order-only mismatch failed the check while explaining nothing (both
+    difference lists empty). The flag section now carries the exact
+    sequences that were compared, in order, so the mismatch is visible."""
+    record = _clean_record(flags=("FLAG_A", "FLAG_B"))
+    native = replace(_native_record(record), reason_codes=("FLAG_B", "FLAG_A"))
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+    assert release["row_dimension_checks"]["a"]["flags"] is False
+    diff = release["row_flag_differences"]["a"]
+    assert diff == {"native_only": [], "legacy_only": []}
+
+    flags = _member_entry(release, "a")["flags"]
+    assert flags["legacy_flags"] == ["FLAG_A", "FLAG_B"]
+    assert flags["native_flags"] == ["FLAG_B", "FLAG_A"]
+
+
+def test_flag_sequence_diagnostics_explain_a_duplicate_count_failure(
+        tmp_path, monkeypatch):
+    """Same set, same order of distinct names, different multiplicity: also
+    invisible to the set diff, explicit in the compared sequences."""
+    record = _clean_record(flags=("FLAG_A", "FLAG_A", "FLAG_B"))
+    native = replace(
+        _native_record(record), reason_codes=("FLAG_A", "FLAG_B"))
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+    assert release["row_dimension_checks"]["a"]["flags"] is False
+    diff = release["row_flag_differences"]["a"]
+    assert diff == {"native_only": [], "legacy_only": []}
+
+    flags = _member_entry(release, "a")["flags"]
+    assert flags["legacy_flags"] == ["FLAG_A", "FLAG_A", "FLAG_B"]
+    assert flags["native_flags"] == ["FLAG_A", "FLAG_B"]
+
+
+def test_flag_sequence_diagnostics_report_the_translated_tuples_not_raw_flags(
+        tmp_path, monkeypatch):
+    """The reported sequences are the comparator's NORMALIZED tuples: the
+    CAL-P/CND-P UNVALIDATED_STRUCTURE and the unscored-row NO_SCORE
+    translations appear even though the raw legacy flags omit them -- the
+    diagnostic cannot contradict the verdict because it reuses the exact
+    function the verdict was decided with."""
+    cal_record = _clean_record(strategy="CAL-P", exp_pnl_model=None)
+    cal_native = replace(_native_record(cal_record), reason_codes=())
+    no_score_record = _clean_record(exp_pnl_model=None)
+    no_score_native = replace(_native_record(no_score_record), reason_codes=())
+    release, _parity = _run(
+        tmp_path, monkeypatch,
+        {"cal": cal_record, "nos": no_score_record},
+        natives_by_fixture={"cal": cal_native, "nos": no_score_native},
+    )
+    assert cal_record["flags"] == ()
+    assert no_score_record["flags"] == ()
+
+    cal = _member_entry(release, "cal")["flags"]
+    assert cal["legacy_flags"] == ["UNVALIDATED_STRUCTURE"]
+    assert cal["native_flags"] == []
+    assert release["row_flag_differences"]["cal"]["legacy_only"] == [
+        "UNVALIDATED_STRUCTURE"]
+
+    nos = _member_entry(release, "nos")["flags"]
+    assert nos["legacy_flags"] == ["NO_SCORE"]
+    assert nos["native_flags"] == []
+    assert release["row_flag_differences"]["nos"]["legacy_only"] == ["NO_SCORE"]
+
+
+def test_flag_sequence_diagnostics_are_bounded_with_omitted_counts(
+        tmp_path, monkeypatch):
+    """A pathological row cannot grow the report without limit: each side
+    keeps its first ``_DIAGNOSTIC_FLAG_SEQ_CAP`` names IN ORDER and the
+    truncated tail is counted, never silently dropped."""
+    cap = phase4_real._DIAGNOSTIC_FLAG_SEQ_CAP
+    legacy_flags = tuple(f"FLAG_A_{index:02d}" for index in range(cap + 5))
+    native_flags = tuple(f"FLAG_B_{index:02d}" for index in range(cap + 9))
+    record = _clean_record(flags=legacy_flags)
+    native = replace(_native_record(record), reason_codes=native_flags)
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+    assert release["row_dimension_checks"]["a"]["flags"] is False
+
+    flags = _member_entry(release, "a")["flags"]
+    assert flags["legacy_flags"] == list(legacy_flags[:cap])
+    assert flags["legacy_flags_omitted"] == 5
+    assert flags["native_flags"] == list(native_flags[:cap])
+    assert flags["native_flags_omitted"] == 9
+    # Bounded serialization of the whole section.
+    dumped = json.dumps(flags, allow_nan=False)
+    assert json.loads(dumped) == flags
 
 
 def _chooser_members_and_choice():
