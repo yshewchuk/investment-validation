@@ -985,3 +985,509 @@ def test_run_targeted_heartbeat_labels_loading_before_replay(tmp_path, monkeypat
     assert "phase=replay" in text
 
 
+# ---------------------------------------------------------------------------
+# observational mode (--observational): the captured-runtime-mismatch fallback
+# ---------------------------------------------------------------------------
+
+_ELIGIBLE_MSG = "execution.simulation.output_hash: captured runtime mismatch"
+_REQUEST_DOC = {"ticker": "ABC", "strategy": "STR-THRU", "as_of": "2026-09-16"}
+
+
+def _explode(*_args, **_kwargs):
+    raise AssertionError("the fallback must not score a row that is not eligible")
+
+
+def _runtime_receipt_rows(stages=None):
+    """Well-formed native stage receipts: the shape
+    ``phase4_real._verified_runtime_receipts`` still validates in observational
+    mode (required stages, valid digests, serialization last)."""
+    stages = tuple(stages if stages is not None else phase4_real._REQUIRED_TRACE_STAGES)
+    return [
+        {"stage": stage,
+         "input_hash": "sha256:" + format(index, "064x"),
+         "output_hash": "sha256:" + format(index + 16, "064x"),
+         "owner": f"test.owner.{stage}"}
+        for index, stage in enumerate(stages)
+    ]
+
+
+def _prior_captured_receipts(stages=None):
+    """Captured runtime receipts from the PRIOR implementation: identical
+    stage ORDER, stale digests and owner stamps — the fields observational
+    mode may look past, never the order."""
+    stages = tuple(stages if stages is not None else phase4_real._REQUIRED_TRACE_STAGES)
+    return tuple(
+        {"stage": stage,
+         "input_hash": "sha256:" + format(index + 64, "064x"),
+         "output_hash": "sha256:" + format(index + 80, "064x"),
+         "owner": f"prior.{stage}"}
+        for index, stage in enumerate(stages)
+    )
+
+
+def _observational_native(record, request_doc=_REQUEST_DOC, **overrides):
+    """A native double that survives every check observational mode KEEPS:
+    runtime-receipt well-formedness and all four identity checks (canonical
+    request, request hash, score id, payload hash)."""
+    base = replace(
+        _native_record(record),
+        resolved_request={**dict(record),
+                          "native_stage_receipts": _runtime_receipt_rows()},
+        canonical_request=to_document(request_doc),
+        **overrides,
+    )
+    identity = phase4_real.score_id(base)
+    return replace(base, score_id=identity, payload_hash=identity,
+                   request_hash=content_hash(base.canonical_request))
+
+
+def _regular_bundle_stub(request_doc=_REQUEST_DOC, captured_stages=None):
+    def verified_fn(pair, _root):
+        return {"trace_hash": "sha256:" + "f" * 64, "request": request_doc,
+                "inputs": None, "frozen_replay": None,
+                "captured_receipts": _prior_captured_receipts(captured_stages),
+                "fixture_id": pair["fixture_id"]}
+    return verified_fn
+
+
+def _raising_replay(exc):
+    def failing(verified):
+        raise exc
+    return failing
+
+
+def _raising_bundle(exc):
+    def failing(pair, _root):
+        raise exc
+    return failing
+
+
+def _observational_corpus(tmp_path, monkeypatch, record, *, strict_exc,
+                          native=None, request_doc=_REQUEST_DOC,
+                          captured_stages=None):
+    """A payload-verified regular pair whose STRICT replay raises
+    ``strict_exc``; the observational rescore — if and only if the tool
+    attempts one — goes through the same repository seams production uses."""
+    root = _write_corpus(tmp_path / "corpus", [_pair_doc("a", record)])
+    monkeypatch.setattr(phase4_real, "_verified_trace_bundle",
+                        _regular_bundle_stub(request_doc, captured_stages))
+    monkeypatch.setattr(phase4_real, "_replayed_member", _raising_replay(strict_exc))
+    monkeypatch.setattr(
+        phase4_real.application, "score_one",
+        lambda *_a, **_k: native if native is not None
+        else _observational_native(record, request_doc=request_doc))
+    return root
+
+
+def test_eligible_runtime_mismatch_falls_back_to_observational_evidence(tmp_path, monkeypatch):
+    """The motivating case: integrity verified, strict replay refused ONLY on a
+    captured runtime receipt — the fallback must surface the dimension/field
+    findings the strict run reports nothing about, and label them honestly."""
+    record = _clean_record(flags=("FLAG_A",))
+    diverging = _observational_native(
+        record,
+        forecasts={**_native_record(record).forecasts, "exp_pnl_sim": 0.987654321},
+        reason_codes=("NO_SCORE",))
+    root = _observational_corpus(
+        tmp_path, monkeypatch, record,
+        strict_exc=phase4_real._TraceError(_ELIGIBLE_MSG), native=diverging)
+
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+
+    assert row["disposition"] == "observational"
+    assert row["runtime_verified"] is False
+    assert _ELIGIBLE_MSG in row["strict_failure"]
+    # The integrity the fallback was allowed to require in the first place.
+    assert row["payload_verified"] is True and row["trace_verified"] is True
+    assert row["runtime_receipt_stages"] == len(phase4_real._REQUIRED_TRACE_STAGES)
+    # The point of the mode: the failed dimensions and their field NAMES.
+    assert "simulation" in row["checks_failed"]
+    assert "flags" in row["checks_failed"]
+    assert "exp_pnl_sim" in row["numeric_findings"]["simulation"]
+    assert row["flag_differences"]["native_only"] == ["NO_SCORE"]
+    # Never counted as compared/agreed, never sign-off evidence.
+    counts = report["summary"]["counts"]
+    assert counts["compared"] == 0 and counts["observational"] == 1
+    assert counts["incomparable"] == 0
+    assert report["summary"]["observational"] == ["a"]
+    assert "a" not in report["summary"]["discrepancies"]
+    assert "a" not in report["summary"]["incomparable"]
+    assert report["claims_sign_off"] is False
+    assert report["full_phase4_gate_required"] is True
+    assert report["observational_mode"] is True
+    assert "0.987654321" not in json.dumps(row)  # still value-free
+
+
+def test_default_off_captured_runtime_mismatch_stays_incomparable(tmp_path, monkeypatch):
+    """Flag OFF (the default): the exact historical strict behavior — the row is
+    incomparable, no second scoring pass runs, and no observational key appears
+    anywhere in the report."""
+    record = _clean_record()
+    root = _observational_corpus(
+        tmp_path, monkeypatch, record,
+        strict_exc=phase4_real._TraceError(_ELIGIBLE_MSG))
+    monkeypatch.setattr(phase4_real.application, "score_one", _explode)
+
+    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink())
+    row = report["rows"][0]
+    assert row["disposition"] == "incomparable"
+    assert _ELIGIBLE_MSG in row["reason"]
+    assert "strict_failure" not in row and "runtime_verified" not in row
+    assert set(report["summary"]["counts"]) == {"compared", "excluded", "incomparable"}
+    assert report["summary"]["counts"]["incomparable"] == 1
+    assert "observational" not in report["summary"]
+    assert "observational_mode" not in report and "observational_note" not in report
+
+
+@pytest.mark.parametrize("reason", [
+    "input_trace: missing",
+    "input_trace.trace_hash: content hash mismatch",
+    "resources: missing request refs ['frozen/model.bin']",
+    "pair.legacy_input_hash: mismatch",
+])
+def test_unverified_trace_or_resources_never_fall_back(tmp_path, monkeypatch, reason):
+    record = _clean_record()
+    root = _write_corpus(tmp_path / "corpus", [_pair_doc("a", record)])
+    monkeypatch.setattr(phase4_real, "_verified_trace_bundle",
+                        _raising_bundle(phase4_real._TraceError(reason)))
+    monkeypatch.setattr(phase4_real.application, "score_one", _explode)
+
+    out = targeted.run_targeted_observational(root, ["a"],
+                                              progress_stream=_Sink())["rows"][0]
+    assert out["disposition"] == "incomparable"
+    assert out["trace_verified"] is False
+    assert reason in out["reason"]
+
+
+def test_corrupt_manifest_bound_row_never_falls_back(tmp_path):
+    rec = _clean_record()
+    doc = _pair_doc("m", rec)
+    declared_row = {"payload_hash": doc["payload_hash"],
+                    "request_hash": "sha256:" + "e" * 64,
+                    "record_kind": "score_result", "covers": []}
+    root = _write_corpus(tmp_path / "corpus", [doc], declared={"m": declared_row})
+
+    out = targeted.run_targeted_observational(root, ["m"],
+                                              progress_stream=_Sink())["rows"][0]
+    assert out["payload_verified"] is False
+    assert out["disposition"] == "incomparable"
+    assert "request_hash" in out["reason"]
+
+
+@pytest.mark.parametrize("message", [
+    "execution: captured stage order mismatch",
+    "execution: serialization receipt is not final",
+    "execution.receipts[0]: malformed",
+    "execution: native stage receipts missing",
+    "execution.identity.request_hash: mismatch",
+    "input_trace.native_inputs.model: must be an object",
+])
+def test_only_the_one_message_may_trigger_the_fallback(tmp_path, monkeypatch, message):
+    record = _clean_record()
+    root = _observational_corpus(
+        tmp_path, monkeypatch, record,
+        strict_exc=phase4_real._TraceError(message))
+    monkeypatch.setattr(phase4_real.application, "score_one", _explode)
+
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+    assert row["disposition"] == "incomparable"
+    assert message in row["reason"]
+    assert report["summary"]["counts"]["observational"] == 0
+
+
+def test_foreign_exception_type_with_the_right_words_stays_incomparable(tmp_path, monkeypatch):
+    """Eligibility is typed: only a repository ``_TraceError`` carrying the
+    exact message qualifies — a lookalike raised by anything else never
+    triggers a fallback."""
+    record = _clean_record()
+    root = _observational_corpus(
+        tmp_path, monkeypatch, record,
+        strict_exc=ValueError(_ELIGIBLE_MSG))
+    monkeypatch.setattr(phase4_real.application, "score_one", _explode)
+
+    out = targeted.run_targeted_observational(root, ["a"],
+                                              progress_stream=_Sink())["rows"][0]
+    assert out["disposition"] == "incomparable"
+    assert "ValueError" in out["reason"]
+
+
+@pytest.mark.parametrize("mode", ["malformed", "unexpected", "identity"])
+def test_refused_rescore_keeps_the_strict_incomparability(tmp_path, monkeypatch, mode):
+    """The fallback is attempted for an eligible row but the rescore itself
+    refuses (malformed runtime receipts, an unexpected exception, or an
+    identity mismatch): the row stays incomparable with its STRICT reason —
+    an observational label is only ever earned by a complete rescore."""
+    record = _clean_record()
+    strict_exc = phase4_real._TraceError(_ELIGIBLE_MSG)
+    if mode == "identity":
+        broken = replace(_observational_native(record), request_hash="sha256:" + "e" * 64)
+        root = _observational_corpus(tmp_path, monkeypatch, record,
+                                     strict_exc=strict_exc, native=broken)
+    else:
+        root = _observational_corpus(tmp_path, monkeypatch, record,
+                                     strict_exc=strict_exc)
+        if mode == "malformed":
+            monkeypatch.setattr(
+                phase4_real, "_verified_runtime_receipts",
+                _raising_replay(phase4_real._TraceError("execution.receipts[0]: malformed")))
+        else:
+            def broken(native):
+                raise RuntimeError("double without resolved_request")
+            monkeypatch.setattr(phase4_real, "_verified_runtime_receipts", broken)
+
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+    assert row["disposition"] == "incomparable"
+    assert _ELIGIBLE_MSG in row["reason"]
+    assert "strict_failure" not in row
+    assert report["summary"]["counts"]["observational"] == 0
+    assert report["summary"]["incomparable"] == ["a"]
+
+
+def test_captured_stage_order_mismatch_refuses_the_fallback(tmp_path, monkeypatch):
+    """Stale receipt FIELDS may be skipped; a runtime emitting stages in an
+    order the captured trace never claimed is a DIFFERENT execution, refused
+    by the same filtered stage-order check the gate runs — even when the
+    rescore's own scoring and identity checks would otherwise pass."""
+    record = _clean_record()
+    stages = phase4_real._REQUIRED_TRACE_STAGES
+    swapped = stages[:6] + (stages[7], stages[6]) + stages[8:]
+    root = _observational_corpus(
+        tmp_path, monkeypatch, record,
+        strict_exc=phase4_real._TraceError(_ELIGIBLE_MSG),
+        captured_stages=swapped)
+
+    report = targeted.run_targeted_observational(root, ["a"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+    assert row["disposition"] == "incomparable"
+    assert _ELIGIBLE_MSG in row["reason"]
+    assert "strict_failure" not in row
+    assert report["summary"]["counts"]["observational"] == 0
+    assert report["summary"]["incomparable"] == ["a"]
+
+
+def _chooser_observational(tmp_path, monkeypatch, member_record, diverge_index=None,
+                           captured_stages=None):
+    """Two-member DYN-SV row wired through the observational seams: member
+    list, per-member bundles (real ``ScoreRequest`` documents, prior-
+    implementation captured receipts), native scoring and the chooser fold —
+    the same helpers ``_replayed_chooser`` walks. ``captured_stages`` maps a
+    member index to the stage SEQUENCE that member's captured trace claims."""
+    summary = _summary_record(menu_size=2)
+    root = _chooser_corpus(tmp_path, summary)
+    requests = [replace(phase4_real._request(), event_id=f"event-m{i}")
+                for i in range(2)]
+    member_pairs = [({"fixture_id": f"m{i}"}, member_record) for i in range(2)]
+    monkeypatch.setattr(phase4_real, "_chooser_members", lambda pair: member_pairs)
+
+    def verified_fn(member_pair, _root):
+        index = int(member_pair["fixture_id"][1:])
+        stages = (captured_stages or {}).get(index)
+        return {"trace_hash": "sha256:" + format(index, "064x"),
+                "request": requests[index], "inputs": None,
+                "frozen_replay": None,
+                "captured_receipts": _prior_captured_receipts(stages)}
+    monkeypatch.setattr(phase4_real, "_verified_trace_bundle", verified_fn)
+
+    natives = []
+    for index in range(2):
+        if index == diverge_index:
+            natives.append(_observational_native(
+                member_record, request_doc=requests[index],
+                reason_codes=("NO_SCORE",)))
+        else:
+            natives.append(_observational_native(
+                member_record, request_doc=requests[index]))
+
+    def score(request, _inputs):
+        for index, expected in enumerate(requests):
+            if request is expected:
+                return natives[index]
+        raise AssertionError("score_one saw an unexpected request")
+    monkeypatch.setattr(phase4_real.application, "score_one", score)
+
+    choice = replace(_native_record(summary), chooser_selection={
+        "strategy": "STR-THRU", "menu_size": 2, "margin": 0.05})
+
+    def choose(first, members):
+        assert first.strategy_version == "DYN-SV"
+        assert len(members) == 2
+        return choice
+    monkeypatch.setattr(phase4_real.application, "_choose_dynamic", choose)
+    return root
+
+
+def test_chooser_observational_fallback_keeps_original_member_indices(tmp_path, monkeypatch):
+    member = _clean_record()
+    root = _chooser_observational(tmp_path, monkeypatch, member, diverge_index=1)
+    monkeypatch.setattr(
+        phase4_real, "_replayed_chooser",
+        _raising_bundle(phase4_real._TraceError(
+            "chooser member 1: execution.gate.input_hash: captured runtime mismatch")))
+
+    report = targeted.run_targeted_observational(root, ["chooser"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+
+    assert row["disposition"] == "observational"
+    assert row["runtime_verified"] is False
+    # The failed member keeps its original index, inside the strict reason.
+    assert "chooser member 1" in row["strict_failure"]
+    assert row["members"] == 2
+    assert row["trace_verified"] is True
+    assert row["trace_hash"] == ["sha256:" + format(i, "064x") for i in range(2)]
+    assert row["runtime_receipt_stages"] == [10, 10]
+    # Member-indexed, value-free findings survive the fallback unchanged.
+    assert row["flag_differences"] == [{"native_only": ["NO_SCORE"], "legacy_only": []}]
+    assert "flags" in row["checks_failed"]
+    assert row["checks"]["chooser"] is True
+    counts = report["summary"]["counts"]
+    assert counts["observational"] == 1 and counts["compared"] == 0
+    assert report["summary"]["observational"] == ["chooser"]
+
+
+@pytest.mark.parametrize("message", [
+    "chooser member 0: input_trace.trace_hash: content hash mismatch",
+    "chooser member 0: execution.simulation: captured runtime mismatch",
+    "execution.simulation.output_hash: captured runtime mismatch: extra",
+    "resources: missing frozen artifact",
+])
+def test_chooser_rows_not_matching_the_one_message_stay_incomparable(
+        tmp_path, monkeypatch, message):
+    root = _write_corpus(tmp_path / "corpus",
+                         [_chooser_pair_doc("chooser", _summary_record())])
+    monkeypatch.setattr(
+        phase4_real, "_replayed_chooser",
+        _raising_bundle(phase4_real._TraceError(message)))
+    monkeypatch.setattr(phase4_real, "_chooser_members", _explode)
+
+    out = targeted.run_targeted_observational(root, ["chooser"],
+                                              progress_stream=_Sink())["rows"][0]
+    assert out["disposition"] == "incomparable"
+    assert out["trace_verified"] is None
+    assert message in out["reason"]
+
+
+def test_chooser_refused_rescore_keeps_the_strict_incomparability(tmp_path, monkeypatch):
+    member = _clean_record()
+    root = _chooser_observational(tmp_path, monkeypatch, member)
+    monkeypatch.setattr(
+        phase4_real, "_replayed_chooser",
+        _raising_bundle(phase4_real._TraceError(
+            "chooser member 1: execution.gate.input_hash: captured runtime mismatch")))
+
+    def corrupt(pair):
+        raise phase4_real._TraceError("chooser member 1: input_trace: missing")
+    monkeypatch.setattr(phase4_real, "_chooser_members", corrupt)
+
+    report = targeted.run_targeted_observational(root, ["chooser"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+    assert row["disposition"] == "incomparable"
+    assert "captured runtime mismatch" in row["reason"]
+    assert report["summary"]["counts"]["observational"] == 0
+
+
+def test_chooser_second_member_stage_order_refuses_the_fallback(tmp_path, monkeypatch):
+    """Astra regression: the strict row fails on member 0 with an ELIGIBLE
+    stale-hash mismatch, while member 1's runtime emits stages in an order its
+    own captured trace never claimed. The fallback must re-run the filtered
+    stage-order check for EVERY member, so the row stays incomparable with no
+    observational count even though member 0 alone would have qualified."""
+    member = _clean_record()
+    stages = phase4_real._REQUIRED_TRACE_STAGES
+    swapped = stages[:6] + (stages[7], stages[6]) + stages[8:]
+    root = _chooser_observational(tmp_path, monkeypatch, member,
+                                  captured_stages={1: swapped})
+    monkeypatch.setattr(
+        phase4_real, "_replayed_chooser",
+        _raising_bundle(phase4_real._TraceError(
+            "chooser member 0: execution.simulation.output_hash: "
+            "captured runtime mismatch")))
+
+    report = targeted.run_targeted_observational(root, ["chooser"],
+                                                 progress_stream=_Sink())
+    row = report["rows"][0]
+    assert row["disposition"] == "incomparable"
+    assert "captured runtime mismatch" in row["reason"]
+    assert "strict_failure" not in row and "runtime_verified" not in row
+    counts = report["summary"]["counts"]
+    assert counts["observational"] == 0 and counts["incomparable"] == 1
+    assert report["summary"]["observational"] == []
+    assert report["summary"]["incomparable"] == ["chooser"]
+
+
+def test_mixed_run_never_inflates_counts_or_sign_off(tmp_path, monkeypatch):
+    """One compared, one observational (with failing checks), one incomparable:
+    each lands in exactly one count/list, the observational row never joins
+    ``discrepancies``, and turning the flag off reproduces the strict counts."""
+    record = _clean_record()
+    docs = [_pair_doc("ok", record), _pair_doc("obs", record), _pair_doc("bad", record)]
+    declared = {d["fixture_id"]: {
+        "payload_hash": d["payload_hash"],
+        "request_hash": (d["request_hash"] if d["fixture_id"] != "bad"
+                         else "sha256:" + "e" * 64),
+        "record_kind": "score_result", "covers": []} for d in docs}
+    root = _write_corpus(tmp_path / "corpus", docs, declared=declared)
+    monkeypatch.setattr(phase4_real, "_verified_trace_bundle", _regular_bundle_stub())
+
+    def replayed_fn(verified):
+        if verified["fixture_id"] == "obs":
+            raise phase4_real._TraceError(
+                "execution.forecast.input_hash: captured runtime mismatch")
+        return (_native_record(record),
+                tuple({"stage": s} for s in phase4_real._REQUIRED_TRACE_STAGES), ())
+    monkeypatch.setattr(phase4_real, "_replayed_member", replayed_fn)
+    monkeypatch.setattr(
+        phase4_real.application, "score_one",
+        lambda *_a, **_k: _observational_native(
+            record, reason_codes=("NO_SCORE",)))
+
+    report = targeted.run_targeted_observational(root, ["ok", "obs", "bad"],
+                                                 progress_stream=_Sink())
+    counts = report["summary"]["counts"]
+    assert counts == {"compared": 1, "excluded": 0, "incomparable": 1,
+                      "observational": 1}
+    assert report["summary"]["discrepancies"] == []
+    assert report["summary"]["incomparable"] == ["bad"]
+    assert report["summary"]["observational"] == ["obs"]
+    rows = {r["fixture_id"]: r for r in report["rows"]}
+    assert rows["obs"]["disposition"] == "observational"
+    assert rows["obs"]["checks_failed"] == ["flags"]  # real findings ...
+    assert rows["ok"]["disposition"] == "compared"
+    assert report["claims_sign_off"] is False
+
+    strict = targeted.run_targeted(root, ["ok", "obs", "bad"],
+                                   progress_stream=_Sink())
+    assert strict["summary"]["counts"] == {"compared": 1, "excluded": 0,
+                                           "incomparable": 2}
+    assert strict["summary"]["incomparable"] == ["bad", "obs"]
+    assert "observational" not in strict["summary"]["counts"]
+
+
+def test_cli_observational_flag_toggles_the_mode(tmp_path, monkeypatch, capsys):
+    record = _clean_record()
+    root = _observational_corpus(
+        tmp_path, monkeypatch, record,
+        strict_exc=phase4_real._TraceError(_ELIGIBLE_MSG))
+
+    assert targeted.main(["--corpus", str(root), "--fixture-id", "a"]) == 0
+    strict = json.loads(capsys.readouterr().out)
+    assert strict["rows"][0]["disposition"] == "incomparable"
+    assert "observational_mode" not in strict
+
+    assert targeted.main(["--corpus", str(root), "--fixture-id", "a",
+                          "--observational"]) == 0
+    obs = json.loads(capsys.readouterr().out)
+    assert obs["rows"][0]["disposition"] == "observational"
+    assert obs["observational_mode"] is True
+    assert obs["summary"]["counts"]["observational"] == 1
+
+
+

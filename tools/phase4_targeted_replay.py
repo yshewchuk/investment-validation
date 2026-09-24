@@ -25,6 +25,40 @@ under the corpus. The full ``checks/phase4_real.py`` gate remains the only
 thing that may sign Phase 4 off; this tool exists to gather targeted evidence
 that a specific fix moved a specific row.
 
+**Observational mode (``--observational``, default OFF) diagnoses, never
+agrees.** After a scoring fix, strict replay of an otherwise fully verified
+row can still refuse with ``execution.<stage>.<field>: captured runtime
+mismatch`` — the captured runtime receipts predate the new implementation,
+so input/payload/trace integrity is fine but the old stage hashes can never
+match. With the flag ON such a row is replayed a second time against the
+SAME verified inputs and frozen release, skipping ONLY the per-stage
+captured receipt FIELD comparison — the filtered captured-stage ORDER check,
+runtime-receipt well-formedness and the identity checks still run, and the
+exact ``checks.phase4_real._record_checks`` still compares against the
+immutable legacy record — and is reported as ``disposition: observational``
+with ``runtime_verified: false`` and the original ``strict_failure``. With
+the flag OFF behavior and output are exactly the strict ones described above.
+An observational row never counts as compared/agreed and never as sign-off
+evidence: the summary carries a separate observational count and list, and
+the full strict gate remains the only thing that may sign Phase 4 off. The
+fallback is REFUSED — the row stays incomparable with its strict reason —
+for corrupt payload/manifest/trace, missing frozen resources, malformed
+runtime receipts, a captured stage-order disagreement, identity mismatch,
+or any unexpected exception; only a verified row whose strict replay failed
+with exactly ``execution.<stage>.<field>: captured runtime mismatch`` may
+go through it. Multi-member DYN-SV rows are supported by re-verifying every
+member bundle through the same helpers, with the order/identity checks
+enforced for EVERY member (one member's stale hashes never license another
+member's different execution); the failed member keeps its original index
+inside ``strict_failure`` (``chooser member N: ...``), and per-member
+evidence stays in frame order. The mode lives ENTIRELY in parallel helpers
+(``run_targeted_observational`` / ``_build_row_observational`` /
+``_observational_summary``): each calls the untouched strict implementations
+first and adds the rescore only for the one eligible refusal, so the
+originally landed strict ``_build_row`` / ``_summary`` / ``run_targeted`` /
+``main`` code paths remain intact line for line and a flag-off run emits
+byte-identical output.
+
 Why the loader is mandatory. A raw pair's ``input_trace`` stores shared frozen
 subtrees by reference (``{"$shared": "sha256:..."}``) and translation rows by
 reference (``{"$rows": ...}``), so ``content_hash`` over the raw JSON does NOT
@@ -49,6 +83,7 @@ Usage::
         --corpus fixtures/tier0 \
         --fixture-id 012_RAMP7-AAPL-2023-11-02_d610d6a5 \
         [--fixture-id OTHER_ID ...] [--output /tmp/targeted.json]
+        [--observational]
 
 Clean JSON goes to stdout (or ``--output``); the progress/ETA line stream goes
 to stderr so stdout stays machine-parseable. The heartbeat labels the whole-
@@ -62,10 +97,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import resource
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -90,6 +127,32 @@ BASELINE_SECONDS_PER_ROW = (32 * 60.0) / 20.0
 COMPARED = "compared"
 EXCLUDED = "excluded"
 INCOMPARABLE = "incomparable"
+
+#: A disposition that exists only under ``--observational`` (never produced by
+#: the strict ``_build_row``): the row's replay skipped ONLY the captured
+#: receipt FIELD comparison. It never counts as compared/agreed and never
+#: contributes sign-off evidence.
+OBSERVATIONAL = "observational"
+
+#: The one exact strict-replay failure allowed to trigger the observational
+#: fallback. ``checks.phase4_real._verify_runtime_execution`` raises this when
+#: the current implementation's stage receipt disagrees with the captured
+#: runtime trace (input/payload/trace integrity itself verified fine).
+_CAPTURED_RUNTIME_MISMATCH = re.compile(
+    r"^execution\.[A-Za-z_][A-Za-z0-9_]*\.(?:input_hash|output_hash|owner): "
+    r"captured runtime mismatch$"
+)
+
+#: ``_replayed_chooser`` re-wraps a member's failure with this index prefix;
+#: only the wrapped cause may be matched against the pattern above.
+_CHOOSER_MEMBER_PREFIX = re.compile(r"^chooser member (\d+): (.*)$", re.DOTALL)
+
+#: The strict builder renders a replay refusal as ``f"{type(exc).__name__}:
+#: {exc}"``; a repository ``_TraceError`` therefore folds into its typed
+#: incomparability reason with exactly this prefix. The observational
+#: eligibility predicates read the refusal back through it, so a foreign
+#: exception type carrying the same words is never eligible.
+_TRACE_ERROR_REFUSAL = "_TraceError: "
 
 #: The five numeric dimensions ``_record_checks`` compares by field name.
 _NUMERIC_DIMENSIONS = (
@@ -404,6 +467,249 @@ def _incomparable(row, *, reason, trace_verified):
             "reason": reason}
 
 
+# ---------------------------------------------------------------------------
+# observational replay (--observational only; never in the strict default path)
+# ---------------------------------------------------------------------------
+
+
+def _is_captured_runtime_mismatch_message(reason: str) -> bool:
+    """True for exactly the failure the observational fallback may answer. The
+    intact strict builder renders a replay refusal into its typed
+    incomparability reason as ``f"{type(exc).__name__}: {exc}"``, so a
+    repository ``_TraceError`` whose message is
+    ``execution.<stage>.<field>: captured runtime mismatch`` (raised by
+    ``_verify_runtime_execution``'s per-stage loop) reads back as this prefix
+    plus that exact message. Anything else — a corrupt trace, malformed
+    receipts, an identity mismatch, a stage ORDER mismatch, a foreign
+    exception type (its prefix names that type), an unexpected exception — is
+    not this one message and must stay incomparable."""
+    return (reason.startswith(_TRACE_ERROR_REFUSAL)
+            and bool(_CAPTURED_RUNTIME_MISMATCH.match(
+                reason[len(_TRACE_ERROR_REFUSAL):])))
+
+
+def _is_chooser_captured_runtime_mismatch_message(reason: str) -> bool:
+    """The same failure surfaced through ``_replayed_chooser``, which wraps a
+    member's ``_TraceError`` as ``chooser member <index>: <cause>``. Only the
+    unwrapped cause may match the one eligible message."""
+    if not reason.startswith(_TRACE_ERROR_REFUSAL):
+        return False
+    match = _CHOOSER_MEMBER_PREFIX.match(reason[len(_TRACE_ERROR_REFUSAL):])
+    return bool(match) and bool(_CAPTURED_RUNTIME_MISMATCH.match(match.group(2)))
+
+
+def _observational_native(verified: Mapping[str, Any]):
+    """Score one verified bundle exactly the way ``phase4_real._replayed_member``
+    scores it (same request, same verified inputs or same frozen release) — the
+    scoring half only, without any runtime verification."""
+    frozen_replay = verified["frozen_replay"]
+    if frozen_replay is None:
+        return phase4_real.application.score_one(verified["request"],
+                                                 verified["inputs"])
+    return phase4_real.application.score_frozen(
+        verified["request"],
+        frozen_replay.inference,
+        frozen_replay.release,
+        frozen_replay.requests,
+        {"_native_inputs": verified["inputs"]},
+    )
+
+
+def _verify_runtime_identity_only(verified: Mapping[str, Any], native):
+    """Mirror of ``phase4_real._verify_runtime_execution`` with ONLY the
+    per-stage receipt FIELD comparison removed (input/output hashes, owner) —
+    the one thing observational mode exists to skip, because a captured
+    runtime receipt's FIELDS reflect the PRIOR implementation. Everything
+    else the strict verifier enforces still refuses here, per member:
+    malformed/missing/duplicate native stage receipts with a non-final
+    serialization receipt (``_verified_runtime_receipts``), the SAME filtered
+    captured-stage ORDER check the gate runs — a runtime emitting stages in an
+    order the captured trace never claimed is a different execution, not a
+    stale receipt — and every identity check (canonical request, request
+    hash, score id, payload hash)."""
+    runtime_receipts = phase4_real._verified_runtime_receipts(native)
+    captured = verified["captured_receipts"]
+    captured_stage_names = {row["stage"] for row in captured}
+    runtime_required = tuple(
+        row for row in runtime_receipts
+        if row["stage"] in captured_stage_names
+    )
+    if tuple(row["stage"] for row in runtime_required) != tuple(
+            row["stage"] for row in captured):
+        raise phase4_real._TraceError("execution: captured stage order mismatch")
+    canonical_request = phase4_real.to_document(verified["request"])
+    if phase4_real.to_document(native.canonical_request) != canonical_request:
+        raise phase4_real._TraceError(
+            "execution.identity.canonical_request: mismatch")
+    if native.request_hash != content_hash(canonical_request):
+        raise phase4_real._TraceError("execution.identity.request_hash: mismatch")
+    expected_score_id = phase4_real.score_id(native)
+    if native.score_id != expected_score_id:
+        raise phase4_real._TraceError("execution.identity.score_id: mismatch")
+    if native.payload_hash != expected_score_id:
+        raise phase4_real._TraceError("execution.identity.payload_hash: mismatch")
+    return runtime_receipts
+
+
+def _observational_member_row(record, verified):
+    """One member's observational evidence: like ``_replay_regular_member``, but
+    the native came from a replay that skipped only the captured receipt FIELD
+    comparison (captured stage order, runtime-receipt well-formedness and the
+    identity checks still ran), so ``runtime_verified`` is False and the caller
+    labels the whole row observational."""
+    native = _observational_native(verified)
+    receipts = _verify_runtime_identity_only(verified, native)
+    checks, numeric, differences = phase4_real._record_checks(record, native)
+    return {
+        "record": record,
+        "native": native,
+        "checks": checks,
+        "numeric": numeric,
+        "differences": differences,
+        "trace_verified": True,
+        "trace_hash": verified["trace_hash"],
+        "runtime_stages": len(receipts),
+    }
+
+
+def _observational_chooser_members(pair, corpus_root: Path):
+    """Observational counterpart of ``_replay_chooser_members``: re-verify EVERY
+    member bundle through ``_verified_trace_bundle`` (so a corrupt trace or a
+    missing frozen resource anywhere in the row still refuses the fallback),
+    score each member skipping only the captured receipt FIELD comparison —
+    the stage-order and identity checks are enforced PER MEMBER, so one
+    member's stale hashes never license another member's reordered execution —
+    keep frame order (the original member indices), then run the same
+    chooser-selection check as the strict path."""
+    rows = []
+    natives = []
+    first_request = None
+    for index, (member_pair, member_record) in enumerate(
+            phase4_real._chooser_members(pair)):
+        try:
+            verified = phase4_real._verified_trace_bundle(member_pair, corpus_root)
+            native = _observational_native(verified)
+            receipts = _verify_runtime_identity_only(verified, native)
+        except phase4_real._TraceError as exc:
+            raise phase4_real._TraceError(
+                f"chooser member {index}: {exc}") from exc
+        checks, numeric, differences = phase4_real._record_checks(
+            member_record, native)
+        rows.append({
+            "record": member_record,
+            "native": native,
+            "checks": checks,
+            "numeric": numeric,
+            "differences": differences,
+            "trace_verified": True,
+            "trace_hash": verified["trace_hash"],
+            "runtime_stages": len(receipts),
+        })
+        natives.append(native)
+        if first_request is None:
+            first_request = verified["request"]
+    choice = phase4_real.application._choose_dynamic(
+        replace(first_request, strategy_version="DYN-SV"), tuple(natives))
+    selection = phase4_real._chooser_selection_checks(
+        pair["payload"]["record"], choice)
+    return rows, selection
+
+
+def _build_row_observational(corpus, declared, fixture_id: str) -> dict[str, Any]:
+    """One selected row under ``--observational``. The intact strict builder
+    runs FIRST, unchanged: a row that compares/excludes — or is incomparable
+    for any other typed reason — is returned exactly as the strict CLI reports
+    it, so a strict success is byte-identical to flag-OFF output. Only a
+    payload-verified row whose strict replay refused with the single captured-
+    runtime-mismatch ``_TraceError``, per the strict builder's OWN typed flags
+    (``trace_verified is True`` for a regular row, whose trace/manifest/frozen-
+    resource verification completed before the replay refused;
+    ``trace_verified is None`` with the member-indexed wrap for a
+    ``dyn_sv_choice`` row), is rescored — re-verifying the bundle(s) and
+    skipping only the captured receipt FIELD comparison while stage order,
+    receipt well-formedness, identities and the exact ``_record_checks`` still
+    run. Any refusal of that rescore returns the strict incomparability
+    verbatim: the row never becomes observational on partial success, and
+    eligibility is never broadened beyond the one message. The aggregation
+    mirrors the strict builder's tail (same helpers, same shape) with the
+    honest observational labels added."""
+    strict = _build_row(corpus, declared, fixture_id)
+    if strict["disposition"] != INCOMPARABLE or not strict.get("payload_verified"):
+        return strict
+    pair = corpus.pairs[fixture_id]
+    if payload_trace_gap(pair):
+        return strict
+    reason = str(strict["reason"])
+    chooser = pair["payload"].get("record_kind") == "dyn_sv_choice"
+    if chooser:
+        if (strict.get("trace_verified") is not None
+                or not _is_chooser_captured_runtime_mismatch_message(reason)):
+            return strict
+    elif (strict.get("trace_verified") is not True
+            or not _is_captured_runtime_mismatch_message(reason)):
+        return strict
+
+    selection = None
+    try:
+        if chooser:
+            members, selection = _observational_chooser_members(pair, corpus.root)
+            trace_verified = all(m["trace_verified"] for m in members)
+            trace_hash = [m["trace_hash"] for m in members]
+            runtime = [m["runtime_stages"] for m in members]
+        else:
+            verified = phase4_real._verified_trace_bundle(pair, corpus.root)
+            members = [_observational_member_row(
+                pair["payload"]["record"], verified)]
+            trace_verified = True
+            trace_hash = verified["trace_hash"]
+            runtime = members[0]["runtime_stages"]
+    except Exception:  # noqa: BLE001 -- a refused rescore never falls back
+        return strict
+
+    checks = {name: all(m["checks"][name] for m in members) for name in members[0]["checks"]}
+    if chooser:
+        checks["chooser"] = all(selection.values())
+    numeric_findings = {
+        dimension: [field for m in members for field in m["numeric"][dimension]["finding_fields"]]
+        for dimension in _NUMERIC_DIMENSIONS
+    }
+    diffs = _row_diffs(members)
+    advisory = {
+        "legacy": sorted(set(pair["payload"]["record"].get("flags") or ())
+                         & phase4_real._ADVISORY_FLAGS),
+        "native": sorted(set(members[0]["native"].reason_codes)
+                         & phase4_real._ADVISORY_FLAGS),
+    }
+    result = {
+        **{key: value for key, value in strict.items() if key != "reason"},
+        "disposition": OBSERVATIONAL,
+        "trace_verified": trace_verified,
+        "trace_hash": trace_hash,
+        "runtime_receipt_stages": runtime,
+        "checks": checks,
+        "checks_failed": sorted(name for name, ok in checks.items() if not ok),
+        "numeric_findings": numeric_findings,
+        "advisory_flags": advisory,
+        "members": len(members),
+        # Explicit, on the row itself, that this evidence skipped the runtime
+        # verification: never comparable with a strict ``compared`` row and
+        # never sign-off evidence, standing in for the strict failure below.
+        "runtime_verified": False,
+        "strict_failure": reason,
+    }
+    for key in ("key_differences", "flag_differences", "null_mask_differences",
+                "never_ran_dimensions"):
+        if diffs[key] is not None:
+            result[key] = diffs[key]
+    if not checks.get("contracts", True):
+        contract_diffs = _row_contract_diffs(members)
+        if contract_diffs is not None:
+            result["contract_differences"] = contract_diffs
+    if chooser:
+        result["chooser_findings"] = sorted(n for n, ok in selection.items() if not ok)
+    return result
+
+
 def _build_row(corpus, declared, fixture_id: str) -> dict[str, Any]:
     """Compute one selected row's value-free evidence: manifest-bound payload
     integrity, then the strict trace verification + native replay + per-record
@@ -543,6 +849,22 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _observational_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The intact strict summary (called first, untouched) plus the SEPARATE
+    observational count and list. The three original disposition counts keep
+    their exact strict definitions — an observational row holds none of them
+    and never joins ``discrepancies`` (which the strict summary limits to
+    COMPARED rows) — so the fallback cannot inflate compared/agreed evidence."""
+    summary = _summary(rows)
+    summary["counts"][OBSERVATIONAL] = sum(
+        r["disposition"] == OBSERVATIONAL for r in rows
+    )
+    summary["observational"] = sorted(
+        r["fixture_id"] for r in rows if r["disposition"] == OBSERVATIONAL
+    )
+    return summary
+
+
 def run_targeted(corpus_root: Path, fixture_ids, *, output=None,
                  progress_stream=None, progress_interval: float = 45.0,
                  baseline_seconds_per_row: float = BASELINE_SECONDS_PER_ROW,
@@ -617,6 +939,97 @@ def run_targeted(corpus_root: Path, fixture_ids, *, output=None,
         "requested": requested,
         "rows": rows,
         "summary": _summary(rows),
+    }
+
+
+def run_targeted_observational(corpus_root: Path, fixture_ids, *, output=None,
+                               progress_stream=None,
+                               progress_interval: float = 45.0,
+                               baseline_seconds_per_row: float = BASELINE_SECONDS_PER_ROW,
+                               ) -> dict[str, Any]:
+    """The ``--observational`` companion of ``run_targeted``: the same whole-
+    corpus hydration and the same validations (including the read-only output
+    guard), but each row is built by ``_build_row_observational``, which runs
+    the intact strict ``_build_row`` first and rescores ONLY the single
+    eligible captured-runtime-mismatch refusal (see the module docstring's
+    Observational mode paragraph). Strict successes are returned verbatim;
+    the report keeps every ``run_targeted`` disclaimer
+    (``claims_sign_off: false``, ``full_phase4_gate_required: true``) and adds
+    ``observational_mode``/``observational_note`` plus the separate
+    observational count/list in the summary. Plain ``run_targeted`` — the
+    default, and the only thing ``main`` runs without the flag — is untouched.
+    Never runs the battery, never writes a file, never claims sign-off."""
+    progress_stream = progress_stream or sys.stderr
+    requested = [str(fid) for fid in fixture_ids]
+    if not requested:
+        raise _SelectionError("no --fixture-id given")
+
+    resolved = t0.resolve_corpus(Path(corpus_root))
+    if not (resolved / "INDEX.json").is_file():
+        raise _SelectionError(f"no tier-0 corpus at {resolved}")
+    _reject_output_inside_corpus(Path(corpus_root), resolved, output)
+
+    progress = _ProgressReporter(len(requested), progress_stream,
+                                 interval=progress_interval,
+                                 baseline=baseline_seconds_per_row)
+    with progress:
+        progress.begin_load()
+        corpus = t0.load(resolved)
+        progress.end_load()
+        declared = _declared_map(corpus)
+        unknown = [fid for fid in requested
+                   if fid not in corpus.pairs
+                   and not (declared is not None and fid in declared)]
+        if unknown:
+            raise _SelectionError(
+                "selected fixture ids are neither declared nor loaded: "
+                + ", ".join(unknown))
+        rows = []
+        for fixture_id in requested:
+            progress.begin_row(fixture_id)
+            started = time.perf_counter()
+            rows.append(_build_row_observational(corpus, declared, fixture_id))
+            progress.end_row(fixture_id, time.perf_counter() - started)
+
+    manifest_bound = declared is not None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "diagnostic": "phase4_targeted_replay",
+        # Hard "do not mistake this for sign-off" markers first.
+        "claims_sign_off": False,
+        "sign_off": False,
+        "overall_phase4_status": "not_evaluated",
+        "full_phase4_gate_required": True,
+        "scope_note": (
+            "Targeted per-row diagnostic only. It replays the named fixtures "
+            "through checks.phase4_real's comparison code but runs no "
+            "acceptance battery and computes no overall Phase 4 status; the "
+            "full checks/phase4_real.py gate remains required for sign-off."
+        ),
+        "memory_note": (
+            "Loaded the full corpus once via checks.tier0_corpus.load(); "
+            "reference hydration is corpus-wide, so selected-row verification "
+            "costs a whole-corpus load. peak_rss_mb below is this process's "
+            "high-water mark; no weaker hand-decoded hash path was used."
+        ),
+        "peak_rss_mb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1),
+        "corpus_root": str(resolved),
+        "corpus_hash": corpus.index.get("corpus_hash"),
+        "manifest_bound": manifest_bound,
+        "requested": requested,
+        "rows": rows,
+        "summary": _observational_summary(rows),
+        "observational_mode": True,
+        "observational_note": (
+            "Rows with disposition=observational re-scored the verified "
+            "inputs/frozen release after strict replay failed ONLY with "
+            "execution.<stage>.<field>: captured runtime mismatch, skipping "
+            "just the per-stage captured receipt field comparison (captured "
+            "stage order, receipt well-formedness and identity checks still "
+            "enforced for every member). They are diagnosis between a "
+            "scoring fix and a recapture, never compared rows and never "
+            "sign-off evidence; the full strict gate remains required."
+        ),
     }
 
 
@@ -752,12 +1165,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default=None,
                         help="write the JSON report here atomically instead of "
                              "stdout; a partial artifact is never left behind.")
+    parser.add_argument("--observational", action="store_true",
+                        help="DIAGNOSIS ONLY (default OFF): when a fully "
+                             "verified row's strict replay fails specifically "
+                             "with execution.<stage>.<field>: captured runtime "
+                             "mismatch, re-score the same verified "
+                             "inputs/frozen release without comparing the "
+                             "per-stage captured receipt fields (captured "
+                             "stage ORDER, receipt well-formedness and "
+                             "identity checks still enforced) and report the "
+                             "dimension findings as disposition "
+                             "'observational' (runtime_verified=false). Such "
+                             "rows never count as compared and are never "
+                             "sign-off evidence; the full gate is still "
+                             "required. Any other failure (corrupt "
+                             "payload/manifest/trace, missing frozen "
+                             "resources, malformed receipts, stage-order "
+                             "disagreement, identity mismatch) stays strict "
+                             "incomparable.")
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     output = Path(args.output) if args.output else None
+    if args.observational:
+        # The strict path below is the originally landed CLI, line for line;
+        # the observational fallback lives in the parallel runner (module
+        # docstring, "Observational mode"), dispatched to here.
+        return _main_observational(args, output)
     try:
         # run_targeted validates the output path (rejecting one inside the
         # read-only corpus) before it loads or replays anything.
@@ -768,6 +1204,32 @@ def main(argv=None) -> int:
     except t0.CorpusFormatError as exc:
         # A hard loader refusal (malformed shared reference, digest mismatch):
         # reported honestly, never downgraded to a partial or weaker result.
+        print(f"targeted-replay: corpus integrity failure: {exc}", file=sys.stderr)
+        return 3
+    text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if output is not None:
+        _atomic_write(output, text)
+        print(f"targeted-replay: wrote report to {output} "
+              f"(summary: {report['summary']['counts']})", file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def _main_observational(args, output) -> int:
+    """``--observational`` counterpart of ``main``'s body: the same honest
+    error reporting and atomic output, driving ``run_targeted_observational``
+    instead of the strict runner. ``main`` dispatches here only when the flag
+    is given, so every strict CLI line there remains intact."""
+    try:
+        report = run_targeted_observational(Path(args.corpus), args.fixture_ids,
+                                            output=output)
+    except _SelectionError as exc:
+        print(f"targeted-replay: {exc}", file=sys.stderr)
+        return 2
+    except t0.CorpusFormatError as exc:
+        # A hard loader refusal stays a hard refusal in both modes; the
+        # observational flag never downgrades it to a partial result.
         print(f"targeted-replay: corpus integrity failure: {exc}", file=sys.stderr)
         return 3
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
