@@ -58,6 +58,8 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -86,7 +88,8 @@ from engine.v2.diagnosis import (  # noqa: E402
 __all__ = ["Corpus", "load", "run", "main", "derive_covers", "seeded_controls",
            "derived_uncovered", "TIME_BUDGET_SECONDS", "CorpusFormatError",
            "SHARED_REF_KEY", "SHARED_DOCUMENT_SCHEMA_VERSION",
-           "ROWS_REF_KEY", "SHARED_TRANSLATION_TABLE_SCHEMA_VERSION"]
+           "ROWS_REF_KEY", "SHARED_TRANSLATION_TABLE_SCHEMA_VERSION",
+           "Progress", "NO_PROGRESS"]
 
 DEFAULT_CORPUS = ROOT / "fixtures" / "tier0"
 
@@ -95,6 +98,215 @@ TIME_BUDGET_SECONDS = 10.0
 
 #: The marker ``capture_tier0_corpus.jsonable`` freezes a NaN/Infinity under.
 NONFINITE = "__nonfinite__"
+
+
+# --------------------------------------------------------------------------
+# progress
+# --------------------------------------------------------------------------
+
+
+class Progress:
+    """At most one ``PROGRESS`` line per ``interval`` seconds for a long loop.
+
+    The real tier-0 corpus takes tens of minutes per pass (``corpus_load``
+    measured 107 minutes on the 3.2 GB release, with the per-case receipts
+    held in memory until the whole stage ended), and AGENTS.md requires at
+    least one progress line per minute for a long job. This ticker is the
+    single reporting primitive for that: a loop calls :meth:`begin` once
+    with its phase name and case total, :meth:`tick` per completed case,
+    and :meth:`beat` from any loop that blocks without ticking. Emission is
+    gated on the wall clock, not on case counts, so output stays modest
+    (~one line per minute no matter how many cases per minute the machine
+    resolves) while ``tick``/``beat`` themselves stay O(1) and allocate
+    nothing that grows with the corpus.
+
+    Each line carries the completed/total case count and the elapsed
+    seconds, plus labeled ETAs -- estimates, never guarantees:
+
+    * ``phase_eta=<s>s`` — observed remainder of the CURRENT PHASE. Only
+      once it has a known total and at least three completed cases; an
+      average-rate extrapolation from fewer samples is a guess wearing a
+      number.
+    * ``gate_eta=<s>s`` — when a ``gate`` object is attached, on EVERY
+      line from the ticker's start to its last beat: the estimated time
+      until the WHOLE gated run finishes (active stage updated from this
+      ticker's observed progress, not-yet-run stages at their fallback
+      profile). The gate math lives with the measurement that owns it --
+      ``checks/phase4_real.py`` builds one over its stage profile and
+      hands the same object to every long stage, so a phase about to
+      finish never claims the whole run is.
+    * ``eta~=<s>s`` — stage-profile provisional, for tickers with a
+      ``stage_seconds`` budget and no gate (``checks/tier0_corpus.py
+      --progress``). Counts the budget down while it stands and up past
+      it (never dropped), and gives way to ``phase_eta`` once observed.
+
+    Completion ticks alone cannot bound the silent gap: one pair or one
+    native replay can itself take minutes. :meth:`start_heartbeat` adds a
+    daemon-thread timer that beats this ticker every ``interval / 4``
+    seconds whether or not anything finished, and emission is gated at
+    ``interval * 3 / 4``, so the worst-case line gap is ``interval``
+    itself. The heartbeat is lifecycle-managed by whoever owns the run
+    (``checks.phase4_real._Stage`` starts it with ``progress()`` and stops
+    it from ``__exit__`` -- which runs on the exception path too -- and
+    ``main()`` stops it from a ``finally``); :meth:`start_heartbeat` is a
+    no-op when one is already running and :meth:`stop_heartbeat` is
+    idempotent and joins the thread, so no timer outlives the stage.
+
+    Lines go to ``stream`` (stderr by default: ``checks/tier0_corpus.py
+    --json`` owns stdout and the fresh-process child parses it) and are
+    flushed, so a piped process shows them promptly. ``name`` prefixes the
+    phase label (``checks/phase4_real.py`` passes its stage name through
+    the ticker it hands :func:`run`/:func:`load`); ``prefix`` identifies
+    the emitting module; ``clock`` is injectable for tests.
+    """
+
+    def __init__(self, name: str = "", prefix: str = "[tier0]", stream=None,
+                 interval: float = 60.0, clock=time.monotonic,
+                 stage_seconds: float | None = None, gate=None) -> None:
+        self.name = name
+        self.prefix = prefix
+        self.stream = sys.stderr if stream is None else stream
+        self.interval = float(interval)
+        self.stage_seconds = (None if stage_seconds is None
+                              else float(stage_seconds))
+        self.gate = gate
+        #: Beat cadence and emit gate together bound the line gap by the
+        #: interval: the timer checks every interval/4 and the first check
+        #: at least 3/4 of an interval after the last line prints.
+        self._gate = 0.75 * self.interval
+        self.phase = ""
+        self.unit = "cases"
+        self.total = 0
+        self.done = 0
+        self._clock = clock
+        self._started = clock()
+        self._phase_started = self._started
+        self._last_line: float | None = None
+        self._print_lock = threading.Lock()
+        self._heartbeat: tuple | None = None
+
+    def begin(self, phase: str, total: int, unit: str = "cases") -> None:
+        self.phase = phase
+        self.unit = unit
+        self.total = int(total)
+        self.done = 0
+        self._phase_started = self._clock()
+
+    def tick(self, n: int = 1) -> None:
+        self.done += n
+        self._emit()
+
+    def beat(self) -> None:
+        """Print a line (same format, same gate) without counting a case:
+        the interim view of a unit still in flight, or of a parent waiting
+        on its child."""
+        self._emit()
+
+    def start_heartbeat(self) -> None:
+        if self._heartbeat is not None:
+            return
+        stop = threading.Event()
+
+        def loop() -> None:
+            every = max(self.interval / 4.0, 0.001)
+            while not stop.wait(every):
+                self.beat()
+
+        thread = threading.Thread(target=loop, daemon=True,
+                                  name=f"progress-heartbeat:{self.name or self.prefix}")
+        self._heartbeat = (stop, thread)
+        thread.start()
+
+    def stop_heartbeat(self) -> None:
+        if self._heartbeat is None:
+            return
+        stop, thread = self._heartbeat
+        self._heartbeat = None
+        stop.set()
+        thread.join(timeout=5.0)
+
+    def heartbeat_active(self) -> bool:
+        return self._heartbeat is not None and self._heartbeat[1].is_alive()
+
+    def count_suffix(self) -> str:
+        """The last phase's completed/total, for a closing stage line."""
+        return f", {self.done}/{self._total_text()} {self.unit}"
+
+    def _total_text(self) -> str:
+        return str(self.total) if self.total > 0 else "?"
+
+    def stage_elapsed(self, now: float) -> float:
+        """Seconds since this ticker (its stage) began."""
+        return now - self._started
+
+    def phase_eta_seconds(self, now: float, min_cases: int = 3):
+        """Observed average-rate remainder of the current phase, or None."""
+        if self.total > 0 and self.done >= min_cases and self.done < self.total:
+            return ((now - self._phase_started) / self.done
+                    * (self.total - self.done))
+        return None
+
+    def _eta_fields(self, now: float) -> list:
+        """The labeled ETA estimates this line may honestly carry."""
+        fields = []
+        observed = self.phase_eta_seconds(now)
+        if observed is not None:
+            fields.append(f"phase_eta={observed:.1f}s")
+        if self.gate is not None:
+            fields.append(f"gate_eta={self.gate.remaining(self, now):.1f}s")
+        elif self.stage_seconds is not None and observed is None:
+            remaining = self.stage_seconds - self.stage_elapsed(now)
+            if self.total <= 0 or self.done < self.total:
+                # Count the budget down while it stands, up past it when it
+                # is overrun -- a best-effort labeled estimate, never a gap.
+                fields.append(f"eta~={remaining if remaining > 0 else -remaining:.1f}s")
+        return fields
+
+    def _emit(self) -> None:
+        now = self._clock()
+        line = None
+        with self._print_lock:
+            if self._last_line is None or now - self._last_line >= self._gate:
+                self._last_line = now
+                label = f"{self.name} {self.phase}".strip() or "run"
+                line = (f"{self.prefix} PROGRESS {label} "
+                        f"{self.done}/{self._total_text()} {self.unit} "
+                        f"elapsed={now - self._started:.1f}s")
+                fields = self._eta_fields(now)
+                if fields:
+                    line += " " + " ".join(fields)
+        if line is not None:
+            print(line, file=self.stream, flush=True)
+
+
+class _NoProgress:
+    """The do-nothing ``Progress`` stand-in every optional-``progress``
+    default uses, so the instrumented loops carry no ``if progress:``
+    branches and an uninstrumented caller costs exactly one no-op call."""
+
+    def begin(self, phase: str, total: int, unit: str = "cases") -> None:
+        pass
+
+    def tick(self, n: int = 1) -> None:
+        pass
+
+    def beat(self) -> None:
+        pass
+
+    def start_heartbeat(self) -> None:
+        pass
+
+    def stop_heartbeat(self) -> None:
+        pass
+
+    def heartbeat_active(self) -> bool:
+        return False
+
+    def count_suffix(self) -> str:
+        return ""
+
+
+NO_PROGRESS = _NoProgress()
 
 
 # --------------------------------------------------------------------------
@@ -491,8 +703,14 @@ def resolve_corpus(root: Path) -> Path:
     return root
 
 
-def load(root: Path) -> Corpus:
+def load(root: Path, progress=NO_PROGRESS) -> Corpus:
     """Read the corpus: the index, and every pair file under ``pairs/``.
+
+    ``progress`` is an optional :class:`Progress` ticker: it begins a
+    ``load`` phase sized by the pair-file count and ticks once per file
+    read, which on the real corpus (minutes of JSON parsing per pair) is
+    the long silent stretch this exists for. Every other behavior below is
+    unchanged.
 
     A pair's payload may embed a shared frozen document by reference
     (``{SHARED_REF_KEY: "sha256:..."}``) instead of in full -- see
@@ -531,11 +749,14 @@ def load(root: Path) -> Corpus:
     shared_dir = root / "shared"
     shared_cache: dict[str, Any] = {}
     table_cache: dict[str, list] = {}
+    paths = sorted((root / "pairs").glob("*.json"))
+    progress.begin("load", len(paths), unit="pairs")
     pairs = {}
-    for path in sorted((root / "pairs").glob("*.json")):
+    for path in paths:
         pair = json.loads(path.read_text())
         pair = _resolve_shared(pair, shared_dir, shared_cache, set(), table_cache)
         pairs[pair["fixture_id"]] = pair
+        progress.tick()
     shared_values = tuple(shared_cache.values()) + tuple(table_cache.values())
     fragments = _IdentityFragments(shared_values) if shared_values else None
     return Corpus(root=root, index=index, pairs=pairs, fragments=fragments)
@@ -594,16 +815,23 @@ def case_manifest(corpus: Corpus) -> ComparisonReceipt:
 # --------------------------------------------------------------------------
 
 
-def case_addressing(corpus: Corpus) -> list[ComparisonReceipt]:
-    """Resolve every record from the hash of its own frozen request."""
+def case_addressing(corpus: Corpus, progress=NO_PROGRESS) -> list[ComparisonReceipt]:
+    """Resolve every record from the hash of its own frozen request.
+
+    Two full passes over every pair (index the requests, then resolve
+    each one), so the ``progress`` ticker is begun with ``2 * pairs``
+    cases and ticked once per hashed request on each pass.
+    """
     # Change B: `fragments=corpus.fragments` (`None` on a corpus with no
     # shared references, the no-op path) -- byte-identical hash, see
     # `_IdentityFragments` and `load`'s docstring.
+    progress.begin("addressing", 2 * len(corpus.ordered_ids), unit="pairs")
     by_request: dict[str, list[str]] = {}
     for fixture_id in corpus.ordered_ids:
         by_request.setdefault(
             content_hash(corpus.request_of(fixture_id), fragments=corpus.fragments),
             []).append(fixture_id)
+        progress.tick()
 
     out: list[ComparisonReceipt] = []
     for fixture_id in corpus.ordered_ids:
@@ -616,11 +844,13 @@ def case_addressing(corpus: Corpus) -> list[ComparisonReceipt]:
             left, right, comparison_kind="tier0_request_addressing",
             left_ref=f"{fixture_id}#declared", right_ref=f"{fixture_id}#recomputed",
         ))
+        progress.tick()
     return out
 
 
-def case_digest(corpus: Corpus) -> list[ComparisonReceipt]:
+def case_digest(corpus: Corpus, progress=NO_PROGRESS) -> list[ComparisonReceipt]:
     # Change B: `fragments=corpus.fragments` -- see `case_addressing` above.
+    progress.begin("digest", len(corpus.ordered_ids), unit="pairs")
     out: list[ComparisonReceipt] = []
     for fixture_id in corpus.ordered_ids:
         pair = corpus.pairs[fixture_id]
@@ -630,12 +860,15 @@ def case_digest(corpus: Corpus) -> list[ComparisonReceipt]:
             comparison_kind="tier0_payload_digest",
             left_ref=f"{fixture_id}#stored", right_ref=f"{fixture_id}#recomputed",
         ))
+        progress.tick()
     return out
 
 
-def case_round_trip(corpus: Corpus, scratch: Path) -> list[ComparisonReceipt]:
+def case_round_trip(corpus: Corpus, scratch: Path,
+                    progress=NO_PROGRESS) -> list[ComparisonReceipt]:
     """Write each record to an actual file and read it back before comparing."""
     scratch.mkdir(parents=True, exist_ok=True)
+    progress.begin("round_trip", len(corpus.ordered_ids), unit="pairs")
     out: list[ComparisonReceipt] = []
     for fixture_id in corpus.ordered_ids:
         record = corpus.record_of(fixture_id)
@@ -647,22 +880,25 @@ def case_round_trip(corpus: Corpus, scratch: Path) -> list[ComparisonReceipt]:
             left_ref=f"{fixture_id}#memory", right_ref=f"{fixture_id}#disk",
         ))
         path.unlink()
+        progress.tick()
     return out
 
 
-def corpus_case_list(corpus: Corpus, scratch: Path) -> list[ComparisonReceipt]:
-    return (case_addressing(corpus) + case_digest(corpus)
-            + case_round_trip(corpus, scratch))
+def corpus_case_list(corpus: Corpus, scratch: Path,
+                     progress=NO_PROGRESS) -> list[ComparisonReceipt]:
+    return (case_addressing(corpus, progress) + case_digest(corpus, progress)
+            + case_round_trip(corpus, scratch, progress))
 
 
-def corpus_verdict(corpus: Corpus, scratch: Path) -> ComparisonReceipt:
+def corpus_verdict(corpus: Corpus, scratch: Path,
+                   progress=NO_PROGRESS) -> ComparisonReceipt:
     """One receipt over every pair and every per-pair case.
 
     The expected population comes from the DECLARED manifest, not from what
     loaded: a corpus that silently lost fifteen of sixteen files compares three
     receipts against an expectation of forty-eight and is ``incomparable``.
     """
-    receipts = corpus_case_list(corpus, scratch)
+    receipts = corpus_case_list(corpus, scratch, progress)
     declared = len(corpus.index.get("pairs") or {}) or len(corpus.pairs)
     return merge_receipts(receipts, comparison_kind="tier0_corpus_replay",
                           tier=0, expected=3 * declared)
@@ -678,18 +914,27 @@ def _one(corpus: Corpus, fixture_id: str) -> Corpus:
                   pairs={fixture_id: corpus.pairs[fixture_id]})
 
 
-def case_batch_and_single(corpus: Corpus, scratch: Path) -> ComparisonReceipt:
+def case_batch_and_single(corpus: Corpus, scratch: Path,
+                          progress=NO_PROGRESS) -> ComparisonReceipt:
     """The corpus verdict folded pair by pair equals the batch verdict.
 
     Determinism of THIS check, not of the scorer: the engine-level batch/single
     parity is rearchitecture phase 1's O30.
+
+    The heaviest case in the battery: it runs ``corpus_case_list`` once per
+    pair and once again over the whole corpus. The per-pair singles get
+    their own ``batch_singles`` phase (one case per folded pair); the
+    whole-corpus pass forwards ``progress`` on, so its own per-pair ticks
+    (addressing/digest/round_trip) keep the line cadence going.
     """
-    singles = [
-        merge_receipts(corpus_case_list(_one(corpus, fid), scratch),
-                       comparison_kind="tier0_single", tier=0, expected=3)
-        for fid in corpus.ordered_ids
-    ]
-    batch = corpus_verdict(corpus, scratch)
+    progress.begin("batch_singles", len(corpus.ordered_ids), unit="pairs")
+    singles = []
+    for fid in corpus.ordered_ids:
+        singles.append(merge_receipts(corpus_case_list(_one(corpus, fid), scratch),
+                                      comparison_kind="tier0_single", tier=0,
+                                      expected=3))
+        progress.tick()
+    batch = corpus_verdict(corpus, scratch, progress)
     folded = merge_receipts(singles, comparison_kind="tier0_corpus_replay",
                             tier=0, expected=len(corpus.pairs))
     return compare_records(
@@ -702,14 +947,73 @@ def case_batch_and_single(corpus: Corpus, scratch: Path) -> ComparisonReceipt:
     )
 
 
-def case_fresh_process(corpus_root: Path, this_verdict: str) -> ComparisonReceipt:
-    """Run the corpus again in a subprocess that shares no memory with this one."""
-    proc = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()),
-         "--corpus", str(corpus_root), "--emit-verdict"],
-        capture_output=True, text=True, cwd=str(ROOT), check=False,
-    )
-    other = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+def _terminate_child(child) -> None:
+    """Stop and reap a fresh-process child whose parent-side wait aborted:
+    TERM, then KILL after a short grace, then reap -- swallowing only
+    process-lifecycle errors (the child may already be gone), never the
+    caller's own exception, which this helper re-raises by returning."""
+    try:
+        child.terminate()
+    except OSError:
+        pass
+    try:
+        child.wait(timeout=5.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        child.kill()
+    except OSError:
+        pass
+    try:
+        child.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def case_fresh_process(corpus_root: Path, this_verdict: str,
+                       progress=NO_PROGRESS) -> ComparisonReceipt:
+    """Run the corpus again in a subprocess that shares no memory with this one.
+
+    The child re-loads and re-verifies the WHOLE corpus, so on the real one
+    this single case is itself a many-minute silent stretch. With a
+    ``progress`` ticker the child is launched with ``--progress`` and an
+    INHERITED stderr -- it emits its own per-minute case lines directly to
+    the operator while it runs, and its stdout stays captured because the
+    last stdout line IS the compared verdict -- while the parent beats its
+    own ticker (stdout, or wherever the caller routed it) from the poll
+    loop, so neither the child's hashing pauses nor any other gap can take
+    the combined output past a minute without a line. Without a ticker,
+    this is exactly the old fully-captured ``subprocess.run`` call. If the
+    parent-side wait itself falls over (``communicate`` or a heartbeat
+    raises), ``_terminate_child`` stops and reaps the child before the
+    original exception propagates -- an instrumented run must never
+    orphan a corpus-loading process.
+    """
+    command = [sys.executable, str(Path(__file__).resolve()),
+               "--corpus", str(corpus_root), "--emit-verdict"]
+    if progress is NO_PROGRESS:
+        proc = subprocess.run(command, capture_output=True, text=True,
+                              cwd=str(ROOT), check=False)
+        child_out = proc.stdout
+    else:
+        progress.begin("fresh_process", 1, unit="subprocess")
+        child = subprocess.Popen(command + ["--progress"], stdout=subprocess.PIPE,
+                                 stderr=None, text=True, cwd=str(ROOT))
+        try:
+            while True:
+                try:
+                    child_out, _ = child.communicate(timeout=5.0)
+                    break
+                except subprocess.TimeoutExpired:
+                    progress.beat()
+        except BaseException:
+            _terminate_child(child)
+            raise
+        finally:
+            if child.stdout is not None:
+                child.stdout.close()
+    other = child_out.strip().splitlines()[-1] if child_out.strip() else ""
     return compare_records(
         {"verdict": this_verdict},
         {"verdict": other or None},
@@ -903,9 +1207,10 @@ def _axis_inputs(corpus: Corpus) -> dict:
     return axis_inputs
 
 
-def _derived(corpus: Corpus) -> dict[str, list[str]]:
+def _derived(corpus: Corpus, progress=NO_PROGRESS) -> dict[str, list[str]]:
     """``{fixture_id: covers}``, re-derived from each surviving pair."""
     axis_inputs = _axis_inputs(corpus)
+    progress.begin("coverage", len(corpus.ordered_ids), unit="pairs")
     out = {}
     for fid in corpus.ordered_ids:
         payload = corpus.pairs[fid].get("payload") or {}
@@ -913,16 +1218,17 @@ def _derived(corpus: Corpus) -> dict[str, list[str]]:
                                  payload.get("request") or {},
                                  payload.get("record_kind"), axis_inputs,
                                  payload.get("relations"))
+        progress.tick()
     return out
 
 
-def derived_uncovered(corpus: Corpus) -> list[str]:
+def derived_uncovered(corpus: Corpus, progress=NO_PROGRESS) -> list[str]:
     """Required axes no surviving pair demonstrates — never the index's claim."""
-    covered = {axis for covers in _derived(corpus).values() for axis in covers}
+    covered = {axis for covers in _derived(corpus, progress).values() for axis in covers}
     return sorted(set(corpus.index.get("required_axes", [])) - covered)
 
 
-def case_coverage(corpus: Corpus) -> ComparisonReceipt:
+def case_coverage(corpus: Corpus, progress=NO_PROGRESS) -> ComparisonReceipt:
     """Every axis claim recomputed from the surviving files (§12.2).
 
     Each pair's stored ``covers`` against the re-derivation from its own frozen
@@ -934,7 +1240,7 @@ def case_coverage(corpus: Corpus) -> ComparisonReceipt:
     left: dict[str, Any] = {"pairs": {}, "axes": {}}
     right: dict[str, Any] = {"pairs": {}, "axes": {}}
     derived_coverage: dict[str, list[str]] = {}
-    for fid, derived in _derived(corpus).items():
+    for fid, derived in _derived(corpus, progress).items():
         left["pairs"][fid] = {"covers": corpus.pairs[fid].get("covers")}
         right["pairs"][fid] = {"covers": derived}
         for axis in derived:
@@ -1050,7 +1356,7 @@ def _seed_pair(fid: str, payload: dict, cause: str | None) -> tuple[ComparisonRe
     return record_receipt, integrity
 
 
-def seeded_controls(corpus: Corpus) -> dict[str, Any]:
+def seeded_controls(corpus: Corpus, progress=NO_PROGRESS) -> dict[str, Any]:
     """Plant every seedable cause into its own real pair, and judge one pass.
 
     Distinct target pairs make each cause's findings attributable, so the one
@@ -1064,6 +1370,7 @@ def seeded_controls(corpus: Corpus) -> dict[str, Any]:
     found_by_cause: dict[str, dict[str, list[dict]]] = {}
     untargeted: list[dict] = []
     field_set_mismatches: list[str] = []
+    progress.begin("seeded_controls", len(corpus.ordered_ids), unit="pairs")
     for fid in corpus.ordered_ids:
         payload = corpus.pairs[fid].get("payload") or {}
         cause = cause_of.get(fid)
@@ -1079,6 +1386,7 @@ def seeded_controls(corpus: Corpus) -> dict[str, Any]:
             found_by_cause[cause] = found
         else:
             untargeted += [dict(f, fixture_id=fid) for f in found["record"] + found["integrity"]]
+        progress.tick()
     one_pass = merge_receipts(receipts, comparison_kind="tier0_seeded_one_pass",
                               expected=len(receipts))
     controls = {}
@@ -1098,9 +1406,9 @@ def seeded_controls(corpus: Corpus) -> dict[str, Any]:
             "field_set_mismatches": field_set_mismatches}
 
 
-def case_seeded_controls(corpus: Corpus) -> ComparisonReceipt:
+def case_seeded_controls(corpus: Corpus, progress=NO_PROGRESS) -> ComparisonReceipt:
     """``agree`` exactly when every seeded control behaved as specified."""
-    summary = seeded_controls(corpus)
+    summary = seeded_controls(corpus, progress)
     expected: dict[str, Any] = {cause: [] for cause in SEEDED_CONTROLS}
     observed: dict[str, Any] = {cause: summary["controls"][cause]["problems"]
                                 for cause in SEEDED_CONTROLS}
@@ -1140,13 +1448,18 @@ def _forbid_network() -> None:
 # --------------------------------------------------------------------------
 
 
-def run(corpus_root: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
+def run(corpus_root: Path, progress=NO_PROGRESS
+        ) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
+    """The full battery. ``progress`` is an optional :class:`Progress`
+    ticker (or any object with ``begin``/``tick``/``beat``) threaded through
+    every per-pair loop, the loader and the fresh-process child."""
     with tempfile.TemporaryDirectory(prefix="tier0-") as tmp:
-        return _run(corpus_root, Path(tmp))
+        return _run(corpus_root, Path(tmp), progress)
 
 
-def _run(corpus_root: Path,
-         scratch: Path) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
+def _run(corpus_root: Path, scratch: Path,
+         progress=NO_PROGRESS
+         ) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt]]:
     # `load(corpus_root)` is passed straight into the call rather than bound
     # to a local first: a named `corpus = load(...)` here would keep this
     # frame's OWN reference alive for the whole `_run_loaded` call, on top of
@@ -1154,11 +1467,14 @@ def _run(corpus_root: Path,
     # that function's docstring. An unnamed call argument has no such
     # second owner (verified: a named local survives the callee's `del`; an
     # inline argument does not).
-    merged, cases, _report_extra = _run_loaded(load(corpus_root), corpus_root, scratch)
+    merged, cases, _report_extra = _run_loaded(
+        load(corpus_root, progress=progress), corpus_root, scratch,
+        progress=progress)
     return merged, cases
 
 
 def _run_loaded(corpus: Corpus, corpus_root: Path, scratch: Path,
+                progress=NO_PROGRESS,
                 ) -> tuple[ComparisonReceipt, dict[str, ComparisonReceipt], dict[str, Any] | None]:
     """The case battery over an ALREADY LOADED corpus.
 
@@ -1195,21 +1511,21 @@ def _run_loaded(corpus: Corpus, corpus_root: Path, scratch: Path,
             "seeded_controls": {},
         }
         return empty, {}, report_extra
-    verdict = corpus_verdict(corpus, scratch)
+    verdict = corpus_verdict(corpus, scratch, progress)
     cases = {
         "manifest": case_manifest(corpus),
         "corpus_replay": verdict,
-        "coverage": case_coverage(corpus),
+        "coverage": case_coverage(corpus, progress),
         "pinned_counterparts": case_pinned_counterparts(corpus),
-        "seeded_controls": case_seeded_controls(corpus),
-        "batch_vs_single": case_batch_and_single(corpus, scratch),
+        "seeded_controls": case_seeded_controls(corpus, progress),
+        "batch_vs_single": case_batch_and_single(corpus, scratch, progress),
     }
     report_extra = {
         "pairs": len(corpus.pairs),
         "declared_pairs": len(corpus.index.get("pairs") or {}),
         "corpus_hash": corpus.index.get("corpus_hash"),
-        "uncovered_axes": derived_uncovered(corpus),
-        "seeded_controls": seeded_controls(corpus),
+        "uncovered_axes": derived_uncovered(corpus, progress),
+        "seeded_controls": seeded_controls(corpus, progress),
     }
     verdict_str = verdict.verdict
     # Every case above is built and every small fact `report_extra` needs is
@@ -1218,7 +1534,7 @@ def _run_loaded(corpus: Corpus, corpus_root: Path, scratch: Path,
     # the last reference and the corpus is collectable from here on.
     del corpus
     gc.collect()
-    cases["fresh_process"] = case_fresh_process(corpus_root, verdict_str)
+    cases["fresh_process"] = case_fresh_process(corpus_root, verdict_str, progress)
     merged = merge_receipts(list(cases.values()),
                             comparison_kind="tier0_corpus", tier=0,
                             expected=len(cases))
@@ -1248,6 +1564,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--emit-verdict", action="store_true",
                     help="print only the corpus verdict (the fresh-process case)")
+    ap.add_argument("--progress", action="store_true",
+                    help="emit at most one per-minute PROGRESS line to stderr "
+                         "(stdout is reserved for the verdict/JSON this CLI owns)")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -1262,22 +1581,34 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     _forbid_network()
+    progress = Progress() if args.progress else NO_PROGRESS
+    # Lifecycle-managed heartbeat: a single 100 MB pair file (or, here in
+    # the child role, its whole load) can block for minutes without a
+    # completion tick, so the timer -- not the loop -- guarantees the
+    # per-minute line. Stopped from a finally on every exit path, and the
+    # --emit-verdict child uses the identical path, so a long first unit
+    # never goes silent even when this process IS the child.
+    progress.start_heartbeat()
+    try:
+        if args.emit_verdict:
+            with tempfile.TemporaryDirectory(prefix="tier0-child-") as tmp:
+                print(corpus_verdict(load(root, progress=progress), Path(tmp),
+                                     progress=progress).verdict)
+            return 0
 
-    if args.emit_verdict:
-        with tempfile.TemporaryDirectory(prefix="tier0-child-") as tmp:
-            print(corpus_verdict(load(root), Path(tmp)).verdict)
-        return 0
-
-    with tempfile.TemporaryDirectory(prefix="tier0-") as tmp:
-        # Same reasoning as `_run`: `load(root)` is passed inline, never
-        # bound to a `corpus =` local, so this frame holds no reference past
-        # the call and `_run_loaded` can actually free the corpus before its
-        # fresh-process subprocess forks. `report_extra` carries what the
-        # JSON report needs instead.
-        merged, cases, report_extra = _run_loaded(load(root), root, Path(tmp))
-        if args.json:
-            print(json.dumps(_json_report(report_extra, merged, cases), indent=2, sort_keys=True))
-            return 0 if merged.verdict == AGREE else 1
+        with tempfile.TemporaryDirectory(prefix="tier0-") as tmp:
+            # Same reasoning as `_run`: `load(root)` is passed inline, never
+            # bound to a `corpus =` local, so this frame holds no reference past
+            # the call and `_run_loaded` can actually free the corpus before its
+            # fresh-process subprocess forks. `report_extra` carries what the
+            # JSON report needs instead.
+            merged, cases, report_extra = _run_loaded(
+                load(root, progress=progress), root, Path(tmp), progress=progress)
+            if args.json:
+                print(json.dumps(_json_report(report_extra, merged, cases), indent=2, sort_keys=True))
+                return 0 if merged.verdict == AGREE else 1
+    finally:
+        progress.stop_heartbeat()
 
     if not args.quiet:
         for name, receipt in cases.items():

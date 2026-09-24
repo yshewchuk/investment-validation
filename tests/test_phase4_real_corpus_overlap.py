@@ -51,7 +51,10 @@ def test_build_evidence_never_holds_two_full_corpora_at_once(tmp_path, monkeypat
     refs: list[weakref.ReferenceType] = []
     overlap_detected = {"flag": False}
 
-    def tracking_load(path):
+    def tracking_load(path, progress=None):
+        # `progress` (the per-minute ticker checks/phase4_real.py now threads
+        # through run_corpus/load) is accepted and dropped: this wrapper
+        # tracks load ORDER and lifetimes only, never progress reporting.
         gc.collect()
         if any(ref() is not None for ref in refs):
             overlap_detected["flag"] = True
