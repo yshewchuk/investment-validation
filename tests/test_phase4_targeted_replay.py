@@ -363,7 +363,104 @@ def test_agreeing_row_fails_nothing_and_records_no_differences(tmp_path, monkeyp
     row = targeted.run_targeted(root, ["a"], progress_stream=_Sink())["rows"][0]
     assert row["disposition"] == "compared"
     assert row["checks_failed"] == []
-    assert not ({"key_differences", "flag_differences", "null_mask_differences"} & set(row))
+    assert not ({"key_differences", "flag_differences", "null_mask_differences",
+                 "contract_differences"} & set(row))
+
+
+# ---------------------------------------------------------------------------
+# contracts mismatch: a compact, deterministic contract_differences field
+# ---------------------------------------------------------------------------
+
+
+def _native_with_leg(native, **leg_overrides):
+    """The same native with its single leg's projected attributes overridden, so
+    ONLY the named leg field can diverge from the legacy record."""
+    leg = {**dict(native.legs[0]), **leg_overrides}
+    return replace(native, legs=(leg,))
+
+
+def test_contract_mismatch_names_differing_leg_attribute_and_both_values(tmp_path, monkeypatch):
+    record = _clean_record()
+    base = _native_record(record)
+    diverging = _native_with_leg(base, strike=105.0, name="put")
+    root = _stub_corpus(tmp_path, monkeypatch, {"a": record}, {"a": diverging})
+
+    row = targeted.run_targeted(root, ["a"], progress_stream=_Sink())["rows"][0]
+
+    assert row["disposition"] == "compared"
+    assert "contracts" in row["checks_failed"]
+    # Only the two leg attributes that changed are reported, in the fixed
+    # projection order (name before strike) — never a dump of either leg.
+    assert row["contract_differences"] == {
+        "legs": [
+            {"index": 0, "attribute": "name", "native": "put", "legacy": "call"},
+            {"index": 0, "attribute": "strike", "native": 105.0, "legacy": 100.0},
+        ]
+    }
+    assert "timeline" not in row["contract_differences"]
+
+
+def test_contract_mismatch_names_differing_timeline_date(tmp_path, monkeypatch):
+    record = _clean_record()
+    base = _native_record(record)
+    diverging = replace(base, entry_exit_plan={
+        **base.entry_exit_plan, "entry_date": "2026-09-15",
+    })
+    root = _stub_corpus(tmp_path, monkeypatch, {"a": record}, {"a": diverging})
+
+    row = targeted.run_targeted(root, ["a"], progress_stream=_Sink())["rows"][0]
+
+    assert "contracts" in row["checks_failed"]
+    assert row["contract_differences"] == {
+        "timeline": [
+            {"attribute": "entry_date", "native": "2026-09-15", "legacy": "2026-09-16"},
+        ]
+    }
+    assert "legs" not in row["contract_differences"]
+
+
+def test_contract_leg_count_mismatch_is_flagged_without_dumping_legs(tmp_path, monkeypatch):
+    record = _clean_record()
+    base = _native_record(record)
+    extra_leg = {"name": "put", "right": "P", "side": "short", "quantity": 1.0,
+                 "strike": 90.0, "expiry": "2026-09-18", "fill": 1.0, "cash_flow": 100.0}
+    diverging = replace(base, legs=(base.legs[0], extra_leg))
+    root = _stub_corpus(tmp_path, monkeypatch, {"a": record}, {"a": diverging})
+
+    row = targeted.run_targeted(root, ["a"], progress_stream=_Sink())["rows"][0]
+
+    assert "contracts" in row["checks_failed"]
+    # The aligned leg agrees; only the differing leg count is reported, as a
+    # scalar — the extra leg's fields are never dumped.
+    assert row["contract_differences"] == {"leg_count": {"native": 2, "legacy": 1}}
+    assert "legs" not in row["contract_differences"]
+
+
+def test_two_member_chooser_contract_mismatch_is_member_indexed(tmp_path, monkeypatch):
+    summary = _summary_record()
+    root = _chooser_corpus(tmp_path, summary)
+    member = _clean_record()
+    clean_native = _native_record(member)
+    bad_native = _native_with_leg(clean_native, expiry="2026-10-16")
+    specs = [(member, clean_native), (member, bad_native)]
+    choice = replace(_native_record(summary), chooser_selection={
+        "strategy": "STR-THRU", "menu_size": 2, "margin": 0.05})
+    monkeypatch.setattr(phase4_real, "_replayed_chooser", _chooser_stub(specs, choice))
+
+    row = targeted.run_targeted(root, ["chooser"], progress_stream=_Sink())["rows"][0]
+
+    assert row["disposition"] == "compared"
+    assert row["members"] == 2
+    assert "contracts" in row["checks_failed"]
+    # Multi-member: only the diverging member is listed, tagged by its index,
+    # so a reader sees WHICH ranked structure's contract drifted.
+    assert row["contract_differences"] == [{
+        "member": 1,
+        "legs": [
+            {"index": 0, "attribute": "expiry", "native": "2026-10-16",
+             "legacy": "2026-09-18"},
+        ],
+    }]
 
 
 def test_trace_verification_failure_is_incomparable(tmp_path, monkeypatch):
