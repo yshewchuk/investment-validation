@@ -2380,6 +2380,12 @@ def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]
     # derived from the native record, and NO_SCORE stays refusing in
     # production: a native NO_SCORE on a scored or already-refused legacy
     # row remains a real finding.
+    #
+    # The ``flags`` verdict is this ORDERED-tuple equality; the symmetric
+    # set diffs below name membership only. When the tuples disagree while
+    # both sets match (order-only or duplicate-count mismatch), the exact
+    # sequences the comparator used are reported, in order, by
+    # ``_diagnostic_flag_sequences`` inside ``row_diagnostics``.
     legacy_expects_no_score = (
         record.get("exp_pnl_model") is None
         and record.get("exp_pnl_analog") is None
@@ -2662,6 +2668,10 @@ _DIAGNOSTIC_LEG_DIFF_CAP = 12
 _DIAGNOSTIC_NUMERIC_FIELD_CAP = 24
 _DIAGNOSTIC_WARNING_CAP = 8
 _DIAGNOSTIC_TEXT_CHARS = 240
+#: Ordered flag names per side kept in a flag-failure diagnostic sequence
+#: (``_diagnostic_flag_sequences``); the tail beyond this cap is counted
+#: (``legacy_flags_omitted``/``native_flags_omitted``), never dropped.
+_DIAGNOSTIC_FLAG_SEQ_CAP = 24
 
 
 def _diagnostic_scalar(value: Any) -> Any:
@@ -2814,6 +2824,58 @@ def _diagnostic_numeric_diff(
     return out
 
 
+def _diagnostic_flag_sequences(
+    record: Mapping[str, Any], native,
+) -> dict[str, Any]:
+    """The EXACT ordered normalized flag sequences the ``flags`` check
+    compares, both sides, bounded -- diagnostics-only.
+
+    ``row_flag_differences`` is a symmetric SET diff, so a failed check can
+    legitimately carry two empty lists when only ORDER or MULTIPLICITY
+    differ (the phase4-observational-13 fixtures-009/015 blind spot); these
+    ordered sequences are what explain such a failure. The legacy-side
+    normalization MIRRORS ``_record_checks`` statement for statement: the
+    advisory strip, then the CAL-P/CND-P UNVALIDATED_STRUCTURE translation,
+    then the NO_SCORE expectation decided against the post-translation
+    tuple -- see the full rationale there. It is a separate function rather
+    than a refactor of the comparator only so the landed
+    ``_record_checks`` source stays untouched;
+    ``tests/test_phase4_real_row_diagnostics.py::
+    test_flag_sequence_diagnostics_match_the_comparator_semantics`` pins
+    the mirror against the real comparator across every translation branch
+    (and through ``_native_parity`` for the emitted section), so this
+    diagnostic can never drift into contradicting the verdict it explains.
+    Each sequence is capped at ``_DIAGNOSTIC_FLAG_SEQ_CAP`` entries IN
+    ORDER, the truncated tail counted rather than silently dropped.
+    """
+    native_flags = _semantic_flags({"flags": native.reason_codes})
+    legacy_flags = _semantic_flags(record)
+    if record.get("strategy") in {"CAL-P", "CND-P"} and "UNVALIDATED_STRUCTURE" not in legacy_flags:
+        legacy_flags = legacy_flags + ("UNVALIDATED_STRUCTURE",)
+    legacy_expects_no_score = (
+        record.get("exp_pnl_model") is None
+        and record.get("exp_pnl_analog") is None
+        and not flags_refuse(legacy_flags)
+    )
+    if legacy_expects_no_score:
+        legacy_flags = legacy_flags + ("NO_SCORE",)
+    sequences: dict[str, Any] = {
+        "legacy_flags": [
+            _diagnostic_scalar(flag) for flag in legacy_flags[:_DIAGNOSTIC_FLAG_SEQ_CAP]
+        ],
+        "native_flags": [
+            _diagnostic_scalar(flag) for flag in native_flags[:_DIAGNOSTIC_FLAG_SEQ_CAP]
+        ],
+    }
+    if len(legacy_flags) > _DIAGNOSTIC_FLAG_SEQ_CAP:
+        sequences["legacy_flags_omitted"] = (
+            len(legacy_flags) - _DIAGNOSTIC_FLAG_SEQ_CAP)
+    if len(native_flags) > _DIAGNOSTIC_FLAG_SEQ_CAP:
+        sequences["native_flags_omitted"] = (
+            len(native_flags) - _DIAGNOSTIC_FLAG_SEQ_CAP)
+    return sequences
+
+
 def _diagnostic_flag_context(
     record: Mapping[str, Any], native,
 ) -> dict[str, Any]:
@@ -2897,6 +2959,13 @@ def _row_diagnostics(
                 member_record, member_native, findings)
         if "flags" in failed:
             context = _diagnostic_flag_context(member_record, member_native)
+            # The compared ordered sequences are added first, so a failed
+            # flags check is explained even when there is no detail/warning
+            # context to quote (the set-diff-only blind spot).
+            context = {
+                **_diagnostic_flag_sequences(member_record, member_native),
+                **context,
+            }
             if context:
                 entry["flags"] = context
         entries[str(index)] = entry
@@ -3211,6 +3280,9 @@ def _native_parity(corpus, progress=NO_PROGRESS) -> tuple[dict, dict]:
     #: entry is a list of per-member dicts; for regular rows, it's a single
     #: dict. When a check passes, the entry is omitted. Field and flag
     #: NAMES only -- never values.
+    #: A failed ``flags`` check can carry two EMPTY sets here when only the
+    #: compared ORDERED tuples' order or duplicate counts differ; the exact
+    #: sequences are reported in ``row_diagnostics``.
     row_key_differences = {}
     row_flag_differences = {}
     row_null_mask_differences = {}

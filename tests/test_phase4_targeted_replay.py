@@ -1564,6 +1564,25 @@ def test_failing_compared_row_gets_gate_diagnostics_outside_the_row(tmp_path, mo
     ]
 
 
+def test_failing_flag_row_diagnostics_inherit_the_ordered_sequences(tmp_path, monkeypatch):
+    """Targeted partial diagnostics reuse the gate's ``_row_diagnostics``,
+    so a same-set-different-order flags failure -- which the value-free
+    ``flag_differences`` can only report as two empty lists -- is explained
+    here automatically by the compared ordered sequences."""
+    record = _clean_record(flags=("FLAG_A", "FLAG_B"))
+    native = replace(_native_record(record), reason_codes=("FLAG_B", "FLAG_A"))
+    root = _stub_corpus(tmp_path, monkeypatch, {"a": record}, {"a": native})
+
+    report = targeted.run_targeted(root, ["a"], progress_stream=_Sink())
+    row = report["rows"][0]
+    assert "flags" in row["checks_failed"]
+    assert row["flag_differences"] == {"native_only": [], "legacy_only": []}
+
+    entry = report["row_diagnostics"]["a"]["members"]["0"]
+    assert entry["flags"]["legacy_flags"] == ["FLAG_A", "FLAG_B"]
+    assert entry["flags"]["native_flags"] == ["FLAG_B", "FLAG_A"]
+
+
 def test_agreeing_and_incomparable_rows_are_never_diagnosed(tmp_path, monkeypatch):
     record = _clean_record()
     root = _stub_corpus(tmp_path, monkeypatch, {"a": record}, {})
