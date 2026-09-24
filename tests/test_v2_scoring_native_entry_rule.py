@@ -376,6 +376,72 @@ def test_score_one_runs_the_entry_rule_after_the_simulation():
     assert "MISSING_FEATURES" not in passed.reason_codes + failed.reason_codes
 
 
+# -- the gate STAGE reaches the rule for an unpriced row (Phase 4 flag parity) --
+#
+# The 009_RAMP7 / 015_RAMP7 / 017 legacy_only MISSING_FEATURES gap: legacy
+# ``Scorer._apply_entry_rule`` is reached for every non-BAD_QUOTE row, priced
+# or not, and flags MISSING_FEATURES when a term is undetermined (an unpriced
+# row has no priced legs, so ``rel_spread`` is None). Native must reach the
+# rule under the SAME ownership condition. ``_execute_gate`` used to bail with
+# ``if entry_cost is None: return {}``, silently withholding the flag legacy
+# carries. These pin the corrected reachability, and -- as a negative -- that
+# the flag is emitted only for the rule's own undetermined term, never for a
+# non-finite input elsewhere on the row (fixture 002's counterexample: chooser
+# non-finite yields CHOOSER_MISSING_FEATURES, not a row-level MISSING_FEATURES).
+
+
+def _gate_stage(block, values, *, strategy="TWIN-P", event_date="2026-03-16"):
+    from engine.v2.scoring import stages
+
+    inputs = SimpleNamespace(gate=block, context={"event_date": event_date})
+    flags: list[str] = []
+    out = stages._execute_gate(inputs, strategy, dict(values), flags)
+    return out, flags
+
+
+@pytest.mark.parametrize("strategy", ["TWIN-P", "RAMP7"])
+def test_gate_stage_reaches_the_rule_on_an_unpriced_row(strategy):
+    """Unpriced (``entry_cost`` None, no legs): the stage still evaluates the
+    rule, the missing spread leaves the verdict undetermined and flags
+    MISSING_FEATURES -- exactly what legacy's row carries."""
+    march = build_trailing_cutoff_artifact(_history().to_dict("records"),
+                                            month="2026-03-16")
+    block = native.entry_rule_block(strategy, mcap_usd=5e10, cutoff=march)
+    out, flags = _gate_stage(
+        block, {"entry_cost": None, "legs": [], "exp_pnl_sim": 0.9}, strategy=strategy)
+    assert out == {"gate_pass": None}
+    assert "MISSING_FEATURES" in flags
+
+
+def test_gate_stage_decides_a_priced_row_without_flagging():
+    """The complement: a priced row whose three terms are all determinate is
+    decided and carries no MISSING_FEATURES -- the corrected reachability does
+    not blanket-flag every entry-rule row."""
+    march = build_trailing_cutoff_artifact(_history().to_dict("records"),
+                                            month="2026-03-16")
+    block = native.entry_rule_block("TWIN-P", mcap_usd=5e10, cutoff=march)
+    out, flags = _gate_stage(
+        block, {"entry_cost": 1.0, "legs": _legs(0.1), "exp_pnl_sim": 0.9})
+    assert out == {"gate_pass": True}
+    assert flags == []
+
+
+def test_gate_stage_ignores_nonfinite_chooser_inputs():
+    """002's counterexample as a unit assertion: non-finite CHOOSER inputs on
+    an otherwise-decided entry-rule row must not surface as MISSING_FEATURES.
+    The gate reads only its own facts (legs, exp_pnl_sim, mcap, cutoff); a
+    non-finite chooser field is the chooser stage's business (and yields the
+    distinct CHOOSER_MISSING_FEATURES), never the row-level flag."""
+    march = build_trailing_cutoff_artifact(_history().to_dict("records"),
+                                            month="2026-03-16")
+    block = native.entry_rule_block("TWIN-P", mcap_usd=5e10, cutoff=march)
+    values = {"entry_cost": 1.0, "legs": _legs(0.1), "exp_pnl_sim": 0.9,
+              "chooser_model_inputs": {"spy_vol5": NAN, "or_implied": INF}}
+    out, flags = _gate_stage(block, values)
+    assert out == {"gate_pass": True}
+    assert "MISSING_FEATURES" not in flags
+
+
 # -- capture -> strict trace -> phase4_real verification and replay ------------
 
 _DIVISOR = {"TWIN-P": 1.5, "TWIN-P5": 1.0, "CND-PS": 2.0, "BFLY-P": 1.0, "BFLY-P5": 3.0,
