@@ -1040,18 +1040,26 @@ def _model_block_from_frozen(source: Mapping[str, Any]) -> dict[str, Any]:
     used -- and reshaped to :func:`engine.v2.scoring.source_inputs._model_block`'s
     target shape (``payoff_recipe``, not ``payoff_artifact_recipe``).
 
-    Returns ``{}`` when the row's capture declared no payoff (a strategy
-    outside PAYOFF_DRIVER, or too few trades for legacy to have fit one) --
+    The payoff fields are built only when the row declared a payoff. With
+    payoff absent but ``model_residual:`` pools declared -- an unpriced row
+    whose chain-independent bands legacy still computed before its payoff
+    guard (fixture 019) -- the block is RESIDUAL-ONLY: it carries
+    :data:`engine.v2.scoring.stages.RESIDUAL_ONLY_FIELD` and the pools, the
+    shape ``_model_block`` itself produces for such a bundle (native seeds
+    the bands from the request identity; no payoff/bands/seed/draw count is
+    synthesized here). Returns ``{}`` only when the row declared neither --
     matching ``_model_block``'s own not-applicable case.
     """
     from engine.v2.foundation.canonical import untag_nonfinite
     from engine.v2.models.lineage import DataDependency, Lineage
+    from engine.v2.scoring.stages import RESIDUAL_ONLY_FIELD
 
     frozen = untag_nonfinite(dict(source.get("frozen") or {}))
     states = dict(frozen.get("states") or {})
     declared = dict(frozen.get("declarations") or {})
     payoff = declared.get("payoff")
-    if payoff is None:
+    residual_declared = any(key.startswith("model_residual:") for key in declared)
+    if payoff is None and not residual_declared:
         return {}
 
     def state(name: Any) -> dict[str, Any]:
@@ -1059,12 +1067,14 @@ def _model_block_from_frozen(source: Mapping[str, Any]) -> dict[str, Any]:
             raise StrictTraceCaptureError(f"declared state {name} was not recorded")
         return dict(states[name])
 
-    fit = state(payoff["state"])
-    block: dict[str, Any] = {
-        "payoff_recipe": {"before": payoff["before"], "seed": payoff["seed"],
-                          "draw_count": payoff["draw_count"]},
-        "payoff_artifact": _inline_payoff_artifact(fit),
-    }
+    block: dict[str, Any] = {}
+    if payoff is not None:
+        fit = state(payoff["state"])
+        block["payoff_recipe"] = {"before": payoff["before"], "seed": payoff["seed"],
+                                  "draw_count": payoff["draw_count"]}
+        block["payoff_artifact"] = _inline_payoff_artifact(fit)
+    else:
+        block[RESIDUAL_ONLY_FIELD] = True
     lineage = Lineage(data=(DataDependency(table="phase4.capture.legacy_served"),))
     residual_recipe: dict[str, Any] = {}
     residual_artifacts: dict[str, Any] = {}
@@ -1104,16 +1114,47 @@ def _model_document(block: Mapping[str, Any]) -> dict[str, Any]:
     dataclass and the two classes are not distinguishable from their
     document shape alone. Every other artifact field has exactly one
     possible class, so it needs no tag.
+
+    A residual-only block documents its :data:`RESIDUAL_ONLY_FIELD` marker
+    and no payoff fields (it has none; a documented ``payoff_recipe: {}``
+    would put the replay's model stage back on the recipe path); a priced
+    block's document is unchanged.
+
+    A marked block is only serialized when the marker is the literal boolean
+    ``True`` the builder writes and NO non-empty payoff recipe/artifact rides
+    beside it. Any other marker (truthy ``1``, ``"yes"``, or an explicit
+    ``False``) and any contradiction is refused HERE, before anything is
+    written -- ``block.get(RESIDUAL_ONLY_FIELD)`` would coerce ``1`` to a
+    documented ``true`` and drop the payoff on the floor, laundering a
+    malformed block into the exact shape the decoder accepts. This mirrors,
+    on the write side, the checks ``checks/phase4_real.py::_decode_model_block``
+    runs on the read side, so a contradictory block is rejected at both ends
+    of the round trip rather than silently normalized at the first.
     """
     if not block:
         return {}
     from engine.v2.models.payoff_artifact import PayoffLineArtifact
+    from engine.v2.scoring.stages import RESIDUAL_ONLY_FIELD
 
-    doc: dict[str, Any] = {"payoff_recipe": dict(block.get("payoff_recipe") or {})}
-    artifact = block.get("payoff_artifact")
-    if artifact is not None:
-        kind = "line" if isinstance(artifact, PayoffLineArtifact) else "surface"
-        doc["payoff_artifact"] = {"kind": kind, "value": to_document(artifact)}
+    doc: dict[str, Any] = {}
+    if RESIDUAL_ONLY_FIELD in block:
+        if block[RESIDUAL_ONLY_FIELD] is not True:
+            raise StrictTraceCaptureError(
+                "model block's residual_only marker must be literal True, not "
+                f"{block[RESIDUAL_ONLY_FIELD]!r}")
+        if block.get("payoff_recipe"):
+            raise StrictTraceCaptureError(
+                "residual_only model block must not declare a payoff recipe")
+        if block.get("payoff_artifact") is not None:
+            raise StrictTraceCaptureError(
+                "residual_only model block must not declare a payoff artifact")
+        doc[RESIDUAL_ONLY_FIELD] = True
+    else:
+        doc["payoff_recipe"] = dict(block.get("payoff_recipe") or {})
+        artifact = block.get("payoff_artifact")
+        if artifact is not None:
+            kind = "line" if isinstance(artifact, PayoffLineArtifact) else "surface"
+            doc["payoff_artifact"] = {"kind": kind, "value": to_document(artifact)}
     doc["model_residual_artifact_recipe"] = dict(
         block.get("model_residual_artifact_recipe") or {})
     residuals = block.get("model_residual_artifacts") or {}
@@ -1931,6 +1972,18 @@ def frozen_source_declarations(
     # -- the model layer (payoff, driver pools, recalibration) ---------------------
     lineage = Lineage(data=(DataDependency(table="phase4.capture.legacy_served"),))
     payoff = declared.get("payoff")
+    residual_recipe, residual_artifacts = {}, {}
+    for key, entry in sorted(declared.items()):
+        if not key.startswith("model_residual:"):
+            continue
+        slot = key.split(":", 1)[1]
+        recorded = state(entry["state"])
+        inline = _inline_driver_pool(recorded, lineage)
+        chosen = _release_match(release_states, inline, _driver_pool_content)
+        residual_artifacts[slot] = chosen
+        residual_recipe[slot] = {"role": chosen.role, "model_id": chosen.model_id,
+                                 "fold": chosen.fold,
+                                 "content_hash": chosen.content_hash}
     if payoff is not None:
         fit = state(payoff["state"])
         inline = _inline_payoff_artifact(fit)
@@ -1939,18 +1992,10 @@ def frozen_source_declarations(
             "before": payoff["before"], "seed": payoff["seed"],
             "draw_count": payoff["draw_count"]}
         out["payoff_artifact"] = artifact
-        residual_recipe, residual_artifacts = {}, {}
-        for key, entry in sorted(declared.items()):
-            if not key.startswith("model_residual:"):
-                continue
-            slot = key.split(":", 1)[1]
-            recorded = state(entry["state"])
-            inline = _inline_driver_pool(recorded, lineage)
-            chosen = _release_match(release_states, inline, _driver_pool_content)
-            residual_artifacts[slot] = chosen
-            residual_recipe[slot] = {"role": chosen.role, "model_id": chosen.model_id,
-                                     "fold": chosen.fold,
-                                     "content_hash": chosen.content_hash}
+    if payoff is not None or residual_artifacts:
+        # Residual declarations survive without a payoff: the bundle they
+        # build is the legitimate RESIDUAL-ONLY request (native bands it,
+        # ``source_inputs._model_block`` flags it) -- no payoff kwargs.
         out["model_residual_artifact_recipe"] = residual_recipe
         out["model_residual_artifacts"] = residual_artifacts
 
