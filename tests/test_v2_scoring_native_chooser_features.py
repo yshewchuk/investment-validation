@@ -633,3 +633,62 @@ def test_full_vector_and_chooser_score_equal_legacy(frozen, analog, tmp_path, mo
         assert result.chooser_score is None and "CHOOSER_MISSING_FEATURES" in result.flags
         assert record.forecasts.get("chooser_score") is None
         assert "CHOOSER_MISSING_FEATURES" in record.reason_codes
+
+
+def test_a_strict_capture_without_producer_role_rows_still_scores(
+        frozen, analog, tmp_path, monkeypatch):
+    """Phase 4 capture regression (the 2026-09-24 fresh-replay defect).
+
+    A strict trace carries ``features.role_model_inputs`` rows only for the
+    roles the row itself served: a forecast-sized menu row (CND-PS, BFLY-P5,
+    CTR5, RAMP7, every DYN-SV member) registers its sizing fold and the
+    chooser's 17 primitives, never the chooser's ``implied_t1``/``runup_move``
+    producer folds -- those folds are recorded at the chooser site and their
+    rows merged into ``model_inputs`` (``_merge_chooser_rows``). The frozen
+    chooser stage must then serve those folds from the full runtime facts --
+    legacy ``Scorer._chooser_frame`` feeds them the same feature frame -- and
+    score; wiping the runtime features to an absent role row left the
+    producer columns NaN and declined every such row with a native-only
+    CHOOSER_MISSING_FEATURES while legacy carried a ``chooser_score``.
+    """
+    root, _ = frozen
+    spot = 100.0
+    quotes = {("P", float(k), EXPIRY): {"bid": max(spot - k, 0.0) + 0.4,
+                                         "ask": max(spot - k, 0.0) + 0.5}
+              for k in range(70, 131)}
+    case = make_case(9, strategy="TWIN-P", spot=spot, quotes=quotes, entry_date=EVENT)
+    case["features"].update({"iv30": 55.0, "signed_streak": 2.0})
+    source = bundle(frozen, case, analog=analog, table=legacy_n_admissible_table())
+    source = SourceBundle(**{**source.__dict__, "residual_recipe": {
+        "mode": "planned_exit", "pre_iv30": 40.0},
+        "paired_residual_rows": tuple(
+            {"event_date": f"2025-{1 + i % 12:02d}-{1 + i % 27:02d}",
+             "pred_abs_move": 3.0 + i % 9, "err_move": math.sin(i) * 3.0,
+             "err_crush": -5.0 + math.cos(i) * 10.0}
+            for i in range(400))})
+    inputs = build_native_score_inputs(source)
+    # What such a trace's role capture holds: the sizing fold's row (aliased
+    # role) and the chooser's 17 primitives -- no implied_t1/runup_move rows.
+    inputs.features["role_model_inputs"] = {
+        "size": {name: case["features"][name] for name in FOLD_FEATURES},
+        "chooser": {name: case["features"][name] for name in PRIMITIVES},
+    }
+    spy = _Spy(inputs.chooser["executors"]["chooser_score"])
+    inputs.chooser["executors"]["chooser_score"] = spy
+    record = application.score_one(_request("TWIN-P"), inputs)
+    assert "CHOOSER_MISSING_FEATURES" not in record.reason_codes, record.reason_codes
+    assert spy.seen is not None, record.reason_codes
+    vector = {name: spy.seen[name] for name in CHOOSER_FEATURES}
+    producer = tuple(c for cols in PRODUCER_COLUMNS.values() for c in cols)
+    assert all(math.isfinite(vector[c]) for c in producer), producer
+
+    legacy_case = _legacy_case_from_record(case, record)
+    scorer = legacy_scorer(tmp_path, monkeypatch, frame=pool_frame())
+    assert diff(legacy_frame(scorer, legacy_case), vector, CHOOSER_FEATURES) == {}
+    artifact = registry.load_artifact(root / "chooser.joblib")
+    scorer.model = lambda *a, **k: (SimpleNamespace(id="dyn_sv_chooser_v1_1"), artifact)
+    result = _Result(legacy_case)
+    Scorer._score_chooser(scorer, SimpleNamespace(strategy="TWIN-P"), result,
+                          legacy_features(legacy_case))
+    assert result.chooser_score is not None, result.flags
+    assert record.forecasts["chooser_score"] == result.chooser_score
