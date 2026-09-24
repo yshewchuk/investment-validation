@@ -122,5 +122,10 @@ def main(argv=None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+# The `== to !=` mutant on the guard below cannot be scored: pytest imports this
+# module to collect the serving tests, and a flipped guard runs main() at import,
+# so argparse raises SystemExit(2) for the required --release-root/--health-path and
+# the runner collects nothing (ERROR, not a kill). The guard's live path is still
+# exercised end-to-end by test_launcher_subprocess_starts_on_ephemeral_port_and_serves_shell.
+if __name__ == "__main__":  # gremlin: pardon[untestable] flipping this guard runs main() during pytest's import for collection (argparse SystemExit(2) on required args), so no serving test can run; covered by the subprocess launcher test
     raise SystemExit(main())
