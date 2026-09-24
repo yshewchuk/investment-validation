@@ -964,6 +964,54 @@ def test_reporter_eta_adds_no_spurious_row_when_nothing_is_active():
     assert "2/2" in done and "0.0m" in done
 
 
+def test_reporter_overdue_final_row_is_unbounded_not_zero():
+    """The exact defect: a lone (final) row that runs past its prior must never
+    show a clamped ``0.0m`` ETA. Once it is overdue the reporter shows the
+    active-row elapsed and an explicit unknown/unbounded remaining estimate."""
+    clock = _FakeClock(0.0)
+    reporter = targeted._ProgressReporter(1, _Sink(), baseline=60.0, clock=clock)
+    reporter.begin_load()
+    reporter.end_load()
+    reporter.begin_row("019")                 # the only row; 60s baseline prior
+    bounded = reporter._format(30.0)          # 30s in < 60s -> still bounded
+    overdue = reporter._format(600.0)         # 10 min in, far past the prior
+
+    assert "0/1" in bounded and "0.5m" in bounded and "overdue" not in bounded
+    assert "overdue" in overdue and "unknown" in overdue
+    assert "unbounded" in overdue
+    # the honest statement of what remains is the row's own elapsed time:
+    assert "active 600s" in overdue
+    # never a zero-minute ETA while the final row is still running:
+    assert "0.0m" not in overdue
+
+
+def test_reporter_prices_dyn_row_by_strategy_kind_before_going_overdue():
+    """A slow DYN-SV row must be bounded by the earlier DYN-SV row's duration,
+    not by the diluted global mean of a mix of fast simple + slow DYN rows; once
+    it passes its OWN kind prior it becomes overdue/unbounded, not 0.0m."""
+    clock = _FakeClock(1000.0)
+    reporter = targeted._ProgressReporter(4, _Sink(), baseline=60.0, clock=clock)
+    reporter.begin_load()
+    reporter.end_load()
+    reporter.begin_row("001", "score_result")
+    reporter.end_row("001", 20.0)             # fast simple row
+    reporter.begin_row("002", "dyn_sv_choice")
+    reporter.end_row("002", 300.0)            # slow DYN-SV row (the prior)
+    # global observed mean = (20+300)/2 = 160s; the DYN kind mean = 300s.
+    reporter.begin_row("019", "dyn_sv_choice")     # final DYN-SV row, in flight
+    within = reporter._format(clock.t + 100.0)     # 100s in < 300s kind prior
+    past = reporter._format(clock.t + 350.0)       # 350s in > 300s kind prior
+
+    # Priced by the 300s DYN prior: leftover (300-100) + 1 queued row * 160 = 360s.
+    assert "2/4" in within and "observed" in within
+    assert "6.0m" in within and "overdue" not in within
+    # the headline rate still reports the overall mean throughput:
+    assert "rate 160s/row" in within
+    # past its own kind prior the row is honestly overdue/unknown, not 0.0m:
+    assert "overdue" in past and "unknown" in past and "0.0m" not in past
+    assert "strategy-kind" in past and "300s/row" in past
+
+
 def test_run_targeted_heartbeat_labels_loading_before_replay(tmp_path, monkeypatch):
     rec = _clean_record()
     root = _write_corpus(tmp_path / "corpus", [_pair_doc("a", rec)])

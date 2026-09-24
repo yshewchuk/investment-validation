@@ -935,6 +935,20 @@ def _observational_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def _progress_kind(corpus, fixture_id: str) -> str | None:
+    """The strategy-kind label the progress reporter buckets observed durations
+    by — the pair's ``record_kind`` (``dyn_sv_choice`` vs a single-member kind),
+    read off ALREADY-hydrated corpus data. It is a pure read of loaded state for
+    the stderr ETA only: it never touches verification or the JSON report, so a
+    flag-off run's report stays byte-identical. A missing/undeterminable kind
+    (declared-but-unloaded pair) yields ``None`` and simply falls back to the
+    global rate."""
+    pair = corpus.pairs.get(fixture_id)
+    payload = pair.get("payload") if isinstance(pair, Mapping) else None
+    kind = payload.get("record_kind") if isinstance(payload, Mapping) else None
+    return kind if isinstance(kind, str) else None
+
+
 def run_targeted(corpus_root: Path, fixture_ids, *, output=None,
                  progress_stream=None, progress_interval: float = 45.0,
                  baseline_seconds_per_row: float = BASELINE_SECONDS_PER_ROW,
@@ -976,7 +990,7 @@ def run_targeted(corpus_root: Path, fixture_ids, *, output=None,
                 + ", ".join(unknown))
         rows = []
         for fixture_id in requested:
-            progress.begin_row(fixture_id)
+            progress.begin_row(fixture_id, _progress_kind(corpus, fixture_id))
             started = time.perf_counter()
             rows.append(_build_row(corpus, declared, fixture_id))
             progress.end_row(fixture_id, time.perf_counter() - started)
@@ -1060,7 +1074,7 @@ def run_targeted_observational(corpus_root: Path, fixture_ids, *, output=None,
                 + ", ".join(unknown))
         rows = []
         for fixture_id in requested:
-            progress.begin_row(fixture_id)
+            progress.begin_row(fixture_id, _progress_kind(corpus, fixture_id))
             started = time.perf_counter()
             rows.append(_build_row_observational(corpus, declared, fixture_id))
             progress.end_row(fixture_id, time.perf_counter() - started)
@@ -1128,9 +1142,16 @@ class _ProgressReporter:
     * ``phase=replay`` — after the load. A ``provisional ETA (replay, after
       load)`` covering ONLY the replay loop. It folds the currently-active
       row's elapsed time into the remaining estimate (so it ticks down and is
-      never a static figure) and flags ``overdue`` once that row exceeds its
-      own prior. Before any row completes the per-row rate is the documented
-      ~32m/20-rows baseline; afterwards it is the observed mean.
+      never a static figure). The in-flight row is priced by its own
+      strategy-kind observed mean when that kind has finished before (so a slow
+      DYN-SV row is bounded by earlier DYN-SV rows, not by the diluted global
+      mean), else the overall observed mean, else the documented ~32m/20-rows
+      baseline. Once the active row passes that prior it flags ``overdue`` and
+      the remaining time is reported as an explicit ``unknown``/``unbounded``
+      estimate (with the row's elapsed shown) rather than a per-row leftover
+      clamped to zero — the reporter never prints a ``0.0m`` ETA while a row is
+      still running or rows remain queued, which is exactly the defect that let
+      a final DYN-SV row show ``0.0m`` for fifteen-plus minutes.
 
     ``interval`` and ``clock`` are injectable so the phase/ETA logic is
     testable against a fake clock without real sleeping."""
@@ -1149,6 +1170,10 @@ class _ProgressReporter:
         self._completed = 0
         self._observed = 0.0
         self._current: str | None = None
+        self._current_kind: str | None = None
+        # observed per strategy-kind (record_kind) totals/counters: a slow DYN-SV
+        # row is priced by earlier DYN-SV rows, not by the faster simple-row mean.
+        self._kind_obs: dict[str, tuple[int, float]] = {}
         self._started = 0.0
         self._phase = "replay"
         self._load_start = 0.0
@@ -1180,16 +1205,26 @@ class _ProgressReporter:
             self._load_seconds = self._clock() - self._load_start
             self._phase = "replay"
 
-    def begin_row(self, fixture_id: str) -> None:
+    def begin_row(self, fixture_id: str, kind: str | None = None) -> None:
+        """Start timing a row. ``kind`` (the pair's ``record_kind``, e.g.
+        ``dyn_sv_choice``) lets the ETA price an in-flight DYN-SV row by earlier
+        DYN-SV rows; it is a stderr progress hint only and never reaches the
+        report or the verification path."""
         with self._lock:
             self._current = fixture_id
+            self._current_kind = kind
             self._row_started = self._clock()
 
     def end_row(self, fixture_id: str, seconds: float) -> None:
         with self._lock:
             self._completed += 1
-            self._observed += max(seconds, 0.0)
+            spent = max(seconds, 0.0)
+            self._observed += spent
+            if self._current_kind is not None:
+                count, total = self._kind_obs.get(self._current_kind, (0, 0.0))
+                self._kind_obs[self._current_kind] = (count + 1, total + spent)
             self._current = None
+            self._current_kind = None
             self._row_started = None
 
     def _format(self, now: float) -> str:
@@ -1197,11 +1232,13 @@ class _ProgressReporter:
             phase = self._phase
             completed, total = self._completed, self._total
             current = self._current
+            current_kind = self._current_kind
             row_started = self._row_started
             rate = (self._observed / completed) if completed else self._baseline
             source = "observed" if completed else "baseline ~32m/20 rows"
+            kind_count, kind_total = self._kind_obs.get(current_kind, (0, 0.0))
+            kind_rate = (kind_total / kind_count) if kind_count else None
             load_seconds = self._load_seconds
-            baseline = self._baseline
             started = self._started
         elapsed = now - started
         stamp = time.strftime("%H:%M:%S")
@@ -1211,16 +1248,34 @@ class _ProgressReporter:
         active = current is not None
         active_elapsed = (now - row_started) if (active and row_started is not None) else 0.0
         not_started = max(total - completed - (1 if active else 0), 0)
-        leftover_active = max(rate - active_elapsed, 0.0) if active else 0.0
-        eta_seconds = leftover_active + not_started * rate
-        overdue = active and active_elapsed > rate
+        # Bound the in-flight row by its OWN strategy kind where we have seen
+        # that kind finish (a DYN-SV row is not priced by the faster simple-row
+        # mean), else the overall observed mean, else the documented baseline.
+        active_rate = kind_rate if kind_rate is not None else rate
+        prior_kind = ("strategy-kind" if kind_rate is not None
+                      else "observed" if completed else "baseline")
+        # Past that prior we cannot say when the row ends: the honest figure is
+        # an unbounded/unknown estimate with the elapsed time shown, never a
+        # per-row leftover clamped to 0.0m over still-running work.
+        overdue = active and active_elapsed > active_rate
         where = f", current: {current}" if active else ""
         load = f"; load {load_seconds:.0f}s" if load_seconds is not None else ""
         tail = " (replay, after load)" if load_seconds is not None else ""
-        flag = ", overdue" if overdue else ""
-        return (f"[targeted-replay {stamp}] phase=replay {completed}/{total} "
-                f"rows{where}; elapsed {elapsed:.0f}s{load}; provisional ETA{tail} "
-                f"{eta_seconds / 60:.1f}m (rate {rate:.0f}s/row, {source}{flag})")
+        head = (f"[targeted-replay {stamp}] phase=replay {completed}/{total} "
+                f"rows{where}; elapsed {elapsed:.0f}s{load}")
+        if overdue:
+            queued = f", {not_started} row(s) still queued" if not_started else ""
+            return (f"{head}; provisional ETA{tail} unknown - {current} overdue: "
+                    f"active {active_elapsed:.0f}s past its {active_rate:.0f}s/row "
+                    f"{prior_kind} prior{queued} (rate {rate:.0f}s/row, {source}, "
+                    f"remaining unbounded)")
+        leftover_active = max(active_rate - active_elapsed, 0.0) if active else 0.0
+        eta_seconds = leftover_active + not_started * rate
+        eta_text = f"{eta_seconds / 60:.1f}m"
+        if (active or not_started) and eta_text == "0.0m":
+            eta_text = "<0.1m"   # work remains: never print a zero-minute ETA
+        return (f"{head}; provisional ETA{tail} {eta_text} "
+                f"(rate {rate:.0f}s/row, {source})")
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval):
