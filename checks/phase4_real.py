@@ -26,6 +26,7 @@ from checks.phase4_frozen_bridge import (  # noqa: E402
     prepare_frozen_chooser,
     prepare_frozen_replay,
     with_frozen_chooser,
+    with_frozen_gate_forecast,
 )
 from checks.phase4_stored_forecasts import (  # noqa: E402
     resolve_stored_forecasts,
@@ -2262,6 +2263,15 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
     # propagates: a reference that cannot be resolved must fail the record,
     # not score without it.
     inputs = with_stored_forecasts(inputs, resolve_stored_forecasts(inputs))
+    # A declared gate forecast REFERENCE (packaged for a gate legacy declined
+    # before feeding ``native_recipes.gate``) executes as the fold its
+    # binding_id names in THIS verified release -- the same resolution
+    # ``tools.capture_tier0_corpus.strict_trace_one`` performs on the capture
+    # side, over the same hash-verified sidecar, so replay runs the identical
+    # evidence.
+    if frozen_replay is not None:
+        inputs = with_frozen_gate_forecast(
+            inputs, release_root=release_root, release=frozen_replay.release)
     return {
         "request": request,
         "inputs": inputs,
