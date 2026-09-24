@@ -8,7 +8,16 @@ name, through the EXACT repository code the full gate uses
 (``checks.phase4_real._verified_trace_bundle`` / ``_replayed_member`` /
 ``_replayed_chooser`` / ``_record_checks``), and emits value-free per-row
 evidence as JSON: the dimension checks, the numeric finding FIELD NAMES, the
-key / flag / null-mask differences, and typed incomparability reasons.
+key / flag / null-mask differences, and typed incomparability reasons. When a
+compared row's ``contracts`` check fails it also reports a compact,
+deterministic ``contract_differences`` naming which projected attributes differ
+(leg name/right/side/quantity/strike/expiry/price/cash_flow, or an
+entry/exit/execution timeline date) with both sides' values — the exact
+``_contract_projection`` the checker compares, so the diagnostic can never
+drift from the verdict it explains. Those projected leg/timeline terms are the
+structural subject of the contracts check, not the numeric parity values the
+rest of the evidence keeps value-free; a multi-member DYN-SV row indexes each
+difference by member.
 
 **This never claims sign-off.** It runs no acceptance battery, computes no
 overall Phase 4 status, writes no final evidence artifact, and modifies nothing
@@ -86,6 +95,17 @@ INCOMPARABLE = "incomparable"
 _NUMERIC_DIMENSIONS = (
     "forecasts", "simulation", "financial_diagnostics", "verdicts", "analogs",
 )
+
+#: The per-leg attributes ``phase4_real._contract_projection`` normalizes onto
+#: every leg, in the order a contract difference is reported (fixed, so the
+#: JSON is deterministic regardless of any source dict's key ordering).
+_LEG_ATTRIBUTES = (
+    "name", "right", "side", "quantity", "strike", "expiry", "price", "cash_flow",
+)
+
+#: The whole-structure trade-timeline dates the projection carries alongside the
+#: legs, in report order.
+_TIMELINE_ATTRIBUTES = ("entry_date", "exit_date", "execution_date")
 
 
 class _SelectionError(ValueError):
@@ -245,6 +265,90 @@ def _row_diffs(members) -> dict[str, Any]:
     }
 
 
+def _contract_side_projections(native, record) -> tuple[dict, dict]:
+    """Both sides of one member's ``contracts`` projection, built through the
+    EXACT helper the checker compares (``phase4_real._contract_projection``) and
+    with the identical caller-side extraction ``_record_checks`` uses (native's
+    ``legs``/``entry_exit_plan``/``quote_provenance``; legacy record's
+    ``legs``/``entry_date``/``exit_date``/``quote_date``). Reusing the projection
+    is the whole point: this can never disagree with the checker's own
+    ``contracts`` verdict, so a reported difference always matches a real one."""
+    native_projection = phase4_real._contract_projection(
+        native.legs,
+        entry_date=native.entry_exit_plan.get("entry_date"),
+        exit_date=native.entry_exit_plan.get("exit_date"),
+        execution_date=native.quote_provenance.get("quote_date"),
+    )
+    legacy_projection = phase4_real._contract_projection(
+        record.get("legs") or (),
+        entry_date=record.get("entry_date"),
+        exit_date=record.get("exit_date"),
+        execution_date=record.get("quote_date"),
+    )
+    return native_projection, legacy_projection
+
+
+def _projected_contract_diff(native_projection, legacy_projection) -> dict | None:
+    """Attribute-level differences between two contract projections, or ``None``
+    when they are equal. Walks the aligned legs attribute-by-attribute in the
+    fixed report order, flags a leg-count mismatch as a scalar (never dumping an
+    entire leg), and names any timeline date that differs — always with BOTH
+    sides' values, which is what lets a reader see the actual contract drift.
+    Only structural leg/timeline terms are reported, so this stays bounded."""
+    native_legs, legacy_legs = native_projection["legs"], legacy_projection["legs"]
+    count_mismatch = len(native_legs) != len(legacy_legs)
+    leg_diffs = []
+    for index in range(min(len(native_legs), len(legacy_legs))):
+        native_leg, legacy_leg = native_legs[index], legacy_legs[index]
+        for attribute in _LEG_ATTRIBUTES:
+            native_value = native_leg.get(attribute)
+            legacy_value = legacy_leg.get(attribute)
+            if native_value != legacy_value:
+                leg_diffs.append({
+                    "index": index, "attribute": attribute,
+                    "native": native_value, "legacy": legacy_value,
+                })
+    timeline_diffs = []
+    for attribute in _TIMELINE_ATTRIBUTES:
+        native_value = native_projection.get(attribute)
+        legacy_value = legacy_projection.get(attribute)
+        if native_value != legacy_value:
+            timeline_diffs.append({
+                "attribute": attribute,
+                "native": native_value, "legacy": legacy_value,
+            })
+    if not (count_mismatch or leg_diffs or timeline_diffs):
+        return None
+    diff: dict[str, Any] = {}
+    if count_mismatch:
+        diff["leg_count"] = {"native": len(native_legs), "legacy": len(legacy_legs)}
+    if leg_diffs:
+        diff["legs"] = leg_diffs
+    if timeline_diffs:
+        diff["timeline"] = timeline_diffs
+    return diff
+
+
+def _member_contract_diff(member) -> dict | None:
+    """One member's contract difference (``None`` when its contracts agree)."""
+    native_projection, legacy_projection = _contract_side_projections(
+        member["native"], member["record"])
+    return _projected_contract_diff(native_projection, legacy_projection)
+
+
+def _row_contract_diffs(members):
+    """Row-level ``contract_differences``: a single member's dict when there is
+    one, else a member-INDEXED list (``{"member": i, ...}``, ascending, only the
+    members that differ) so a multi-member DYN-SV row shows which ranked member's
+    contract drifted rather than a positionally-ambiguous list."""
+    per_member = [_member_contract_diff(m) for m in members]
+    if len(members) == 1:
+        return per_member[0]
+    entries = [{"member": index, **diff}
+               for index, diff in enumerate(per_member) if diff is not None]
+    return entries or None
+
+
 def _replay_regular_member(record, verified):
     """Native-replay one verified (non-chooser) trace and run the full gate's
     per-record comparison. Raises whatever the repository replay/verify code
@@ -399,6 +503,13 @@ def _build_row(corpus, declared, fixture_id: str) -> dict[str, Any]:
                 "never_ran_dimensions"):
         if diffs[key] is not None:
             result[key] = diffs[key]
+    # A contracts mismatch already failed the row's check; explain WHICH
+    # projected attribute drifted (reusing the checker's own projection, so the
+    # reported difference can never disagree with the ``contracts`` verdict).
+    if not checks.get("contracts", True):
+        contract_diffs = _row_contract_diffs(members)
+        if contract_diffs is not None:
+            result["contract_differences"] = contract_diffs
     if chooser:
         result["chooser_findings"] = sorted(n for n, ok in selection.items() if not ok)
     return result
