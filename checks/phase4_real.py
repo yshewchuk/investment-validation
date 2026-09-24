@@ -2624,6 +2624,290 @@ def _plant_structural_defect(record: Mapping[str, Any], native, dimension: str):
     raise ValueError(f"unknown structural defect dimension {dimension!r}")
 
 
+# -- bounded, actionable diagnostics for failing compared rows ----------------
+#
+# ``row_dimension_checks``/``row_numeric_findings``/``row_*_differences`` are
+# value-free BY CONSTRUCTION (see the comment above ``row_dimension_checks``),
+# which is what the comparison receipt was built to carry. That is exactly why
+# one gate run still cannot root-cause the few fields that disagree: no
+# contract attribute pair, no failed-numeric scalar pair, no chooser
+# selection pair appears anywhere in the evidence. ``row_diagnostics`` adds
+# those values, and ONLY those values, as a separate map inside
+# ``saved_release_comparison``: it is computed from the same objects the
+# comparators already read, but it never joins ``rows`` -- the list whose
+# ``content_hash`` IS ``comparison_receipt`` -- so no decision, control,
+# receipt or gate status can be influenced by diagnostic data. Every section
+# is bounded (capped entries, truncated text) so a row failing many checks,
+# or a DYN-SV row with many failing members, cannot grow the report without
+# limit, and every leaf goes through ``_diagnostic_scalar`` so the whole map
+# stays strict-JSON serializable and deterministic (NaN/+/-inf become the
+# foundation's ``__nonfinite__`` tag, containers are never dumped).
+
+#: Leg attributes of ``_contract_projection``, in fixed report order, and the
+#: whole-structure timeline dates it carries alongside them -- the exact
+#: fields the ``contracts`` check compares (``tools/phase4_targeted_replay.py``
+#: walks the same projection for the same reason: a diagnostic that reuses the
+#: checker's own projection can never contradict the verdict it explains).
+_DIAGNOSTIC_LEG_ATTRIBUTES = (
+    "name", "right", "side", "quantity", "strike", "expiry", "price",
+    "cash_flow",
+)
+_DIAGNOSTIC_TIMELINE_ATTRIBUTES = ("entry_date", "exit_date", "execution_date")
+#: Caps. Member entries per row (the DYN-SV menu is 7; the cap exists so no
+#: future widening of a row's membership can un-bound the report), differing
+#: leg attributes per member, scalar-valued fields per numeric dimension,
+#: warnings per flag failure, and characters per free-text excerpt.
+_DIAGNOSTIC_MEMBER_CAP = 12
+_DIAGNOSTIC_LEG_DIFF_CAP = 12
+_DIAGNOSTIC_NUMERIC_FIELD_CAP = 24
+_DIAGNOSTIC_WARNING_CAP = 8
+_DIAGNOSTIC_TEXT_CHARS = 240
+
+
+def _diagnostic_scalar(value: Any) -> Any:
+    """One diagnostic value, JSON-deterministic and BOUNDED.
+
+    ``None``/bool/int pass through (the point of the diagnostics is that
+    ``None`` IS a value worth showing: legacy-absent-versus-native-present is
+    a root cause); floats pass through only when finite, with NaN/inf
+    rendered as the same ``{"__nonfinite__": repr}`` tag
+    ``engine.v2.foundation.tag_nonfinite`` uses, so strict JSON writers never
+    see a bare ``NaN``; strings -- a leg ``name``, a rendered date, a chosen
+    strategy, any corpus-supplied text -- are display material, never a
+    bounded shape, and go through ``_diagnostic_text`` so an arbitrary
+    (however long) string is capped at ``_DIAGNOSTIC_TEXT_CHARS`` plus the
+    deterministic ``...[truncated]`` marker instead of passing through
+    unbounded; anything else (a container, a dataclass -- none of which a
+    numeric view or contract projection should ever hold) collapses to a
+    type marker, never its contents: diagnostics name scalar values, they
+    never dump records, feature vectors, all legs or full model inputs.
+    This is an ENCODING for display only: every comparison that decides
+    whether to report a difference is made on the RAW values upstream, never
+    on this output (two distinct NaNs encode to one tag but are a real
+    inequality the ``contracts`` check already acted on).
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _diagnostic_text(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return float(value)
+        return {NONFINITE_KEY: repr(value)}
+    return f"<{type(value).__name__}>"
+
+
+def _diagnostic_text(value: Any) -> str:
+    """Bounded single-line excerpt of a free-text diagnostic field."""
+    text = " ".join(str(value).split())
+    if len(text) > _DIAGNOSTIC_TEXT_CHARS:
+        text = text[:_DIAGNOSTIC_TEXT_CHARS] + "...[truncated]"
+    return text
+
+
+def _diagnostic_bound(items: list, cap: int, key: str) -> dict[str, Any]:
+    """A capped list of bounded diff entries, with the omitted count named
+    rather than silently dropped (``key`` becomes the ``..._omitted`` field
+    when truncation happens)."""
+    if len(items) <= cap:
+        return {"entries": items}
+    return {"entries": items[:cap], f"{key}_omitted": len(items) - cap}
+
+
+def _contract_side_projections(native, record: Mapping[str, Any]) -> tuple[dict, dict]:
+    """Both sides of one member's ``contracts`` projection, built through the
+    EXACT ``_contract_projection`` and with the identical per-side field
+    extraction ``_record_checks`` uses: native's ``legs``/``entry_exit_plan``/
+    ``quote_provenance``, legacy's ``legs``/``entry_date``/``exit_date``/
+    ``quote_date``. Reusing the projection is what ties every reported
+    difference to the checker's own verdict."""
+    native_projection = _contract_projection(
+        native.legs,
+        entry_date=native.entry_exit_plan.get("entry_date"),
+        exit_date=native.entry_exit_plan.get("exit_date"),
+        execution_date=native.quote_provenance.get("quote_date"),
+    )
+    legacy_projection = _contract_projection(
+        record.get("legs") or (),
+        entry_date=record.get("entry_date"),
+        exit_date=record.get("exit_date"),
+        execution_date=record.get("quote_date"),
+    )
+    return native_projection, legacy_projection
+
+
+def _diagnostic_contract_diff(native, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Which projected leg attributes / timeline dates make this member's
+    ``contracts`` check fail, each with BOTH sides' values, plus a leg-count
+    difference when the counts differ. Only the differing fixed attributes
+    are named -- never a full leg or the whole projection."""
+    native_projection, legacy_projection = _contract_side_projections(native, record)
+    native_legs = native_projection["legs"]
+    legacy_legs = legacy_projection["legs"]
+    diff: dict[str, Any] = {}
+    if len(native_legs) != len(legacy_legs):
+        diff["leg_count"] = {"native": len(native_legs), "legacy": len(legacy_legs)}
+    leg_diffs = []
+    for index in range(min(len(native_legs), len(legacy_legs))):
+        native_leg, legacy_leg = native_legs[index], legacy_legs[index]
+        for attribute in _DIAGNOSTIC_LEG_ATTRIBUTES:
+            # Compare the RAW projected values -- the same ``!=`` the
+            # projection equality the ``contracts`` check applied is built
+            # from -- and encode/truncate ONLY what a raw difference
+            # surfaced. Encoding first would hide the pair-equal-looking
+            # failures: two distinct NaN strikes fail the check (NaN !=
+            # NaN) yet both encode to one identical ``__nonfinite__`` tag,
+            # so an encoded-value comparison would report no difference at
+            # all for a check that just failed.
+            native_raw = native_leg.get(attribute)
+            legacy_raw = legacy_leg.get(attribute)
+            if native_raw != legacy_raw:
+                leg_diffs.append({
+                    "leg": index, "attribute": attribute,
+                    "native": _diagnostic_scalar(native_raw),
+                    "legacy": _diagnostic_scalar(legacy_raw),
+                })
+    if leg_diffs:
+        diff["legs"] = _diagnostic_bound(leg_diffs, _DIAGNOSTIC_LEG_DIFF_CAP, "legs")
+    timeline_diffs = []
+    for attribute in _DIAGNOSTIC_TIMELINE_ATTRIBUTES:
+        native_raw = native_projection.get(attribute)
+        legacy_raw = legacy_projection.get(attribute)
+        if native_raw != legacy_raw:
+            timeline_diffs.append({
+                "attribute": attribute,
+                "native": _diagnostic_scalar(native_raw),
+                "legacy": _diagnostic_scalar(legacy_raw),
+            })
+    if timeline_diffs:
+        diff["timeline"] = timeline_diffs  # at most one per attribute: 3 max
+    return diff
+
+
+def _diagnostic_numeric_diff(
+    record: Mapping[str, Any], native, finding_fields: Mapping[str, list],
+) -> dict[str, Any]:
+    """For every numeric dimension whose comparison produced findings: each
+    failed field NAME (already in ``row_numeric_findings``) paired with its
+    legacy/native scalar values straight out of ``_numeric_views`` -- the
+    same views the comparator read, including ``None`` (None-versus-number
+    is itself a root cause the value-free evidence could never show)."""
+    expected, actual = _numeric_views(record, native)
+    out: dict[str, Any] = {}
+    for dimension in sorted(finding_fields):
+        fields = sorted(finding_fields[dimension])
+        if not fields:
+            continue
+        expected_view = expected.get(dimension, {})
+        actual_view = actual.get(dimension, {})
+        entries = [{
+            "field": field,
+            "legacy": _diagnostic_scalar(expected_view.get(field)),
+            "native": _diagnostic_scalar(actual_view.get(field)),
+        } for field in fields[:_DIAGNOSTIC_NUMERIC_FIELD_CAP]]
+        bounded: dict[str, Any] = {"fields": entries}
+        if len(fields) > _DIAGNOSTIC_NUMERIC_FIELD_CAP:
+            bounded["fields_omitted"] = len(fields) - _DIAGNOSTIC_NUMERIC_FIELD_CAP
+        out[dimension] = bounded
+    return out
+
+
+def _diagnostic_flag_context(
+    record: Mapping[str, Any], native,
+) -> dict[str, Any]:
+    """Bounded refusal context for a failed ``flags`` check, when available:
+    the legacy record's own human-readable ``detail`` excerpt and the native
+    record's ``warnings``. The flag NAME sets are already value-free evidence
+    in ``row_flag_differences``; these two fields say WHY each side flagged
+    what it did."""
+    context: dict[str, Any] = {}
+    detail = record.get("detail") if isinstance(record, Mapping) else None
+    if isinstance(detail, str) and detail.strip():
+        context["legacy_detail"] = _diagnostic_text(detail)
+        if len(" ".join(detail.split())) > _DIAGNOSTIC_TEXT_CHARS:
+            context["legacy_detail_truncated"] = True
+    warnings = tuple(getattr(native, "warnings", ()) or ())
+    if warnings:
+        context["native_warnings"] = [
+            _diagnostic_text(warning) for warning in warnings[:_DIAGNOSTIC_WARNING_CAP]
+        ]
+        if len(warnings) > _DIAGNOSTIC_WARNING_CAP:
+            context["native_warnings_omitted"] = len(warnings) - _DIAGNOSTIC_WARNING_CAP
+    return context
+
+
+def _diagnostic_chooser_diff(
+    record: Mapping[str, Any], native, selection: Mapping[str, bool],
+) -> dict[str, Any]:
+    """The chooser selection triple, both sides, with the failing checks
+    named: which of strategy/menu/margin drifted, and to what."""
+    native_selection = dict(getattr(native, "chooser_selection", None) or {})
+    return {
+        "failed": sorted(name for name, agree in selection.items() if not agree),
+        "legacy": {
+            "chosen_strategy": _diagnostic_scalar(record.get("chosen_strategy")),
+            "menu_size": _diagnostic_scalar(record.get("menu_size")),
+            "margin": _diagnostic_scalar(record.get("chosen_margin")),
+        },
+        "native": {
+            "chosen_strategy": _diagnostic_scalar(native_selection.get("strategy")),
+            "menu_size": _diagnostic_scalar(native_selection.get("menu_size")),
+            "margin": _diagnostic_scalar(native_selection.get("margin")),
+        },
+    }
+
+
+def _row_diagnostics(
+    members, member_checks, numeric_findings, row_checks,
+    record, native, selection,
+) -> dict[str, Any]:
+    """One failing compared row's diagnostics.
+
+    Members are keyed by their ORIGINAL frame index -- for a DYN-SV row the
+    index ``_chooser_members`` verified against the trace's own
+    ``member_index``, for a regular row always ``0`` -- so a sparse failure
+    (say members 1 and 4 of a 7-row menu) names exactly those indices rather
+    than renumbered positions. Only failing checks produce sections; a member
+    whose checks all agree never appears. The chooser section is row-level
+    (the selection is one verdict over the combined native)."""
+    entries: dict[str, Any] = {}
+    omitted_members = 0
+    for index in range(len(members)):
+        failed = sorted(
+            name for name, agree in member_checks[index].items() if not agree)
+        if not failed:
+            continue
+        if len(entries) >= _DIAGNOSTIC_MEMBER_CAP:
+            omitted_members += 1
+            continue
+        member_record, member_native = members[index][0], members[index][2]
+        entry: dict[str, Any] = {"failed_checks": failed}
+        if "contracts" in failed:
+            entry["contracts"] = _diagnostic_contract_diff(
+                member_native, member_record)
+        findings = {
+            dimension: fields
+            for dimension, fields in numeric_findings[index].items()
+            if fields and dimension in failed
+        }
+        if findings:
+            entry["numeric"] = _diagnostic_numeric_diff(
+                member_record, member_native, findings)
+        if "flags" in failed:
+            context = _diagnostic_flag_context(member_record, member_native)
+            if context:
+                entry["flags"] = context
+        entries[str(index)] = entry
+    diagnostics: dict[str, Any] = {"members": entries}
+    if omitted_members:
+        diagnostics["members_omitted"] = omitted_members
+    if selection is not None and row_checks.get("chooser") is False:
+        diagnostics["chooser"] = _diagnostic_chooser_diff(record, native, selection)
+    return diagnostics
+
+
 def _native_parity(corpus, progress=NO_PROGRESS) -> tuple[dict, dict]:
     """Compare only complete, hash-verified traces from the saved release.
 
@@ -2638,6 +2922,12 @@ def _native_parity(corpus, progress=NO_PROGRESS) -> tuple[dict, dict]:
     rows = []
     native_ids = []
     legacy_ids = []
+    #: Additive, bounded diagnostics for compared rows with failed checks --
+    #: built in parallel to ``rows`` and NEVER stored inside a ``row``, so
+    #: ``comparison_receipt = content_hash(rows)`` stays byte-identical to a
+    #: run without diagnostics (computed, added separately from the hashed
+    #: rows; see the header comment above ``_diagnostic_scalar``).
+    row_diagnostics: dict[str, Any] = {}
     dispositions = {"compared": 0, "refused_as_expected": 0, "incomparable": 0}
     runtime_stage_counts = {stage: 0 for stage in _REQUIRED_TRACE_STAGES}
     structural_negative_controls = {
@@ -2837,6 +3127,18 @@ def _native_parity(corpus, progress=NO_PROGRESS) -> tuple[dict, dict]:
                 chooser_defect_detected = not mutated_selection["chosen_strategy"]
         rows.append(row)
         native_ids.append(native.payload_hash)
+        #: Bounded diagnostics for this row IF any check failed -- read-only
+        #: over data this loop already computed (``members``, the per-member
+        #: ``member_checks``/``numeric_findings``, and for a chooser row the
+        #: ``selection`` triple above). Stored OUTSIDE ``rows``, so the
+        #: comparison receipt, the decision logic above and the control
+        #: loops are untouched by diagnostic content; an incomparable or
+        #: excluded row is never diagnosed and keeps its typed reason.
+        if not all(checks.values()):
+            row_diagnostics[fixture_id] = _row_diagnostics(
+                members, member_checks, numeric_findings, checks,
+                record, native, selection if chooser_pair else None,
+            )
     #: Fold the running bool + attempted/reason tracking into the tri-state
     #: verdict the evidence carries. ``passed`` overrides everything (a
     #: later row proving the control works is what stops the search);
@@ -3017,6 +3319,11 @@ def _native_parity(corpus, progress=NO_PROGRESS) -> tuple[dict, dict]:
         "row_flag_differences": row_flag_differences,
         "row_null_mask_differences": row_null_mask_differences,
         "row_never_ran_dimensions": row_never_ran_dimensions,
+        # Additive, value-bearing diagnostics for compared rows that failed
+        # at least one check. Separate from every hashed structure above
+        # (``comparison_receipt`` hashes ``rows``, not this map); no decision,
+        # control or receipt reads it.
+        "row_diagnostics": row_diagnostics,
         "dimension_rollup": dimension_rollup,
         "dispositions": tuple({
             "fixture_id": row["fixture_id"],
