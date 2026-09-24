@@ -478,15 +478,40 @@ def _check_extrapolated(geometry: Geometry, pricing: Pricing,
 
 
 def _gate_in_domain(inputs: NativeScoreInputs, values: Mapping[str, Any]) -> bool:
-    """Mirrors engine/score.py:2475 ``_gate_in_domain`` (mcap floor clause).
+    """Mirrors engine/score.py:3317 ``_gate_in_domain`` (mcap floor clause).
 
-    Legacy's computed-moves clause was removed 2026-09-06 (see the docstring
-    at that line); only the market-cap floor remains live. Reads ``mcap_log``
-    from the model's own feature vector (never a legacy answer field). A
-    missing or non-finite ``mcap_log`` is in-domain by construction, matching
-    legacy's silent fall-through for the same cases.
+    Legacy's computed-moves clause was removed 2026-09-06; only the market-cap
+    floor remains live. It is a predicate on the BASE feature frame: legacy
+    evaluates it as ``Scorer._gate_in_domain(request, features)`` with
+    ``features`` being ``Scorer._features``' post-pricing frame (engine/score.py
+    :1990 -> :4113), i.e. ``features["mcap_log"]`` read off that one frame.
+
+    So must native -- and it cannot get there through :func:`_facts`. ``_facts``
+    deliberately merges the flattened forecast/chooser ``model_inputs`` OVER
+    ``source_features`` (stages.py:515-516), because the model EXECUTIONs want
+    their own role vectors to win. But the domain guard is not a model execution:
+    a role vector records ``mcap_log`` on its own (often earlier) frame, and a
+    non-finite one is kept verbatim rather than dropped --
+    ``_coerce_feature_value`` returns ``float("nan")`` for a missing DAILY_STATE
+    column (tools/capture_tier0_corpus.py:577-587). When such a NaN shadows the
+    base frame's real, below-floor ``mcap_log``, native reads "no market cap",
+    calls the row in-domain and omits the ``OUT_OF_DOMAIN`` refusal that legacy,
+    reading the base frame directly, still stamps. That is a per-row semantic
+    divergence, not a data defect, so the guard is defined on the same frame
+    legacy defines it on.
+
+    ``source_features`` (the captured base frame, engine/score.py:2706-2711) is
+    the authoritative source. The merged ``_facts`` view is consulted ONLY when
+    the base frame carries no ``mcap_log`` key at all -- the compatibility path
+    (``NativeScoreInputs.from_legacy_fields`` and the synthetic fixtures), where
+    there is no separate source snapshot; a real capture always has one, so this
+    never re-introduces the shadow there. A missing or non-finite ``mcap_log``
+    is in-domain by construction, matching legacy's ``np.isfinite`` fall-through.
     """
-    mcap_log = _finite(_facts(inputs, values).get("mcap_log"))
+    base = inputs.features.get("source_features")
+    holder = (base if isinstance(base, Mapping) and "mcap_log" in base
+              else _facts(inputs, values))
+    mcap_log = _finite(holder.get("mcap_log"))
     if mcap_log is None:
         return True
     return mcap_log >= log(GATE_MCAP_FLOOR)

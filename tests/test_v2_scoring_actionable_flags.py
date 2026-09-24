@@ -61,8 +61,8 @@ def _analog_block() -> dict:
     }
 
 
-def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
-           quotes=None, diagnostics=None, simulation=None,
+def _inputs(*, context_overrides=None, model_inputs=None, source_features=None,
+           gate=None, quotes=None, diagnostics=None, simulation=None,
            analogs=None) -> NativeScoreInputs:
     context = {
         "ticker": "AAA",
@@ -80,9 +80,12 @@ def _inputs(*, context_overrides=None, model_inputs=None, gate=None,
         "driver_name": "abs_move",
         "models": {"driver_prediction": {"intercept": 0.0, "coefficients": {}}},
     }
+    features = {"model_inputs": dict(model_inputs or {})}
+    if source_features is not None:
+        features["source_features"] = dict(source_features)
     return NativeScoreInputs(
         context=context,
-        features={"model_inputs": dict(model_inputs or {})},
+        features=features,
         forecast=forecast,
         geometry=None,
         pricing=None,
@@ -139,6 +142,49 @@ def test_out_of_domain_does_not_fire_above_mcap_floor():
     gate = {"model": {"intercept": 0.5, "coefficients": {}}, "threshold": 0.0}
     values = assemble_native_values(_inputs(
         model_inputs={"mcap_log": math.log(2e9)}, gate=gate,
+    ))
+    assert "OUT_OF_DOMAIN" not in values["flags"]
+    assert values.get("gate_score") == 0.5
+
+
+# -- Gate domain guard reads the base frame, not a shadowing model vector ----
+# engine/score.py:4113 evaluates the market-cap floor on the ONE base feature
+# frame (``_gate_in_domain(request, features)``), never on a model's own
+# feature vector. Native's ``_facts`` merges the flattened forecast/chooser
+# ``model_inputs`` OVER ``source_features`` (right for the models, wrong here),
+# and a role vector keeps a non-finite DAILY_STATE ``mcap_log`` verbatim as NaN
+# (capture_tier0_corpus.py:577-587). Both directions below fail if the guard
+# reads ``_facts`` instead of the base frame legacy gates on.
+
+
+def test_out_of_domain_fires_when_a_nan_model_vector_shadows_the_base_frame():
+    # The row-008 class of divergence: base frame mcap_log is a real, finite
+    # value below the floor; the model_inputs vector carries NaN (a role's
+    # non-finite market cap, kept as-is at capture). Legacy still refuses;
+    # native must stamp OUT_OF_DOMAIN off the base frame, not read the NaN as
+    # "no market cap" and let the small name through.
+    import math
+    gate = {"model": {"intercept": 0.5, "coefficients": {}}, "threshold": 0.0}
+    values = assemble_native_values(_inputs(
+        model_inputs={"mcap_log": float("nan")},
+        source_features={"mcap_log": math.log(1e8)},
+        gate=gate,
+    ))
+    assert "OUT_OF_DOMAIN" in values["flags"]
+    assert values.get("gate_score") is None
+
+
+def test_out_of_domain_does_not_fire_when_the_base_frame_is_in_domain():
+    # Mirror of the case above: the base frame is comfortably above the floor
+    # while a shadowing model vector sits below it. An unrelated STR-THRU row
+    # must NOT be stamped OUT_OF_DOMAIN off the model vector; the guard reads
+    # the base frame and lets the gate run.
+    import math
+    gate = {"model": {"intercept": 0.5, "coefficients": {}}, "threshold": 0.0}
+    values = assemble_native_values(_inputs(
+        model_inputs={"mcap_log": math.log(1e8)},
+        source_features={"mcap_log": math.log(2e9)},
+        gate=gate,
     ))
     assert "OUT_OF_DOMAIN" not in values["flags"]
     assert values.get("gate_score") == 0.5
