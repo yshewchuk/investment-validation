@@ -8,16 +8,22 @@ construction.
 
 Hard rules from the guide, enforced here:
 
-* **Binds 0.0.0.0 by default.** This makes the dashboard reachable through a
-  published container port and from other interfaces on the host.
-  ``DASHBOARD_HOST`` / ``DASHBOARD_PORT`` can still override the bind.
-  Network access controls remain responsible for protecting the position and
-  licensed quote data exposed by the board.
-* **Quota-spending actions are local-only.** ``POST /api/refresh`` shells out
-  to the nightly job with ``--no-publish``.
+* **Binds 127.0.0.1 (loopback) by default.** The quota-spending
+  ``POST /api/refresh`` fails direct remote connections by default, but a
+  same-host tunnel or reverse proxy can still front the loopback listener and
+  expose it. ``DASHBOARD_HOST`` / ``DASHBOARD_PORT`` still override the
+  bind: deliberately set ``DASHBOARD_HOST=0.0.0.0`` for a published container
+  port or another host interface, and protect that interface with your own
+  access controls — the board discloses position intent and redistributes
+  licensed quote data.
+* **Quota-spending actions are local by default.** ``POST /api/refresh`` shells
+  out to the nightly job with ``--no-publish``. Local is the default, not a
+  guarantee: a same-host tunnel or reverse proxy can front the loopback
+  listener, so exposing it is an operator decision and whatever fronts it must
+  gate the unauthenticated route.
 * Port 8711 was the semis scanner's; that dashboard is retired, and this one
-  moved onto its port (2026-09-07) so a container with only 8711 published
-  reaches it without an env override.
+  moved onto its port (2026-09-07). Reaching it through a published container
+  port now takes the deliberate ``DASHBOARD_HOST=0.0.0.0`` override above.
 
 Run::
 
@@ -156,8 +162,8 @@ def refresh():
 # The bundle itself, served LAST so /api/* routes win.
 app.mount("/", StaticFiles(directory=str(BUNDLE), html=True), name="bundle")
 
-#: Every interface on port 8711 unless the environment says otherwise.
-DEFAULT_HOST = "0.0.0.0"
+#: Loopback only by default; set DASHBOARD_HOST=0.0.0.0 to bind elsewhere on purpose.
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8711
 
 if __name__ == "__main__":

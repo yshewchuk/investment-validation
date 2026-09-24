@@ -3,10 +3,13 @@
 a snapshot unauthenticated, on ANY bind address.
 
 Context (see ``dashboard-bind-all-interfaces`` in project memory): the
-LEGACY desk app (``dashboard/earnings_app.py``) defaults to binding
-``0.0.0.0`` with no auth layer at all, and its ``POST /api/refresh`` is
-reachable by anyone who can route to the port. The v2 replacement for
-phone/remote access is ``engine.v2.dashboard.preview`` (CLI launcher) over
+LEGACY desk app (``dashboard/earnings_app.py``) now defaults to binding
+loopback (127.0.0.1) after this branch, but it still has no auth layer at
+all: its unauthenticated ``POST /api/refresh`` can still be exposed via an
+explicit wide bind (``DASHBOARD_HOST=0.0.0.0``) or a same-host tunnel or
+reverse proxy fronting the loopback listener. The v2 replacement for
+phone/remote access requires its token: it is
+``engine.v2.dashboard.preview`` (CLI launcher) over
 ``engine.v2.serving.operations.create_server`` -- a token-gated transport
 where Cloudflare Access (or any perimeter control) is defense in depth, not
 the only thing standing between the board and the network, because the app
