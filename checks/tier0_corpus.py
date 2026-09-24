@@ -44,8 +44,12 @@ O30. An earlier version ran a "reordered inputs" case here that iterated sorted
 ids whichever way the files were loaded; it could not fail, so it is gone
 rather than kept as a claim.
 
-Stdlib plus ``engine/v2/diagnosis`` only. It must run in a bare checkout with
-no pandas, no store and no models, or the "every edit" commitment is not real.
+Stdlib plus ``engine/v2/diagnosis`` and ``engine/v2/foundation/canonical``
+only -- the latter just for :func:`iter_canonical_json`, the chunked generator
+a bounded shared-document fragment is assembled from (see
+:class:`_IdentityFragments`); neither pulls anything beyond the standard
+library. It must run in a bare checkout with no pandas, no store and no
+models, or the "every edit" commitment is not real.
 """
 from __future__ import annotations
 
@@ -84,6 +88,7 @@ from engine.v2.diagnosis import (  # noqa: E402
     merge_receipts,
     problem,
 )
+from engine.v2.foundation.canonical import iter_canonical_json  # noqa: E402
 
 __all__ = ["Corpus", "load", "run", "main", "derive_covers", "seeded_controls",
            "derived_uncovered", "TIME_BUDGET_SECONDS", "CorpusFormatError",
@@ -320,13 +325,17 @@ class Corpus:
     index: dict[str, Any]
     pairs: dict[str, dict] = field(default_factory=dict)
     #: Change B (§ "pass fragments into case_digest and case_addressing"):
-    #: `load()`'s own identity-keyed shared cache, wrapped so
+    #: `load()`'s whole shared DOCUMENTS keyed by identity, wrapped so
     #: `content_hash(..., fragments=corpus.fragments)` renders a shared
-    #: subtree once per DIGEST instead of once per referencing pair. `None`
-    #: when this corpus loaded no shared references at all (the common case
-    #: for a synthetic/old-format corpus) -- callers pass it straight to
-    #: `content_hash`'s `fragments=` kwarg either way; `fragments=None` is
-    #: that function's own no-op path.
+    #: subtree once per DIGEST instead of once per referencing pair. Each
+    #: cached document's text is BOUNDED (see :class:`_IdentityFragments`):
+    #: a document that would exceed the per-fragment or aggregate budget --
+    #: including one with a translation table nested inside it -- is not
+    #: cached, and the generator streams it instead. Translation-row tables
+    #: are not direct fragments. `None` when this corpus loaded no shared
+    #: document at all (a `$rows`-only or old-format/synthetic corpus) --
+    #: callers pass it straight to `content_hash`'s `fragments=` kwarg either
+    #: way; `fragments=None` is that function's own no-op path.
     fragments: Any = None
 
     @property
@@ -645,40 +654,100 @@ def _resolve_rows_reference(node: dict, shared_dir: Path,
     return rows
 
 
+#: Hard bounds on the canonical text :class:`_IdentityFragments` is allowed to
+#: memoize: one shared document's text is cached only up to
+#: ``_FRAGMENTS_MAX_CHARS_PER_FRAGMENT`` characters (1 Mi), and every cached
+#: document together up to ``_FRAGMENTS_MAX_TOTAL_CHARS`` (16 Mi). The real
+#: corpus's shared documents can embed resolved translation rows -- a single
+#: logical document can therefore run to hundreds of megabytes -- so an
+#: unbounded cache would re-materialize exactly the whole-table string the
+#: fragment path exists to avoid. A subtree that would breach either bound is
+#: NOT cached: :meth:`_IdentityFragments.canonical` returns ``None`` and
+#: ``iter_canonical_json`` streams it, byte-for-byte, piece by piece.
+_FRAGMENTS_MAX_CHARS_PER_FRAGMENT = 1 << 20
+_FRAGMENTS_MAX_TOTAL_CHARS = 16 << 20
+
+
 class _IdentityFragments:
     """``content_hash``'s ``fragments`` protocol (``engine/v2/foundation/
-    canonical.py``), backed by ``load()``'s own ``shared_cache``/
-    ``table_cache``: every ``$shared``/``$rows`` (``identity`` order)
-    reference in one :func:`load` call already resolves to a SINGLE Python
-    object per digest (``_resolve_shared``'s and
-    ``_load_translation_table``'s docstrings), reused by identity
-    everywhere it is referenced. Handing that same set of objects to
-    ``content_hash`` as ``fragments`` renders each one ONCE per digest
-    instead of once per referencing pair -- canonicalize-and-hash are
-    already fused (``canonical.py`` module docstring), so this changes
-    nothing about the hash produced, only how many times a shared subtree's
-    text is built (pinned byte-identical in
+    canonical.py``), backed by ``load()``'s whole shared DOCUMENTS: every
+    ``$shared`` reference in one :func:`load` call already resolves to a
+    SINGLE Python object per digest (``_resolve_shared``'s docstring), reused
+    by identity everywhere it is referenced. Handing those objects to
+    ``content_hash`` as ``fragments`` renders each one ONCE per digest instead
+    of once per referencing pair -- canonicalize-and-hash are already fused
+    (``canonical.py`` module docstring), so this changes nothing about the
+    hash produced, only how many times a shared subtree's text is built
+    (pinned byte-identical in
     ``tests/test_tier0_corpus.py::test_fragments_do_not_change_the_hash``).
 
-    Deliberately simpler than ``tools/capture_tier0_corpus.py``'s
-    ``_SharedTraceDocuments``: no LRU eviction, because the shared set here
-    is already bounded by the corpus's own ``shared/`` directory (one entry
-    per DISTINCT digest, not per occurrence) rather than per-candidate
-    working sets during a live scoring run.
+    Translation-row tables (``load()``'s ``table_cache``) are deliberately NOT
+    registered here. They are still shared BY IDENTITY across occurrences -- an
+    ``identity``-order reference aliases the one cached row list, order and all
+    -- but they are never a cached fragment: a real table can be hundreds of
+    megabytes, and even rendering it once would build the very whole-table
+    string this cache exists to prevent. A payload carrying a table is
+    canonicalized by streaming that row list chunk by chunk. A table nested
+    INSIDE a shared document is likewise never cached on its own; it only
+    contributes to that document's text, which is itself subject to the bounds
+    below.
+
+    BOUNDED, NOT LRU-EVICTED. ``tools/capture_tier0_corpus.py``'s
+    ``_SharedTraceDocuments`` LRU-evicts to keep its per-candidate working set
+    under budget; the corpus fragment set is consulted once per digest, not
+    repeatedly per candidate, so rather than evict it refuses to grow:
+    :meth:`canonical` assembles a fragment's text from ``iter_canonical_json
+    (node)`` (with fragments disabled -- the exact bytes ``render``/``_plain``
+    would produce, but yielded piecewise) and NEVER calls the unbounded
+    ``render`` callback for a node it holds. It abandons any subtree whose
+    text would cross :data:`_FRAGMENTS_MAX_CHARS_PER_FRAGMENT` or the
+    :data:`_FRAGMENTS_MAX_TOTAL_CHARS` aggregate, remembering those
+    identities so a repeat occurrence returns ``None`` without collecting
+    again. A ``None`` simply lets ``iter_canonical_json`` stream that subtree
+    -- identical bytes, only never memoized.
     """
 
-    def __init__(self, shared_values: tuple[Any, ...]) -> None:
+    def __init__(self, shared_values: tuple[Any, ...], *,
+                 per_fragment_max: int = _FRAGMENTS_MAX_CHARS_PER_FRAGMENT,
+                 total_max: int = _FRAGMENTS_MAX_TOTAL_CHARS) -> None:
         self._held: dict[int, Any] = {id(v): v for v in shared_values}
         self._texts: dict[int, str] = {}
+        # Identities whose text is over either budget: never cached, and never
+        # re-collected (the outer generator streams them on every occurrence).
+        self._rejected: set[int] = set()
+        self._total_chars = 0
+        self._per_fragment_max = int(per_fragment_max)
+        self._total_max = int(total_max)
 
     def canonical(self, node: Any, render) -> str | None:
+        # ``render`` (canonical.py's ``_plain``) is deliberately never called:
+        # it joins the whole subtree into one unbounded string, which is what
+        # blew the gate's memory. This method bounds its own rendering by
+        # collecting ``iter_canonical_json``'s chunks and bailing at a budget.
         key = id(node)
         if self._held.get(key) is not node:
             return None
         text = self._texts.get(key)
-        if text is None:
-            text = render(node)
-            self._texts[key] = text
+        if text is not None:
+            return text
+        if key in self._rejected:
+            return None
+        headroom = self._total_max - self._total_chars
+        limit = self._per_fragment_max if self._per_fragment_max < headroom else headroom
+        if limit <= 0:
+            self._rejected.add(key)
+            return None
+        chunks: list[str] = []
+        size = 0
+        for chunk in iter_canonical_json(node):
+            size += len(chunk)
+            if size > limit:
+                self._rejected.add(key)
+                return None
+            chunks.append(chunk)
+        text = "".join(chunks)
+        self._texts[key] = text
+        self._total_chars += size
         return text
 
 
@@ -738,12 +807,20 @@ def load(root: Path, progress=NO_PROGRESS) -> Corpus:
     here does anything but pass values through (literally: unresolved
     subtrees come back as the SAME object, not a rebuilt copy).
 
-    The returned :class:`Corpus`'s ``fragments`` (Change B) wraps exactly
-    these same ``shared_cache``/``table_cache`` objects -- see
-    :class:`_IdentityFragments` -- so ``case_digest`` and ``case_addressing``
-    can hash a payload without re-canonicalising a shared subtree once per
-    pair that references it. ``None`` when this call resolved no shared
-    references at all.
+    The returned :class:`Corpus`'s ``fragments`` (Change B) wraps ``load()``'s
+    whole shared DOCUMENTS -- the ``shared_cache`` values ONLY, never the
+    ``table_cache`` row lists -- see :class:`_IdentityFragments` -- so
+    ``case_digest`` and ``case_addressing`` can hash a payload without
+    re-canonicalising a shared subtree once per pair that references it, with
+    each cached document's text bounded to
+    :data:`_FRAGMENTS_MAX_CHARS_PER_FRAGMENT` characters. Translation tables
+    stay shared by identity and keep their exact stored order, but they are
+    streamed, not cached, so a multi-hundred-megabyte table can never become
+    one giant fragment (and one nested inside a shared document only makes that
+    document over-budget, whereupon the whole document streams too). ``None``
+    when this call resolved no shared document at all -- a corpus that uses
+    only ``$rows`` tables, or an old-format corpus with no references, gets
+    ``None`` and every payload hashes on the plain streaming path.
     """
     index = json.loads((root / "INDEX.json").read_text())
     shared_dir = root / "shared"
@@ -757,7 +834,11 @@ def load(root: Path, progress=NO_PROGRESS) -> Corpus:
         pair = _resolve_shared(pair, shared_dir, shared_cache, set(), table_cache)
         pairs[pair["fixture_id"]] = pair
         progress.tick()
-    shared_values = tuple(shared_cache.values()) + tuple(table_cache.values())
+    # Fragment candidates are the whole shared DOCUMENTS only. Table row lists
+    # stay shared by identity across occurrences (an ``identity`` reference
+    # aliases the one cached list), but they are never registered as cached
+    # fragments -- see :class:`_IdentityFragments` for why.
+    shared_values = tuple(shared_cache.values())
     fragments = _IdentityFragments(shared_values) if shared_values else None
     return Corpus(root=root, index=index, pairs=pairs, fragments=fragments)
 
