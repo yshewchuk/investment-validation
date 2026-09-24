@@ -2551,6 +2551,15 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
     _check_wide_market(pricing, flags)
     _check_bad_quote(pricing, flags)
     _check_extrapolated(geometry, pricing, flags)
+    # Phase 4 ordered-flag parity: legacy stamps a pricing-boundary refusal
+    # (COARSE_LADDER / NO_CHAIN) in ``_price_entry`` and only afterwards
+    # reaches the model/analog/gate/chooser layers, so the refusal precedes
+    # their flags in ``result.flags``. Publish it here -- before the late
+    # stages -- to match that ordered position. ``_add_flag`` dedups, so the
+    # identical block below stays a no-op on this path.
+    for refusal in (geometry.refusal, pricing.refusal):
+        if refusal:
+            _add_flag(flags, refusal)
     _append_late_stages(
         inputs, values, executed, geometry, pricing, is_compatibility, flags,
         observer,
