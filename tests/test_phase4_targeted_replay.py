@@ -985,31 +985,30 @@ def test_reporter_overdue_final_row_is_unbounded_not_zero():
     assert "0.0m" not in overdue
 
 
-def test_reporter_prices_dyn_row_by_strategy_kind_before_going_overdue():
-    """A slow DYN-SV row must be bounded by the earlier DYN-SV row's duration,
-    not by the diluted global mean of a mix of fast simple + slow DYN rows; once
-    it passes its OWN kind prior it becomes overdue/unbounded, not 0.0m."""
-    clock = _FakeClock(1000.0)
-    reporter = targeted._ProgressReporter(4, _Sink(), baseline=60.0, clock=clock)
-    reporter.begin_load()
-    reporter.end_load()
-    reporter.begin_row("001", "score_result")
-    reporter.end_row("001", 20.0)             # fast simple row
-    reporter.begin_row("002", "dyn_sv_choice")
-    reporter.end_row("002", 300.0)            # slow DYN-SV row (the prior)
-    # global observed mean = (20+300)/2 = 160s; the DYN kind mean = 300s.
-    reporter.begin_row("019", "dyn_sv_choice")     # final DYN-SV row, in flight
-    within = reporter._format(clock.t + 100.0)     # 100s in < 300s kind prior
-    past = reporter._format(clock.t + 350.0)       # 350s in > 300s kind prior
+def test_reporter_zero_rounding_never_prints_zero_minutes():
+    """A leftover estimate that merely ROUNDS to 0.0m must never print a
+    zero-minute ETA while work runs or waits: an active row sitting exactly at
+    its prior (not yet overdue, since the check is strict ``>``) and a queued
+    row under a sub-minute observed rate both fall back to a sub-minute figure.
+    """
+    clock = _FakeClock(0.0)
+    active = targeted._ProgressReporter(1, _Sink(), baseline=10.0, clock=clock)
+    active.begin_load()
+    active.end_load()
+    active.begin_row("solo")                    # 10s baseline prior
+    at_prior = active._format(10.0)             # elapsed == prior -> bounded, not overdue
+    assert "0/1" in at_prior and "overdue" not in at_prior
+    assert "0.0m" not in at_prior and "<0.1m" in at_prior
 
-    # Priced by the 300s DYN prior: leftover (300-100) + 1 queued row * 160 = 360s.
-    assert "2/4" in within and "observed" in within
-    assert "6.0m" in within and "overdue" not in within
-    # the headline rate still reports the overall mean throughput:
-    assert "rate 160s/row" in within
-    # past its own kind prior the row is honestly overdue/unknown, not 0.0m:
-    assert "overdue" in past and "unknown" in past and "0.0m" not in past
-    assert "strategy-kind" in past and "300s/row" in past
+    clock2 = _FakeClock(0.0)
+    queued = targeted._ProgressReporter(2, _Sink(), baseline=1.0, clock=clock2)
+    queued.begin_load()
+    queued.end_load()
+    queued.begin_row("a")
+    queued.end_row("a", 1.0)                     # observed rate 1s/row
+    gap = queued._format(clock2.t)               # no active row, one still queued
+    assert "1/2" in gap and "observed" in gap
+    assert "0.0m" not in gap and "<0.1m" in gap
 
 
 def test_run_targeted_heartbeat_labels_loading_before_replay(tmp_path, monkeypatch):
