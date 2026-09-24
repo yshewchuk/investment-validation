@@ -2450,8 +2450,17 @@ def _replayed_member(verified: Mapping[str, Any]):
 
 
 def _frozen_receipt(verified: Mapping[str, Any]) -> str | None:
-    frozen_replay = verified["frozen_replay"]
-    return frozen_replay.receipt if frozen_replay is not None else None
+    """The frozen replay receipt of a verified bundle, FULL or COMPACT.
+
+    A regular row hands over the complete ``_verified_trace_bundle`` and is
+    read exactly as before; a replayed chooser member hands over
+    ``_verified_member_summary``, which keeps the receipt STRING and drops
+    the object that owns the release/inputs, so one member's frozen plan
+    cannot stay resident for the whole menu."""
+    if "frozen_replay" in verified:
+        frozen_replay = verified["frozen_replay"]
+        return frozen_replay.receipt if frozen_replay is not None else None
+    return verified["frozen_replay_receipt"]
 
 
 def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]:
@@ -2672,15 +2681,46 @@ def _chooser_members(pair: Mapping[str, Any]) -> list[tuple[dict, dict]]:
     return out
 
 
+def _verified_member_summary(verified: Mapping[str, Any]) -> dict[str, Any]:
+    """The metadata a replayed chooser member must keep; its heavy bundle must not.
+
+    Called ONLY after ``_replayed_member`` has run every runtime/identity
+    check over the complete bundle, so everything the bundle PROVED is already
+    proven; what the full gate and the targeted replay still read off a
+    member's verified element are exactly these four fields: the request (the
+    chooser is built from member 0's), the same-input receipt (rolled into the
+    row's ``same_input_hash``), the member trace hash, and the frozen replay
+    receipt. The bundle itself -- ``inputs``, ``frozen_replay``,
+    ``frozen_chooser`` -- is what made a wide menu expensive: keeping every
+    prior member's copy resident while a late member replayed is what pushed
+    fixture 019 (11 members) to 9.2 GB and a bounded_run kill. Nothing is
+    compared here; this is retention, so no hash, resource, runtime, identity
+    or chooser comparison is weakened by it.
+    """
+    frozen_replay = verified.get("frozen_replay")
+    return {
+        "request": verified["request"],
+        "same_input_receipt": verified["same_input_receipt"],
+        "trace_hash": verified["trace_hash"],
+        "frozen_replay_receipt": (
+            frozen_replay.receipt if frozen_replay is not None else None),
+    }
+
+
 def _replayed_chooser(pair: Mapping[str, Any], release_root: Path):
     """Replay a ``dyn_sv_choice`` pair natively.
 
     Every ranked member is verified and scored exactly as a traced scored
     pair; the native chooser (``application._choose_dynamic``) then ranks the
     native member records in frame order. Returns ``(members, choice)`` with
-    ``members`` as ``(legacy record, verified, native, receipts,
-    identities)``.
-    """
+    ``members`` as ``(legacy record, verified summary, native, receipts,
+    identities)``, frame order preserved. The verified element is the compact
+    ``_verified_member_summary``, built only after the member fully passed
+    verification AND replay, and the full bundle's last local reference is
+    dropped before the next member is verified -- so at most one member's
+    heavy bundle exists at a time, while a failing late member still refuses
+    the ENTIRE chooser (the compaction changes what is kept, never what is
+    checked)."""
     members = []
     for index, (member_pair, member_record) in enumerate(_chooser_members(pair)):
         try:
@@ -2688,7 +2728,12 @@ def _replayed_chooser(pair: Mapping[str, Any], release_root: Path):
             native, receipts, identities = _replayed_member(verified)
         except _TraceError as exc:
             raise _TraceError(f"chooser member {index}: {exc}") from exc
-        members.append((member_record, verified, native, receipts, identities))
+        summary = _verified_member_summary(verified)
+        # The loop local is the bundle's last strong reference while the next
+        # ``_verified_trace_bundle`` runs; without the del the compaction
+        # would still keep TWO full bundles resident per step.
+        del verified
+        members.append((member_record, summary, native, receipts, identities))
     first = members[0][1]["request"]
     choice = application._choose_dynamic(
         replace(first, strategy_version="DYN-SV"),

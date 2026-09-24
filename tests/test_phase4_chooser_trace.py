@@ -672,3 +672,157 @@ def test_a_pair_over_a_shared_chooser_document_hashes_like_the_plain_digest(
                      record_kind="dyn_sv_choice", duration=0.0,
                      input_trace=trace, legacy_input_hash=trace["shared_input_hash"])
     assert pair["payload_hash"] == content_hash(pair["payload"])
+
+
+# -- replay memory: a menu keeps ONE member bundle resident at a time -----------------
+#
+# A strict four-row targeted replay of the reattached 22-pair corpus still died
+# at 9.2 GB under bounded_run when fixture 019 (11 ranked members) began:
+# ``_replayed_chooser`` appended each member's ENTIRE verified bundle (inputs,
+# frozen_replay, frozen_chooser) into ``members``, so by member 11 every prior
+# bundle was still resident while it replayed. Nothing downstream reads those
+# heavy objects after ``_replayed_member`` succeeds -- the full gate rolls up
+# ``same_input_receipt``, ``trace_hash`` and the frozen replay receipt, and the
+# targeted replay reads ``trace_hash`` -- so a member's verified element is now
+# the compact ``_verified_member_summary``, built only AFTER the member fully
+# passed verification and replay, with the full bundle released before the
+# next member is verified. These tests pin the retention fix without weakening
+# it: metadata and every comparison receipt keep the exact full-bundle values,
+# member frame order and the choice are unchanged, and a late member failure
+# still refuses the ENTIRE chooser.
+
+def _attached_choice(tmp_path, monkeypatch):
+    """A published 3-member ``dyn_sv_choice`` pair in ``tmp_path``."""
+    candidate = _choice(tmp_path, monkeypatch)
+    attach_strict_probe([candidate], "snapshot-1", tmp_path)
+    return _pair(candidate)
+
+
+def test_replayed_chooser_members_carry_the_full_bundle_metadata_exactly(tmp_path, monkeypatch):
+    pair = _attached_choice(tmp_path, monkeypatch)
+    members, _native = phase4_real._replayed_chooser(pair, tmp_path)
+    member_pairs = [member_pair for member_pair, _record
+                    in phase4_real._chooser_members(pair)]
+
+    for index, item in enumerate(members):
+        _record, summary, _native, _receipts, _identities = item
+        assert set(summary) == {"request", "same_input_receipt", "trace_hash",
+                                "frozen_replay_receipt"}
+        full = phase4_real._verified_trace_bundle(member_pairs[index], tmp_path)
+        assert summary["request"] == full["request"]
+        assert summary["same_input_receipt"] == full["same_input_receipt"]
+        assert summary["trace_hash"] == full["trace_hash"]
+        # ``_frozen_receipt`` reads BOTH shapes: the compact member summary
+        # and the full bundle a regular row still carries.
+        assert phase4_real._frozen_receipt(summary) == phase4_real._frozen_receipt(full)
+
+
+def test_the_gate_comparison_receipt_is_unchanged_by_the_compaction(tmp_path, monkeypatch):
+    """The retained metadata is EXACTLY what the gate reads off a chooser
+    member's verified element: disabling the compaction (identity summary)
+    must roll up a byte-identical ``comparison_receipt`` -- every hashed row
+    field (same_input_hash, trace_hash, the frozen receipt list, all checks)
+    is unchanged by keeping only the summary."""
+    pair = _attached_choice(tmp_path, monkeypatch)
+    real_summary = phase4_real._verified_member_summary
+    receipts = {}
+    for label, summary in (("compact", real_summary), ("full", lambda verified: verified)):
+        monkeypatch.setattr(phase4_real, "_verified_member_summary", summary)
+        release, _parity = phase4_real._native_parity(_corpus(tmp_path, pair))
+        assert release["dispositions"][0]["disposition"] == "compared"
+        receipts[label] = release["comparison_receipt"]
+    assert receipts["compact"] == receipts["full"]
+
+
+def test_compacted_members_keep_frame_order_and_the_selection(tmp_path, monkeypatch):
+    pair = _attached_choice(tmp_path, monkeypatch)
+    trace = pair["payload"]["input_trace"]
+
+    members, choice = phase4_real._replayed_chooser(pair, tmp_path)
+    # One member per ranked frame row, IN ORDER: the legacy records, the
+    # member trace hashes and the chooser selection all line up with what the
+    # pre-compaction tuple shape produced.
+    assert [item[0] for item in members] == [
+        row["record"] for row in pair["payload"]["request"]["frame_rows"]]
+    assert [item[1]["trace_hash"] for item in members] == [
+        member["input_trace"]["trace_hash"] for member in trace["members"]]
+    checks = phase4_real._chooser_selection_checks(pair["payload"]["record"], choice)
+    assert checks == {"chosen_strategy": True, "menu_size": True, "chosen_margin": True}
+    assert (choice.chooser_selection["strategy"]
+            == pair["payload"]["record"]["chosen_strategy"])
+
+
+def test_a_late_member_replay_failure_still_refuses_the_whole_chooser(tmp_path, monkeypatch):
+    pair = _attached_choice(tmp_path, monkeypatch)
+    real_replay = phase4_real._replayed_member
+    seen = []
+
+    def replay(verified):
+        seen.append(verified["trace_hash"])
+        if len(seen) == 3:
+            raise phase4_real._TraceError(
+                "execution.simulation: captured runtime mismatch")
+        return real_replay(verified)
+
+    monkeypatch.setattr(phase4_real, "_replayed_member", replay)
+    with pytest.raises(phase4_real._TraceError, match="chooser member 2:"):
+        phase4_real._replayed_chooser(pair, tmp_path)
+    # Compaction happens only AFTER a member fully passes: the refusal landed
+    # on the LAST of three verified, replayed members -- the first two had
+    # already been compacted -- and still killed the entire chooser.
+    assert len(seen) == 3
+    seen.clear()  # the gate re-runs the chooser; make the third member fail again
+    release, _parity = phase4_real._native_parity(_corpus(tmp_path, pair))
+    assert release["population"]["incomparable"] == 1
+    reason = release["dispositions"][0]["reason"]
+    assert reason.startswith("_TraceError: chooser member 2:")
+
+
+def test_a_member_bundle_is_released_before_the_next_member_is_verified(tmp_path, monkeypatch):
+    """The regression this fix exists for: member i's heavy verified payload
+    must be UNREACHABLE before member i+1's bundle is built. With the old
+    retention (the full verified dict kept in every member tuple) the weakrefs
+    below stay alive and the second assertion list is [False, False]."""
+    import gc
+    import weakref
+    from dataclasses import dataclass
+
+    pair = _attached_choice(tmp_path, monkeypatch)
+
+    @dataclass
+    class _FakeRequest:
+        strategy_version: str = "TST"
+
+    class _Heavy:
+        """Weakref-able stand-in for the bundle's heavy payloads (a bare
+        ``object()`` carries no ``__weakref__`` slot)."""
+
+    refs = []
+    released_before_next = []
+
+    def bundle(_member_pair, _release_root):
+        gc.collect()
+        if refs:
+            released_before_next.append(all(ref() is None for ref in refs))
+        heavy = _Heavy()  # stand-in for inputs/frozen_replay/frozen_chooser
+        refs.append(weakref.ref(heavy))
+        return {
+            "request": _FakeRequest(), "inputs": heavy,
+            "frozen_replay": None, "frozen_chooser": heavy, "captured_receipts": (),
+            "same_input_receipt": f"same-{len(refs)}",
+            "trace_hash": f"trace-{len(refs)}",
+        }
+
+    def replay(verified):
+        return SimpleNamespace(payload_hash=verified["trace_hash"]), (), ()
+
+    monkeypatch.setattr(phase4_real, "_verified_trace_bundle", bundle)
+    monkeypatch.setattr(phase4_real, "_replayed_member", replay)
+    monkeypatch.setattr(phase4_real.application, "_choose_dynamic",
+                        lambda _request, _natives: SimpleNamespace(chooser_selection={}))
+
+    members, _native = phase4_real._replayed_chooser(pair, tmp_path)
+    assert len(members) == 3
+    assert [item[1]["trace_hash"] for item in members] == ["trace-1", "trace-2", "trace-3"]
+    assert released_before_next == [True, True], \
+        "a prior member's full verified bundle was still resident"
