@@ -1217,7 +1217,23 @@ class _ProgressReporter:
         where = f", current: {current}" if active else ""
         load = f"; load {load_seconds:.0f}s" if load_seconds is not None else ""
         tail = " (replay, after load)" if load_seconds is not None else ""
+        # An in-flight row that has passed its per-row prior can no longer be
+        # bounded by the rate: report the honest unbounded/unknown estimate, with
+        # the row's own elapsed, instead of a leftover clamped down to zero (the
+        # defect that showed 0.0m for a final DYN-SV row running minutes on end).
+        if overdue:
+            return (f"[targeted-replay {stamp}] phase=replay {completed}/{total} "
+                    f"rows{where}; elapsed {elapsed:.0f}s{load}; provisional ETA{tail} "
+                    f"unknown - {current} overdue: active {active_elapsed:.0f}s past "
+                    f"{rate:.0f}s/row prior, remaining unbounded "
+                    f"(rate {rate:.0f}s/row, {source})")
         flag = ", overdue" if overdue else ""
+        # And while work is still running or queued, a leftover that merely
+        # ROUNDS to zero must never be reported as a zero-minute ETA.
+        if (active or not_started) and f"{eta_seconds / 60:.1f}m" == "0.0m":
+            return (f"[targeted-replay {stamp}] phase=replay {completed}/{total} "
+                    f"rows{where}; elapsed {elapsed:.0f}s{load}; provisional ETA{tail} "
+                    f"<0.1m (rate {rate:.0f}s/row, {source}{flag})")
         return (f"[targeted-replay {stamp}] phase=replay {completed}/{total} "
                 f"rows{where}; elapsed {elapsed:.0f}s{load}; provisional ETA{tail} "
                 f"{eta_seconds / 60:.1f}m (rate {rate:.0f}s/row, {source}{flag})")
