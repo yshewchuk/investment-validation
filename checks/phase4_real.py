@@ -1851,6 +1851,80 @@ def _translation_path(value: Any, label: str) -> tuple[Any, ...]:
     return tuple(path)
 
 
+def _is_logical_leaf(value: Any) -> bool:
+    """Whether ``value`` is an atomic leaf under ``_leaf_values``' walk.
+
+    A scalar (anything that is neither a ``Mapping`` nor a ``list`` -- this
+    includes a raw ``tuple``, which ``_leaf_values`` likewise treats as a single
+    value), an empty ``Mapping``/``list``, or the exact one-key
+    ``{NONFINITE_KEY: <str>}`` tag ``tag_nonfinite``/``canonical_json`` emit for
+    a single nonfinite float. Everything else is a container to descend into.
+    Kept in lockstep with ``_leaf_values`` so path resolution and the recursive
+    leaf count agree on what a leaf is.
+    """
+    if isinstance(value, Mapping):
+        if set(value) == {NONFINITE_KEY} and isinstance(value[NONFINITE_KEY], str):
+            return True
+        return not value
+    if isinstance(value, list):
+        return not value
+    return True
+
+
+def _count_logical_leaves(value: Any) -> int:
+    """Number of leaves ``_leaf_values`` would emit for ``value``.
+
+    Mirrors ``_leaf_values`` exactly (same container/short-circuit order), so
+    ``len(_leaf_values(value))`` == ``_count_logical_leaves(value)`` for every
+    input it would accept, and it raises the same error it raises on non-string
+    object keys -- but without materializing the path->value mapping (the
+    point of this refactor: the caller only needs the count, not the dict).
+    """
+    if isinstance(value, Mapping):
+        if _is_logical_leaf(value):
+            return 1
+        total = 0
+        for key in value:
+            if not isinstance(key, str):
+                raise _TraceError("input_translation: object keys must be strings")
+            total += _count_logical_leaves(value[key])
+        return total
+    if isinstance(value, list):
+        if not value:
+            return 1
+        return sum(_count_logical_leaves(item) for item in value)
+    return 1
+
+
+def _resolve_logical_leaf(document: Any, path: tuple[Any, ...]) -> Any:
+    """Return the leaf ``path`` addresses in ``document`` or raise.
+
+    Direct lookup replaces the full path->value dict walk: a path is valid only
+    if it never descends through a logical leaf, uses a string key on an object
+    / integer index on a list, stays in range, finds every key, and terminates
+    exactly on a leaf. Every failure is collapsed by the caller to one
+    "not a document leaf" meaning, matching the previous ``path not in
+    _leaf_values(document)`` check.
+    """
+    current = document
+    for segment in path:
+        if _is_logical_leaf(current):
+            raise _TraceError("path traverses through a leaf")
+        if isinstance(current, Mapping):
+            if not isinstance(segment, str) or segment not in current:
+                raise _TraceError("path segment missing in object")
+            current = current[segment]
+        elif isinstance(current, list):
+            if type(segment) is not int or segment >= len(current):
+                raise _TraceError("path segment invalid for list")
+            current = current[segment]
+        else:  # pragma: no cover - scalars are leaves, caught above
+            raise _TraceError("path traverses through a leaf")
+    if not _is_logical_leaf(current):
+        raise _TraceError("path ends on a nonleaf")
+    return current
+
+
 def _verified_translation(
     translation: Any,
     shared_inputs: Mapping[str, Any],
@@ -1891,8 +1965,14 @@ def _verified_translation(
             if key != "source_ref"
         },
     }
-    shared_leaves = _leaf_values(shared_inputs)
-    native_leaves = _leaf_values(native_document)
+    # Count leaves instead of building the full path->value dicts. A distinct,
+    # valid leaf path per mapping plus an equal leaf count proves full coverage
+    # (the recorded paths are a subset of the leaves; equal size forces set
+    # equality), and each value is looked up on demand below -- so neither the
+    # dicts nor the two final ``set(dict)`` coverage copies are ever
+    # materialized.
+    shared_leaf_count = _count_logical_leaves(shared_inputs)
+    native_leaf_count = _count_logical_leaves(native_document)
     mappings = translation.get("mappings")
     if not isinstance(mappings, list):
         raise _TraceError("input_translation.mappings: expected list")
@@ -1908,10 +1988,11 @@ def _verified_translation(
         native_path = _translation_path(row["native_path"], f"{label}.native_path")
         if shared_path in shared_paths or native_path in native_paths:
             raise _TraceError(f"{label}: duplicate path")
-        if shared_path not in shared_leaves or native_path not in native_leaves:
-            raise _TraceError(f"{label}: path is not a document leaf")
-        shared_value = shared_leaves[shared_path]
-        native_value = native_leaves[native_path]
+        try:
+            shared_value = _resolve_logical_leaf(shared_inputs, shared_path)
+            native_value = _resolve_logical_leaf(native_document, native_path)
+        except _TraceError as exc:
+            raise _TraceError(f"{label}: path is not a document leaf") from exc
         value_hash = _verify_content(
             shared_value, row.get("value_hash"), f"{label}.value_hash",
         )
@@ -1919,7 +2000,10 @@ def _verified_translation(
             raise _TraceError(f"{label}: translated values differ")
         shared_paths.add(shared_path)
         native_paths.add(native_path)
-    if shared_paths != set(shared_leaves) or native_paths != set(native_leaves):
+    if (
+        len(shared_paths) != shared_leaf_count
+        or len(native_paths) != native_leaf_count
+    ):
         raise _TraceError("input_translation.mappings: leaf coverage mismatch")
 
     expected_derived = [{
@@ -2366,8 +2450,17 @@ def _replayed_member(verified: Mapping[str, Any]):
 
 
 def _frozen_receipt(verified: Mapping[str, Any]) -> str | None:
-    frozen_replay = verified["frozen_replay"]
-    return frozen_replay.receipt if frozen_replay is not None else None
+    """The frozen replay receipt of a verified bundle, FULL or COMPACT.
+
+    A regular row hands over the complete ``_verified_trace_bundle`` and is
+    read exactly as before; a replayed chooser member hands over
+    ``_verified_member_summary``, which keeps the receipt STRING and drops
+    the object that owns the release/inputs, so one member's frozen plan
+    cannot stay resident for the whole menu."""
+    if "frozen_replay" in verified:
+        frozen_replay = verified["frozen_replay"]
+        return frozen_replay.receipt if frozen_replay is not None else None
+    return verified["frozen_replay_receipt"]
 
 
 def _record_checks(record: Mapping[str, Any], native) -> tuple[dict, dict, dict]:
@@ -2588,15 +2681,46 @@ def _chooser_members(pair: Mapping[str, Any]) -> list[tuple[dict, dict]]:
     return out
 
 
+def _verified_member_summary(verified: Mapping[str, Any]) -> dict[str, Any]:
+    """The metadata a replayed chooser member must keep; its heavy bundle must not.
+
+    Called ONLY after ``_replayed_member`` has run every runtime/identity
+    check over the complete bundle, so everything the bundle PROVED is already
+    proven; what the full gate and the targeted replay still read off a
+    member's verified element are exactly these four fields: the request (the
+    chooser is built from member 0's), the same-input receipt (rolled into the
+    row's ``same_input_hash``), the member trace hash, and the frozen replay
+    receipt. The bundle itself -- ``inputs``, ``frozen_replay``,
+    ``frozen_chooser`` -- is what made a wide menu expensive: keeping every
+    prior member's copy resident while a late member replayed is what pushed
+    fixture 019 (11 members) to 9.2 GB and a bounded_run kill. Nothing is
+    compared here; this is retention, so no hash, resource, runtime, identity
+    or chooser comparison is weakened by it.
+    """
+    frozen_replay = verified.get("frozen_replay")
+    return {
+        "request": verified["request"],
+        "same_input_receipt": verified["same_input_receipt"],
+        "trace_hash": verified["trace_hash"],
+        "frozen_replay_receipt": (
+            frozen_replay.receipt if frozen_replay is not None else None),
+    }
+
+
 def _replayed_chooser(pair: Mapping[str, Any], release_root: Path):
     """Replay a ``dyn_sv_choice`` pair natively.
 
     Every ranked member is verified and scored exactly as a traced scored
     pair; the native chooser (``application._choose_dynamic``) then ranks the
     native member records in frame order. Returns ``(members, choice)`` with
-    ``members`` as ``(legacy record, verified, native, receipts,
-    identities)``.
-    """
+    ``members`` as ``(legacy record, verified summary, native, receipts,
+    identities)``, frame order preserved. The verified element is the compact
+    ``_verified_member_summary``, built only after the member fully passed
+    verification AND replay, and the full bundle's last local reference is
+    dropped before the next member is verified -- so at most one member's
+    heavy bundle exists at a time, while a failing late member still refuses
+    the ENTIRE chooser (the compaction changes what is kept, never what is
+    checked)."""
     members = []
     for index, (member_pair, member_record) in enumerate(_chooser_members(pair)):
         try:
@@ -2604,7 +2728,12 @@ def _replayed_chooser(pair: Mapping[str, Any], release_root: Path):
             native, receipts, identities = _replayed_member(verified)
         except _TraceError as exc:
             raise _TraceError(f"chooser member {index}: {exc}") from exc
-        members.append((member_record, verified, native, receipts, identities))
+        summary = _verified_member_summary(verified)
+        # The loop local is the bundle's last strong reference while the next
+        # ``_verified_trace_bundle`` runs; without the del the compaction
+        # would still keep TWO full bundles resident per step.
+        del verified
+        members.append((member_record, summary, native, receipts, identities))
     first = members[0][1]["request"]
     choice = application._choose_dynamic(
         replace(first, strategy_version="DYN-SV"),
