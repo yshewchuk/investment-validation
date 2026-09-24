@@ -313,6 +313,22 @@ def test_backup_to_carries_rows_committed_while_only_in_wal(tmp_path):
         assert {row[0] for row in restored.execute("SELECT job_id FROM jobs")} == ids
 
 
+def test_backup_to_refuses_an_existing_destination_naming_it(tmp_path):
+    """Never overwrite: a second backup onto a path that already exists is
+    refused with a FileExistsError that names the requested destination,
+    and the refusal leaves the existing backup file untouched."""
+    conn, clock, _ = catalog(tmp_path)
+    ids = {submit(conn, REGISTRY, POLICY, request(key), clock=clock).job_id
+           for key in ("one", "two")}
+    dest = tmp_path / "existing-backup.sqlite"
+    backup_to(conn, dest)
+    with pytest.raises(FileExistsError) as err:
+        backup_to(conn, dest)
+    assert str(dest) in str(err.value)
+    with sqlite3.connect(dest) as untouched:
+        assert {row[0] for row in untouched.execute("SELECT job_id FROM jobs")} == ids
+
+
 def test_integrity_errors_is_empty_when_sound_and_names_the_offending_table(tmp_path):
     """Empty when the catalog is sound; one finding per foreign-key
     violation, keyed by the child table that holds the orphaned row."""
