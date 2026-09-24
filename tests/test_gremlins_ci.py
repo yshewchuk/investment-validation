@@ -165,6 +165,65 @@ def test_valid_raw_report_converts_to_schema2_rows(tmp_path, ci_env):
     assert "pytest-gremlins 1.9.0" in md and "Survivors: 1" in md and f"{REL}:12" in md
 
 
+# -- plugin file-path normalization (finding 2: absolute paths on the runner) ---------------
+
+def test_normalize_file_path_accepts_in_root_absolute_and_refuses_the_rest(tmp_path):
+    """The runner's raw writes an absolute file_path under the checkout. An
+    absolute path is repo-relative-izable only when it RESOLVES beneath the
+    root; every other refusal (outside the root, traversal that escapes, wrong
+    drive, non-string) and the strict relative rules must hold exactly as before."""
+    root = tmp_path / "checkout"
+    (root / "engine" / "v2").mkdir(parents=True)
+    assert gr.normalize_file_path(str(root / REL), root) == REL           # in-root absolute
+    assert gr.normalize_file_path(str(root / "top.py"), root) == "top.py"
+    assert gr.normalize_file_path(REL, root) == REL                       # relative, verbatim
+    assert gr.normalize_file_path("./x.py", root) == "./x.py"            # path_ok's own rules
+    assert gr.normalize_file_path("/etc/passwd", root) is None            # absolute, outside
+    assert gr.normalize_file_path(str(tmp_path / "elsewhere.py"), root) is None
+    assert gr.normalize_file_path(str(root / "engine" / ".." / ".." / "secret.py"), root) is None
+    assert gr.normalize_file_path("C:\\evil\\x.py", root) is None         # wrong drive
+    assert gr.normalize_file_path("", root) is None
+    assert gr.normalize_file_path(None, root) is None
+
+
+def test_export_turns_the_plugin_absolute_path_into_a_valid_score(tmp_path, ci_env):
+    """The real plugin shape (CI run 36062806372): an absolute file_path under
+    the checkout. Export must normalize it repo-relative, resolve the function
+    from source and score -- not fail RAW_INVALID -- while leaving the raw bytes
+    and SHA provenance untouched."""
+    abs_toy = str(tmp_path / "checkout" / REL)  # exactly what gremlins 1.9.0 writes
+    doc = raw_doc([
+        gremlin("g1", "zapped", 5, file_path=abs_toy, killing_test="tests/test_toy.py::t_add"),
+        gremlin("g2", "survived", 12, file_path=abs_toy, operator="swap-comparison"),
+    ])
+    code, out = export(tmp_path, doc)
+    assert code == 0
+    s = summary_of(out)
+    assert s["complete"] is True and s["tool_error"] is False and s["failure_reasons"] == []
+    assert (s["total"], s["checked"], s["score"]) == (2, 2, 0.5)  # a real measurement
+    rows = {r["mutant_name"]: r for r in gr.read_jsonl(out / "results.jsonl")}
+    assert rows["g1"]["file"] == REL and rows["g1"]["function"] == "add"
+    assert rows["g2"]["file"] == REL and rows["g2"]["function"] == "Box.size"
+    assert list(s["files"]) == [REL]  # per-file block keyed repo-relative
+    # provenance preserved: the audit copy still carries the absolute path bytes
+    assert json.loads((out / "gremlins.json").read_bytes())["results"][0]["file_path"] == abs_toy
+    assert s["raw_summary"] == doc["summary"]
+
+
+def test_export_still_refuses_an_absolute_path_outside_the_source_root(tmp_path, ci_env):
+    """Normalization is a convenience for in-checkout paths, not a licence to
+    read outside it: an absolute path under a different root stays
+    ``malformed: file_path`` / RAW_INVALID, with no score fabricated."""
+    outside = str(tmp_path / "elsewhere" / REL)
+    code, out = export(tmp_path, raw_doc([gremlin("g1", "zapped", 5, file_path=outside)]))
+    assert code == 1
+    s = summary_of(out)
+    assert s["complete"] is False and s["tool_error"] is True
+    assert "RAW_INVALID" in s["failure_reasons"]
+    assert any("malformed: file_path" in p for p in s["problems"])
+    assert s["total"] is None and s["score"] is None
+
+
 # -- zero mutants and survivors -----------------------------------------------------------
 
 def test_zero_mutants_is_an_honest_undefined_score(tmp_path, ci_env):
