@@ -311,8 +311,15 @@ class Service:
         except Exception as exc:
             problem = exc.problem if isinstance(exc, OpsError) else make_problem(
                 "LAUNCH_FAILED", "trusted worker launch failed")
-            commit_attempt(self.conn, claim.attempt_id, claim.fence,
-                           Outcome(False, "verified_dead", failure=problem), clock=self.clock)
+            # Same fence-aware recording as a failed completion (``_finish`` ->
+            # ``_commit_failure``): when the lease expires while this launch's
+            # own pre-work runs (manifest hashing, the code snapshot, the read
+            # pin), a raw ``commit_attempt`` re-raised LEASE_LOST out of
+            # ``tick()`` and crashed the supervisor loop. The attempt is handed
+            # to recovery instead — reservations and the store lease held
+            # until reconciliation, every lease-expiry check unchanged; only
+            # WHERE the refusal is recorded changes.
+            self._commit_failure(claim, {"exit_code": None}, problem)
 
     def _stage_legacy_inputs(self, claim, launch):
         """Populate this attempt's legacy inputs before the worker launches.

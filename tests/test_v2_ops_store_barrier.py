@@ -70,6 +70,11 @@ def _open_leases(conn):
     return conn.execute("SELECT COUNT(*) FROM store_leases WHERE released_at IS NULL").fetchone()[0]
 
 
+def _held_reservations(conn):
+    return conn.execute("SELECT COUNT(*) FROM resource_reservations "
+                        "WHERE released_at IS NULL").fetchone()[0]
+
+
 def test_o17_writer_excluded_while_readers_hold_shared_leases(tmp_path):
     conn, clock, supervisor = catalog(tmp_path)
     _submit(conn, clock, "r1", "reader")
@@ -264,7 +269,11 @@ def _run_supervisor(root, *, mutate, complete):
         run_until(service, conn, job.job_id, timeout=90)
         row = conn.execute("SELECT state, failure_json FROM jobs WHERE job_id=?",
                            (job.job_id,)).fetchone()
+        attempts = conn.execute("SELECT attempt_number, state, failure_json FROM attempts "
+                                "WHERE job_id=? ORDER BY attempt_number", (job.job_id,)).fetchall()
         return {"state": row[0], "failure": row[1],
+                "attempts": [(a["attempt_number"], a["state"], a["failure_json"])
+                             for a in attempts],
                 "checkpoints": conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0],
                 "outputs": conn.execute("SELECT COUNT(*) FROM attempt_outputs").fetchone()[0],
                 "leases_open": conn.execute("SELECT COUNT(*) FROM store_leases "
@@ -276,8 +285,8 @@ def _run_supervisor(root, *, mutate, complete):
 
 def test_o17_supervisor_blocks_commit_when_pinned_input_changed(tmp_path):
     result = _run_supervisor(tmp_path / "case1", mutate=True, complete=True)
-    assert result["state"] == "failed"
-    assert "INPUT_CHANGED" in result["failure"]
+    assert result["state"] == "failed", result
+    assert "INPUT_CHANGED" in result["failure"], result
     assert result["checkpoints"] == 0
     assert result["outputs"] == 0
     assert result["leases_open"] == 0
@@ -285,13 +294,65 @@ def test_o17_supervisor_blocks_commit_when_pinned_input_changed(tmp_path):
 
 def test_o17_supervisor_commits_when_pinned_input_holds(tmp_path):
     result = _run_supervisor(tmp_path / "case2", mutate=False, complete=True)
-    assert result["state"] == "succeeded"
+    # The full result (job failure_json and every attempt's outcome) on the
+    # message: the CI-only "failed" this exposes was undiagnosable without it.
+    assert result["state"] == "succeeded", result
     assert result["checkpoints"] == 1
     assert result["outputs"] == 1
 
 
 def test_o17_incomplete_read_set_disables_cache_reuse(tmp_path):
     result = _run_supervisor(tmp_path / "case3", mutate=False, complete=False)
-    assert result["state"] == "succeeded"
+    assert result["state"] == "succeeded", result
     assert result["checkpoints"] == 0
     assert result["outputs"] == 1
+
+
+def test_o17_launch_refusal_after_lease_expiry_strands_rather_than_escapes(tmp_path):
+    """Deterministic regression for an independently reproduced expired-launch
+    robustness bug (2026-09-22 CI lease-sensitivity investigation): ``_launch``
+    recorded its own failure with a raw ``commit_attempt``, so a lease that
+    expired while the launch's pre-work ran (manifest hashing, the code
+    snapshot) made ``verify_fence`` re-raise
+    ``LEASE_LOST: the attempt's lease has expired`` out of ``tick()`` — seen
+    escaping a supervisor test under an artificial CPU-contention stress loop.
+    This is NOT the confirmed root cause of the CI-only
+    ``test_o17_supervisor_commits_when_pinned_input_holds`` failure, which
+    stays unexplained (CI committed a ``failed`` job; this bug instead
+    escapes as a raised ``LEASE_LOST``). A failed launch must take the same
+    fence-aware path as a failed completion (``test_v2_ops_coordinator_lease``
+    holds that invariant for the effect path): hand the attempt to recovery,
+    with its store lease and reservation deliberately still held and nothing
+    of the attempt committed."""
+    conn, clock, supervisor = catalog(tmp_path)
+    _submit(conn, clock, "r1", "reader")
+    claim = _claim(conn, clock, supervisor)
+    repo = Path(__file__).resolve().parents[1]
+    service = Service(conn, tmp_path, BOUND_REGISTRY, TEST_POLICY, clock=clock,
+                      code_source=repo, store_root=tmp_path)
+    clock.advance(121)  # past LEASE_SECONDS: the attempt's lease is gone
+    # The claimed "reader" job's implementation_ref is a stub ("code"), so the
+    # launch refuses on its first check — the point is what the refusal does
+    # AFTER the lease expiry: previously this raised, now it must not.
+    service._launch(claim)
+    attempt = conn.execute("SELECT state FROM attempts WHERE attempt_id=?",
+                           (claim.attempt_id,)).fetchone()
+    assert attempt["state"] == "recovery_pending"
+    job = conn.execute("SELECT state, fence FROM jobs WHERE job_id=?",
+                       (claim.job_id,)).fetchone()
+    assert job["state"] == "running" and job["fence"] == claim.fence + 1
+    assert _open_leases(conn) == 1
+    assert _held_reservations(conn) == 1
+    # The stranding records the refusal and nothing else: no output row and no
+    # checkpoint may exist for the fenced-off attempt.
+    assert conn.execute("SELECT COUNT(*) FROM attempt_outputs WHERE attempt_id=?",
+                        (claim.attempt_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 0
+    # Recovery releases them: nothing ever launched under this attempt's fake
+    # epoch boot id, so ownership is proved gone and the verified-dead settle
+    # releases the store lease and the reservation it held.
+    service.reconcile()
+    assert conn.execute("SELECT state FROM attempts WHERE attempt_id=?",
+                        (claim.attempt_id,)).fetchone()[0] == "failed"
+    assert _open_leases(conn) == 0
+    assert _held_reservations(conn) == 0
