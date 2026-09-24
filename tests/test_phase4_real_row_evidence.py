@@ -639,3 +639,140 @@ def test_native_carrying_none_gate_keys_is_a_normal_agreeing_comparison(
     checks = release["row_dimension_checks"]["a"]
     assert checks["verdicts"] is True
     assert "a" not in release["row_never_ran_dimensions"]
+
+
+# -- NO_SCORE parity translation (F17, user decision 2026-09-23) ------------
+# The native scoring layer refuses an unscored, unflagged row with the
+# native-only NO_SCORE (engine/v2/scoring/application.py:183-190); legacy
+# had no such code, so _record_checks must expect exactly one appended
+# NO_SCORE on the legacy side when the LEGACY record is unscored by
+# legacy's own rule (engine/score.py:1335: exp_pnl_model/exp_pnl_analog
+# only) and its own flags refuse nothing (engine.v2.scoring.stages.
+# flags_refuse). These tests assert flags only, so unrelated numeric
+# dimensions cannot make them vacuous either way.
+
+
+def _no_score_native(record, reason_codes):
+    from dataclasses import replace
+
+    return replace(_native_record(record), reason_codes=tuple(reason_codes))
+
+
+def test_unscored_legacy_row_expects_native_no_score(tmp_path, monkeypatch):
+    """Rule's positive case: no legacy score, no legacy flags, native
+    carries NO_SCORE -> the flags dimension agrees and records no diff."""
+    record = _clean_record(exp_pnl_model=None)
+    native = _no_score_native(record, ("NO_SCORE",))
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    assert release["row_dimension_checks"]["a"]["flags"] is True
+    assert "a" not in release["row_flag_differences"]
+
+
+def test_unscored_legacy_no_score_expectation_is_required_not_matched_loosely(
+        tmp_path, monkeypatch):
+    """Nonvacuity: the same unscored, unflagged legacy row against a native
+    MISSING NO_SCORE must now FAIL with NO_SCORE named legacy-only -- the
+    translation adds an expectation, it does not exempt NO_SCORE from the
+    comparison."""
+    record = _clean_record(exp_pnl_model=None)
+    # _native_record mirrors the (empty) legacy flags verbatim: no NO_SCORE.
+    release, _parity = _run(tmp_path, monkeypatch, {"a": record})
+
+    assert release["row_dimension_checks"]["a"]["flags"] is False
+    diff = release["row_flag_differences"]["a"]
+    assert diff["legacy_only"] == ["NO_SCORE"]
+    assert diff["native_only"] == []
+
+
+def test_legacy_score_of_zero_does_not_excuse_native_no_score(tmp_path, monkeypatch):
+    """0.0 IS a score (legacy's scored rule is ``is not None``): an
+    unscored-expecting NO_SCORE must not be appended, so a native NO_SCORE
+    on a scored row stays a native-only finding."""
+    record = _clean_record(exp_pnl_model=0.0)
+    native = _no_score_native(record, ("NO_SCORE",))
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["flags"] is False
+    diff = release["row_flag_differences"]["a"]
+    assert diff["native_only"] == ["NO_SCORE"]
+    assert diff["legacy_only"] == []
+
+
+def test_analog_only_legacy_score_does_not_excuse_native_no_score(
+        tmp_path, monkeypatch):
+    """exp_pnl_analog alone makes the row scored (engine/score.py:1335), so
+    the NO_SCORE expectation must not fire; native's NO_SCORE stays a real
+    finding. exp_pnl_sim is NOT a score and must never excuse it either."""
+    record = _clean_record(exp_pnl_model=None, exp_pnl_analog=-0.05)
+    native = _no_score_native(record, ("NO_SCORE",))
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    checks = release["row_dimension_checks"]["a"]
+    assert checks["flags"] is False
+    diff = release["row_flag_differences"]["a"]
+    assert diff["native_only"] == ["NO_SCORE"]
+    assert diff["legacy_only"] == []
+
+
+def test_refusing_legacy_flag_suppresses_no_score_expectation(tmp_path, monkeypatch):
+    """A legacy flag that refuses (BAD_QUOTE is not in ADVISORY_FLAGS) is
+    already a disposition: NO_SCORE must not be expected on top of it, so
+    native flags mirroring the legacy ones agree."""
+    record = _clean_record(exp_pnl_model=None, flags=("BAD_QUOTE",))
+    native = _no_score_native(record, ("BAD_QUOTE",))
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    assert release["row_dimension_checks"]["a"]["flags"] is True
+    assert "a" not in release["row_flag_differences"]
+
+
+def test_advisory_legacy_flags_still_expect_no_score(tmp_path, monkeypatch):
+    """NO_PAYOFF_MAP/THIN_ANALOGS annotate without refusing
+    (flags_refuse is False for advisory-only flags), so an unscored row
+    carrying only advisory flags still expects the appended NO_SCORE --
+    and it lands LAST, matching native's (*reasons, "NO_SCORE") order."""
+    record = _clean_record(
+        exp_pnl_model=None, flags=("NO_PAYOFF_MAP", "THIN_ANALOGS"))
+    native = _no_score_native(
+        record, ("NO_PAYOFF_MAP", "THIN_ANALOGS", "NO_SCORE"))
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    assert release["row_dimension_checks"]["a"]["flags"] is True
+    assert "a" not in release["row_flag_differences"]
+
+
+def test_unvalidated_structure_refusal_suppresses_no_score(tmp_path, monkeypatch):
+    """Regression (follow-up correction 2026-09-23): the NO_SCORE
+    expectation must be decided against the legacy flag tuple AFTER the
+    CAL-P/CND-P synthetic UNVALIDATED_STRUCTURE translation. An unscored
+    CAL-P row with no original legacy flags already expects a refusing
+    UNVALIDATED_STRUCTURE, so native may validly carry that alone --
+    appending NO_SCORE on top (the pre-fix ordering, which saw the empty
+    pre-translation tuple) would demand BOTH and spuriously fail with
+    NO_SCORE legacy-only."""
+    record = _clean_record(strategy="CAL-P", exp_pnl_model=None)
+    native = _no_score_native(record, ("UNVALIDATED_STRUCTURE",))
+
+    release, _parity = _run(
+        tmp_path, monkeypatch, {"a": record}, natives_by_fixture={"a": native},
+    )
+
+    assert release["row_dimension_checks"]["a"]["flags"] is True
+    assert "a" not in release["row_flag_differences"]
