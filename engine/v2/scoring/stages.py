@@ -1026,6 +1026,46 @@ def _strategy_name(inputs: NativeScoreInputs, strategy: str | None,
     return name
 
 
+def _observed_empty_quote_lookup(inputs: NativeScoreInputs) -> bool:
+    """Whether the capture recorded a quote lookup that ran and found nothing.
+
+    ``tools/capture_tier0_corpus.py::_quote_map`` writes an EMPTY ``quotes``
+    mapping only when legacy explicitly recorded why (``quote_status``
+    ``"empty"``: the chain lookup ran and came back with no usable chain --
+    ``engine/score.py:2347-2351`` flags ``NO_CHAIN`` there, BEFORE any expiry
+    resolution -- or ``"not_reached"``, whose rows are refused upstream and
+    never reach the geometry gate with a spot at all, since capture records
+    no spot for an unpriced row). So an empty-but-recorded domain is the
+    observed fact legacy itself refused on, and the gate must classify it
+    like legacy: ``NO_CHAIN``, not ``MISSING_EXPIRY``. Quotes that exist but
+    carry no eligible expiration, and bundles with no ``quotes`` evidence at
+    all (or a non-mapping under that key -- a malformed capture), return
+    ``False`` and stay on the fail-closed ``MISSING_EXPIRY`` path. Reads the
+    same declared blocks in the same priority as ``_quote_map``, so pricing
+    and geometry classify off one and the same evidence.
+    """
+    for block in (inputs.context, inputs.features):
+        declared = block.get("quotes")
+        if isinstance(declared, Mapping):
+            return not declared
+    return False
+
+
+def _refuse_unbuilt_geometry(geometry: Geometry, name: str) -> Geometry:
+    """Re-stamp a generation that returned no legs and no refusal.
+
+    Moved verbatim out of ``_resolve_geometry`` (identical behavior) to keep
+    that function's classification branch inside the complexity budget --
+    see the same precedent in ``domain.generation.structures``'s
+    ``_resolve_put_ladder_legs``.
+    """
+    if geometry.refusal is None and not geometry.legs:
+        return Geometry(
+            name, geometry.spot, geometry.width, (), "MISSING_CONTRACTS",
+        )
+    return geometry
+
+
 def _resolve_geometry(inputs: NativeScoreInputs, name: str,
                       values: dict[str, Any]):
     geometry_inputs = dict(values)
@@ -1042,6 +1082,14 @@ def _resolve_geometry(inputs: NativeScoreInputs, name: str,
             # `has_resolvable_expiry` is the same native selection `generate`
             # performs below, so this refuses only when that selection also
             # finds nothing, not merely because legacy never priced the row.
+            if _observed_empty_quote_lookup(inputs):
+                # The empty domain IS the captured lookup: legacy ran it,
+                # found no chain, and flagged NO_CHAIN before resolving any
+                # expiry (engine/score.py:2347-2351). Conflating that
+                # observed-empty fact with the MISSING_EXPIRY return below
+                # (quotes present, nothing eligible -- or no evidence at all)
+                # is the 002/019 member-2 refusal mismatch.
+                return geometry_inputs, Geometry(name, spot, 0.0, (), "NO_CHAIN")
             return geometry_inputs, Geometry(name, spot, 0.0, (), "MISSING_EXPIRY")
     if inputs.geometry is not None:
         geometry_inputs["resolved_legs"] = tuple(vars(leg) for leg in inputs.geometry.legs)
@@ -1058,10 +1106,12 @@ def _resolve_geometry(inputs: NativeScoreInputs, name: str,
             raise
         geometry = Geometry(name, 0.0, 0.0, (), str(exc),
                             getattr(exc, "detail", None))
-    if geometry.refusal is None and not geometry.legs:
-        geometry = Geometry(
-            name, geometry.spot, geometry.width, (), "MISSING_CONTRACTS",
-        )
+    # Extracted to ``_refuse_unbuilt_geometry`` (unchanged semantics) the
+    # same way ``structures._resolve_put_ladder_legs`` was extracted out of
+    # ``generate``: the branch budget belongs to whichever function names
+    # the stage's decision, and the empty-domain-vs-missing-expiry
+    # classification is ``_resolve_geometry``'s.
+    geometry = _refuse_unbuilt_geometry(geometry, name)
     return geometry_inputs, geometry
 
 
