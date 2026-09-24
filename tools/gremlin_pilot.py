@@ -32,7 +32,7 @@ pytest-gremlins' own keys.
     python -m pytest --gremlins \\
         --gremlin-targets=<comma-separated expanded source files> \\
         --gremlin-workers=N --gremlin-cache --gremlin-report=json \\
-        -p no:xdist -p no:cacheprovider --deselect=... <expanded test files>
+        -p no:cacheprovider --deselect=... <expanded test files>
 
 Rules this tool encodes, all pinned by ``tests/test_gremlin_ci.py``:
 
@@ -40,7 +40,11 @@ Rules this tool encodes, all pinned by ``tests/test_gremlin_ci.py``:
   ``min(nproc, 4)``. A ``--workers`` request is never honored above that ceiling.
   ``--gremlin-workers`` is what makes gremlins parallel; there is no separate
   parallelism switch and never a second runner (pytest-xdist) stacked on top of
-  it -- we pass ``-p no:xdist`` so the two cannot fight over cores.
+  it -- we simply never pass pytest's ``-n``, so xdist is loaded but has nothing
+  to run. We must NOT disable it either: pytest-gremlins 1.9.0 implements
+  xdist's hooks (``pytest_configure_node``), so ``-p no:xdist`` makes pluggy
+  abort collection with PluginValidationError: unknown hook (CI run
+  36059422920 -- pytest exit 3, no raw report, every module a tool failure).
 * No batch mode. pytest-gremlins' batch mode unions the test pools of the files
   that cover a mutant, which runs unrelated tests against it and so manufactures
   false timeouts. We never pass ``--gremlin-batch``.
@@ -96,7 +100,10 @@ import mutation_pilot as pilot  # noqa: E402  (reuses load_config + module parti
 # supported; the raw report is written to coverage/gremlins/gremlins.json; the
 # cache directory is .gremlins_cache and 1.9.0 does have --gremlin-clear-cache;
 # the default worker pool runs mutants in subprocesses; the per-mutant timeout is
-# hardcoded to 30s and has no configuration option. None of these are guessed.
+# hardcoded to 30s and has no configuration option; it implements pytest-xdist's
+# hooks (pytest_configure_node), so `-p no:xdist` aborts collection with a pluggy
+# PluginValidationError (CI run 36059422920) and xdist must stay loaded (never
+# passed a `-n`; parallelism is --gremlin-workers only). None of these are guessed.
 RAW_REL = Path("coverage") / "gremlins" / "gremlins.json"
 CACHE_DIRNAME = ".gremlins_cache"
 PER_MUTANT_TIMEOUT_SECONDS = 30  # hardcoded in 1.9.0, not configurable
@@ -270,10 +277,12 @@ def build_pytest_command(targets: list[str], tests: list[str], workers: int, *,
     incremental run reuses it) and rebuilds it (a ``--fresh`` run has had the
     directory cleared first, so this run writes a clean one). ``--gremlin-workers``
     is the parallelism switch; ``--gremlin-report=json`` makes the raw
-    ``coverage/gremlins/gremlins.json`` the adapter reads. ``-p no:xdist`` and
-    ``-p no:cacheprovider`` come from ``pytest_args`` (the toml's default) so we
-    never stack pytest-xdist on top of gremlins' own workers. No batch flag ever
-    appears.
+    ``coverage/gremlins/gremlins.json`` the adapter reads. ``-p no:cacheprovider``
+    comes from ``pytest_args`` (the toml's default). pytest-xdist is neither
+    disabled nor invoked: no pytest ``-n`` (gremlins' own workers do the running)
+    and no ``-p no:xdist`` either -- 1.9.0 implements xdist's hooks, so
+    disabling the plugin fails pluggy validation during collection. No batch
+    flag ever appears.
     """
     python = python or sys.executable
     cmd = [python, "-m", "pytest", "--gremlins",
@@ -399,7 +408,7 @@ def cmd_run(cfg: dict, args) -> int:
         sys.exit(f"{module}: nothing to run (targets or tests empty)")
     workers = resolve_workers(args.workers, ci=is_ci(), nproc=args.nproc or cpu_count())
     deselect = list(cfg["defaults"].get("deselect", []))
-    pytest_args = list(cfg["defaults"].get("pytest_args", ["-p", "no:xdist", "-p", "no:cacheprovider"]))
+    pytest_args = list(cfg["defaults"].get("pytest_args", ["-p", "no:cacheprovider"]))
 
     clear_stale_report(cwd)  # every run: a stale raw report must not look current
     if args.fresh:

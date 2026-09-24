@@ -30,7 +30,7 @@ CANDIDATE = ROOT / "tools" / "gremlin_workflow_candidate.yml"
 WORKFLOW = yaml.safe_load(CANDIDATE.read_text())
 JOBS = WORKFLOW["jobs"]
 
-DEFAULTS = {"pytest_args": ["-p", "no:xdist", "-p", "no:cacheprovider"],
+DEFAULTS = {"pytest_args": ["-p", "no:cacheprovider"],
             "deselect": ["tests/test_a.py::needs_data"]}
 
 
@@ -86,7 +86,7 @@ def stub_partition(monkeypatch, targets=("engine/a.py", "engine/b.py"),
 def test_command_selects_targets_and_tests_and_parallel_workers():
     cmd = gp.build_pytest_command(["engine/a.py", "engine/b.py"], ["tests/test_a.py"],
                                   3, fresh=False, deselect=["tests/test_a.py::needs_data"],
-                                  pytest_args=["-p", "no:xdist", "-p", "no:cacheprovider"],
+                                  pytest_args=["-p", "no:cacheprovider"],
                                   python="python")
     assert cmd[:3] == ["python", "-m", "pytest"]
     assert "--gremlins" in cmd
@@ -94,23 +94,39 @@ def test_command_selects_targets_and_tests_and_parallel_workers():
     assert "--gremlin-workers=3" in cmd
     assert "--gremlin-cache" in cmd
     assert "--gremlin-report=json" in cmd
-    assert "-p" in cmd and "no:xdist" in cmd and "no:cacheprovider" in cmd
+    assert "-p" in cmd and "no:cacheprovider" in cmd
+    assert "no:xdist" not in cmd      # disabling xdist aborts collection under gremlins
     assert "--deselect=tests/test_a.py::needs_data" in cmd
     assert cmd[-1] == "tests/test_a.py"                          # test files are positional args
 
 
 def test_command_never_enables_batch_mode():
     cmd = gp.build_pytest_command(["engine/a.py"], ["tests/test_a.py"], 2, fresh=True,
-                                  deselect=[], pytest_args=["-p", "no:xdist"])
+                                  deselect=[], pytest_args=["-p", "no:cacheprovider"])
     joined = " ".join(cmd)
     assert "--gremlin-batch" not in joined       # batch unions test pools -> false timeouts
-    assert "xdist" in joined                      # xdist is only ever disabled, never used to run
+    assert "xdist" not in joined                 # never disabled (gremlins' xdist hooks) and never invoked
+
+
+def test_command_leaves_xdist_loaded_and_never_passes_n():
+    # pytest-gremlins 1.9.0 implements pytest-xdist's hooks (pytest_configure_node):
+    # `-p no:xdist` made pluggy abort collection with PluginValidationError: unknown
+    # hook (CI run 36059422920 -- pytest exit 3, no coverage/gremlins/gremlins.json,
+    # every module correctly a tool failure). So xdist stays loaded. It cannot fight
+    # gremlins for cores: parallelism is --gremlin-workers only, and a pytest
+    # -n/--numprocesses switch never appears.
+    cmd = gp.build_pytest_command(["engine/a.py"], ["tests/test_a.py"], 4, fresh=False,
+                                  deselect=[], pytest_args=["-p", "no:cacheprovider"])
+    joined = " ".join(cmd)
+    assert "no:xdist" not in joined
+    assert "-n" not in cmd and "--numprocesses" not in joined
+    assert "--gremlin-workers=4" in cmd          # the only parallelism switch
 
 
 def test_deselects_appear_before_the_test_files():
     cmd = gp.build_pytest_command(["engine/a.py"], ["tests/test_a.py", "tests/test_b.py"], 2,
                                   fresh=False, deselect=["tests/test_b.py::needs_browser"],
-                                  pytest_args=["-p", "no:xdist"])
+                                  pytest_args=["-p", "no:cacheprovider"])
     dsel = cmd.index("--deselect=tests/test_b.py::needs_browser")
     assert dsel < cmd.index("tests/test_a.py")
     assert cmd[-2:] == ["tests/test_a.py", "tests/test_b.py"]
@@ -350,6 +366,7 @@ def test_run_builds_command_env_and_cwd(monkeypatch, tmp_path, capsys):
     assert "--deselect=tests/test_a.py::needs_data" in cmd
     assert cmd[-1] == "tests/test_a.py"
     assert "--gremlin-batch" not in cmd
+    assert "no:xdist" not in cmd                 # the default argv must keep xdist loaded (CI run 36059422920)
     assert kw["cwd"] == str(tmp_path)
     assert kw["env"]["OMP_NUM_THREADS"] == "1"   # BLAS pool pinned
     text = capsys.readouterr().out
@@ -447,6 +464,37 @@ def test_run_refuses_module_with_nothing_to_run(monkeypatch):
     stub_partition(monkeypatch, targets=(), tests=())
     with pytest.raises(SystemExit):
         gp.cmd_run(cfg(), run_args(cwd=None))
+
+
+# -- production pytest_args defaults: the shipped toml + the in-code fallback --
+
+def test_shipped_toml_pytest_args_never_disable_xdist():
+    # The command tests above pass an EXPLICIT corrected pytest_args and the
+    # cmd_run tests MOCK the defaults, so neither protects the shipped config
+    # itself. tools/mutation_pilot.toml [defaults] pytest_args IS production:
+    # cmd_run reads it unchanged into the gremlins argv. An edit reintroducing
+    # `-p no:xdist` there is the CI run 36059422920 bug (pytest-gremlins 1.9.0
+    # implements xdist's hooks, so pluggy aborts collection) and must fail here.
+    import mutation_pilot as pilot
+    args = pilot.load_config()["defaults"]["pytest_args"]
+    assert "no:xdist" not in args
+    assert args == ["-p", "no:cacheprovider"]
+
+
+def test_missing_pytest_args_fallback_never_disables_xdist(monkeypatch, tmp_path):
+    # gremlin_pilot's in-code fallback -- cmd_run reads
+    # defaults.get("pytest_args", [...]) -- is the other production default, and
+    # every other cmd_run cfg carries the key, so the fallback branch was
+    # unpinned. Run a defaults dict with NO pytest_args and pin what the real
+    # argv gets: xdist stays loaded and the fallback is exactly
+    # `-p no:cacheprovider`.
+    stub_partition(monkeypatch)
+    calls = stub_popen(monkeypatch, rc=0)
+    bare = {"defaults": {}, "modules": {"toy": {"why": "x"}}}
+    assert gp.cmd_run(bare, run_args(cwd=tmp_path)) == 0
+    cmd = calls[0][0]
+    assert "no:xdist" not in cmd
+    assert cmd[cmd.index("-p") + 1] == "no:cacheprovider"
 
 
 # -- matrix selection reuses the toml partition ----------------------------
