@@ -221,9 +221,8 @@ clean test run fails, or the run hits its 330-minute step timeout.
   Be honest about what it does: `debug` is **full-run verbosity**, not a
   stats-only hook -- with it on, mutmut echoes every mutant's child pytest
   output for the whole run, so the log grows large. Because that is expensive,
-   the driver enables it only where it is warranted: automatically on the
-   `ops_legacy` and `ops_catalog_state` CI shards (their stats steps are the
-   ones known to fail), and on any
+  the driver enables it only where it is warranted: automatically on the
+  `ops_legacy` CI shard (its stats step is the one known to fail), and on any
   other run only when `MUTATION_PILOT_DEBUG` is set explicitly (`1/true/yes/on`
   turn it on; any other value, including `0/false/off`, turns it off and always
   wins over the CI default). Set `MUTATION_PILOT_DEBUG` in the `mutate` job's
@@ -231,6 +230,8 @@ clean test run fails, or the run hits its 330-minute step timeout.
   only: it never reruns a shard and never changes the exit code the job gates
   on. A plain pytest pass over the same selection would only mean the CI failure
   was not reproduced, not a root cause.
+  The `ops_catalog_state` CI shard enables the same debug setting under the
+  same CI-only default (its stats step failed the same way in run 36025664817).
 
 | trigger | mode | state |
 |---|---|---|
