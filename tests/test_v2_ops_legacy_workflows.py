@@ -1,14 +1,17 @@
 """Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28)."""
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.diagnostics import audit_writes, snapshot_sensitive
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
     ExperimentSpec,
+    experiment_plan,
     register_hypothesis,
     run_experiment,
     synthetic_fixture_runner,
@@ -28,6 +31,7 @@ from engine.v2.ops.nightly import (
     graph_order,
     run_shadow_nightly,
 )
+from engine.v2.ops.plans import request_from_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit_graph
 from tests.ops_support import FakeClock, catalog
@@ -208,6 +212,24 @@ def test_primary_registration_conflicts_on_changed_input(tmp_path):
         register_hypothesis(conn, spec, "input-b", mode="primary")
 
 
+def test_request_from_plan_accepts_experiment_and_rejects_unknown_kind(tmp_path):
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps({"experiment_id": "EXP-JOB", "runner": "synthetic"}))
+    plan = experiment_plan(spec_path, smoke=True)
+    store = ArtifactStore(tmp_path)
+    spec_ref = store.publish_bytes(json.dumps(plan["spec_document"], sort_keys=True).encode(),
+                                   schema_ref="experiment_spec.v1.0")
+    plan["parameters"]["input_bindings"] = {"spec.json": spec_ref.artifact_id}
+
+    command = request_from_plan(plan, "key-1")
+    assert command.job.kind == "experiment"
+    assert command.job.checkpoint_contract_ref == "experiment_receipt.v1.0"
+
+    forged = dict(plan, kind="nightly")
+    with pytest.raises(OpsError, match="not enabled for submission"):
+        request_from_plan(forged, "key-2")
+
+
 def test_failure_evidence_carries_no_exception_text(tmp_path):
     spec = ExperimentSpec("EXP-D2", "plumbing", "fixture", ("fixture",), 7,
                           ("fold-1",), {"fill": "mid"}, "synthetic")
@@ -270,11 +292,27 @@ def test_o16_write_audit_detects_undisclosed_production_writes(tmp_path):
 
 
 def test_o16_whole_legacy_nightly_is_not_an_adapter_entry(tmp_path):
-    assert not any("nightly" in name for name in ACTION_NAMES)
-    assert not any("nightly" in name for name in registry().names())
-    with pytest.raises(OpsError):
-        legacy_action("run_nightly", {}, tmp_path)
-    with pytest.raises(OpsError, match="not audited"):
-        invoke_nightly_helper(tmp_path, "run_nightly")
-    with pytest.raises(OpsError, match="not audited"):
-        invoke_nightly_helper(tmp_path, "publish")
+    # legacy_action/invoke_nightly_helper route through
+    # legacy_adapter._rooted_import, which sets INVESTING_PLAN_ROOT as a
+    # process-wide side effect and never restores it -- even on the refusal
+    # path exercised here. Left alone, that leaks this test's tmp_path into
+    # engine.paths.ROOT for whatever module imports it next in the same
+    # process (see tests/test_v2_data_reference_inputs.py, which reads
+    # engine.models.registry's own paths.ROOT and failed exactly this way
+    # when this test ran first in a land sweep). Save/restore here, the same
+    # pattern tests/conftest.py's tmp_root fixture uses.
+    original_root_env = os.environ.get("INVESTING_PLAN_ROOT")
+    try:
+        assert not any("nightly" in name for name in ACTION_NAMES)
+        assert not any("nightly" in name for name in registry().names())
+        with pytest.raises(OpsError):
+            legacy_action("run_nightly", {}, tmp_path)
+        with pytest.raises(OpsError, match="not audited"):
+            invoke_nightly_helper(tmp_path, "run_nightly")
+        with pytest.raises(OpsError, match="not audited"):
+            invoke_nightly_helper(tmp_path, "publish")
+    finally:
+        if original_root_env is None:
+            os.environ.pop("INVESTING_PLAN_ROOT", None)
+        else:
+            os.environ["INVESTING_PLAN_ROOT"] = original_root_env

@@ -132,14 +132,25 @@ def save_plan(conn, root, document, *, clock):
     return ref
 
 
+#: Plan kinds enabled for submission, with the effect scope each must carry.
+_ENABLED_PLAN_KINDS = {"artifact_check": ["private_artifacts"], "experiment": ["staged"]}
+
+#: The checkpoint contract each enabled kind's registered ``JobKind`` declares
+#: (``engine.v2.ops.stages.registry()``); a submission whose contract differs
+#: from its kind is refused by ``submission.validate_request``.
+_PLAN_CHECKPOINT_CONTRACTS = {"artifact_check": "receipt.v1.0",
+                              "experiment": "experiment_receipt.v1.0"}
+
+
 def request_from_plan(plan, key):
     if plan.get("schema_version") != "operations_plan.v1.0" or plan.get("blocked_prerequisites"):
         raise fail("INVALID_REQUEST", "plan has unsupported schema or blocked prerequisites")
-    if plan["kind"] != "artifact_check" or plan["effects"] != ["private_artifacts"]:
+    if plan["kind"] not in _ENABLED_PLAN_KINDS or plan["effects"] != _ENABLED_PLAN_KINDS[plan["kind"]]:
         raise fail("INVALID_REQUEST", "plan kind is not enabled for submission")
     job = JobSpec(kind=plan["kind"], implementation_ref=plan["implementation_ref"],
                   spec_hash=plan.get("spec_hash"), environment_ref=plan["environment_ref"],
                   parameters=plan["parameters"], input_refs=tuple(plan["input_refs"]),
                   output_namespace=plan["mode"], resource_class=plan["resource_class"],
-                  retry_policy_ref="bounded", checkpoint_contract_ref="receipt.v1.0")
+                  retry_policy_ref="bounded",
+                  checkpoint_contract_ref=_PLAN_CHECKPOINT_CONTRACTS[plan["kind"]])
     return SubmitRequest(namespace=plan["mode"], idempotency_key=key, principal="operator", job=job)

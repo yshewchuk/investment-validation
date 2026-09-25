@@ -30,6 +30,18 @@ class RescoreParameters:
 
 
 @dataclass(frozen=True)
+class ExperimentParameters:
+    """A supervised smoke-mode experiment run (P6 slice 10). ``spec.json`` —
+    the ExperimentSpec document — is resolved into staging via
+    ``input_bindings`` exactly like ``RescoreParameters``' request pair."""
+
+    expected_ids: tuple[str, ...]
+    input_bindings: dict[str, str] | None = None
+    runner: str = ""
+    no_ledger: bool = True
+
+
+@dataclass(frozen=True)
 class SnapshotImportParameters:
     """P2-7/Task7b: the ``snapshot_import`` worker needs nothing scalar at all
     — its full plan (table sources, contract refs, calendar/source-priority
@@ -202,6 +214,15 @@ def _core_kinds():
             name="artifact_check", worker="artifact_check", parameters=CheckParameters,
             resource_classes=frozenset({"delivery"}), effects=("staged",),
             retry=RetryPolicy("bounded", 3, (1, 5)), checkpoint_contract="receipt.v1.0",
+            namespaces=frozenset({"shadow", "smoke"})),
+        # P6 slice 10: a supervised smoke-mode experiment run. No
+        # store_domains: the worker's runner subprocess writes only inside
+        # its own private staging root, never the shared legacy tree.
+        JobKind(
+            name="experiment", worker="experiment", parameters=ExperimentParameters,
+            resource_classes=frozenset({"experiment_heavy"}), effects=("staged",),
+            retry=RetryPolicy("bounded", 2, (30, 120)),
+            checkpoint_contract="experiment_receipt.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
         # P2-5/B1c: a pure, non-legacy worker (see worker.py) that derives
         # decision_plan.v1.0/decision_evidence.v1.0 from bound, already-

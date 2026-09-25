@@ -13,7 +13,7 @@ import traceback
 from pathlib import Path
 
 from engine.v2.ops import worker_progress
-from engine.v2.ops.errors import OpsError, make_problem
+from engine.v2.ops.errors import OpsError, fail, make_problem
 
 
 def _write_diagnostics(root: Path) -> None:
@@ -179,6 +179,8 @@ def dispatch(worker, parameters, root, *, envelope=None):
                 "no_work": not parameters["expected_ids"],
                 "observed": {"affinity": sorted(os.sched_getaffinity(0)),
                              "threads": os.environ["OMP_NUM_THREADS"]}}
+    if worker == "experiment":
+        return _dispatch_experiment(parameters, root)
     raise ValueError("unsupported worker")
 
 
@@ -283,6 +285,44 @@ def _dispatch_effect_receipt(worker, parameters, root):
     return {"outputs": [{"name": name, "path": "receipt.json", "schema": "effect_receipt.v1.0"}],
             "completed_ids": list(parameters["expected_ids"]),
             "no_work": not parameters["expected_ids"]}
+
+
+def _dispatch_experiment(parameters, root):
+    """P6 slice 10: run one smoke-mode experiment under admission. Pure
+    function of ``parameters`` and staging, like ``_dispatch_adhoc_rescore``
+    — the runner subprocess writes only inside ``root``, never the shared
+    legacy tree, so this carries no ``store_domains`` lease."""
+    from engine.v2.ops.experiments import (
+        experiment_spec_from_document,
+        run_experiment,
+        synthetic_fixture_runner,
+    )
+    from engine.v2.ops.legacy_adapter import run_legacy_script
+
+    if not parameters.get("no_ledger", True):
+        raise fail("INVALID_REQUEST", "worker only supports smoke runs")
+    document = json.loads((root / "spec.json").read_text())
+    spec = experiment_spec_from_document(document)
+    runner_id = parameters["runner"]
+    if runner_id == "synthetic":
+        runner, synthetic = synthetic_fixture_runner, True
+    else:
+        def runner(*, run_dir, no_ledger):
+            if not no_ledger:
+                raise fail("INVALID_REQUEST", "worker only supports smoke runs")
+            completed = run_legacy_script(root, runner_id)
+            return {"returncode": completed.returncode}
+        synthetic = False
+    receipt = run_experiment(spec, root, root, runner=runner, mode="smoke", synthetic=synthetic)
+    (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
+    if receipt["status"] != "succeeded":
+        raise fail("VALIDATION_FAILED", "experiment run did not succeed",
+                   details={"status": receipt["status"],
+                            "error_code": receipt["evidence"].get("error_code")})
+    expected = parameters["expected_ids"]
+    return {"outputs": [{"name": "experiment_receipt", "path": "experiment_receipt.json",
+                         "schema": "experiment_receipt.v1.0"}],
+            "completed_ids": list(expected), "no_work": False}
 
 
 if __name__ == "__main__":

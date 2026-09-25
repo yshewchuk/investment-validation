@@ -66,6 +66,9 @@ _CASES = {
     "artifact_check": dict(
         resource_class="delivery", checkpoint_contract="receipt.v1.0",
         max_attempts=3, backoff=(1, 5), extra_field=None),
+    "experiment": dict(
+        resource_class="experiment_heavy", checkpoint_contract="experiment_receipt.v1.0",
+        max_attempts=2, backoff=(30, 120), extra_field=("no_ledger", True)),
     "decision_evidence": dict(
         resource_class="validation", checkpoint_contract="decision_evidence_pair.v1.0",
         max_attempts=2, backoff=(5, 30), extra_field=("session", "s")),

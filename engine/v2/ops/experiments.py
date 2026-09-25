@@ -16,10 +16,13 @@ from engine.v2.ops.fingerprints import (
     source_closure,
     worker_source_manifest,
 )
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
 
 def experiment_plan(spec_path: Path | str, *, smoke=True):
-    """Create an immutable infrastructure plan for the registered smoke worker."""
+    """Create an immutable plan for a supervised smoke-mode experiment run."""
+    profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
+    threads = profile.thread_count or profile.cpu_count
     path = Path(spec_path)
     if not smoke:
         raise fail("INVALID_REQUEST", "production experiment activation is disabled")
@@ -29,22 +32,52 @@ def experiment_plan(spec_path: Path | str, *, smoke=True):
     experiment_id = document.get("experiment_id")
     if not isinstance(experiment_id, str) or not experiment_id:
         raise fail("INVALID_REQUEST", "experiment specification has no experiment_id")
+    runner = document.get("runner")
+    if not isinstance(runner, str) or not runner:
+        raise fail("INVALID_REQUEST", "experiment specification has no runner")
     return {
         "schema_version": "operations_plan.v1.0",
-        "kind": "artifact_check",
+        "kind": "experiment",
         "mode": "smoke",
-        "effects": ["private_artifacts"],
-        "parameters": {"expected_ids": ["experiment:" + experiment_id]},
+        "effects": ["staged"],
+        "parameters": {"expected_ids": ["experiment:" + experiment_id],
+                       "input_bindings": None,
+                       "runner": runner, "no_ledger": True},
         "input_refs": [],
         "blocked_prerequisites": [],
         "spec_hash": content_hash(document),
         "implementation_ref": content_hash(worker_source_manifest(
             Path(__file__).resolve().parents[3])),
-        "environment_ref": content_hash(environment_identity()),
-        "resource_class": "delivery",
-        "status": "not_applicable",
-        "reason": "registered experiment execution is deferred; this plan only checks plumbing",
+        "environment_ref": content_hash(environment_identity(threads)),
+        "resource_class": "experiment_heavy",
+        "spec_document": document,
     }
+
+
+def experiment_spec_from_document(document: dict) -> ExperimentSpec:
+    """The typed ``ExperimentSpec`` a parsed spec document names.
+
+    ``experiment_plan`` hashes the raw document; this is the one place the
+    typed form -- needed by both the worker dispatch and the coordinator's
+    durable attempt record -- is built, so a missing required field is refused
+    once, as an ``OpsError``, never a bare ``KeyError``.
+    """
+    for name in ("hypothesis", "primary_arm_id", "economic_params", "price_source"):
+        if name not in document or document[name] is None:
+            raise fail("INVALID_REQUEST", "experiment specification is missing a required field",
+                       details={"field": name})
+    return ExperimentSpec(
+        experiment_id=document.get("experiment_id", ""),
+        hypothesis=document["hypothesis"],
+        primary_arm_id=document["primary_arm_id"],
+        arms=tuple(document.get("arms", ())),
+        seed=document.get("seed", 0),
+        folds=tuple(document.get("folds", ())),
+        economic_params=document["economic_params"],
+        price_source=document["price_source"],
+        input_files=tuple(document.get("input_files", ())),
+        runner=document.get("runner", "synthetic"),
+    )
 
 
 @dataclass(frozen=True)
