@@ -201,3 +201,54 @@ def test_legacy_score_binds_the_features_job_output():
     assert features_job_id in score.job.dependency_job_ids
     assert score.job.parameters["input_bindings"]["features.json"] == \
         features_job_id + "#legacy_features"
+
+
+def test_every_dag_stage_dispatches_to_a_known_action(monkeypatch, tmp_path):
+    """Every stage the real nightly DAG builds (``nightly._DAG_STAGES``) must
+    resolve, through ``worker.dispatch``, to a worker branch that is
+    actually wired up -- not fall through to "legacy action is not
+    allowlisted" or "unsupported worker". This is the exact shape of the
+    ``legacy_features`` defect: the stage existed in the DAG and had a real
+    ``_action_*`` implementation, but the allowlist in
+    ``legacy_actions.ACTION_NAMES`` had never been updated to include it, so
+    a worker that actually tried to run it raised at dispatch time.
+
+    Every underlying action/effect implementation is monkeypatched to a
+    trivial stub so this test proves ROUTING, not full business logic.
+    """
+    from engine.v2.ops import legacy_actions, worker
+    from engine.v2.ops.nightly import _DAG_STAGES, _action_for
+
+    calls = []
+
+    def fake_legacy_action(action, parameters, staging, legacy_root=None, cross_check=None):
+        calls.append(("legacy_action", action))
+        return {"path": "stub.json"}
+
+    def fake_decision_evidence(parameters, root):
+        calls.append(("decision_evidence", "decision_evidence"))
+        return {"outputs": [], "completed_ids": ["decision_evidence"]}
+
+    def fake_effect_receipt(worker_name, parameters, root):
+        calls.append(("effect_receipt", worker_name))
+        return {"outputs": [], "completed_ids": [worker_name]}
+
+    monkeypatch.setattr(legacy_actions, "legacy_action", fake_legacy_action)
+    monkeypatch.setattr(worker, "_dispatch_decision_evidence", fake_decision_evidence)
+    monkeypatch.setattr(worker, "_dispatch_effect_receipt", fake_effect_receipt)
+
+    for stage in _DAG_STAGES:
+        kind = _action_for(stage)
+        calls.clear()
+        result = worker.dispatch(kind, {}, tmp_path)
+        assert result is not None, f"stage {stage!r} (kind {kind!r}) did not dispatch"
+        assert calls, f"stage {stage!r} (kind {kind!r}) reached no known stub"
+
+    # Negative control: removing an action from the allowlist must make
+    # dispatching its stage raise again, proving this test actually catches
+    # the regression it targets (and would have caught the original
+    # ``legacy_features`` omission).
+    trimmed = tuple(name for name in legacy_actions.ACTION_NAMES if name != "legacy_features")
+    monkeypatch.setattr(legacy_actions, "ACTION_NAMES", trimmed)
+    with pytest.raises(ValueError):
+        worker.dispatch(_action_for("features"), {}, tmp_path)
