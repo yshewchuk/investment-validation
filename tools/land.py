@@ -392,7 +392,8 @@ def _run(root: Path, args: argparse.Namespace, saved: tuple[str, str],
         # exclusion instead of folding it into "passed".
         pytest_run = subprocess.run(
             [sys.executable, str(root / "tools" / "bounded_run.py"),
-             "--max-rss-gb", "2", "--cpu-set", args.cpu_set, "--",
+             "--max-rss-gb", "2", "--cpu-set", args.cpu_set,
+             "--max-wait-s", "1800", "--",
              sys.executable, "-m", "pytest", "-v", "-m", oc.MARKERS, *targets],
             cwd=str(root), capture_output=True, text=True)
         # pytest's own exit code 5 means "no tests were collected" -- here,
@@ -402,6 +403,15 @@ def _run(root: Path, args: argparse.Namespace, saved: tuple[str, str],
         # failure: 0 vs 5 vs any other code distinguishes "ran clean",
         # "selected nothing to run", and "actually failed" without
         # collapsing the middle case into either of the outer two.
+        # bounded_run exits 75 (EX_TEMPFAIL) when it timed out waiting for a
+        # shared test slot or a heavy-job headroom -- the box was busy, the
+        # tests never ran, so this is not "tests failed" and land.py should
+        # say so plainly rather than dumping a pytest tail that does not exist.
+        if pytest_run.returncode == 75:
+            restore_head(root, saved)
+            eprint("land: resource wait timed out (bounded_run exit 75) — "
+                   "box busy, retry")
+            return 8
         if pytest_run.returncode not in (0, 5):
             tail = "\n".join(
                 (pytest_run.stdout + pytest_run.stderr).splitlines()[-TEST_TAIL_LINES:])

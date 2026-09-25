@@ -13,8 +13,10 @@ module they check.
 
 Runs, in order, against the WORKING TREE of the current agent worktree:
   1. the pre-commit gates (hygiene, import layers, code budgets, package READMEs, v2 lint)
-  2. the named test files, serially, under bounded_run (1.5 GB cap, 1 GB box floor),
-     CI marker expression, no xdist.
+  2. the named test files, serially, under bounded_run (1.5 GB cap, 1 GB box floor,
+     --max-wait-s 600), CI marker expression, no xdist. If bounded_run gives up waiting
+     for a test slot or heavy-job headroom (exit 75), the tests never ran: the verdict is
+     RESOURCE WAIT TIMEOUT and oc-check exits 75 ("box busy, retry"), not a test failure.
 Output is trimmed so a long log cannot flood the model. Exit 0 only when all pass.
 
 Every run writes .oc_logs/oc_check_report.json: verdict, per-step results, targets,
@@ -37,6 +39,8 @@ WORKTREES = MAIN / ".claude" / "worktrees"
 ARG_RE = re.compile(r"^tests/[A-Za-z0-9_/]+\.py(::[A-Za-z0-9_\[\]\-.]+)*$")
 MARKERS = "not needs_data and not needs_corpus and not heavy_host and not browser"
 TAIL = 60
+EX_TEMPFAIL = 75  # bounded_run: gave up waiting for a test slot / heavy-job headroom
+RESOURCE_WAIT_MSG = "oc-check: resource wait timed out (bounded_run exit 75) — box busy, retry"
 ALWAYS_RUN_MARKER = "# land: always-run"  # test files carrying this line always run when any engine/checks/tools file changed
 
 
@@ -71,6 +75,11 @@ def run(label, cmd, env, timeout):
     except subprocess.TimeoutExpired:
         print(f"== {label}: TIMEOUT after {timeout}s")
         STEPS.append({"step": label, "result": "TIMEOUT"})
+        return False
+    if label == "pytest" and p.returncode == EX_TEMPFAIL:
+        print(f"== {label}: {RESOURCE_WAIT_MSG}")
+        STEPS.append({"step": label, "result": "RESOURCE WAIT TIMEOUT",
+                      "tail": tail(p.stdout + p.stderr)})
         return False
     ok = p.returncode == 0
     print(f"== {label}: {'PASS' if ok else f'FAIL (rc={p.returncode})'}")
@@ -165,10 +174,11 @@ def main():
     ok = all([run(label, cmd, env, 300) for label, cmd in gates])
     if args:
         cmd = [py, str(root / "tools" / "bounded_run.py"), "--max-rss-gb", "1.5", "--min-free-gb", "1.0",
-               "--cores", "4", "--", py, "-m", "pytest", "-q", "-p", "no:xdist", "-p", "no:cacheprovider",
+               "--cores", "4", "--max-wait-s", "600", "--", py, "-m", "pytest", "-q", "-p", "no:xdist", "-p", "no:cacheprovider",
                "-m", MARKERS, "--tb=short", "-rfE", *args]
         ok = run("pytest", cmd, env, 900) and ok
-    verdict = "ALL GREEN" if ok else "NOT GREEN"
+    waited_out = any(s.get("result") == "RESOURCE WAIT TIMEOUT" for s in STEPS)
+    verdict = "ALL GREEN" if ok else ("RESOURCE WAIT TIMEOUT" if waited_out else "NOT GREEN")
     REPORT.parent.mkdir(exist_ok=True)
     REPORT.write_text(json.dumps({
         "verdict": verdict, "tree": tree_id(root), "targets": args, "steps": STEPS,
@@ -176,6 +186,9 @@ def main():
         "finished": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }, indent=2))
     print(f"oc-check: {verdict}  (report: {REPORT})")
+    if waited_out:
+        print(RESOURCE_WAIT_MSG)
+        sys.exit(EX_TEMPFAIL)
     sys.exit(0 if ok else 1)
 
 
