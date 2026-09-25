@@ -16,10 +16,13 @@ from engine.v2.ops.fingerprints import (
     source_closure,
     worker_source_manifest,
 )
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
 
 def experiment_plan(spec_path: Path | str, *, smoke=True):
     """Create an immutable plan for a supervised smoke-mode experiment run."""
+    profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
+    threads = profile.thread_count or profile.cpu_count
     path = Path(spec_path)
     if not smoke:
         raise fail("INVALID_REQUEST", "production experiment activation is disabled")
@@ -45,7 +48,7 @@ def experiment_plan(spec_path: Path | str, *, smoke=True):
         "spec_hash": content_hash(document),
         "implementation_ref": content_hash(worker_source_manifest(
             Path(__file__).resolve().parents[3])),
-        "environment_ref": content_hash(environment_identity()),
+        "environment_ref": content_hash(environment_identity(threads)),
         "resource_class": "experiment_heavy",
         "spec_document": document,
     }
