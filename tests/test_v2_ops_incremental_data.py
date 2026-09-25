@@ -76,13 +76,14 @@ def test_cache_first_plan_uses_existing_supervisor_and_shared_provider_budget(tm
     plan = incremental_data.plan_refresh(
         _snapshot(), (_unit("cached", "AAPL"), _unit("fetch", "MSFT")),
         cached_outcomes={"cached": cached}, provider_account="orats-account",
-        max_attempts=3)
+        max_attempts=3, expected_head_generation=1)
     assert [unit.request_id for unit in plan.fetch_units] == ["fetch"]
     assert plan.provider_calls == 3
 
     spec = incremental_data.refresh_job_spec(
         plan, implementation_ref="code", environment_ref="env",
-        output_namespace="shadow")
+        output_namespace="shadow", catalog_path="catalog.sqlite",
+        objects_root="objects")
     request = SubmitRequest(
         namespace="shadow", idempotency_key="refresh-2026-09-15",
         principal="operator", job=spec)
@@ -103,7 +104,7 @@ def test_failed_or_partial_outcomes_cannot_admit_watermark_advancing_commit():
     unit = _unit("r1", "AAPL")
     plan = incremental_data.plan_refresh(
         _snapshot(), (unit,), cached_outcomes={}, provider_account="polygon",
-        max_attempts=2)
+        max_attempts=2, expected_head_generation=1)
     partial = incremental_data.classify_response(
         200, ("AAPL",), returned_keys=(), request_id="r1",
         receipt_ref="receipt-r1")

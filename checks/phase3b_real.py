@@ -421,7 +421,8 @@ def _acceptance_acquisition_controls(conn, snapshot):
         partition_key="2026-09-17", expected_keys=("MISSING",))
     empty_plan = ops_data.plan_refresh(
         snapshot, (empty_unit,), cached_outcomes={},
-        provider_account="phase3b-empty-account", max_attempts=1)
+        provider_account="phase3b-empty-account", max_attempts=1,
+        expected_head_generation=1)
     empty = ops_data.classify_response(
         200, ("MISSING",), empty_keys=("MISSING",),
         request_id=empty_unit.request_id, receipt_ref="phase3b-empty-receipt",
@@ -453,10 +454,12 @@ def _acceptance_acquisition_controls(conn, snapshot):
             expected_keys=("Q" + str(index),))
         plan = ops_data.plan_refresh(
             snapshot, (unit,), cached_outcomes={}, provider_account=account,
-            max_attempts=1)
+            max_attempts=1, expected_head_generation=1)
         spec = ops_data.refresh_job_spec(
             plan, implementation_ref="phase3b-acceptance",
-            environment_ref="phase3b-acceptance", output_namespace="shadow")
+            environment_ref="phase3b-acceptance", output_namespace="shadow",
+            catalog_path="phase3b-acceptance-catalog",
+            objects_root="phase3b-acceptance-objects")
         submit(conn, registry, policy, SubmitRequest(
             namespace="shadow", idempotency_key="phase3b-quota-" + str(index),
             principal="phase3b-acceptance", job=spec), clock=clock)
@@ -596,7 +599,10 @@ def _cache_metrics(conn, store, snapshot, base_rows, clock, run_root):
         expected_ids=("phase3b-acquisition",), parent_snapshot_id=snapshot.snapshot_id,
         refresh_plan_hash=content_hash({"phase3b": "actual-acquisition",
                                          "snapshot": snapshot.snapshot_id}),
-        provider_calls=1)
+        provider_calls=1, catalog_path=str(run_root / "catalog.sqlite3"),
+        objects_root=str(run_root / "objects"), scope="real",
+        expected_head_generation=generation,
+        expected_head_snapshot_id=snapshot.snapshot_id)
     result = daily_data.run_incremental_refresh(parameters, acquisition_root)
     if result["status"] != "complete" or not result["coverage_advanced"]:
         raise AssertionError("actual incremental acquisition did not complete")

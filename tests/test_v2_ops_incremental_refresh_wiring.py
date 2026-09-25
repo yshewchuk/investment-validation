@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import SnapshotRef, SubmitRequest
+from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import (
@@ -57,7 +58,7 @@ def _cache_satisfied_refresh_plan():
         receipt_ref="receipt-eod-2026-09-18-AAPL", raw_hash="sha256:" + "b" * 64,
         cache_hit=True)
     return plan_refresh(_snapshot(), (unit,), cached_outcomes={"eod-2026-09-18-AAPL": outcome},
-                        provider_account=None)
+                        provider_account=None, expected_head_generation=1)
 
 
 def test_legacy_mode_dag_is_unchanged():
@@ -73,27 +74,33 @@ def test_native_refresh_mode_submits_the_real_native_stage(tmp_path):
     ``legacy_refresh`` adapter action (which is not even a registered kind)."""
     refresh_plan = _cache_satisfied_refresh_plan()
     plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18")
-    requests = build_legacy_job_requests(
-        plan, tickers=("FAKE",), year_start=2025, year_end=2026,
-        refresh_mode="native", refresh_plan=refresh_plan)
-
-    kinds = [request.job.kind for request in requests]
-    assert kinds[0] == "incremental_refresh"
-    assert kinds[1:] == _LEGACY_KINDS
-    assert "legacy_refresh" not in kinds  # never a registered kind; proves it is not the adapter
-
-    refresh_request = requests[0]
-    assert refresh_request.job.resource_class == "io_fetch"
-    assert refresh_request.job.parameters["parent_snapshot_id"] == "snap-parent"
-    assert refresh_request.job.parameters["expected_ids"] == ["eod-2026-09-18-AAPL"]
-    assert refresh_request.job.parameters["provider_calls"] == 0
-
-    # Real admission proof: the production registry (stages.registry()) accepts
-    # it, exactly like every other stage's job in this same DAG.
-    conn = open_catalog(tmp_path / "ops.sqlite", clock=FakeClock())
+    clock = FakeClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
     try:
+        requests = build_legacy_job_requests(
+            plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+            refresh_mode="native", refresh_plan=refresh_plan,
+            catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
+            conn=conn, store=ArtifactStore(tmp_path), clock=clock)
+
+        kinds = [request.job.kind for request in requests]
+        assert kinds[0] == "incremental_refresh"
+        assert kinds[1:] == _LEGACY_KINDS
+        assert "legacy_refresh" not in kinds  # never a registered kind; proves it is not the adapter
+
+        refresh_request = requests[0]
+        assert refresh_request.job.resource_class == "io_fetch"
+        assert refresh_request.job.parameters["parent_snapshot_id"] == "snap-parent"
+        assert refresh_request.job.parameters["expected_ids"] == ["eod-2026-09-18-AAPL"]
+        assert refresh_request.job.parameters["provider_calls"] == 0
+        # S4A: the pinned plan is published, admitted and bound for staging.
+        binding = refresh_request.job.parameters["input_bindings"]["refresh_plan.json"]
+        assert binding in refresh_request.job.input_refs
+
+        # Real admission proof: the production registry (stages.registry()) accepts
+        # it, exactly like every other stage's job in this same DAG.
         policy = NamespacePolicy({"operator": frozenset({"shadow"})})
-        receipts = submit_graph(conn, registry(), policy, requests, clock=FakeClock())
+        receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
         assert len(receipts) == len(requests)
         row = conn.execute(
             "SELECT kind FROM jobs WHERE job_id = ?", (receipts[0].job_id,)).fetchone()
@@ -126,7 +133,8 @@ def test_refresh_mode_is_explicit_and_inspectable_on_the_saved_plan():
     refresh_plan = _cache_satisfied_refresh_plan()
     native = nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18",
                           manifest_ref="artifact:fake", expected_population=("FAKE|x|2026-09-18",),
-                          refresh_mode="native", refresh_plan=refresh_plan)
+                          refresh_mode="native", refresh_plan=refresh_plan,
+                          catalog_path="/tmp/ops.sqlite", objects_root="/tmp/ops")
     assert native["refresh_mode"] == "native"
     assert native["refresh_plan"]["parent_snapshot_id"] == "snap-parent"
     assert native["refresh_plan"]["plan_hash"] == refresh_plan.plan_hash
@@ -148,7 +156,8 @@ def test_end_to_end_plan_document_drives_which_action_is_submitted(tmp_path):
     refresh_plan = _cache_satisfied_refresh_plan()
     plan = nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18", manifest_ref="artifact:fake",
                         expected_population=("FAKE|x|2026-09-18",),
-                        refresh_mode="native", refresh_plan=refresh_plan)
+                        refresh_mode="native", refresh_plan=refresh_plan,
+                        catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path))
     requests = build_legacy_job_requests(
         plan, tickers=(), year_start=plan["year_start"], year_end=plan["year_end"],
         input_refs=(plan["input_manifest_ref"],),

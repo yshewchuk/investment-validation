@@ -542,7 +542,7 @@ def deterministic_fixture_evidence() -> dict:
         receipt_ref="receipt-a", raw_hash=h, cache_hit=True)
     plan = incremental_data.plan_refresh(
         snapshot, (unit_b, unit_a), cached_outcomes={"req-a": cached},
-        provider_account="polygon", max_attempts=3)
+        provider_account="polygon", max_attempts=3, expected_head_generation=1)
     complete_b = incremental_data.classify_response(
         200, ("MSFT",), returned_keys=("MSFT",), request_id="req-b",
         receipt_ref="receipt-b", raw_hash=h)

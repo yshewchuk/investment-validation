@@ -60,7 +60,9 @@ def test_supervised_refresh_without_staged_input_is_truthful_failure(tmp_path):
             expected_ids=("request-1",),
             parent_snapshot_id="nonexistent-snapshot",
             refresh_plan_hash="sha256:" + "a" * 64,
-            provider_calls=0,
+            provider_calls=0, catalog_path=str(tmp_path / "ops.sqlite"),
+            objects_root=str(tmp_path / "objects"), scope="shadow",
+            expected_head_generation=0,
         ),
         tmp_path,
     )
@@ -81,7 +83,9 @@ def test_supervised_refresh_with_explicit_empty_input_fails_closed(tmp_path):
             expected_ids=("request-1",),
             parent_snapshot_id="snapshot-1",
             refresh_plan_hash="sha256:" + "a" * 64,
-            provider_calls=0,
+            provider_calls=0, catalog_path=str(tmp_path / "ops.sqlite"),
+            objects_root=str(tmp_path / "objects"), scope="shadow",
+            expected_head_generation=0,
         ),
         tmp_path,
     )
@@ -148,7 +152,10 @@ def _refresh_input(tmp_path, parent_id, generation, plan_hash, revisions, raws,
     params = RefreshParameters(
         expected_ids=(f"daily-market-{generation}",),
         parent_snapshot_id=parent_id, refresh_plan_hash=plan_hash,
-        provider_calls=0)
+        provider_calls=0, catalog_path=str(tmp_path / "ops.sqlite"),
+        objects_root=str(tmp_path / "objects"), scope="shadow",
+        expected_head_generation=generation,
+        expected_head_snapshot_id=parent_id)
     return root, params
 
 

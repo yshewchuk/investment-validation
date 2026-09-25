@@ -483,20 +483,44 @@ def _resolve_refresh_plan(refresh_mode, refresh_plan):
             else from_document(RefreshPlan, refresh_plan))
 
 
-def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref):
+def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref,
+                            *, catalog_path, objects_root, conn=None, store=None, clock=None):
     """R3B-3: the native refresh job, built by the stage's own contract
     (``incremental_data.refresh_job_spec``) -- never re-derived through
     ``_legacy_params``/``_job_spec``, whose contract (``LegacyParameters``)
-    does not fit it."""
-    from engine.v2.contracts import SubmitRequest
-    from engine.v2.ops.fingerprints import environment_identity
-    from engine.v2.ops.incremental_data import refresh_job_spec
+    does not fit it.
 
+    S4A: the pinned refresh plan is published and bound as
+    ``refresh_plan.json`` so ``executor._materialize_inputs`` copies it into
+    the attempt's staging root for the worker. The published artifact is
+    registered (and admitted through ``input_refs``) when this caller holds
+    the catalog; ``catalog_path``/``objects_root`` are otherwise threaded
+    straight into the job's own deployment identity.
+    """
+    from engine.v2.contracts import SubmitRequest
+    from engine.v2.foundation import ArtifactStore, canonical_json, to_document
+    from engine.v2.ops.catalog import transaction
+    from engine.v2.ops.checkpoints import register_artifact
+    from engine.v2.ops.fingerprints import environment_identity
+    from engine.v2.ops.incremental_data import REFRESH_PLAN_SCHEMA, refresh_job_spec
+
+    bindings, input_refs = {}, ()
+    if objects_root is not None:
+        store = store or ArtifactStore(objects_root)
+        ref = store.publish_bytes(
+            canonical_json(to_document(refresh_plan_obj)).encode(),
+            schema_ref=REFRESH_PLAN_SCHEMA)
+        if conn is not None and clock is not None:
+            with transaction(conn):
+                register_artifact(conn, ref, None, clock)
+        bindings["refresh_plan.json"] = ref.artifact_id
+        input_refs = (ref.artifact_id,)
     job = refresh_job_spec(
         refresh_plan_obj, implementation_ref=implementation_ref,
         environment_ref=(environment_ref or content_hash(
             environment_identity(_thread_count(kind)))),
-        output_namespace="shadow")
+        output_namespace="shadow", catalog_path=catalog_path, objects_root=objects_root,
+        input_bindings=bindings or None, input_refs=input_refs)
     return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
 
 
@@ -509,13 +533,37 @@ def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
     return stages
 
 
+def _request_universe(tickers, context_tickers, full_universe):
+    """Validate the watchlist/context relation and default the context."""
+    context_tickers = tuple(context_tickers) or tuple(tickers)
+    if not set(tickers) <= set(context_tickers):
+        raise fail("INVALID_REQUEST", "watchlist tickers must be a subset of the context tickers")
+    if full_universe is not None and sorted(tickers) != sorted(context_tickers):
+        raise fail("INVALID_REQUEST", "a full run must score its whole context",
+                   details={"tickers": sorted(tickers), "context_tickers": sorted(context_tickers)})
+    return context_tickers
+
+
+def _native_refresh_request(plan, key, refresh_plan_obj, kind, implementation_ref,
+                            environment_ref, catalog_path, objects_root, conn, store, clock):
+    """Build the native refresh job, preferring the caller's staging identity
+    and falling back to the one pinned on the saved plan."""
+    return _refresh_submit_request(
+        key, refresh_plan_obj, kind, implementation_ref, environment_ref,
+        catalog_path=catalog_path if catalog_path is not None else plan.get("catalog_path"),
+        objects_root=objects_root if objects_root is not None else plan.get("objects_root"),
+        conn=conn, store=store, clock=clock)
+
+
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
                               environment_ref=None, include_prerequisites=False,
                               expected_population=(), alt_strikes=1, input_refs=(),
                               full_universe=None, context_tickers=(),
                               input_mode="legacy", snapshot_inputs=None,
                               prior_selfcheck_ref=None,
-                              refresh_mode="legacy", refresh_plan=None):
+                              refresh_mode="legacy", refresh_plan=None,
+                              catalog_path=None, objects_root=None,
+                              conn=None, store=None, clock=None):
     """Build server-allowlisted JobSpecs for the actual legacy worker DAG.
 
     ``input_mode="snapshot"`` (P2-6 §9.3) adds one ``legacy_materialize``
@@ -554,12 +602,7 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
     requests = []
     keys = {}
-    context_tickers = tuple(context_tickers) or tuple(tickers)
-    if not set(tickers) <= set(context_tickers):
-        raise fail("INVALID_REQUEST", "watchlist tickers must be a subset of the context tickers")
-    if full_universe is not None and sorted(tickers) != sorted(context_tickers):
-        raise fail("INVALID_REQUEST", "a full run must score its whole context",
-                  details={"tickers": sorted(tickers), "context_tickers": sorted(context_tickers)})
+    context_tickers = _request_universe(tickers, context_tickers, full_universe)
     plan_identity = _plan_identity(plan, input_refs)
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
@@ -570,8 +613,9 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
         keys[stage] = job_id_for("shadow", key)
         kind = _action_for(stage, refresh_mode=refresh_mode)
         if kind == NATIVE_REFRESH_ACTION:
-            requests.append(_refresh_submit_request(key, refresh_plan_obj, kind,
-                                                     implementation_ref, environment_ref))
+            requests.append(_native_refresh_request(
+                plan, key, refresh_plan_obj, kind, implementation_ref, environment_ref,
+                catalog_path, objects_root, conn, store, clock))
             continue
         parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
                                        effect_scope, snapshot,
