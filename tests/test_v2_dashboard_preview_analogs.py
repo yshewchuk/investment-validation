@@ -64,6 +64,10 @@ def _committed_release(tmp_path):
     serving_store = ArtifactStore(serving_root / "objects")
     serving_conn = projections.connect(str(serving_root / "serving.sqlite"))
     row = _row(n_analogs=2, exp_pnl_analog=0.08, win_analog=0.6)
+    # Fixture-injected ids are deliberate here: this test covers the HTTP route
+    # over a synthetic index. The real scorer -> renderer -> bridge -> index
+    # path that supplies the ids is covered end to end by
+    # tests/test_v2_serving_analog_ids.py.
     display = _compact(row, selected_row_ids=["row-a", "row-b"],
                        contributing_row_ids=["row-a"])
     release = projections.build_candidate(
