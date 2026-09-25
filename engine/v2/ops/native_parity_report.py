@@ -59,13 +59,6 @@ __all__ = [
 
 SCHEMA_VERSION = "native_parity_report.v1.0"
 
-#: Every dimension ``engine.v2.parity.dimensions.NEVER_RAN_DIMENSIONS`` can
-#: name (``analogs``, ``simulation``, ``verdicts``).  The supervisor's default
-#: for spec_ns_c's OPEN dimension-list decision: a native stage that never ran
-#: is reported as a comparison dimension -- including its typed placeholder
-#: defaults -- rather than silently excluded from the report.
-PARITY_DIMENSIONS: tuple[str, ...] = tuple(sorted(NEVER_RAN_DIMENSIONS))
-
 #: The checker's own numeric field groups, reused by name -- see
 #: ``checks/phase4_real._compare_numeric_outputs``, whose dimension names and
 #: field tuples these are.  A dimension outside this map is refused, never
@@ -77,6 +70,15 @@ _DIMENSION_FIELDS: dict[str, tuple[str, ...]] = {
     "verdicts": GATE_FIELDS,
     "analogs": ANALOG_FIELDS,
 }
+
+#: Every one of the checker's five numeric field groups.  ``forecasts`` and
+#: ``financial_diagnostics`` carry the served numbers, so they are compared
+#: too; the ``NEVER_RAN_DIMENSIONS`` groups (``analogs``, ``simulation``,
+#: ``verdicts``) stay in, including their typed placeholder defaults, rather
+#: than being silently excluded from the report.
+PARITY_DIMENSIONS: tuple[str, ...] = tuple(sorted(_DIMENSION_FIELDS))
+if not set(NEVER_RAN_DIMENSIONS) <= set(PARITY_DIMENSIONS):
+    raise RuntimeError("PARITY_DIMENSIONS must cover every never-ran dimension")
 
 
 def _dimension_fields(dimension: str) -> tuple[str, ...]:
@@ -111,6 +113,19 @@ def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, An
     return mismatches
 
 
+def _refuse_empty_inputs(legacy_rows: Mapping[str, Any], native_rows: Mapping[str, Any],
+                         dimensions: tuple[str, ...]) -> None:
+    """Fail closed: an empty comparison must never report ``compared``."""
+    for dimension in dimensions:
+        _dimension_fields(dimension)
+    if not dimensions:
+        raise fail("VALIDATION_FAILED", "native parity report has no dimensions")
+    if not legacy_rows:
+        raise fail("VALIDATION_FAILED", "native parity report has no legacy rows")
+    if not native_rows:
+        raise fail("VALIDATION_FAILED", "native parity report has no native rows")
+
+
 def compare_native_vs_legacy(
     legacy_rows: dict[str, dict],
     native_rows: dict[str, dict],
@@ -124,13 +139,12 @@ def compare_native_vs_legacy(
     and each ``dimensions`` entry that does not agree becomes one entry in
     ``mismatches`` carrying the checker's own finding fields and receipt.
     ``dimensions`` entries outside the checker's numeric field groups are
-    refused up front with ``INVALID_REQUEST``.
+    refused up front with ``INVALID_REQUEST``.  Empty ``dimensions``, an empty side, or no shared key at all is refused with ``VALIDATION_FAILED``: a report that compared nothing never claims ``"compared"``.
 
     G2: this function classifies and returns; it has no path that writes a
     native value into a legacy row or the reverse, and a mismatch never raises.
     """
-    for dimension in dimensions:
-        _dimension_fields(dimension)
+    _refuse_empty_inputs(legacy_rows, native_rows, dimensions)
     compared: list[str] = []
     only_legacy: list[str] = []
     only_native: list[str] = []
@@ -145,6 +159,9 @@ def compare_native_vs_legacy(
         else:
             compared.append(key)
             mismatches.extend(_row_mismatches(key, legacy, native, dimensions))
+    if not compared:
+        raise fail("VALIDATION_FAILED", "native parity report shares no row key",
+                   details={"only_legacy": len(only_legacy), "only_native": len(only_native)})
     return {
         "schema_version": SCHEMA_VERSION,
         "compared": compared,

@@ -368,3 +368,150 @@ def test_native_parity_stage_runs_optional_in_the_real_shadow_graph(tmp_path):
                          if row["stage_id"] == "native_parity")
     assert stage_receipt["status"] == "succeeded"
     assert json.loads(report_path.read_text())["schema_version"] == "native_parity_report.v1.0"
+
+
+# --------------------------------------------------------------------------
+# Review fixes: fail-closed parity, registered stage, no-job stage, one switch.
+# --------------------------------------------------------------------------
+
+def _native_rows():
+    return build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+
+
+def _differing_legacy(rows):
+    return {key: {**row, "exp_pnl_model": (row.get("exp_pnl_model") or 0.0) + 1.0}
+            for key, row in rows.items()}
+
+
+@pytest.mark.parametrize("case", ["no_rows", "no_legacy", "no_native", "no_dimensions",
+                                  "no_shared_key"])
+def test_parity_report_refuses_an_empty_comparison(case):
+    rows = _native_rows()
+    legacy, native, dims = dict(rows), dict(rows), PARITY_DIMENSIONS
+    if case == "no_rows":
+        legacy, native = {}, {}
+    elif case == "no_legacy":
+        legacy = {}
+    elif case == "no_native":
+        native = {}
+    elif case == "no_dimensions":
+        dims = ()
+    else:
+        legacy = {"other-key": next(iter(rows.values()))}
+    with pytest.raises(OpsError) as error:
+        compare_native_vs_legacy(legacy, native, dims)
+    assert error.value.code == "VALIDATION_FAILED"
+
+
+def test_parity_dimensions_cover_all_five_field_groups():
+    assert PARITY_DIMENSIONS == ("analogs", "financial_diagnostics", "forecasts",
+                                 "simulation", "verdicts")
+
+
+def _all_but_parity():
+    return {stage: (lambda value, stage=stage: {**value, stage: "ok"})
+            for stage in GRAPH if stage != "native_parity"}
+
+
+def test_legacy_mode_nightly_still_succeeds_with_the_registered_parity_stage(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    plan = build_nightly_plan(Path.cwd(), _EVENT_DATE, shadow_serving_scorer="legacy")
+    receipt = run_shadow_nightly(source, tmp_path / "private", _EVENT_DATE,
+                                 handlers=_all_but_parity(), plan=plan)
+    assert receipt["status"] == "succeeded"
+    stage = next(row for row in receipt["stages"] if row["stage_id"] == "native_parity")
+    assert stage["status"] == "succeeded" and stage["error_code"] is None
+    assert not (tmp_path / "private" / "native_parity_report.json").exists()
+
+
+def test_native_mode_parity_difference_is_reported_not_a_status_change(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    rows = _native_rows()
+    receipt = run_shadow_nightly(source, tmp_path / "private", _EVENT_DATE,
+                                 handlers=_all_but_parity(), plan=dict(_NATIVE_PLAN),
+                                 parity_rows=(_differing_legacy(rows), rows))
+    assert receipt["status"] == "succeeded"
+    report = json.loads((tmp_path / "private" / "native_parity_report.json").read_text())
+    assert report["compared"] and report["mismatches"]
+
+
+def test_native_mode_without_rows_degrades_only_the_optional_parity_stage(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    receipt = run_shadow_nightly(source, tmp_path / "private", _EVENT_DATE,
+                                 handlers=_all_but_parity(), plan=dict(_NATIVE_PLAN))
+    degraded = [row for row in receipt["stages"] if row["status"] == "degraded"]
+    assert [row["stage_id"] for row in degraded] == ["native_parity"]
+    assert degraded[0]["error_code"] == "OpsError"
+
+
+def test_native_parity_is_never_a_job_request():
+    from engine.v2.ops.nightly import build_legacy_job_requests
+    plan = build_nightly_plan(Path.cwd(), _EVENT_DATE)
+    assert "native_parity" in plan["order"]
+    requests = build_legacy_job_requests(plan, tickers=("AAA",), year_start=2024,
+                                         year_end=2024, include_prerequisites=True)
+    kinds = {request.job.kind for request in requests}
+    assert "legacy_native_parity" not in kinds and "native_parity" not in kinds
+    assert not any(request.idempotency_key.endswith(":native_parity") for request in requests)
+
+
+def test_one_switch_source_of_truth_for_both_halves():
+    from engine.v2.contracts import serving as contracts_serving
+    assert ops_shadow.SHADOW_SERVING_SCORERS is contracts_serving.SHADOW_SERVING_SCORERS
+    assert serving_shadow.SHADOW_SERVING_SCORERS is contracts_serving.SHADOW_SERVING_SCORERS
+    assert contracts_serving.DEFAULT_SHADOW_SERVING_SCORER == "native"
+    assert native_shadow_serving_mode({}) == "native"
+    with pytest.raises(OpsError) as ops_error:
+        native_shadow_serving_mode({"shadow_serving_scorer": "bogus"})
+    assert ops_error.value.code == "INVALID_REQUEST"
+    with pytest.raises(NativeShadowConfigError) as serving_error:
+        serving_shadow.shadow_serving_row_source({"shadow_serving_scorer": "bogus"},
+                                                 _EMPTY_SCORE_DOC, {}, {})
+    assert serving_error.value.code == "INVALID_REQUEST"
+
+
+def test_phase4_rebinding_of_compare_records_reaches_compare_dimension(monkeypatch):
+    class Rebound(Exception):
+        pass
+
+    def rebound(*args, **kwargs):
+        raise Rebound
+
+    monkeypatch.setattr(phase4_real, "compare_records", rebound)
+    with pytest.raises(Rebound):
+        phase4_real._compare_dimension({}, {}, "forecasts")
+
+
+def _tool_args(tmp_path, plan=None, native_inputs=None):
+    import argparse
+    plan_path = None
+    if plan is not None:
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+    return argparse.Namespace(nightly_plan=plan_path, native_inputs=native_inputs)
+
+
+def test_dashboard_project_serves_native_rows_through_the_seam(tmp_path):
+    from engine.v2.foundation import to_document
+    from tools import v2_dashboard_project as tool
+    legacy_rows = {"AAA": [{"ticker": "AAA"}]}
+    assert tool._shadow_rows(_tool_args(tmp_path), _EMPTY_SCORE_DOC, legacy_rows) is legacy_rows
+    assert tool._shadow_rows(_tool_args(tmp_path, {"shadow_serving_scorer": "legacy"}),
+                             _EMPTY_SCORE_DOC, legacy_rows) is legacy_rows
+    with pytest.raises(OpsError) as error:
+        tool._shadow_rows(_tool_args(tmp_path, dict(_NATIVE_PLAN)), _EMPTY_SCORE_DOC, legacy_rows)
+    assert error.value.code == "INVALID_REQUEST"
+    pairs = _pairs()
+    inputs_path = tmp_path / "native_inputs.json"
+    inputs_path.write_text(json.dumps({key: {"request": to_document(request),
+                                             "inputs": to_document(inputs)}
+                                       for key, (request, inputs) in pairs.items()},
+                                      default=str))
+    served = tool._shadow_rows(_tool_args(tmp_path, dict(_NATIVE_PLAN), inputs_path),
+                               _EMPTY_SCORE_DOC, legacy_rows)
+    expected = serving_shadow.shadow_serving_row_source(_NATIVE_PLAN, _EMPTY_SCORE_DOC,
+                                                        legacy_rows, pairs)
+    assert served == expected and served != legacy_rows

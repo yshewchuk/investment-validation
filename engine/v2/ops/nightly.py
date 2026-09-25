@@ -614,8 +614,15 @@ def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, env
     return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
 
 
+#: GRAPH stages that are never submitted as worker jobs: ``native_parity``
+#: (spec_ns_c) is a report over rows the shadow run already holds, run by its
+#: ``run_shadow_nightly`` handler; there is no ``legacy_native_parity`` kind.
+NO_JOB_STAGES = frozenset({"native_parity"})
+
+
 def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
     stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
+    stages = tuple(stage for stage in stages if stage not in NO_JOB_STAGES)
     if snapshot is not None:
         stages = ("materialize",) + stages
     if refresh_mode == "native" and "refresh" not in stages:
@@ -748,13 +755,38 @@ def _run_stage(stage, handler, value, input_hash):
                    details={"stage": stage, "error": type(exc).__name__}) from exc
 
 
+def _registered_handlers(handlers, plan, parity_rows, private: Path) -> dict:
+    """The caller's handlers plus the nightly's own ``native_parity`` handler.
+
+    ``native_parity`` is registered here, never left to each caller, so the
+    stage is never ``NOT_CONFIGURED``: a ``"legacy"`` plan reports
+    ``not_applicable`` and a ``"native"`` plan (the default when no plan is
+    given) compares ``parity_rows`` -- ``(legacy_rows, native_rows)`` -- into
+    ``<private>/native_parity_report.json``.  A caller's own handler wins.
+    """
+    from engine.v2.ops.native_parity_report import native_parity_handler
+    registered = dict(handlers or {})
+    if "native_parity" not in registered:
+        legacy_rows, native_rows = parity_rows if parity_rows is not None else ({}, {})
+        registered["native_parity"] = native_parity_handler(
+            plan if plan is not None else {}, legacy_rows=legacy_rows,
+            native_rows=native_rows, report_path=private / "native_parity_report.json")
+    return registered
+
+
 def run_shadow_nightly(source_root: Path | str, private_root: Path | str,
                        session: str, *, handlers: dict[str, Callable] | None = None,
-                       read_set=(), initial=None, receipt_path=None) -> dict:
-    """Execute the real coarse graph using private copies and stage receipts."""
-    handlers = handlers or {}
+                       read_set=(), initial=None, receipt_path=None,
+                       plan: dict | None = None, parity_rows=None) -> dict:
+    """Execute the real coarse graph using private copies and stage receipts.
+
+    ``plan`` (``build_nightly_plan``'s document) carries the G5
+    ``shadow_serving_scorer`` switch the registered ``native_parity`` handler
+    reads; ``parity_rows`` is ``(legacy_rows, native_rows)`` for native mode.
+    """
     source = Path(source_root).resolve()
     private = Path(private_root).resolve()
+    handlers = _registered_handlers(handlers, plan, parity_rows, private)
     receipt = NightlyReceipt(session=session)
     receipt.read_set = copy_read_set(source, private / "legacy", tuple(read_set))
     value = initial if initial is not None else {"session": session}

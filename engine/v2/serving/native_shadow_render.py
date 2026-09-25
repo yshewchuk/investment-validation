@@ -36,8 +36,9 @@ A native scoring failure propagates uncaught: there is deliberately no
 path fails the shadow render loudly instead of serving stale/legacy rows
 under a "native" label.  ``engine.v2.ops.native_shadow_render`` is this
 seam's ops half; the two packages are layer-7 peers
-(``checks/import_layers.py``), so each side owns the same two-string
-``INVALID_REQUEST`` validation instead of importing the other.
+(``checks/import_layers.py``), so both read the allowed values and the
+default from ``engine.v2.contracts.serving`` and each raises its own typed
+``INVALID_REQUEST`` refusal.
 """
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from engine.v2.contracts import ScoreRequest
+from engine.v2.contracts.serving import SHADOW_SERVING_SCORERS, shadow_serving_scorer
 from engine.v2.scoring.application import score_one
 from engine.v2.scoring.stages import NativeScoreInputs, analog_display_fields
 
@@ -58,11 +60,6 @@ __all__ = [
     "shadow_serving_row_source",
 ]
 
-#: The only values ``shadow_serving_scorer`` may carry; the same contract as
-#: ``engine.v2.ops.native_shadow_render.native_shadow_serving_mode``.
-SHADOW_SERVING_SCORERS = ("native", "legacy")
-
-_DEFAULT_SCORER = "native"
 
 #: The renderer's own precision rule, read off the bridge's mapping: a display
 #: row is rounded to ``dashboard/render.py``'s ``BUNDLE_PRECISION`` (6) except
@@ -95,8 +92,8 @@ class NativeShadowConfigError(Exception):
 
 
 def _shadow_serving_mode(plan: Mapping[str, Any]) -> str:
-    mode = plan.get("shadow_serving_scorer", _DEFAULT_SCORER)
-    if mode not in SHADOW_SERVING_SCORERS:
+    mode = shadow_serving_scorer(plan)
+    if mode is None:
         raise NativeShadowConfigError(
             "shadow_serving_scorer must be legacy or native")
     return mode

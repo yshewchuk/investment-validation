@@ -11,8 +11,7 @@ The row-building half of the seam lives in
 ``engine.v2.serving.native_shadow_render`` and this module cannot import it:
 ``engine.v2.ops`` and ``engine.v2.serving`` are both layer 7 peers
 (``system_rearchitecture.md`` §4.1, enforced by ``checks/import_layers.py``)
-and a peer is not "down".  The serving side owns the native rows and its own
-copy of the same two-string validation; the composing ``tools`` layer -- the
+and a peer is not "down".  The serving side owns the native rows and its own typed refusal over the same ``engine.v2.contracts.serving`` lookup; the composing ``tools`` layer -- the
 one place allowed to import both (guide §2, exactly as
 ``tools/v2_dashboard_project.py`` already imports ``engine.v2.ops.bootstrap``
 and ``engine.v2.serving.projections`` together) -- is what binds the two
@@ -26,14 +25,10 @@ AST).
 """
 from __future__ import annotations
 
+from engine.v2.contracts.serving import SHADOW_SERVING_SCORERS, shadow_serving_scorer
 from engine.v2.ops.errors import fail
 
 __all__ = ["SHADOW_SERVING_SCORERS", "native_shadow_serving_mode"]
-
-#: The only values ``shadow_serving_scorer`` may carry.
-SHADOW_SERVING_SCORERS = ("native", "legacy")
-
-_DEFAULT_SCORER = "native"
 
 
 def native_shadow_serving_mode(plan: dict) -> str:
@@ -48,7 +43,7 @@ def native_shadow_serving_mode(plan: dict) -> str:
     refusal reuses ``engine.v2.ops.errors.fail``, the same envelope every
     other plan validation uses, never a bare ``ValueError``.
     """
-    mode = plan.get("shadow_serving_scorer", _DEFAULT_SCORER)
-    if mode not in SHADOW_SERVING_SCORERS:
+    mode = shadow_serving_scorer(plan)
+    if mode is None:
         raise fail("INVALID_REQUEST", "shadow_serving_scorer must be legacy or native")
     return mode
