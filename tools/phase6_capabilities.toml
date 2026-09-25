@@ -665,8 +665,8 @@ ids = ["cli:tools/baseline_export.py", "cli:tools/capture_attach_probe.py", "cli
 reason = "Phase 0/1 baseline and corpus capture/verification tooling; evidence producers, not consumers."
 
 [[excluded]]
-ids = ["cli:tools/mutation_pilot.py", "cli:tools/mutation_report.py", "cli:tools/mutation_results.py"]
-reason = "Mutation-testing CI tooling."
+ids = ["cli:tools/mutation_pilot.py", "cli:tools/mutation_report.py", "cli:tools/mutation_results.py", "cli:tools/gremlin_pilot.py", "cli:tools/gremlin_results.py"]
+reason = "Mutation-testing CI tooling (mutmut and pytest-gremlins backends)."
 
 [[excluded]]
 ids = ["cli:tools/oc_check.py"]
