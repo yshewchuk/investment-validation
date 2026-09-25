@@ -18,14 +18,19 @@ Commands::
 With ``--expected-modules`` (the plan job's JSON module list) the merged
 artifact must describe EXACTLY that set, every member of it fully measured: a
 missing, unexpected or duplicated module report -- no module directory at all
--- or a module whose run exited nonzero (a step-timeout kill is -1) yields an
-incomplete diagnostic (``complete: false``, ``tool_error: true``,
+-- or a module whose run exited nonzero (a step-timeout kill, or a missing rc
+file from a GitHub hard kill or a skipped step, is -1; a clean in-script
+time-box stop is 124) yields an incomplete diagnostic (``complete: false``,
 machine-readable ``failure_reasons``, the affected modules in
-``failed_run_modules``, score withheld) and a nonzero exit, so neither a subset
-nor a timeout-truncated run can be published as the latest completed run.
-Without the contract the merge behaves as before (local and historical merges
-keep working); a module reported twice is an unusable input set either way and
-is refused.
+``failed_run_modules``, score withheld), so neither a subset nor a
+timeout-truncated run can be published as the latest completed run. A nonzero
+run that is not a tool error -- an incremental run stopped by its own
+per-push time box (``run_exit_code`` 124) -- stays incomplete and withholds
+the score but reports ``tool_error: false`` and exits zero; the same 124 in a
+full run is a real tool error, and so is -1 in either mode (it never means a
+clean stop). Without the contract the merge behaves as before (local and
+historical merges keep working); a module reported twice is an unusable input
+set either way and is refused.
 
 Row fields (schema_version 1); the guide (tests/README.md, "Mutation CI")
 documents each one:
@@ -475,14 +480,20 @@ def merge_dirs(inputs: list[Path], out: Path,
     describe EXACTLY that set, every member fully measured: a missing, unexpected
     or duplicated module report, no module directory at all, inputs from more than
     one run/SHA/mode, or a module whose ``run_exit_code`` is nonzero (a step
-    timeout kill is -1) make the artifact an incomplete diagnostic --
-    ``complete: false``, ``tool_error: true``, machine-readable
-    ``failure_reasons``, the affected modules named in ``failed_run_modules`` and
-    a withheld score -- so neither a subset nor a timeout-truncated run can ever
-    be read as the latest completed full run. Counts stay auditable for what
-    really arrived, except when nothing arrived or one module reported twice,
-    where every count is null (never a fabricated zero or a silently doubled
-    total)."""
+    timeout kill, or a missing rc file, is -1; a clean in-script time-box stop is
+    124) make the artifact an incomplete diagnostic -- ``complete: false``,
+    machine-readable ``failure_reasons``, the affected modules named in
+    ``failed_run_modules`` and a withheld score -- so neither a subset nor a
+    timeout-truncated run can ever be read as the latest completed full run. The
+    one exception to ``tool_error`` is the per-push time box: an incremental run
+    stopped by its own budget (``run_exit_code`` 124 with mode ``incremental``)
+    is still incomplete and still withholds its score, but is not a tool error,
+    so it does not fail the gate; the same 124 in a full run (no time box to
+    exempt it) remains one, and so does -1 in either mode -- it never means a
+    clean stop, only a step timeout kill or a missing rc file (GitHub's hard
+    kill, or a skipped step). Counts stay auditable for what really arrived,
+    except when nothing arrived or one module reported twice, where every count
+    is null (never a fabricated zero or a silently doubled total)."""
     out.mkdir(parents=True, exist_ok=True)
     seen: dict[str, Path] = {}
     duplicates: dict[str, list[Path]] = {}
@@ -511,15 +522,25 @@ def merge_dirs(inputs: list[Path], out: Path,
         for key in ("run_id", "sha", "mode"):
             if len(vals := {s.get(key) for s in summaries}) > 1:
                 mismatch.append(f"{key}s {sorted(map(str, vals))}")
-        # A module whose mutmut run exited nonzero (a step-timeout kill is -1)
+        # A module whose mutmut run exited nonzero (a step-timeout kill, or a
+        # missing rc file, is -1; a clean in-script time-box stop is 124)
         # checked only part of its mutants: its rows are real but its totals and
         # score are partial. The aggregate must fail rather than publish them as a
-        # complete measurement.
+        # complete measurement. One nonzero code is not a tool error: the per-push
+        # incremental run's own time budget stops mutmut cleanly with
+        # TIME_BUDGET_STOP_RC (124), so in incremental mode that rc alone makes
+        # the run INCOMPLETE without failing the gate; the same 124 in full mode
+        # is a real tool error (no time box to exempt it), and so is -1 in either
+        # mode -- it never means a clean stop.
         failed = {}
         for s in summaries:
             if (rc := s.get("run_exit_code")) not in (None, 0):
                 failed.setdefault(s["module"], set()).add(rc)
         failed = {m: sorted(codes) for m, codes in sorted(failed.items())}
+        run_mode = next((s.get("mode") for s in summaries), None)
+        gate_failed = {m: [rc for rc in codes if not (rc == 124 and run_mode == "incremental")]
+                       for m, codes in failed.items()}
+        gate_failed = {m: codes for m, codes in gate_failed.items() if codes}
         contract_violated = not complete_set or bool(mismatch)
         reasons = []
         if not inputs:
@@ -536,11 +557,13 @@ def merge_dirs(inputs: list[Path], out: Path,
                            + "; no single report to attribute")
         if mismatch:
             reasons.append("RUN_PROVENANCE_MISMATCH: " + "; ".join(mismatch))
+        _RC_REASON = {-1: "TIMEOUT_KILL", 124: "TIME_BUDGET_STOP"}
+        _RC_PAREN = {-1: " (step timeout kill)", 124: " (clean time-box stop)"}
         for name, codes in failed.items():
             for rc in codes:
-                reasons.append(f"{'TIMEOUT_KILL' if rc == -1 else 'RUN_INCOMPLETE'}: {name}'s "
+                reasons.append(f"{_RC_REASON.get(rc, 'RUN_INCOMPLETE')}: {name}'s "
                                f"run exited {rc}"
-                               + (" (step timeout kill)" if rc == -1 else "")
+                               + _RC_PAREN.get(rc, "")
                                + ": its results are partial, so the aggregate is not a "
                                  "complete measurement")
         if not summaries or duplicates:
@@ -565,7 +588,7 @@ def merge_dirs(inputs: list[Path], out: Path,
                                 "complete_set": complete_set},
             "failed_run_modules": failed,
             "complete": not (contract_violated or bool(failed)),
-            "tool_error": contract_violated or bool(failed),
+            "tool_error": contract_violated or bool(gate_failed),
             "failure_reasons": reasons,
         })
     write_jsonl(out / "results.jsonl", rows)
@@ -602,7 +625,14 @@ def merge_dirs(inputs: list[Path], out: Path,
                       if r.startswith(("NO_MODULE_REPORTS", "MISSING_MODULES",
                                        "UNEXPECTED_MODULES", "DUPLICATE_MODULES",
                                        "RUN_PROVENANCE", "TIMEOUT_KILL",
-                                       "RUN_INCOMPLETE"))]
+                                       "TIME_BUDGET_STOP", "RUN_INCOMPLETE"))]
+        elif failed:
+            lines += ["", f"**A planned module hit the per-push time box "
+                      f"({', '.join(failed)}): its results are PARTIAL, so this run is "
+                      "INCOMPLETE -- not a tool failure, and not a valid full run. "
+                      "Score withheld, counts cover only what really arrived.**"]
+            lines += [f"- {r}" for r in merged["failure_reasons"]
+                      if r.startswith("TIME_BUDGET_STOP")]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     return merged
 
