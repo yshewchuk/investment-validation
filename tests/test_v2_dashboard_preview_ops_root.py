@@ -88,14 +88,23 @@ def _published_nightly_plan(tmp_path: Path, capsys) -> tuple[Path, str]:
 # --------------------------------------------------------------------------
 
 
-def _run_launcher(tmp_path, monkeypatch, *, ops_root=None):
+def _run_launcher(tmp_path, monkeypatch, *, ops_root=None, calibration_health_path=None):
     monkeypatch.setenv(preview.TOKEN_ENV_VAR, TOKEN)
     bundle, health = _dashboard_bundle(tmp_path)
     argv = ["--host", "127.0.0.1", "--port", "0",
             "--release-root", str(bundle), "--health-path", str(health)]
     if ops_root is not None:
         argv += ["--ops-root", str(ops_root)]
+    if calibration_health_path is not None:
+        argv += ["--calibration-health-path", str(calibration_health_path)]
     return preview.run(argv)
+
+
+def _get_calibration_health(server, *, token=TOKEN):
+    request = Request(f"http://127.0.0.1:{server.server_port}/calibration-health.json")
+    if token is not None:
+        request.add_header("Authorization", "Bearer " + token)
+    return urlopen(request, timeout=5)
 
 
 def _post_refresh(server, body, *, token=TOKEN):
@@ -186,5 +195,40 @@ def test_without_ops_root_valid_plan_ref_still_503_and_is_not_guessed(tmp_path, 
             _post_refresh(server, {"plan_ref": plan_ref})
         assert error.value.code == 503
         assert _job_count(ops_root) == 0
+    finally:
+        _stop(server, thread)
+
+
+def test_calibration_health_reachable_via_preview_run(tmp_path, monkeypatch):
+    # A ledger_health.v1-shaped export (no schema_version, exactly what
+    # engine.v2.ledger.calibration.export_health_file writes): the route must
+    # serve the file's own bytes, canonicalized the way /health.json does.
+    payload = {"generated_at": "2026-09-19T00:00:00+00:00", "n_scored": 3,
+               "per_strategy": {"STR-THRU": {"available": True}}}
+    expected = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    export = tmp_path / "calibration_health.json"
+    export.write_bytes(expected)
+
+    server, thread, release_id = _run_launcher(
+        tmp_path, monkeypatch, calibration_health_path=export)
+    try:
+        assert release_id == "r1"
+        response = _get_calibration_health(server)
+        assert response.status == 200
+        assert response.read() == expected
+    finally:
+        _stop(server, thread)
+
+
+def test_calibration_health_503_when_not_configured(tmp_path, monkeypatch):
+    # Omitting --calibration-health-path must not guess a path from
+    # --health-path or --release-root: the route keeps its explicit 503 and
+    # must never answer 200 with stale or empty content.
+    server, thread, release_id = _run_launcher(tmp_path, monkeypatch)
+    try:
+        assert release_id == "r1"
+        with pytest.raises(HTTPError) as error:
+            _get_calibration_health(server)
+        assert error.value.code == 503
     finally:
         _stop(server, thread)
