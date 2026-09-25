@@ -261,8 +261,32 @@ def test_live_window_single_weekday_reaches_next_weeks_occurrence():
     unknown_heavy = replace(DEFAULT_POLICY.profiles[0], heavy=True, estimated_seconds=None)
     eight_days = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=8 * 24 * 3600)
 
-    assert live_window_reason(policy, unknown_heavy, tuesday_night) is not None
+    assert live_window_reason(policy, unknown_heavy, tuesday_night) is None
     assert live_window_reason(policy, eight_days, tuesday_night) is not None
+
+
+def test_live_window_unknown_heavy_horizon_only_refuses_near_occurrences():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    tuesday_morning = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    unknown_heavy = replace(DEFAULT_POLICY.profiles[0], heavy=True, estimated_seconds=None)
+
+    weekdays = LiveWindow(name="live_session", weekdays=(1, 2, 3, 4, 5),
+                          start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(weekdays,))
+    # Tuesday's own window opens 3.5 h away: inside the 24 h horizon, refused.
+    assert live_window_reason(policy, unknown_heavy, tuesday_morning) is not None
+
+    monday_only = LiveWindow(name="live_session", weekdays=(1,),
+                             start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(monday_only,))
+    # The only upcoming occurrence is Monday's, >6 days out: beyond the 24 h
+    # horizon, so the unknown-duration heavy job is admitted.
+    assert live_window_reason(policy, unknown_heavy, tuesday_morning) is None
 
 
 # ---------------------------------------------------------------------------

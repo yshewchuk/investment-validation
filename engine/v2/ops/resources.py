@@ -73,6 +73,11 @@ __all__ = [
     "live_window_reason",
 ]
 
+#: An unknown-duration heavy job is refused against an upcoming live window
+#: only while that window is active now or begins within this horizon; one
+#: further out leaves room to finish before it even with no estimate.
+UNKNOWN_DURATION_HORIZON = timedelta(hours=24)
+
 
 @dataclass(frozen=True)
 class ActiveReservation:
@@ -172,11 +177,15 @@ def _live_window_overlap_reason(profile: ResourceProfile, now: datetime, begin: 
     """The refusal for one occurrence, or ``None`` if this profile can't touch
     it. A job overlaps when it can still be running when the window opens; a
     heavy job with no duration estimate is refused only against the FIRST
-    upcoming occurrence (``first``), since its length is unknown."""
+    not-yet-ended occurrence (``first``), since its length is unknown, and
+    only while that occurrence is active now or begins within
+    ``UNKNOWN_DURATION_HORIZON`` -- a window further out leaves room to
+    finish before it even without an estimate."""
     estimate = profile.estimated_seconds
     completion = now + timedelta(seconds=estimate or 0)
     overlaps = now < finish and completion > begin
-    unknown_heavy = first and profile.heavy and estimate is None and now < finish
+    unknown_heavy = (first and profile.heavy and estimate is None and now < finish
+                     and begin - now <= UNKNOWN_DURATION_HORIZON)
     if not (overlaps or unknown_heavy):
         return None
     return QueueReason(code="LIVE_WINDOW", needed={"completion_seconds": estimate or 0},
