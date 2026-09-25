@@ -498,21 +498,31 @@ def _cached_yfinance(conn, units) -> dict:
     return cached_unit_outcomes(conn, units, source=YFINANCE_SOURCE, endpoint="earnings")
 
 
-def _native_calendar(repository, parent):
+def _native_calendar(repository, parent) -> tuple[object | None, tuple[str, ...]]:
     """The pinned snapshot's own trading calendar, or ``None`` for the fallback.
 
     ``native_trading_calendar`` raises ``ValueError`` when the snapshot carries
-    no ``daily_market`` session; that one specific error is the weekday
-    fallback, and it is logged here so the job diagnostics name it instead of
-    the horizon silently changing shape.
+    no ``daily_market`` session; that one specific error selects the weekday
+    fallback. The error text is returned as a job-result warning so the
+    diagnostics in the evidence name the fallback instead of the horizon
+    silently changing shape.
     """
     try:
-        return native_trading_calendar(daily_by_ticker(repository, parent.snapshot))
-    except ValueError:
-        _LOGGER.warning(
-            "forward_calendar: pinned snapshot has no daily_market session; "
-            "using the weekday calendar fallback")
-        return None
+        return native_trading_calendar(daily_by_ticker(repository, parent.snapshot)), ()
+    except ValueError as exc:
+        warning = f"weekday calendar fallback: {exc}"
+        _LOGGER.warning("forward_calendar: %s", warning)
+        return None, (warning,)
+
+
+def _result(parameters, *, status: str, completed_ids, coverage_advanced: bool,
+            warnings, candidate_snapshot_id=None) -> RefreshCallbackResult:
+    """One job-result document; ``warnings`` carries any degradation evidence."""
+    return RefreshCallbackResult(
+        status=status, completed_ids=completed_ids, coverage_advanced=coverage_advanced,
+        parent_snapshot_id=parameters.parent_snapshot_id,
+        refresh_plan_hash=parameters.refresh_plan_hash,
+        candidate_snapshot_id=candidate_snapshot_id, warnings=warnings)
 
 
 def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
@@ -522,15 +532,15 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
     Never calls ``engine.data.rebuild.rebuild``: the claims merge into the
     existing ``earnings_events`` contract through ``generic_incremental``
     against the pinned parent snapshot. The horizon calendar comes from that
-    snapshot's own ``daily_market`` dates (a snapshot without one logs the
-    weekday fallback); each source's units are planned cache-first, so a unit
-    backed by a durable complete receipt never reaches the provider again
-    (spec R2), and any unit that ends transient/refused/not_final fails the
-    job with its typed code before anything is committed (spec R3). A
-    same-session retry rebuilds EVERY unit's claims -- fresh fetches plus the
-    cached complete receipts re-read by receipt -- so it commits exactly what a
-    clean single run would, while a run whose units are all cache-satisfied is
-    a no-op.
+    snapshot's own ``daily_market`` dates (a snapshot without one records the
+    weekday fallback as a result warning); each source's units are planned
+    cache-first, so a unit backed by a durable complete receipt never reaches
+    the provider again (spec R2), and any unit that ends
+    transient/refused/not_final fails the job with its typed code before
+    anything is committed (spec R3). A same-session retry rebuilds EVERY unit's
+    claims -- fresh fetches plus the cached complete receipts re-read by
+    receipt -- so it commits exactly what a clean single run would, while a run
+    whose rebuilt claims are already committed rows is a no-op.
     """
     root = Path(root)
     document = _input_document(root)
@@ -548,7 +558,8 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
         as_of = _as_of_day(document.get("as_of") or parameters.as_of)
         horizon = int(document.get("horizon_days", 21))
         wanted = {str(ticker) for ticker in (document.get("tickers") or parameters.tickers)}
-        dates = horizon_dates(as_of, horizon, calendar=_native_calendar(repository, parent))
+        calendar, warnings = _native_calendar(repository, parent)
+        dates = horizon_dates(as_of, horizon, calendar=calendar)
         received_at = clock.now().isoformat()
 
         nasdaq_units = date_units(dates, as_of=as_of)
@@ -569,25 +580,24 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
         if code:
             raise fail(code, "forward calendar provider response was not complete")
         if not claims:
-            return RefreshCallbackResult(
-                status="noop", completed_ids=tuple(sorted(wanted)), coverage_advanced=False,
-                parent_snapshot_id=parameters.parent_snapshot_id,
-                refresh_plan_hash=parameters.refresh_plan_hash)
-        if not nasdaq_plan.fetch_units and not yfinance_plan.fetch_units:
-            # Every fed unit is already cached and its claims committed by an
-            # earlier same-session run: rebuilding the identical claims would
-            # only mint another identical generation, so this run is a no-op.
-            return RefreshCallbackResult(
-                status="noop", completed_ids=tuple(sorted(wanted)), coverage_advanced=False,
-                parent_snapshot_id=parameters.parent_snapshot_id,
-                refresh_plan_hash=parameters.refresh_plan_hash)
+            return _result(parameters, status="noop", completed_ids=tuple(sorted(wanted)),
+                           coverage_advanced=False, warnings=warnings)
         existing = _existing_index(repository, parent)
+        if (not nasdaq_plan.fetch_units and not yfinance_plan.fetch_units
+                and all(key in existing for key in claims)):
+            # Every rebuilt claim is already a committed row in the pinned
+            # parent: rebuilding identical claims would only mint another
+            # identical generation, so this run is a no-op. A cached receipt is
+            # NOT a committed row -- a commit that failed leaves the receipt
+            # durable while the row is absent, so that case falls through and
+            # is rebuilt from its receipt and committed here.
+            return _result(parameters, status="noop", completed_ids=tuple(sorted(wanted)),
+                           coverage_advanced=False, warnings=warnings)
         receipt = _commit_claims(conn, store, parent, claims, existing,
                                  scope=str(document["scope"]), clock=clock, document=document)
-        return RefreshCallbackResult(
-            status="complete", completed_ids=tuple(sorted(wanted)),
-            coverage_advanced=True, parent_snapshot_id=parameters.parent_snapshot_id,
-            refresh_plan_hash=parameters.refresh_plan_hash,
-            candidate_snapshot_id=(receipt.resulting_head_snapshot_id if receipt else None))
+        return _result(parameters, status="complete", completed_ids=tuple(sorted(wanted)),
+                       coverage_advanced=True, warnings=warnings,
+                       candidate_snapshot_id=(receipt.resulting_head_snapshot_id
+                                              if receipt else None))
     finally:
         conn.close()

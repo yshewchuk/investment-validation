@@ -121,6 +121,8 @@ class RefreshCallbackResult:
     This document carries only committed candidate identity and job binding;
     it deliberately has no dependency on data-layer candidate classes. Bulk
     rows and raw provider payloads stay in the staging directory.
+    ``warnings`` records a degradation the job took knowingly (for example a
+    calendar fallback), so it is evidence in the result, not only a log line.
     """
 
     status: Literal[
@@ -132,6 +134,7 @@ class RefreshCallbackResult:
     parent_snapshot_id: str
     refresh_plan_hash: str
     candidate_snapshot_id: str | None = None
+    warnings: tuple[str, ...] = ()
     schema_version: str = REFRESH_RESULT_SCHEMA
 
 

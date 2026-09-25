@@ -44,7 +44,7 @@ from engine.v2.ops.calendar_moves_jobs import (
     NATIVE_NASDAQ_ACCOUNT,
     CalendarMovesParameters,
 )
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.nightly import build_legacy_job_requests
 from engine.v2.ops.plans import nightly_plan
 from engine.v2.ops.profiles import MIB
@@ -877,6 +877,89 @@ def test_computed_moves_retry_commits_every_cached_unit(tmp_path, monkeypatch):
     assert sorted(retry_rows, key=_row_key) == sorted(clean_rows, key=_row_key)
 
 
+def _injected_commit_fault(point):
+    raise fail("INPUT_CHANGED", "commit stage failed after every unit fetched: " + point)
+
+
+def test_computed_moves_retry_after_commit_failure_rebuilds_every_cached_unit(
+        tmp_path, monkeypatch):
+    """Every unit fetches, the fenced commit fails INPUT_CHANGED (receipts are
+    durable, rows are not), then the retry makes zero provider calls and
+    commits every row a clean run would; a further retry is then a true noop."""
+    retry_root = tmp_path / "cm-commit-fail"
+    clean_root = tmp_path / "cm-commit-clean"
+    retry_conn, retry_clock, retry_store = _prepared_root(retry_root, TICKERS)
+    head = _head(retry_conn)
+    _write_store_input(retry_root, "computed_moves_refresh_input.json", head,
+                       as_of=SESSION, all_scoreable=True)
+    parameters = _store_parameters(retry_root, head)
+
+    frame = _history_frame()
+    calls = []
+
+    def history(ticker):
+        calls.append(ticker)
+        return frame.to_csv().encode(), "complete", {}, []
+
+    state = {"fail": True}
+    real_commit = computed_moves_store.data_catalog.commit_snapshot
+
+    def commit(*args, **kwargs):
+        if state["fail"]:
+            kwargs["fault"] = _injected_commit_fault
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(computed_moves_store.data_catalog, "commit_snapshot", commit)
+    _fixed_system_clock(monkeypatch, computed_moves_store, retry_clock)
+
+    with pytest.raises(OpsError) as exc:
+        computed_moves_store.run_computed_moves_refresh(parameters, retry_root, fetcher=history)
+    assert exc.value.code == "INPUT_CHANGED"
+    assert sorted(calls) == sorted(TICKERS)  # every unit fetched before the commit ran
+    assert retry_conn.execute(
+        "SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'computed_moves'"
+    ).fetchone()[0] == len(TICKERS)  # receipts are durable ...
+    assert _head(retry_conn)["generation"] == head["generation"]  # ... rows are not committed
+
+    state["fail"] = False
+    calls.clear()
+    retried = computed_moves_store.run_computed_moves_refresh(parameters, retry_root,
+                                                             fetcher=history)
+    assert retried.status == "complete"
+    assert tuple(retried.completed_ids) == TICKERS
+    assert calls == []  # every unit was re-read from its cached receipt
+    after = _head(retry_conn)
+    assert after["generation"] == head["generation"] + 1
+
+    clean_conn, clean_clock, clean_store = _prepared_root(clean_root, TICKERS)
+    clean_head = _head(clean_conn)
+    _write_store_input(clean_root, "computed_moves_refresh_input.json", clean_head,
+                       as_of=SESSION, all_scoreable=True)
+    _fixed_system_clock(monkeypatch, computed_moves_store, clean_clock)
+    clean = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(clean_root, clean_head), clean_root,
+        fetcher=lambda ticker: (frame.to_csv().encode(), "complete", {}, []))
+    assert clean.status == "complete"
+
+    retry_rows = _fragment_rows(retry_conn, retry_store, after["snapshot_id"], "computed_moves")
+    clean_rows = _fragment_rows(clean_conn, clean_store, _head(clean_conn)["snapshot_id"],
+                                "computed_moves")
+    assert sorted(retry_rows, key=_row_key) == sorted(clean_rows, key=_row_key)
+
+    captures = retry_conn.execute(
+        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0]
+    _write_store_input(retry_root, "computed_moves_refresh_input.json", after,
+                       as_of=SESSION, all_scoreable=True)
+    noop = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(retry_root, after), retry_root, fetcher=history)
+    assert noop.status == "noop"
+    assert calls == []
+    assert (_head(retry_conn)["snapshot_id"], _head(retry_conn)["generation"]) == (
+        after["snapshot_id"], after["generation"])
+    assert retry_conn.execute(
+        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == captures
+
+
 def test_forward_calendar_retry_commits_every_cached_unit(tmp_path, monkeypatch):
     """20 good date units + 1 transient, then it recovers: the retry rebuilds
     the cached Nasdaq date receipts AND the cached yfinance receipt, commits
@@ -958,3 +1041,100 @@ def test_forward_calendar_retry_commits_every_cached_unit(tmp_path, monkeypatch)
     clean_rows = _fragment_rows(clean_conn, clean_store, _head(clean_conn)["snapshot_id"],
                                 "earnings_events")
     assert sorted(retry_rows, key=_row_key) == sorted(clean_rows, key=_row_key)
+
+
+def test_forward_calendar_retry_after_commit_failure_rebuilds_every_cached_unit(
+        tmp_path, monkeypatch):
+    """Every date and ticker unit fetches, the fenced commit fails
+    INPUT_CHANGED (receipts are durable, rows are not), then the retry makes
+    zero provider calls and commits every row a clean run would; a further
+    retry when those rows are committed is a true noop."""
+    retry_root = tmp_path / "fc-commit-fail"
+    clean_root = tmp_path / "fc-commit-clean"
+    retry_conn, retry_clock, retry_store = _prepared_root(retry_root, TICKERS)
+    head = _head(retry_conn)
+    _write_store_input(retry_root, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    parameters = _store_parameters(retry_root, head, expected_ids=TICKERS)
+
+    rows = [{"symbol": ticker, "time": "time-not-supplied"} for ticker in TICKERS]
+    body = json.dumps({"data": {"rows": rows}}).encode()
+    nasdaq_calls, earnings_calls = [], []
+
+    def nasdaq(unit):
+        nasdaq_calls.append(unit["partition_key"])
+        return body, "complete", {"status": 200}, rows
+
+    earnings = pd.DataFrame([{"ticker": ticker, "event_date": SESSION,
+                              "annc_tod": "1650", "session": "AMC"} for ticker in TICKERS])
+
+    def earn(ticker):
+        earnings_calls.append(ticker)
+        return earnings.to_csv(index=False).encode(), "complete", {}, []
+
+    state = {"fail": True}
+    real_commit = forward_calendar_store.generic_incremental.commit_generic_table_candidate
+
+    def commit(*args, **kwargs):
+        if state["fail"]:
+            kwargs["fault"] = _injected_commit_fault
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(forward_calendar_store.generic_incremental,
+                        "commit_generic_table_candidate", commit)
+    _fixed_system_clock(monkeypatch, forward_calendar_store, retry_clock)
+
+    with pytest.raises(OpsError) as exc:
+        forward_calendar_store.run_forward_calendar_refresh(
+            parameters, retry_root, nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert exc.value.code == "INPUT_CHANGED"
+    assert len(nasdaq_calls) > 0 and len(set(nasdaq_calls)) == len(nasdaq_calls)
+    assert earnings_calls == list(TICKERS)
+    receipts = nasdaq_calls[:]
+    assert retry_conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == (
+        len(receipts) + len(TICKERS))  # receipts are durable ...
+    assert _head(retry_conn)["generation"] == head["generation"]  # ... rows are not committed
+
+    state["fail"] = False
+    nasdaq_calls.clear()
+    earnings_calls.clear()
+    retried = forward_calendar_store.run_forward_calendar_refresh(
+        parameters, retry_root, nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert retried.status == "complete"
+    assert tuple(retried.completed_ids) == TICKERS
+    assert nasdaq_calls == [] and earnings_calls == []  # every receipt was re-read
+    after = _head(retry_conn)
+    assert after["generation"] == head["generation"] + 1
+
+    clean_conn, clean_clock, clean_store = _prepared_root(clean_root, TICKERS)
+    clean_head = _head(clean_conn)
+    _write_store_input(clean_root, "forward_calendar_refresh_input.json", clean_head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    _fixed_system_clock(monkeypatch, forward_calendar_store, clean_clock)
+    clean = forward_calendar_store.run_forward_calendar_refresh(
+        _store_parameters(clean_root, clean_head, expected_ids=TICKERS), clean_root,
+        nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert clean.status == "complete"
+
+    retry_rows = _fragment_rows(retry_conn, retry_store, after["snapshot_id"], "earnings_events")
+    clean_rows = _fragment_rows(clean_conn, clean_store, _head(clean_conn)["snapshot_id"],
+                                "earnings_events")
+    assert sorted(retry_rows, key=_row_key) == sorted(clean_rows, key=_row_key)
+
+    nasdaq_calls.clear()
+    earnings_calls.clear()
+    revisions = retry_conn.execute(
+        "SELECT COUNT(*) FROM data_table_revisions WHERE table_name = 'earnings_events'"
+    ).fetchone()[0]
+    _write_store_input(retry_root, "forward_calendar_refresh_input.json", after,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    noop = forward_calendar_store.run_forward_calendar_refresh(
+        _store_parameters(retry_root, after, expected_ids=TICKERS), retry_root,
+        nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert noop.status == "noop"
+    assert nasdaq_calls == [] and earnings_calls == []
+    assert (_head(retry_conn)["snapshot_id"], _head(retry_conn)["generation"]) == (
+        after["snapshot_id"], after["generation"])
+    assert retry_conn.execute(
+        "SELECT COUNT(*) FROM data_table_revisions WHERE table_name = 'earnings_events'"
+    ).fetchone()[0] == revisions

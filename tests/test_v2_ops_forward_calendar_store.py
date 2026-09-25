@@ -10,6 +10,7 @@ import pandas as pd
 
 from engine.calendar import SESSION_PRIORITY
 from engine.v2.contracts import SnapshotRef
+from engine.v2.ops import forward_calendar_store
 from engine.v2.ops.forward_calendar_store import (
     SESSION_BY_TIME,
     date_units,
@@ -98,6 +99,18 @@ def test_unit_ids_carry_the_as_of_date():
     assert ticker_unit.request_id == "yfinance:earnings:AAPL:" + AS_OF
     [next_day] = date_units([pd.Timestamp("2026-09-21")], as_of="2026-09-19")
     assert next_day.request_id != day_unit.request_id
+
+
+def test_native_calendar_fallback_is_recorded_as_a_warning(monkeypatch):
+    """Spec s4c: the weekday fallback is job-result evidence, not only a log line."""
+    monkeypatch.setattr(forward_calendar_store, "daily_by_ticker",
+                        lambda repository, snapshot: {})
+    parent = type("Parent", (), {"snapshot": object()})()
+    calendar, warnings = forward_calendar_store._native_calendar(object(), parent)
+    assert calendar is None
+    assert len(warnings) == 1
+    assert warnings[0].startswith("weekday calendar fallback:")
+    assert "daily_market session" in warnings[0]
 
 
 def test_no_provider_call_when_all_cached():

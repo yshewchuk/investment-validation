@@ -360,6 +360,13 @@ def _committed_targets(parent, targets) -> tuple[str, ...]:
     return tuple(ticker for ticker in targets if ticker in committed)
 
 
+def _noop_result(parameters, completed_ids, plan_hash) -> RefreshCallbackResult:
+    """A truthful rerun result: nothing committed, nothing advanced."""
+    return RefreshCallbackResult(
+        status="noop", completed_ids=completed_ids, coverage_advanced=False,
+        parent_snapshot_id=parameters.parent_snapshot_id, refresh_plan_hash=plan_hash)
+
+
 def _input_document(root: Path) -> dict | None:
     path = root / INPUT_PATH
     if not path.is_file():
@@ -424,21 +431,19 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(document["expected_head_generation"]))
         if not plan.fetch_units:
-            # Every wanted receipt is already complete and committed: a rerun
-            # has no work, and never refetches a cache hit (spec R2).
-            return RefreshCallbackResult(
-                status="noop", completed_ids=_committed_targets(parent, targets),
-                coverage_advanced=False, parent_snapshot_id=parameters.parent_snapshot_id,
-                refresh_plan_hash=plan.plan_hash)
+            # A cached receipt is not a committed row: a commit that failed
+            # leaves the receipt durable while the fragment is absent. Only a
+            # rerun whose wanted rows are ALL already committed is a no-op;
+            # anything missing falls through and is rebuilt from cache.
+            committed = _committed_targets(parent, targets)
+            if len(committed) == len(targets):
+                return _noop_result(parameters, committed, plan.plan_hash)
         fragment_records, attempts = _capture_targets(
             conn, store, plan, fetcher, clock,
             events_by_ticker=_group_by_ticker(events),
             daily_by_ticker=_group_by_ticker(daily))
         if not fragment_records:
-            return RefreshCallbackResult(
-                status="noop", completed_ids=_committed_targets(parent, targets),
-                coverage_advanced=False, parent_snapshot_id=parameters.parent_snapshot_id,
-                refresh_plan_hash=plan.plan_hash)
+            return _noop_result(parameters, _committed_targets(parent, targets), plan.plan_hash)
 
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],
