@@ -7,7 +7,13 @@ back -- so a later test never imports ``engine.paths`` at a dead root.
 """
 import os
 
-PRE_TEST_ROOT = object()
+import pytest
+
+# Both tests must run on the same xdist worker, in file order.
+pytestmark = pytest.mark.xdist_group("env_restore_probe")
+
+_UNSET = object()
+PRE_TEST_ROOT = _UNSET
 
 
 def test_leak_probe_sets_investing_plan_root():
@@ -17,4 +23,6 @@ def test_leak_probe_sets_investing_plan_root():
 
 
 def test_fixture_restores_investing_plan_root_after_the_leak():
+    if PRE_TEST_ROOT is _UNSET:
+        pytest.skip("run with the leak probe test first")
     assert os.environ.get("INVESTING_PLAN_ROOT") == PRE_TEST_ROOT
