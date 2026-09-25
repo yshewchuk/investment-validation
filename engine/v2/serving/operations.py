@@ -5,7 +5,6 @@ import hmac
 import http.cookies
 import http.server
 import json
-import mimetypes
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -17,11 +16,14 @@ from engine.v2.models.deployment import (
     resolve_release,
 )
 
+from . import derivation_projection, release_media
+
 HTTPStatus = http.HTTPStatus
 
-__all__ = ["OperationsHandler", "create_server", "model_release_page_document", "shell_document"]
+__all__ = ["OperationsHandler", "create_server", "derivation_page_document",
+           "model_release_page_document", "shell_document"]
 
-_VIEWS = ("board", "explorer", "book", "models", "derivation", "flags")
+_VIEWS = ("board", "explorer", "book", "models", "flags")
 
 MODEL_RELEASE_VIEW_V1 = "model_release_view.v1.0"
 MODEL_RELEASE_NOT_CONFIGURED = "MODEL_RELEASE_NOT_CONFIGURED"
@@ -64,6 +66,30 @@ def _read_health(path: Path) -> bytes:
     return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
+def _read_calibration_health(path: Path) -> bytes:
+    """Read an exported calibration health artifact.
+
+    ``--calibration-health-path`` points at a copy of the ledger calibration
+    producer's own ``ledger_health.v1`` bytes
+    (``engine.v2.ledger.calibration.export_health_file``). That document --
+    like the legacy ``health.json`` it mirrors -- carries no
+    ``schema_version``, so it is recognized by ``generated_at`` and canonicalized
+    exactly as ``/health.json`` does. An ``operations_health.v1.0`` document is
+    accepted too (the same reader then serves either exported health file);
+    anything else is refused, never served as empty JSON.
+    """
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("health artifact is indirect")
+    document = json.loads(path.read_text())
+    if not isinstance(document, dict):
+        raise ValueError("unsupported health artifact")
+    if document.get("schema_version") == "operations_health.v1.0":
+        return _read_health(path)
+    if "generated_at" not in document or "n_scored" not in document:
+        raise ValueError("unsupported health artifact")
+    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
 def shell_document(*, frozen_at: str | None = None) -> bytes:
     """Small outer shell; legacy bytes are loaded inside its immutable frame.
 
@@ -78,7 +104,7 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     """
     frozen = frozen_at or "unknown"
     routes = ("trades/board", "trades/explorer", "trades/book", "models/modelx",
-              "models/derivation", "models/health")
+              "models/health")
     views = "".join(f'<a href="/#/{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
     html = f'''<!doctype html><meta charset="utf-8"><title>Operations shell</title>
 <style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
@@ -208,6 +234,44 @@ load();
     return html.encode()
 
 
+def derivation_page_document() -> bytes:
+    """Small standalone page for the native strategy derivation document (P6-4).
+
+    Fetches ``/derivation.json`` client-side -- the SAME registry document the
+    JSON route serves -- and renders it with ``textContent`` only (no
+    ``innerHTML``, nothing here builds HTML out of server data). A refusal
+    renders as an explicit message, never as an empty table.
+    """
+    html = '''<!doctype html><meta charset="utf-8"><title>Strategy derivation</title>
+<style>body{margin:0;font:14px sans-serif;padding:16px}#summary.refused{color:#a33}
+pre{background:#f4f4f4;padding:8px;overflow:auto}</style>
+<h1>Strategy derivation</h1>
+<div id="summary">loading...</div>
+<pre id="detail"></pre>
+<script>
+async function load(){
+  const summary=document.querySelector('#summary'), detail=document.querySelector('#detail');
+  try{
+    const r=await fetch('/derivation.json',{credentials:'same-origin'});
+    const j=await r.json();
+    detail.textContent=JSON.stringify(j,null,2);
+    if(j.status==='available'){
+      summary.textContent=j.strategies.length+' strategy definition(s) from the native registry';
+      summary.className='';
+    } else {
+      summary.textContent='no derivation: '+(j.reason_code||'UNKNOWN');
+      summary.className='refused';
+    }
+  }catch(e){
+    summary.textContent='derivation unavailable';
+    summary.className='refused';
+  }
+}
+load();
+</script>'''
+    return html.encode()
+
+
 class OperationsHandler(http.server.BaseHTTPRequestHandler):
     """Handler factory state is assigned by ``create_server``; no ops imports."""
 
@@ -218,6 +282,11 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         path = unquote(urlsplit(self.path).path)
         if path == "/health.json":
             return self._artifact(config, _read_health, config.health_path, auth=True)
+        if path == "/calibration-health.json":
+            if config.calibration_health_path is None:
+                return self._send(HTTPStatus.SERVICE_UNAVAILABLE, b"not configured\n", "text/plain")
+            return self._artifact(config, _read_calibration_health,
+                                  config.calibration_health_path, auth=True)
         if path == "/" or path.lstrip("/") in _VIEWS:
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
         if path.startswith("/legacy/"):
@@ -226,6 +295,10 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._model_release_json_route(config)
         if path == "/models/release":
             return self._send(HTTPStatus.OK, model_release_page_document(), "text/html")
+        if path == "/derivation.json":
+            return self._derivation_json_route(config)
+        if path == "/derivation":
+            return self._send(HTTPStatus.OK, derivation_page_document(), "text/html")
         if path.startswith("/actions/whatif/"):
             return self._whatif_result_route(config, path)
         if path == "/release/current.json":
@@ -353,6 +426,15 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         return self._send(status, body, "application/json")
 
+    def _derivation_json_route(self, config):
+        if not self._authorized():
+            return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
+        query = parse_qs(urlsplit(self.path).query)
+        strategy_id = (query.get("strategy_id") or [None])[0]
+        status, document = derivation_projection.derivation_document(strategy_id)
+        body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        return self._send(status, body, "application/json")
+
     def _release_route(self, config, path):
         if not self._authorized():
             return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
@@ -365,7 +447,7 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             if len(safe_relative_path(rel[0])) != 1:
                 raise ValueError("unsafe release id")
             file = _safe_file(config.release_root / "releases" / rel[0], rel[1])
-            content_type = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+            content_type = release_media.content_type_for(file.name)
             return self._send(HTTPStatus.OK, file.read_bytes(), content_type)
         except (ArtifactError, OSError, ValueError):
             return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
@@ -404,14 +486,18 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
 
 def create_server(address, *, token: str, health_path: Path | str, release_root: Path | str,
                   frozen_at: str = "unknown", submit_refresh=None, submit_whatif=None,
-                  fetch_whatif=None, model_release_root: Path | str | None = None):
+                  fetch_whatif=None, model_release_root: Path | str | None = None,
+                  calibration_health_path: Path | str | None = None):
     config = type("Config", (), {"token": token, "health_path": Path(health_path),
                                   "release_root": Path(release_root), "frozen_at": frozen_at,
                                   "submit_refresh": submit_refresh, "submit_whatif": submit_whatif,
                                   "fetch_whatif": fetch_whatif,
                                   "model_release_root": (Path(model_release_root)
                                                           if model_release_root is not None
-                                                          else None)})
+                                                          else None),
+                                  "calibration_health_path": (Path(calibration_health_path)
+                                                               if calibration_health_path is not None
+                                                               else None)})
     server = http.server.ThreadingHTTPServer(address, OperationsHandler)
     server.config = config
     return server

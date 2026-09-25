@@ -21,6 +21,7 @@ stay ``None`` here, documented rather than guessed.
 from __future__ import annotations
 
 import json
+import os
 from contextlib import contextmanager
 from typing import Any
 
@@ -29,8 +30,8 @@ from engine.v2.foundation import Clock, canonical_json, format_timestamp, from_d
 
 from . import catalog_reader, legacy_adapter
 
-__all__ = ["CALIBRATION_TRIGGER", "SCHEMA_V3", "calibrate", "calibration_due",
-           "health_ref", "report_ref", "scored_pairs"]
+__all__ = ["CALIBRATION_TRIGGER", "SCHEMA_V3", "CalibrationNotYetRun", "calibrate",
+           "calibration_due", "export_health_file", "health_ref", "report_ref", "scored_pairs"]
 
 #: Mirrors engine.ledger.CALIBRATION_TRIGGER (plan §P4.2): newly scored
 #: outcomes that trigger a calibration recompute. Kept as a literal, not an
@@ -128,6 +129,30 @@ def _health_payload(conn, per_strategy: dict, *, n_scored: int, clock: Clock) ->
         "data_freshness": {"latest_prediction_as_of": latest},
         "quota_state": None,
     }
+
+
+class CalibrationNotYetRun(Exception):
+    """No health artifact exists yet: ``calibrate`` has never published one."""
+
+
+def export_health_file(conn, store, dest) -> None:
+    """Copy the published ledger health artifact to ``dest``, atomically.
+
+    Reads ``health_ref(conn)`` and refuses with ``CalibrationNotYetRun`` before
+    ``calibrate`` has ever published a health artifact -- never writing an
+    empty or placeholder file. The bytes written are exactly the artifact's
+    verified bytes (``store.read_verified``), so a release's exported copy and
+    the catalog's reference agree by construction; the temporary file keeps a
+    crash from leaving a partial document at ``dest``.
+    """
+    ref = health_ref(conn)
+    if ref is None:
+        raise CalibrationNotYetRun(
+            "calibrate() has never published a health artifact; refusing to export a placeholder")
+    data = store.read_verified(ref)
+    temporary = dest.with_suffix(".tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, dest)
 
 
 def calibrate(conn, store, *, clock: Clock, force: bool = False,

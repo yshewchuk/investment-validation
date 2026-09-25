@@ -37,7 +37,9 @@ failure rather than a stale sentence.
 
 `engine/v2/scoring` resolves strategy and deployment identities before scoring.
 
-<!-- consumers: engine.v2.scoring -->
+`engine/v2/serving` renders the strategy derivation view (Phase 6 slice 9).
+
+<!-- consumers: engine.v2.scoring, engine.v2.serving -->
 
 ## Usage
 

@@ -305,14 +305,14 @@ id = "research-tools"
 area = "research"
 capability = "Research data tools: real-fill pull and quality, trade table build/prune, signal screen, log diagnostics"
 old = ["cli:engine/data/pulls/polygon_fills.py", "cli:tools/fill_quality.py", "cli:engine/build_trades.py", "cli:tools/reconcile_trades.py", "cli:tools/signal_screen.py", "cli:tools/log_diagnostics.py"]
-new = ["MISSING"]
+new = ["cli:tools/v2_fill_quality.py", "cli:tools/v2_polygon_fills.py", "cli:tools/v2_signal_screen.py"]
 producer = "legacy Tier-2 store readers/writers (engine.data.store)"
 identity = "none: read the mutable legacy store"
 tests = ["tests/test_polygon_fills.py", "tests/test_fill_quality.py", "tests/test_build_trades.py", "tests/test_log_diagnostics.py"]
-disposition = "missing"
+disposition = "compatibility-adapter"
 owner = "P6-2"
 decision = "UD-4"
-notes = "Needs a pinned v2 snapshot read path (or a declared frozen legacy-materialized read set) so research reads the official data. Deferred: no experiments run during the migration (user, 2026-09-19); tools stay on the legacy Tier-2 store until after cutover."
+notes = "Needs a pinned v2 snapshot read path (or a declared frozen legacy-materialized read set) so research reads the official data. Deferred: no experiments run during the migration (user, 2026-09-19); tools stay on the legacy Tier-2 store until after cutover. v2 signal_screen, fill_quality, polygon_fills read pinned v2 snapshots (slice 6); build_trades, reconcile_trades, replay follow in slice 7; log_diagnostics reads no store."
 
 # ------------------------------------------------------------------ board
 
@@ -325,9 +325,9 @@ new = ["route:v2-api GET /api/v1/events", "route:v2-api GET /api/v1/releases/cur
 producer = "serving projections built by the Phase 3 bridge from the legacy score.json + rendered bundle"
 identity = "release_id (projection binding), cursor bound to release and filters"
 tests = ["tests/test_v2_serving_api.py", "tests/test_v2_serving_projections.py", "tests/test_checks_phase3_api_pagination.py", "tests/test_v2_dashboard_browser.py", "tests/test_v2_dashboard_board_filters_ops_root.py"]
-disposition = "compatibility-adapter"
+disposition = "native"
 owner = "P6-4"
-notes = "The v2 API filters date/ticker/strategy/verdict; gate, out-of-domain and disabled toggles exist only in the compatibility shell."
+notes = "Slice 8 landed the legacy filter set on the v2 API's `GET /api/v1/events`: `date_from`/`date_to`/`ticker`/`strategy`/`verdict` plus the `gate` (pass|fail|na), `out_of_domain` and `disabled` toggles, applied by `engine/v2/serving/projections.py` `_score_row_clauses` to the release's own score-summary rows (api.py validates `out_of_domain`/`disabled` as booleans and `gate` as pass|fail|na). All three toggles are native now, not shell-only, so the row's disposition moves off compatibility-adapter; the compatibility shell's own controls remain as an alternate read of the same pinned release."
 
 [[row]]
 id = "board-deep-links"
@@ -391,12 +391,13 @@ id = "strategy-derivation"
 area = "strategy"
 capability = "Strategy definitions and per-row derivation (gate terms, thresholds, worked example)"
 old = ["view:legacy #/models/derivation", "control:legacy d-strategy", "control:legacy d-row"]
-new = ["route:v2-ops GET /derivation", "py:engine/v2/registry/strategies.py::default_registry"]
-producer = "legacy render.build_strategies inside legacy_render; native registry not surfaced"
-identity = "compatibility bundle inside the published release_id"
-tests = ["tests/test_dashboard.py", "tests/test_v2_registry_scoring.py"]
-disposition = "compatibility-adapter"
+new = ["route:v2-ops GET /derivation", "route:v2-ops GET /derivation.json", "py:engine/v2/registry/strategies.py::default_registry"]
+producer = "native frozen registry (engine/v2/registry/strategies.py) projected by engine/v2/serving/derivation_projection.py and served by the operations server"
+identity = "registry StrategySpec definition_hash per strategy; scope-current, not release-pinned"
+tests = ["tests/test_dashboard.py", "tests/test_v2_registry_scoring.py", "tests/test_v2_serving_derivation.py", "tests/test_v2_dashboard_preview_derivation.py"]
+disposition = "native"
 owner = "P6-4"
+notes = "Compat shell path `view:legacy #/models/derivation` is retired from this row and superseded by native `GET /derivation.json` (all strategies sorted by strategy_id; each StrategySpec via `to_document`; `?strategy_id=` returns one or refuses UNKNOWN_STRATEGY_ID, 404) plus the small `GET /derivation` page that fetches it. The legacy board itself is untouched -- only this row's disposition moves, and the shell nav no longer routes derivation into the frame."
 
 [[row]]
 id = "strategy-score-detail"
@@ -519,15 +520,28 @@ owner = "P6-2"
 [[row]]
 id = "operations-health"
 area = "operations"
-capability = "Health: model/calibration health view, selfcheck result, job and publication health"
+capability = "Health: ops liveness document, selfcheck result, job and publication health"
 old = ["route:legacy-app GET /api/health", "view:legacy #/models/health"]
 new = ["cli:ops health", "cli:ops doctor", "cli:ops init", "route:v2-ops GET /health.json", "route:v2-api GET /api/v1/operations", "route:v2-ops GET /flags"]
-producer = "ops health document (operations_health.v1.0) and the legacy health view in the bundle"
+producer = "ops health document (operations_health.v1.0)"
 identity = "health generated_at + release_id; scope-current, not release-pinned"
 tests = ["tests/test_v2_ops_health.py", "tests/test_v2_ops_serving.py"]
-disposition = "compatibility-adapter"
+disposition = "native"
 owner = "P6-4"
-notes = "Model/calibration health remains the legacy-rendered view."
+notes = "Ops liveness (`GET /health.json`, operations_health.v1.0, built by engine/v2/ops/health.py) is native on the operations server; the model/calibration half of the legacy /api/health view is split out to operations-model-calibration-health."
+
+[[row]]
+id = "operations-model-calibration-health"
+area = "operations"
+capability = "Model/calibration health (brier skill, settlement diagnostics, champion versions)"
+old = ["route:legacy-app GET /api/health", "view:legacy #/models/health"]
+new = ["route:v2-ops GET /calibration-health.json", "py:engine/v2/ledger/calibration.py::export_health_file"]
+producer = "decisions-calibration (engine/v2/ledger/calibration.py::calibrate) publishes the immutable ledger_health.v1 artifact; export_health_file copies it to a release-side file"
+identity = "ledger health generated_at + n_scored, bound to the artifact content_hash recorded by health_ref(conn)"
+tests = ["tests/test_v2_ledger_calibration.py", "tests/test_v2_dashboard_preview_ops_root.py"]
+disposition = "native"
+owner = "P6-4"
+notes = "Producer is decisions-calibration (`calibrate`, engine/v2/ledger/calibration.py:133), which already publishes ledger_health.v1 and records its ArtifactRef in the ledger_calibration_state singleton; the gap was only HTTP. The preview launcher's `--calibration-health-path` points `GET /calibration-health.json` at an exported copy (the route never opens a sqlite connection); unset keeps the explicit 503 refusal."
 
 [[row]]
 id = "operations-quotas"
@@ -568,6 +582,7 @@ identity = "bundle content hash inside the release"
 tests = ["tests/test_v2_ops_render_parity.py", "tests/test_v2_serving_projections.py", "tests/test_v2_serving_legacy_bundle.py"]
 disposition = "compatibility-adapter"
 owner = "P6-4"
+notes = "The open 'is tools/v2_dashboard_verified_input.py still part of the real publish runbook' question is resolved by grep: it has no code caller (no module imports it, no job or effect invokes it), but it is still the FIRST command of the Phase 3A runbook's current verification sequence (guides/rearchitecture_phase3_runbook.md, 'Current P3A verification sequence'), producing the preview_input.json tools/v2_dashboard_project.py consumes. It is therefore not dead and stays in `new`; the runbook, not a Python caller, is its consumer. Removal is a Phase 8A call."
 
 [[row]]
 id = "export-offline-file"

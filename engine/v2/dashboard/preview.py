@@ -11,6 +11,11 @@ the deployed model release store — a distinct store from the dashboard bundle
 ``--release-root``, never guessed from it. Omitting it keeps the route's
 explicit ``MODEL_RELEASE_NOT_CONFIGURED`` refusal.
 
+``--calibration-health-path`` points the server's ``/calibration-health.json``
+view at an exported copy of the ledger calibration producer's own
+``ledger_health.v1`` document, again never guessed from ``--health-path``.
+Omitting it keeps that route's explicit 503 ``not configured`` refusal.
+
 ``--ops-root`` points the authenticated ``POST /actions/refresh`` route at the
 catalog/artifact root a nightly plan is published under — again distinct from
 ``--release-root``, never guessed from it. When set, the route's
@@ -24,7 +29,7 @@ Run as::
 
     V2_DASHBOARD_TOKEN=... python3 -m engine.v2.dashboard.preview \\
         --host 127.0.0.1 --port 8765 --release-root R --health-path H \\
-        --model-release-root M --ops-root O
+        --model-release-root M --ops-root O --calibration-health-path C
 """
 from __future__ import annotations
 
@@ -80,6 +85,11 @@ def _parse_args(argv):
                         help="deployed model release store for /models/release.json; distinct "
                              "from --release-root, never inferred from it. Omit to keep the "
                              "route's explicit MODEL_RELEASE_NOT_CONFIGURED refusal.")
+    parser.add_argument("--calibration-health-path", default=None,
+                        help="exported ledger calibration health JSON (ledger_health.v1) for "
+                             "/calibration-health.json; distinct from --health-path, never "
+                             "inferred from it. Omit to keep the route's explicit 503 "
+                             "'not configured' refusal.")
     parser.add_argument("--ops-root", default=None,
                         help="catalog/artifact root POST /actions/refresh submits an "
                              "already-published nightly plan against, via "
@@ -107,7 +117,8 @@ def run(argv=None):
     server = build_server(host=args.host, port=args.port, token=token,
                           health_path=args.health_path, release_root=args.release_root,
                           frozen_at=args.frozen_at, model_release_root=args.model_release_root,
-                          ops_root=args.ops_root)
+                          ops_root=args.ops_root,
+                          calibration_health_path=args.calibration_health_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     probe_host = args.host if args.host not in ("0.0.0.0", "::") else "127.0.0.1"

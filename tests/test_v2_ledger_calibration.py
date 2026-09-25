@@ -168,3 +168,28 @@ class TestTheTriggerRule:
         due = calibration.calibrate(conn, store, clock=FakeClock(), trigger=1)
         assert due["regenerated"] is True
         assert due["n_scored"] == 4
+
+
+class TestExportHealthFile:
+    def test_export_health_file_writes_published_artifact_bytes(self, conn, store, tmp_path):
+        preds, outs = _three_trades()
+        _import(conn, preds, outs)
+        calibration.calibrate(conn, store, clock=FakeClock(), force=True)
+
+        dest = tmp_path / "export" / "calibration_health.json"
+        dest.parent.mkdir()
+        calibration.export_health_file(conn, store, dest)
+
+        ref = calibration.health_ref(conn)
+        assert ref is not None
+        assert dest.read_bytes() == store.read_verified(ref)
+
+    def test_export_health_file_refuses_before_first_calibrate(self, conn, store, tmp_path):
+        dest = tmp_path / "export" / "calibration_health.json"
+        dest.parent.mkdir()
+
+        with pytest.raises(calibration.CalibrationNotYetRun):
+            calibration.export_health_file(conn, store, dest)
+
+        assert not dest.exists()  # never an empty or placeholder file
+        assert not dest.with_suffix(".tmp").exists()
