@@ -1018,6 +1018,7 @@ class _FetchedUnit:
     expected: tuple[CoverageKey, ...]
     outcomes: tuple[CoverageOutcome, ...]
     receipt_id: str
+    received_at: str
 
 
 def _load_refresh_plan_document(root):
@@ -1036,10 +1037,11 @@ def _load_refresh_plan_document(root):
 def _acquire_refresh_units(parameters, root, document, fetcher):
     plan = _load_refresh_plan_document(root)
     units = tuple(plan.get("fetch_units", ()))
-    if not units:
+    cached = tuple(plan.get("cached", ()))
+    if not units and not cached:
         raise errors.fail("INPUT_CHANGED", "refresh plan has no fetch units to acquire")
     if any(str(unit.get("table_name", "")) != str(document.get("table_name", ""))
-           for unit in units):
+           for unit in (*units, *tuple(plan.get("units", ())))):
         raise errors.fail("CONTRACT_MISMATCH",
                           "refresh plan table_name does not match the staged refresh identity")
     conn = catalog.sqlite3.connect(str(document["catalog_path"]))
@@ -1048,11 +1050,58 @@ def _acquire_refresh_units(parameters, root, document, fetcher):
         store = ArtifactStore(str(document["objects_root"]))
         contract = _parent_daily_market_contract(conn, parameters.parent_snapshot_id)
         resolved = fetcher or _load_daily_market_fetcher()
-        fetched = tuple(_fetch_unit(conn, store, contract, unit, resolved)
-                        for unit in units)
+        fetched = (tuple(_fetch_unit(conn, store, contract, unit, resolved)
+                         for unit in units)
+                   if units else
+                   _cached_fetched_units(conn, store, contract, plan, resolved))
     finally:
         conn.close()
     _merge_fetched_units(document, contract, fetched)
+
+
+def _cached_fetched_units(conn, store, contract, plan, fetcher):
+    """S4B2: rebuild every cached unit's evidence without a provider call.
+
+    ``plan["cached"]`` holds decoded acquisition outcomes for units whose raw
+    receipt already exists; each is matched back to its unit by
+    ``request_id`` (never by list position). The raw bytes are read back,
+    verified and parsed into the exact ``{"summaries": ..., "cores": ...}``
+    shape the ORATS fetcher published, then merged by the provider's own
+    ``_merge_ticker_rows`` -- reached through the injected fetcher closure so
+    the data layer never imports the ops provider.
+    """
+    merge_rows = getattr(fetcher, "merge_ticker_rows", None)
+    if merge_rows is None:
+        raise errors.fail("RESOURCE_UNAVAILABLE",
+                          "the provider adapter cannot rebuild cached daily_market rows")
+    units = {str(unit.get("request_id", "")): unit for unit in plan.get("units", ())}
+    fetched = []
+    for outcome in plan.get("cached", ()):
+        unit = units.get(str(outcome.get("request_id", "")))
+        if unit is None:
+            raise errors.fail("INPUT_CHANGED", "cached outcome has no matching refresh unit")
+        receipt_id = str(outcome.get("receipt_ref", ""))
+        record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})
+        raw_bytes = store.read_verified(_artifact_ref(record.object_ref, RAW_SCHEMA_REF))
+        fetched.append(_fetched_unit_rows(
+            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows), record))
+    return tuple(fetched)
+
+
+def _cached_ticker_rows(raw_bytes, merge_rows):
+    try:
+        parsed = json.loads(raw_bytes)
+        summaries = _cached_data_rows(parsed["summaries"])
+        cores = _cached_data_rows(parsed["cores"])
+    except (KeyError, TypeError, ValueError):
+        raise errors.fail("MANIFEST_CORRUPT",
+                          "cached daily_market payload is malformed") from None
+    return merge_rows(summaries, cores)
+
+
+def _cached_data_rows(document):
+    data = document.get("data") if isinstance(document, dict) else None
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else ()
 
 
 def _parent_daily_market_contract(conn, parent_snapshot_id):
@@ -1073,25 +1122,31 @@ def _fetch_unit(conn, store, contract, unit, fetcher):
         "partition_key": str(unit["partition_key"]),
         "keys": [str(key) for key in unit.get("expected_keys", ())],
     }
-    received_at = format_timestamp(SystemClock().now())
     record = cache_raw_receipt(
         conn, store,
         RawPayload(payload=raw_bytes, response_kind=response_kind,
                    response_meta=dict(response_meta)),
         source=FETCH_SOURCE, endpoint=request["table_name"], request=request,
-        received_at=received_at)
+        received_at=format_timestamp(SystemClock().now()))
+    return _fetched_unit_rows(contract, unit, ticker_rows, record)
+
+
+def _fetched_unit_rows(contract, unit, ticker_rows, record):
+    """One ``_FetchedUnit`` from ``(unit, ticker_rows, receipt)`` -- shared by
+    the live-fetch and cache-only branches so both stage identical evidence."""
     revisions = tuple(
-        _fetched_revision(contract, unit, row, record.raw_receipt_id, received_at)
+        _fetched_revision(contract, unit, row, record.raw_receipt_id, record.received_at)
         for row in ticker_rows)
     return _FetchedUnit(
-        raw_payload={"receipt_id": record.raw_receipt_id, "response_kind": response_kind,
-                     "response_meta": dict(response_meta), "source": FETCH_SOURCE,
-                     "endpoint": request["table_name"], "request": request,
-                     "received_at": received_at},
+        raw_payload={"receipt_id": record.raw_receipt_id,
+                     "response_kind": record.response_kind,
+                     "response_meta": dict(record.response_meta),
+                     "source": record.source, "endpoint": record.endpoint,
+                     "request": dict(record.request), "received_at": record.received_at},
         revisions=tuple(_revision_document(item) for item in revisions),
         expected=tuple(_coverage_key(item) for item in revisions),
         outcomes=tuple(_coverage_outcome(item, record.raw_receipt_id) for item in revisions),
-        receipt_id=record.raw_receipt_id)
+        receipt_id=record.raw_receipt_id, received_at=record.received_at)
 
 
 def _fetched_revision(contract, unit, row, raw_receipt_id, received_at):
@@ -1125,6 +1180,14 @@ def _coverage_outcome(revision, receipt_id):
 
 
 def _fetched_coverage(contract, fetched):
+    """Completed coverage over the acquired units.
+
+    ``completed_at`` is the newest receipt's own ``received_at``, never a
+    fresh wall-clock stamp: a cache-only replay of the same receipt must
+    reproduce the exact coverage document its first acquisition committed
+    (``coverage_id`` excludes ``completed_at``, so a wall-clock stamp would
+    reuse the same identity with different content and conflict on re-record).
+    """
     expected = tuple(key for item in fetched for key in item.expected)
     sessions = sorted(key.session_date for key in expected)
     if not sessions:
@@ -1137,7 +1200,7 @@ def _fetched_coverage(contract, fetched):
         source=FETCH_SOURCE, endpoint=TABLE_NAME, interval=interval, expected=expected,
         outcomes=tuple(outcome for item in fetched for outcome in item.outcomes),
         acquisition_receipt_refs=tuple(item.receipt_id for item in fetched),
-        completed_at=format_timestamp(SystemClock().now()))
+        completed_at=max(item.received_at for item in fetched))
 
 
 def _merge_fetched_units(document, contract, fetched):
