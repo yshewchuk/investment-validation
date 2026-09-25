@@ -9,7 +9,9 @@ pytest-gremlins (``tools/gremlin_results.py``), whose ``diff``/``triage``/
 By default reads the merged ``mutation-report`` artifact of the latest
 completed run of ``.github/workflows/mutation.yml`` (the pytest-gremlins
 workflow) on main, fetched with ``gh`` into a cache directory outside the repo
-(``$MUTATION_REPORT_CACHE``, default ``~/.cache/investing-plan-mutation-report``).
+(``$MUTATION_REPORT_CACHE``, default ``~/.cache/investing-plan-mutation-report``)
+and cached per run ID AND artifact, so two backends sharing a run number never
+shadow each other's download.
 ``--backend mutmut`` reads the independent mutmut workflow's runs and its
 ``mutation-mutmut-report`` artifact instead (see Sources). Each run's artifact
 holds every mutant, not only the ones it re-tested, so the latest run is a
@@ -117,11 +119,21 @@ def list_runs(limit: int, repo: str | None, *, sha: str | None = None,
 
 
 def fetch_run(run_id: str, repo: str | None, artifact: str = ARTIFACT) -> Path | None:
-    """The run's merged artifact, downloaded once and cached by run id; None
-    when the run has none (e.g. its plan job failed, or retention expired)."""
-    dest = cache_dir() / str(run_id)
-    if (dest / "summary.json").exists():
-        return dest
+    """The run's merged artifact, downloaded once and cached per run ID AND
+    artifact name: the two backends share GitHub run numbers, so a plain
+    run-id cache would answer a mutmut request with the same run's gremlins
+    artifact (and vice versa). A cache hit must also carry an ``.artifact``
+    marker naming exactly what it holds; a markerless or mismatched directory
+    is re-downloaded, never trusted. None when the run has no such artifact
+    (its plan job failed, the other backend never ran this id, or retention
+    expired)."""
+    dest = cache_dir() / str(run_id) / artifact
+    try:
+        cached = (dest / "summary.json").exists()
+        if cached and (dest / ".artifact").read_text().strip() == artifact:
+            return dest
+    except OSError:
+        pass
     dest.mkdir(parents=True, exist_ok=True)
     cmd = ["gh", "run", "download", str(run_id), "-n", artifact, "-D", str(dest)]
     cmd += ["-R", repo] if repo else []
@@ -130,6 +142,7 @@ def fetch_run(run_id: str, repo: str | None, artifact: str = ARTIFACT) -> Path |
         print(f"note: no {artifact} artifact for run {run_id}: {proc.stderr.strip()[:200]}",
               file=sys.stderr)
         return None
+    (dest / ".artifact").write_text(artifact + "\n")
     return dest
 
 

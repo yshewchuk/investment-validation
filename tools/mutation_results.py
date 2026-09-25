@@ -16,13 +16,16 @@ Commands::
             IN_DIR [IN_DIR ...]
 
 With ``--expected-modules`` (the plan job's JSON module list) the merged
-artifact must describe EXACTLY that module set: a missing, unexpected or
-duplicated module report -- or no module directory at all -- yields an
-incomplete diagnostic (``complete: false``, ``tool_error: true``, machine-
-readable ``failure_reasons``, score withheld) and a nonzero exit, so a subset
-can never be published as the latest completed run. Without the contract the
-merge behaves as before (local and historical merges keep working); a module
-reported twice is an unusable input set either way and is refused.
+artifact must describe EXACTLY that set, every member of it fully measured: a
+missing, unexpected or duplicated module report -- no module directory at all
+-- or a module whose run exited nonzero (a step-timeout kill is -1) yields an
+incomplete diagnostic (``complete: false``, ``tool_error: true``,
+machine-readable ``failure_reasons``, the affected modules in
+``failed_run_modules``, score withheld) and a nonzero exit, so neither a subset
+nor a timeout-truncated run can be published as the latest completed run.
+Without the contract the merge behaves as before (local and historical merges
+keep working); a module reported twice is an unusable input set either way and
+is refused.
 
 Row fields (schema_version 1); the guide (tests/README.md, "Mutation CI")
 documents each one:
@@ -469,11 +472,14 @@ def merge_dirs(inputs: list[Path], out: Path,
     Without ``expected`` this is the historical/local merge, unchanged -- a
     module reported twice is refused, because there is no honest way to pick one.
     With ``expected`` (the plan job's module list) the merged artifact must
-    describe EXACTLY that set: a missing, unexpected or duplicated module report,
-    no module directory at all, or inputs from more than one run/SHA/mode make the
-    artifact an incomplete diagnostic -- ``complete: false``, ``tool_error: true``,
-    machine-readable ``failure_reasons`` and a withheld score -- so a subset can
-    never be read as the latest completed full run. Counts stay auditable for what
+    describe EXACTLY that set, every member fully measured: a missing, unexpected
+    or duplicated module report, no module directory at all, inputs from more than
+    one run/SHA/mode, or a module whose ``run_exit_code`` is nonzero (a step
+    timeout kill is -1) make the artifact an incomplete diagnostic --
+    ``complete: false``, ``tool_error: true``, machine-readable
+    ``failure_reasons``, the affected modules named in ``failed_run_modules`` and
+    a withheld score -- so neither a subset nor a timeout-truncated run can ever
+    be read as the latest completed full run. Counts stay auditable for what
     really arrived, except when nothing arrived or one module reported twice,
     where every count is null (never a fabricated zero or a silently doubled
     total)."""
@@ -505,6 +511,15 @@ def merge_dirs(inputs: list[Path], out: Path,
         for key in ("run_id", "sha", "mode"):
             if len(vals := {s.get(key) for s in summaries}) > 1:
                 mismatch.append(f"{key}s {sorted(map(str, vals))}")
+        # A module whose mutmut run exited nonzero (a step-timeout kill is -1)
+        # checked only part of its mutants: its rows are real but its totals and
+        # score are partial. The aggregate must fail rather than publish them as a
+        # complete measurement.
+        failed = {}
+        for s in summaries:
+            if (rc := s.get("run_exit_code")) not in (None, 0):
+                failed.setdefault(s["module"], set()).add(rc)
+        failed = {m: sorted(codes) for m, codes in sorted(failed.items())}
         contract_violated = not complete_set or bool(mismatch)
         reasons = []
         if not inputs:
@@ -521,13 +536,21 @@ def merge_dirs(inputs: list[Path], out: Path,
                            + "; no single report to attribute")
         if mismatch:
             reasons.append("RUN_PROVENANCE_MISMATCH: " + "; ".join(mismatch))
+        for name, codes in failed.items():
+            for rc in codes:
+                reasons.append(f"{'TIMEOUT_KILL' if rc == -1 else 'RUN_INCOMPLETE'}: {name}'s "
+                               f"run exited {rc}"
+                               + (" (step timeout kill)" if rc == -1 else "")
+                               + ": its results are partial, so the aggregate is not a "
+                                 "complete measurement")
         if not summaries or duplicates:
             # Nothing honest to aggregate: null counts, not zeros over an empty
             # set and not a total that silently double-counts.
             merged = {**merged, **null_block()}
-        elif contract_violated:
-            # Counts cover only what really arrived; no input measurement made
-            # this score, so it is withheld rather than recomputed.
+        elif contract_violated or failed:
+            # Counts cover only what really arrived; a partial run's own score is
+            # not a full measurement and a recomputed aggregate score would be a
+            # number no input measurement ever made, so it is withheld.
             merged = {**merged, "score": None}
         # A duplicated module has no single honest entry: the ambiguity lives in
         # ``module_contract.duplicate``, not resolved to whichever dir read first.
@@ -540,8 +563,9 @@ def merge_dirs(inputs: list[Path], out: Path,
                                 "duplicate": {n: sorted(str(d) for d in ds)
                                               for n, ds in sorted(duplicates.items())},
                                 "complete_set": complete_set},
-            "complete": not contract_violated,
-            "tool_error": contract_violated,
+            "failed_run_modules": failed,
+            "complete": not (contract_violated or bool(failed)),
+            "tool_error": contract_violated or bool(failed),
             "failure_reasons": reasons,
         })
     write_jsonl(out / "results.jsonl", rows)
@@ -561,15 +585,24 @@ def merge_dirs(inputs: list[Path], out: Path,
         lines += ["", f"Expected modules ({len(expected)}): {', '.join(expected) or '(none)'}",
                   f"Reported modules ({len(seen)}): {', '.join(present) or '(none)'}"]
         if merged["tool_error"]:
-            lines += ["", "**The module reports that arrived are NOT the set the plan "
-                      "expected -- this is not a valid full run. Score withheld, counts "
-                      "cover only what really arrived, and the artifact is marked "
-                      "INCOMPLETE (tool failure) so no consumer can read it as the "
-                      "latest completed run.**"]
+            if contract_violated:
+                lines += ["", "**The module reports that arrived are NOT the set the plan "
+                          "expected -- this is not a valid full run. Score withheld, counts "
+                          "cover only what really arrived, and the artifact is marked "
+                          "INCOMPLETE (tool failure) so no consumer can read it as the "
+                          "latest completed run.**"]
+            if failed:
+                lines += ["", f"**A planned module's mutmut run exited nonzero "
+                          f"({', '.join(failed)}): its results are PARTIAL, so this is "
+                          "not a valid full run. Score withheld, counts cover only what "
+                          "really arrived, and the artifact is marked INCOMPLETE (tool "
+                          "failure) so no consumer can read it as the latest completed "
+                          "run.**"]
             lines += [f"- {r}" for r in merged["failure_reasons"]
                       if r.startswith(("NO_MODULE_REPORTS", "MISSING_MODULES",
                                        "UNEXPECTED_MODULES", "DUPLICATE_MODULES",
-                                       "RUN_PROVENANCE"))]
+                                       "RUN_PROVENANCE", "TIMEOUT_KILL",
+                                       "RUN_INCOMPLETE"))]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     return merged
 
@@ -592,7 +625,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--expected-modules", default=None,
                    help="JSON array of the module names the plan expects; a report set "
-                        "that is not exactly this list is an incomplete tool error")
+                        "that is not exactly this list, or a module whose run exited "
+                        "nonzero, is an incomplete tool error")
     # nargs="*": the report job calls merge even when the download found no
     # module directory at all, so the expected-module contract can write the
     # incomplete diagnostic instead of the job passing on an empty set.

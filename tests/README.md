@@ -241,7 +241,10 @@ does. And in both, the `report` job's merge is handed the plan's module list
 (`--expected-modules`) and refuses to publish a clean-looking subset as the
 complete run: a missing, extra or duplicated module report -- or nothing
 downloaded at all -- yields an incomplete tool-error diagnostic with the score
-withheld, and the job fails.
+withheld, and the job fails. In the mutmut workflow a module whose recorded
+`run_exit_code` is nonzero (a step timeout kill is `-1`) propagates the same
+way: the aggregate is incomplete, the score is withheld and the merge exits
+nonzero, so a run that died part-way can never read as a completed one.
 
 The rest of this section is the mutmut workflow's own contract (the gremlins
 one is documented under "Backend: pytest-gremlins" below).
@@ -325,8 +328,12 @@ module artifacts arrived, and marks the aggregate `complete: false` /
 arrived) with `MISSING_MODULES` / `UNEXPECTED_MODULES` / `DUPLICATE_MODULES` /
 `NO_MODULE_REPORTS` reasons and a nonzero exit whenever the reported set is
 not exactly the planned one -- and, like the gremlins merge, when the inputs
-are not one run/SHA/mode. The `report` job still uploads the diagnostic
-artifact (always()) before failing on that exit.
+are not one run/SHA/mode -- or when any module's `run_exit_code` is nonzero:
+a timeout kill (-1) arrives as a `TIMEOUT_KILL` reason and any other nonzero
+exit as `RUN_INCOMPLETE`, both naming the module there and in
+`failed_run_modules`, with counts still covering only what really arrived.
+The `report` job still uploads the diagnostic artifact (always()) before
+failing on that exit.
 
 `results.jsonl` has one row per mutant, including mutants a run did not
 re-test. Its fields (`schema_version` 1):

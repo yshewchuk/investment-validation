@@ -32,10 +32,12 @@
 # - The merge is given the plan's module list (--expected-modules) and is
 #   called even when ZERO module artifacts were downloaded, because a matrix
 #   job that died before its export/upload would otherwise leave a subset that
-#   publishes as a valid full run: a missing, extra or duplicated module set
-#   makes merge write an incomplete tool-error artifact (never a clean-looking
-#   subset) and exit nonzero, so `mutation-mutmut-report` can only ever
-#   describe the whole planned run.
+#   publishes as a valid full run: a missing, extra or duplicated module set,
+#   or a module whose recorded run_exit_code is nonzero (a step-timeout kill
+#   is -1, and the step gate that exports it has no rc file to read, so -1 is
+#   exactly what it records), makes merge write an incomplete tool-error
+#   artifact (never a clean-looking or half-run report) and exit nonzero, so
+#   `mutation-mutmut-report` can only ever describe the whole planned run.
 #
 # mutmut needs no cache fingerprint of its own beyond the key below: its state
 # is keyed by the backend version, Python, the toml hash and the module, and
@@ -241,7 +243,8 @@ jobs:
           fi
           # Capture merge's rc, do NOT let `set -e` skip the rest: merge writes a
           # diagnostic summary and then exits nonzero when a module is missing,
-          # unexpected, duplicated or the inputs are not one run. The
+          # unexpected, duplicated, its inputs are not one run, or a module's
+          # run exited nonzero (partial results; a timeout is -1). The
           # consolidated artifact and that summary are the whole point of the
           # report job, so they must survive the nonzero rc; the job fails on it
           # only in the gate step below.

@@ -836,14 +836,15 @@ def test_the_two_workflows_own_disjoint_artifact_names():
 
 # -- merge expected-modules contract: the aggregate can never lie about scope ----------
 
-def _module_artifact(tmp_path: Path, name: str, statuses, info=None, tag=None):
+def _module_artifact(tmp_path: Path, name: str, statuses, info=None, tag=None, run_exit_code=None):
     """A directory in the shape the mutate job uploads (summary.json + results)."""
     info = info or INFO
     rows = [_row(name, "a.py", "f", s, name=f"{tag or name}{i}") for i, s in enumerate(statuses)]
     d = tmp_path / (tag or name)
     d.mkdir()
     mr.write_jsonl(d / "results.jsonl", rows)
-    (d / "summary.json").write_text(json.dumps(mr.summarize(rows, name, info, ["a.py"])))
+    (d / "summary.json").write_text(json.dumps(
+        mr.summarize(rows, name, info, ["a.py"], run_exit_code=run_exit_code)))
     return d
 
 
@@ -907,6 +908,49 @@ def test_merge_mixed_provenance_is_flagged_under_the_contract(tmp_path):
     assert merged["tool_error"] and merged["score"] is None
     assert any(r.startswith("RUN_PROVENANCE_MISMATCH") and "run_ids" in r
                for r in merged["failure_reasons"])
+
+
+# A module whose mutmut run exited nonzero (the step-timeout kill is -1) checked
+# only part of its mutants: its report is complete-looking, so the merge must
+# catch the recorded exit code or the aggregate would publish a truncated run as
+# the latest completed full score with a clean exit.
+
+@pytest.mark.parametrize("rc,label", [(-1, "TIMEOUT_KILL"), (2, "RUN_INCOMPLETE")])
+def test_merge_propagates_a_failed_module_run_as_an_incomplete_tool_error(tmp_path, rc, label):
+    a = _module_artifact(tmp_path, "a", ["killed", "survived"])
+    b = _module_artifact(tmp_path, "b", ["killed"], run_exit_code=rc)
+    merged = mr.merge_dirs([a, b], tmp_path / "m", ["a", "b"])
+    assert not merged["complete"] and merged["tool_error"]
+    assert merged["score"] is None  # a partial run never carries a clean aggregate score
+    assert merged["total"] == 3  # counts stay auditable for what really arrived
+    assert merged["failed_run_modules"] == {"b": [rc]}  # the affected module, by name
+    assert any(r.startswith(label) and r.split(":")[1].strip().startswith("b's")
+               for r in merged["failure_reasons"]), merged["failure_reasons"]
+    md = (tmp_path / "m" / "summary.md").read_text()
+    assert label in md and "b" in md and "INCOMPLETE" in md
+    # and the CLI -- the workflow's gate on its rc -- must not read it as success
+    assert mr.main(["merge", "--out", str(tmp_path / "m2"), "--expected-modules", '["a", "b"]',
+                    str(a), str(b)]) == 1
+
+
+def test_merge_zero_and_absent_run_exit_codes_stay_a_valid_run(tmp_path):
+    a = _module_artifact(tmp_path, "a", ["killed"], run_exit_code=0)
+    b = _module_artifact(tmp_path, "b", ["killed"])  # export recorded no rc: local merge
+    merged = mr.merge_dirs([a, b], tmp_path / "m", ["a", "b"])
+    assert merged["complete"] and not merged["tool_error"]
+    assert merged["failed_run_modules"] == {} and merged["failure_reasons"] == []
+    assert merged["score"] == 1.0
+
+
+def test_merge_timeout_and_a_broken_set_flag_both(tmp_path):
+    """A missing module AND a timed-out one: every violation is named, not the
+    first one found."""
+    a = _module_artifact(tmp_path, "a", ["killed"], run_exit_code=-1)
+    merged = mr.merge_dirs([a], tmp_path / "m", ["a", "b"])
+    assert not merged["complete"] and merged["tool_error"] and merged["score"] is None
+    assert merged["failed_run_modules"] == {"a": [-1]}
+    prefixes = {r.split(":")[0] for r in merged["failure_reasons"]}
+    assert {"MISSING_MODULES", "TIMEOUT_KILL"} <= prefixes
 
 
 def test_merge_without_a_contract_keeps_the_historical_shape(tmp_path):
@@ -981,3 +1025,85 @@ def test_report_cli_backend_selects_the_workflow_and_artifact(monkeypatch, tmp_p
     calls.clear()
     assert rep.main(["--backend", "mutmut", "--history", "1"]) == 0  # trend follows the backend
     assert calls and calls[0][calls[0].index("--workflow") + 1] == "mutation-mutmut.yml"
+
+
+# -- fetch_run cache: keyed by run ID AND artifact, never by run ID alone --------------
+
+def _fake_download(present):
+    """A fake ``gh run download`` that serves only the artifacts named in
+    ``present`` (writing the artifact's own name as the summary), recording
+    every invocation."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        artifact = cmd[cmd.index("-n") + 1]
+        dest = Path(cmd[cmd.index("-D") + 1])
+        if artifact not in present:
+            return types.SimpleNamespace(returncode=1, stdout="",
+                                         stderr=f"{artifact} not found")
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "summary.json").write_text(artifact)
+        (dest / "results.jsonl").write_text("")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    return calls, fake_run
+
+
+def test_fetch_run_caches_per_artifact_so_two_backends_cannot_share_a_run_id(monkeypatch,
+                                                                              tmp_path):
+    """GitHub run ids are shared between the two workflows: asking the same run
+    for the other backend must fetch that backend's own artifact, not read the
+    first backend's cached copy."""
+    monkeypatch.setenv("MUTATION_REPORT_CACHE", str(tmp_path / "cache"))
+    calls, fake_run = _fake_download({"mutation-report", "mutation-mutmut-report"})
+    monkeypatch.setattr(rep.subprocess, "run", fake_run)
+    gre = rep.fetch_run("123", None, "mutation-report")
+    mut = rep.fetch_run("123", None, "mutation-mutmut-report")
+    assert gre is not None and mut is not None and gre != mut
+    assert gre.name == "mutation-report" and mut.name == "mutation-mutmut-report"
+    assert (gre / "summary.json").read_text() == "mutation-report"  # its own artifact
+    assert (mut / "summary.json").read_text() == "mutation-mutmut-report"
+    assert rep.fetch_run("123", None, "mutation-report") == gre
+    assert rep.fetch_run("123", None, "mutation-mutmut-report") == mut
+    assert len(calls) == 2  # both cached hits, neither served the other's download
+
+
+def test_fetch_run_absent_backend_artifact_is_never_answered_from_the_other(monkeypatch,
+                                                                            tmp_path):
+    """A run of one workflow has no artifact for the other: the request stays
+    a miss (None) instead of being shadowed by the cached sibling."""
+    monkeypatch.setenv("MUTATION_REPORT_CACHE", str(tmp_path / "cache"))
+    calls, fake_run = _fake_download({"mutation-report"})
+    monkeypatch.setattr(rep.subprocess, "run", fake_run)
+    assert rep.fetch_run("123", None, "mutation-report") is not None
+    assert rep.fetch_run("123", None, "mutation-mutmut-report") is None
+    assert len(calls) == 2  # a real download attempt, failed -- not a stale cache hit
+
+
+def test_fetch_run_cache_hit_requires_a_matching_artifact_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("MUTATION_REPORT_CACHE", str(tmp_path / "cache"))
+    dest = tmp_path / "cache" / "123" / "mutation-mutmut-report"
+    dest.mkdir(parents=True)
+    (dest / "summary.json").write_text("{}")  # a markerless entry is never trusted
+    calls, fake_run = _fake_download({"mutation-mutmut-report"})
+    monkeypatch.setattr(rep.subprocess, "run", fake_run)
+    found = rep.fetch_run("123", None, "mutation-mutmut-report")
+    assert len(calls) == 1 and found == dest
+    assert (found / ".artifact").read_text().strip() == "mutation-mutmut-report"
+    assert rep.fetch_run("123", None, "mutation-mutmut-report") == dest
+    assert len(calls) == 1  # now a genuine cache hit
+
+
+def test_report_cli_two_backends_same_run_id_read_their_own_downloads(monkeypatch, tmp_path):
+    monkeypatch.setenv("MUTATION_REPORT_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(rep, "gh_json", lambda args, repo: [{"databaseId": 123}])
+    calls, fake_run = _fake_download({"mutation-report"})  # run 123 is a gremlins run
+    seen = []
+    monkeypatch.setattr(rep.subprocess, "run", fake_run)
+    monkeypatch.setattr(mr, "read_jsonl", lambda p: seen.append(Path(p).parent.name) or [])
+    assert rep.main([]) == 0
+    assert seen == ["mutation-report"]
+    with pytest.raises(SystemExit):  # the cached gremlins copy must not answer here
+        rep.main(["--backend", "mutmut", "--run", "123"])
+    assert seen == ["mutation-report"] and calls[-1][calls[-1].index("-n") + 1] == \
+        "mutation-mutmut-report"
