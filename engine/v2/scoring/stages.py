@@ -163,7 +163,6 @@ _SIMULATION_OUTPUTS = frozenset({
 _GATE_OUTPUTS = frozenset({"gate_score", "gate_threshold", "gate_pass"})
 _ANALOG_OUTPUTS = frozenset({
     "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
-    "selected_row_ids", "contributing_row_ids",
 })
 #: engine/score.py:2210/2214-2216 -- the payoff-calibration/model layer.
 _MODEL_OUTPUTS = frozenset({
@@ -2240,6 +2239,38 @@ def _record_analog_ids(display: dict[str, Any] | None, result) -> None:
         display["contributing_row_ids"] = tuple(result.contributing_row_ids)
 
 
+#: The analog row ids carried on ``StageObservation.display_document``; a
+#: display-row builder merges them onto the row it renders. Never onto the
+#: score/engine row: ``bridge._build_bridge`` hashes that into ``score_id``.
+DISPLAY_ANALOG_FIELDS = ("selected_row_ids", "contributing_row_ids")
+
+
+def analog_display_fields(
+    observations: Iterable[StageObservation],
+) -> dict[str, tuple[str, ...]]:
+    """The analog stage's observed row ids, as display-only row fields.
+
+    ``_record_analog_ids`` puts them on the observer's non-hashed
+    ``display_document``; a caller that scored with an observer hands this
+    result to the renderer, whose rendered row is what
+    ``projections._score_summary_fields`` reads through
+    ``bridge.display_record``. Missing or empty results stay empty tuples, so
+    a row whose analog stage never ran still renders ``[]``.
+    """
+    fields: dict[str, tuple[str, ...]] = {name: () for name in DISPLAY_ANALOG_FIELDS}
+    for item in observations:
+        if getattr(item.receipt, "stage", None) != "analogs":
+            continue
+        display = item.display_document
+        if not isinstance(display, Mapping):
+            continue
+        for name in DISPLAY_ANALOG_FIELDS:
+            value = display.get(name)
+            if value is not None:
+                fields[name] = tuple(str(row_id) for row_id in value)
+    return fields
+
+
 def _execute_frozen_analogs(
     block: Mapping[str, Any],
     strategy: str | None,
@@ -2885,7 +2916,8 @@ def assemble_native_values(inputs: NativeScoreInputs, *, strategy: str | None = 
 
 
 __all__ = [
-    "ADVISORY_FLAGS", "NativeScoreInputs", "STAGE_NAMES", "StageObservation",
-    "StageObserver", "StageReceipt",
+    "ADVISORY_FLAGS", "DISPLAY_ANALOG_FIELDS", "NativeScoreInputs", "STAGE_NAMES",
+    "StageObservation", "StageObserver", "StageReceipt",
+    "analog_display_fields",
     "assemble_native_values", "flags_refuse", "receipt",
 ]
