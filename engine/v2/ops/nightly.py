@@ -175,37 +175,31 @@ def _generation_pin(plan):
 
 
 def _publication_bindings(keys):
-    bindings = {"bundle.tar": _job_output("projection", keys),
-                "selfcheck.json": _job_output("selfcheck", keys),
-                # P2-C03: the independent anchor for "which session does this
-                # release speak for" — never trust the decisions watermark's own
-                # occurrence alone (a stale one for the wrong session must still
-                # refuse the decision gate; see effects_graph.publication_effect).
-                "finality.json": _job_output("finality", keys)}
-    if "engineering_gate" in keys:
-        bindings["engineering_gate.json"] = _job_output("engineering_gate", keys)
-    return bindings
+    return {"bundle.tar": _job_output("projection", keys),
+            "selfcheck.json": _job_output("selfcheck", keys),
+            # P2-C03: the independent anchor for "which session does this
+            # release speak for" — never trust the decisions watermark's own
+            # occurrence alone (a stale one for the wrong session must still
+            # refuse the decision gate; see effects_graph.publication_effect).
+            "finality.json": _job_output("finality", keys),
+            "engineering_gate.json": _job_output("engineering_gate", keys)}
 
 
 def _decision_bindings(keys):
-    """The decisions job's inputs; ``decision_evidence`` is bound only when the
-    sequence built it (the production DAG always does)."""
-    bindings = {"score.json": _job_output("score", keys),
-                "finality.json": _job_output("finality", keys)}
-    if "decision_evidence" in keys:
-        bindings["decision_plan.json"] = keys["decision_evidence"] + "#decision_plan"
-        bindings["decision_evidence.json"] = keys["decision_evidence"] + "#decision_evidence"
-    return bindings
+    """The decisions job's inputs, including the decision evidence pair."""
+    return {"score.json": _job_output("score", keys),
+            "finality.json": _job_output("finality", keys),
+            "decision_plan.json": keys["decision_evidence"] + "#decision_plan",
+            "decision_evidence.json": keys["decision_evidence"] + "#decision_evidence"}
 
 
 def _render_bindings(keys, prior_selfcheck_ref):
-    """The render job's inputs, with the ledger generation and the optional
-    prior selfcheck bound only when the sequence carries them."""
+    """The render job's inputs: the ledger generation is always bound, and the
+    optional prior selfcheck only when the caller supplies one."""
     bindings = {"score.json": _job_output("score", keys),
                 "model_evidence.json": _job_output("model_evidence", keys),
-                "finality.json": _job_output("finality", keys)}
-    if "ledger_export" in keys:
-        bindings["ledger_generation.tar"] = _job_output("ledger_export", keys)
+                "finality.json": _job_output("finality", keys),
+                "ledger_generation.tar": _job_output("ledger_export", keys)}
     if prior_selfcheck_ref:
         bindings["prior_selfcheck.json"] = prior_selfcheck_ref
     return bindings

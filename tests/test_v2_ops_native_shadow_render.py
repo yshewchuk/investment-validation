@@ -40,7 +40,14 @@ from engine.v2.ops.native_parity_report import (
     write_parity_report,
 )
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
-from engine.v2.ops.nightly import GRAPH, OPTIONAL, build_nightly_plan, run_shadow_nightly
+from engine.v2.ops.nightly import (
+    GRAPH,
+    OPTIONAL,
+    _stage_sequence,
+    build_legacy_job_requests,
+    build_nightly_plan,
+    run_shadow_nightly,
+)
 from engine.v2.scoring import application
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import analog_display_fields
@@ -459,14 +466,49 @@ def test_native_mode_without_rows_degrades_only_the_optional_parity_stage(tmp_pa
 
 
 def test_native_parity_is_never_a_job_request():
-    from engine.v2.ops.nightly import build_legacy_job_requests
     plan = build_nightly_plan(Path.cwd(), _EVENT_DATE)
     assert "native_parity" in plan["order"]
+    assert "native_parity" not in _stage_sequence(plan, True, None, "legacy")
+    assert "native_parity" not in _stage_sequence(plan, False, None, "legacy")
     requests = build_legacy_job_requests(plan, tickers=("AAA",), year_start=2024,
-                                         year_end=2024, include_prerequisites=True)
+                                         year_end=2024)
     kinds = {request.job.kind for request in requests}
     assert "legacy_native_parity" not in kinds and "native_parity" not in kinds
     assert not any(request.idempotency_key.endswith(":native_parity") for request in requests)
+
+
+def _plan_with_order(*order):
+    plan = build_nightly_plan(Path.cwd(), _EVENT_DATE)
+    return {**plan, "order": list(order)}
+
+
+def test_include_prerequisites_needs_the_decision_evidence_binding():
+    plan = build_nightly_plan(Path.cwd(), _EVENT_DATE)
+    with pytest.raises(KeyError, match="decision_evidence"):
+        build_legacy_job_requests(plan, tickers=("AAA",), year_start=2024, year_end=2024,
+                                  include_prerequisites=True)
+
+
+def test_include_prerequisites_needs_the_ledger_generation_binding():
+    plan = _plan_with_order("refresh", "finality", "features", "score", "model_evidence",
+                            "projection")
+    with pytest.raises(KeyError, match="ledger_export"):
+        build_legacy_job_requests(plan, tickers=("AAA",), year_start=2024, year_end=2024,
+                                  include_prerequisites=True)
+
+
+def test_include_prerequisites_needs_the_engineering_gate_binding(monkeypatch):
+    """The publication helper's own KeyError, reached with parent lookups
+    neutralized by real (empty-parent) graph entries for the two key-only
+    stages the prefix of this order has to process."""
+    from engine.v2.ops import nightly
+    monkeypatch.setitem(nightly.GRAPH, "export", ())
+    monkeypatch.setitem(nightly.GRAPH, "ledger_export", ())
+    plan = _plan_with_order("refresh", "finality", "features", "score", "model_evidence",
+                            "export", "ledger_export", "projection", "selfcheck", "publication")
+    with pytest.raises(KeyError, match="engineering_gate"):
+        build_legacy_job_requests(plan, tickers=("AAA",), year_start=2024, year_end=2024,
+                                  include_prerequisites=True)
 
 
 def test_one_switch_source_of_truth_for_both_halves():

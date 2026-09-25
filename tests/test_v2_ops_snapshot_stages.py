@@ -43,7 +43,7 @@ from engine.v2.ops.checkpoints import cache_identity, register_artifact
 from engine.v2.ops.cli import dispatch, parser
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.input_bindings import recorded_bindings, resolved_inputs_hash
-from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
+from engine.v2.ops.nightly import _stage_sequence, build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.snapshot_roots import default_materialization_base, hash_tree, materialization_root
 from engine.v2.ops.snapshot_stages import snapshot_cache_inputs
@@ -1151,6 +1151,7 @@ def test_planning_refusals(case):
     with pytest.raises(OpsError):
         nightly_plan(str(REPO), SESSION, input_mode="snapshot")
     plan = build_nightly_plan(str(REPO), SESSION)
+    assert "native_parity" not in _stage_sequence(plan, True, None, "legacy")
     for kwargs in ({"input_mode": "other"}, {"input_mode": "snapshot"},
                    {"input_mode": "snapshot", "snapshot_inputs": _FAKE_SNAPSHOT_INPUTS,
                     "include_prerequisites": True}):
