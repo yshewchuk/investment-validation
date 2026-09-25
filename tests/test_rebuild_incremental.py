@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 import random
+import shutil
 import string
 
 import pytest
@@ -73,26 +74,43 @@ def _snapshot(paths):
         for p in sorted(base.rglob("*")):
             if p.is_file():
                 out[str(p.relative_to(paths.CURATED))] = p.read_bytes()
-    return out
+    flags = {}
+    for p in sorted(paths.QUARANTINE.rglob("*.flag.json")):
+        entries = json.loads(p.read_text())
+        entries = entries if isinstance(entries, list) else [entries]
+        flags[str(p.relative_to(paths.QUARANTINE))] = [
+            {k: v for k, v in e.items() if k != "flagged_at"} for e in entries
+        ]
+    return out, flags
+
+
+def _clear_quarantine(paths):
+    """Every run gets its own quarantine dir."""
+    if paths.QUARANTINE.exists():
+        shutil.rmtree(paths.QUARANTINE)
 
 
 def _full(paths):
     from engine.data import rebuild
 
+    _clear_quarantine(paths)
     reports = (rebuild.build_daily_table(), rebuild.build_chains_table())
-    return _snapshot(paths), reports
+    snap, flags = _snapshot(paths)
+    return snap, reports, flags
 
 
 def _incr(paths, **kw):
     from engine.data import rebuild
     from engine.data.normalize import n_daily
 
+    _clear_quarantine(paths)
     n_daily.fetch_daily_index.cache_clear()
     caches = [rebuild_cache.InputCache(t, **kw) for t in ("daily_market", "option_chains")]
     reports = (rebuild.build_daily_table(None, caches[0]), rebuild.build_chains_table(None, caches[1]))
     for c in caches:
         c.commit()
-    return _snapshot(paths), reports, caches
+    snap, flags = _snapshot(paths)
+    return snap, reports, caches, flags
 
 
 def _parsed(caches):
@@ -101,16 +119,27 @@ def _parsed(caches):
 
 def test_cold_run_is_full_and_matches(world):
     full = _full(world)
-    snap, reports, caches = _incr(world)
-    assert snap == full[0] and reports == full[1]
+    snap, reports, caches, flags = _incr(world)
+    assert (snap, reports, flags) == full
     assert all(c.full for c in caches) and all(p > 0 for p in _parsed(caches))
+
+
+def test_quarantine_flags_match_and_the_bad_file_is_flagged_in_every_run(world):
+    flagged = "2024-01-02_c2_b1.json.gz.flag.json"
+    full = _full(world)
+    assert flagged in full[2]
+    _, _, _, cold_flags = _incr(world)
+    assert flagged in cold_flags
+    snap, reports, _, warm_flags = _incr(world)
+    assert flagged in warm_flags
+    assert (snap, reports, warm_flags) == full
 
 
 def test_warm_run_parses_nothing_and_matches(world):
     full = _full(world)
     _incr(world)
-    snap, reports, caches = _incr(world)
-    assert snap == full[0] and reports == full[1]
+    snap, reports, caches, flags = _incr(world)
+    assert (snap, reports, flags) == full
     assert _parsed(caches) == [0, 0] and not any(c.full for c in caches)
     assert all(c.stats["reused"] > 0 for c in caches)
 
@@ -126,11 +155,14 @@ def test_one_file_change_reparses_only_it(world, change):
             {"rows": [_strike("CCC", "2024-01-09", 100.0)]})
     else:
         target.unlink()
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
+    stats = caches[1].stats
+    total = stats["reused"] + stats["parsed"] + stats["removed"]
+    assert stats["reused"] == total - 1
     assert _parsed(caches) == [0, 0 if change == "removed" else 1]
     if change == "removed":
         assert caches[1].stats["removed"] == 1
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_daily_file_change_and_new_market_day(world):
@@ -138,42 +170,42 @@ def test_daily_file_change_and_new_market_day(world):
     _gz(world.RAW_ORATS_SUMMARIES / "BBB.json.gz", [_summ("2024-01-02", 55.0)])
     _fetch(world, "hist/summaries", {"tradeDate": "2024-01-09"},
            {"data": [dict(_summ("2024-01-09", 21.0), ticker=t) for t in ("AAA", "CCC")]})
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
     assert caches[0].stats["parsed"] == 1
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_corrupt_manifest_falls_back_to_full(world):
     _incr(world)
     (rebuild_cache.cache_root() / "option_chains" / "manifest.json").write_text("{not json")
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
     assert caches[1].full and caches[1].stats["reused"] == 0
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_corrupt_entry_is_reparsed(world):
     _incr(world)
     for p in (rebuild_cache.cache_root() / "option_chains" / "entries").rglob("*.pkl"):
         p.write_bytes(b"garbage")
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
     assert caches[1].stats["reused"] == 0 and caches[1].stats["parsed"] > 0
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_code_version_change_forces_full(world, monkeypatch):
     _incr(world)
     monkeypatch.setattr(rebuild_cache, "CACHE_SCHEMA", rebuild_cache.CACHE_SCHEMA + 1)
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
     assert all(c.fallback_reason == "code version changed" for c in caches)
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_env_var_forces_full(world, monkeypatch):
     _incr(world)
     monkeypatch.setenv(rebuild_cache.FORCE_ENV, "1")
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
     assert all(c.fallback_reason == "forced" for c in caches)
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_default_rebuild_never_touches_the_cache(world, monkeypatch):
@@ -219,10 +251,10 @@ def test_same_size_rewrite_with_restored_mtime_is_reparsed(world):
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert path.stat().st_size == st.st_size
     assert path.stat().st_mtime_ns == st.st_mtime_ns
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
     assert caches[1].stats["parsed"] == 1
     assert caches[1].stats["hashed"] >= 1
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_old_format_manifest_entry_is_rehashed_not_an_error(world):
@@ -233,10 +265,10 @@ def test_old_format_manifest_entry_is_rehashed_not_an_error(world):
         rec.pop("st_ino", None)
         rec.pop("st_ctime_ns", None)
     manifest_path.write_text(json.dumps(doc, sort_keys=True))
-    snap, reports, caches = _incr(world)
+    snap, reports, caches, flags = _incr(world)
     assert caches[1].stats["hashed"] >= 1
     assert caches[1].stats["reused"] > 0
-    assert (snap, reports) == _full(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_sample_with_incremental_is_refused(world):
@@ -268,8 +300,8 @@ def test_mixed_mktcap_dtypes_match_full_rebuild(world, cached_int):
     _incr(world)
     _gz(legacy, [{"tradeDate": "2024-01-02",
                   "mktCap": None if cached_int else 5000}])
-    snap, reports, caches = _incr(world)
-    assert (snap, reports) == _full(world)
+    snap, reports, caches, flags = _incr(world)
+    assert (snap, reports, flags) == _full(world)
 
 
 def test_proof_tool_compare_trees_names_differences(tmp_path):
@@ -282,3 +314,16 @@ def test_proof_tool_compare_trees_names_differences(tmp_path):
     (a / "t" / "only.parquet").write_bytes(b"z")
     assert compare_trees(a, b) == ["only in full: t/only.parquet", "bytes differ: t/p.parquet"]
     assert compare_trees(a, a) == []
+
+
+def test_proof_tool_compare_stats_ignores_only_timestamps_and_snapshot():
+    from tools.verify_incremental_rebuild import IGNORED_STAT_KEYS, compare_stats
+
+    a = {"snapshot": "s1", "elapsed_s": 1.0,
+         "reports": {"daily": {"rows": 2, "tickers": 1, "flagged_at": "x", "generated_at": "y"}}}
+    b = {"snapshot": "s2", "elapsed_s": 9.9,
+         "reports": {"daily": {"rows": 2, "tickers": 1, "flagged_at": "z", "generated_at": "w"}}}
+    assert compare_stats(a, b) == []
+    assert IGNORED_STAT_KEYS == {"elapsed_s", "flagged_at", "generated_at", "snapshot"}
+    b["reports"]["daily"]["rows"] = 3
+    assert compare_stats(a, b) == ["reports.daily.rows: 2 != 3"]
