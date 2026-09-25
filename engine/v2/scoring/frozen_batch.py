@@ -17,7 +17,11 @@ deployment; the two per-request mappings are keyed *only* by
 missing, nothing extra — unlike ``score_batch`` there is no event-only
 fallback); every ``InferenceRequest`` must name the release, and the release
 binding it selects must be compatible with the request's strategy, decision
-clock and feature order.
+clock and feature order. Every request's ``_native_inputs`` payload must
+already be a ``NativeScoreInputs`` instance: ``score_frozen`` type-checks it
+only *after* running inference, so a malformed payload on a later request
+would otherwise let earlier requests infer before the batch dies with a
+``TypeError``.
 
 Preflight deliberately never opens artifact bytes. A missing or tampered
 member is verified at inference time exactly as an individual call would, so
@@ -35,6 +39,7 @@ from engine.v2.models.no_fit import no_fit_guard
 
 from .application import score_frozen
 from .identity import request_hash
+from .stages import NativeScoreInputs
 
 if TYPE_CHECKING:
     from engine.v2.models.contracts import InferenceRequest, ModelRelease
@@ -101,6 +106,14 @@ def _preflight(requests: tuple[ScoreRequest, ...], snapshot_id: str,
                 f"request {identity} fields must map {_REQUIRED_FIELD!r} to "
                 "source-built NativeScoreInputs; artifact content is verified "
                 "at inference, not here")
+        payload = fields[_REQUIRED_FIELD]
+        if not isinstance(payload, NativeScoreInputs):
+            raise FrozenBatchPreflightError(
+                f"request {identity} maps {_REQUIRED_FIELD!r} to "
+                f"{type(payload).__name__}, not a NativeScoreInputs payload; "
+                "score_frozen would only fail on it after inferring this and "
+                "any earlier requests, so the whole batch is refused here "
+                "without opening artifact bytes")
         items = _inference_items(inference_requests_by_request[identity], identity)
         for item in items:
             _check_inference_request(request, identity, release, item)

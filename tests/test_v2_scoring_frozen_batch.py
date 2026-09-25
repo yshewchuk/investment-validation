@@ -241,6 +241,32 @@ def test_preflight_mismatch_prevents_all_inference(tmp_path, case):
     assert len(ok) == len(requests)  # only the complete, matching batch ever ran
 
 
+def test_later_malformed_native_inputs_payload_refuses_whole_batch(tmp_path):
+    """``score_frozen`` type-checks ``_native_inputs`` *after* inferring, so a
+    later request's malformed payload must be caught in whole-batch preflight:
+    nothing in the batch infers, and the failure is a preflight refusal, not
+    the post-inference ``TypeError`` the single call would raise."""
+    root, hashes, release = _ready(tmp_path)
+    plain = _request()
+    later = replace(plain, geometry_override={"strike": 105.0})
+    requests = [plain, later]
+    keys = [request_hash(request) for request in requests]
+    spy = _CountingInference(FrozenInference(root))
+    kwargs = _kwargs(release, spy, requests, _fields(root, hashes))
+    kwargs["fields_by_request"][keys[1]] = {"_native_inputs": None}
+
+    with both_guards():
+        with pytest.raises(FrozenBatchPreflightError) as excinfo:
+            score_frozen_batch(_batch(requests), **kwargs)
+
+    assert spy.calls == []  # the first request never ran ahead of the bad payload
+    error = excinfo.value
+    assert type(error) is FrozenBatchPreflightError
+    assert isinstance(error, ValueError) and not isinstance(error, TypeError)
+    assert "NativeScoreInputs" in str(error)
+    assert keys[1] in str(error)  # the offending request is named
+
+
 def test_missing_artifact_gives_refusal_not_a_preflight_error(tmp_path):
     """Preflight never opens artifact bytes: the P5-2 MODEL_NOT_READY refusal
     from ``score_frozen`` survives batching unchanged."""
