@@ -111,10 +111,14 @@ calls it:
   slice: the launcher's `_server.build_server` now hands `create_server` a
   callback bound to the explicitly named ops root, so a `POST /actions/refresh`
   over an already-published nightly plan returns 202 with the supervised job
-  ids (and is idempotent on a repeat) instead of 503. This is a shadow plan
-  submission only -- no inline refresh and no production-authority switch --
-  so `board-refresh-action` stays open in P6-4 until the desk path itself is
-  retired; omitting `--ops-root` preserves the read-only 503.
+  ids (and is idempotent on a repeat) instead of 503. By the completion bar
+  above, that runtime reachability closes this route capability:
+  `board-refresh-action` is `native` in P6-4. Retiring the legacy desk path is
+  explicitly NOT the Phase 6 bar -- `POST /api/refresh` may keep running
+  through Phase 7 and until 8A deletes the legacy tree. The refresh stays a
+  shadow plan submission only, with no inline refresh and no
+  production-authority switch; omitting `--ops-root` preserves the read-only
+  503.
 - `engine/v2/scoring/application.py:739 score_batch` is a complete native
   batch scorer with 5 call sites, all in tests, zero in production.
 

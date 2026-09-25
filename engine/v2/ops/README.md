@@ -44,8 +44,12 @@ serving reads a versioned health artifact without a peer-layer import. The one
 exception is the layer-8 preview launcher's server composition
 (`engine.v2.dashboard._server`), which imports `cli.refresh_action` lazily and
 only to wire an optional `--ops-root` shadow nightly-plan submission onto the
-operations server's `POST /actions/refresh`; it never imports the supervisor,
-executor or a write path.
+operations server's `POST /actions/refresh`. That lazy import still runs
+`engine.v2.ops.cli`'s own top-level imports, so the supervisor, executor and
+submission write path all load, and `refresh_action` writes the queued jobs to
+the catalog. What the route does NOT do is start the supervisor, execute the
+submitted jobs inline, or switch production authority: it queues the plan and
+returns the job ids, leaving execution to a separately started supervisor.
 
 <!-- consumers: engine.v2.dashboard -->
 
