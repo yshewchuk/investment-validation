@@ -467,7 +467,13 @@ def rebuild(
     per-input parses for ``daily_market`` and ``option_chains`` -- see
     :mod:`engine.data.rebuild_cache`. The outputs are byte-identical to the
     default full rebuild, which neither reads nor writes that cache.
+
+    ``sample`` cannot be combined with ``incremental``: a sampled run sees only
+    part of the inputs, so committing its manifest would prune the cache of
+    every input the sample skipped.
     """
+    if incremental and sample:
+        raise ValueError("--sample cannot be combined with --incremental")
     started = time.time()
     paths.ensure_dirs()
     result = RebuildResult()
@@ -530,6 +536,9 @@ def main(argv: list[str] | None = None) -> int:
         "rows over; the correct follow-up to a Tier-2 correction at that date",
     )
     args = ap.parse_args(argv)
+
+    if args.incremental and args.sample:
+        ap.error("--sample cannot be combined with --incremental")
 
     tables = tuple(args.table) if args.table else TABLE_ORDER
     result = rebuild(tables=tables, sample=args.sample, tier4_since=args.tier4_since,

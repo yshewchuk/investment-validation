@@ -4,6 +4,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import random
+import string
 
 import pytest
 
@@ -190,6 +192,84 @@ def test_incremental_rebuild_writes_the_cache(world):
 
     rebuild.rebuild(tables=("daily", "chains"), incremental=True)
     assert (rebuild_cache.cache_root() / "option_chains" / "manifest.json").exists()
+
+
+def _rewrite_same_size(path, obj, size):
+    """Rewrite ``path`` as gzipped ``obj``, padded to exactly ``size`` bytes."""
+    base = json.dumps(obj)
+    rng = random.Random(0)
+    pad = "".join(rng.choices(string.ascii_letters + string.digits, k=8192))
+    for n in range(len(pad) + 1):
+        text = base[:-1] + ', "pad": "' + pad[:n] + '"}'
+        with gzip.open(path, "wt") as fh:
+            fh.write(text)
+        if path.stat().st_size == size:
+            return
+    raise AssertionError(f"could not rewrite {path.name} to {size} bytes")
+
+
+def test_same_size_rewrite_with_restored_mtime_is_reparsed(world):
+    """size+mtime are forgeable (cp -p, touch -r); the inode/ctime guard is not."""
+    import os
+
+    _incr(world)
+    path = world.RAW_ORATS_STRIKES / "2024-01-03_b1.json.gz"
+    st = path.stat()
+    _rewrite_same_size(path, {"rows": []}, st.st_size)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert path.stat().st_size == st.st_size
+    assert path.stat().st_mtime_ns == st.st_mtime_ns
+    snap, reports, caches = _incr(world)
+    assert caches[1].stats["parsed"] == 1
+    assert caches[1].stats["hashed"] >= 1
+    assert (snap, reports) == _full(world)
+
+
+def test_old_format_manifest_entry_is_rehashed_not_an_error(world):
+    _incr(world)
+    manifest_path = rebuild_cache.cache_root() / "option_chains" / "manifest.json"
+    doc = json.loads(manifest_path.read_text())
+    for rec in doc["inputs"].values():
+        rec.pop("st_ino", None)
+        rec.pop("st_ctime_ns", None)
+    manifest_path.write_text(json.dumps(doc, sort_keys=True))
+    snap, reports, caches = _incr(world)
+    assert caches[1].stats["hashed"] >= 1
+    assert caches[1].stats["reused"] > 0
+    assert (snap, reports) == _full(world)
+
+
+def test_sample_with_incremental_is_refused(world):
+    from engine.data import rebuild
+
+    with pytest.raises(ValueError, match="--sample cannot be combined with --incremental"):
+        rebuild.rebuild(tables=("daily", "chains"), sample=1, incremental=True)
+    assert not rebuild_cache.cache_root().exists()
+
+
+def test_cli_refuses_sample_with_incremental(capsys):
+    from engine.data import rebuild
+
+    with pytest.raises(SystemExit) as exc:
+        rebuild.main(["--sample", "1", "--incremental"])
+    assert exc.value.code == 2
+    assert "--sample cannot be combined with --incremental" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("cached_int", [True, False])
+def test_mixed_mktcap_dtypes_match_full_rebuild(world, cached_int):
+    """A cached part's int mktCap and a fresh part's None (and the reverse)."""
+    from engine.data.normalize import n_daily
+
+    legacy = world.RAW_ORATS_CORES / "AAA.json.gz"
+    history = n_daily.history_body_path("AAA", "cores")
+    _gz(history, {"data": [{"tradeDate": "2024-01-03",
+                            "mktCap": 5000 if cached_int else None}]})
+    _incr(world)
+    _gz(legacy, [{"tradeDate": "2024-01-02",
+                  "mktCap": None if cached_int else 5000}])
+    snap, reports, caches = _incr(world)
+    assert (snap, reports) == _full(world)
 
 
 def test_proof_tool_compare_trees_names_differences(tmp_path):

@@ -3,8 +3,8 @@
 The legacy nightly's rebuild is parse-bound: it re-reads and re-parses every
 raw file on every run although almost none of them changed. This module keeps
 the parsed result of each raw input, keyed on a manifest of
-``(path, size, mtime_ns, sha256)``, so a later run can skip the parse of an
-input whose bytes are unchanged.
+``(path, size, mtime_ns, st_ino, st_ctime_ns, sha256)``, so a later run can
+skip the parse of an input whose bytes are unchanged.
 
 Only per-input work is cached. Anything that depends on the whole universe
 (cross-source dedupe, the market-wide daily index, validation of a ticker's
@@ -126,9 +126,17 @@ class Signature:
     size: int
     mtime_ns: int
     sha256: str
+    st_ino: int = 0
+    st_ctime_ns: int = 0
 
     def as_dict(self) -> dict:
-        return {"size": self.size, "mtime_ns": self.mtime_ns, "sha256": self.sha256}
+        return {
+            "size": self.size,
+            "mtime_ns": self.mtime_ns,
+            "sha256": self.sha256,
+            "st_ino": self.st_ino,
+            "st_ctime_ns": self.st_ctime_ns,
+        }
 
 
 def _sha256(path: Path) -> str:
@@ -194,13 +202,28 @@ class InputCache:
     # -- per input ---------------------------------------------------------
 
     def signature(self, path: Path) -> Signature:
-        """The input's signature, hashing its bytes only if size/mtime moved."""
+        """The input's signature, hashing its bytes only if nothing moved.
+
+        The manifest's cached digest is trusted only when size, mtime, inode
+        and ctime all match. A same-size rewrite that preserves mtime
+        (``cp -p``, ``rsync -t``, a tar restore, ``touch -r``) moves ctime, so
+        it is rehashed rather than reused. An entry written by the previous
+        manifest format lacks the inode/ctime keys and is likewise rehashed,
+        not treated as an error.
+        """
         st = path.stat()
         rec = self._old.get(str(path))
-        if rec and rec.get("size") == st.st_size and rec.get("mtime_ns") == st.st_mtime_ns:
-            return Signature(st.st_size, st.st_mtime_ns, str(rec.get("sha256")))
+        if rec is not None and (
+            rec.get("size") == st.st_size
+            and rec.get("mtime_ns") == st.st_mtime_ns
+            and rec.get("st_ino") == st.st_ino
+            and rec.get("st_ctime_ns") == st.st_ctime_ns
+        ):
+            return Signature(st.st_size, st.st_mtime_ns, str(rec.get("sha256")),
+                             st.st_ino, st.st_ctime_ns)
         self.stats["hashed"] += 1
-        return Signature(st.st_size, st.st_mtime_ns, _sha256(path))
+        return Signature(st.st_size, st.st_mtime_ns, _sha256(path),
+                         st.st_ino, st.st_ctime_ns)
 
     def lookup(self, path: Path, source_id: str) -> tuple[bool, Any, Signature]:
         """``(hit, value, signature)`` for one raw input."""
