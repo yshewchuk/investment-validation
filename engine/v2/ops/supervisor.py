@@ -957,12 +957,20 @@ class Service:
         self.lock.release()
 
 
-def serve(service, *, once=False):
+def serve(service, *, once=False, until=None):
+    """Tick until stopped: ``once`` for a single idle pass, or ``until`` when
+    the caller owns a completion predicate (the nightly trigger's own
+    "every job of the submitted plan is terminal"). ``until`` is checked
+    after each tick, never before ``service.start()``, so the recovery pass a
+    start performs always runs.
+    """
     service.start()
     try:
         while True:
             active = service.tick()
             if once and not active:
+                break
+            if until is not None and until():
                 break
             time.sleep(0.1 if once else 1)
     finally:

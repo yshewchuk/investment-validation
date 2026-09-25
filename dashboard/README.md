@@ -405,9 +405,10 @@ opened and looked at.
 
 Separate from the legacy cron line above — which is UNCHANGED and still the one
 that publishes the board — a systemd timer retries the native **shadow-mode**
-nightly qualification all night. The service plans and submits the parallel
-native DAG only once ORATS has published the as-of session, so a second heavy
-run never overlaps the legacy one.
+nightly qualification all night. The service plans, submits and then runs the
+parallel native DAG itself (the same supervisor `ops serve` runs), all while
+holding the legacy nightly's own `reports/.nightly.lock` for the whole run, so
+a second heavy run can never overlap it.
 
     systemctl --user enable --now native-nightly-trigger.timer     # user session
     # system-level instead (as root; edit WorkingDirectory first):
@@ -421,21 +422,43 @@ service runs, from the repo root:
         python3 -m engine.v2.ops.nightly_trigger
 
 The timer fires every 30 minutes unconditionally; the trigger is the only
-window/deadline authority (00:00–06:00 America/New_York by default): it probes
-ORATS once (the market-wide summaries/cores pair, never a refresh job) and
-refuses to submit while the legacy nightly's own `reports/.nightly.lock` is
-held, recording `busy_legacy` for the next tick. A `submitted` or `missed`
-date is terminal — never re-probed, never submitted twice; the receipt and
-`reports/phase6/nightly_trigger/<as-of>.json` are the P6-6 evidence. Exit code
-0 means `submitted`/`not_yet`/`busy_legacy` (retry), 1 means `missed`/`error`
-(visible in the journal). One JSON `TriggerReceipt` line is printed per run.
+window/deadline authority. Its default as-of is the most recent completed
+trading session strictly before today in America/New_York (weekends and US
+market holidays skipped). That session's retry window is 00:00–06:00 ET on the
+calendar day after it: a Friday as-of is retried Saturday 00:00–06:00 and
+MISSED at Saturday 06:00, and up to five minutes of grace keeps a 06:00 tick
+that fires seconds late inside. The tick probes ORATS once (the market-wide
+summaries/cores pair, never a refresh job); a not-final probe records
+`not_yet` and submits nothing.
 
-To make a scheduled run submittable, place the qualification documents beside
-the state files: `reports/phase6/nightly_trigger/expected_population.json`
-(the planned population, a JSON list of `ticker|strategy|event_date` keys —
-its tickers are the default universe) and
-`reports/phase6/nightly_trigger/input_manifest.json` (from
-`ops capture-inputs`). Without them `ops submit` refuses the plan and the
-receipt records that refusal as `error`; the trigger never bypasses the
-planned-population gate. `--as-of YYYY-MM-DD` (default: today in
-America/New_York) and `--root .` are the only CLI options.
+Before probing, the tick takes a NON-BLOCKING `flock` (LOCK_EX|LOCK_NB) on
+`reports/.nightly.lock` and holds it for the ENTIRE native run — probe, plan,
+submit and the supervisor serve loop that drives every job of the submitted
+plan to a terminal state — releasing it only on exit. A tick that cannot
+acquire it records `busy_legacy` and exits 0 for a retry; a manual legacy
+nightly started while a native run holds it refuses to start, which is
+intended. The legacy cron time (21:30 weekdays) is unaffected: it ends well
+before 00:00 ET.
+
+The plan is the native nightly plan's full-population option (`--full-run`):
+the scheduled universe is the full default population — the tickers of
+`reports/phase6/nightly_trigger/expected_population.json` (a JSON list of
+`ticker|strategy|event_date` keys, passed to the plan unchanged as
+`--expected-population`) when the operator has captured it — never a
+ticker-list argument and never a slice of the context. A crash between submit
+and the state write cannot double-submit: the trigger writes `submitting` with
+the plan_ref before calling submit, resubmits that SAME plan_ref on the next
+tick without ever re-planning, and an already-submitted plan_ref is a no-op by
+plan identity. A finished run is `completed` (every job succeeded) or `failed`
+(terminal with failures). `missed` is terminal; `error` becomes terminal as
+`failed_setup` after three consecutive errors for the same as-of. A tick whose
+pending as-of is already terminal exits 0 with status `idle` and writes
+nothing — only the first transition to `missed`/`failed`/`failed_setup` exits
+1. The receipt and `reports/phase6/nightly_trigger/<as-of>.json` are the P6-6
+evidence; one JSON `TriggerReceipt` line is printed per run. `--as-of
+YYYY-MM-DD` (default: the most recent completed trading session) and `--root .`
+are the only CLI options. To make a scheduled run submittable, place
+`reports/phase6/nightly_trigger/input_manifest.json` (from `ops
+capture-inputs`) beside the population document; without them `ops submit`
+refuses the plan and the receipt records that refusal as `error`; the trigger
+never bypasses the planned-population gate.

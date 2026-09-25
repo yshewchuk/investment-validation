@@ -1,11 +1,12 @@
 """Required-case proof for ``engine.v2.ops.nightly_trigger`` (Phase 6 slice 12).
 
-Every branch is driven with a fake clock, a fake provider callable and a fake
-submit callable -- no network, no catalog, no real systemd timer. The three
-negative controls the slice brief names are explicit assertions, not status
-strings: a not-final probe never submits, a past-deadline run never submits,
-and a rerun of a decided date never submits again. BUSY_LEGACY is proven with
-a REAL ``fcntl.flock`` held by the test against the legacy lock file.
+Every branch is driven with a fake clock, fake provider/plan/submit/serve
+seams -- no network, no catalog, no real systemd timer. The negative controls
+are explicit assertions, not status strings: a not-final probe never submits, a
+past-deadline run never submits, and a rerun of a decided date never probes or
+submits again. The mutual-exclusion lock is proven with a REAL
+``fcntl.flock``: BUSY_LEGACY against a lock held by the test, and the hold
+itself across the whole probe->submit->serve run.
 """
 from __future__ import annotations
 
@@ -22,18 +23,25 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.ops import nightly_trigger  # noqa: E402
+from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.nightly_trigger import (  # noqa: E402
+    TriggerReceipt,
+    default_as_of,
+    full_population,
     load_state,
     probe_finality,
     run_trigger,
     state_path,
+    write_state,
 )
 
 ET = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
 AS_OF = "2026-09-25"
-IN_WINDOW = datetime(2026, 9, 25, 2, 0, tzinfo=ET)
-BEFORE_WINDOW = datetime(2026, 9, 25, 1, 0, tzinfo=ET)
-AFTER_DEADLINE = datetime(2026, 9, 25, 6, 30, tzinfo=ET)
+IN_WINDOW = datetime(2026, 9, 26, 2, 0, tzinfo=ET)
+BEFORE_WINDOW = datetime(2026, 9, 25, 23, 30, tzinfo=ET)
+AT_0602 = datetime(2026, 9, 26, 6, 2, tzinfo=ET)
+AFTER_DEADLINE = datetime(2026, 9, 26, 6, 30, tzinfo=ET)
 
 
 class FakeClock:
@@ -60,38 +68,76 @@ class FakeProvider:
         return self.is_final, self.detail
 
 
-class FakeSubmit:
-    """A submit callable: records calls, returns a fixed plan_ref."""
+class FakePlan:
+    """The injected plan seam: returns a fixed plan_ref and records its call."""
 
     def __init__(self, plan_ref="plan_ref_1"):
         self.plan_ref = plan_ref
-        self.call_count = 0
         self.calls = []
 
-    def __call__(self, root, as_of, tickers, context_tickers, clock):
-        self.call_count += 1
-        self.calls.append({"root": root, "as_of": as_of, "tickers": tuple(tickers),
-                           "context_tickers": tuple(context_tickers), "clock": clock})
+    def __call__(self, root, as_of, tickers, context_tickers, clock, *, full_run=True):
+        self.calls.append({"root": Path(root), "as_of": as_of, "tickers": tuple(tickers),
+                           "context_tickers": tuple(context_tickers), "full_run": full_run})
         return self.plan_ref
 
 
-def _run(root, clock, provider, submit, *, as_of=AS_OF, **overrides):
-    kwargs = dict(tickers=("AAA", "BBB"), context_tickers=("AAA", "BBB"),
+class FakeSubmit:
+    """The injected (idempotent) submit seam; asserts the run lock is held."""
+
+    def __init__(self, fail_times=0, crash_times=0):
+        self.fail_times, self.crash_times = fail_times, crash_times
+        self.calls = []
+
+    def __call__(self, root, as_of, plan_ref, clock):
+        assert _lock_held(root), "submit ran without holding the legacy nightly lock"
+        self.calls.append((as_of, plan_ref))
+        if self.crash_times:
+            self.crash_times -= 1
+            raise RuntimeError("simulated crash between submit and the state write")
+        if self.fail_times:
+            self.fail_times -= 1
+            raise OSError("submit failed")
+        return {"run_id": "run_test", "jobs": []}
+
+
+class FakeServe:
+    """The injected serve seam: fixed final status, asserts the lock is held."""
+
+    def __init__(self, final="completed", fail_times=0):
+        self.final, self.fail_times = final, fail_times
+        self.calls = []
+
+    def __call__(self, root, plan_ref, clock):
+        assert _lock_held(root), "serve ran without holding the legacy nightly lock"
+        self.calls.append((plan_ref, Path(root)))
+        if self.fail_times:
+            self.fail_times -= 1
+            raise OSError("serve failed")
+        return self.final
+
+
+def _lock_held(root) -> bool:
+    """True while another handle holds the run lock (same-process flock)."""
+    path = Path(root) / "reports" / ".nightly.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def _run(root, clock, provider, plan, submit, serve, *, as_of=AS_OF,
+         tickers=("AAA", "BBB"), context_tickers=None, **overrides):
+    kwargs = dict(tickers=tickers,
+                  context_tickers=tickers if context_tickers is None else context_tickers,
                   deadline_et="06:00", window_start_et="00:00",
-                  provider=provider, clock=clock, submit_fn=submit)
+                  provider=provider, clock=clock, plan_fn=plan, submit_fn=submit,
+                  serve_fn=serve)
     kwargs.update(overrides)
     return run_trigger(root, as_of, **kwargs)
-
-
-@pytest.fixture(autouse=True)
-def _isolated_legacy_lock(tmp_path, monkeypatch):
-    """Keep the real repo's ``reports/.nightly.lock`` out of every test.
-
-    Without this, each in-window run would flock the worktree's own lock file,
-    and two tests running in parallel could momentarily see each other as a
-    legacy nightly -- a flaky BUSY_LEGACY in the middle of an unrelated case.
-    """
-    monkeypatch.setattr(nightly_trigger, "repo_root", lambda: tmp_path)
 
 
 # --------------------------------------------------------------------------
@@ -100,14 +146,11 @@ def _isolated_legacy_lock(tmp_path, monkeypatch):
 
 
 def test_before_window_is_not_yet_without_probing_or_submitting(tmp_path):
-    provider, submit = FakeProvider(True), FakeSubmit()
-    # The default window starts at 00:00, so "before" is exercised with a
-    # one-hour window: 01:00 is before a 02:00 start.
-    receipt = _run(tmp_path, FakeClock(BEFORE_WINDOW), provider, submit,
-                   window_start_et="02:00")
+    provider, plan, submit, serve = FakeProvider(True), FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(BEFORE_WINDOW), provider, plan, submit, serve)
     assert receipt.status == "not_yet"
-    assert provider.calls == []
-    assert submit.call_count == 0
+    assert provider.calls == [] and plan.calls == []
+    assert submit.calls == [] and serve.calls == []
     assert not state_path(tmp_path, AS_OF).exists()
 
 
@@ -117,92 +160,112 @@ def test_before_window_is_not_yet_without_probing_or_submitting(tmp_path):
 
 
 def test_in_window_not_final_is_not_yet_and_never_submits(tmp_path):
-    provider, submit = FakeProvider(False), FakeSubmit()
-    receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, submit)
+    provider, plan, submit, serve = FakeProvider(False), FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
     assert receipt.status == "not_yet" and receipt.detail == "not final"
     assert provider.calls == [(AS_OF, ("AAA", "BBB"))]
-    assert submit.call_count == 0  # the negative control, not just the status
+    assert submit.calls == [] and plan.calls == []  # the negative control
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "not_yet"
+    assert _lock_held(tmp_path) is False  # released on exit
 
 
 def test_not_final_probe_leaves_submit_untouched_as_a_shared_fake(tmp_path):
     submit = FakeSubmit()
-    _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(False), submit)
-    _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(False), submit)
-    assert submit.call_count == 0
+    _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(False), FakePlan(), submit, FakeServe())
+    _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(False), FakePlan(), submit, FakeServe())
+    assert submit.calls == []
 
 
 # --------------------------------------------------------------------------
-# 3. final, in window: one submit, plan_ref recorded, state written
+# 3. final, in window: plan, submit, serve; full population declared
 # --------------------------------------------------------------------------
 
 
-def test_final_in_window_submits_exactly_once_and_records_plan_ref(tmp_path):
-    submit = FakeSubmit("plan_ref_9")
-    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), submit)
-    assert receipt.status == "submitted" and receipt.plan_ref == "plan_ref_9"
-    assert submit.call_count == 1
-    assert submit.calls[0]["as_of"] == AS_OF
-    assert submit.calls[0]["tickers"] == ("AAA", "BBB")
-    assert submit.calls[0]["context_tickers"] == ("AAA", "BBB")
+def test_final_in_window_plans_submits_serves_and_completes(tmp_path):
+    provider, plan = FakeProvider(True), FakePlan("plan_ref_9")
+    submit, serve = FakeSubmit(), FakeServe("completed")
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_ref_9"
+    assert len(plan.calls) == 1
+    assert plan.calls[0]["full_run"] is True
+    assert plan.calls[0]["tickers"] == ("AAA", "BBB")
+    assert plan.calls[0]["context_tickers"] == ("AAA", "BBB")
+    assert submit.calls == [(AS_OF, "plan_ref_9")]
+    assert serve.calls == [("plan_ref_9", tmp_path)]
     assert load_state(tmp_path, AS_OF) == receipt
-    assert state_path(tmp_path, AS_OF).is_file()
     assert not state_path(tmp_path, AS_OF).with_name(AS_OF + ".json.tmp").exists()
 
 
+def test_a_serve_failure_is_recorded_as_failed(tmp_path):
+    plan, submit, serve = FakePlan("plan_f"), FakeSubmit(), FakeServe("failed")
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert receipt.status == "failed" and receipt.plan_ref == "plan_f"
+
+
 # --------------------------------------------------------------------------
-# 5. past deadline: MISSED for both provider verdicts, one state write
+# 5. past deadline: MISSED for both provider verdicts, no probe, no submit
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("is_final", [True, False])
 def test_after_deadline_is_missed_and_never_submits(tmp_path, is_final):
-    provider, submit = FakeProvider(is_final), FakeSubmit()
-    receipt = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, submit)
+    provider, plan, submit, serve = (FakeProvider(is_final), FakePlan(), FakeSubmit(),
+                                     FakeServe())
+    receipt = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, plan, submit, serve)
     assert receipt.status == "missed"
     assert provider.calls == []  # the deadline gates before any probe
-    assert submit.call_count == 0
-    before = state_path(tmp_path, AS_OF).read_text()
-    again = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, submit)
-    assert again == receipt
-    assert state_path(tmp_path, AS_OF).read_text() == before
-    assert submit.call_count == 0
+    assert submit.calls == [] and plan.calls == [] and serve.calls == []
+    rerun = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, plan, submit, serve)
+    assert rerun.status == "idle" and rerun.plan_ref == receipt.plan_ref
+    assert provider.calls == []
+
+
+def test_deadline_grace_keeps_the_0602_tick_inside_and_misses_0610(tmp_path):
+    # 06:02 is inside the five-minute grace: the probe still runs.
+    inside = _run(tmp_path / "inside", FakeClock(AT_0602), FakeProvider(False),
+                  FakePlan(), FakeSubmit(), FakeServe())
+    assert inside.status == "not_yet"
+    # 06:02 with a final provider completes the run.
+    final = _run(tmp_path / "final", FakeClock(AT_0602), FakeProvider(True),
+                 FakePlan("plan_0602"), FakeSubmit(), FakeServe())
+    assert final.status == "completed"
+    # 06:10 is past the grace: MISSED without a probe.
+    provider = FakeProvider(True)
+    late = _run(tmp_path / "late", FakeClock(datetime(2026, 9, 26, 6, 10, tzinfo=ET)),
+                provider, FakePlan(), FakeSubmit(), FakeServe())
+    assert late.status == "missed" and provider.calls == []
 
 
 # --------------------------------------------------------------------------
-# 6. rerun of a submitted date: stored receipt, no second submit
+# 6. rerun of a terminal date: IDLE, no probe, no write, no journal spam
 # --------------------------------------------------------------------------
 
 
-def test_rerun_after_submit_never_submits_again(tmp_path):
-    provider, submit = FakeProvider(True), FakeSubmit("plan_ref_7")
-    first = _run(tmp_path, FakeClock(IN_WINDOW), provider, submit)
-    assert first.status == "submitted" and submit.call_count == 1
-    # Even a later clock (past the deadline) may not resurrect the date.
-    second = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, submit)
-    assert second == first and second.plan_ref == "plan_ref_7"
-    assert submit.call_count == 1
-
-
-# --------------------------------------------------------------------------
-# 7. rerun of a missed date: terminal, no re-probe, no re-submit
-# --------------------------------------------------------------------------
+def test_terminal_state_is_idle_without_probing_or_writing(tmp_path):
+    provider, plan, submit, serve = FakeProvider(True), FakePlan(), FakeSubmit(), FakeServe()
+    first = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
+    assert first.status == "completed"
+    path = state_path(tmp_path, AS_OF)
+    before = path.read_text()
+    second = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, plan, submit, serve)
+    assert second.status == "idle" and second.plan_ref == first.plan_ref
+    assert provider.calls == [(AS_OF, ("AAA", "BBB"))]  # never probed again
+    assert len(plan.calls) == 1 and len(submit.calls) == 1 and len(serve.calls) == 1
+    assert path.read_text() == before  # nothing written
 
 
 def test_missed_state_is_terminal_and_never_reprobes(tmp_path):
-    provider, submit = FakeProvider(True), FakeSubmit()
-    first = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, submit)
+    provider, plan, submit, serve = FakeProvider(True), FakePlan(), FakeSubmit(), FakeServe()
+    first = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, plan, submit, serve)
     assert first.status == "missed"
-    probes_before = len(provider.calls)
-    second = _run(tmp_path, FakeClock(IN_WINDOW), provider, submit)
-    assert second == first and second.status == "missed"
-    assert len(provider.calls) == probes_before
-    assert submit.call_count == 0
+    second = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
+    assert second.status == "idle"
+    assert provider.calls == [] and submit.calls == []
 
 
 # --------------------------------------------------------------------------
-# 8. corrupt / missing / mismatched state is no prior state
+# 7. corrupt / missing / mismatched state is no prior state
 # --------------------------------------------------------------------------
 
 
@@ -211,25 +274,32 @@ def test_missed_state_is_terminal_and_never_reprobes(tmp_path):
     json.dumps(["submitted"]),
     json.dumps({"as_of": "2026-01-01", "status": "submitted", "detail": "", "checked_at": ""}),
     json.dumps({"as_of": AS_OF, "status": "not-a-status"}),
+    json.dumps({"as_of": AS_OF, "status": "error", "error_count": "many", "plan_ref": 7}),
 ])
 def test_corrupt_state_falls_through_to_the_normal_decision(tmp_path, payload):
     path = state_path(tmp_path, AS_OF)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(payload)
-    submit = FakeSubmit("plan_ref_fresh")
-    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), submit)
-    assert receipt.status == "submitted" and receipt.plan_ref == "plan_ref_fresh"
-    assert submit.call_count == 1
+    plan, submit, serve = FakePlan("plan_fresh"), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_fresh"
+    assert len(plan.calls) == 1
 
 
 def test_missing_state_falls_through_to_the_normal_decision(tmp_path):
-    submit = FakeSubmit()
-    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), submit)
-    assert receipt.status == "submitted" and submit.call_count == 1
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert receipt.status == "completed" and len(plan.calls) == 1
+
+
+def test_run_trigger_refuses_a_non_iso_as_of(tmp_path):
+    with pytest.raises(OpsError):
+        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), FakePlan(), FakeSubmit(),
+             FakeServe(), as_of="not-a-date")
 
 
 # --------------------------------------------------------------------------
-# 9. probe_finality on its own, both branches
+# 8. probe_finality on its own, both branches
 # --------------------------------------------------------------------------
 
 
@@ -242,40 +312,183 @@ def test_probe_finality_delegates_both_branches_to_the_provider():
 
 
 # --------------------------------------------------------------------------
-# BUSY_LEGACY: a real flock, held by this test, on the legacy lock file
+# 9. mutual exclusion: BUSY_LEGACY, and the lock held across the whole run
 # --------------------------------------------------------------------------
 
 
-def test_busy_legacy_with_a_real_flock_records_retry_and_releases_probe(tmp_path, monkeypatch):
-    monkeypatch.setattr(nightly_trigger, "repo_root", lambda: tmp_path)
+def test_busy_legacy_with_a_real_flock_records_retry_and_never_probes(tmp_path):
     lock = tmp_path / "reports" / ".nightly.lock"
     lock.parent.mkdir(parents=True)
     holder = lock.open("a+")
     try:
         fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        provider, submit = FakeProvider(True), FakeSubmit()
-        receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, submit)
+        provider, plan, submit, serve = (FakeProvider(True), FakePlan(), FakeSubmit(),
+                                         FakeServe())
+        receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
         assert receipt.status == "busy_legacy"
-        assert submit.call_count == 0  # never submit beside a heavy legacy run
+        assert provider.calls == []  # the lock is taken before the probe
+        assert plan.calls == [] and submit.calls == [] and serve.calls == []
         assert not holder.closed  # the test's own lock is untouched
         stored = load_state(tmp_path, AS_OF)
         assert stored is not None and stored.status == "busy_legacy"
     finally:
         holder.close()
-    submit = FakeSubmit("plan_ref_after_release")
-    receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, submit)
-    assert receipt.status == "submitted" and submit.call_count == 1
+    plan, submit, serve = FakePlan("plan_after_release"), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert receipt.status == "completed" and submit.calls == [(AS_OF, "plan_after_release")]
 
 
-def test_legacy_lock_path_is_the_repo_reports_lock(tmp_path, monkeypatch):
-    monkeypatch.setattr(nightly_trigger, "repo_root", lambda: tmp_path)
-    assert nightly_trigger.legacy_lock_path() == tmp_path / "reports" / ".nightly.lock"
-    assert state_path(tmp_path, AS_OF) == (
-        tmp_path / "reports" / "phase6" / "nightly_trigger" / f"{AS_OF}.json")
+def test_the_lock_is_held_for_the_whole_run_and_released_after(tmp_path):
+    # FakeSubmit/FakeServe assert the lock is held during their calls; the
+    # busy-tick check below proves it is released when the run returns.
+    plan, submit, serve = FakePlan("plan_lock"), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert receipt.status == "completed"
+    assert _lock_held(tmp_path) is False
 
 
 # --------------------------------------------------------------------------
-# CLI: one JSON receipt line; exit 0 for not_yet, 1 for missed/error
+# 10. no double submit: crash between submit and the state write
+# --------------------------------------------------------------------------
+
+
+def test_crash_between_submit_and_state_write_resubmits_the_same_plan_ref(tmp_path):
+    plan, submit, serve = FakePlan("plan_A"), FakeSubmit(crash_times=1), FakeServe()
+    with pytest.raises(RuntimeError):
+        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.status == "submitting" and stored.plan_ref == "plan_A"
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert receipt.status == "completed"
+    assert len(plan.calls) == 1  # never re-planned
+    assert submit.calls == [(AS_OF, "plan_A"), (AS_OF, "plan_A")]  # same ref, no new plan
+
+
+def test_submitted_state_resumes_serving_without_replanning(tmp_path):
+    write_state(tmp_path, TriggerReceipt(as_of=AS_OF, status="submitted", detail="crash",
+                                         checked_at="2026-09-26T06:00:00Z", plan_ref="plan_X"))
+    provider, plan, submit, serve = FakeProvider(True), FakePlan(), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_X"
+    assert provider.calls == [] and plan.calls == []
+    assert submit.calls == [(AS_OF, "plan_X")]  # idempotent no-op resubmission
+    assert serve.calls == [("plan_X", tmp_path)]
+
+
+def test_error_after_a_failed_submit_keeps_the_plan_ref(tmp_path):
+    plan, submit, serve = FakePlan("plan_err"), FakeSubmit(fail_times=1), FakeServe()
+    first = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert first.status == "error" and first.plan_ref == "plan_err" and first.error_count == 1
+    second = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert second.status == "completed"
+    assert len(plan.calls) == 1
+    assert submit.calls == [(AS_OF, "plan_err"), (AS_OF, "plan_err")]
+
+
+# --------------------------------------------------------------------------
+# 11. error -> failed_setup after three consecutive errors, exit-once semantics
+# --------------------------------------------------------------------------
+
+
+def test_three_consecutive_setup_errors_become_failed_setup_once(tmp_path):
+    provider, plan = FakeProvider(True), FakePlan("plan_boom")
+    submit, serve = FakeSubmit(fail_times=3), FakeServe()
+    statuses, counts = [], []
+    for _ in range(3):
+        receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
+        statuses.append(receipt.status)
+        counts.append(receipt.error_count)
+    assert statuses == ["error", "error", "failed_setup"]
+    assert counts == [1, 2, 3]
+    assert provider.calls == [(AS_OF, ("AAA", "BBB"))]  # probed once, then resumed
+    assert len(plan.calls) == 1 and len(submit.calls) == 3
+    terminal = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, submit, serve)
+    assert terminal.status == "idle"
+    assert len(submit.calls) == 3  # a terminal tick never submits again
+
+
+# --------------------------------------------------------------------------
+# 12. default as-of: most recent completed trading session before today ET
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("moment, expected", [
+    (datetime(2026, 9, 26, 0, 30, tzinfo=ET), "2026-09-25"),   # Saturday -> Friday
+    (datetime(2026, 9, 28, 0, 30, tzinfo=ET), "2026-09-25"),   # Monday -> Friday
+    (datetime(2026, 11, 1, 0, 30, tzinfo=ET), "2026-10-30"),   # DST end (Sunday)
+    (datetime(2026, 3, 8, 0, 30, tzinfo=ET), "2026-03-06"),    # DST start (Sunday)
+    (datetime(2026, 11, 26, 0, 30, tzinfo=ET), "2026-11-25"),  # Thanksgiving skipped
+])
+def test_default_as_of_is_the_previous_trading_session(moment, expected):
+    assert default_as_of(FakeClock(moment)) == expected
+
+
+def test_default_as_of_reads_converted_clocks_in_america_new_york():
+    # 04:30 UTC on the fall-back date is 00:30 EDT: still Sunday Nov 1.
+    assert default_as_of(FakeClock(datetime(2026, 11, 1, 4, 30, tzinfo=UTC))) == "2026-10-30"
+    # 07:30 UTC is 02:30 EST after the transition: still Sunday Nov 1.
+    assert default_as_of(FakeClock(datetime(2026, 11, 1, 7, 30, tzinfo=UTC))) == "2026-10-30"
+    # 07:30 UTC on the spring-forward date is 03:30 EDT: still Sunday Mar 8.
+    assert default_as_of(FakeClock(datetime(2026, 3, 8, 7, 30, tzinfo=UTC))) == "2026-03-06"
+
+
+# --------------------------------------------------------------------------
+# 13. population: the native plan's full default population, never empty
+# --------------------------------------------------------------------------
+
+
+def _write_population(root: Path, keys) -> Path:
+    path = root / "reports" / "phase6" / "nightly_trigger" / "expected_population.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(list(keys)))
+    return path
+
+
+def test_full_population_is_the_operator_document(tmp_path):
+    document = _write_population(
+        tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25",
+                   "AAA|EXP-1|2026-09-25"])
+    assert full_population(tmp_path) == (("AAA", "BBB"), ("AAA", "BBB"))
+    assert document.is_file()
+    assert full_population(tmp_path / "absent") == ((), ())
+
+
+class _DummyConn:
+    def close(self):
+        return None
+
+
+def test_default_plan_passes_full_run_and_the_full_population(tmp_path, monkeypatch):
+    document = _write_population(
+        tmp_path, ["AAA|STR-THRU|2026-09-25", "BBB|STR-THRU|2026-09-25"])
+    captured = {}
+    from engine.v2.ops import bootstrap, cli
+
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+
+    def fake_plan(args, root, conn, clock):
+        captured["args"] = args
+        return {"plan_ref": "plan_full", "plan": {}}
+
+    monkeypatch.setattr(cli, "_plan_command", fake_plan)
+    plan_ref = nightly_trigger._default_plan(tmp_path, AS_OF, (), (), None)
+    assert plan_ref == "plan_full"
+    args = captured["args"]
+    assert args.full_run is True
+    assert args.expected_population == document
+    assert args.tickers == "AAA,BBB" and args.context_tickers == "AAA,BBB"
+
+
+def test_scheduled_run_declares_the_full_population(tmp_path):
+    plan, submit, serve = FakePlan("plan_pop"), FakeSubmit(), FakeServe()
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve,
+                   tickers=("AAA", "BBB"))
+    assert receipt.status == "completed"
+    assert plan.calls[0]["full_run"] is True and plan.calls[0]["tickers"] == ("AAA", "BBB")
+
+
+# --------------------------------------------------------------------------
+# 14. CLI: one JSON receipt line; exit 0 IDLE, 1 on the first failure
 # --------------------------------------------------------------------------
 
 
@@ -289,11 +502,14 @@ def test_main_prints_one_receipt_and_exits_zero_for_not_yet(tmp_path, monkeypatc
     assert json.loads(lines[0])["status"] == "not_yet"
 
 
-def test_main_exits_one_for_missed(tmp_path, monkeypatch, capsys):
+def test_main_exits_one_for_missed_then_zero_for_idle(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(nightly_trigger, "SystemClock", lambda: FakeClock(AFTER_DEADLINE))
-    code = nightly_trigger.main(["--as-of", AS_OF, "--root", str(tmp_path)])
+    assert nightly_trigger.main(["--as-of", AS_OF, "--root", str(tmp_path)]) == 1
     document = json.loads(capsys.readouterr().out.strip())
-    assert code == 1 and document["status"] == "missed"
+    assert document["status"] == "missed"
+    assert nightly_trigger.main(["--as-of", AS_OF, "--root", str(tmp_path)]) == 0
+    idle = json.loads(capsys.readouterr().out.strip())
+    assert idle["status"] == "idle"
 
 
 def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
@@ -310,3 +526,14 @@ def test_main_records_the_submit_refusal_when_qualification_inputs_are_absent(
     assert "INVALID_REQUEST" in document["detail"]
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.status == "error"
+
+
+# --------------------------------------------------------------------------
+# 15. paths
+# --------------------------------------------------------------------------
+
+
+def test_lock_and_state_paths_live_under_the_root(tmp_path):
+    assert nightly_trigger.legacy_lock_path(tmp_path) == tmp_path / "reports" / ".nightly.lock"
+    assert state_path(tmp_path, AS_OF) == (
+        tmp_path / "reports" / "phase6" / "nightly_trigger" / f"{AS_OF}.json")
