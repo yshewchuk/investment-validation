@@ -102,16 +102,26 @@ the direction that matters -- reporting a capability as done when nothing
 calls it:
 
 - It recorded `board-refresh-action` as `native` because `refresh_action`
-  (`engine/v2/ops/cli.py:572`) existed, while
-  `engine/v2/dashboard/preview.py:82`'s call to `create_server` never passed
-  a `submit_refresh` callable. Whenever `config.submit_refresh is None`,
+  (`engine/v2/ops/cli.py`) existed, while `engine/v2/dashboard/preview.py`'s
+  composition of `create_server` passed no `submit_refresh` callable:
+  whenever `config.submit_refresh is None`,
   `engine/v2/serving/operations.py::_refresh_route` returns 503
   (`refresh not configured`). Correct, auth-gated code wired to nothing.
+  Closed at the wiring level by the P6-4 `--ops-root` runtime-reachability
+  slice: the launcher's `_server.build_server` now hands `create_server` a
+  callback bound to the explicitly named ops root, so a `POST /actions/refresh`
+  over an already-published nightly plan returns 202 with the supervised job
+  ids (and is idempotent on a repeat) instead of 503. This is a shadow plan
+  submission only -- no inline refresh and no production-authority switch --
+  so `board-refresh-action` stays open in P6-4 until the desk path itself is
+  retired; omitting `--ops-root` preserves the read-only 503.
 - `engine/v2/scoring/application.py:739 score_batch` is a complete native
   batch scorer with 5 call sites, all in tests, zero in production.
 
-(Both verified directly against source on 2026-09-20; state them as verified
-facts, not as open questions.)
+(Both were verified directly against source on 2026-09-20; state them as
+verified facts, not as open questions. The refresh wiring is re-verified on
+2026-09-24 by `tests/test_v2_dashboard_preview_ops_root.py`, which drives a
+real `preview.run`.)
 
 So: a green `checks/phase6_inventory.py` run does not imply anything works
 at runtime. It proves a row exists, its owner/disposition are valid and its
@@ -211,7 +221,7 @@ Adapter edges per owner: 8A 2, P3B 12, P4 36, P5 9, P6-2 7, P6-3 9, P6-4 15, P6-
 | `board-list` | Upcoming-prints board: strategy/gate/ticker filters, out-of-domain and disabled toggles, ranking | `route:legacy-app GET /api/board`<br>`route:legacy-app GET /api/meta`<br>`view:legacy #/trades/board`<br>`control:legacy f-strategy`<br>`control:legacy f-gate`<br>`control:legacy f-ticker`<br>`control:legacy f-ood`<br>`control:legacy f-disabled` | `route:v2-api GET /api/v1/events`<br>`route:v2-api GET /api/v1/releases/current`<br>`route:v2-api GET /api/v1/releases/{release_id}`<br>`view:ui #board`<br>`route:v2-ops GET /board`<br>`cli:engine/v2/serving/api.py` | serving projections built by the Phase 3 bridge from the legacy score.json + rendered bundle | release_id (projection binding), cursor bound to release and filters | `tests/test_v2_serving_api.py`<br>`tests/test_v2_serving_projections.py`<br>`tests/test_checks_phase3_api_pagination.py`<br>`tests/test_v2_dashboard_browser.py` | compatibility-adapter | P6-4 |
 | `board-deep-links` | Deep links and back/forward that reopen a view (and ticker) in a pinned release | `view:legacy #/trades/explorer`<br>`view:legacy #/models/modelx` | `view:ui #event`<br>`view:ui #score`<br>`route:v2-ops GET /release/current.json`<br>`route:v2-ops GET /` | React hash routes carry release_id; the shell pins one release and forwards legacy hashes into its frame | release_id in the URL / pinned once per shell session | `tests/test_v2_dashboard_browser.py`<br>`tests/test_v2_ops_serving_browser.py` | compatibility-adapter | P6-4 |
 | `board-compat-shell` | Serve the dashboard bundle (desk server on 8711) | `route:legacy-app MOUNT /`<br>`cli:dashboard/earnings_app.py` | `route:v2-ops GET /`<br>`route:v2-ops GET /release/current`<br>`route:v2-ops GET /release/*`<br>`route:v2-ops GET /legacy/*`<br>`cli:engine/v2/dashboard/preview.py` | operations server serving immutable compatibility bundles under a health banner | release_id resolved once from CURRENT | `tests/test_v2_ops_serving.py`<br>`tests/test_v2_dashboard_preview.py`<br>`tests/test_checks_phase3_preview.py` | compatibility-adapter | P6-4 |
-| `board-refresh-action` | Desk action: re-run the nightly without publishing | `route:legacy-app POST /api/refresh` | `cli:ops plan`<br>`cli:ops submit`<br>`route:v2-ops POST /actions/refresh` | supervised nightly plan/submit | job ids of the submitted plan | `tests/test_v2_ops_nightly_completion.py`<br>`tests/test_v2_ops_cli_refresh_action.py`<br>`tests/test_v2_ops_serving.py` | native | P6-4 |
+| `board-refresh-action` | Desk action: re-run the nightly without publishing | `route:legacy-app POST /api/refresh` | `cli:ops plan`<br>`cli:ops submit`<br>`route:v2-ops POST /actions/refresh` | supervised nightly plan/submit | job ids of the submitted plan | `tests/test_v2_ops_nightly_completion.py`<br>`tests/test_v2_ops_cli_refresh_action.py`<br>`tests/test_v2_ops_serving.py`<br>`tests/test_v2_dashboard_preview_ops_root.py` | native | P6-4 |
 | `board-adhoc-rescore` | Desk action: ad-hoc re-score of one ticker/strategy at an off-ladder strike or expiry | `route:legacy-app GET /api/score` | `cli:ops rescore`<br>`route:v2-ops POST /actions/whatif`<br>`route:v2-ops GET /actions/whatif/*`<br>`py:engine/v2/scoring/application.py::score_one` | adhoc_rescore supervised job (engine/v2/ops/worker.py::_dispatch_adhoc_rescore) under the v2 no-fit guard | job id from the what-if submission; result route binds to the server's pinned current release_id | `tests/test_v2_ops_cli_rescore.py`<br>`tests/test_v2_ops_cli_whatif.py`<br>`tests/test_v2_ops_worker_adhoc_rescore.py`<br>`tests/test_v2_ops_serving.py` | native | P6-4 |
 | `strategy-derivation` | Strategy definitions and per-row derivation (gate terms, thresholds, worked example) | `view:legacy #/models/derivation`<br>`control:legacy d-strategy`<br>`control:legacy d-row` | `route:v2-ops GET /derivation`<br>`py:engine/v2/registry/strategies.py::default_registry` | legacy render.build_strategies inside legacy_render; native registry not surfaced | compatibility bundle inside the published release_id | `tests/test_dashboard.py`<br>`tests/test_v2_registry_scoring.py` | compatibility-adapter | P6-4 |
 | `strategy-score-detail` | Per-event strategy scores, refusal codes, legs/order ticket and payoff | `route:legacy-app GET /api/ticker/{sym}` | `route:v2-api GET /api/v1/events/{event_id}/scores`<br>`route:v2-api GET /api/v1/scores/{score_id}`<br>`view:ui #event`<br>`view:ui #score` | LegacyScoreBridge rows (Phase 3 bridge) published as immutable objects | release_id + score_id; lazy detail with ETag | `tests/test_v2_serving_api.py`<br>`tests/test_v2_serving_bridge.py`<br>`tests/test_checks_phase3_browser.py` | compatibility-adapter | P6-4 |

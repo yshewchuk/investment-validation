@@ -208,6 +208,20 @@ refuse to start with no `V2_DASHBOARD_TOKEN` set. Neither command's output
 ever includes the token (`engine/v2/dashboard/preview.py`,
 `engine/v2/serving/api.py`, `tests/test_v2_serving_api.py`).
 
+The launcher also takes two explicitly named roots, each distinct from
+`--release-root` and never inferred from it: `--model-release-root` backs
+`/models/release.json`, and `--ops-root` (P6-4) backs the authenticated
+`POST /actions/refresh` action. With `--ops-root <ops-root>` pointing at a
+catalog that already holds a published nightly plan (from `ops plan nightly`),
+a token-authenticated `POST /actions/refresh {"plan_ref": "<artifact id>"}`
+submits that same supervised nightly DAG and returns `202` with the job ids
+(a repeat with the same `plan_ref` is idempotent); a missing/wrong token is
+`401` and creates nothing, and a malformed `plan_ref` is a `400`. Omit
+`--ops-root` and the route keeps its read-only `503` (`refresh not
+configured`). This is a shadow plan submission only — it never runs the
+refresh inline and never switches production authority
+(`tests/test_v2_dashboard_preview_ops_root.py`).
+
 ## 5. Project the next accepted release; publish after validation
 
 **Status: projection and publication have been exercised end to end against

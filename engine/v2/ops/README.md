@@ -40,9 +40,14 @@ a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
 No other production package imports ops. The CLI starts the coordinator, and
-serving reads a versioned health artifact without a peer-layer import.
+serving reads a versioned health artifact without a peer-layer import. The one
+exception is the layer-8 preview launcher's server composition
+(`engine.v2.dashboard._server`), which imports `cli.refresh_action` lazily and
+only to wire an optional `--ops-root` shadow nightly-plan submission onto the
+operations server's `POST /actions/refresh`; it never imports the supervisor,
+executor or a write path.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.dashboard -->
 
 ## Usage
 

@@ -362,12 +362,12 @@ old = ["route:legacy-app POST /api/refresh"]
 new = ["cli:ops plan", "cli:ops submit", "route:v2-ops POST /actions/refresh"]
 producer = "supervised nightly plan/submit"
 identity = "job ids of the submitted plan"
-tests = ["tests/test_v2_ops_nightly_completion.py", "tests/test_v2_ops_cli_refresh_action.py", "tests/test_v2_ops_serving.py"]
+tests = ["tests/test_v2_ops_nightly_completion.py", "tests/test_v2_ops_cli_refresh_action.py", "tests/test_v2_ops_serving.py", "tests/test_v2_dashboard_preview_ops_root.py"]
 disposition = "native"
 owner = "P6-4"
 interactive = true
 decision = "UD-1"
-notes = "UD-1 (keep both): the CLI stays the documented path (ops plan/ops submit); POST /actions/refresh adds a token-protected route on the operations server that submits the same supervised nightly plan and returns a job id, never running the refresh inline."
+notes = "UD-1 (keep both): the CLI stays the documented path (ops plan/ops submit); POST /actions/refresh adds a token-protected route on the operations server that submits the same supervised nightly plan and returns a job id, never running the refresh inline. As of the P6-4 --ops-root slice the route is now runtime-reachable through the preview launcher: _server.build_server passes create_server a submit_refresh callback bound to an explicitly named ops root (distinct from --release-root, never guessed from it), proven by a real preview.run returning 202 with jobs and idempotent on a repeat, 401 (no job) on a bad token and a safe 400 on a malformed plan_ref; omitting --ops-root keeps the read-only 503. Shadow submission only -- no inline refresh and no production-authority switch -- so the row stays open in P6-4 until the desk path is retired."
 
 [[row]]
 id = "board-adhoc-rescore"

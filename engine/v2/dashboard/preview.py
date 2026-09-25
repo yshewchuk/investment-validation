@@ -11,11 +11,20 @@ the deployed model release store — a distinct store from the dashboard bundle
 ``--release-root``, never guessed from it. Omitting it keeps the route's
 explicit ``MODEL_RELEASE_NOT_CONFIGURED`` refusal.
 
+``--ops-root`` points the authenticated ``POST /actions/refresh`` route at the
+catalog/artifact root a nightly plan is published under — again distinct from
+``--release-root``, never guessed from it. When set, the route's
+``submit_refresh`` callback calls ``engine.v2.ops.cli.refresh_action`` on
+exactly that root, so a refresh POST over an already-published nightly plan
+submits the shadow nightly (a ``202`` with job ids) rather than the read-only
+``503``. Omitting it keeps that explicit 503 refusal; this wires nothing for
+production authority and never runs the refresh inline.
+
 Run as::
 
     V2_DASHBOARD_TOKEN=... python3 -m engine.v2.dashboard.preview \\
         --host 127.0.0.1 --port 8765 --release-root R --health-path H \\
-        --model-release-root M
+        --model-release-root M --ops-root O
 """
 from __future__ import annotations
 
@@ -28,7 +37,7 @@ import threading
 import urllib.error
 import urllib.request
 
-from engine.v2.serving.operations import create_server
+from engine.v2.dashboard._server import build_server
 
 __all__ = ["TOKEN_ENV_VAR", "is_loopback", "resolve_release_id", "run", "main"]
 
@@ -71,6 +80,12 @@ def _parse_args(argv):
                         help="deployed model release store for /models/release.json; distinct "
                              "from --release-root, never inferred from it. Omit to keep the "
                              "route's explicit MODEL_RELEASE_NOT_CONFIGURED refusal.")
+    parser.add_argument("--ops-root", default=None,
+                        help="catalog/artifact root POST /actions/refresh submits an "
+                             "already-published nightly plan against, via "
+                             "engine.v2.ops.cli.refresh_action; distinct from --release-root, "
+                             "never inferred from it. Omit to keep the route's read-only "
+                             "503 'refresh not configured' refusal.")
     parser.add_argument("--frozen-at", default="unknown")
     parser.add_argument("--allow-non-loopback", action="store_true")
     return parser.parse_args(argv)
@@ -89,9 +104,10 @@ def run(argv=None):
     if not args.allow_non_loopback and not is_loopback(args.host):
         raise SystemExit(
             f"refusing non-loopback host {args.host!r} without --allow-non-loopback")
-    server = create_server((args.host, args.port), token=token, health_path=args.health_path,
-                           release_root=args.release_root, frozen_at=args.frozen_at,
-                           model_release_root=args.model_release_root)
+    server = build_server(host=args.host, port=args.port, token=token,
+                          health_path=args.health_path, release_root=args.release_root,
+                          frozen_at=args.frozen_at, model_release_root=args.model_release_root,
+                          ops_root=args.ops_root)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     probe_host = args.host if args.host not in ("0.0.0.0", "::") else "127.0.0.1"
