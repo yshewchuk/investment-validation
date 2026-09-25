@@ -478,7 +478,9 @@ mutate = [
 ]
 tests = [
     "tests/test_v2_dashboard_preview.py",
+    "tests/test_v2_dashboard_preview_analogs.py",
     "tests/test_v2_ops_serving.py",
+    "tests/test_v2_serving_analogs.py",
     "tests/test_v2_serving_api.py",
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",

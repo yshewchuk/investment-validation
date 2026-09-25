@@ -40,11 +40,22 @@ class StageReceipt:
 
 @dataclass(frozen=True)
 class StageObservation:
-    """Stable documents and receipt emitted when one native stage completes."""
+    """Stable documents and receipt emitted when one native stage completes.
+
+    ``display_document`` is a display/serialization-only side channel: it is
+    carried to observers but is deliberately EXCLUDED from content hashing.
+    ``_emit_stage`` hashes only ``input_document``/``output_document``, so a
+    value here never moves a stage receipt or any later stage's ``prior``
+    chain. Per-event analog row ids (``selected_row_ids``/
+    ``contributing_row_ids``) ride here: they are answer-shaped display data
+    a serving projection needs, not scored output the Phase 4 captured
+    corpus receipts pin.
+    """
 
     input_document: Any
     output_document: Any
     receipt: StageReceipt
+    display_document: Any = None
 
 
 StageObserver = Callable[[StageObservation], None]
@@ -124,6 +135,7 @@ def _emit_stage(
     input_document: Any,
     output_document: Any,
     observer: StageObserver | None,
+    display_document: Any = None,
 ) -> None:
     input_document = to_document(input_document)
     output_document = to_document(output_document)
@@ -132,6 +144,7 @@ def _emit_stage(
     if observer is not None:
         observer(StageObservation(
             deepcopy(input_document), deepcopy(output_document), item,
+            deepcopy(display_document),
         ))
 
 
@@ -2213,11 +2226,26 @@ ANALOG_ARTIFACT_FIELD = "analog_artifact"
 ANALOG_ARTIFACT_RECIPE_FIELD = "analog_artifact_recipe"
 
 
+def _record_analog_ids(display: dict[str, Any] | None, result) -> None:
+    """Copy the analog result's row ids into the non-hashed display channel.
+
+    They are display/serving data (``projections._score_summary_fields`` reads
+    them off the rendered row), never scored output: putting them in the
+    stage's hashed output would move the "analogs" receipt and every later
+    stage's ``prior`` chain, which ``checks/phase4_real.py`` compares against
+    the captured corpus. A caller that passes no channel simply drops them.
+    """
+    if display is not None:
+        display["selected_row_ids"] = tuple(result.selected_row_ids)
+        display["contributing_row_ids"] = tuple(result.contributing_row_ids)
+
+
 def _execute_frozen_analogs(
     block: Mapping[str, Any],
     strategy: str | None,
     values: dict[str, Any],
     flags: list[str],
+    display: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from engine.v2.scoring.native_analog import evaluate_frozen_analogs
 
@@ -2246,9 +2274,8 @@ def _execute_frozen_analogs(
         "ci_low": result.ci_low,
         "ci_high": result.ci_high,
         "n_analogs": result.n_analogs,
-        "selected_row_ids": result.selected_row_ids,
-        "contributing_row_ids": result.contributing_row_ids,
     }
+    _record_analog_ids(display, result)
     values.update(output)
     return output
 
@@ -2269,6 +2296,7 @@ def _execute_analogs(
     values: dict[str, Any],
     flags: list[str],
     strategy: str | None = None,
+    display: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Calculate analog summaries from a hash-bound source population.
 
@@ -2278,12 +2306,16 @@ def _execute_analogs(
     request's strategy, fill alpha and evidence cutoff, and a missing or
     mismatched artifact is MODEL_NOT_READY -- never a rebuild, never the
     declared-rows path below, which stays the compatibility path.
+
+    ``display``, when given, receives the result's row ids for the
+    non-hashed display channel (``_record_analog_ids``); they are never part
+    of the returned/hashed output or of ``values``.
     """
     block = inputs.analogs
     if block.get("mode") == "not_applicable":
         return {}
     if ANALOG_ARTIFACT_FIELD in block:
-        return _execute_frozen_analogs(block, strategy, values, flags)
+        return _execute_frozen_analogs(block, strategy, values, flags, display)
     recipe = block.get("recipe")
     source_rows = block.get("source_rows")
     query_features = block.get("query_features")
@@ -2322,9 +2354,8 @@ def _execute_analogs(
         "ci_low": result.ci_low,
         "ci_high": result.ci_high,
         "n_analogs": result.n_analogs,
-        "selected_row_ids": result.selected_row_ids,
-        "contributing_row_ids": result.contributing_row_ids,
     }
+    _record_analog_ids(display, result)
     values.update(output)
     return output
 
@@ -2663,12 +2694,15 @@ def _append_normal_late_stages(
         executed, "model", {"prior": executed[-1].output_hash},
         model_output, observer,
     )
-    analog_output = _execute_analogs(inputs, values, flags, geometry.strategy)
+    analog_display: dict[str, Any] = {}
+    analog_output = _execute_analogs(
+        inputs, values, flags, geometry.strategy, analog_display)
     analog_inputs: dict[str, Any] = {"prior": executed[-1].output_hash}
     analog_identity = _analog_identity(inputs.analogs)
     if analog_identity is not None:
         analog_inputs["inputs"] = analog_identity
-    _emit_stage(executed, "analogs", analog_inputs, analog_output, observer)
+    _emit_stage(executed, "analogs", analog_inputs, analog_output, observer,
+                analog_display or None)
     simulation = _execute_simulation(
         inputs, values, geometry, pricing, flags,
     )

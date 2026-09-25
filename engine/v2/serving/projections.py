@@ -158,7 +158,12 @@ _V2 = (
 _V3 = (
     "ALTER TABLE serving_score_summary ADD COLUMN selected_row_ids TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE serving_score_summary ADD COLUMN contributing_row_ids TEXT NOT NULL DEFAULT '[]'",
-    "ALTER TABLE serving_score_summary ADD COLUMN n_analogs INTEGER NOT NULL DEFAULT 0",
+    # Nullable: a rendered row that carries no `n_analogs` key means "the
+    # analog layer never ran", distinct from a real run that matched zero
+    # rows (a genuine 0). Migration 3 is new on this branch, so it is edited
+    # in place; `_checksum` derives from these statements, so the checksum
+    # moves with them automatically.
+    "ALTER TABLE serving_score_summary ADD COLUMN n_analogs INTEGER",
 )
 
 #: ``(version, name, statements)`` — one transaction each, numbered 1..n.
@@ -374,7 +379,7 @@ def _score_summary_fields(bridge: LegacyScoreBridge) -> dict:
         flags=json.dumps(list(bridge.display_record.get("flags") or [])),
         selected_row_ids=json.dumps(list(display.get("selected_row_ids") or [])),
         contributing_row_ids=json.dumps(list(display.get("contributing_row_ids") or [])),
-        n_analogs=display.get("n_analogs") or 0)
+        n_analogs=display.get("n_analogs"))
 
 
 def build_candidate(
