@@ -408,6 +408,19 @@ def test_stats_debug_explicit_off_beats_the_ops_catalog_state_ci_default(monkeyp
         assert pilot.stats_debug_enabled("ops_catalog_state")
 
 
+def test_stats_debug_defaults_on_for_ops_runtime_in_ci(monkeypatch):
+    monkeypatch.delenv("MUTATION_PILOT_DEBUG", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert pilot.stats_debug_enabled("ops_runtime")
+    # an explicit off wins even on the CI shard that would otherwise default on
+    monkeypatch.setenv("MUTATION_PILOT_DEBUG", "0")
+    assert not pilot.stats_debug_enabled("ops_runtime")
+    # and ops_runtime itself is quiet in every local run
+    monkeypatch.delenv("MUTATION_PILOT_DEBUG", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    assert not pilot.stats_debug_enabled("ops_runtime")
+
+
 def test_mutmut_config_text_adds_debug_only_when_requested():
     off = pilot.mutmut_config_text(DIAG_DEFAULTS, ["engine/x.py"], ["tests/test_a.py"],
                                    ["tests"], debug=False)
