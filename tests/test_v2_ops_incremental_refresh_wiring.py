@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import SnapshotRef, SubmitRequest
-from engine.v2.foundation import ArtifactStore
+from engine.v2.data.catalog import commit_snapshot
+from engine.v2.data.manifests import dataset_manifest, snapshot_ref
+from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import (
@@ -24,11 +26,16 @@ from engine.v2.ops.incremental_data import (
     classify_response,
     plan_refresh,
 )
-from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
+from engine.v2.ops.nightly import (
+    NATIVE_DAILY_MARKET_ACCOUNT,
+    build_legacy_job_requests,
+    build_nightly_plan,
+)
 from engine.v2.ops.plans import nightly_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit_graph
 from tests.ops_support import FakeClock
+from tests.test_v2_data_manifests import _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF
 
 #: The exact kind sequence the pre-existing legacy-only test
 #: (test_v2_ops_legacy_workflows.py::test_allowlisted_legacy_dag_submits_with_real_dependencies)
@@ -109,11 +116,61 @@ def test_native_refresh_mode_submits_the_real_native_stage(tmp_path):
         conn.close()
 
 
-def test_native_refresh_mode_needs_a_pinned_plan():
+def _commit_shadow_head(conn, store, clock):
+    """A resolvable, empty ``daily_market`` snapshot at the ``shadow`` head.
+
+    The native builder (``nightly._build_native_refresh_plan``) reads this
+    head for its parent snapshot and expected generation; ``Repository.
+    resolve`` re-verifies the snapshot identity from catalog rows alone, so
+    the commit has to go through the real public builder.
+    """
+    receipt_ref = content_hash({"wiring": "parent-receipt"})
+    manifest = dataset_manifest(
+        _DAILY_MARKET_REF, (), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    snapshot = snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal-v1",
+        source_priority_version="priority-v1", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="shadow", request_hash=content_hash({"wiring": "base"}),
+        contracts=(_DAILY_MARKET_CONTRACT,), objects=(), records=(), manifests=(manifest,),
+        snapshot=snapshot, expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="wiring-base", attempt_id="wiring-base", fence=1,
+        fence_check=lambda _conn: None, clock=clock, store=store)
+    return conn.execute(
+        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = 'shadow'").fetchone()[0]
+
+
+def test_native_refresh_mode_without_override_builds_its_plan(tmp_path):
+    """S4B2: without a pinned override native mode builds its RefreshPlan from
+    the shadow head. With no catalog to read that head from it refuses with
+    the builder's own message, never the old "needs a pinned plan"."""
     plan = build_nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18")
-    with pytest.raises(OpsError, match="native refresh mode needs a pinned refresh plan"):
+    with pytest.raises(OpsError, match="native refresh planning needs an open catalog"):
         build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
                                   refresh_mode="native")
+
+    clock = FakeClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        store = ArtifactStore(tmp_path)
+        head = _commit_shadow_head(conn, store, clock)
+        requests = build_legacy_job_requests(
+            plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+            refresh_mode="native", catalog_path=str(tmp_path / "ops.sqlite"),
+            objects_root=str(tmp_path), conn=conn, store=store, clock=clock)
+        refresh = requests[0]
+        assert refresh.job.kind == "incremental_refresh"
+        assert refresh.job.parameters["parent_snapshot_id"] == head
+        assert refresh.job.parameters["expected_ids"] == ["eod-2026-09-18-market"]
+        # one market-wide unit x 3 bounded attempts x 2 ORATS calls per unit.
+        assert refresh.job.parameters["provider_calls"] == 6
+        assert refresh.job.provider_budget_ref == NATIVE_DAILY_MARKET_ACCOUNT
+        # the freshly built plan is published and bound exactly like an override.
+        binding = refresh.job.parameters["input_bindings"]["refresh_plan.json"]
+        assert binding in refresh.job.input_refs
+    finally:
+        conn.close()
 
 
 def test_bad_refresh_mode_is_refused():
@@ -143,10 +200,32 @@ def test_refresh_mode_is_explicit_and_inspectable_on_the_saved_plan():
     assert native["plan_hash"] != legacy["plan_hash"]
 
 
-def test_native_refresh_mode_needs_a_pinned_plan_at_plan_time():
-    with pytest.raises(OpsError, match="native refresh mode needs a pinned refresh plan"):
-        nightly_plan(str(Path(__file__).resolve().parents[1]), "2026-09-18", manifest_ref="artifact:fake",
-                    expected_population=("FAKE|x|2026-09-18",), refresh_mode="native")
+def test_native_refresh_mode_without_override_builds_its_plan_at_plan_time(tmp_path):
+    """S4B2: planning no longer refuses without a pinned RefreshPlan -- it
+    pins only the mode and the deployment identity, and that document alone
+    is enough for the submit path to build the native job from the head."""
+    clock = FakeClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        store = ArtifactStore(tmp_path)
+        head = _commit_shadow_head(conn, store, clock)
+        plan = nightly_plan(
+            str(Path(__file__).resolve().parents[1]), "2026-09-18",
+            manifest_ref="artifact:fake", tickers=("FAKE",), context_tickers=("FAKE",),
+            expected_population=("FAKE|x|2026-09-18",), refresh_mode="native",
+            catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path), clock=clock)
+        assert plan["refresh_mode"] == "native"
+        assert "refresh_plan" not in plan  # nothing pinned; the head is read at submit time
+
+        requests = build_legacy_job_requests(
+            plan, tickers=("FAKE",), year_start=plan["year_start"], year_end=plan["year_end"],
+            refresh_mode=plan["refresh_mode"], conn=conn, store=store, clock=clock)
+        refresh = requests[0]
+        assert refresh.job.kind == "incremental_refresh"
+        assert refresh.job.parameters["parent_snapshot_id"] == head
+        assert refresh.job.parameters["expected_ids"] == ["eod-2026-09-18-market"]
+    finally:
+        conn.close()
 
 
 def test_end_to_end_plan_document_drives_which_action_is_submitted(tmp_path):

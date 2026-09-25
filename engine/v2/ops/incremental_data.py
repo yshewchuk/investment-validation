@@ -15,6 +15,7 @@ There is no second executor or budget ledger here.
 """
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +110,7 @@ class RefreshParameters:
     expected_head_generation: int
     expected_head_snapshot_id: str | None = None
     table_name: str = "daily_market"
+    provider_account: str | None = None
     input_bindings: dict[str, str] | None = None
 
 
@@ -301,7 +303,8 @@ def coverage_complete(outcome: AcquisitionOutcome) -> bool:
 
 def plan_refresh(parent_snapshot: SnapshotRef, units: Sequence[RefreshUnit], *,
                  cached_outcomes: Mapping[str, AcquisitionOutcome], provider_account: str | None,
-                 expected_head_generation: int, max_attempts: int = 3) -> RefreshPlan:
+                 expected_head_generation: int, max_attempts: int = 3,
+                 calls_per_unit: int = 1) -> RefreshPlan:
     """Plan cache misses and reserve every possible provider attempt up front."""
     if max_attempts < 1:
         raise fail("INVALID_REQUEST", "refresh max_attempts must be positive")
@@ -318,7 +321,7 @@ def plan_refresh(parent_snapshot: SnapshotRef, units: Sequence[RefreshUnit], *,
             cached.append(outcome)
         else:
             fetch.append(unit)
-    calls = len(fetch) * max_attempts
+    calls = len(fetch) * max_attempts * calls_per_unit
     if calls and not provider_account:
         raise fail("INVALID_REQUEST", "cache misses require a shared provider account")
     payload = {
@@ -419,6 +422,7 @@ def refresh_job_spec(plan: RefreshPlan, *, implementation_ref: str,
         catalog_path=catalog_path, objects_root=objects_root,
         scope=output_namespace, expected_head_generation=plan.expected_head_generation,
         expected_head_snapshot_id=plan.parent_snapshot_id,
+        provider_account=plan.provider_account,
         input_bindings=dict(input_bindings) if input_bindings is not None else None)
     return JobSpec(
         kind="incremental_refresh", implementation_ref=implementation_ref,
@@ -460,13 +464,18 @@ def run_refresh_worker(parameters: Mapping[str, object], root: Path, *,
 def _load_data_refresh_callback() -> RefreshCallback:
     """Resolve the public callback at worker runtime, without data candidate types.
 
-    The default is the daily_market fetch wrapper (S4A): it turns the staged
-    identity document and the bound ``refresh_plan.json`` into acquired data
-    through the injected provider fetcher, then delegates to the unchanged
-    ``run_incremental_refresh`` commit path.
+    The ops layer injects the native ORATS provider fetcher: the returned
+    partial binds the daily_market fetch wrapper (S4A) to
+    ``orats_daily_market_fetcher()``, which turns the staged identity document
+    and the bound ``refresh_plan.json`` into acquired data and then delegates
+    to the unchanged ``run_incremental_refresh`` commit path. Constructing the
+    fetcher reads no credentials and touches no network; the key is read only
+    when the fetcher is called.
     """
     from engine.v2.data.incremental import run_daily_market_refresh
-    return run_daily_market_refresh
+    from engine.v2.ops.providers import orats_daily_market_fetcher
+    return functools.partial(run_daily_market_refresh,
+                             fetcher=orats_daily_market_fetcher())
 
 
 def validate_refresh_result_document(value) -> RefreshCallbackResult:

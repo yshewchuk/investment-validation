@@ -157,14 +157,14 @@ def _add_price_refresh_command(commands):
 
 
 def _add_refresh_mode_arguments(plan):
-    """R3B-3: ``--refresh-mode native --refresh-plan <file>`` submits one
+    """R3B-3: ``--refresh-mode native [--refresh-plan <file>]`` submits one
     real ``incremental_refresh`` job as part of the nightly DAG (see
     ``nightly._resolve_refresh_plan``). Default ``legacy`` submits none --
     ``ops price-refresh`` remains the only refresh path, unchanged."""
     plan.add_argument("--refresh-mode", default="legacy", choices=("legacy", "native"))
     plan.add_argument("--refresh-plan", type=Path, default=None,
-                      help="JSON engine.v2.ops.incremental_data.RefreshPlan document "
-                           "(to_document()'d); required with --refresh-mode native")
+                      help="optional pinned RefreshPlan document (to_document()'d JSON); "
+                           "when omitted the shadow head builds the plan at submission")
 
 
 def _add_reconcile_command(commands):
@@ -174,6 +174,20 @@ def _add_reconcile_command(commands):
     reconcile.add_argument("--root", default=argparse.SUPPRESS)
     reconcile.add_argument("job_id")
     reconcile.add_argument("--expected-attempt", required=True)
+
+
+def _add_provider_account_command(commands):
+    """S4B2: ``ops provider-account``, the one production writer of the
+    ``provider_accounts`` row the scheduler reserves against
+    (``scheduler._reserve_provider`` refuses with CREDENTIAL_INVALID when the
+    row is absent). Only budget numbers live here -- never a credential."""
+    provider = commands.add_parser("provider-account")
+    provider.add_argument("--root", default=argparse.SUPPRESS)
+    provider.add_argument("--account", required=True)
+    provider.add_argument("--remaining", type=int, required=True,
+                          help="total provider calls the account may spend")
+    provider.add_argument("--live-reserve", type=int, required=True,
+                          help="calls held back from ordinary admission")
 
 
 def _add_rescore_command(commands):
@@ -245,6 +259,7 @@ def parser():
     capture.add_argument("--source-root", required=True, type=Path)
     capture.add_argument("--output", required=True, type=Path)
     _add_reconcile_command(commands)
+    _add_provider_account_command(commands)
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
     _add_price_refresh_command(commands)
@@ -400,8 +415,11 @@ def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
 
 
 def _read_refresh_plan(args):
-    """R3B-3: ``--refresh-mode native``'s pinned ``RefreshPlan`` document.
+    """R3B-3/S4B2: ``--refresh-mode native``'s optional pinned ``RefreshPlan``.
 
+    ``--refresh-plan`` is now purely an override: omitted, the caller is
+    asking the submit path to build the production plan from the shadow head
+    (``nightly.build_legacy_job_requests``/``_build_native_refresh_plan``).
     Resolving a real plan from live cache inventory is the data layer's job
     (``engine.v2.ops.incremental_data.plan_refresh``), not this CLI's -- like
     ``--input-manifest``, this reads a document the caller already resolved.
@@ -409,7 +427,7 @@ def _read_refresh_plan(args):
     if args.refresh_mode != "native":
         return None
     if not args.refresh_plan:
-        raise fail("INVALID_REQUEST", "--refresh-mode native needs --refresh-plan")
+        return None
     if not args.refresh_plan.is_file() or args.refresh_plan.is_symlink():
         raise fail("INPUT_CHANGED", "refresh plan file is missing")
     return json.loads(args.refresh_plan.read_text())
@@ -502,6 +520,8 @@ def dispatch(args, root, conn, clock):
         return ledger_command(args, root, conn, clock)
     if args.command == "price-history":
         return price_history_command(args, root, conn, clock)
+    if args.command == "provider-account":
+        return provider_account_command(args, conn)
     return job_command(args, conn, clock, root)
 
 
@@ -895,6 +915,38 @@ def price_history_command(args, root, conn, clock):
                   details={"source_root": str(args.source_root)})
     return capture(conn, ArtifactStore(root), args.source_root, scope=args.scope, root=root,
                    dry_run=args.dry_run, clock=clock)
+
+
+def _provider_account_row(conn, account):
+    return conn.execute(
+        "SELECT account, generation, remaining, live_reserve, uncertain, "
+        "blocked_code, next_eligible_at FROM provider_accounts WHERE account = ?",
+        (account,)).fetchone()
+
+
+def provider_account_command(args, conn):
+    """Create or update one provider account's durable budget row (S4B2).
+
+    Absent: created with generation 1. Present: ``remaining`` and
+    ``live_reserve`` are replaced and ``generation`` increments, in one
+    transaction; ``blocked_code``/``next_eligible_at`` (operator and backoff
+    state) are never touched by a budget edit. The resulting row is printed
+    as JSON; this table holds no credentials.
+    """
+    from engine.v2.ops.provider_budget import configure_account
+
+    if min(args.remaining, args.live_reserve) < 0:
+        raise fail("INVALID_REQUEST", "negative provider budget")
+    if _provider_account_row(conn, args.account) is None:
+        configure_account(conn, args.account, 1, args.remaining, args.live_reserve)
+    else:
+        with transaction(conn):
+            conn.execute(
+                "UPDATE provider_accounts SET remaining = ?, live_reserve = ?, "
+                "generation = CAST(CAST(generation AS INTEGER) + 1 AS TEXT) "
+                "WHERE account = ?",
+                (args.remaining, args.live_reserve, args.account))
+    return dict(_provider_account_row(conn, args.account))
 
 
 def reconcile_command(args, root, conn, clock):

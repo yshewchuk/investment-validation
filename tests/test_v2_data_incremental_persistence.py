@@ -204,13 +204,7 @@ def test_frozen_curated_append_correction_tombstone_and_noop_replay(tmp_path):
     append_revision = _frozen_revision(
         append_row, append_raw.raw_receipt_id, "revision-append", spot=append_row["spot"])
     append_coverage = _coverage(append_revision, append_raw.raw_receipt_id)
-    raw_doc = {
-        "payload": json.dumps(append_payload).encode().decode(),
-        "response_kind": "complete", "response_meta": {"frozen_path": str(append_path)},
-        "source": "frozen-curated", "endpoint": "daily_market",
-        "request": {"path": str(append_path), "keys": [append_row["ticker"]]},
-        "received_at": clock.now().isoformat(),
-    }
+    raw_doc = {"receipt_id": append_raw.raw_receipt_id}
     plan_hash = "sha256:" + "1" * 64
     failed_root, failed_params = _refresh_input(
         tmp_path, parent.snapshot_id, 1, plan_hash, (append_revision,),
@@ -244,13 +238,7 @@ def test_frozen_curated_append_correction_tombstone_and_noop_replay(tmp_path):
     tombstone = _frozen_revision(
         base_rows[1], correction_raw.raw_receipt_id, "revision-tombstone", deleted=True)
     r3_coverage = _coverage(correction, correction_raw.raw_receipt_id)
-    correction_doc = {
-        "payload": json.dumps(correction_payload).encode().decode(),
-        "response_kind": "complete", "response_meta": {"frozen_path": str(base_path)},
-        "source": "frozen-curated", "endpoint": "daily_market",
-        "request": {"path": str(base_path), "keys": [base_rows[0]["ticker"]]},
-        "received_at": clock.now().isoformat(),
-    }
+    correction_doc = {"receipt_id": correction_raw.raw_receipt_id}
     r3_root, r3_params = _refresh_input(
         tmp_path, snapshot_r2.snapshot_id, 2, "sha256:" + "2" * 64,
         (correction, tombstone), (correction_doc,), r3_coverage)

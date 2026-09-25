@@ -14,6 +14,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.ops.executor_watchdog import observe, process_info, signal_owned
 from engine.v2.ops.input_bindings import resolve_and_record
 from engine.v2.ops.lifecycle import record_launch
+from engine.v2.ops.providers import provider_credentials
 from engine.v2.ops.refresh_staging import stage_refresh_input
 
 THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -48,6 +49,7 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
            "PYTHONDONTWRITEBYTECODE": "1", "LANG": "C.UTF-8",
            "INVESTING_PLAN_ROOT": legacy}
     env.update({key: str(claim.resources.thread_count) for key in THREAD_VARIABLES})
+    env.update(provider_credentials(claim.spec.parameters))
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
     # A7: raw stderr goes to a private per-attempt file, never DEVNULL and
