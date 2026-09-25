@@ -181,6 +181,9 @@ def dispatch(worker, parameters, root, *, envelope=None):
                              "threads": os.environ["OMP_NUM_THREADS"]}}
     if worker == "experiment":
         return _dispatch_experiment(parameters, root)
+    if worker == "training":
+        from engine.v2.ops.training import run_training_worker
+        return run_training_worker(parameters, root)
     raise ValueError("unsupported worker")
 
 

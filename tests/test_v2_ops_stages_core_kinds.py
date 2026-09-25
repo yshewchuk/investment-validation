@@ -87,6 +87,12 @@ _CASES = {
         resource_class="materialize",
         checkpoint_contract="legacy_materialization_manifest.v1.0",
         max_attempts=2, backoff=(5, 30), extra_field=("scratch_estimate_bytes", 5)),
+    "training": dict(
+        resource_class="experiment_heavy",
+        checkpoint_contract="training_job_result.v1.0",
+        max_attempts=1, backoff=(60,), extra_field=("ticker_chunk", 7),
+        required={"expected_ids": ["training"], "mode": "state",
+                  "state": "paired_residual_pool"}),
 }
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
@@ -94,8 +100,10 @@ _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
 
 
 def _extra_params(name):
-    field = _CASES[name]["extra_field"]
-    return {field[0]: field[1]} if field else {}
+    case = _CASES[name]
+    field = case["extra_field"]
+    extra = {field[0]: field[1]} if field else {}
+    return {**case.get("required", {}), **extra}
 
 
 def test_core_kinds_are_exactly_the_expected_static_set():
