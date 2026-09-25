@@ -46,6 +46,10 @@ def _get_derivation(server, *, token=TOKEN):
     return urlopen(request, timeout=5)
 
 
+def _get_shell(server):
+    return urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5)
+
+
 def _stop(server, thread) -> None:
     server.shutdown()
     thread.join(timeout=2)
@@ -67,5 +71,31 @@ def test_derivation_json_reachable_via_preview_run(tmp_path, monkeypatch):
             with pytest.raises(HTTPError) as error:
                 _get_derivation(server, token=bad)
             assert error.value.code == 401
+    finally:
+        _stop(server, thread)
+
+
+def test_shell_document_nav_links_to_the_derivation_view(tmp_path, monkeypatch):
+    """The shell nav must route derivation to the native page, not the frame.
+
+    Slice 9 removed ``"derivation"`` from ``_VIEWS`` so the native
+    ``/derivation`` page could be reached, which also dropped the shell's
+    derivation link. This pins the restored entry: the shell served by a real
+    ``preview.run`` carries an ``href="/derivation"`` nav link to the native
+    view (never the retired ``#/models/derivation`` legacy frame route), the
+    calibration health view stays linked, and the derivation href itself
+    resolves to the native page rather than back to the shell.
+    """
+    server, thread, release_id = _run_launcher(tmp_path, monkeypatch)
+    try:
+        assert release_id == "r1"
+        shell = _get_shell(server).read().decode()
+        assert '<a href="/derivation">derivation</a>' in shell
+        assert 'href="/#/models/derivation"' not in shell
+        assert 'href="/#/models/health"' in shell  # calibration health view stays reachable
+
+        page = urlopen(f"http://127.0.0.1:{server.server_port}/derivation", timeout=5)
+        assert page.status == 200
+        assert b"Strategy derivation" in page.read()
     finally:
         _stop(server, thread)

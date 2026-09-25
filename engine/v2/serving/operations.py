@@ -23,7 +23,7 @@ HTTPStatus = http.HTTPStatus
 __all__ = ["OperationsHandler", "create_server", "derivation_page_document",
            "model_release_page_document", "shell_document"]
 
-_VIEWS = ("board", "explorer", "book", "models", "flags")
+_VIEWS = ("board", "explorer", "book", "models", "derivation", "flags")
 
 MODEL_RELEASE_VIEW_V1 = "model_release_view.v1.0"
 MODEL_RELEASE_NOT_CONFIGURED = "MODEL_RELEASE_NOT_CONFIGURED"
@@ -103,9 +103,9 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     frame URL from it.
     """
     frozen = frozen_at or "unknown"
-    routes = ("trades/board", "trades/explorer", "trades/book", "models/modelx",
-              "models/health")
-    views = "".join(f'<a href="/#/{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
+    routes = ("/#/trades/board", "/#/trades/explorer", "/#/trades/book", "/#/models/modelx",
+              "/derivation", "/#/models/health")
+    views = "".join(f'<a href="{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
     html = f'''<!doctype html><meta charset="utf-8"><title>Operations shell</title>
 <style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
 <div id="ops">health: <span id="state">unknown</span> <small id="stamp">offline frozen at {frozen}</small> <small id="release">release: resolving...</small></div>
@@ -287,6 +287,8 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
                 return self._send(HTTPStatus.SERVICE_UNAVAILABLE, b"not configured\n", "text/plain")
             return self._artifact(config, _read_calibration_health,
                                   config.calibration_health_path, auth=True)
+        if path == "/derivation":
+            return self._send(HTTPStatus.OK, derivation_page_document(), "text/html")
         if path == "/" or path.lstrip("/") in _VIEWS:
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
         if path.startswith("/legacy/"):
@@ -297,8 +299,6 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, model_release_page_document(), "text/html")
         if path == "/derivation.json":
             return self._derivation_json_route(config)
-        if path == "/derivation":
-            return self._send(HTTPStatus.OK, derivation_page_document(), "text/html")
         if path.startswith("/actions/whatif/"):
             return self._whatif_result_route(config, path)
         if path == "/release/current.json":
