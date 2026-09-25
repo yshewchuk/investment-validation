@@ -356,6 +356,18 @@ def browser(playwright_instance):
         b.close()
 
 
+@pytest.fixture(autouse=True)
+def _restore_investing_plan_root():
+    # ``legacy_adapter._rooted_import`` sets ``os.environ["INVESTING_PLAN_ROOT"]`` to a
+    # tmp path and never restores it, so a later test imports ``engine.paths`` at a dead root.
+    original_root_env = os.environ.get("INVESTING_PLAN_ROOT")
+    yield
+    if original_root_env is None:
+        os.environ.pop("INVESTING_PLAN_ROOT", None)
+    else:
+        os.environ["INVESTING_PLAN_ROOT"] = original_root_env
+
+
 @pytest.fixture
 def tmp_root(tmp_path, monkeypatch):
     """Point ``engine.paths`` at a throwaway tree for the duration of a test."""
