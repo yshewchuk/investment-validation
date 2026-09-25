@@ -267,8 +267,7 @@ SEEDED_CONTROLS: dict[str, dict[str, Any]] = {
         "findings": {"record": {"stages": ["analogs"],
                                 "includes": ["ci_low", "ci_high"],
                                 "excludes": ["exp_pnl_analog", "n_analogs",
-                                             "win_analog", "selected_row_ids",
-                                             "contributing_row_ids"]}},
+                                             "win_analog"]}},
     },
     "replay_input_rounded": {
         "commit": "b33036c",

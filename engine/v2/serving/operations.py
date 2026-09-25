@@ -16,7 +16,7 @@ from engine.v2.models.deployment import (
     resolve_release,
 )
 
-from . import analog_projection, derivation_projection, projections, release_media
+from . import analog_projection, derivation_projection, release_media
 
 HTTPStatus = http.HTTPStatus
 
@@ -297,7 +297,7 @@ async function load(releaseId, eventId){
     const j=await r.json();
     detail.textContent=JSON.stringify(j,null,2);
     if(j.status==='available'){
-      summary.textContent=j.n_analogs+' analog(s) for event '+j.event_id+': '+j.selected_row_ids.length+' selected, '+j.contributing_row_ids.length+' contributing';
+      summary.textContent=j.analogs.length+' score(s) for event '+j.event_id;
       summary.className='';
     } else {
       summary.textContent='no analogs: '+(j.reason_code||'UNKNOWN');
@@ -492,6 +492,7 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         query = parse_qs(urlsplit(self.path).query)
         release_id = (query.get("release_id") or [None])[0]
         event_id = (query.get("event_id") or [None])[0]
+        strategy = (query.get("strategy") or [None])[0]
         if not release_id or not event_id:
             return self._send(HTTPStatus.BAD_REQUEST,
                               b"release_id and event_id are required\n", "text/plain")
@@ -499,14 +500,20 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._send(HTTPStatus.SERVICE_UNAVAILABLE,
                               b"analogs not configured\n", "text/plain")
         try:
-            conn = projections.connect(str(config.serving_index_path))
-        except Exception:
-            return self._send(HTTPStatus.SERVICE_UNAVAILABLE,
-                              b"serving index unavailable\n", "text/plain")
+            conn = analog_projection.open_read_only(config.serving_index_path)
+        except analog_projection.ServingIndexError as exc:
+            return self._send_document(*analog_projection.index_refusal(exc.reason_code))
         try:
-            status, document = analog_projection.analog_document(conn, None, release_id, event_id)
+            if not analog_projection.index_is_current(conn):
+                return self._send_document(*analog_projection.index_refusal(
+                    analog_projection.SERVING_INDEX_OUTDATED))
+            status, document = analog_projection.analog_document(
+                conn, None, release_id, event_id, strategy)
         finally:
             conn.close()
+        return self._send_document(status, document)
+
+    def _send_document(self, status, document):
         body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         return self._send(status, body, "application/json")
 

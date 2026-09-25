@@ -459,6 +459,35 @@ def test_expected_return_stays_null_when_only_analog_is_present(tmp_path):
     assert summary.expected_return_sim is None
 
 
+def test_n_analogs_stores_null_when_absent_and_a_real_zero_as_zero(tmp_path):
+    """Migration 3's n_analogs is nullable: a display row carrying no
+    ``n_analogs`` key means the analog layer never ran (stored NULL), while a
+    real run that matched zero rows stores 0 -- the two are never conflated."""
+    conn, store, snap = _events_snapshot(tmp_path, [
+        _event_row("e1", "AAA", datetime(2024, 1, 5)),
+        _event_row("e2", "BBB", datetime(2024, 1, 5)),
+    ])
+    repo = Repository(conn, store)
+    serving_conn, serving_store = _serving(tmp_path)
+    zero = _row(ticker="AAA", n_analogs=0)
+    absent = _row(ticker="BBB", n_analogs=None)
+    zero_display = _compact(zero)
+    absent_display = _compact(absent)
+    absent_display.pop("n_analogs")
+    release = _build(_preview_input(), _score_doc(rows=[zero, absent]),
+                     _bundle(zero_display, absent_display),
+                     repository=repo, snap=snap,
+                     serving_conn=serving_conn, serving_store=serving_store)
+    assert isinstance(release, PreviewRelease)
+    rows = serving_conn.execute(
+        "SELECT e.ticker, s.n_analogs FROM serving_score_summary s "
+        "JOIN serving_event_summary e ON e.release_id = s.release_id "
+        "AND e.event_id = s.event_id WHERE s.release_id = ?",
+        (release.release_id,)).fetchall()
+    assert {row["ticker"]: row["n_analogs"] for row in rows} == {
+        "AAA": 0, "BBB": None}
+
+
 # --------------------------------------------------------------------------
 # schema migration: a v1-only serving.sqlite gains v2's `flags` column
 # --------------------------------------------------------------------------
@@ -504,7 +533,9 @@ def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
         assert json.loads(row["flags"]) == ["OUT_OF_DOMAIN"]
         assert json.loads(row["selected_row_ids"]) == []
         assert json.loads(row["contributing_row_ids"]) == []
-        assert row["n_analogs"] == 0
+        # Migration 3's n_analogs is nullable: a row that never declared a
+        # count stays NULL, never an invented 0.
+        assert row["n_analogs"] is None
     finally:
         migrated.close()
 

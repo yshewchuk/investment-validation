@@ -65,13 +65,8 @@ def test_analog_clean_case_recomputes_legacy_matcher_exactly():
     # Three exact bucket matches: no widening, a real bootstrap interval.
     assert legacy["n_analogs"] == 3
     assert legacy["ci_low"] is not None and legacy["ci_high"] is not None
-    legacy_view = {name: output[name] for name in legacy}
-    assert legacy_view == legacy
-    # Native-only row ids travel alongside the legacy numbers, untouched by
-    # the legacy comparison above.
-    assert output["selected_row_ids"] == ("exact-a", "exact-b", "exact-c")
-    assert output["contributing_row_ids"] == output["selected_row_ids"]
-    assert _compare_dimension(legacy, legacy_view, "analogs")["agree"] is True
+    assert output == legacy
+    assert _compare_dimension(legacy, output, "analogs")["agree"] is True
 
 
 def test_analog_inputs_carry_no_legacy_answer():
