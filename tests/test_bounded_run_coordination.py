@@ -501,3 +501,122 @@ def test_sigterm_to_a_polite_tree_releases_promptly(tmp_path):
     assert not _pid_live(int(pid_file.read_text()))
     assert elapsed < 5, elapsed
     assert proc.returncode == -signal.SIGTERM
+
+
+def test_heavy_starts_at_once_while_every_slot_is_held(tmp_path):
+    state = tmp_path / "state"
+    fd = _hold_slot(state)
+    try:
+        code, out = _run(state,
+                         [sys.executable, "-c", "print('CHILD' + '-RAN')"],
+                         heavy=True, max_wait="0.5",
+                         extra_env={"BOUNDED_RUN_SLOTS": "1"})
+    finally:
+        os.close(fd)
+    assert code == 0, out
+    assert "CHILD-RAN" in out
+    assert "RESOURCE WAIT" not in out
+
+
+def test_heavy_waits_indefinitely_by_default():
+    import tools.bounded_run as br
+    parser = br._build_parser()
+    cases = {("--heavy",): float("inf"), (): br.MAX_WAIT_DEFAULT_S,
+             ("--heavy", "--max-wait-s", "7"): 7.0}
+    for flags, expected in cases.items():
+        args = parser.parse_args([*flags, "--", "true"])
+        br._validate(args, parser)
+        assert args.max_wait_s == expected, flags
+
+
+def test_child_does_not_inherit_the_spawn_signal_mask(tmp_path):
+    child = ("import re; s = open('/proc/self/status').read(); "
+             "print('SIGBLK=' + re.search(r'SigBlk:\\s*(\\S+)', s).group(1))")
+    code, out = _run(tmp_path / "state", [sys.executable, "-c", child])
+    assert code == 0, out
+    # rsplit: bounded_run echoes the command line, which also says SIGBLK=
+    mask = int(out.rsplit("SIGBLK=", 1)[1].split()[0], 16)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        assert not mask & (1 << (sig - 1)), (sig, hex(mask))
+
+
+@pytest.mark.parametrize("heavy", [False, True], ids=["slot", "heavy"])
+def test_sigkilled_wrapper_keeps_the_lock_while_its_job_lives(tmp_path, heavy):
+    state = tmp_path / "state"
+    marker = tmp_path / "markers"
+    release = tmp_path / "release"
+    proc = _popen(state, _hold_child("job", marker, release), heavy=heavy)
+    try:
+        _wait_for(lambda: "job-start" in _markers(marker))
+        lock = (state / f"heavy-{proc.pid}.json" if heavy
+                else state / "slot-0.lock")
+        proc.kill()
+        # wait(), not communicate(): the job inherited the stdout pipe and
+        # keeps it open, so communicate() would wait for the job to end.
+        proc.wait(timeout=30)
+        assert _is_held_by_other(lock)
+        if heavy:
+            import tools.bounded_run as br
+            assert [e["pid"] for e in br._live_heavies(state)] == [proc.pid]
+        release.write_text("go")
+        _wait_for(lambda: "job-end" in _markers(marker))
+        _wait_for(lambda: _lock_free(lock))
+    finally:
+        release.write_text("go")
+        proc.stdout.close()
+    if heavy:
+        import tools.bounded_run as br
+        assert br._live_heavies(state) == []
+        assert not lock.exists()
+
+
+def _is_held_by_other(path: Path) -> bool:
+    return path.exists() and not _lock_free(path)
+
+
+def test_heavy_start_sweeps_only_unlocked_temp_files(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    debris = state / ".heavy-999998.json.tmp"
+    debris.write_text("{")
+    busy = state / ".heavy-999997.json.tmp"
+    busy.write_text("{")
+    fd = os.open(busy, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        code, out = _run(state, [sys.executable, "-c", "print('ok')"],
+                         heavy=True)
+        assert code == 0, out
+        assert not debris.exists()
+        assert busy.exists()
+    finally:
+        os.close(fd)
+
+
+def test_admission_counts_the_unused_cap_of_running_jobs(tmp_path):
+    # 4 GiB free, a live 0.1 GiB heavy reservation: one 2 GiB job fits, but
+    # a second must not count the first's not-yet-resident 2 GiB as free.
+    state = tmp_path / "state"
+    marker = tmp_path / "markers"
+    release = tmp_path / "release"
+    env = {"BOUNDED_RUN_SLOTS_UNDER_HEAVY": "4"}
+    fd, _ = _hold_heavy(state)
+    try:
+        first = _popen(state, _hold_child("a", marker, release),
+                       available_mb=4096.0, max_rss_gb="2", extra_env=env)
+        _wait_for(lambda: "a-start" in _markers(marker))
+        second = _popen(state, _child("b", 0.0, marker), available_mb=4096.0,
+                        max_rss_gb="2", extra_env=env,
+                        pre=_wait_marker("b", "b-wait", marker))
+        _wait_for(lambda: "b-wait" in _markers(marker))
+        assert "b-start" not in _markers(marker)
+        release.write_text("go")
+        out_a, _ = first.communicate(timeout=30)
+        out_b, _ = second.communicate(timeout=30)
+    finally:
+        os.close(fd)
+        release.write_text("go")
+    assert first.returncode == 0 and second.returncode == 0, (out_a, out_b)
+    assert "RESOURCE WAIT" in out_b and "headroom" in out_b
+    times = _markers(marker)
+    assert times["b-start"] >= times["a-end"]

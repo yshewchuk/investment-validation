@@ -122,8 +122,8 @@ COORDINATION section of the `bounded_run.py` module docstring.
 
 | Knob | Default | Effect |
 |---|---|---|
-| `--heavy` | off | Marks the one big job (run the nightly with it). It holds `heavy-<pid>.json` (flocked for its life) and reserves its `--max-rss-gb`; a second `--heavy` job waits until the first exits. Check-then-register is serialised on `heavy.lock`. |
-| `--max-wait-s S` | 3600 | Bounds every RESOURCE WAIT. On expiry bounded_run exits **75** without launching. `oc_check.py` passes 600 and `land.py` 1800; both report exit 75 as "resource wait timed out — box busy, retry", not as a test failure. |
+| `--heavy` | off | Marks the one big job; the nightly must always run with it. It takes no test slot, so it starts at once even when every slot is held. It holds `heavy-<pid>.json` (flocked for its life) and reserves its `--max-rss-gb`; a second `--heavy` job waits until the first exits. Check-then-register is serialised on `heavy.lock`. |
+| `--max-wait-s S` | 3600; unbounded with `--heavy` | Bounds every RESOURCE WAIT (a `--heavy` job waits for another heavy job indefinitely unless given). On expiry bounded_run exits **75** without launching. `oc_check.py` passes 600 and `land.py` 1800; both report exit 75 as "resource wait timed out — box busy, retry", not as a test failure. |
 | `BOUNDED_RUN_STATE_DIR` | `/tmp/bounded_run_state` | Where slot, heavy and lock files live. Tests point it at `tmp_path`. |
 | `BOUNDED_RUN_SLOTS` | 3 | Test slots (`slot-<i>.lock`) for non-heavy jobs while no heavy reservation is live. |
 | `BOUNDED_RUN_SLOTS_UNDER_HEAVY` | 2 | Slot count while a heavy reservation is live. Running jobs are never preempted. |
@@ -132,11 +132,10 @@ COORDINATION section of the `bounded_run.py` module docstring.
 Admission: only while a heavy reservation is live, a non-heavy job also waits
 until MemAvailable minus the heavy job's unclaimed reservation (reserve less
 its tree's current RSS) covers its own `--max-rss-gb` plus `--min-free-gb`.
-With no heavy job live, a job starts as soon as it has a slot. On
+Each held slot records its job's cap, and the not-yet-resident part of it counts against that headroom too (admission is serialised on `admission.lock`). With no heavy job live, a job starts as soon as it has a slot. On
 SIGTERM/SIGINT/SIGHUP, bounded_run forwards SIGTERM to its child's process
 group, waits for the group to exit (SIGKILL after `SIGNAL_WAIT_S`, 30 s), and
-only then releases its slot or reservation. Locks are flocks, so a crashed
-run's files never block anyone. Tests: `tests/test_bounded_run_coordination.py`.
+only then releases its slot or reservation. Termination signals are blocked across the spawn. The held lock fds are passed to the child, so a SIGKILLed bounded_run keeps its slot or reservation until its job exits. Locks are flocks, so a crashed run's files never block anyone once its job is gone. Tests: `tests/test_bounded_run_coordination.py`.
 
 ## CI tests
 

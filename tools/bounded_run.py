@@ -94,8 +94,12 @@ COORDINATION
     ``heavy-<pid>.json`` (pid, reserve, start, argv0) and holds that file's
     flock for its whole life, so at most one heavy job runs at a time. A
     second heavy job waits (RESOURCE WAIT, every 30 s) for the first to
-    finish; a file whose lock is free belonged to a crashed run, and the
-    next reader deletes it and ignores it.
+    finish -- indefinitely unless ``--max-wait-s`` is given; a file whose
+    lock is free belonged to a crashed run, and the next reader deletes it
+    and ignores it. A heavy job never takes a test slot, so it starts at once
+    however many test jobs are running. Always launch the nightly with
+    ``--heavy``: without it, the nightly queues for a test slot like any
+    test run and gives up after an hour.
   * every non-heavy job holds one of ``BOUNDED_RUN_SLOTS`` test slots
     (default 3, ``slot-<i>.lock`` files), dropping to
     ``BOUNDED_RUN_SLOTS_UNDER_HEAVY`` (default 2) while a heavy reservation
@@ -107,7 +111,11 @@ COORDINATION
     (its ``reserve_gb`` less the heavy tree's current RSS). It starts only
     when that covers its own ``--max-rss-gb`` plus ``--min-free-gb``;
     otherwise it waits (RESOURCE WAIT, every 5 s), so the heavy job's
-    reservation is not spent twice by test runs. With NO live heavy
+    reservation is not spent twice by test runs. Each held slot records its
+    job's ``--max-rss-gb``, and the part of it not yet resident counts
+    against headroom too, so two jobs admitted back to back cannot both
+    spend the same free memory (admission is serialised on
+    ``admission.lock``). With NO live heavy
     reservation there is no admission check at all: the job launches as soon
     as it has a slot, exactly as before coordination existed.
 
@@ -121,9 +129,14 @@ COORDINATION
   process group as SIGTERM; bounded_run then waits (up to ``SIGNAL_WAIT_S``,
   30 s, before SIGKILL) until no live process remains in that group, and only
   then releases its slot or heavy reservation, so the next waiter never
-  starts while the old tree still holds memory.
+  starts while the old tree still holds memory. Those signals are blocked
+  across the spawn, so none can land between the fork and recording the
+  child. The held lock FDs are also passed to the child, so if bounded_run
+  itself is SIGKILLed the slot/reservation stays held until its job's
+  process exits (a background process that inherits those FDs and outlives
+  the job keeps holding them too).
 
-  ``--max-wait-s`` (default 3600) bounds every RESOURCE WAIT: on expiry the
+  ``--max-wait-s`` (default 3600; unbounded for ``--heavy``) bounds every RESOURCE WAIT: on expiry the
   job exits 75 (EX_TEMPFAIL) without launching, printing "RESOURCE WAIT timed
   out" to stderr. A bounded_run started by another bounded_run inherits
   ``BOUNDED_RUN_NESTED=1`` and skips slots and admission, because the outer
@@ -136,7 +149,7 @@ Usage:
         [--max-swap-gb G] [--min-free-gb F] [--poll-s S] [--heavy] \\
         [--max-wait-s S] -- <command...>
 
-    python3 tools/bounded_run.py --max-rss-gb 5.5 -- \\
+    python3 tools/bounded_run.py --heavy --max-rss-gb 5.5 -- \\
         python3 -m engine.dashboard.nightly --as-of 2026-09-09
 """
 from __future__ import annotations
@@ -171,6 +184,8 @@ ADMISSION_POLL_S = 5.0
 HEAVY_POLL_S = 30.0
 EX_TEMPFAIL = 75
 SIGNAL_WAIT_S = 30.0
+#: The signals bounded_run forwards to its job (and blocks around the spawn).
+_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
 def _read_status(pid: int) -> dict[str, str]:
@@ -408,7 +423,7 @@ def _on_signal(signum, _frame) -> None:
 
 def _install_cleanup() -> None:
     atexit.register(_cleanup)
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for sig in _SIGNALS:
         try:
             signal.signal(sig, _on_signal)
         except (OSError, ValueError):
@@ -443,6 +458,35 @@ def _try_lock(path: Path) -> int | None:
         os.close(fd)
         return None
     return fd
+
+
+def _is_held(path: Path) -> bool:
+    """Whether some live process holds ``path``'s flock right now."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def _sweep_heavy_tmp(state: Path) -> None:
+    """Delete ``.heavy-*.json.tmp`` files whose flock is free: debris from a
+    heavy starter that died between creating and renaming its reservation.
+    Called only while holding ``heavy.lock``, which every creator holds for
+    the whole create-lock-rename step, so a live creator's temp file can
+    never be swept from under it."""
+    for path in state.glob(".heavy-*.json.tmp"):
+        if not _is_held(path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def _read_heavy(path: Path) -> dict | None:
@@ -489,26 +533,46 @@ def _unlink_if_same(path: Path, fd: int) -> None:
         pass
 
 
-def _heavy_rss_mb(pid: int) -> float:
+def _tree_rss_mb(pid: int) -> float:
     return sum(_vmrss_mb(proc) for proc in _descendants(pid))
 
 
-def _headroom_mb(heavies: list[dict]) -> float:
-    """MemAvailable minus what live heavy reservations have still to claim.
+def _unclaimed_mb(entry: dict, key: str, scale: float) -> float:
+    """``entry[key] * scale`` (a budget in MB) less the RSS its pid's tree
+    already holds; a malformed entry claims nothing, a bad pid claims all."""
+    try:
+        pid = int(entry.get("pid", 0))
+        budget_mb = float(entry.get(key, 0.0)) * scale
+    except (TypeError, ValueError):
+        return 0.0
+    if pid <= 0:
+        return max(0.0, budget_mb)
+    return max(0.0, budget_mb - _tree_rss_mb(pid))
 
-    A reservation's claim is ``reserve_gb`` less its tree's current RSS: it
-    already owns the resident part, so only the unclaimed remainder has to be
-    held back from new (non-heavy) jobs.
+
+def _slot_claims_mb(state: Path) -> float:
+    """The unused part of the caps recorded by every HELD test slot."""
+    claimed = 0.0
+    for path in sorted(state.glob("slot-*.lock")):
+        if _is_held(path):
+            entry = _read_heavy(path)
+            if entry is not None:
+                claimed += _unclaimed_mb(entry, "cap_mb", 1.0)
+    return claimed
+
+
+def _headroom_mb(state: Path, heavies: list[dict]) -> float:
+    """MemAvailable minus what live heavy reservations and running test jobs
+    have still to claim.
+
+    A heavy reservation's claim is ``reserve_gb`` less its tree's current
+    RSS, and a held slot's is its job's ``--max-rss-gb`` less its tree's RSS:
+    each already owns its resident part, so only the unclaimed remainder has
+    to be held back from a new job, and two jobs admitted back to back cannot
+    both count the same free memory.
     """
-    committed = 0.0
-    for entry in heavies:
-        try:
-            pid = int(entry.get("pid", 0))
-            reserve_mb = float(entry.get("reserve_gb", 0.0)) * 1024.0
-        except (TypeError, ValueError):
-            continue
-        committed += max(0.0, reserve_mb - _heavy_rss_mb(pid))
-    return _available_mb() - committed
+    committed = sum(_unclaimed_mb(e, "reserve_gb", 1024.0) for e in heavies)
+    return _available_mb() - committed - _slot_claims_mb(state)
 
 
 def _slot_count(heavies: list[dict]) -> int:
@@ -517,10 +581,15 @@ def _slot_count(heavies: list[dict]) -> int:
     return _env_int(SLOTS_ENV, SLOTS_DEFAULT)
 
 
-def _acquire_slot(state: Path, count: int) -> int | None:
+def _acquire_slot(state: Path, count: int, cap_mb: float) -> int | None:
+    """Take the first free slot below ``count`` and record this job's cap in
+    it, so later admissions can subtract the part of it not yet resident."""
     for index in range(count):
         fd = _try_lock(state / f"slot-{index}.lock")
         if fd is not None:
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, json.dumps({"pid": os.getpid(),
+                                      "cap_mb": cap_mb}).encode(), 0)
             print(f"[bounded] holding test slot {index} of {count}", flush=True)
             return fd
     return None
@@ -541,8 +610,8 @@ def _reserve_heavy(state: Path, reserve_gb: float, argv0: str) -> None:
         "argv0": argv0,
     }
     fd = os.open(tmp_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
-    os.write(fd, json.dumps(payload).encode())
     fcntl.flock(fd, fcntl.LOCK_EX)
+    os.write(fd, json.dumps(payload).encode())
     os.rename(tmp_path, path)
     _CLEANUP_FDS.append(fd)
     _CLEANUP_PATHS.append(path)
@@ -576,6 +645,7 @@ def _coordinate_heavy(state: Path, deadline: float, args,
         lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _sweep_heavy_tmp(state)
             live = _live_heavies(state)
             if not live:
                 _reserve_heavy(state, args.max_rss_gb,
@@ -590,35 +660,49 @@ def _coordinate_heavy(state: Path, deadline: float, args,
                        HEAVY_POLL_S)
 
 
-def _coordinate_slot(state: Path, deadline: float, args,
-                     cap_mb: float, floor_mb: float) -> int | None:
-    """Reservation-aware admission applies ONLY while a live heavy
-    reservation exists; with none, this is exactly the pre-coordination
-    slot wait (no headroom check at all), so a bare run never has to satisfy
-    a heavy-reservation headroom it has no reason to know about.
+def _admit_once(state: Path, cap_mb: float,
+                required_mb: float) -> tuple[int | None, str, str, float]:
+    """One admission attempt under ``admission.lock``: ``(slot_fd, "", "",
+    0)`` when admitted, else ``(None, expiry_reason, wait_reason, poll_s)``.
+
+    The lock serialises check-headroom-then-take-slot across jobs, so the
+    next job's headroom already sees this job's recorded cap. The headroom
+    check applies ONLY while a live heavy reservation exists; with none this
+    is exactly the pre-coordination slot wait, so a bare run never has to
+    satisfy a headroom it has no reason to know about.
     """
-    required_mb = cap_mb + floor_mb
-    while True:
+    lock_fd = os.open(state / "admission.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
         heavies = _live_heavies(state)
         if heavies:
-            headroom = _headroom_mb(heavies)
+            headroom = _headroom_mb(state, heavies)
             if headroom < required_mb:
-                if _expired(deadline, "headroom under a heavy reservation",
-                            args.max_wait_s):
-                    return EX_TEMPFAIL
-                _resource_wait(
-                    f"heavy reservation leaves headroom "
-                    f"{headroom / 1024.0:.2f}G < required "
-                    f"{required_mb / 1024.0:.2f}G", ADMISSION_POLL_S)
-                continue
+                return (None, "headroom under a heavy reservation",
+                        f"heavy reservation leaves headroom "
+                        f"{headroom / 1024.0:.2f}G < required "
+                        f"{required_mb / 1024.0:.2f}G", ADMISSION_POLL_S)
         count = _slot_count(heavies)
-        fd = _acquire_slot(state, count)
+        fd = _acquire_slot(state, count, cap_mb)
+        if fd is None:
+            return (None, f"a test slot (of {count})",
+                    f"test slot ({count} available, all held)", SLOT_POLL_S)
+        return fd, "", "", 0.0
+    finally:
+        os.close(lock_fd)
+
+
+def _coordinate_slot(state: Path, deadline: float, args,
+                     cap_mb: float, floor_mb: float) -> int | None:
+    while True:
+        fd, what, waiting, poll_s = _admit_once(state, cap_mb,
+                                                cap_mb + floor_mb)
         if fd is not None:
             _CLEANUP_FDS.append(fd)
             return None
-        if _expired(deadline, f"a test slot (of {count})", args.max_wait_s):
+        if _expired(deadline, what, args.max_wait_s):
             return EX_TEMPFAIL
-        _resource_wait(f"test slot ({count} available, all held)", SLOT_POLL_S)
+        _resource_wait(waiting, poll_s)
 
 
 def _coordinate(args, cap_mb: float, floor_mb: float,
@@ -689,10 +773,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heavy", action="store_true",
                         help="announce a heavy job: one at a time, and reserve "
                              "--max-rss-gb from other jobs while it runs")
-    parser.add_argument("--max-wait-s", type=float, default=MAX_WAIT_DEFAULT_S,
+    parser.add_argument("--max-wait-s", type=float, default=None,
                         help="max seconds to wait for a slot, a heavy "
                              "reservation or headroom before exiting 75 "
-                             "(default: 3600)")
+                             "(default: 3600; with --heavy, wait "
+                             "indefinitely for the running heavy job)")
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="the command to run; prefix it with -- if it "
                              "carries its own flags")
@@ -706,6 +791,10 @@ def _validate(args, parser) -> None:
         parser.error("--poll-s must be positive")
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must not be negative")
+    if args.max_wait_s is None:
+        # A heavy job (the nightly) must not give up on the night because
+        # another heavy job is still running; it queues behind it instead.
+        args.max_wait_s = float("inf") if args.heavy else MAX_WAIT_DEFAULT_S
     if args.max_wait_s < 0:
         parser.error("--max-wait-s must not be negative")
 
@@ -782,17 +871,42 @@ def main() -> int:
         return wait_code
 
     started = time.monotonic()
-    proc = subprocess.Popen(
-        ["taskset", "-c", cores, "nice", "-n", "19", *command],
-        env=env, start_new_session=True,
-    )
+    proc = _spawn(["taskset", "-c", cores, "nice", "-n", "19", *command], env)
     global _ACTIVE_PGID
-    _ACTIVE_PGID = proc.pid
     try:
         return _watch(proc, args, cap_mb, floor_mb, swap_cap_mb, started)
     finally:
         _ACTIVE_PGID = None
         _cleanup()
+
+
+def _spawn(argv: list[str], env: dict[str, str]) -> subprocess.Popen:
+    """Launch the job and record its process group, signal-safely.
+
+    Our termination signals stay blocked from before the fork until
+    ``_ACTIVE_PGID`` is set, so a signal can never arrive while a child
+    exists that ``_on_signal`` does not know about; a signal sent meanwhile
+    is delivered as soon as the mask is restored. The child restores the
+    original mask before exec, so it never inherits the blocked set.
+
+    The held slot/reservation lock FDs are passed to the child: the flocks
+    then live as long as the job's process, so a bounded_run that is itself
+    SIGKILLed or OOM-killed does not free its slot or heavy reservation
+    while its job still holds the memory.
+    """
+    global _ACTIVE_PGID
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _SIGNALS)
+    try:
+        proc = subprocess.Popen(
+            argv, env=env, start_new_session=True,
+            pass_fds=tuple(_CLEANUP_FDS),
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK,
+                                                      old_mask),
+        )
+        _ACTIVE_PGID = proc.pid
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+    return proc
 
 
 def _log_exit(code: int, started: float) -> None:

@@ -287,8 +287,14 @@ Two nightlies still cannot run at once, and no longer try: the CLI takes an
 exclusive `single_run_lock` and a second invocation exits 1 naming the holder.
 For anything genuinely heavy running beside it, cap the job rather than hope:
 
-    python3 tools/bounded_run.py --max-rss-gb 5.5 -- \
+    python3 tools/bounded_run.py --heavy --max-rss-gb 5.5 -- \
         python3 -m engine.dashboard.nightly
+
+`--heavy` is required for the nightly: it registers the one heavy-job memory
+reservation, skips the shared test slots (so it starts at once however many
+test runs hold them), and waits indefinitely -- not 3600 s -- if another heavy
+job is already running. Without it the nightly queues for a test slot like any
+test run and exits 75 after an hour (see `tests/README.md`, "Sharing the box").
 
 An abort at the cap costs the night's compute, not its downloads or its ledger
 — see that file's header for exactly what survives.
