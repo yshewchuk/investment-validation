@@ -80,6 +80,26 @@ Judgement calls (task brief decision 1, P2-4):
 * "deadline exceeded" is its own registered code, ``DEADLINE_EXCEEDED``
   (task 2 review fix) — resource category, retryable (a caller may simply
   retry with a later deadline).
+
+--------------------------------------------------------------------------
+Phase 6 slice 3: snapshot-read foundation for research tooling
+--------------------------------------------------------------------------
+
+``resolve_pinned``/``resolve_full_pinned`` are the one new pair of public
+methods this slice adds, over the existing ``resolve``/``resolve_full`` —
+the shared read foundation the six ``research-*`` CLIs and
+``engine/replay.py`` migrate onto in later slices (UD-4, settled 09-20), not
+those migrations themselves. Judgement call: no new failure code and no
+change to ``DATA_FAILURE_CODES`` — a scope with no committed head reuses
+``SNAPSHOT_NOT_READY`` verbatim (same code ``engine.v2.ops.snapshots.
+resolve_snapshot_head`` already raises for the identical condition at the
+ops layer), rather than registering something narrower for "this scope
+never had a promoted snapshot". No new "resolve me the latest snapshot
+regardless of scope" entrypoint was added, and none should be: the two new
+methods take an explicit ``scope`` and always end in a call to ``resolve``/
+``resolve_full``, so a tampered manifest is refused exactly as it already
+is (``MANIFEST_CORRUPT``), and there is no way to reach a read without an
+explicit, catalog-verified snapshot id underneath it.
 """
 from __future__ import annotations
 
@@ -492,6 +512,50 @@ class Repository:
         return ResolvedSnapshot(
             contracts=tuple(contracts.values()), objects=tuple(objects_by_id.values()),
             records=tuple(all_records), table_manifests=table_versions, snapshot=snap)
+
+    def resolve_pinned(self, scope: str) -> SnapshotRef:
+        """The ``scope``'s current pinned snapshot, exactly re-verified.
+
+        Phase 6 slice 3: the sanctioned spelling of "give me the current
+        one" for a caller that (unlike ``price_history_store``'s own
+        head-then-``resolve_full`` pattern, not yet shared) has no reason to
+        touch ``data_snapshot_heads`` itself. ``data_snapshot_heads`` is the
+        one place a snapshot becomes "current" for a scope — an explicit
+        promotion compare-and-swap (``catalog.move_head`` /
+        ``snapshot_promotion.promote``), never a timestamp comparison — so
+        this is still not the "implicit latest" this module's own docstring
+        (judgement call, "Implicit latest") says ``resolve`` deliberately
+        has none of: the scope name is explicit, and the resulting id is
+        re-verified through :meth:`resolve` exactly like any other lookup,
+        never trusted from the head row alone.
+
+        A scope with no committed head raises ``SNAPSHOT_NOT_READY`` (the
+        same code and detail shape as ``engine.v2.ops.snapshots.
+        resolve_snapshot_head``, this module's ops-layer sibling for the
+        job-planning case). There is no second source of "current" this
+        falls back to: a snapshot committed under a different scope, or one
+        this scope's head has already moved past, is never returned.
+        """
+        row = self._conn.execute(
+            "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?", (scope,)).fetchone()
+        if row is None:
+            raise errors.fail("SNAPSHOT_NOT_READY", "scope has no committed head",
+                      details={"scope": scope})
+        return self.resolve(row["snapshot_id"])
+
+    def resolve_full_pinned(self, scope: str) -> ResolvedSnapshot:
+        """``resolve_full`` on ``scope``'s current pinned snapshot.
+
+        Same head lookup and ``SNAPSHOT_NOT_READY`` refusal as
+        :meth:`resolve_pinned`; see there for why this is not an "implicit
+        latest".
+        """
+        row = self._conn.execute(
+            "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?", (scope,)).fetchone()
+        if row is None:
+            raise errors.fail("SNAPSHOT_NOT_READY", "scope has no committed head",
+                      details={"scope": scope})
+        return self.resolve_full(row["snapshot_id"])
 
     def latest_dataset_version(self, contract_id: str):
         """The newest committed dataset version for ``contract_id``, independent
