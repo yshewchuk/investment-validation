@@ -191,7 +191,10 @@ with another heavy job (§7):
         --evidence-dir reports/phase6_evidence/route_probe
 
 It requests GET routes only; every declared POST route is listed in the
-receipt as `skipped_post` and is never requested. The token is read **only**
+receipt as `skipped_post` and is never requested. `GET /release/current` is an
+expected same-origin redirect (the documented 302 to the pinned release's
+`index.html`): the probe records that 302 without following it, and only a
+same-origin `Location` counts as a pass. The token is read **only**
 from the `V2_PROBE_TOKEN` environment variable and is never written to the
 receipt or any log — never pass it on the command line. The receipt's
 `generated_at` must fall inside the same session window, or the completeness

@@ -7,8 +7,10 @@ stub. Only GET routes are requested; every declared POST route must appear in
 the receipt as ``skipped_post`` and must never reach its server callback.
 ``/release/current`` is a documented 302 redirect: the probe records that 302
 as the route's own result and never follows it, so the bearer token is never
-re-sent to the URL its ``Location`` header names. The bearer token comes only
-from ``V2_PROBE_TOKEN`` and never appears in a receipt.
+re-sent to the URL its ``Location`` header names. That 302 passes only because
+its ``Location`` is same-origin; a cross-origin 302 there, or any 3xx on
+another route, fails. The bearer token comes only from ``V2_PROBE_TOKEN`` and
+never appears in a receipt.
 """
 from __future__ import annotations
 
@@ -62,6 +64,32 @@ def _stop(server, thread):
     server.server_close()
 
 
+def _serve_redirecting(redirect_path, location):
+    """A stub origin: 302 on one path, 200 on every other GET route."""
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == redirect_path:
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = (b'{"release_id": "r1"}'
+                    if self.path == "/release/current.json" else b"ok")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"http://127.0.0.1:{server.server_port}"
+
+
 def _probe(tmp_path, base, *, session="s1"):
     return probe_mod.probe(base_url=base, session=session,
                            evidence_dir=tmp_path / "evidence")
@@ -73,6 +101,8 @@ def _key(row):
 
 def _ok(row):
     status = row.get("status")
+    if row.get("expected_redirect") is True and isinstance(status, int) and 300 <= status < 400:
+        return True
     return isinstance(status, int) and 200 <= status < 300
 
 
@@ -90,7 +120,7 @@ def test_probe_reaches_every_declared_get_route_and_writes_the_receipt(tmp_path)
     assert receipt["schema_version"] == "route_probe_receipt.v1.0"
     assert receipt["session"] == "s1"
     assert receipt["generated_at"]
-    assert receipt["all_2xx"] is False
+    assert receipt["all_2xx"] is True
     rows = {_key(row): row for row in receipt["routes"]}
     for route in route_table():
         row = rows[(route["method"], route["path"])]
@@ -108,10 +138,12 @@ def test_probe_reaches_every_declared_get_route_and_writes_the_receipt(tmp_path)
                 assert row["status"] == 302, route
             else:
                 assert _ok(row), (route, row)
-    # Documented non-200: /release/current's 302 is recorded as the route's
-    # own result and never followed, so the bearer token is never re-sent to
-    # the URL its Location header names.
+    # /release/current's 302 is recorded as the route's own result and never
+    # followed; it passes as an expected same-origin redirect, so the token is
+    # never re-sent to the URL its Location header names.
     assert rows[("GET", "/release/current")]["status"] == 302
+    assert rows[("GET", "/release/current")]["location"] == "/release/r1/index.html"
+    assert rows[("GET", "/release/current")]["expected_redirect"] is True
     assert calls == []
     written = tmp_path / "evidence" / "s1-route_probe.json"
     assert json.loads(written.read_text()) == receipt
@@ -189,6 +221,36 @@ def test_redirect_is_recorded_not_followed_and_the_token_is_not_resent(tmp_path)
     assert receipt["all_2xx"] is False
 
 
+def test_expected_redirect_to_a_cross_origin_location_is_a_failure(tmp_path):
+    server, thread, base = _serve_redirecting(
+        "/release/current", "http://127.0.0.1:1/elsewhere")
+    try:
+        receipt = _probe(tmp_path, base, session="s11")
+    finally:
+        _stop(server, thread)
+
+    rows = {_key(row): row for row in receipt["routes"]}
+    current = rows[("GET", "/release/current")]
+    assert current["status"] == 302
+    assert current["location"] == "http://127.0.0.1:1/elsewhere"
+    assert "expected_redirect" not in current
+    assert receipt["all_2xx"] is False
+
+
+def test_same_origin_redirect_on_an_unexpected_route_is_a_failure(tmp_path):
+    server, thread, base = _serve_redirecting("/health.json", "/health.json")
+    try:
+        receipt = _probe(tmp_path, base, session="s12")
+    finally:
+        _stop(server, thread)
+
+    rows = {_key(row): row for row in receipt["routes"]}
+    health = rows[("GET", "/health.json")]
+    assert health["status"] == 302
+    assert "expected_redirect" not in health
+    assert receipt["all_2xx"] is False
+
+
 def test_probe_fails_closed_when_the_base_path_does_not_exist(tmp_path):
     server, thread, base, _ = _serve(tmp_path)
     try:
@@ -211,7 +273,7 @@ def test_one_missing_route_is_a_failure_with_per_route_detail(tmp_path):
 
     assert receipt["all_2xx"] is False
     failed = {_key(row) for row in receipt["routes"] if _probed(row) and not _ok(row)}
-    assert failed == {("GET", "/release/current"), ("GET", "/release/")}
+    assert failed == {("GET", "/release/")}
 
 
 def test_main_exits_one_and_writes_a_failed_receipt(tmp_path):
@@ -238,9 +300,9 @@ def test_whatif_result_route_is_skipped_without_a_job_id(tmp_path):
     skipped = [row for row in receipt["routes"] if "skipped" in row]
     assert skipped == [{"method": "GET", "path": "/actions/whatif/",
                         "skipped": "no job id in this session"}]
-    # False only because /release/current's documented 302 is recorded as-is;
-    # the skip itself is never a fabricated 2xx.
-    assert receipt["all_2xx"] is False
+    # True: /release/current's documented same-origin 302 is an expected
+    # redirect; the skip itself is never a fabricated 2xx.
+    assert receipt["all_2xx"] is True
 
 
 def test_probe_refuses_without_the_env_token(tmp_path, monkeypatch):

@@ -11,10 +11,14 @@ mutating the server. Each GET request carries the bearer token read from the
 (``<evidence-dir>/<session>-route_probe.json``) with its status, response size,
 latency and timestamp. The token is never written to the receipt or any log.
 Redirects are never followed: a 3xx is recorded as the route's own status and
-the bearer token is never re-sent to a ``Location`` URL. The probe is
-fail-closed: if any probed route does not answer 2xx, ``all_2xx`` is false,
-the failures are printed and the process exits 1 -- a 401/403/404/5xx is a
-failure here, not a security result.
+the bearer token is never re-sent to a ``Location`` URL. ``GET /release/current``
+is a documented redirect: a 3xx there passes only when its ``Location`` is
+same-origin (relative, or the probe base's scheme+host+port) and the row is
+recorded with ``expected_redirect: true``; a cross-origin 3xx there, or a 3xx
+on any other route, is a failure. The probe is fail-closed: ``all_2xx`` means
+every probed route answered 2xx or an expected same-origin redirect, otherwise
+it is false, the failures are printed and the process exits 1 -- a
+401/403/404/5xx is a failure here, not a security result.
 
 Parameterized routes are resolved to one concrete in-session path before
 probing. The resolution source is the third element the server declares on
@@ -42,6 +46,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +72,11 @@ SCHEMA_VERSION = "route_probe_receipt.v1.0"
 #: listing, and it is never written to a receipt or a log line.
 TOKEN_ENV = "V2_PROBE_TOKEN"
 
+#: Routes the server documents as redirects. A 3xx on one of these passes only
+#: when its ``Location`` is same-origin; the receipt row then carries
+#: ``expected_redirect: true``. Every other 3xx, and any cross-origin one, fails.
+EXPECTED_REDIRECTS = {("GET", "/release/current")}
+
 #: ``example_suffix_source`` values the probe knows how to resolve.
 _LITERAL_PREFIX = "literal:"
 _CURRENT_RELEASE_ID = "current-release-id"
@@ -84,6 +94,41 @@ def _now() -> str:
 def _is_2xx(row: dict) -> bool:
     status = row.get("status")
     return isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300
+
+
+def _origin(url_parts) -> tuple:
+    port = url_parts.port
+    if port is None:
+        port = 443 if url_parts.scheme.lower() == "https" else 80
+    return url_parts.scheme.lower(), (url_parts.hostname or "").lower(), port
+
+
+def _same_origin(location: str, base_url: str) -> bool:
+    """A relative reference, or a URL with the probe base's scheme/host/port."""
+    try:
+        target = urllib.parse.urlsplit(location)
+        base = urllib.parse.urlsplit(base_url)
+        if not target.scheme and not target.netloc:
+            return bool(location)
+        return _origin(target) == _origin(base)
+    except ValueError:
+        return False
+
+
+def _is_expected_redirect(row: dict, base_url: str) -> bool:
+    """An expected-redirect route answering 3xx to a same-origin ``Location``."""
+    if (row.get("method"), row.get("path")) not in EXPECTED_REDIRECTS:
+        return False
+    status = row.get("status")
+    if not isinstance(status, int) or isinstance(status, bool) or not 300 <= status < 400:
+        return False
+    location = row.get("location")
+    return isinstance(location, str) and _same_origin(location, base_url)
+
+
+def _passes(row: dict, base_url: str) -> bool:
+    """A probed row passes on 2xx or an expected same-origin redirect."""
+    return _is_2xx(row) or _is_expected_redirect(row, base_url)
 
 
 def _token_from_env() -> str:
@@ -127,17 +172,20 @@ def _request(base_url: str, path: str, method: str, token: str, *,
     started = time.perf_counter()
     status = None
     error = None
+    location = None
     payload = b""
     try:
         with opener.open(request, timeout=timeout) as response:
             payload = response.read()
             status = response.status
+            location = response.headers.get("Location")
     except urllib.error.HTTPError as exc:
         try:
             payload = exc.read()
         finally:
             exc.close()
         status = exc.code
+        location = exc.headers.get("Location")
     except (urllib.error.URLError, OSError, ValueError) as exc:
         error = str(exc)
     row = {
@@ -148,6 +196,8 @@ def _request(base_url: str, path: str, method: str, token: str, *,
         "latency_ms": round((time.perf_counter() - started) * 1000, 3),
         "requested_at": requested_at,
     }
+    if location is not None:
+        row["location"] = location
     if error is not None:
         row["error"] = error
     return row, payload
@@ -226,13 +276,17 @@ def probe(*, base_url: str, session: str, evidence_dir, timeout: float = 10.0) -
         row["declared_path"] = declared
         rows.append(row)
 
+    for row in rows:
+        if _is_expected_redirect(row, base_url):
+            row["expected_redirect"] = True
+
     receipt = {
         "schema_version": SCHEMA_VERSION,
         "session": session,
         "base_url": base_url,
         "generated_at": _now(),
         "routes": rows,
-        "all_2xx": all(_is_2xx(row) for row in rows if _probed(row)),
+        "all_2xx": all(_passes(row, base_url) for row in rows if _probed(row)),
     }
     evidence_dir = Path(evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -265,7 +319,7 @@ def main(argv=None) -> int:
         elif "skipped_post" in row:
             print(f"route-probe: SKIPPED-POST {row['method']} {row['path']}: "
                   f"{row['skipped_post']}")
-        elif not _is_2xx(row):
+        elif not _passes(row, args.base_url):
             detail = row.get("error") or f"status {row.get('status')}"
             print(f"route-probe: FAIL {row['method']} {row['path']}: {detail}",
                   file=sys.stderr)
