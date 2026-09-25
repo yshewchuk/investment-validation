@@ -35,6 +35,24 @@ publication, authority or resource behavior requires a documented impact
 decision and fresh qualification unless equivalence proves the path unchanged.
 Do not grandfather compatibility-only preview nights.
 
+## P7-1 manifest checker
+
+`checks/phase7_candidate_manifest.py` validates one candidate/authority
+manifest against schema `phase7_candidate_manifest.v1.0` (documented in the
+module docstring) by reading and hash-checking the referenced files it can
+reach, never trusting summary booleans: exact code/config identity, pinned
+data snapshot and model deployment, native job graph and consumer inventory
+refs, old and proposed schedule/writer/credential ownership with retained
+old deployment refs, and hash-verified 3B/4/5/6 phase evidence (3A preview
+evidence cannot substitute). It rejects implicit latest refs, duplicate or
+unaccounted scheduled writers/background jobs, conflicting writer ownership,
+and stale or malformed evidence. It is read-only: it never writes authority,
+production pointers, credentials or release state. A green run validates
+manifest consistency only; it is not a Phase 7 readiness claim, and the
+tests run on synthetic fixtures exclusively.
+
+    python3 checks/phase7_candidate_manifest.py MANIFEST.json [--root DIR] [--json]
+
 ## Switch and rollback protocol
 
 Before P7-4, prepare all reversible work and a concrete reviewable result.
