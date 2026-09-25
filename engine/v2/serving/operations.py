@@ -27,6 +27,7 @@ MODEL_RELEASE_VIEW_V1 = "model_release_view.v1.0"
 MODEL_RELEASE_NOT_CONFIGURED = "MODEL_RELEASE_NOT_CONFIGURED"
 MODEL_RELEASE_NOT_DEPLOYED = "MODEL_RELEASE_NOT_DEPLOYED"
 MODEL_RELEASE_POINTER_UNRESOLVED = "MODEL_RELEASE_POINTER_UNRESOLVED"
+MODEL_RELEASE_NOT_BOUND = "MODEL_RELEASE_NOT_BOUND"
 
 
 def _safe_file(root: Path, relative: str) -> Path:
@@ -107,6 +108,17 @@ def _model_release_document(root: Path) -> tuple[HTTPStatus, dict]:
     for the board release pointer. No release ever deployed and an
     unresolvable pointer are distinct, explicit refusals -- never an empty
     success.
+
+    Interim (bug C7): this document still describes the currently DEPLOYED
+    model release, not the model release the served board was actually
+    scored with -- no board release anywhere records which model release
+    scored it (see the C7 investigation hand-back), so there is nothing to
+    resolve that binding from yet. Real board binding lands with the Phase 6
+    native-scoring publication slice. Until then every branch that names a
+    release also carries ``board_binding: null`` and
+    ``board_binding_reason: MODEL_RELEASE_NOT_BOUND`` so a reader never
+    mistakes ``release_id``/``deployed_release_id`` (the DEPLOYED pointer)
+    for what the board shows.
     """
     try:
         pointer = current_pointer(root)
@@ -145,6 +157,8 @@ def _model_release_document(root: Path) -> tuple[HTTPStatus, dict]:
     return HTTPStatus.OK, {
         "schema_version": MODEL_RELEASE_VIEW_V1, "status": "deployed",
         "release_id": release.release_id, "deployment_id": release.deployment_id,
+        "deployed_release_id": release.release_id,
+        "board_binding": None, "board_binding_reason": MODEL_RELEASE_NOT_BOUND,
         "members": members,
         "dependencies": {
             "previous_release_id": pointer.previous_release_id,
@@ -177,7 +191,7 @@ async function load(){
     const j=await r.json();
     detail.textContent=JSON.stringify(j,null,2);
     if(j.status==='deployed'){
-      summary.textContent='release '+j.release_id+' (deployment '+j.deployment_id+')';
+      summary.textContent='currently DEPLOYED release '+j.release_id+' (deployment '+j.deployment_id+') -- not necessarily what the board was scored with: '+(j.board_binding||('no board binding ('+j.board_binding_reason+')'));
       summary.className='';
     } else {
       summary.textContent='no release deployed: '+(j.reason_code||'UNKNOWN');
