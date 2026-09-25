@@ -40,6 +40,19 @@ owner = "P6-2"
 notes = "build_nightly_plan refuses any mode but shadow; the graph's stages still call legacy through legacy_* actions."
 
 [[row]]
+id = "nightly-scheduling"
+area = "nightly"
+capability = "Native shadow nightly scheduling: ORATS-finality-gated trigger, retry window, missed-deadline handling"
+old = ["cron:dashboard/README.md legacy nightly line (unchanged)"]
+new = ["cli:engine/v2/ops/nightly_trigger.py", "systemd:ops/systemd/native-nightly-trigger.timer"]
+producer = "systemd timer -> nightly_trigger.run_trigger -> ops plan/submit nightly (shadow)"
+identity = "as_of date; state file reports/phase6/nightly_trigger/<as_of>.json"
+tests = ["tests/test_v2_ops_nightly_trigger.py"]
+disposition = "native"
+owner = "P6-6"
+notes = "Legacy nightly's own cron schedule is untouched; this only schedules the parallel shadow-mode qualification run."
+
+[[row]]
 id = "nightly-refresh"
 area = "nightly"
 capability = "Nightly data refresh: calendar, chains, prices, history backfill, computed moves"

@@ -56,6 +56,17 @@
 !/ui/src/**/*.tsx
 !/ui/src/**/*.css
 
+# ── ops/ (systemd units for the native nightly trigger) ──────────────────
+# The trigger's units are operational config that must ship with the code
+# (dashboard/README.md documents the install). .service/.timer are neither
+# allowed extensions nor docs, so the default-deny blocks them without an
+# explicit allowlist. Exact paths/extensions under ops/ only, so nothing else
+# under it can ride in.
+!ops/
+!ops/systemd/
+!ops/systemd/*.service
+!ops/systemd/*.timer
+
 # ── HARD BLOCKS (last rule wins — these override every allow above) ──────
 
 # credentials
