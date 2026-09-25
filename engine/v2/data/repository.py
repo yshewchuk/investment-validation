@@ -504,7 +504,7 @@ class Repository:
         with _read_only(self._conn) as conn:
             row = conn.execute(
                 "SELECT dataset_version_id FROM data_dataset_versions WHERE contract_id = ? "
-                "ORDER BY registered_at DESC, rowid DESC LIMIT 1", (contract_id,)).fetchone()
+                "ORDER BY rowid DESC LIMIT 1", (contract_id,)).fetchone()
             if row is None:
                 return None, ()
             manifest = self._manifest(conn, row["dataset_version_id"])

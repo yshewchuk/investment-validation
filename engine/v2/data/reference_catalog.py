@@ -116,7 +116,7 @@ def insert_reference_inputs(conn: sqlite3.Connection, receipt_id: str,
 
 _COMMITTED_RECEIPT_FOR_SNAPSHOT = (
     "SELECT receipt_id FROM data_import_receipts WHERE scope = ? AND status = 'committed' "
-    "AND result_snapshot_id = ? ORDER BY registered_at DESC, rowid DESC LIMIT 1"
+    "AND result_snapshot_id = ? ORDER BY rowid DESC LIMIT 1"
 )
 
 

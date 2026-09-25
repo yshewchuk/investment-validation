@@ -190,10 +190,14 @@ class Service:
     def start(self):
         if not self.lock.acquire():
             raise OpsError(make_problem("RESOURCE_UNAVAILABLE", "another supervisor holds this catalog"))
-        epoch = begin_epoch(self.conn, clock=self.clock, boot_id=self.boot, pid=os.getpid())
-        self.identity = Supervisor(epoch, self.boot)
-        fence_foreign_epochs(self.conn, epoch_id=epoch, clock=self.clock)
-        self.reconcile()
+        try:
+            epoch = begin_epoch(self.conn, clock=self.clock, boot_id=self.boot, pid=os.getpid())
+            self.identity = Supervisor(epoch, self.boot)
+            fence_foreign_epochs(self.conn, epoch_id=epoch, clock=self.clock)
+            self.reconcile()
+        except BaseException:
+            self.lock.release()
+            raise
 
     def reconcile(self):
         rows = self.conn.execute("SELECT * FROM attempts WHERE state = 'recovery_pending'").fetchall()
