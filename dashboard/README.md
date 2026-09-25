@@ -400,3 +400,42 @@ opened and looked at.
 | `quota_below_reserve` | live ops is eating the 3k/month reserve | refresh degrades to cache until the month rolls |
 | Rows badged `NO_CHAIN` | no option chain in the store for that event | expected for names outside the pulled slices |
 | CAL-P rows unscored | the scorer disables CAL-P until EXP-101/102 | by design — the evidence is for a different structure |
+
+## Native nightly trigger (systemd timer)
+
+Separate from the legacy cron line above — which is UNCHANGED and still the one
+that publishes the board — a systemd timer retries the native **shadow-mode**
+nightly qualification all night. The service plans and submits the parallel
+native DAG only once ORATS has published the as-of session, so a second heavy
+run never overlaps the legacy one.
+
+    systemctl --user enable --now native-nightly-trigger.timer     # user session
+    # system-level instead (as root; edit WorkingDirectory first):
+    cp ops/systemd/native-nightly-trigger.* /etc/systemd/system/
+    systemctl enable --now native-nightly-trigger.timer
+
+Install is an operator action; nothing in this repo enables the timer. The
+service runs, from the repo root:
+
+    python3 tools/bounded_run.py --max-rss-gb 8 --max-swap-gb 6 --cores 8 -- \
+        python3 -m engine.v2.ops.nightly_trigger
+
+The timer fires every 30 minutes unconditionally; the trigger is the only
+window/deadline authority (00:00–06:00 America/New_York by default): it probes
+ORATS once (the market-wide summaries/cores pair, never a refresh job) and
+refuses to submit while the legacy nightly's own `reports/.nightly.lock` is
+held, recording `busy_legacy` for the next tick. A `submitted` or `missed`
+date is terminal — never re-probed, never submitted twice; the receipt and
+`reports/phase6/nightly_trigger/<as-of>.json` are the P6-6 evidence. Exit code
+0 means `submitted`/`not_yet`/`busy_legacy` (retry), 1 means `missed`/`error`
+(visible in the journal). One JSON `TriggerReceipt` line is printed per run.
+
+To make a scheduled run submittable, place the qualification documents beside
+the state files: `reports/phase6/nightly_trigger/expected_population.json`
+(the planned population, a JSON list of `ticker|strategy|event_date` keys —
+its tickers are the default universe) and
+`reports/phase6/nightly_trigger/input_manifest.json` (from
+`ops capture-inputs`). Without them `ops submit` refuses the plan and the
+receipt records that refusal as `error`; the trigger never bypasses the
+planned-population gate. `--as-of YYYY-MM-DD` (default: today in
+America/New_York) and `--root .` are the only CLI options.
