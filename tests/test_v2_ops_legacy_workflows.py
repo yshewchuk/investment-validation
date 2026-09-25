@@ -1,5 +1,6 @@
 """Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28)."""
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -291,11 +292,27 @@ def test_o16_write_audit_detects_undisclosed_production_writes(tmp_path):
 
 
 def test_o16_whole_legacy_nightly_is_not_an_adapter_entry(tmp_path):
-    assert not any("nightly" in name for name in ACTION_NAMES)
-    assert not any("nightly" in name for name in registry().names())
-    with pytest.raises(OpsError):
-        legacy_action("run_nightly", {}, tmp_path)
-    with pytest.raises(OpsError, match="not audited"):
-        invoke_nightly_helper(tmp_path, "run_nightly")
-    with pytest.raises(OpsError, match="not audited"):
-        invoke_nightly_helper(tmp_path, "publish")
+    # legacy_action/invoke_nightly_helper route through
+    # legacy_adapter._rooted_import, which sets INVESTING_PLAN_ROOT as a
+    # process-wide side effect and never restores it -- even on the refusal
+    # path exercised here. Left alone, that leaks this test's tmp_path into
+    # engine.paths.ROOT for whatever module imports it next in the same
+    # process (see tests/test_v2_data_reference_inputs.py, which reads
+    # engine.models.registry's own paths.ROOT and failed exactly this way
+    # when this test ran first in a land sweep). Save/restore here, the same
+    # pattern tests/conftest.py's tmp_root fixture uses.
+    original_root_env = os.environ.get("INVESTING_PLAN_ROOT")
+    try:
+        assert not any("nightly" in name for name in ACTION_NAMES)
+        assert not any("nightly" in name for name in registry().names())
+        with pytest.raises(OpsError):
+            legacy_action("run_nightly", {}, tmp_path)
+        with pytest.raises(OpsError, match="not audited"):
+            invoke_nightly_helper(tmp_path, "run_nightly")
+        with pytest.raises(OpsError, match="not audited"):
+            invoke_nightly_helper(tmp_path, "publish")
+    finally:
+        if original_root_env is None:
+            os.environ.pop("INVESTING_PLAN_ROOT", None)
+        else:
+            os.environ["INVESTING_PLAN_ROOT"] = original_root_env
