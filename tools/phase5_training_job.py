@@ -17,7 +17,7 @@ never a prediction, target or PnL value.
 Usage::
 
     python3 tools/phase5_training_job.py --list
-    python3 tools/bounded_run.py --max-rss-gb 5.5 -- python3 -u tools/phase5_training_job.py \\
+    python3 tools/bounded_run.py --max-rss-gb 5.5 --heavy -- python3 -u tools/phase5_training_job.py \\
         --recipe size:*:champion --out /root/p5-3-runs/size-champion --plan-only
 
 Calibration recipes (``*:calibration``) need the request's fill alpha and

@@ -256,7 +256,7 @@ is stale.
 ~3 GiB resident, minutes each, **sequential, one at a time** (D6):
 
 ```text
-/usr/bin/python3 tools/bounded_run.py --max-rss-gb 6.5 --cpu-set 0-5 -- /usr/bin/python3 tools/replay_tier1.py --json
+/usr/bin/python3 tools/bounded_run.py --max-rss-gb 6.5 --heavy --cpu-set 0-5 -- /usr/bin/python3 tools/replay_tier1.py --json
 /usr/bin/python3 tools/bounded_run.py --max-rss-gb 6.5 --cpu-set 0-5 -- /usr/bin/python3 tools/replay_tier1.py --seed-defects
 ```
 

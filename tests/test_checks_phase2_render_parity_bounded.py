@@ -9,8 +9,25 @@ legacy import anywhere in this file.
 from __future__ import annotations
 
 import os
+import subprocess
 
+import checks.rearchitecture_phase2_render_parity as parity
 from checks.rearchitecture_phase2_render_parity import run_bounded
+
+
+def test_run_bounded_passes_a_resource_wait_below_its_own_timeout(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"], seen["timeout"] = command, kwargs["timeout"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(parity.subprocess, "run", fake_run)
+    parity.run_bounded(["/usr/bin/python3", "-c", "pass"], max_rss_gb=1.0,
+                       cwd=tmp_path, env=dict(os.environ), timeout=1800)
+    argv = seen["command"]
+    assert "--max-wait-s" in argv
+    assert float(argv[argv.index("--max-wait-s") + 1]) < seen["timeout"]
 
 
 def test_exceeding_a_tiny_rss_cap_is_reported_as_a_clean_137_not_a_hang(tmp_path):
