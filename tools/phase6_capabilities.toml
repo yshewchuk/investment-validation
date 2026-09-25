@@ -28,6 +28,7 @@
 
 [[row]]
 id = "nightly-orchestration"
+evidence = "job:legacy_finality"
 area = "nightly"
 capability = "Nightly orchestration: plan, universe, single-run lock, submit and supervise the EOD graph"
 old = ["cli:engine/dashboard/nightly.py", "nightly:legacy universe"]
@@ -41,6 +42,7 @@ notes = "build_nightly_plan refuses any mode but shadow; the graph's stages stil
 
 [[row]]
 id = "nightly-refresh"
+evidence = "job:incremental_refresh"
 area = "nightly"
 capability = "Nightly data refresh: calendar, chains, prices, history backfill, computed moves"
 old = ["nightly:legacy refresh", "nightly:legacy backfill", "nightly:legacy moves", "cli:engine/data/pulls/forward_calendar.py", "cli:engine/data/pulls/computed_moves.py"]
@@ -54,6 +56,7 @@ notes = "Native refresh exists but is opt-in; ops price-refresh wraps legacy pri
 
 [[row]]
 id = "nightly-features"
+evidence = "job:legacy_features"
 area = "nightly"
 capability = "Tier-3 panel and Tier-4 forecast rebuild before scoring"
 old = ["nightly:legacy tiers", "cli:engine/data/rebuild.py", "cli:engine/data/features/tier4.py"]
@@ -67,6 +70,7 @@ notes = "features is now in _DAG_STAGES/_DAG_PARENTS (between finality and score
 
 [[row]]
 id = "nightly-score"
+evidence = "job:legacy_score"
 area = "nightly"
 capability = "Score the calendar, validate refreshed inputs, and build the explorer strike ladder"
 old = ["nightly:legacy score", "nightly:legacy validate", "nightly:legacy ladder"]
@@ -80,6 +84,7 @@ notes = "P6-2 swaps legacy_score for the Phase 4 kernel with the Phase 5 frozen 
 
 [[row]]
 id = "nightly-selfcheck"
+evidence = "job:legacy_selfcheck"
 area = "nightly"
 capability = "Bundle self-check: re-score sampled board rows directly through the engine before publish"
 old = ["nightly:legacy selfcheck", "cli:engine/dashboard/selfcheck.py"]
@@ -92,6 +97,7 @@ owner = "P6-2"
 
 [[row]]
 id = "nightly-publish"
+evidence = "job:publication"
 area = "nightly"
 capability = "Atomic publication of the rendered bundle with secret scan and gates"
 old = ["nightly:legacy publish", "writer:engine/dashboard/publish.py::publish_bundle", "writer:engine/dashboard/publish.py::LocalPublisher.publish"]
@@ -105,6 +111,7 @@ notes = "Native for the local release; remote delivery is the separate export-re
 
 [[row]]
 id = "nightly-backup"
+evidence = "job:backup"
 area = "nightly"
 capability = "Nightly backup after decisions commit"
 old = ["nightly:legacy backup", "cli:tools/private_mirror.py", "writer:tools/private_mirror.py::sync"]
@@ -119,6 +126,7 @@ notes = "UD-3: the legacy --backup git push + private-mirror sync has no v2 stag
 
 [[row]]
 id = "nightly-engineering-gate"
+evidence = "job:engineering_gate"
 area = "nightly"
 capability = "Code-budget/engineering gate that withholds publication and counts the failure streak"
 old = []
@@ -134,6 +142,7 @@ notes = "v2-only protection (system design §4.7); no legacy counterpart."
 
 [[row]]
 id = "decisions-predictions"
+evidence = "job:legacy_decisions"
 area = "decisions"
 capability = "Freeze predictions before rendering (idempotent row ids, late backfilled nights flagged)"
 old = ["nightly:legacy ledger", "cli:engine/ledger.py", "cli:engine.ledger snapshot", "writer:engine/ledger.py::snapshot", "writer:engine/ledger.py::write_predictions"]
@@ -147,6 +156,7 @@ notes = "Shadow authority only; the official ledger stays legacy until Phase 7."
 
 [[row]]
 id = "decisions-validation"
+evidence = "job:legacy_decision_replay"
 area = "decisions"
 capability = "Validate decisions by replaying them from frozen inputs before commit"
 old = []
@@ -159,6 +169,7 @@ owner = "P6-3"
 
 [[row]]
 id = "decisions-supersede"
+evidence = "open"
 area = "decisions"
 capability = "Reasoned superseding entry for an immutable bad decision"
 old = ["writer:engine/ledger.py::supersede"]
@@ -172,6 +183,7 @@ notes = "Both sides are Python callables with no operator command; parity of acc
 
 [[row]]
 id = "decisions-settlement"
+evidence = "job:legacy_settlement"
 area = "decisions"
 capability = "Settle predictions whose events passed; missing finality blocks settlement"
 old = ["nightly:legacy settle", "cli:engine.ledger score", "writer:engine/ledger.py::score_outcomes"]
@@ -184,6 +196,7 @@ owner = "P6-3"
 
 [[row]]
 id = "decisions-ledger-export"
+evidence = "job:ledger_export"
 area = "decisions"
 capability = "Export canonical decisions/outcomes in the legacy ledger file format for legacy readers"
 old = ["py:engine/ledger.py::read_predictions", "py:engine/ledger.py::read_outcomes"]
@@ -196,6 +209,7 @@ owner = "P6-3"
 
 [[row]]
 id = "decisions-history-import"
+evidence = "cli:ops ledger import-history"
 area = "decisions"
 capability = "Bootstrap a catalog with the historical legacy prediction/outcome ledger"
 old = ["py:engine/ledger.py::read_predictions"]
@@ -208,6 +222,7 @@ owner = "P6-3"
 
 [[row]]
 id = "decisions-calibration"
+evidence = "cli:ops ledger calibrate"
 area = "decisions"
 capability = "Regenerate the ledger calibration report and health.json from settled predictions"
 old = ["cli:engine.ledger calibrate", "writer:engine/ledger.py::calibrate", "writer:engine/ledger.py::write_health"]
@@ -221,6 +236,7 @@ notes = "Never writes into the real (read-only) ledger/ tree; state and artifact
 
 [[row]]
 id = "decisions-status"
+evidence = "cli:ops ledger status"
 area = "decisions"
 capability = "Ledger status summary (counts, duplicates, pending settlement)"
 old = ["cli:engine.ledger status"]
@@ -236,6 +252,7 @@ notes = "duplicates/pending_settlement are v2-native additions beyond engine.led
 
 [[row]]
 id = "books-view"
+evidence = "route:GET /book"
 area = "books"
 capability = "Hypothetical book and its contrarian (declined) counterpart, with strategy/recommended filters"
 old = ["cli:engine/portfolio.py", "view:legacy #/trades/book", "control:legacy bk-f-strategy", "control:legacy bk-f-recommended"]
@@ -248,6 +265,7 @@ owner = "P6-3"
 
 [[row]]
 id = "books-funding"
+evidence = "cli:ops ledger book"
 area = "books"
 capability = "Book totals, capital per trade and funding computed against canonical records"
 old = ["cli:engine/portfolio.py"]
@@ -263,6 +281,7 @@ notes = "Totals agree with the existing accounting by construction: same build_b
 
 [[row]]
 id = "research-experiments"
+evidence = "open"
 area = "research"
 capability = "Preregistered experiment runs through evaluate(): run log, testing ledger, --no-ledger smoke"
 old = ["cli-family:experiments/*/run.py", "writer:engine/evaluate.py::evaluate", "writer:engine/evaluate.py::append_run_log"]
@@ -276,6 +295,7 @@ notes = "Only EXP-182 is onboarded; other runners run by filesystem path outside
 
 [[row]]
 id = "research-reports"
+evidence = "open"
 area = "research"
 capability = "Generated REPORT.md with figures, fill sensitivity, sample funnel and accuracy checklist"
 old = ["writer:engine/report.py::Report.write", "writer:engine/report.py::fig_equity", "writer:engine/report.py::fig_by_year", "writer:engine/report.py::fig_mc_fan", "writer:engine/report.py::fig_mc_fan_paths", "writer:engine/report.py::fig_alpha_curve", "writer:engine/report.py::fig_stress_grid", "writer:engine/report.py::fig_reliability"]
@@ -288,6 +308,7 @@ owner = "P6-2"
 
 [[row]]
 id = "research-replay"
+evidence = "exempt"
 area = "research"
 capability = "Replay selected trades on real prices through the same kernel as serving"
 old = ["py:engine/replay.py::replay"]
@@ -302,6 +323,7 @@ notes = "v2 application.replay re-scores a frozen decision; research trade repla
 
 [[row]]
 id = "research-tools"
+evidence = "cli:tools/v2_fill_quality.py"
 area = "research"
 capability = "Research data tools: real-fill pull and quality, trade table build/prune, signal screen, log diagnostics"
 old = ["cli:engine/data/pulls/polygon_fills.py", "cli:tools/fill_quality.py", "cli:engine/build_trades.py", "cli:tools/reconcile_trades.py", "cli:tools/signal_screen.py", "cli:tools/log_diagnostics.py"]
@@ -318,6 +340,7 @@ notes = "Needs a pinned v2 snapshot read path (or a declared frozen legacy-mater
 
 [[row]]
 id = "board-list"
+evidence = "route:GET /board"
 area = "board"
 capability = "Upcoming-prints board: strategy/gate/ticker filters, out-of-domain and disabled toggles, ranking"
 old = ["route:legacy-app GET /api/board", "route:legacy-app GET /api/meta", "view:legacy #/trades/board", "control:legacy f-strategy", "control:legacy f-gate", "control:legacy f-ticker", "control:legacy f-ood", "control:legacy f-disabled"]
@@ -331,6 +354,7 @@ notes = "Slice 8 landed the legacy filter set on the v2 API's `GET /api/v1/event
 
 [[row]]
 id = "board-deep-links"
+evidence = "route:GET /release/current.json"
 area = "board"
 capability = "Deep links and back/forward that reopen a view (and ticker) in a pinned release"
 old = ["view:legacy #/trades/explorer", "view:legacy #/models/modelx"]
@@ -344,6 +368,7 @@ notes = "Legacy #/trades/explorer/<TICKER> links work only through the shell fra
 
 [[row]]
 id = "board-compat-shell"
+evidence = "route:GET /"
 area = "board"
 capability = "Serve the dashboard bundle (desk server on 8711)"
 old = ["route:legacy-app MOUNT /", "cli:dashboard/earnings_app.py"]
@@ -356,6 +381,7 @@ owner = "P6-4"
 
 [[row]]
 id = "board-refresh-action"
+evidence = "route:POST /actions/refresh"
 area = "board"
 capability = "Desk action: re-run the nightly without publishing"
 old = ["route:legacy-app POST /api/refresh"]
@@ -371,6 +397,7 @@ notes = "UD-1 (keep both): the CLI stays the documented path (ops plan/ops submi
 
 [[row]]
 id = "board-adhoc-rescore"
+evidence = "job:adhoc_rescore"
 area = "board"
 capability = "Desk action: ad-hoc re-score of one ticker/strategy at an off-ladder strike or expiry"
 old = ["route:legacy-app GET /api/score"]
@@ -388,6 +415,7 @@ notes = "UD-2 (keep both): `ops rescore` prints score_one's canonical record for
 
 [[row]]
 id = "strategy-derivation"
+evidence = "route:GET /derivation.json"
 area = "strategy"
 capability = "Strategy definitions and per-row derivation (gate terms, thresholds, worked example)"
 old = ["view:legacy #/models/derivation", "control:legacy d-strategy", "control:legacy d-row"]
@@ -401,6 +429,7 @@ notes = "Compat shell path `view:legacy #/models/derivation` is retired from thi
 
 [[row]]
 id = "strategy-score-detail"
+evidence = "open"
 area = "strategy"
 capability = "Per-event strategy scores, refusal codes, legs/order ticket and payoff"
 old = ["route:legacy-app GET /api/ticker/{sym}"]
@@ -414,6 +443,7 @@ notes = "Replace the bridge's legacy-score input with the canonical projection."
 
 [[row]]
 id = "strategy-explorer"
+evidence = "route:GET /explorer"
 area = "strategy"
 capability = "Explorer: strike grid for a ticker, detail and order ticket"
 old = ["view:legacy #/trades/explorer", "control:legacy x-ticker"]
@@ -428,6 +458,7 @@ owner = "P6-4"
 
 [[row]]
 id = "models-evidence-stage"
+evidence = "job:legacy_model_evidence"
 area = "models"
 capability = "Build the model-evidence payload (per-feature stats, scatter samples) nightly"
 old = ["nightly:legacy model_evidence", "cli:engine/dashboard/model_evidence.py", "writer:engine/dashboard/model_evidence.py::build_model_evidence"]
@@ -440,6 +471,7 @@ owner = "P6-2"
 
 [[row]]
 id = "models-explorer"
+evidence = "route:GET /models"
 area = "models"
 capability = "Model explorer: model/feature pickers, inputs, shape and caveats"
 old = ["view:legacy #/models/modelx", "control:legacy m-model", "control:legacy m-feature"]
@@ -452,6 +484,7 @@ owner = "P6-4"
 
 [[row]]
 id = "models-release-page"
+evidence = "route:GET /models/release.json"
 area = "models"
 capability = "Show the deployed model release (ids, folds, dependencies) matching the scores on the board"
 old = []
@@ -465,6 +498,7 @@ notes = "System design §11 Evidence/recovery: matching deployment/model page. /
 
 [[row]]
 id = "models-training"
+evidence = "job:training"
 area = "models"
 capability = "Retrain current model roles and register candidates"
 old = ["cli:engine/models/training/train_all.py", "cli:tools/build_chooser_pool.py"]
@@ -480,6 +514,7 @@ notes = "Phase 5 owns the lifecycle; P6-2 wires it as an ops job."
 
 [[row]]
 id = "history-analogs"
+evidence = "route:GET /explorer"
 area = "history"
 capability = "Historical prints and analog list for a ticker"
 old = ["route:legacy-app GET /api/ticker/{sym}", "view:legacy #/trades/explorer"]
@@ -495,6 +530,7 @@ notes = "v2 projections carry only n_analogs/win_analog-style fields; the histor
 
 [[row]]
 id = "operations-flags"
+evidence = "route:GET /flags"
 area = "operations"
 capability = "Flags: gate triggers, date changes/conflicts, calibration drift, staleness, quota reserve"
 old = ["nightly:legacy flags", "route:legacy-app GET /api/flags"]
@@ -507,6 +543,7 @@ owner = "P6-4"
 
 [[row]]
 id = "operations-finality"
+evidence = "job:legacy_finality"
 area = "operations"
 capability = "Resolve the final session and covered tickers before scoring/settlement"
 old = ["nightly:legacy finality"]
@@ -519,6 +556,7 @@ owner = "P6-2"
 
 [[row]]
 id = "operations-health"
+evidence = "route:GET /health.json"
 area = "operations"
 capability = "Health: ops liveness document, selfcheck result, job and publication health"
 old = ["route:legacy-app GET /api/health", "view:legacy #/models/health"]
@@ -532,6 +570,7 @@ notes = "Ops liveness (`GET /health.json`, operations_health.v1.0, built by engi
 
 [[row]]
 id = "operations-model-calibration-health"
+evidence = "route:GET /calibration-health.json"
 area = "operations"
 capability = "Model/calibration health (brier skill, settlement diagnostics, champion versions)"
 old = ["route:legacy-app GET /api/health", "view:legacy #/models/health"]
@@ -545,6 +584,7 @@ notes = "Producer is decisions-calibration (`calibrate`, engine/v2/ledger/calibr
 
 [[row]]
 id = "operations-quotas"
+evidence = "route:GET /release/current"
 area = "operations"
 capability = "Provider quota state and reserve"
 old = ["py:engine/dashboard/render.py::quota_state"]
@@ -558,6 +598,7 @@ notes = "The displayed quota comes from the legacy store; v2 account-level budge
 
 [[row]]
 id = "operations-jobs"
+evidence = "cli:ops get"
 area = "operations"
 capability = "Job inspection and control: get, logs, explain, cancel, resume, reconcile"
 old = ["py:engine/dashboard/nightly.py::single_run_lock"]
@@ -573,6 +614,7 @@ notes = "Legacy had only a lock and a run report; browser job buttons are post-c
 
 [[row]]
 id = "export-bundle"
+evidence = "job:legacy_render"
 area = "export"
 capability = "Render the self-contained bundle (.json + .js wrappers, opens from file://)"
 old = ["nightly:legacy render", "writer:engine/dashboard/render.py::render_bundle"]
@@ -586,6 +628,7 @@ notes = "The open 'is tools/v2_dashboard_verified_input.py still part of the rea
 
 [[row]]
 id = "export-offline-file"
+evidence = "cli:tools/v2_dashboard_offline_file.py"
 area = "export"
 capability = "Offline single-file export of a pinned release (phone without network)"
 old = ["writer:engine/dashboard/render.py::write_single_file"]
@@ -599,6 +642,7 @@ notes = "Not a scrape of a live dashboard: it reads the pinned v2 release direct
 
 [[row]]
 id = "export-remote-delivery"
+evidence = "route:GET /"
 area = "export"
 capability = "Authenticated remote snapshot for phone access (Cloudflare Access), with access probe"
 old = ["nightly:legacy publish", "doc:dashboard/README.md"]
@@ -612,6 +656,7 @@ notes = "Closes the dashboard-bind-all-interfaces gap for v2: app-level bearer-t
 
 [[row]]
 id = "export-restore-drill"
+evidence = "cli:tools/v2_restore_drill.py"
 area = "export"
 capability = "Restore a deployment from backup, replay an original score offline, reconcile ledger/report"
 old = ["doc:RECOVERY.md"]
@@ -627,6 +672,7 @@ notes = "UD-3: local backup only, never pushes (git push / private-mirror stays 
 
 [[row]]
 id = "dormant-sep2026-pull"
+evidence = "exempt"
 area = "research"
 capability = "One-time Sep-2026 ORATS pull plan and T-2 decision-chain arms"
 old = ["cli:engine/data/pulls/sep2026_plan.py"]
@@ -640,6 +686,7 @@ active = false
 
 [[row]]
 id = "dormant-orats-cache-migration"
+evidence = "exempt"
 area = "research"
 capability = "One-shot import of old ORATS strike pulls into the Tier-1 cache"
 old = ["cli:tools/migrate_orats_cache.py"]
