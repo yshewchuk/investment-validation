@@ -174,14 +174,14 @@ def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
     assert ran["spec_hash"] == planned_hash, "planned and ran rows must join"
     assert float(ran["oos_mean_mid"]) == pytest.approx(0.02)
     assert float(ran["sharpe_trade"]) == pytest.approx(1.5)
-    assert ran["notes"] == ""
+    assert "notes" not in frame.columns, "the legacy ledger format stays at 7 columns"
     assert not (ops / "experiments").exists()
 
 
 def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(tmp_path):
     """Review fix item 5: no results JSON -> empty headline columns, the
-    optional notes column records metrics_source, and the durable run's
-    evidence keeps the same fact for a pre-existing 7-column ledger."""
+    legacy ledger keeps its fixed 7 columns, and the durable run's evidence
+    records ``metrics_source: unavailable``."""
     checkout, spec_path, ledger, _planned_hash = _tiny_checkout(tmp_path, with_metrics=False)
     document = json.loads(spec_path.read_text())
     spec = experiments.experiment_spec_from_document(document)
@@ -202,7 +202,7 @@ def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(t
         ran = lib.ledger_read(ledger).fillna("").iloc[-1]
         assert ran["stage"] == "ran"
         assert ran["oos_mean_mid"] == "" and ran["sharpe_trade"] == ""
-        assert ran["notes"] == "metrics_source: unavailable"
+        assert "notes" not in lib.ledger_read(ledger).columns
         evidence = json.loads(conn.execute(
             "SELECT evidence_json FROM experiment_runs WHERE run_id=?",
             (run_id,)).fetchone()[0])

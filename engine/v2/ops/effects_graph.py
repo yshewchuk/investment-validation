@@ -908,15 +908,15 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
     runner's ``spec.yaml`` computed by the same
     :func:`experiments.legacy_spec_hash` the PLANNED row used, so planned
     and ran rows join. The runner's own results JSON supplies the headline
-    metrics; when it did not write them the columns stay empty and the row's
-    optional ``notes`` column records ``metrics_source: unavailable`` (also
-    kept on the durable run's evidence, since a pre-existing 7-column ledger
-    has no notes column to write).
+    metrics; when it did not write them the columns stay empty and the fact
+    is recorded on the durable run's evidence as
+    ``metrics_source: unavailable`` (the legacy ledger format stays at its
+    fixed 7 columns).
     """
     from datetime import datetime, timezone
 
     from engine.v2.ops.experiments import experiments_ledger_path, registered_spec_hash
-    from experiments.lib import LEDGER_COLUMNS, LEDGER_OPTIONAL_COLUMNS, ledger_append
+    from experiments.lib import LEDGER_COLUMNS, ledger_append
 
     ledger = experiments_ledger_path(checkout_root)
     if _ran_row_exists(ledger, spec.experiment_id):
@@ -927,9 +927,7 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
            "spec_hash": registered_spec_hash(checkout_root, spec) or "",
            "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
            "stage": "ran", "oos_mean_mid": mean, "sharpe_trade": sharpe,
-           "promoted": "False",
-           "notes": "" if available else "metrics_source: unavailable"}
-    columns = [*LEDGER_COLUMNS, *LEDGER_OPTIONAL_COLUMNS]
-    ledger_append([{name: row.get(name, "") for name in columns}], path=ledger)
+           "promoted": "False"}
+    ledger_append([{name: row.get(name, "") for name in LEDGER_COLUMNS}], path=ledger)
     if not available:
         _mark_metrics_source(conn, run_id, "unavailable")
