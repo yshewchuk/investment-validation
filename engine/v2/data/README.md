@@ -71,7 +71,9 @@ is an ordinary downward import, never the reverse. The serving-side
 `(ticker, event_date) -> EventRef` resolver is built entirely on
 `Repository.scan`, never a raw parquet read.
 
-<!-- consumers: engine.v2.ops, engine.v2.serving -->
+`engine.v2.research` — research tools reading pinned snapshots (Phase 6 slice 6).
+
+<!-- consumers: engine.v2.ops, engine.v2.serving, engine.v2.research -->
 
 ## Usage
 
