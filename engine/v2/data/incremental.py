@@ -45,6 +45,7 @@ from engine.v2.foundation import (
     artifact_reference,
     canonical_json,
     content_hash,
+    ensure_directory,
     format_timestamp,
     from_document,
     to_document,
@@ -62,6 +63,7 @@ __all__ = [
     "cache_normalization",
     "cache_raw_receipt",
     "commit_daily_market_candidate",
+    "run_daily_market_refresh",
     "run_incremental_refresh",
     "daily_market_logical_key",
     "load_daily_market_rows",
@@ -73,6 +75,7 @@ __all__ = [
 RAW_SCHEMA_REF = "incremental_raw.v1"
 NORMALIZED_SCHEMA_REF = "daily_market_revisions.v1"
 TABLE_NAME = "daily_market"
+FETCH_SOURCE = "daily_market"
 MAX_STAGED_INPUT_BYTES = 64 << 20
 MAX_STAGED_PAYLOADS = 4096
 MAX_RAW_PAYLOAD_BYTES = 32 << 20
@@ -980,6 +983,185 @@ def commit_daily_market_candidate(conn: Any, store: ArtifactStore,
         record_references=lambda c, rid: _record_candidate_references(
             c, rid, candidate, clock),
         audit_partitions=True)
+
+
+def run_daily_market_refresh(parameters, root, *, fetcher=None):
+    """Fetch a planned daily_market refresh, then commit it through the worker path.
+
+    The attempt's staging directory carries the identity document the executor
+    wrote (``engine.v2.ops.refresh_staging.stage_refresh_input``) plus the bound
+    ``refresh_plan.json``. Each planned fetch unit is acquired exactly once
+    through ``fetcher(unit) -> (raw_bytes, response_kind, response_meta,
+    ticker_rows)`` -- the sole network edge and the sole test seam. The default
+    fetcher is resolved lazily so importing this module never imports a
+    provider client; a live provider adapter is a separate slice. Acquired
+    evidence is appended to the same document in place and the unchanged
+    :func:`run_incremental_refresh` performs the commit.
+    """
+    path = root / "incremental_refresh_input.json"
+    if not path.is_file():
+        return run_incremental_refresh(parameters, root)
+    document = json.loads(path.read_text())
+    if not document.get("catalog_path"):
+        return run_incremental_refresh(parameters, root)
+    if not document.get("coverage"):
+        _acquire_refresh_units(parameters, root, document, fetcher)
+        path.write_text(canonical_json(document))
+    return run_incremental_refresh(parameters, root)
+
+
+@dataclass(frozen=True, kw_only=True)
+class _FetchedUnit:
+    """One fetch unit's staged evidence, ready to merge into the input document."""
+
+    raw_payload: dict
+    revisions: tuple[dict, ...]
+    expected: tuple[CoverageKey, ...]
+    outcomes: tuple[CoverageOutcome, ...]
+    receipt_id: str
+
+
+def _load_refresh_plan_document(root):
+    path = root / "refresh_plan.json"
+    if not path.is_file():
+        raise errors.fail("INPUT_CHANGED", "refresh plan document is missing from staging")
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        raise errors.fail("INPUT_CHANGED", "refresh plan document is malformed") from None
+    if not isinstance(document, dict):
+        raise errors.fail("INPUT_CHANGED", "refresh plan document is malformed")
+    return document
+
+
+def _acquire_refresh_units(parameters, root, document, fetcher):
+    plan = _load_refresh_plan_document(root)
+    units = tuple(plan.get("fetch_units", ()))
+    if not units:
+        raise errors.fail("INPUT_CHANGED", "refresh plan has no fetch units to acquire")
+    fetch_root = str(document["fetch_root"])
+    conn = catalog.sqlite3.connect(str(document["catalog_path"]))
+    conn.row_factory = catalog.sqlite3.Row
+    try:
+        store = ArtifactStore(str(document["objects_root"]))
+        contract = _parent_daily_market_contract(conn, parameters.parent_snapshot_id)
+        resolved = fetcher or _load_daily_market_fetcher()
+        fetched = tuple(_fetch_unit(conn, store, fetch_root, contract, unit, resolved)
+                        for unit in units)
+    finally:
+        conn.close()
+    _merge_fetched_units(document, contract, fetched)
+
+
+def _parent_daily_market_contract(conn, parent_snapshot_id):
+    parent = repository.Repository(conn).resolve_full(parent_snapshot_id)
+    contract = next((item for item in parent.contracts if item.table_name == TABLE_NAME), None)
+    if contract is None:
+        raise errors.fail("CONTRACT_MISMATCH", "parent snapshot has no daily_market contract")
+    return contract
+
+
+def _fetch_unit(conn, store, fetch_root, contract, unit, fetcher):
+    raw_bytes, response_kind, response_meta, ticker_rows = fetcher(unit)
+    if response_kind not in ("complete", "legitimate_empty"):
+        raise errors.fail("TRANSIENT_SOURCE", "daily_market provider response was not complete")
+    request = {
+        "request_id": str(unit["request_id"]),
+        "table_name": str(unit["table_name"]),
+        "partition_key": str(unit["partition_key"]),
+        "keys": [str(key) for key in unit.get("expected_keys", ())],
+    }
+    received_at = format_timestamp(SystemClock().now())
+    _cache_fetched_bytes(fetch_root, request["request_id"], raw_bytes)
+    record = cache_raw_receipt(
+        conn, store,
+        RawPayload(payload=raw_bytes, response_kind=response_kind,
+                   response_meta=dict(response_meta)),
+        source=FETCH_SOURCE, endpoint=request["table_name"], request=request,
+        received_at=received_at)
+    revisions = tuple(
+        _fetched_revision(contract, unit, row, record.raw_receipt_id, received_at)
+        for row in ticker_rows)
+    return _FetchedUnit(
+        raw_payload={"payload": raw_bytes.decode(), "response_kind": response_kind,
+                     "response_meta": dict(response_meta), "source": FETCH_SOURCE,
+                     "endpoint": request["table_name"], "request": request,
+                     "received_at": received_at},
+        revisions=tuple(_revision_document(item) for item in revisions),
+        expected=tuple(_coverage_key(item) for item in revisions),
+        outcomes=tuple(_coverage_outcome(item, record.raw_receipt_id) for item in revisions),
+        receipt_id=record.raw_receipt_id)
+
+
+def _fetched_revision(contract, unit, row, raw_receipt_id, received_at):
+    canonical = _canonical_row(contract, row)
+    ticker = str(canonical["ticker"])
+    session_date = _session_date(canonical["date"])
+    content = revision_content_hash(ticker=ticker, session_date=session_date,
+                                    row=canonical, deleted=False)
+    revision_id = "rev_" + content_hash({
+        "unit": str(unit["request_id"]), "ticker": ticker,
+        "session_date": session_date}).removeprefix(CONTENT_HASH_PREFIX)[:32]
+    candidate = RevisionCandidate(
+        revision_id=revision_id,
+        logical_key=daily_market_logical_key(ticker, session_date),
+        source=FETCH_SOURCE, source_priority=0, finality="final",
+        revision_ordinal=1, received_at=received_at, content_hash=content)
+    return DailyMarketRevision(
+        candidate=candidate, ticker=ticker, session_date=session_date, row=canonical,
+        deleted=False, raw_receipt_id=raw_receipt_id, normalization_id="pending")
+
+
+def _coverage_key(revision):
+    return CoverageKey(item_key=revision.candidate.logical_key,
+                       session_date=revision.session_date, ticker=revision.ticker)
+
+
+def _coverage_outcome(revision, receipt_id):
+    return CoverageOutcome(
+        key=_coverage_key(revision), status="present", receipt_id=receipt_id,
+        revision_id=revision.candidate.revision_id, finality="final")
+
+
+def _fetched_coverage(contract, fetched):
+    expected = tuple(key for item in fetched for key in item.expected)
+    sessions = sorted(key.session_date for key in expected)
+    if not sessions:
+        raise errors.fail("INPUT_CHANGED", "daily_market fetch returned no ticker rows")
+    interval = TimeInterval(column="date", start_inclusive=sessions[0],
+                            end_exclusive=sessions[-1] + "T23:59:59")
+    return build_completed_coverage(
+        TableContractRef(contract_id=contract.contract_id,
+                         definition_hash=contract.definition_hash),
+        source=FETCH_SOURCE, endpoint=TABLE_NAME, interval=interval, expected=expected,
+        outcomes=tuple(outcome for item in fetched for outcome in item.outcomes),
+        acquisition_receipt_refs=tuple(item.receipt_id for item in fetched),
+        completed_at=format_timestamp(SystemClock().now()))
+
+
+def _merge_fetched_units(document, contract, fetched):
+    document["raw_payloads"] = [item.raw_payload for item in fetched]
+    document["incoming_revisions"] = [revision for item in fetched
+                                      for revision in item.revisions]
+    document["coverage"] = to_document(_fetched_coverage(contract, fetched))
+
+
+def _cache_fetched_bytes(fetch_root, request_id, raw_bytes):
+    ensure_directory(fetch_root)
+    digest = content_hash({"request_id": request_id}).removeprefix(CONTENT_HASH_PREFIX)[:32]
+    with open(f"{fetch_root.rstrip('/')}/fetch_{digest}.raw", "wb") as stream:
+        stream.write(raw_bytes)
+
+
+def _load_daily_market_fetcher():
+    """Resolve the production provider adapter lazily; S4A wires the seam only.
+
+    Picking and authenticating a live daily_market provider is a separate
+    slice, so the default fails closed rather than silently reading a legacy
+    cache. Tests and the future adapter pass ``fetcher`` explicitly.
+    """
+    raise errors.fail("RESOURCE_UNAVAILABLE",
+                      "no daily_market provider adapter is configured")
 
 
 def run_incremental_refresh(parameters, root):

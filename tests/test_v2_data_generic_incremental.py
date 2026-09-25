@@ -391,7 +391,10 @@ def test_generic_refresh_worker_commits_json_timestamp_rows(tmp_path, table_name
             expected_ids=("request-" + table_name,),
             parent_snapshot_id=parent.snapshot_id,
             refresh_plan_hash=plan_hash,
-            provider_calls=0,
+            provider_calls=0, catalog_path=str(tmp_path / "ops.sqlite"),
+            objects_root=str(tmp_path / "objects"), scope="generic-worker",
+            expected_head_generation=1,
+            expected_head_snapshot_id=parent.snapshot_id, table_name=table_name,
         ),
         root,
     )
