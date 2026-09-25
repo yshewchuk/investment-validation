@@ -170,7 +170,7 @@ jobs:
           set -euo pipefail
           date +%s > "$RUNNER_TEMP/mutation-start"
           set +e
-          if [ "$MODE" = "incremental" ]; then BUDGET=$((55 * 60)); else BUDGET=$((325 * 60)); fi
+          if [ "$MODE" = "incremental" ]; then BUDGET=$((52 * 60)); else BUDGET=$((322 * 60)); fi
           python -u tools/mutation_pilot.py run "$MODULE" --max-children "$(nproc)" --time-budget-seconds "$BUDGET"
           echo "$?" > "$RUNNER_TEMP/mutation-rc"
           set -e
@@ -210,8 +210,8 @@ jobs:
         if: always() && steps.key.outcome == 'success'
         run: |
           rc=$(cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1)
-          if [ "$rc" = "-1" ] && [ "$MODE" = "incremental" ]; then
-            echo "::notice::mutmut run hit the per-push time box; module is INCOMPLETE (TIMEOUT_KILL), not a tool error"
+          if [ "$rc" = "124" ] && [ "$MODE" = "incremental" ]; then
+            echo "::notice::mutmut run hit the per-push time box; module is INCOMPLETE (TIME_BUDGET_STOP), not a tool error"
             exit 0
           fi
           if [ "$rc" != 0 ]; then echo "::error::mutmut run exited $rc"; exit 1; fi

@@ -337,11 +337,15 @@ def cmd_count(cfg: dict, args) -> int:
 # its time budget ran out -- the SAME value the CI export step's own fallback
 # (`cat mutation-rc 2>/dev/null || echo -1`) already writes when GitHub's step
 # timeout kills the whole step before the "echo $?" line can run. Reusing -1
-# means mutation_results.py's existing TIMEOUT_KILL handling (partial results,
-# a withheld score, the module named in `failed_run_modules`) needs no new
-# code path: a clean in-script stop and a raw step-timeout kill are the same
-# event -- "ran out of allotted time" -- reported identically downstream.
-TIME_BUDGET_STOP_RC = -1
+# 124, not -1: the exit code is written to a shell file and re-read as text
+# (mutation-rc in the workflow), where -1 is already claimed for "no rc file at
+# all" (a missing or GitHub-killed step, via `|| echo -1`) -- an ambiguity a
+# clean stop must not share. 124 matches coreutils `timeout`'s own convention
+# for "the command was still running when the time budget expired" and gives
+# mutation_results.py's TIME_BUDGET_STOP handling (partial results, a withheld
+# score, the module named in `failed_run_modules`, exempted from the gate only
+# in incremental mode) an unambiguous code of its own to key off.
+TIME_BUDGET_STOP_RC = 124
 # How long to let mutmut's own KeyboardInterrupt unwind (stop_all_workers +
 # shutdown/drain of the fork server, per mutmut/__main__.py's `run` command)
 # after SIGINT before concluding it is stuck and escalating to SIGKILL.
@@ -382,7 +386,7 @@ def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float)
     try:
         real_rc = proc.wait(timeout=SIGINT_GRACE_SECONDS)
         print(f"[mutation_pilot] mutmut stopped cleanly after SIGINT (its own exit code "
-              f"{real_rc}); reporting {TIME_BUDGET_STOP_RC} (TIME BUDGET, not a tool error)",
+              f"{real_rc}); reporting {TIME_BUDGET_STOP_RC} (TIME_BUDGET_STOP, not a tool error)",
               flush=True)
     except subprocess.TimeoutExpired:
         print(f"[mutation_pilot] mutmut did not exit within {SIGINT_GRACE_SECONDS}s of SIGINT; "
@@ -538,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-children", type=int, default=None)
     p.add_argument("--time-budget-seconds", type=float, default=None,
                    help="stop mutmut cleanly (SIGINT) after this many seconds instead of "
-                        "letting it run unbounded; returns TIME_BUDGET_STOP_RC (-1)")
+                        "letting it run unbounded; returns TIME_BUDGET_STOP_RC (124)")
     p.add_argument("--fresh", action="store_true", help="delete the work copy and its results first")
     p = sub.add_parser("report")
     p.add_argument("modules", nargs="*")
