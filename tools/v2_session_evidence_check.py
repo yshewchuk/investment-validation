@@ -5,16 +5,19 @@ Each Phase 6 capability row declares, in ``tools/phase6_capabilities.toml``,
 the one real artifact that counts as its evidence:
 
 * ``job:<kind>`` -- a succeeded attempt of that job kind whose ``started_at``
-  falls inside the session window; when no attempt matches, a delivered
-  ``outbox`` row of the same kind (the outbox table has no timestamp column,
-  so that fallback is reported with ``window_checked: false``);
+  falls inside the session window; a delivered ``outbox`` row is NEVER
+  evidence (the outbox table carries no timestamp at all, so it can never be
+  tied to the session);
 * ``route:<METHOD> <path>`` -- a 2xx row for that method/path in this
   session's own route-probe receipt
-  (``<evidence-dir>/route_probe/<session>-route_probe.json``);
+  (``<evidence-dir>/route_probe/<session>-route_probe.json``), whose
+  ``generated_at`` ALSO falls inside the same session window;
 * ``cli:<tool>`` -- a resource-measurement record under
-  ``<evidence-dir>/resource_measurement/`` whose ``command`` names that tool,
-  whose ``exit_code`` is 0, that was not killed, and that started inside the
-  window;
+  ``<evidence-dir>/resource_measurement/`` whose ``command`` starts with that
+  tool's own tokens (after normalising ``python3``/``-m`` and ``tools/``),
+  whose ``exit_code`` is 0, that was not killed, that is not a
+  ``-h``/``--help``/``--version`` run, and that started inside the window; a
+  list value names several entries and requires EVERY one of them;
 * ``exempt`` -- no evidence required (any ``missing``/``dormant-historical``
   disposition is exempt too);
 * ``open`` -- a known gap: reported as OPEN and it fails the verdict while any
@@ -41,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -75,7 +79,6 @@ _JOB_ATTEMPT_SQL = (
     "WHERE jobs.kind = ? AND attempts.state = 'succeeded' "
     "AND attempts.started_at BETWEEN ? AND ? LIMIT 1"
 )
-_OUTBOX_SQL = "SELECT 1 FROM outbox WHERE kind = ? AND state = 'delivered' LIMIT 1"
 
 
 def parse_instant(text: str) -> datetime:
@@ -111,22 +114,57 @@ def _is_clean_exit(record: dict) -> bool:
     return record.get("killed") is False
 
 
-def command_matches(command, tool: str) -> bool:
-    """True when ``tool`` names the recorded command's own argv.
+#: A usage or version printout is never evidence, whatever it claims to have
+#: run.
+_HELP_FLAGS = frozenset({"-h", "--help", "--version"})
+_INTERPRETER = re.compile(r"python[0-9.]*$")
 
-    ``cli:`` evidence has two shapes and neither may be guessed at: a tool path
-    (``tools/v2_fill_quality.py`` -- one argv element) and an ops subcommand
-    (``ops ledger calibrate`` -- matched token by token, in order, against
-    ``python3 -m engine.v2.ops ledger calibrate``).
+
+def _normalised_argv(command):
+    """The recorded argv with interpreter/module/``tools/`` prefixes normalised.
+
+    ``None`` when the value is not an argv list, or when the run merely printed
+    usage/version (``-h``/``--help``/``--version``): neither can be evidence.
+    ``python3``/``python3.11`` (or a path to one) is dropped, ``-m`` is
+    dropped and a dotted module reduced to its program name
+    (``engine.v2.ops`` -> ``ops``), and a leading ``tools/`` is stripped.
     """
     if not isinstance(command, list):
-        return False
+        return None
     argv = [part for part in command if isinstance(part, str)]
+    if not argv or any(part in _HELP_FLAGS for part in argv):
+        return None
+    if _INTERPRETER.fullmatch(Path(argv[0]).name):
+        argv = argv[1:]
+    if argv and argv[0] == "-m":
+        argv = argv[1:]
+        if argv and "." in argv[0] and "/" not in argv[0]:
+            argv = [argv[0].rsplit(".", 1)[-1], *argv[1:]]
+    return [part.removeprefix("tools/") for part in argv]
+
+
+def _declared_tokens(tool: str) -> list[str]:
     parts = tool.split()
-    if not parts or len(parts) > len(argv):
+    if not parts:
+        return []
+    return [parts[0].removeprefix("tools/"), *parts[1:]]
+
+
+def command_matches(command, tool: str) -> bool:
+    """True when the recorded run's own argv IS ``tool``, token for token.
+
+    ``cli:`` evidence has two shapes: a tool path (``tools/z.py``) and an ops
+    subcommand (``ops ledger calibrate``). The recorded argv is normalised
+    (interpreter and ``-m`` prefixes dropped, a dotted module reduced to its
+    program name, ``tools/`` stripped) and must then START WITH the declared
+    command's tokens exactly -- a different tool whose name merely contains
+    the declared one is not evidence, and neither is a usage/version run.
+    """
+    recorded = _normalised_argv(command)
+    if recorded is None:
         return False
-    return any(all(parts[offset] in argv[start + offset] for offset in range(len(parts)))
-               for start in range(len(argv) - len(parts) + 1))
+    declared = _declared_tokens(tool)
+    return bool(declared) and recorded[:len(declared)] == declared
 
 
 def _in_window(started_at, start: datetime, end: datetime) -> bool:
@@ -153,30 +191,25 @@ def _detail(row_id, evidence, status, source, window_checked, detail) -> dict:
 def _job_evidence(conn, kind: str, start_wire: str, end_wire: str):
     """``(covered, source, window_checked, detail)`` for one ``job:<kind>``.
 
-    Attempts first (that kind, succeeded, inside the window), then the outbox
-    (delivered effect of the same kind). The outbox table has no timestamp
-    column at all (``engine/v2/ops/schema_runtime.py``), so an outbox hit is
-    recorded with ``window_checked: false`` -- the limitation is named on the
-    row, never hidden.
+    The ONLY evidence is a succeeded attempt of that kind whose ``started_at``
+    falls inside the window. A delivered ``outbox`` row is deliberately not
+    consulted: the table carries no timestamp at all, so such a row can never
+    be tied to this session (Opus review #2 -- the old fallback counted any
+    old effect as in-window coverage).
     """
     try:
         hit = conn.execute(_JOB_ATTEMPT_SQL, (kind, start_wire, end_wire)).fetchone()
-        if hit is not None:
-            return True, "job", True, f"succeeded {kind!r} attempt inside the window"
-        hit = conn.execute(_OUTBOX_SQL, (kind,)).fetchone()
     except sqlite3.Error as exc:
         return False, "job", True, f"catalog query failed: {exc}"
     if hit is not None:
-        return True, "outbox", False, (
-            f"delivered outbox effect {kind!r}; the outbox table carries no timestamp, "
-            "so the session window was NOT checked")
-    return False, "job", True, (
-        f"no succeeded {kind!r} attempt in the window and no delivered outbox effect")
+        return True, "job", True, f"succeeded {kind!r} attempt inside the window"
+    return False, "job", True, f"no succeeded {kind!r} attempt inside the window"
 
 
-def _load_route_receipt(path: Path, session: str):
-    """``(receipt, detail)``; a receipt for another session is refused here so
-    one session's probe can never cover another's rows."""
+def _load_route_receipt(path: Path, session: str, start: datetime, end: datetime):
+    """``(receipt, detail)``; a receipt for another session, or one generated
+    outside this session's window, is refused here so one session's probe can
+    never cover another's rows (or a stale probe cover this one)."""
     try:
         document = json.loads(path.read_text())
     except FileNotFoundError:
@@ -188,6 +221,10 @@ def _load_route_receipt(path: Path, session: str):
     if document.get("session") != session:
         return None, (f"route-probe receipt {path} names session "
                       f"{document.get('session')!r}, not {session!r}")
+    generated = document.get("generated_at")
+    if not _in_window(generated, start, end):
+        return None, (f"route-probe receipt {path} was generated at "
+                      f"{generated!r}, outside the session window")
     return document, None
 
 
@@ -281,7 +318,7 @@ def check(*, session: str, window_start: str, window_end: str, catalog: Path,
     route_detail = None
     if route_needed:
         route_path = evidence_path / ROUTE_PROBE_DIR / f"{session}-route_probe.json"
-        route_receipt, route_detail = _load_route_receipt(route_path, session)
+        route_receipt, route_detail = _load_route_receipt(route_path, session, start, end)
 
     records: list[dict] = []
     unreadable: list[str] = []
@@ -310,13 +347,25 @@ def check(*, session: str, window_start: str, window_end: str, catalog: Path,
                        else f"disposition {disposition!r}")
                 details.append(_detail(row_id, declared_evidence, "exempt", None, None, why))
                 continue
-            if not isinstance(declared_evidence, str) or ":" not in declared_evidence:
+            if isinstance(declared_evidence, list):
+                entries = declared_evidence
+            elif isinstance(declared_evidence, str) and ":" in declared_evidence:
+                entries = [declared_evidence]
+            else:
                 uncovered.append(row_id)
                 details.append(_detail(row_id, declared_evidence, "uncovered", None, None,
                                        "no usable evidence field (fails closed)"))
                 continue
-            source_kind, _, argument = declared_evidence.partition(":")
-            if source_kind == "job":
+            all_ok = True
+            last_source = last_window_checked = None
+            reasons = []
+            for entry in entries:
+                if not isinstance(entry, str) or ":" not in entry:
+                    all_ok = False
+                    reasons.append(f"{entry!r}: no usable evidence field (fails closed)")
+                    continue
+                source_kind, _, argument = entry.partition(":")
+                if source_kind == "job":
                 if conn is None:
                     ok, source, window_checked = False, "job", None
                     detail = f"catalog unavailable: {catalog_error}"
