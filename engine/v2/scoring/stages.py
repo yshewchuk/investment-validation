@@ -150,6 +150,7 @@ _SIMULATION_OUTPUTS = frozenset({
 _GATE_OUTPUTS = frozenset({"gate_score", "gate_threshold", "gate_pass"})
 _ANALOG_OUTPUTS = frozenset({
     "exp_pnl_analog", "win_analog", "ci_low", "ci_high", "n_analogs",
+    "selected_row_ids", "contributing_row_ids",
 })
 #: engine/score.py:2210/2214-2216 -- the payoff-calibration/model layer.
 _MODEL_OUTPUTS = frozenset({
@@ -2245,6 +2246,8 @@ def _execute_frozen_analogs(
         "ci_low": result.ci_low,
         "ci_high": result.ci_high,
         "n_analogs": result.n_analogs,
+        "selected_row_ids": result.selected_row_ids,
+        "contributing_row_ids": result.contributing_row_ids,
     }
     values.update(output)
     return output
@@ -2319,6 +2322,8 @@ def _execute_analogs(
         "ci_low": result.ci_low,
         "ci_high": result.ci_high,
         "n_analogs": result.n_analogs,
+        "selected_row_ids": result.selected_row_ids,
+        "contributing_row_ids": result.contributing_row_ids,
     }
     values.update(output)
     return output

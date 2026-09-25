@@ -483,13 +483,13 @@ id = "history-analogs"
 area = "history"
 capability = "Historical prints and analog list for a ticker"
 old = ["route:legacy-app GET /api/ticker/{sym}", "view:legacy #/trades/explorer"]
-new = ["route:v2-ops GET /explorer", "route:v2-ops GET /release/*"]
-producer = "legacy ticker payload inside the compatibility bundle"
-identity = "compatibility bundle inside the published release_id"
-tests = ["tests/test_dashboard.py", "tests/test_analogs.py"]
+new = ["route:v2-ops GET /explorer", "route:v2-ops GET /release/*", "route:v2-ops GET /analogs", "route:v2-ops GET /analogs.json", "py:engine/v2/serving/analog_projection.py::analog_document"]
+producer = "legacy ticker payload inside the compatibility bundle; native analog row ids persisted on serving_score_summary by the scoring analog stage, projected by engine/v2/serving/analog_projection.py"
+identity = "compatibility bundle inside the published release_id; release_id + event_id for the native analog view (row ids and a count only)"
+tests = ["tests/test_dashboard.py", "tests/test_analogs.py", "tests/test_v2_serving_analogs.py", "tests/test_v2_dashboard_preview_analogs.py"]
 disposition = "compatibility-adapter"
 owner = "P6-4"
-notes = "v2 projections carry only n_analogs/win_analog-style fields; the history and analog list exist only in the legacy ticker payload."
+notes = "S9H adds the native per-event analog view: GET /analogs.json?release_id=&event_id= reads selected_row_ids/contributing_row_ids/n_analogs straight off the serving_score_summary row and returns row ids and a count only (no recomputed PnL/win-rate/CI), refusing an unknown pair as EVENT_NOT_FOUND; GET /analogs is the small page that fetches it. The legacy explorer ticker payload stays the row's compatibility path: v2 projections carry only n_analogs/win_analog-style fields; the history and analog list exist only in the legacy ticker payload."
 
 # ------------------------------------------------------------- operations
 
