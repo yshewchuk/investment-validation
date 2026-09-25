@@ -73,6 +73,11 @@ __all__ = [
     "live_window_reason",
 ]
 
+#: An unknown-duration heavy job is refused against an upcoming live window
+#: only while that window is active now or begins within this horizon; one
+#: further out leaves room to finish before it even with no estimate.
+UNKNOWN_DURATION_HORIZON = timedelta(hours=24)
+
 
 @dataclass(frozen=True)
 class ActiveReservation:
@@ -146,6 +151,49 @@ def worker_cpu_ids(policy: ResourcePolicy, sample: CapacitySample) -> list[int]:
     return sorted(sample.allowed_cpu_ids)[policy.reserved_cpu_count:]
 
 
+def _live_window_occurrences(now: datetime, start: time, end: time,
+                             weekdays: tuple[int, ...]):
+    """Yield ``(begin, finish)`` for every occurrence of one live window that
+    falls on a configured weekday and has not yet ended, scanning offsets
+    -1..+7 in increasing order (offset -1 so a window that started yesterday
+    and crosses midnight is still seen). Occurrences with ``finish <= now``
+    are skipped, so the FIRST occurrence yielded -- the one the conservative
+    unknown-duration rule anchors to -- is the first that has not ended."""
+    for offset in range(-1, 8):
+        day = now.date() + timedelta(days=offset)
+        if day.isoweekday() not in weekdays:
+            continue
+        begin = datetime.combine(day, start, tzinfo=now.tzinfo)
+        finish = datetime.combine(day, end, tzinfo=now.tzinfo)
+        if finish <= begin:
+            finish += timedelta(days=1)
+        if finish <= now:
+            continue
+        yield begin, finish
+
+
+def _live_window_overlap_reason(profile: ResourceProfile, now: datetime, begin: datetime,
+                                finish: datetime, *, first: bool) -> QueueReason | None:
+    """The refusal for one occurrence, or ``None`` if this profile can't touch
+    it. A job overlaps when it can still be running when the window opens; a
+    heavy job with no duration estimate is refused only against the FIRST
+    not-yet-ended occurrence (``first``), since its length is unknown, and
+    only while that occurrence is active now or begins within
+    ``UNKNOWN_DURATION_HORIZON`` -- a window further out leaves room to
+    finish before it even without an estimate."""
+    estimate = profile.estimated_seconds
+    completion = now + timedelta(seconds=estimate or 0)
+    overlaps = now < finish and completion > begin
+    unknown_heavy = (first and profile.heavy and estimate is None and now < finish
+                     and begin - now <= UNKNOWN_DURATION_HORIZON)
+    if not (overlaps or unknown_heavy):
+        return None
+    return QueueReason(code="LIVE_WINDOW", needed={"completion_seconds": estimate or 0},
+                       available={"seconds_until_window": max(
+                           0, int((begin - now).total_seconds()))},
+                       reconsider="live_window_end")
+
+
 def live_window_reason(policy: ResourcePolicy, profile: ResourceProfile,
                        now: datetime) -> QueueReason | None:
     """Refuse work that can conservatively overlap a reserved live window."""
@@ -157,20 +205,12 @@ def live_window_reason(policy: ResourcePolicy, profile: ResourceProfile,
             end = time.fromisoformat(window.end_utc)
         except ValueError:
             return QueueReason(code="INVALID_LIVE_WINDOW", reconsider="policy_change")
-        day = now.date() + timedelta(days=(window.weekdays[0] - now.isoweekday()) % 7)
-        begin = datetime.combine(day, start, tzinfo=now.tzinfo)
-        finish = datetime.combine(day, end, tzinfo=now.tzinfo)
-        if finish <= begin:
-            finish += timedelta(days=1)
-        estimate = profile.estimated_seconds
-        completion = now + timedelta(seconds=estimate or 0)
-        overlaps = now < finish and completion > begin
-        unknown_heavy = profile.heavy and estimate is None and now < finish
-        if overlaps or unknown_heavy:
-            return QueueReason(code="LIVE_WINDOW", needed={"completion_seconds": estimate or 0},
-                               available={"seconds_until_window": max(
-                                   0, int((begin - now).total_seconds()))},
-                               reconsider="live_window_end")
+        occurrences = _live_window_occurrences(now, start, end, window.weekdays)
+        for index, (begin, finish) in enumerate(occurrences):
+            reason = _live_window_overlap_reason(
+                profile, now, begin, finish, first=index == 0)
+            if reason is not None:
+                return reason
     return None
 
 

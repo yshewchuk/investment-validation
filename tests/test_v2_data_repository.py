@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -259,6 +260,26 @@ def test_latest_dataset_version_empty_and_populated(tmp_path):
     assert manifest is not None
     assert len(records) == 1
     assert records[0].fragment_id == record.fragment_id
+
+
+def test_latest_dataset_version_trusts_rowid_not_the_wall_clock(tmp_path):
+    """``registered_at`` is wall-clock text; a backward clock step (WSL resume)
+    can make a later insert carry an *earlier* timestamp. "Latest" must then
+    still mean the most recently registered version, so ordering keys on
+    ``rowid`` alone -- never on ``registered_at``."""
+    conn, clock = _catalog(tmp_path)
+    repo = Repository(conn)
+    record_2024 = _record_for("2024")
+    _commit(conn, clock, [record_2024], receipt_id="r1", scope="shadow")
+
+    clock.value -= timedelta(days=1)  # the second registration is stamped EARLIER
+    record_2025 = _record_for("2025")
+    _commit(conn, clock, [record_2025], receipt_id="r2", scope="other")
+
+    manifest, records = repo.latest_dataset_version(_SEC_CONTRACT.contract_id)
+    assert manifest is not None
+    assert len(records) == 1
+    assert records[0].fragment_id == record_2025.fragment_id
 
 
 def test_table_contract_and_fragment_records_refuse_unknown_table(tmp_path):

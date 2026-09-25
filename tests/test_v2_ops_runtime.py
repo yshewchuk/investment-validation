@@ -181,6 +181,114 @@ def test_live_window_admission_is_conservative_about_unknown_durations():
     assert live_window_reason(broken, short, before).code == "INVALID_LIVE_WINDOW"
 
 
+def test_live_window_admission_checks_every_configured_weekday():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    window = LiveWindow(name="live_session", weekdays=(1, 2, 3, 4, 5),
+                        start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(window,))
+    utc = timezone.utc
+    tuesday = datetime(2026, 9, 15, 14, 0, tzinfo=utc)     # 30 min into a weekday window
+    saturday = datetime(2026, 9, 19, 14, 0, tzinfo=utc)    # weekend, no configured window
+    early = datetime(2026, 9, 15, 10, 0, tzinfo=utc)       # 3.5 h before Tuesday opens
+
+    short = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=600)
+    five_hours = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=5 * 3600)
+
+    # Every configured weekday is examined, not just the tuple's first entry.
+    assert live_window_reason(policy, short, tuesday) is not None
+    # A weekend never falls inside a Mon-Fri window, even mid-day.
+    assert live_window_reason(policy, short, saturday) is None
+    # A job long enough to run into the coming window is refused; one short
+    # enough to finish well before it is admitted.
+    assert live_window_reason(policy, five_hours, early) is not None
+    assert live_window_reason(policy, short, early) is None
+
+
+def test_live_window_admission_sees_a_window_that_crossed_midnight():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    window = LiveWindow(name="live_session", weekdays=(1,), start_utc="22:00", end_utc="02:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(window,))
+    # Tuesday 01:00 is still inside the window that opened Monday 22:00.
+    tuesday_early = datetime(2026, 9, 15, 1, 0, tzinfo=timezone.utc)
+
+    short = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=600)
+    assert live_window_reason(policy, short, tuesday_early) is not None
+
+
+def test_live_window_unknown_heavy_refused_against_first_not_yet_ended_window():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    window = LiveWindow(name="live_session", weekdays=(1, 2, 3, 4, 5),
+                        start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(window,))
+    tuesday_morning = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+
+    unknown_heavy = replace(DEFAULT_POLICY.profiles[0], heavy=True, estimated_seconds=None)
+    # Monday's window has already ended, so it must not consume the "first"
+    # slot; Tuesday's still-upcoming window is the one an unknown-duration
+    # heavy job is refused against.
+    assert live_window_reason(policy, unknown_heavy, tuesday_morning) is not None
+
+
+def test_live_window_single_weekday_reaches_next_weeks_occurrence():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    # A single-weekday window seen from after it closes that day: the only
+    # occurrence left is NEXT week's same weekday, seven days out -- the far
+    # edge the +7 scan offset must still reach.
+    window = LiveWindow(name="live_session", weekdays=(2,), start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(window,))
+    tuesday_night = datetime(2026, 9, 15, 21, 0, tzinfo=timezone.utc)   # Tue, 1 h after close
+
+    unknown_heavy = replace(DEFAULT_POLICY.profiles[0], heavy=True, estimated_seconds=None)
+    eight_days = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=8 * 24 * 3600)
+
+    assert live_window_reason(policy, unknown_heavy, tuesday_night) is None
+    assert live_window_reason(policy, eight_days, tuesday_night) is not None
+
+
+def test_live_window_unknown_heavy_horizon_only_refuses_near_occurrences():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    tuesday_morning = datetime(2026, 9, 15, 10, 0, tzinfo=timezone.utc)
+    unknown_heavy = replace(DEFAULT_POLICY.profiles[0], heavy=True, estimated_seconds=None)
+
+    weekdays = LiveWindow(name="live_session", weekdays=(1, 2, 3, 4, 5),
+                          start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(weekdays,))
+    # Tuesday's own window opens 3.5 h away: inside the 24 h horizon, refused.
+    assert live_window_reason(policy, unknown_heavy, tuesday_morning) is not None
+
+    monday_only = LiveWindow(name="live_session", weekdays=(1,),
+                             start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(monday_only,))
+    # The only upcoming occurrence is Monday's, >6 days out: beyond the 24 h
+    # horizon, so the unknown-duration heavy job is admitted.
+    assert live_window_reason(policy, unknown_heavy, tuesday_morning) is None
+
+
 # ---------------------------------------------------------------------------
 # plans.request_from_plan: the boundary where a saved plan document becomes a
 # submission command. Its only caller is ``ops submit`` for non-nightly plans
@@ -254,3 +362,21 @@ def test_request_from_plan_refuses_a_check_plan_outside_the_private_artifacts_ef
         forged = dict(artifact_check_document, effects=effects)
         with pytest.raises(OpsError, match="not enabled for submission"):
             request_from_plan(forged, "artifact_check_forged")
+
+
+def test_failed_service_start_releases_the_supervisor_lock(tmp_path, monkeypatch):
+    # ``Service.start`` acquires the lock before reconciling; a start that
+    # blows up must hand the lock back, not leave a dead supervisor holding
+    # it (the pre-fix leak made every later start RESOURCE_UNAVAILABLE).
+    conn, clock, _ = catalog(tmp_path)
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=REPO)
+
+    def boom():
+        raise RuntimeError("reconcile failed")
+
+    monkeypatch.setattr(service, "reconcile", boom)
+    with pytest.raises(RuntimeError):
+        service.start()
+    assert service.lock.acquire() is True
+    service.lock.release()

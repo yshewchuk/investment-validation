@@ -147,6 +147,24 @@ def test_deployed_release_is_visible_end_to_end(tmp_path):
         _stop(server, thread)
 
 
+def test_deployed_release_document_marks_itself_unbound_from_the_board(tmp_path):
+    models_root = tmp_path / "models"
+    release, inventory, payloads, _ = _fixture("r1")
+    stage_release(models_root, release, inventory, payloads)
+    promote(models_root, "r1")
+    server, thread, base = _serve(tmp_path, model_release_root=models_root)
+    try:
+        body = json.loads(_get(base + "/models/release.json", "secret").read())
+        assert body["status"] == "deployed"
+        # The DEPLOYED pointer is echoed as deployed_release_id, and the
+        # document never implies the served board was scored with it (bug C7).
+        assert body["deployed_release_id"] == body["release_id"]
+        assert body["board_binding"] is None
+        assert body["board_binding_reason"] == "MODEL_RELEASE_NOT_BOUND"
+    finally:
+        _stop(server, thread)
+
+
 def test_rollback_lineage_is_reported_as_a_dependency(tmp_path):
     models_root = tmp_path / "models"
     release1, inventory1, payloads1, _ = _fixture("r1")
