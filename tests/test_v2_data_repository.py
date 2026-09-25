@@ -282,6 +282,101 @@ def test_latest_dataset_version_trusts_rowid_not_the_wall_clock(tmp_path):
     assert records[0].fragment_id == record_2025.fragment_id
 
 
+# --------------------------------------------------------------------------
+# Phase 6 slice 3: resolve_pinned/resolve_full_pinned — snapshot-read
+# foundation for research tooling (UD-4)
+# --------------------------------------------------------------------------
+
+
+def test_resolve_pinned_no_committed_head_raises(tmp_path):
+    conn, _clock = _catalog(tmp_path)
+    with pytest.raises(DataError) as err:
+        Repository(conn).resolve_pinned("shadow")
+    assert err.value.code == "SNAPSHOT_NOT_READY"
+
+    with pytest.raises(DataError) as err:
+        Repository(conn).resolve_full_pinned("shadow")
+    assert err.value.code == "SNAPSHOT_NOT_READY"
+
+
+def test_resolve_pinned_does_not_fall_back_to_a_different_scopes_head(tmp_path):
+    """Negative control (plan): a snapshot committed but never promoted to
+    THIS scope's head must refuse, not silently fall back to some other
+    head that does exist."""
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _commit(conn, clock, [record], receipt_id="r1", scope="candidate")
+
+    with pytest.raises(DataError) as err:
+        Repository(conn).resolve_pinned("shadow")
+    assert err.value.code == "SNAPSHOT_NOT_READY"
+
+
+def test_resolve_pinned_tracks_head_moves(tmp_path):
+    conn, clock = _catalog(tmp_path)
+    record_a = _record_for("2024")
+    _, snap_a = _commit(conn, clock, [record_a], receipt_id="ra", scope="shadow")
+
+    resolved = Repository(conn).resolve_pinned("shadow")
+    assert resolved == snap_a
+    full = Repository(conn).resolve_full_pinned("shadow")
+    assert full.snapshot == snap_a
+
+    record_b = _record_for("2025")
+    manifest_ab, snap_b = _manifest_and_snapshot([record_a, record_b])
+    commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("b-request"), contracts=[_SEC_CONTRACT],
+        objects=[record_a.object_ref, record_b.object_ref], records=[record_a, record_b],
+        manifests=[manifest_ab], snapshot=snap_b, expected_head_snapshot_id=snap_a.snapshot_id,
+        expected_head_generation=1, receipt_id="rb", attempt_id="att-1", fence=1,
+        fence_check=_noop_fence, clock=clock)
+
+    assert Repository(conn).resolve_pinned("shadow") == snap_b
+
+
+def test_resolve_pinned_refuses_a_tampered_head_snapshot(tmp_path):
+    """Negative control (brief): a tampered manifest hash is refused even
+    when reached through resolve_pinned's head lookup, not just resolve."""
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _, snap = _commit(conn, clock, [record], receipt_id="r1", scope="shadow")
+    conn.close()
+
+    copy_path = tmp_path / "tampered_pinned.sqlite"
+    _consistent_copy(tmp_path / "catalog.sqlite", copy_path)
+    tampered = ops_connect(copy_path)
+    tampered.execute("DROP TRIGGER data_snapshots_no_delete")
+    tampered.execute("DROP TRIGGER data_snapshots_no_update")
+    tampered.execute("UPDATE data_snapshots SET manifest_hash = ? WHERE snapshot_id = ?",
+                     ("sha256:" + "0" * 64, snap.snapshot_id))
+
+    with pytest.raises(DataError) as err:
+        Repository(tampered).resolve_pinned("shadow")
+    assert err.value.code == "MANIFEST_CORRUPT"
+
+    with pytest.raises(DataError) as err:
+        Repository(tampered).resolve_full_pinned("shadow")
+    assert err.value.code == "MANIFEST_CORRUPT"
+    tampered.close()
+
+
+def test_resolve_rejects_an_implicit_latest_sentinel_not_an_explicit_id(tmp_path):
+    """Negative control (brief): a read without an explicit, real snapshot id
+    is refused — no "latest"/"current" sentinel is special-cased anywhere in
+    this foundation, on the underlying resolve/resolve_full it is built on."""
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _commit(conn, clock, [record], receipt_id="r1", scope="shadow")
+
+    for sentinel in ("latest", "current", "", None):
+        with pytest.raises(DataError) as err:
+            Repository(conn).resolve(sentinel)
+        assert err.value.code == "SNAPSHOT_NOT_FOUND"
+        with pytest.raises(DataError) as err:
+            Repository(conn).resolve_full(sentinel)
+        assert err.value.code == "SNAPSHOT_NOT_FOUND"
+
+
 def test_table_contract_and_fragment_records_refuse_unknown_table(tmp_path):
     conn, clock = _catalog(tmp_path)
     record = _record_for("2024")
