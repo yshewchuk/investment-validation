@@ -72,6 +72,17 @@ from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import verify_pinned_model_modules
 from engine.v2.ops.legacy_adapter import iter_raw_fetch_cache, manifest_files
 
+# ``legacy_features`` can never have a static read plan, so it is an explicit,
+# documented exception to the barrier set rather than a barrier kind:
+# ``_action_features`` -> ``engine/data/rebuild.py`` ->
+# ``engine/data/features/panel.py`` globs ``paths.RAW_OQUANTS_MOVES`` and
+# ``paths.COMPUTED_MOVES`` for ``moves_*.json`` (panel.py:252/256), then reads
+# a per-ticker price CSV under ``paths.RAW_YF`` for every ticker that glob
+# discovers (panel.py:461-544) -- a data-dependent file set that ``capture()``
+# cannot enumerate up front. A run that includes this kind cannot claim its
+# legacy inputs were captured by this module.
+UNCAPTURED_KINDS = frozenset({"legacy_features"})
+
 __all__ = ["capture", "write_manifest"]
 
 _DATA_DIR = reference_inputs.DATA_DIR  # "data" -- engine.paths.DATA, relative to ROOT
