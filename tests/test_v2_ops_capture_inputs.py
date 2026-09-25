@@ -52,7 +52,7 @@ from engine.v2.data.legacy_nightly_read_plan import (  # noqa: E402
     required_families,
 )
 from engine.v2.foundation import to_document  # noqa: E402
-from engine.v2.ops.capture_inputs import capture  # noqa: E402
+from engine.v2.ops.capture_inputs import UNCAPTURED_KINDS, capture  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.legacy_adapter import copy_read_set  # noqa: E402
 from tests.test_v2_data_import import build_legacy_store  # noqa: E402
@@ -127,14 +127,24 @@ def test_barrier_kinds_are_the_structural_six():
     longer exact complements within ``ACTION_NAMES`` -- assert the sharper
     invariant instead: every barrier kind not exclusively snapshot-backed is
     declared here, and nothing declared here is snapshot-only.
+
+    ``legacy_features`` is neither: its read set is data-dependent (panel.py
+    globs the moves files, then reads a per-ticker price CSV per discovery),
+    so it can have no static capture plan and sits in
+    ``capture_inputs.UNCAPTURED_KINDS`` -- the explicit, documented exception
+    subtracted from the completeness equation below, not a barrier kind.
     """
     from engine.v2.ops.legacy_actions import ACTION_NAMES
     from engine.v2.ops.stages import SNAPSHOT_BACKED_KINDS
 
     snapshot_only = SNAPSHOT_BACKED_KINDS - set(BARRIER_KINDS)
     assert snapshot_only == {"legacy_score", "legacy_score_requests", "legacy_decision_replay"}
-    assert set(BARRIER_KINDS) == set(ACTION_NAMES) - snapshot_only
+    assert set(BARRIER_KINDS) == set(ACTION_NAMES) - snapshot_only - set(UNCAPTURED_KINDS)
     assert set(BARRIER_KINDS) & snapshot_only == set()
+    assert set(UNCAPTURED_KINDS) == {"legacy_features"}
+    assert set(UNCAPTURED_KINDS) & set(BARRIER_KINDS) == set()
+    assert set(UNCAPTURED_KINDS) & SNAPSHOT_BACKED_KINDS == set()
+    assert set(UNCAPTURED_KINDS) <= set(ACTION_NAMES)
 
 
 def test_manifest_problems_rejects_wrong_capture_ref():

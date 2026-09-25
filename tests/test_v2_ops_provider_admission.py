@@ -3,11 +3,13 @@ from dataclasses import dataclass
 
 import pytest
 
+from engine.v2.foundation import format_timestamp
 from engine.v2.ops import provider_budget
+from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.lifecycle import complete_cancel, request_cancel
 from engine.v2.ops.profiles import DEFAULT_POLICY
-from engine.v2.ops.scheduler import claim_next
+from engine.v2.ops.scheduler import _reserve_provider, claim_next
 from engine.v2.ops.submission import (
     JobKind,
     KindRegistry,
@@ -147,3 +149,34 @@ def test_reserve_holds_one_live_lease_and_only_unreserved_calls(tmp_path):
         "SELECT attempt_id, released_at FROM provider_reservations")}
     assert rows[claim_a.attempt_id] is not None
     assert rows[claim_b.attempt_id] is None
+
+
+def test_claim_reservation_refuses_exhausted_account_and_admits_when_budget_fits(tmp_path):
+    """The production reservation path: scheduler._reserve_provider, run inside
+    the claim transaction from _create_attempt (engine/v2/ops/scheduler.py
+    ~326) -- provider_budget.reserve is not reached in production. An exhausted
+    account (an estimate above remaining minus live_reserve) is refused with
+    RESOURCE_UNAVAILABLE and leaves no reservation behind; the identical call
+    against an account whose budget covers the estimate is admitted (negative
+    control) and holds the live lease for the claim's own fence."""
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    stamp = format_timestamp(clock.now())
+
+    provider_budget.configure_account(conn, "acct-exhausted", "gen-1", remaining=1, live_reserve=0)
+    with pytest.raises(OpsError) as err:
+        with transaction(conn):
+            _reserve_provider(conn, "acct-exhausted", claim.attempt_id, claim.fence,
+                              {"provider_calls": 2}, stamp)
+    assert err.value.code == "RESOURCE_UNAVAILABLE"
+    assert conn.execute("SELECT COUNT(*) FROM provider_reservations").fetchone()[0] == 0
+
+    provider_budget.configure_account(conn, "acct-open", "gen-1", remaining=2, live_reserve=0)
+    with transaction(conn):
+        _reserve_provider(conn, "acct-open", claim.attempt_id, claim.fence,
+                          {"provider_calls": 2}, stamp)
+    row = conn.execute("SELECT * FROM provider_reservations WHERE account = 'acct-open'").fetchone()
+    assert row["attempt_id"] == claim.attempt_id
+    assert row["fence"] == claim.fence
+    assert row["reserved_calls"] == 2
+    assert row["released_at"] is None
