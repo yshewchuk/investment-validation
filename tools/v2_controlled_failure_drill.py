@@ -363,15 +363,17 @@ def _candidate(catalog, store_root, target, backup):
     return Path(catalog), Path(store_root), Path(target), Path(backup)
 
 
-def _write_evidence(receipt: dict, artifact_root) -> None:
-    """The receipt as durable evidence: always under the repo's
-    ``reports/phase6_evidence/controlled_failure/``, and additionally under
-    ``--artifact-root`` when one was given."""
+def _write_evidence(receipt: dict, artifact_root, *, real_candidate: bool) -> None:
+    """The receipt as durable evidence: under the repo's
+    ``reports/phase6_evidence/controlled_failure/`` only when run
+    ``--against-real-candidate``; scratch/fixture runs write nowhere but
+    ``--artifact-root`` (when given) -- never the real repo tree."""
     name = f"controlled_failure_{receipt['scenario']}_receipt.json"
     payload = json.dumps(receipt, indent=2, sort_keys=True)
-    evidence_dir = ROOT / "reports" / "phase6_evidence" / "controlled_failure"
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    (evidence_dir / name).write_text(payload)
+    if real_candidate:
+        evidence_dir = ROOT / "reports" / "phase6_evidence" / "controlled_failure"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / name).write_text(payload)
     if artifact_root is not None:
         artifact_root = Path(artifact_root)
         artifact_root.mkdir(parents=True, exist_ok=True)
@@ -402,7 +404,7 @@ def run_drill(*, scenario: str, scratch_root: Path | str, artifact_root=None,
         raise
     except (OpsError, sqlite3.Error, OSError, ValueError) as exc:
         raise OpsFailureDrillError(f"{scenario} refused: {exc}") from exc
-    _write_evidence(receipt, artifact_root)
+    _write_evidence(receipt, artifact_root, real_candidate=candidate is not None)
     return receipt
 
 

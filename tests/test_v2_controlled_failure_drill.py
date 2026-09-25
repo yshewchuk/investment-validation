@@ -126,7 +126,10 @@ def test_cli_exit_code_matches_verdict_for_both_scenarios(tmp_path, capsys):
         assert code == {"PASS": 0, "FAIL": 1}[receipt["verdict"]]
 
 
-def test_evidence_receipt_written_with_capabilities_per_scenario(tmp_path, capsys):
+def test_evidence_receipt_copies_to_artifact_root_in_scratch_mode(
+        tmp_path, capsys, monkeypatch):
+    fake_root = tmp_path / "fake-root"
+    monkeypatch.setattr(v2_controlled_failure_drill, "ROOT", fake_root)
     for scenario in SCENARIOS:
         evidence = tmp_path / ("evidence-" + scenario)
         _, code = _run_cli(tmp_path, scenario, artifact_root=evidence)
@@ -139,9 +142,28 @@ def test_evidence_receipt_written_with_capabilities_per_scenario(tmp_path, capsy
         assert json.loads(copy.read_text()) == receipt
         assert receipt["capabilities_covered"] == CAPABILITIES[scenario]
 
-        reported = (v2_controlled_failure_drill.ROOT / "reports" / "phase6_evidence"
-                    / "controlled_failure" / name)
-        assert json.loads(reported.read_text()) == receipt
+        assert not (fake_root / "reports" / "phase6_evidence"
+                    / "controlled_failure" / name).exists()
+
+
+def test_evidence_receipt_written_under_root_against_real_candidate(
+        tmp_path, capsys, monkeypatch):
+    fake_root = tmp_path / "fake-root"
+    monkeypatch.setattr(v2_controlled_failure_drill, "ROOT", fake_root)
+    backup, _, _, catalog, store_root, target, _ = _build_published_fixture(tmp_path)
+    scratch = tmp_path / "candidate-evidence-scratch"
+
+    code = v2_controlled_failure_drill.main([
+        "--scenario", "after-good-release", "--scratch-root", str(scratch),
+        "--against-real-candidate", str(catalog), "--store-root", str(store_root),
+        "--target", str(target), "--backup", str(backup)])
+    receipt = _receipt(capsys)
+
+    assert code == 0
+    name = "controlled_failure_after-good-release_receipt.json"
+    reported = (fake_root / "reports" / "phase6_evidence" / "controlled_failure" / name)
+    assert reported.is_file()
+    assert json.loads(reported.read_text()) == receipt
 
 
 def test_existing_scratch_root_is_refused_with_exit_2(tmp_path, capsys):
@@ -172,7 +194,8 @@ def test_partial_real_candidate_flags_are_refused_with_exit_2(tmp_path, capsys):
 
 
 def test_against_real_candidate_rehearses_on_copies_and_leaves_the_candidate_alone(
-        tmp_path, capsys):
+        tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(v2_controlled_failure_drill, "ROOT", tmp_path / "fake-root")
     backup, _, _, catalog, store_root, target, _ = _build_published_fixture(tmp_path)
     assert current(target) == "R0"
     scratch = tmp_path / "candidate-scratch"

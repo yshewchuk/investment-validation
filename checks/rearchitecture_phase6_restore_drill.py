@@ -63,7 +63,6 @@ from engine.v2.ops.publication import publish_local, stage_release  # noqa: E402
 from engine.v2.ops.recovery import begin_epoch  # noqa: E402
 from engine.v2.ops.scheduler import Supervisor  # noqa: E402
 from engine.v2.scoring.stages import NativeScoreInputs, STAGE_NAMES, StageReceipt  # noqa: E402
-from tests.ops_support import enqueue_claim  # noqa: E402
 from tools.v2_restore_drill import run_drill  # noqa: E402
 
 STAMP = "2026-09-19T00:00:00.000000Z"
@@ -168,7 +167,10 @@ def _all_gates(store, release_id, occurrence, files):
 def _fenced_claim(conn, clock, key):
     """One real submit/claim/fence claim, reached the same way
     ``tests/ops_support.py::enqueue_claim`` reaches it. The helper itself is
-    reused directly; this only supplies the supervisor epoch it needs."""
+    reused directly (imported lazily here, not at module level, so this
+    checks/ module never depends on tests/ at import time); this only
+    supplies the supervisor epoch it needs."""
+    from tests.ops_support import enqueue_claim
     epoch_id = begin_epoch(conn, clock=clock, boot_id="controlled-failure", pid=1)
     claim = enqueue_claim(conn, clock, Supervisor(epoch_id, "controlled-failure"), key=key)
     if claim is None:
