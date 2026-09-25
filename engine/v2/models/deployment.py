@@ -405,10 +405,24 @@ def _append_history(root: Path, state: PointerState) -> None:
     _atomic_write_bytes(path, _encode(state))
 
 
+def _repair_history(root: Path) -> None:
+    """Record the live pointer's history entry if a crash skipped it."""
+    pointer = current_pointer(root)
+    if pointer is None:
+        return
+    path = _history_dir(root) / f"{pointer.sequence:06d}.json"
+    if not path.exists():
+        _append_history(root, pointer)
+
+
 def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> PointerState:
     if _read_manifest(root, release_id) is None:
         raise ReleaseNotStaged(release_id)
+    _repair_history(root)
     previous = current_pointer(root)
+    if previous is not None and previous.release_id == release_id:
+        # Already deployed: a repeated promote is a no-op, never its own predecessor.
+        return previous
     state = PointerState(
         sequence=_next_sequence(root),
         release_id=release_id,
@@ -432,7 +446,8 @@ def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:
     """Point ``DEPLOYED`` back at the release the current one was promoted from."""
     root = Path(root)
     current = current_pointer(root)
-    if current is None or current.previous_release_id is None:
+    if (current is None or current.previous_release_id is None
+            or current.previous_release_id == current.release_id):
         raise NoPriorRelease("no prior release to roll back to")
     return _swap_pointer(root, current.previous_release_id, "rollback", clock)
 

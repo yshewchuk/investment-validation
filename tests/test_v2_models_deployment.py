@@ -329,3 +329,66 @@ def test_reused_explicit_id_with_same_bytes_but_different_binding_refuses(tmp_pa
         stage_release(tmp_path, conflicting_release, inventory, payloads)
 
     assert error.value.issues[0].code == "RELEASE_ID_REUSED"
+
+
+def test_repeated_promote_is_idempotent_and_rolls_back_to_the_real_predecessor(tmp_path):
+    r1, inv1, pay1 = _fixture("r1", intercept=1.0, coefficient=2.0)
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+
+    promote(tmp_path, "r1")
+    prior_b = promote(tmp_path, "r2")
+    repeated = promote(tmp_path, "r2")
+
+    assert repeated == prior_b
+    history = pointer_history(tmp_path)
+    assert len(history) == 2
+    assert [item.release_id for item in history] == ["r1", "r2"]
+    assert history[1].previous_release_id == "r1"
+
+    state = rollback(tmp_path)
+    assert state.release_id == "r1"
+    assert current_pointer(tmp_path).release_id == "r1"
+
+
+def test_promote_after_crash_between_pointer_write_and_history_repairs_history(tmp_path, monkeypatch):
+    r1, inv1, pay1 = _fixture("r1", intercept=1.0, coefficient=2.0)
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    promote(tmp_path, "r1")
+
+    real_append = deployment_module._append_history
+
+    def _crash(root, state):
+        raise RuntimeError("simulated crash between pointer write and history append")
+
+    monkeypatch.setattr(deployment_module, "_append_history", _crash)
+    with pytest.raises(RuntimeError):
+        promote(tmp_path, "r2")
+    monkeypatch.setattr(deployment_module, "_append_history", real_append)
+
+    promote(tmp_path, "r2")
+
+    history = pointer_history(tmp_path)
+    assert len(history) == 2
+    assert history[1].release_id == "r2"
+    assert history[1].previous_release_id == "r1"
+
+    state = rollback(tmp_path)
+    assert state.release_id == "r1"
+    assert current_pointer(tmp_path).release_id == "r1"
+
+
+def test_rollback_refuses_a_pointer_that_is_its_own_predecessor(tmp_path):
+    state = deployment_module.PointerState(
+        sequence=0, release_id="r1", previous_release_id="r1",
+        action="promote", at="2024-01-01T00:00:00Z",
+    )
+    deployment_module._atomic_write_bytes(
+        deployment_module._pointer_path(tmp_path), deployment_module._encode(state),
+    )
+
+    with pytest.raises(NoPriorRelease):
+        rollback(tmp_path)
