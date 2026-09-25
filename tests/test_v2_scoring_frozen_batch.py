@@ -31,6 +31,7 @@ from engine.v2.scoring.frozen_batch import (
     FrozenBatchPreflightError,
     score_frozen_batch,
 )
+from engine.v2.scoring.frozen_inputs import build_inference_requests
 from engine.v2.scoring.identity import request_hash
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 
@@ -73,6 +74,13 @@ def _fields(root: Path, hashes: dict) -> dict:
 def _refusal_fields() -> dict:
     bundle = _bundle(feature_vector={"x": 2.5}, feature_missing_mask={"x": False})
     return {"_native_inputs": build_native_score_inputs(bundle)}
+
+
+def _nonfinite_only_inputs():
+    """A real ``NativeScoreInputs`` whose only feature came back non-finite."""
+    bundle = _bundle(feature_vector={"x": {"__nonfinite__": "nan"}},
+                     feature_missing_mask={"x": False})
+    return build_native_score_inputs(bundle)
 
 
 def _batch(requests) -> ScoreBatch:
@@ -211,8 +219,12 @@ _MUTATIONS = {
             {keys[0]: replace(_INFERENCE_REQUEST, binding_id="ghost")}),
     "fields-missing-native-inputs": lambda kw, keys: kw[
         "fields_by_request"].update({keys[0]: {}}),
-    "empty-inference-tuple": lambda kw, keys: kw[
-        "inference_requests_by_request"].update({keys[0]: ()}),
+    "none-inference-request": lambda kw, keys: kw[
+        "inference_requests_by_request"].update({keys[0]: None}),
+    "non-inference-request-value": lambda kw, keys: kw[
+        "inference_requests_by_request"].update({keys[0]: "driver"}),
+    "non-inference-request-item": lambda kw, keys: kw[
+        "inference_requests_by_request"].update({keys[0]: (_INFERENCE_REQUEST, 7)}),
 }
 
 
@@ -239,6 +251,75 @@ def test_preflight_mismatch_prevents_all_inference(tmp_path, case):
             score_frozen_batch(_batch(requests), **kwargs)
     assert spy.calls == []  # the mismatch refused the batch ahead of inference
     assert len(ok) == len(requests)  # only the complete, matching batch ever ran
+
+
+# ---------------------------------------------------------------------------
+# a legitimately mapped empty inference tuple is a batch, not a batch error
+# ---------------------------------------------------------------------------
+
+
+def test_all_nonfinite_record_maps_to_the_empty_tuple_and_still_batches(tmp_path):
+    """``frozen_inputs.build_inference_requests`` legitimately returns ``()``
+    when every required feature value came back non-finite, and
+    ``score_frozen`` serves that omission as its own no-model refusal. The
+    batch preflight must accept the explicitly mapped empty tuple -- and still
+    fit nothing and infer nothing for that request."""
+    root, hashes, release = _ready(tmp_path)
+    before = _tree(root)
+    nonfinite = _nonfinite_only_inputs()
+    built = build_inference_requests(nonfinite, release.bindings, release.release_id)
+    assert built == ()  # the real builder's own all-nonfinite omission
+
+    omitted = _request()
+    fields = {request_hash(omitted): {"_native_inputs": nonfinite}}
+    mapped = {request_hash(omitted): built}
+    spy = _CountingInference(FrozenInference(root))
+    guard_state, refusal_attempts = [], []
+
+    def observe(observation):
+        guard_state.append(fitting_forbidden())
+        try:
+            forbid_fitting("frozen-batch-empty-probe")
+        except RuntimeFitForbidden:
+            refusal_attempts.append(True)
+
+    # no ambient guard: the batch itself must open ``no_fit_guard()``
+    [record] = score_frozen_batch(
+        _batch([omitted]), snapshot_id="snap-1", release=release, inference=spy,
+        fields_by_request=fields, inference_requests_by_request=mapped,
+        observer=observe)
+    assert spy.calls == []  # the empty mapping never reached ``infer``
+    assert guard_state and all(guard_state)  # never a fit-capable code path
+    assert len(refusal_attempts) == len(guard_state)
+    assert not fitting_forbidden()
+    assert (record.validation_status, record.readiness) == ("refused", "refused")
+    assert record.forecasts["driver_prediction"] is None
+    assert "MISSING_FEATURES" in record.reason_codes
+    assert record.resolved_request["native_source_ref"] == "frozen:r1:"
+
+    # byte-for-byte the direct ``score_frozen`` outcome for the same () mapping
+    direct = application.score_frozen(omitted, spy, release, built,
+                                      fields[request_hash(omitted)])
+    assert _document(record) == _document(direct)
+    assert record.score_id == direct.score_id
+
+    # and an empty-mapped request rides alongside an inferring one unchanged
+    inference = FrozenInference(root)
+    finite = replace(omitted, event_id="evt-finite")
+    fields[request_hash(finite)] = _fields(root, hashes)
+    mapped[request_hash(finite)] = _INFERENCE_REQUEST
+    batched = score_frozen_batch(
+        _batch([omitted, finite]), snapshot_id="snap-1", release=release,
+        inference=inference, fields_by_request=fields,
+        inference_requests_by_request=mapped)
+    singles = tuple(
+        application.score_frozen(request, inference, release,
+                                 mapped[request_hash(request)],
+                                 fields[request_hash(request)])
+        for request in (omitted, finite))
+    assert [r.validation_status for r in batched] == ["refused", "scored"]
+    assert [_document(r) for r in batched] == [_document(r) for r in singles]
+    assert _tree(root) == before  # nothing fitted, fetched or written
 
 
 def test_later_malformed_native_inputs_payload_refuses_whole_batch(tmp_path):

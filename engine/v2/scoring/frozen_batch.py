@@ -8,16 +8,22 @@ declared ``ScoreBatch`` is scored by delegating each request, in order, to
 resolved ``ModelRelease`` and one ``FrozenInference``, so a batch and the
 identical sequence of individual ``score_frozen`` calls produce byte-for-byte
 the same records — same order, same frozen evidence, same refusals, same
-score IDs.
+score IDs, and same empty-inference omissions.
 
 The batch is a unit: preflight validates the whole declaration before the
 first inference. Every request must name the pinned snapshot and the release
 deployment; the two per-request mappings are keyed *only* by
 ``application.identity.request_hash`` values with exact coverage (nothing
 missing, nothing extra — unlike ``score_batch`` there is no event-only
-fallback); every ``InferenceRequest`` must name the release, and the release
-binding it selects must be compatible with the request's strategy, decision
-clock and feature order. Every request's ``_native_inputs`` payload must
+fallback); every mapped inference item must be an ``InferenceRequest`` naming
+the release, and the release binding it selects must be compatible with the
+request's strategy, decision clock and feature order. A request may map to the
+EMPTY tuple: ``frozen_inputs.build_inference_requests`` legitimately returns
+``()`` when every required feature value came back non-finite, and
+``score_frozen`` serves that by running no inference at all and emitting its
+own no-model refusal — so the batch accepts an explicitly mapped empty tuple
+and refuses a ``None`` or any other non-``InferenceRequest`` mapping value
+instead. Every request's ``_native_inputs`` payload must
 already be a ``NativeScoreInputs`` instance: ``score_frozen`` type-checks it
 only *after* running inference, so a malformed payload on a later request
 would otherwise let earlier requests infer before the batch dies with a
@@ -40,6 +46,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Mapping
 
 from engine.v2.contracts import ScoreBatch, ScoreRecord, ScoreRequest
+from engine.v2.models.contracts import InferenceRequest
 from engine.v2.models.no_fit import no_fit_guard
 
 from .application import score_frozen
@@ -47,7 +54,7 @@ from .identity import request_hash
 from .stages import NativeScoreInputs
 
 if TYPE_CHECKING:
-    from engine.v2.models.contracts import InferenceRequest, ModelRelease
+    from engine.v2.models.contracts import ModelRelease
     from engine.v2.models.loader import FrozenInference
 
     from .stages import StageObserver
@@ -77,9 +84,11 @@ def score_frozen_batch(
     ``fields_by_request`` maps each ``request_hash`` to the ``fields`` mapping
     handed to ``score_frozen`` (``{"_native_inputs": NativeScoreInputs}``);
     ``inference_requests_by_request`` maps the same hash to one
-    ``InferenceRequest`` or a tuple of them. Records come back in
-    ``batch.requests`` order, identical to individual ``score_frozen`` calls
-    with the same pinned ``snapshot_id``, ``release`` and ``inference``.
+    ``InferenceRequest`` or a tuple of them — the empty tuple included, the
+    all-nonfinite omission ``frozen_inputs.build_inference_requests`` returns.
+    Records come back in ``batch.requests`` order, identical to individual
+    ``score_frozen`` calls with the same pinned ``snapshot_id``, ``release``
+    and ``inference``.
     Raises ``FrozenBatchPreflightError`` before any inference if the batch
     does not name one coherent frozen unit.
     """
@@ -151,10 +160,30 @@ def _check_pinned_identity(request: ScoreRequest, identity: str, snapshot_id: st
 
 
 def _inference_items(value: Any, identity: str) -> tuple[Any, ...]:
-    items = tuple(value) if isinstance(value, (tuple, list)) else (value,)
-    if not items:
+    """Normalise one request's mapped inference value and type-check every item.
+
+    A tuple/list is the sequence ``frozen_inputs.build_inference_requests``
+    returns — INCLUDING its legitimate empty ``()``, the all-features-non-finite
+    omission ``score_frozen`` itself serves as a no-model refusal. Any other
+    value must already be a single ``InferenceRequest``; a ``None`` or any other
+    malformed item is a batch-level refusal here rather than an attribute or
+    ``infer`` crash once earlier requests have already run.
+    """
+    if isinstance(value, (tuple, list)):
+        items = tuple(value)
+    elif isinstance(value, InferenceRequest):
+        return (value,)
+    else:
         raise FrozenBatchPreflightError(
-            f"request {identity} maps to an empty inference request tuple")
+            f"request {identity} maps to {type(value).__name__}, not an "
+            "InferenceRequest or a tuple of them; a record whose every "
+            "required feature is non-finite maps legitimately to the empty "
+            "tuple, never to None")
+    for item in items:
+        if not isinstance(item, InferenceRequest):
+            raise FrozenBatchPreflightError(
+                f"request {identity} maps to a tuple containing "
+                f"{type(item).__name__}, not an InferenceRequest")
     return items
 
 
