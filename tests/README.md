@@ -113,6 +113,31 @@ those files alone on a quieter box. `TEST_POLICY` caps every profile at
 256 MiB, so a memory `RESOURCE WAIT` means MemAvailable was below about
 0.75 GiB for a whole minute.
 
+### Sharing the box: `bounded_run` test slots and the heavy reservation
+
+Every `tools/bounded_run.py` run (so every `oc_check.py` and `land.py` test
+step) coordinates with the others through a state directory, so test runs
+cannot starve a heavy job such as the legacy nightly. Full contract: the
+COORDINATION section of the `bounded_run.py` module docstring.
+
+| Knob | Default | Effect |
+|---|---|---|
+| `--heavy` | off | Marks the one big job (run the nightly with it). It holds `heavy-<pid>.json` (flocked for its life) and reserves its `--max-rss-gb`; a second `--heavy` job waits until the first exits. Check-then-register is serialised on `heavy.lock`. |
+| `--max-wait-s S` | 3600 | Bounds every RESOURCE WAIT. On expiry bounded_run exits **75** without launching. `oc_check.py` passes 600 and `land.py` 1800; both report exit 75 as "resource wait timed out — box busy, retry", not as a test failure. |
+| `BOUNDED_RUN_STATE_DIR` | `/tmp/bounded_run_state` | Where slot, heavy and lock files live. Tests point it at `tmp_path`. |
+| `BOUNDED_RUN_SLOTS` | 3 | Test slots (`slot-<i>.lock`) for non-heavy jobs while no heavy reservation is live. |
+| `BOUNDED_RUN_SLOTS_UNDER_HEAVY` | 2 | Slot count while a heavy reservation is live. Running jobs are never preempted. |
+| `BOUNDED_RUN_NESTED` | set to `1` in every child | A bounded_run inside another skips slots and admission (the outer run holds the slot); a nested `--heavy` job still registers its reservation. |
+
+Admission: only while a heavy reservation is live, a non-heavy job also waits
+until MemAvailable minus the heavy job's unclaimed reservation (reserve less
+its tree's current RSS) covers its own `--max-rss-gb` plus `--min-free-gb`.
+With no heavy job live, a job starts as soon as it has a slot. On
+SIGTERM/SIGINT/SIGHUP, bounded_run forwards SIGTERM to its child's process
+group, waits for the group to exit (SIGKILL after `SIGNAL_WAIT_S`, 30 s), and
+only then releases its slot or reservation. Locks are flocks, so a crashed
+run's files never block anyone. Tests: `tests/test_bounded_run_coordination.py`.
+
 ## CI tests
 
 GitHub Actions runs `.github/workflows/tests.yml` on every push to `main` and

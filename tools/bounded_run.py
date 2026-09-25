@@ -102,19 +102,34 @@ COORDINATION
     is live. A job only starts on a slot index below the current count; a
     running job is never preempted. With no free slot it waits (RESOURCE
     WAIT, every 5 s).
-  * before starting, a non-heavy job also needs headroom: MemAvailable minus
-    the unclaimed part of every live heavy reservation (its ``reserve_gb``
-    less the heavy tree's current RSS). It starts only when that covers its
-    own ``--max-rss-gb`` plus ``--min-free-gb``; otherwise it waits
-    (RESOURCE WAIT, every 5 s), so the heavy job's reservation is not spent
-    twice by test runs.
+  * while a heavy reservation is live, a non-heavy job also needs headroom:
+    MemAvailable minus the unclaimed part of every live heavy reservation
+    (its ``reserve_gb`` less the heavy tree's current RSS). It starts only
+    when that covers its own ``--max-rss-gb`` plus ``--min-free-gb``;
+    otherwise it waits (RESOURCE WAIT, every 5 s), so the heavy job's
+    reservation is not spent twice by test runs. With NO live heavy
+    reservation there is no admission check at all: the job launches as soon
+    as it has a slot, exactly as before coordination existed.
+
+  Races: two heavy starters serialise their check-then-register step on
+  ``heavy.lock`` (held only for that step), and the reservation file is
+  written and locked under a temporary name before it is renamed into place,
+  so a reader never sees an unlocked or half-written reservation. Every lock
+  is an flock, so the kernel releases it when its holder dies.
+
+  Signals: SIGTERM/SIGINT/SIGHUP to bounded_run are forwarded to the job's
+  process group as SIGTERM; bounded_run then waits (up to ``SIGNAL_WAIT_S``,
+  30 s, before SIGKILL) until no live process remains in that group, and only
+  then releases its slot or heavy reservation, so the next waiter never
+  starts while the old tree still holds memory.
 
   ``--max-wait-s`` (default 3600) bounds every RESOURCE WAIT: on expiry the
-  job exits 75 (EX_TEMPFAIL) without launching. A bounded_run started by
-  another bounded_run inherits ``BOUNDED_RUN_NESTED=1`` and skips slots and
-  admission entirely, because the outer job already holds a slot and
-  reserved the memory; bounded_run sets that variable in every child
-  environment it launches.
+  job exits 75 (EX_TEMPFAIL) without launching, printing "RESOURCE WAIT timed
+  out" to stderr. A bounded_run started by another bounded_run inherits
+  ``BOUNDED_RUN_NESTED=1`` and skips slots and admission, because the outer
+  job already holds a slot; a nested ``--heavy`` job still registers (and
+  waits for) its heavy reservation. bounded_run sets that variable in every
+  child environment it launches.
 
 Usage:
     python3 tools/bounded_run.py [--cores N] [--max-rss-gb G] \\
@@ -303,27 +318,51 @@ _ACTIVE_PGID: int | None = None
 
 def _cleanup() -> None:
     """Release slot/reservation locks and delete the heavy file. Idempotent."""
-    while _CLEANUP_FDS:
-        try:
-            os.close(_CLEANUP_FDS.pop())
-        except OSError:
-            pass
+    # Unlink before closing: once the lock is released a reader may treat
+    # the file as stale, and the file should already be gone by then.
     while _CLEANUP_PATHS:
         try:
             _CLEANUP_PATHS.pop().unlink()
         except OSError:
             pass
+    while _CLEANUP_FDS:
+        try:
+            os.close(_CLEANUP_FDS.pop())
+        except OSError:
+            pass
+
+
+def _reap(pid: int) -> None:
+    """Reap ``pid`` if it is our exited child, so it stops counting as live.
+
+    Uses ``waitpid`` directly rather than ``Popen.poll``: a signal handler
+    can interrupt ``poll`` while it holds Popen's internal lock, and then a
+    second ``poll`` would silently decline to reap.
+    """
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
 
 
 def _pgid_alive(pgid: int) -> bool:
-    """Whether any process in ``pgid`` still exists (signal 0, no delivery)."""
-    try:
-        os.killpg(pgid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
+    """Whether any NON-zombie process in group ``pgid`` still exists.
+
+    ``killpg(pgid, 0)`` alone is not enough: an exited but unreaped member (a
+    zombie) still counts for it, yet holds no memory. Read ``/proc`` instead.
+    """
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as fh:
+                parts = fh.read().rpartition(b")")[2].split()
+            state, pgrp = parts[0], int(parts[2])
+        except (OSError, IndexError, ValueError):
+            continue
+        if pgrp == pgid and state not in (b"Z", b"X"):
+            return True
+    return False
 
 
 def _wait_for_pgid_exit(pgid: int, timeout_s: float) -> None:
@@ -335,6 +374,7 @@ def _wait_for_pgid_exit(pgid: int, timeout_s: float) -> None:
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        _reap(pgid)
         if not _pgid_alive(pgid):
             return
         time.sleep(0.05)
@@ -346,6 +386,7 @@ def _wait_for_pgid_exit(pgid: int, timeout_s: float) -> None:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and _pgid_alive(pgid):
             time.sleep(0.05)
+    _reap(pgid)
 
 
 def _on_signal(signum, _frame) -> None:
@@ -432,12 +473,20 @@ def _live_heavies(state: Path) -> list[dict]:
             if entry is not None:
                 out.append(entry)
             continue
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        _unlink_if_same(path, fd)
         os.close(fd)
     return out
+
+
+def _unlink_if_same(path: Path, fd: int) -> None:
+    """Unlink ``path`` only if it still names the inode ``fd`` has locked, so
+    a stale file is never confused with a fresh reservation renamed onto the
+    same name (pid reuse) between our open and our unlink."""
+    try:
+        if os.stat(path).st_ino == os.fstat(fd).st_ino:
+            path.unlink()
+    except OSError:
+        pass
 
 
 def _heavy_rss_mb(pid: int) -> float:

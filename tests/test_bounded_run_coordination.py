@@ -10,10 +10,13 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -339,3 +342,162 @@ def test_slot_count_env_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("BOUNDED_RUN_SLOTS_UNDER_HEAVY", "1")
     assert br._slot_count([]) == 4
     assert br._slot_count([{"pid": 1}]) == 1
+
+def _barrier(go: Path) -> list[str]:
+    """Wrapper code that blocks until ``go`` exists, so two wrappers enter
+    coordination within a millisecond of each other."""
+    return ["import os",
+            f"while not os.path.exists({str(go)!r}):\n    time.sleep(0.001)"]
+
+
+def test_concurrent_heavy_starters_exactly_one_runs(tmp_path):
+    # Unlike test_second_heavy_waits_for_the_first, nothing orders the two
+    # starters: both are released from one barrier and race to register.
+    for round_ in range(3):
+        base = tmp_path / f"r{round_}"
+        state, marker = base / "state", base / "markers"
+        release, go = base / "release", base / "go"
+        base.mkdir()
+        procs = {
+            label: _popen(state, _hold_child(label, marker, release),
+                          heavy=True,
+                          pre=_barrier(go) + _wait_marker(
+                              label, f"{label}-wait", marker))
+            for label in ("x", "y")
+        }
+        go.write_text("go")
+        _wait_for(lambda: any(f"{k}-start" in _markers(marker) for k in procs))
+        first = next(k for k in procs if f"{k}-start" in _markers(marker))
+        second = "y" if first == "x" else "x"
+        _wait_for(lambda: f"{second}-wait" in _markers(marker))
+        assert f"{second}-start" not in _markers(marker)
+        assert len(list(state.glob("heavy-*.json"))) == 1
+        release.write_text("go")
+        outs = {k: p.communicate(timeout=30)[0] for k, p in procs.items()}
+        assert all(p.returncode == 0 for p in procs.values()), outs
+        assert "RESOURCE WAIT" in outs[second] and "heavy" in outs[second]
+        assert "RESOURCE WAIT" not in outs[first]
+        times = _markers(marker)
+        assert times[f"{second}-start"] >= times[f"{first}-end"]
+        assert not list(state.glob("heavy-*.json"))
+
+
+def _stubborn_tree(pids: Path) -> list[str]:
+    """A child that ignores SIGTERM and starts a grandchild that ignores it
+    too (SIG_IGN survives exec), then records both pids."""
+    code = (
+        "import signal, subprocess, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "import os\n"
+        "gc = subprocess.Popen(['sleep', '30'])\n"
+        f"open({str(pids)!r} + '.tmp', 'w').write(f'{{os.getpid()}} {{gc.pid}}')\n"
+        f"os.rename({str(pids)!r} + '.tmp', {str(pids)!r})\n"
+        "time.sleep(30)\n"
+    )
+    return [sys.executable, "-c", code]
+
+
+def _pid_live(pid: int) -> bool:
+    """True while ``pid`` exists and is not a zombie."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
+    except FileNotFoundError:
+        return False
+    return stat.rpartition(b")")[2].split()[0] not in (b"Z", b"X")
+
+
+def _lock_free(path: Path) -> bool:
+    """True when ``path`` is gone or its flock can be taken right now."""
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+@pytest.mark.parametrize("heavy", [False, True], ids=["slot", "heavy"])
+def test_sigterm_releases_the_lock_only_after_the_tree_is_gone(tmp_path,
+                                                                heavy):
+    state = tmp_path / "state"
+    pids_file = tmp_path / "pids"
+    proc = _popen(state, _stubborn_tree(pids_file), heavy=heavy,
+                  pre=["br.SIGNAL_WAIT_S = 1.0"])
+    try:
+        _wait_for(pids_file.exists)
+        pids = [int(p) for p in pids_file.read_text().split()]
+        lock = (state / f"heavy-{proc.pid}.json" if heavy
+                else state / "slot-0.lock")
+        assert not _lock_free(lock)
+        started = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        while not _lock_free(lock):
+            assert time.monotonic() - started < 20, "lock never released"
+            time.sleep(0.005)
+        released_after = time.monotonic() - started
+        alive_at_release = [pid for pid in pids if _pid_live(pid)]
+        proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert alive_at_release == []
+    # the tree ignored SIGTERM, so the release had to wait for the SIGKILL
+    assert released_after >= 0.9
+    assert proc.returncode == -signal.SIGTERM
+
+
+def test_no_live_heavy_launches_even_above_mem_available(tmp_path):
+    code, out = _run(tmp_path / "state",
+                     [sys.executable, "-c", "print('CHILD' + '-RAN')"],
+                     available_mb=1024.0, max_rss_gb="4", max_wait="0.5")
+    assert code == 0, out
+    assert "CHILD-RAN" in out
+    assert "RESOURCE WAIT" not in out
+
+
+def test_live_heavy_applies_admission_to_the_same_job(tmp_path):
+    state = tmp_path / "state"
+    fd, _ = _hold_heavy(state)
+    try:
+        code, out = _run(state,
+                         [sys.executable, "-c", "print('CHILD' + '-RAN')"],
+                         available_mb=1024.0, max_rss_gb="4", max_wait="0.3")
+    finally:
+        os.close(fd)
+    assert code == 75, out
+    assert "headroom" in out and "RESOURCE WAIT timed out" in out
+    assert "CHILD-RAN" not in out
+
+
+def test_sigterm_to_a_polite_tree_releases_promptly(tmp_path):
+    # SIGNAL_WAIT_S stays at its 30 s default: a child that honours SIGTERM
+    # must not hold the slot for the whole wait just because it is an
+    # unreaped zombie of the wrapper.
+    state = tmp_path / "state"
+    pid_file = tmp_path / "pid"
+    child = [sys.executable, "-c",
+             "import os, time\n"
+             f"open({str(pid_file)!r} + '.tmp', 'w').write(str(os.getpid()))\n"
+             f"os.rename({str(pid_file)!r} + '.tmp', {str(pid_file)!r})\n"
+             "time.sleep(30)\n"]
+    proc = _popen(state, child)
+    try:
+        _wait_for(pid_file.exists)
+        lock = state / "slot-0.lock"
+        assert not _lock_free(lock)
+        started = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=30)
+        elapsed = time.monotonic() - started
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert _lock_free(lock)
+    assert not _pid_live(int(pid_file.read_text()))
+    assert elapsed < 5, elapsed
+    assert proc.returncode == -signal.SIGTERM
