@@ -406,6 +406,24 @@ PACKAGES: tuple[Package, ...] = (
             ("Repair the data it found wrong", "the package that produced it"),
         ),
     ),
+    Package(
+        dotted="engine.v2.research",
+        layer=7.0,
+        label="—",
+        owner="Research tooling — offline analysis CLIs reading a pinned v2 snapshot "
+              "(not a §4 owner-table row; added Phase 6 slice 6, decision UD-4)",
+        replaces=("the store-reaching halves of tools/signal_screen.py, "
+                  "tools/fill_quality.py and engine/data/pulls/polygon_fills.py's read path",),
+        responsibilities=(
+            "Pure analysis cores moved verbatim from the legacy research tools.",
+            "One resolve_pinned/resolve call per run, with the resulting "
+            "snapshot_id threaded through every read and into the output.",
+        ),
+        non_responsibilities=(
+            ("Mutate the trades ledger or fetch from a network provider",
+             "engine/build_trades.py and engine/data/pulls (legacy, unchanged)"),
+        ),
+    ),
 )
 
 
