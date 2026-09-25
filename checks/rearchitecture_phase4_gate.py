@@ -16,7 +16,16 @@ def check(evidence: dict) -> dict:
     if evidence.get("schema_version") != "phase4_acceptance.v1.0":
         findings.append("unsupported evidence schema")
     population = evidence.get("population") or {}
-    if not population or not (population.get("expected") == population.get("supported") == population.get("compared")):
+    expected = population.get("expected") if isinstance(population, dict) else None
+    supported = population.get("supported") if isinstance(population, dict) else None
+    compared = population.get("compared") if isinstance(population, dict) else None
+    counts = (expected, supported, compared)
+    complete = (
+        all(isinstance(count, int) and not isinstance(count, bool) for count in counts)
+        and expected > 0
+        and expected == supported == compared
+    )
+    if not complete:
         findings.append("population is incomplete")
     if evidence.get("status") not in {"FOUNDATION_PASS", "PASS"}:
         findings.append("phase 4 status is not accepted")
