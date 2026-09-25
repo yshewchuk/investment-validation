@@ -5,7 +5,7 @@ import base64
 import json
 from datetime import datetime
 
-from engine.v2.foundation import content_hash, format_timestamp
+from engine.v2.foundation import canonical_json, content_hash, format_timestamp
 from engine.v2.ledger.decisions import (
     DecisionConflict,
     _import_decision_id,
@@ -268,6 +268,82 @@ def commit_decisions(conn, claim, candidates, context, validated_context, *, clo
         raise fail("INPUT_CHANGED", "validated candidate content changed")
     with transaction(conn):
         return commit_decisions_in_transaction(conn, claim, candidates, validated_context, clock=clock)
+
+
+def validated_supersede_payload(payload):
+    """The canonical JSON object ``decisions.insert`` accepts, or a typed refusal.
+
+    ``insert`` is the one authority on a decision payload: it calls
+    ``content_hash``/``canonical_json`` on it and reads mapping keys. This
+    re-applies exactly those rules -- never a second copy of them -- so the
+    CLI's pre-submission check and the coordinator's commit check cannot
+    drift from what the ledger will actually take.
+    """
+    if not isinstance(payload, dict):
+        raise fail("VALIDATION_FAILED", "decision payload must be a JSON object",
+                   details={"field": "new_payload"})
+    try:
+        canonical_json(payload)
+    except (TypeError, ValueError):
+        raise fail("VALIDATION_FAILED", "decision payload is not canonical JSON",
+                   details={"field": "new_payload"}) from None
+    return dict(payload)
+
+
+def _lookup_supersede_target(conn, old_decision_id, decision_id, payload_hash):
+    """Refuse an unknown or already-superseded target before any write.
+
+    The identical retry -- the one existing superseding row that carries this
+    same derived ``decision_id`` and payload hash -- is not "already
+    superseded" for this purpose: ``insert`` returns it unchanged, which is
+    what keeps a re-run idempotent. Every other superseding row refuses.
+    """
+    existing = conn.execute("SELECT decision_id FROM decisions WHERE decision_id=?",
+                            (old_decision_id,)).fetchone()
+    if existing is None:
+        raise fail("VALIDATION_FAILED", "unknown decision_id",
+                   details={"old_decision_id": old_decision_id})
+    already = conn.execute("SELECT decision_id, payload_hash FROM decisions WHERE supersedes=?",
+                           (old_decision_id,)).fetchone()
+    if already is not None and (already["decision_id"] != decision_id
+                                or already["payload_hash"] != payload_hash):
+        raise fail("VALIDATION_FAILED", "decision already superseded",
+                   details={"old_decision_id": old_decision_id, "by": already["decision_id"]})
+
+
+def commit_supersede(conn, claim, *, clock):
+    """Commit a ``decisions_supersede`` job: append a new decision that
+    supersedes an existing one, inside its own fenced transaction.
+
+    The target must exist and must not already be superseded (an identical
+    retry of the same supersession is the one exception, resolving through
+    ``insert``'s own idempotency); otherwise this refuses typed and the
+    ledger is unchanged. The new row's identity is derived with the ledger's
+    own first-committed-row derivation,
+    :func:`engine.v2.ledger.decisions._import_decision_id`
+    (``kind + ":" + row_id`` for every non-outcome kind) -- no new scheme.
+
+    Called directly by the supervisor's coordinator-effect dispatch, so it
+    returns the same ``(effect_fn_or_None, extra_refs)`` shape
+    ``Service._coordinator_effect`` returns; this function's own transaction
+    did the write, so there is no further effect for the finish path to run.
+    """
+    parameters = claim.spec.parameters
+    reason = parameters.get("reason")
+    payload = validated_supersede_payload(parameters.get("new_payload"))
+    if not reason:
+        raise fail("VALIDATION_FAILED", "supersede needs a reason")
+    old_decision_id = str(parameters.get("old_decision_id") or "")
+    payload["supersede_reason"] = reason
+    decision_id = _import_decision_id("supersede", old_decision_id, payload)
+    with transaction(conn):
+        verify_fence(conn, claim.attempt_id, claim.fence, clock.now())
+        _lookup_supersede_target(conn, old_decision_id, decision_id, content_hash(payload))
+        insert(conn, logical_key=decision_id, decision_id=decision_id, payload=payload,
+               purpose="decision_supersede", kind="supersede", validations={},
+               created_at=format_timestamp(clock.now()),
+               supersedes=old_decision_id, owner="catalog")
+    return None, ()
 
 
 #: Fixed, literal scope for settlement-line divergences -- deliberately NOT

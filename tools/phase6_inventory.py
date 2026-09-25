@@ -83,6 +83,7 @@ LEGACY_NIGHTLY = "engine/dashboard/nightly.py"
 V2_NIGHTLY = "engine/v2/ops/nightly.py"
 V2_ACTIONS = "engine/v2/ops/legacy_adapter.py"
 V2_EFFECTS = "engine/v2/ops/effects_graph.py"
+V2_STAGES = "engine/v2/ops/stages.py"
 SUBCOMMAND_CLIS = {"engine/ledger.py": "engine.ledger", "engine/v2/ops/cli.py": "ops"}
 CLI_ROOTS = ("engine", "dashboard", "tools")
 EXPERIMENT_GLOB = "experiments/*/run.py"
@@ -422,9 +423,33 @@ def resolve_symbol(root: Path, ref: str) -> bool:
     return re.search(rf"\b{re.escape(symbol)}\b", path.read_text()) is not None
 
 
+def _job_kind_names(root: Path) -> set[str]:
+    """The supervised job kinds ``engine/v2/ops/stages.py`` registers.
+
+    A ``job:<kind>`` declaration names the allowlist entry itself rather than
+    a path into the tools, so it resolves against the source that owns the
+    registry. The file is absent only in synthetic trees that claim no job
+    kind, which resolve to the empty set.
+    """
+    path = root / V2_STAGES
+    if not path.is_file():
+        return set()
+    names = set()
+    for node in ast.walk(ast.parse(path.read_text(), filename=V2_STAGES)):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "JobKind"):
+            for keyword in node.keywords:
+                if (keyword.arg == "name" and isinstance(keyword.value, ast.Constant)
+                        and isinstance(keyword.value.value, str)):
+                    names.add(keyword.value.value)
+    return names
+
+
 def resolve_entrypoint(root: Path, ref: str, discovered: dict) -> bool:
     if ref.startswith("py:"):
         return resolve_symbol(root, ref.removeprefix("py:"))
+    if ref.startswith("job:"):
+        return ref.removeprefix("job:") in _job_kind_names(root)
     return ref in discovered
 
 

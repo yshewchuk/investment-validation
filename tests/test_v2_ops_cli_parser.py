@@ -33,7 +33,7 @@ def test_command_tree_is_exactly_the_expected_set():
     assert _subparser_choices(p) == sorted({
         "init", "doctor", "health", "serve", "plan", "submit", "rescore",
         "capture-inputs", "reconcile", "provider-account", "snapshot", "ledger",
-        "price-refresh", "price-history", "get", "logs", "cancel", "resume",
+        "decisions", "price-refresh", "price-history", "get", "logs", "cancel", "resume",
         "explain"})
     for action in p._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -41,6 +41,7 @@ def test_command_tree_is_exactly_the_expected_set():
                 {"plan-import", "submit", "promote", "rollback"})
             assert _subparser_choices(action.choices["ledger"]) == sorted(
                 {"import-history", "status", "calibrate", "book"})
+            assert _subparser_choices(action.choices["decisions"]) == ["supersede"]
             assert _subparser_choices(action.choices["price-history"]) == ["capture"]
 
 
@@ -174,6 +175,15 @@ _CASES = [
       "--include-declined"],
      {"capital_per_trade": 1000.5, "command": "ledger", "contracts": 5,
       "include_declined": True, "ledger_command": "book", "root": "data/operations"}),
+    ("decisions_supersede_defaults",
+     ["decisions", "supersede", "--row-id", "r1", "--reason", "x"],
+     {"command": "decisions", "decisions_command": "supersede", "from_json": None,
+      "reason": "x", "root": "data/operations", "row_id": "r1"}),
+    ("decisions_supersede_from_json",
+     ["decisions", "--root", "R1", "supersede", "--row-id", "r2", "--reason", "y",
+      "--from-json", "new.json"],
+     {"command": "decisions", "decisions_command": "supersede", "from_json": Path("new.json"),
+      "reason": "y", "root": "R1", "row_id": "r2"}),
     ("price_refresh_defaults", ["price-refresh", "--session", "2026-01-01"],
      {"command": "price-refresh", "dry_run": False, "root": "data/operations",
       "session": "2026-01-01"}),
@@ -250,6 +260,7 @@ _ERROR_CASES = [
     ("missing_command", []),
     ("plan_missing_kind", ["plan"]),
     ("ledger_missing_subcommand", ["ledger"]),
+    ("decisions_missing_subcommand", ["decisions"]),
     ("snapshot_missing_subcommand", ["snapshot"]),
     ("price_history_missing_subcommand", ["price-history"]),
     ("reconcile_missing_expected_attempt", ["reconcile", "job1"]),
