@@ -30,6 +30,16 @@ def _ref(path: Path, doc) -> dict:
     return {"path": str(path), "sha256": _sha(blob)}
 
 
+def _rewrite_bytes(ref: dict, blob: bytes) -> None:
+    """Replace a referenced file's bytes and re-point the ref at them."""
+    Path(ref["path"]).write_bytes(blob)
+    ref["sha256"] = _sha(blob)
+
+
+def _rewrite_json(ref: dict, doc) -> None:
+    _rewrite_bytes(ref, json.dumps(doc, indent=2, sort_keys=True).encode())
+
+
 def good_tree(tmp_path: Path) -> dict:
     """A fully valid manifest plus its referenced files."""
     cfg = _ref(tmp_path / "candidate" / "supervisor.json", {"profile": "eod"})
@@ -108,6 +118,7 @@ def test_valid_manifest_has_no_findings(tmp_path):
     assert evidence["findings"] == []
     assert evidence["ok"] and evidence["status"] == "MANIFEST_VALID"
     assert "not a Phase 7 readiness claim" in evidence["note"]
+    assert "never queries a live scheduler" in evidence["note"]
 
 
 def test_deterministic_and_sorted(tmp_path):
@@ -142,6 +153,9 @@ def test_read_only(tmp_path):
     lambda m: m["data_snapshot"].update(snapshot_id="latest"),
     lambda m: m["model_deployment"].update(release_id="current"),
     lambda m: m["authority"]["retained_old_deployment"].update(ref="prod"),
+    lambda m: m["authority"]["retained_old_deployment"].update(ref="deploy:current"),
+    lambda m: m["authority"]["retained_old_deployment"].update(ref="image:stable"),
+    lambda m: m["authority"]["retained_old_deployment"].update(ref="refs/heads/main/"),
     lambda m: m["authority"]["proposed"].update(credential_owner=""),
     lambda m: m["job_graph"]["jobs"][0].update(owner="whatever:latest"),
     lambda m: m["candidate"]["config"][0].update(name="default"),
@@ -150,6 +164,22 @@ def test_implicit_refs_rejected(tmp_path, mutate):
     manifest = good_tree(tmp_path)
     mutate(manifest)
     assert p7.LATEST_REF in codes_for(manifest, tmp_path)
+
+
+@pytest.mark.parametrize("value", [
+    "deploy:current", "image:stable", "refs/heads/main/", "refs/heads/main//",
+    "prod:", "LATEST", " main ", "refs/heads/STABLE/", "whatever:latest",
+])
+def test_implicit_detection_normalizes_trailing_separators_and_colon_suffixes(value):
+    assert p7._is_implicit(value)
+
+
+@pytest.mark.parametrize("value", [
+    "rel-0007", "snap-2026-09-24", "deploy/legacy-2026-09-01", "image:stable:1.2",
+    "refs/tags/v9-release", "eod-v2", "prod-eod-2026-09-24",
+])
+def test_exact_identities_are_not_implicit(value):
+    assert not p7._is_implicit(value)
 
 
 def test_short_or_non_hex_commit_rejected(tmp_path):
@@ -222,6 +252,51 @@ def test_malformed_referenced_json_detected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# negative controls: referenced documents must carry the exact identity
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_document_must_name_the_pinned_snapshot(tmp_path):
+    manifest = good_tree(tmp_path)
+    _rewrite_json(manifest["data_snapshot"], {"snapshot_id": "snap-2026-09-23"})
+    assert (p7.REF_MISMATCH, "data_snapshot") in findings_for(manifest, tmp_path)
+
+
+def test_snapshot_document_without_snapshot_id_fails_closed(tmp_path):
+    manifest = good_tree(tmp_path)
+    _rewrite_json(manifest["data_snapshot"], {"id": "snap-2026-09-24"})
+    assert (p7.REF_MISMATCH, "data_snapshot") in findings_for(manifest, tmp_path)
+
+
+@pytest.mark.parametrize("doc", [None, [], "snap-2026-09-24"])
+def test_snapshot_document_non_object_rejected(tmp_path, doc):
+    manifest = good_tree(tmp_path)
+    _rewrite_json(manifest["data_snapshot"], doc)
+    assert (p7.REF_MALFORMED, "data_snapshot") in findings_for(manifest, tmp_path)
+
+
+def test_release_document_must_name_the_deployed_release(tmp_path):
+    manifest = good_tree(tmp_path)
+    _rewrite_json(manifest["model_deployment"],
+                  {"release_id": "rel-0005", "schema_version": "phase5_staged_release.v1.0"})
+    assert (p7.REF_MISMATCH, "model_deployment") in findings_for(manifest, tmp_path)
+
+
+def test_release_document_without_release_id_fails_closed(tmp_path):
+    """A parseable release document omitting release_id is not an accepted release."""
+    manifest = good_tree(tmp_path)
+    _rewrite_json(manifest["model_deployment"], {"schema_version": "phase5_staged_release.v1.0"})
+    assert (p7.REF_MISMATCH, "model_deployment") in findings_for(manifest, tmp_path)
+
+
+@pytest.mark.parametrize("doc", [None, [], "rel-0007"])
+def test_release_document_non_object_rejected(tmp_path, doc):
+    manifest = good_tree(tmp_path)
+    _rewrite_json(manifest["model_deployment"], doc)
+    assert (p7.REF_MALFORMED, "model_deployment") in findings_for(manifest, tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # negative controls: job graph accounting
 # ---------------------------------------------------------------------------
 
@@ -279,6 +354,72 @@ def test_hidden_background_writer_rejected(tmp_path):
     assert (p7.WRITER_CONFLICT, "job:catalog-backup") in found
 
 
+# ---------------------------------------------------------------------------
+# negative controls: graph rows are strictly typed and never coerced
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("official", ["false", "true", None, 1])
+def test_writes_official_must_be_a_real_bool(tmp_path, official):
+    """String/null/int writes_official is a finding, never silently coerced."""
+    manifest = good_tree(tmp_path)
+    doc = json.loads(Path(manifest["job_graph"]["path"]).read_text())
+    for job in doc["jobs"]:
+        if job["id"] == "native-eod":
+            job["writes_official"] = official
+    _rewrite_json(manifest["job_graph"], doc)
+    found = findings_for(manifest, tmp_path)
+    assert (p7.REF_MALFORMED, "job_graph") in found
+    # the accounted official writer is never *confirmed* by a non-bool value
+    assert (p7.REF_MISMATCH, "job:native-eod") in found
+
+
+def test_string_false_is_never_read_as_a_writers_flag(tmp_path):
+    """A background row with writes_official "false" fails as malformed, not as a writer."""
+    manifest = good_tree(tmp_path)
+    doc = json.loads(Path(manifest["job_graph"]["path"]).read_text())
+    for job in doc["jobs"]:
+        if job["id"] == "catalog-backup":
+            job["writes_official"] = "false"
+    _rewrite_json(manifest["job_graph"], doc)
+    found = findings_for(manifest, tmp_path)
+    assert (p7.REF_MALFORMED, "job_graph") in found
+    assert (p7.WRITER_CONFLICT, "job:catalog-backup") not in found
+
+
+def test_graph_row_missing_writes_official_is_not_silently_false(tmp_path):
+    """Omitting the flag on a background row must fail, not pass as False."""
+    manifest = good_tree(tmp_path)
+    doc = json.loads(Path(manifest["job_graph"]["path"]).read_text())
+    for job in doc["jobs"]:
+        if job["id"] == "catalog-backup":
+            del job["writes_official"]
+    _rewrite_json(manifest["job_graph"], doc)
+    evidence = p7.validate(manifest, tmp_path)
+    assert (p7.REF_MALFORMED, "job_graph") in findings_for(manifest, tmp_path)
+    assert not evidence["ok"]
+
+
+def test_graph_rows_require_string_id_and_schedule(tmp_path):
+    manifest = good_tree(tmp_path)
+    doc = json.loads(Path(manifest["job_graph"]["path"]).read_text())
+    doc["jobs"][3]["id"] = 9
+    doc["jobs"][2]["schedule"] = ["nightly"]
+    _rewrite_json(manifest["job_graph"], doc)
+    details = {f["detail"] for f in p7.validate(manifest, tmp_path)["findings"]
+               if f["code"] == p7.REF_MALFORMED and f["subject"] == "job_graph"}
+    assert any("no string id" in d for d in details)
+    assert any("schedule=" in d for d in details)
+
+
+def test_null_graph_document_fails_instead_of_skipping(tmp_path):
+    """A graph file that parses to null must not silence the accounting comparison."""
+    manifest = good_tree(tmp_path)
+    _rewrite_bytes(manifest["job_graph"], b"null")
+    found = findings_for(manifest, tmp_path)
+    assert (p7.REF_MALFORMED, "job_graph") in found
+
+
 def test_official_writer_job_owned_by_undeclared_writer_rejected(tmp_path):
     manifest = good_tree(tmp_path)
     for job in manifest["job_graph"]["jobs"]:
@@ -287,6 +428,18 @@ def test_official_writer_job_owned_by_undeclared_writer_rejected(tmp_path):
     found = findings_for(manifest, tmp_path)
     assert (p7.WRITER_CONFLICT, "job:native-eod") in found
     assert (p7.WRITER_NO_JOB, "authority.proposed.writer") in found
+
+
+def test_authority_schedule_writer_pairs_cannot_be_swapped(tmp_path):
+    """Each side's schedule is validated against its own writer's job, not the union:
+    swapping the old and proposed schedule values must fail on both sides."""
+    manifest = good_tree(tmp_path)
+    manifest["authority"]["old"]["schedule"] = "eod-v2"
+    manifest["authority"]["proposed"]["schedule"] = "eod-v1"
+    found = findings_for(manifest, tmp_path)
+    assert (p7.REF_MISMATCH, "authority.old.schedule") in found
+    assert (p7.REF_MISMATCH, "authority.proposed.schedule") in found
+    assert not p7.validate(manifest, tmp_path)["ok"]
 
 
 def test_duplicate_official_writer_per_side_rejected(tmp_path):
@@ -361,6 +514,35 @@ def test_empty_consumer_list_rejected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# negative controls: malformed entries report findings, never TypeError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("entry", [{"id": "board"}, ["board"], 7, True, None])
+def test_nonstring_consumer_entry_is_a_named_finding(tmp_path, entry):
+    """Dict/list/other consumer entries must produce a stable finding, not a crash."""
+    manifest = good_tree(tmp_path)
+    manifest["consumer_inventory"]["consumers"][0] = entry
+    found = findings_for(manifest, tmp_path)
+    assert (p7.BAD_CONSUMER, "consumer_inventory.consumers[0]") in found
+
+
+@pytest.mark.parametrize("bad", [["eod", "v2"], 42, {"cron": "eod"}, None])
+def test_nonstring_job_schedule_is_a_named_finding(tmp_path, bad):
+    """A non-string declared schedule must produce a stable finding, not a crash."""
+    manifest = good_tree(tmp_path)
+    manifest["job_graph"]["jobs"][0]["schedule"] = bad
+    found = findings_for(manifest, tmp_path)
+    assert (p7.BAD_SCHEDULE, "job:native-eod") in found
+
+
+def test_nonstring_inventory_document_shape_rejected(tmp_path):
+    manifest = good_tree(tmp_path)
+    _rewrite_json(manifest["consumer_inventory"], "board")
+    assert (p7.REF_MALFORMED, "consumer_inventory") in findings_for(manifest, tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # negative controls: phase evidence
 # ---------------------------------------------------------------------------
 
@@ -408,6 +590,39 @@ def test_phase_five_release_binding(tmp_path):
     assert (p7.REF_MISMATCH, "phase:5") in findings_for(manifest, tmp_path)
 
 
+# ---------------------------------------------------------------------------
+# negative controls: evidence documents must be objects with exact bindings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("blob", [b"null", b"[1, 2]", b'"PASS"', b"42"])
+def test_evidence_non_object_document_rejected(tmp_path, blob):
+    """A null/list/scalar evidence file must be a finding, never a skipped check."""
+    manifest = good_tree(tmp_path)
+    _rewrite_bytes(manifest["phase_evidence"][1], blob)  # the Phase 4 row
+    assert (p7.REF_MALFORMED, "phase:4") in findings_for(manifest, tmp_path)
+
+
+def test_evidence_without_commit_binding_fails_closed(tmp_path):
+    """Evidence that names no commit no longer passes silently."""
+    manifest = good_tree(tmp_path)
+    row = manifest["phase_evidence"][1]
+    doc = json.loads(Path(row["path"]).read_text())
+    del doc["candidate_commit"]
+    _rewrite_json(row, doc)
+    assert (p7.EVIDENCE_STALE, "phase:4") in findings_for(manifest, tmp_path)
+
+
+def test_phase_five_release_binding_is_required(tmp_path):
+    """Phase 5 evidence that omits the release binding must fail closed."""
+    manifest = good_tree(tmp_path)
+    row = next(r for r in manifest["phase_evidence"] if r["phase"] == "5")
+    doc = json.loads(Path(row["path"]).read_text())
+    del doc["release_id"]
+    _rewrite_json(row, doc)
+    assert (p7.REF_MISMATCH, "phase:5") in findings_for(manifest, tmp_path)
+
+
 def test_unknown_and_missing_top_level_keys_rejected(tmp_path):
     manifest = good_tree(tmp_path)
     manifest["phase7_approved"] = True
@@ -446,3 +661,20 @@ def test_cli_human_and_json_modes(tmp_path, capsys):
 def test_cli_unreadable_manifest_exits_two(tmp_path, capsys):
     assert p7.main([str(tmp_path / "nope.json")]) == 2
     assert "cannot read manifest" in capsys.readouterr().err
+
+
+def test_cli_reports_malformed_entries_as_json_exit_one(tmp_path, capsys):
+    """Malformed consumer/schedule entries must yield stable findings and exit 1,
+    never a TypeError traceback from the CLI."""
+    manifest = good_tree(tmp_path)
+    manifest["consumer_inventory"]["consumers"].append({"name": "phone"})
+    for job in manifest["job_graph"]["jobs"]:
+        if job["id"] == "board-reads":
+            job["schedule"] = ["serve"]
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    assert p7.main([str(path), "--root", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "MANIFEST_INVALID"
+    assert p7.BAD_CONSUMER in payload["finding_codes"]
+    assert p7.BAD_SCHEDULE in payload["finding_codes"]

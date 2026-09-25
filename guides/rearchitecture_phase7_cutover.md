@@ -41,15 +41,21 @@ Do not grandfather compatibility-only preview nights.
 manifest against schema `phase7_candidate_manifest.v1.0` (documented in the
 module docstring) by reading and hash-checking the referenced files it can
 reach, never trusting summary booleans: exact code/config identity, pinned
-data snapshot and model deployment, native job graph and consumer inventory
-refs, old and proposed schedule/writer/credential ownership with retained
-old deployment refs, and hash-verified 3B/4/5/6 phase evidence (3A preview
-evidence cannot substitute). It rejects implicit latest refs, duplicate or
-unaccounted scheduled writers/background jobs, conflicting writer ownership,
-and stale or malformed evidence. It is read-only: it never writes authority,
-production pointers, credentials or release state. A green run validates
-manifest consistency only; it is not a Phase 7 readiness claim, and the
-tests run on synthetic fixtures exclusively.
+data snapshot and model deployment (the referenced snapshot and release
+documents must be JSON objects declaring exactly that identity), native job
+graph (rows strictly typed with string id/schedule and a real boolean
+``writes_official``) and consumer inventory refs, old and proposed
+schedule/writer/credential ownership validated as one pair per side (the
+sides' values cannot be swapped), with retained old deployment refs, and
+hash-verified 3B/4/5/6 phase evidence that must be JSON objects binding the
+exact candidate commit and, for Phase 5, the deployed release (missing
+bindings fail closed; 3A preview evidence cannot substitute). It rejects
+implicit latest refs, duplicate or unaccounted scheduled writers/background
+jobs, conflicting writer ownership, and stale or malformed evidence. It is
+read-only: it never writes authority, production pointers, credentials or
+release state. A green run validates manifest consistency only; it is not a
+Phase 7 readiness claim, and the tests run on synthetic fixtures
+exclusively.
 
     python3 checks/phase7_candidate_manifest.py MANIFEST.json [--root DIR] [--json]
 

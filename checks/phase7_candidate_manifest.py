@@ -10,7 +10,10 @@ job*. This checker validates one such manifest against the referenced files
 it can reach. It is read-only: it never writes authority, production
 pointers, credentials or release state, and a green result validates the
 manifest's internal consistency and referenced evidence, **not** Phase 7
-readiness, which requires real dated evidence this repo does not ship.
+readiness, which requires real dated evidence this repo does not ship. The
+checker never queries a live scheduler or deployment system, so it can never
+claim the referenced job graph or consumer inventory is a *complete* real-world
+inventory — only that the manifest agrees with the files it references.
 
 Input manifest schema ``phase7_candidate_manifest.v1.0``
 --------------------------------------------------------
@@ -18,36 +21,48 @@ Every key listed is required; an unknown key at any strict level is a
 finding (a typo must not silently disable a control). All identity strings
 must be exact: an empty value, or one of ``latest``/``current``/``newest``/
 ``head``/``main``/``master``/``trunk``/``stable``/``prod``/``production``/
-``live``/``default`` (alone, as a ``:latest``-style suffix, or as the last
-path segment), is rejected.
+``live``/``default`` — alone, as a ``:``-suffix (``deploy:current``,
+``image:stable``), or as the last path segment — is rejected; trailing
+``/`` and ``:`` separators are normalized away first, so ``refs/heads/main/``
+is caught exactly like ``refs/heads/main``.
 
 ``candidate``: ``{"commit": "<40- or 64-hex git sha>", "config": [{"name", "path",
 "sha256"}]}`` — at least one config identity; every referenced file must
 exist, hash to its recorded ``sha256`` (64-hex) and parse.
 
 ``data_snapshot``: ``{"snapshot_id", "sha256", "path"}`` — one pinned
-snapshot, never a floating pointer.
+snapshot, never a floating pointer. The referenced snapshot document must
+parse to a JSON object that declares the same ``snapshot_id``; a
+non-object, a document that omits the key or names a different snapshot
+fails closed.
 
 ``model_deployment``: ``{"release_id", "path", "sha256"}`` — the referenced
-release manifest must parse and name the same ``release_id``.
+release manifest must parse to a JSON object that declares exactly the same
+``release_id``; an object omitting ``release_id`` is a finding, not a pass.
 
 ``job_graph``: ``{"path", "sha256", "jobs": [{"id", "schedule", "kind",
 "owner"}]}`` — the accounting of every job. ``kind`` is one of
-``scheduled_writer``, ``background`` or ``reader``. The referenced graph
-document must parse to ``{"jobs": [{"id", "schedule",
-"writes_official": bool}]}``; the two job sets must agree exactly
+``scheduled_writer``, ``background`` or ``reader``, and each ``schedule``
+must be a string. The referenced graph document must parse to
+``{"jobs": [{"id", "schedule", "writes_official": bool}]}`` where every row
+carries a string ``id``, a string ``schedule`` and a real JSON boolean
+``writes_official`` — missing, null or string-coerced values (``"false"``)
+are findings, never silently converted. The two job sets must agree exactly
 (id and schedule per id), so a scheduled job that exists but is not
 accounted for, or an accounted job the graph does not run, both fail.
 
 ``consumer_inventory``: ``{"path", "sha256", "consumers": ["<name>", ...]}``
-— the referenced document must contain every declared consumer name (as an
-``id``/``name``/``consumer`` value anywhere in it); an empty list is a
-finding.
+— a non-empty list of name strings; a dict, list or other nonstring entry
+is a named finding. The referenced document must contain every declared
+consumer name (as an ``id``/``name``/``consumer`` value anywhere in it).
 
 ``authority``: ``{"old": {"schedule", "writer", "credential_owner"},
 "proposed": {same}, "retained_old_deployment": {"ref", "rollback_owner"}}``
 — both sides of the switch must be owned explicitly, and the old deployment
-must be named for retention with a rollback owner. At most one
+must be named for retention with a rollback owner. Each side's
+``schedule``/``writer`` pair is validated together against that side's own
+job — the checker does not compare the two sides' schedules as a union, so
+swapping the old and proposed schedule values fails. At most one
 ``scheduled_writer`` job per side (a duplicate official writer fails);
 every ``scheduled_writer`` job's owner must be one declared writer; a
 ``background``/``reader`` job the graph marks ``writes_official`` is a
@@ -59,11 +74,13 @@ roles (a manifest that changes nothing cannot be a switch).
 "sha256"}]`` — one row per required phase ``3B``, ``4``, ``5``, ``6``
 (the 3A preview cannot substitute: a row's ``schema_version`` must start
 with ``phase<normalized phase>``). Each referenced evidence file must
-exist, hash correctly, parse as JSON, carry the declared
+exist, hash correctly, parse as a JSON *object* (a null, list or scalar
+document is a finding, not a skipped check), carry the declared
 ``schema_version``, report exactly the declared ``status`` (a truthy
 boolean in the file is never consulted), bind the manifest's ``commit``
-when it names a commit, and — for Phase 5 — the manifest's
-``release_id``.
+under one of the commit keys — evidence that names no commit binding fails
+closed — and — for Phase 5 — bind the manifest's ``release_id``, likewise
+required.
 
 Usage::
 
@@ -96,6 +113,8 @@ SCHEMA_VERSION = "P7_SCHEMA_VERSION"
 UNKNOWN_KEY = "P7_UNKNOWN_KEY"
 MISSING_FIELD = "P7_MISSING_FIELD"
 BAD_LIST = "P7_BAD_LIST"
+BAD_CONSUMER = "P7_BAD_CONSUMER"
+BAD_SCHEDULE = "P7_BAD_SCHEDULE"
 BAD_JOB_KIND = "P7_BAD_JOB_KIND"
 BAD_PHASE = "P7_BAD_PHASE"
 LATEST_REF = "P7_LATEST_REF"
@@ -119,7 +138,8 @@ OWNERSHIP_INCOMPLETE = "P7_OWNERSHIP_INCOMPLETE"
 OLD_DEPLOYMENT_MISSING = "P7_OLD_DEPLOYMENT_MISSING"
 
 FINDING_CODES = (
-    SCHEMA_VERSION, UNKNOWN_KEY, MISSING_FIELD, BAD_LIST, BAD_JOB_KIND, BAD_PHASE,
+    SCHEMA_VERSION, UNKNOWN_KEY, MISSING_FIELD, BAD_LIST, BAD_CONSUMER, BAD_SCHEDULE,
+    BAD_JOB_KIND, BAD_PHASE,
     LATEST_REF, BAD_HASH, BAD_CODE_IDENTITY, DUPLICATE, REF_MISSING, REF_HASH_MISMATCH,
     REF_MALFORMED, REF_MISMATCH, UNACCOUNTED_JOB, PHANTOM_JOB, WRITER_CONFLICT,
     DUPLICATE_OFFICIAL_WRITER, WRITER_NO_JOB, WRITER_NO_SWITCH, CONSUMER_UNACCOUNTED,
@@ -177,9 +197,16 @@ def _is_implicit(value: Any) -> bool:
     if not isinstance(value, str) or not value.strip():
         return True
     text = value.strip().lower()
-    if text in IMPLICIT_REFS or text.endswith(":latest") or "/latest" in text:
+    while text and text[-1] in "/: ":
+        text = text[:-1].rstrip()
+    if not text or text in IMPLICIT_REFS:
         return True
-    return bool(text.rsplit("/", 1)[-1]) and text.rsplit("/", 1)[-1] in IMPLICIT_REFS
+    tail = text.rsplit(":", 1)[-1].rstrip("/").rstrip(":")
+    if tail in IMPLICIT_REFS:
+        return True
+    if bool(text.rsplit("/", 1)[-1]) and text.rsplit("/", 1)[-1] in IMPLICIT_REFS:
+        return True
+    return "/latest" in text
 
 
 def _identity(findings: _Findings, subject: str, field: str, value: Any) -> Any:
@@ -255,14 +282,17 @@ def _read_verified(findings: _Findings, subject: str, path: Any, digest: Any,
     return data
 
 
+_UNREADABLE = object()  # distinct from a document that parsed to JSON null
+
+
 def _parse_json(findings: _Findings, subject: str, data: bytes | None) -> Any:
     if data is None:
-        return None
+        return _UNREADABLE
     try:
         return json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         findings.add(REF_MALFORMED, subject, "verified bytes are not valid UTF-8 JSON")
-        return None
+        return _UNREADABLE
 
 
 def _verify_ref(findings: _Findings, subject: str, obj: Mapping, root: Path) -> Any:
@@ -313,24 +343,49 @@ def _check_candidate(cand: Mapping, findings: _Findings, root: Path) -> None:
 
 
 def _check_data_snapshot(snap: Mapping, findings: _Findings, root: Path) -> None:
-    _identity(findings, "data_snapshot", "snapshot_id", snap.get("snapshot_id"))
-    _verify_ref(findings, "data_snapshot", snap, root)
+    declared_id = _identity(findings, "data_snapshot", "snapshot_id", snap.get("snapshot_id"))
+    doc = _verify_ref(findings, "data_snapshot", snap, root)
+    if doc is _UNREADABLE:
+        return
+    if not isinstance(doc, Mapping):
+        findings.add(REF_MALFORMED, "data_snapshot",
+                     "referenced snapshot document is not a JSON object")
+        return
+    named = doc.get("snapshot_id")
+    if named is None:
+        findings.add(REF_MISMATCH, "data_snapshot",
+                     "referenced snapshot document declares no snapshot_id (fail closed)")
+    elif named != declared_id:
+        findings.add(REF_MISMATCH, "data_snapshot",
+                     f"snapshot document names {named!r}, not the pinned {declared_id!r}")
 
 
 def _check_model_deployment(dep: Mapping, findings: _Findings, root: Path) -> Any:
     release = _identity(findings, "model_deployment", "release_id", dep.get("release_id"))
     doc = _verify_ref(findings, "model_deployment", dep, root)
-    if isinstance(doc, Mapping) and release is not None:
-        declared = doc.get("release_id")
-        if declared is not None and declared != release:
-            findings.add(REF_MISMATCH, "model_deployment",
-                         f"release manifest names {declared!r}, not {release!r}")
+    if doc is not _UNREADABLE:
+        if not isinstance(doc, Mapping):
+            findings.add(REF_MALFORMED, "model_deployment",
+                         "referenced release document is not a JSON object")
+        else:
+            named = doc.get("release_id")
+            if named is None:
+                findings.add(REF_MISMATCH, "model_deployment",
+                             "release manifest declares no release_id (fail closed)")
+            elif named != release:
+                findings.add(REF_MISMATCH, "model_deployment",
+                             f"release manifest names {named!r}, not {release!r}")
     return release
 
 
 def _check_job_accounting(job: Mapping, findings: _Findings) -> None:
     subject = str(job.get("id") or "?")
-    _identity(findings, f"job:{subject}", "schedule", job.get("schedule"))
+    schedule = job.get("schedule")
+    if isinstance(schedule, str):
+        _identity(findings, f"job:{subject}", "schedule", schedule)
+    else:
+        findings.add(BAD_SCHEDULE, f"job:{subject}",
+                     f"schedule={schedule!r} is not a string schedule")
     _identity(findings, f"job:{subject}", "owner", job.get("owner"))
     if job.get("kind") not in JOB_KINDS:
         findings.add(BAD_JOB_KIND, f"job:{subject}", f"kind={job.get('kind')!r} not in {JOB_KINDS}")
@@ -349,17 +404,31 @@ def _check_job_graph(graph: Mapping, findings: _Findings, root: Path) -> list[di
             continue
         declared[jid] = job
     doc = _verify_ref(findings, "job_graph", graph, root)
+    if doc is _UNREADABLE:
+        return list(declared.values())
     graph_rows = doc.get("jobs") if isinstance(doc, Mapping) else None
     if not isinstance(graph_rows, list):
-        if doc is not None:
-            findings.add(REF_MALFORMED, "job_graph", "referenced graph has no 'jobs' list")
+        findings.add(REF_MALFORMED, "job_graph",
+                     "referenced graph is not a JSON object with a 'jobs' list")
         return list(declared.values())
     graph_jobs: dict[str, dict] = {}
     for i, row in enumerate(graph_rows):
-        if not isinstance(row, Mapping) or not isinstance(row.get("id"), str):
+        if not isinstance(row, Mapping):
             findings.add(REF_MALFORMED, "job_graph", f"graph jobs[{i}] is not a mapped row")
             continue
-        jid = row["id"]
+        jid = row.get("id")
+        if not isinstance(jid, str) or not jid.strip():
+            findings.add(REF_MALFORMED, "job_graph", f"graph jobs[{i}] has no string id")
+            continue
+        sched = row.get("schedule")
+        if not isinstance(sched, str) or not sched.strip():
+            findings.add(REF_MALFORMED, "job_graph",
+                         f"graph jobs[{i}] (id {jid!r}) schedule={sched!r} is not a string")
+        official = row.get("writes_official")
+        if not isinstance(official, bool):
+            findings.add(REF_MALFORMED, "job_graph",
+                         f"graph jobs[{i}] (id {jid!r}) writes_official={official!r} "
+                         "must be a JSON boolean, not missing, null or a string")
         if jid in graph_jobs:
             findings.add(DUPLICATE, f"job:{jid}", "job id repeated in the referenced graph")
             continue
@@ -376,14 +445,15 @@ def _check_job_graph(graph: Mapping, findings: _Findings, root: Path) -> list[di
         if row.get("schedule") != job.get("schedule"):
             findings.add(REF_MISMATCH, f"job:{jid}", f"graph schedule {row.get('schedule')!r} "
                                                      f"!= accounted {job.get('schedule')!r}")
-        official = bool(row.get("writes_official"))
+        official = row.get("writes_official")
         kind = job.get("kind")
-        if official and kind != "scheduled_writer":
+        if official is True and kind != "scheduled_writer":
             findings.add(WRITER_CONFLICT, f"job:{jid}",
                          f"graph marks it an official writer but it is accounted {kind!r}")
-        if kind == "scheduled_writer" and not official:
+        if kind == "scheduled_writer" and official is not True:
             findings.add(REF_MISMATCH, f"job:{jid}",
-                         "accounted scheduled_writer but the graph says writes_official false")
+                         "accounted scheduled_writer but the graph does not confirm "
+                         f"writes_official=true (found {official!r})")
     return list(declared.values())
 
 
@@ -417,50 +487,63 @@ def _check_authority(authority: Mapping, jobs: list[dict], findings: _Findings) 
 
     writers = {side: sides[side].get("writer") for side in sides}
     scheduled = [j for j in jobs if j.get("kind") == "scheduled_writer"]
-    official_schedules = set()
     for job in scheduled:
         owner = job.get("owner")
-        if owner not in writers.values():
+        if owner not in list(writers.values()):
             findings.add(WRITER_CONFLICT, f"job:{job.get('id')}",
                          f"official writer {owner!r} is not a declared old/proposed writer")
             continue
-        official_schedules.add(job.get("schedule"))
     for side, writer in writers.items():
         count = sum(1 for j in scheduled if j.get("owner") == writer)
         if count > 1:
             findings.add(DUPLICATE_OFFICIAL_WRITER, f"authority.{side}.writer",
-                         f"{writer!r} owns {count} scheduled_writer jobs; one official writer only")
+                          f"{writer!r} owns {count} scheduled_writer jobs; "
+                          "one official writer only")
         if count == 0 and writer:
             findings.add(WRITER_NO_JOB, f"authority.{side}.writer",
                          f"{writer!r} owns no scheduled_writer job in the graph")
     by_schedule: dict = {}
     for job in jobs:
-        if job.get("kind") in ("scheduled_writer", "background"):
-            by_schedule.setdefault(job.get("schedule"), []).append(job.get("id"))
+        sched = job.get("schedule")
+        if job.get("kind") in ("scheduled_writer", "background") and isinstance(sched, str):
+            by_schedule.setdefault(sched, []).append(job.get("id"))
     for schedule, ids in sorted(by_schedule.items(), key=lambda kv: str(kv[0])):
-        if schedule is not None and len(ids) > 1:
+        if schedule and len(ids) > 1:
             findings.add(DUPLICATE, f"schedule:{schedule}",
                          f"non-reader jobs {sorted(map(str, ids))} share one schedule")
     for side_name, side in sides.items():
         schedule = side.get("schedule")
-        if schedule and schedule not in official_schedules:
+        writer = side.get("writer")
+        owned = [j.get("schedule") for j in scheduled
+                 if writer and j.get("owner") == writer and isinstance(j.get("schedule"), str)]
+        if isinstance(schedule, str) and owned and schedule not in owned:
             findings.add(REF_MISMATCH, f"authority.{side_name}.schedule",
-                         f"declared schedule {schedule!r} carries no official writer job")
+                         f"declared schedule {schedule!r} is not carried by {writer!r}'s own "
+                         "scheduled_writer job; schedule and writer must be validated as one "
+                         "pair per side and cannot be swapped between sides")
 
 
 def _check_consumer_inventory(inv: Mapping, findings: _Findings, root: Path) -> None:
     names = _obj_list(findings, inv.get("consumers"), "consumer_inventory.consumers")
     seen = set()
-    for name in names:
+    for i, name in enumerate(names):
+        if not isinstance(name, str):
+            findings.add(BAD_CONSUMER, f"consumer_inventory.consumers[{i}]",
+                         f"entry {name!r} is not a consumer name string")
+            continue
         _identity(findings, "consumer_inventory", "consumer", name)
-        if isinstance(name, str) and name in seen:
+        if name in seen:
             findings.add(DUPLICATE, f"consumer:{name}", "consumer listed twice")
         seen.add(name)
     doc = _verify_ref(findings, "consumer_inventory", inv, root)
-    if doc is None:
+    if doc is _UNREADABLE:
+        return
+    if not isinstance(doc, (Mapping, list)):
+        findings.add(REF_MALFORMED, "consumer_inventory",
+                     "referenced inventory is neither a JSON object nor array")
         return
     present = _names_in(doc)
-    for name in sorted(map(str, seen)):
+    for name in sorted(seen):
         if name not in present:
             findings.add(CONSUMER_UNACCOUNTED, f"consumer:{name}",
                          "declared consumer has no row in the referenced inventory")
@@ -504,7 +587,12 @@ def _check_phase_evidence(rows: Any, findings: _Findings, root: Path,
                          f"{declared_schema!r} does not belong to phase {phase!r} ({token}...)")
         data = _read_verified(findings, subject, row.get("path"), row.get("sha256"), root)
         doc = _parse_json(findings, subject, data)
+        if doc is _UNREADABLE:
+            continue
         if not isinstance(doc, Mapping):
+            findings.add(REF_MALFORMED, subject,
+                         "evidence document is not a JSON object "
+                         f"(found {type(doc).__name__.lower()})")
             continue
         if doc.get("schema_version") != declared_schema:
             findings.add(EVIDENCE_STALE, subject,
@@ -515,12 +603,21 @@ def _check_phase_evidence(rows: Any, findings: _Findings, root: Path,
             findings.add(EVIDENCE_STALE, subject,
                          f"evidence status {doc.get('status')!r} != required {status!r}")
         bound = next((doc[k] for k in _COMMIT_KEYS if k in doc), None)
-        if bound is not None and commit and bound != commit:
+        if bound is None:
+            findings.add(EVIDENCE_STALE, subject,
+                         f"evidence names no candidate commit binding (one of "
+                         f"{list(_COMMIT_KEYS)}); missing bindings fail closed")
+        elif bound != commit:
             findings.add(EVIDENCE_STALE, subject, f"evidence bound to {bound!r}, "
-                                                  "not this candidate's commit")
-        if phase == "5" and release and doc.get("release_id") not in (None, release):
-            findings.add(REF_MISMATCH, subject,
-                         f"evidence release {doc.get('release_id')!r} != deployed {release!r}")
+                                                  f"not this candidate's commit {commit!r}")
+        if phase == "5":
+            if "release_id" not in doc:
+                findings.add(REF_MISMATCH, subject,
+                             "Phase 5 evidence names no release_id binding "
+                             "(fail closed)")
+            elif doc.get("release_id") != release:
+                findings.add(REF_MISMATCH, subject,
+                             f"evidence release {doc.get('release_id')!r} != deployed {release!r}")
 
 
 # --------------------------------------------------------------------------
@@ -569,7 +666,9 @@ def validate(manifest: Any, root: Path | str = ROOT) -> dict:
             "status": "MANIFEST_VALID" if not rows else "MANIFEST_INVALID",
             "findings": rows,
             "finding_codes": sorted({r["code"] for r in rows}),
-            "note": "manifest-consistency validation only; not a Phase 7 readiness claim"}
+            "note": "manifest-consistency validation only: it never queries a live "
+                    "scheduler and cannot prove referenced inventories are complete; "
+                    "not a Phase 7 readiness claim"}
 
 
 def load_manifest(path: Path | str) -> Any:
