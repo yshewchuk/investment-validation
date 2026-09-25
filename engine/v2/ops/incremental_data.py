@@ -15,6 +15,7 @@ There is no second executor or budget ledger here.
 """
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -460,13 +461,18 @@ def run_refresh_worker(parameters: Mapping[str, object], root: Path, *,
 def _load_data_refresh_callback() -> RefreshCallback:
     """Resolve the public callback at worker runtime, without data candidate types.
 
-    The default is the daily_market fetch wrapper (S4A): it turns the staged
-    identity document and the bound ``refresh_plan.json`` into acquired data
-    through the injected provider fetcher, then delegates to the unchanged
-    ``run_incremental_refresh`` commit path.
+    The ops layer injects the native ORATS provider fetcher: the returned
+    partial binds the daily_market fetch wrapper (S4A) to
+    ``orats_daily_market_fetcher()``, which turns the staged identity document
+    and the bound ``refresh_plan.json`` into acquired data and then delegates
+    to the unchanged ``run_incremental_refresh`` commit path. Constructing the
+    fetcher reads no credentials and touches no network; the key is read only
+    when the fetcher is called.
     """
     from engine.v2.data.incremental import run_daily_market_refresh
-    return run_daily_market_refresh
+    from engine.v2.ops.providers import orats_daily_market_fetcher
+    return functools.partial(run_daily_market_refresh,
+                             fetcher=orats_daily_market_fetcher())
 
 
 def validate_refresh_result_document(value) -> RefreshCallbackResult:

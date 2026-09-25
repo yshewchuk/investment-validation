@@ -80,15 +80,14 @@ def _head(conn):
 def _install_fake_fetcher(monkeypatch, row):
     """Bind a canned response as the worker's provider edge (real subprocess)."""
     stub = (
-        "import functools, json, sys\n"
-        "import engine.v2.data.incremental as incremental\n"
+        "import json, sys\n"
+        "import engine.v2.ops.providers as providers\n"
         "from engine.v2.ops import worker\n"
         "ROW = json.loads(%r)\n"
         "def fake_fetcher(unit):\n"
         "    row = dict(ROW)\n"
         "    return (json.dumps(row).encode(), \"complete\", {\"status\": 200}, [row])\n"
-        "incremental.run_daily_market_refresh = functools.partial(\n"
-        "    incremental.run_daily_market_refresh, fetcher=fake_fetcher)\n"
+        "providers.orats_daily_market_fetcher = lambda **kwargs: fake_fetcher\n"
         "raise SystemExit(worker.main())\n"
     ) % json.dumps(row)
     real = subprocess.Popen

@@ -145,6 +145,11 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "CONTRACT_MISMATCH": ("validation", False),
     "QUERY_NOT_BOUNDED": ("validation", False),
     "RESULT_LIMIT_EXCEEDED": ("resource", False),
+    # S4B layering fix: the data-layer refresh wrapper resolves no provider
+    # adapter (the ops layer injects the ORATS fetcher), so a direct call
+    # without injection fails closed. Same name and semantics as the
+    # ``contracts.operations.FAILURE_CODES`` row.
+    "RESOURCE_UNAVAILABLE": ("resource", True),
     "INPUT_CHANGED": ("integrity", True),
     "OBJECT_CORRUPT": ("integrity", False),
     "MANIFEST_CORRUPT": ("integrity", False),
