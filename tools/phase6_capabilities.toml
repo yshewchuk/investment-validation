@@ -381,7 +381,8 @@ owner = "P6-4"
 
 [[row]]
 id = "board-refresh-action"
-evidence = "route:POST /actions/refresh"
+evidence = "open"
+reason = "the refresh action (engine/v2/ops/cli.py refresh_action) submits an ordinary nightly graph via submit_graph; no session source distinguishes an action-submitted nightly from a scheduled one, and the GET-only probe never POSTs"
 area = "board"
 capability = "Desk action: re-run the nightly without publishing"
 old = ["route:legacy-app POST /api/refresh"]

@@ -10,9 +10,11 @@ mutating the server. Each GET request carries the bearer token read from the
 ``V2_PROBE_TOKEN`` environment variable and is recorded to a session receipt
 (``<evidence-dir>/<session>-route_probe.json``) with its status, response size,
 latency and timestamp. The token is never written to the receipt or any log.
-The probe is fail-closed: if any probed route does not answer 2xx (after
-redirects), ``all_2xx`` is false, the failures are printed and the process
-exits 1 -- a 401/403/404/5xx is a failure here, not a security result.
+Redirects are never followed: a 3xx is recorded as the route's own status and
+the bearer token is never re-sent to a ``Location`` URL. The probe is
+fail-closed: if any probed route does not answer 2xx, ``all_2xx`` is false,
+the failures are printed and the process exits 1 -- a 401/403/404/5xx is a
+failure here, not a security result.
 
 Parameterized routes are resolved to one concrete in-session path before
 probing. The resolution source is the third element the server declares on
@@ -91,6 +93,14 @@ def _token_from_env() -> str:
     return token
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: a 3xx is the route's recorded result, and the
+    bearer token is never re-sent to the URL a ``Location`` header names."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _document_field(payload: bytes, name: str):
     """A nonempty string field of a JSON response body, else ``None``."""
     try:
@@ -105,19 +115,21 @@ def _request(base_url: str, path: str, method: str, token: str, *,
              timeout: float):
     """Issue one real request; return ``(row, response_bytes)``.
 
-    Redirects are followed (urllib's default), so ``/release/current``'s
-    documented 302-to-200 is recorded as its final status; an unreached route
-    records ``status: null`` plus the error, never a fabricated success.
+    Redirects are refused, never followed: a 3xx is recorded as the route's
+    own status and the bearer token is never re-sent to the URL a ``Location``
+    header names. An unreached route records ``status: null`` plus the error,
+    never a fabricated success.
     """
     request = urllib.request.Request(base_url.rstrip("/") + path, method=method)
     request.add_header("Authorization", "Bearer " + token)
+    opener = urllib.request.build_opener(_NoRedirects())
     requested_at = _now()
     started = time.perf_counter()
     status = None
     error = None
     payload = b""
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = response.read()
             status = response.status
     except urllib.error.HTTPError as exc:

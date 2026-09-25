@@ -17,6 +17,7 @@ import textwrap
 from pathlib import Path
 
 from tools import v2_session_evidence_check as sec
+from tools.phase6_inventory import DECLARATIONS, load_declarations
 
 SESSION = "s1"
 START = "2026-09-25T00:00:00Z"
@@ -305,6 +306,28 @@ def test_ops_subcommand_evidence_matches_the_module_argv(tmp_path):
     assert result["rows_uncovered"] == []
 
 
+def test_unlisted_dotted_module_is_not_reduced_to_its_last_name(tmp_path):
+    declarations = _declarations(tmp_path, _row("cli-row", "cli:ops ledger status"))
+    evidence = tmp_path / "evidence"
+    _resource_record(evidence, command=["python3", "-m", "foo.ops",
+                                        "ledger", "status"])
+
+    result = _check(tmp_path, declarations, evidence=evidence)
+
+    assert result["rows_uncovered"] == ["cli-row"]
+
+
+def test_allowlisted_engine_ops_module_matches_ops_evidence(tmp_path):
+    declarations = _declarations(tmp_path, _row("cli-row", "cli:ops ledger status"))
+    evidence = tmp_path / "evidence"
+    _resource_record(evidence, command=["python3", "-m", "engine.v2.ops",
+                                        "ledger", "status"])
+
+    result = _check(tmp_path, declarations, evidence=evidence)
+
+    assert result["rows_uncovered"] == []
+
+
 def test_list_evidence_needs_every_entry_and_names_the_missing_one(tmp_path):
     declarations = _declarations(
         tmp_path, _row_list("tools-row", ["cli:tools/x.py", "cli:tools/y.py"]))
@@ -330,6 +353,37 @@ def test_list_evidence_is_covered_when_every_entry_ran(tmp_path):
 
     assert result["rows_uncovered"] == []
     assert result["rows_covered"] == 1
+
+
+def test_empty_evidence_list_fails_closed(tmp_path):
+    declarations = _declarations(tmp_path, _row_list("empty-row", []))
+
+    result = _check(tmp_path, declarations)
+
+    assert result["rows_uncovered"] == ["empty-row"]
+    assert "no usable evidence field" in result["rows"][0]["detail"]
+
+
+def test_non_string_evidence_element_fails_closed(tmp_path):
+    block = textwrap.dedent('''
+        [[row]]
+        id = "mixed-row"
+        area = "board"
+        capability = "c"
+        new = []
+        producer = "p"
+        identity = "i"
+        tests = []
+        disposition = "native"
+        owner = "P6-4"
+        evidence = ["cli:x", 3]
+    ''')
+    declarations = _declarations(tmp_path, block)
+
+    result = _check(tmp_path, declarations)
+
+    assert result["rows_uncovered"] == ["mixed-row"]
+    assert "no usable evidence field" in result["rows"][0]["detail"]
 
 
 def test_unreadable_resource_record_is_reported_not_fatal(tmp_path):
@@ -395,6 +449,21 @@ def test_user_decision_entries_are_not_rows(tmp_path):
 
     assert result["rows_total"] == 1
     assert result["rows_exempt"] == 1
+
+
+# ------------------------------------------------- real declarations guard
+
+
+def test_real_declarations_never_require_a_post_route():
+    """The route probe requests GET routes only, so a ``route:POST ...`` row
+    could never be covered; the shipped declarations must not contain one."""
+    declared = load_declarations(sec.ROOT / DECLARATIONS)
+
+    for row in declared.get("row", []):
+        evidence = row.get("evidence")
+        entries = evidence if isinstance(evidence, list) else [evidence]
+        assert not any(isinstance(entry, str) and entry.startswith("route:POST")
+                       for entry in entries), row.get("id")
 
 
 # --------------------------------------------------------------- CLI surface

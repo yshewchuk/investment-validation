@@ -115,6 +115,11 @@ def _is_clean_exit(record: dict) -> bool:
 _HELP_FLAGS = frozenset({"-h", "--help", "--version"})
 _INTERPRETER = re.compile(r"python[0-9.]*$")
 
+#: ``-m`` modules the recorder may use for an ops subcommand. Only an
+#: explicitly listed module is reduced to its program name; any other dotted
+#: module keeps its full name, so ``foo.ops`` never matches ``cli:ops``.
+_MODULE_ALIASES = {"engine.v2.ops": "ops"}
+
 
 def _normalised_argv(command):
     """The recorded argv with interpreter/module/``tools/`` prefixes normalised.
@@ -122,8 +127,9 @@ def _normalised_argv(command):
     ``None`` when the value is not an argv list, or when the run merely printed
     usage/version (``-h``/``--help``/``--version``): neither can be evidence.
     ``python3``/``python3.11`` (or a path to one) is dropped, ``-m`` is
-    dropped and a dotted module reduced to its program name
-    (``engine.v2.ops`` -> ``ops``), and a leading ``tools/`` is stripped.
+    dropped and an explicitly allowlisted dotted module is reduced to its
+    program name (``engine.v2.ops`` -> ``ops``; any other module keeps its
+    full dotted name), and a leading ``tools/`` is stripped.
     """
     if not isinstance(command, list):
         return None
@@ -134,8 +140,8 @@ def _normalised_argv(command):
         argv = argv[1:]
     if argv and argv[0] == "-m":
         argv = argv[1:]
-        if argv and "." in argv[0] and "/" not in argv[0]:
-            argv = [argv[0].rsplit(".", 1)[-1], *argv[1:]]
+        if argv and argv[0] in _MODULE_ALIASES:
+            argv = [_MODULE_ALIASES[argv[0]], *argv[1:]]
     return [part.removeprefix("tools/") for part in argv]
 
 
@@ -151,10 +157,11 @@ def command_matches(command, tool: str) -> bool:
 
     ``cli:`` evidence has two shapes: a tool path (``tools/z.py``) and an ops
     subcommand (``ops ledger calibrate``). The recorded argv is normalised
-    (interpreter and ``-m`` prefixes dropped, a dotted module reduced to its
-    program name, ``tools/`` stripped) and must then START WITH the declared
-    command's tokens exactly -- a different tool whose name merely contains
-    the declared one is not evidence, and neither is a usage/version run.
+    (interpreter and ``-m`` prefixes dropped, an allowlisted dotted module
+    reduced to its program name, ``tools/`` stripped) and must then START
+    WITH the declared command's tokens exactly -- a different tool whose name
+    merely contains the declared one is not evidence, and neither is a
+    usage/version run.
     """
     recorded = _normalised_argv(command)
     if recorded is None:
@@ -282,10 +289,13 @@ def _evidence_entries(declared_evidence):
     """The declared entries, or ``None`` when the field is unusable.
 
     A string with a ``:`` is one entry; a list is several entries, EVERY one
-    of which must be satisfied. Anything else (a bare string, a non-string)
-    fails closed.
+    of which must be satisfied. Anything else -- a bare string, an empty
+    list, a non-string element -- fails closed.
     """
     if isinstance(declared_evidence, list):
+        if not declared_evidence or any(
+                not isinstance(entry, str) for entry in declared_evidence):
+            return None
         return declared_evidence
     if isinstance(declared_evidence, str) and ":" in declared_evidence:
         return [declared_evidence]
