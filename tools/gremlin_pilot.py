@@ -1,7 +1,9 @@
 """Mutation-testing pilot, pytest-gremlins backend: run one module's tests with
 parallel gremlin workers and report the result.
 
-This is the runner that replaces mutmut in the active CI workflow. It reuses the
+This is the runner behind the active gremlins CI workflow
+(``.github/workflows/mutation.yml``). It runs ALONGSIDE the independent mutmut
+workflow (``.github/workflows/mutation-mutmut.yml``), not instead of it. It reuses the
 *module partition* from ``tools/mutation_pilot.toml`` unchanged -- the same
 enabled/excluded modules, the same ``mutate``/``skip``/``tests`` fnmatch
 expansion (via ``mutation_pilot``'s reliable ``load_config``, ``expand``,

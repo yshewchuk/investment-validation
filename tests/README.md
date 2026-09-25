@@ -232,8 +232,9 @@ comparison outright (`MUTATION_BACKEND_MISMATCH`). Each backend's own
 week-over-week trend is the meaningful number. Access paths: the gremlins
 aggregate stays `mutation-report` -- what `tools/mutation_report.py` reads by
 default, unchanged -- and the mutmut aggregate is `mutation-mutmut-report`,
-readable with `tools/mutation_report.py --backend mutmut` (or
-`gh run download --workflow mutation-mutmut.yml -n mutation-mutmut-report`).
+readable with `tools/mutation_report.py --backend mutmut` (or by run ID:
+`gh run list --workflow mutation-mutmut.yml` for the run's ID, then
+`gh run download <run-id> -n mutation-mutmut-report`).
 
 In both workflows scores never fail a job; a job fails only when the tool
 does. And in both, the `report` job's merge is handed the plan's module list

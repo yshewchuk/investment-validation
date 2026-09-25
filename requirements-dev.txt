@@ -5,12 +5,13 @@
 # forcing a new Phase 0 baseline version, so it lives here instead.
 
 pytest-xdist==3.8.0
-# Mutation testing (tools/mutation_pilot.py, .github/workflows/mutation.yml).
+# Mutation testing (tools/mutation_pilot.py, .github/workflows/mutation-mutmut.yml).
 # The CI cache key carries this version: a bump starts every module from scratch.
 mutmut==3.8.0
 # Parallel mutation testing with pytest-gremlins (tools/gremlin_pilot.py, the
-# gremlins workflow draft in tools/gremlin_workflow_candidate.yml, which the
-# supervisor applies to .github/workflows/mutation.yml). It runs as a pytest
+# active gremlins workflow .github/workflows/mutation.yml -- mirrored in
+# tools/gremlin_workflow_candidate.yml, the copy the gremlins CI tests parse).
+# It runs as a pytest
 # plugin on the already-pinned pytest 9.1.1 / coverage 7.16.0 in requirements.txt,
 # supports Python 3.14, and needs no engine import. The gremlins CI cache key
 # carries this version too: a bump starts every module from scratch.

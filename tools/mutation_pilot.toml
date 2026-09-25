@@ -1,9 +1,10 @@
 # Mutation testing (mutmut 3.8.0, pinned in requirements-dev.txt). How to run
 # it: tests/README.md, "Mutation-testing pilot" (local) and "Mutation CI".
 # Driven by tools/mutation_pilot.py. Every enabled [modules.<name>] is one job
-# of .github/workflows/mutation.yml's matrix; a module with an `excluded`
-# reason is listed but never run. The CI cache key hashes this file, so any
-# edit here restarts every module's incremental state.
+# of the mutmut workflow's matrix (.github/workflows/mutation-mutmut.yml; the
+# gremlins matrix in mutation.yml schedules the same modules); a module with an
+# `excluded` reason is listed but never run. The CI cache key hashes this file,
+# so any edit here restarts every module's incremental state.
 #
 # `mutate` and `tests` entries are tracked paths or globs (fnmatch: `*` also
 # matches `/`); `skip` removes paths from `mutate`. A pattern that matches
@@ -21,9 +22,10 @@
 # inside the repo or under data/.
 
 # Shared module map: the pytest-gremlins runner (tools/gremlin_pilot.py, and the
-# gremlins workflow draft in tools/gremlin_workflow_candidate.yml that the
-# supervisor applies to .github/workflows/mutation.yml) reads THIS file's
-# partition, exclusions, `mutate`/`skip`/`tests` expansion and `[defaults]
+# active gremlins workflow .github/workflows/mutation.yml -- mirrored in the
+# candidate copy tools/gremlin_workflow_candidate.yml that the gremlins CI
+# tests parse) reads THIS file's partition, exclusions, `mutate`/`skip`/`tests`
+# expansion and `[defaults]
 # deselect` unchanged -- it only changes how the mutants are executed (parallel
 # gremlin workers in the repo checkout, not mutmut in a work copy). Keeping one
 # map means the exhaustive module-ownership test (tests/test_mutation_ci.py:
@@ -131,7 +133,8 @@ tests = [
     "tests/test_v2_scoring_source_inputs.py",
 ]
 
-# -- engine/v2 matrix modules (CI: .github/workflows/mutation.yml) ---------
+# -- engine/v2 matrix modules (CI: .github/workflows/mutation-mutmut.yml and
+#    mutation.yml, which build their matrices from this same partition) ------
 # Tests: data-free files only (they pass with no data/, which CI does not have),
 # chosen from the tests that import the module, most specific first, capped at
 # ~150 s of clean test time per module (40 s for foundation, which every test

@@ -1,10 +1,11 @@
-# Mutation testing (pytest-gremlins), report only. This is the full gremlins
-# workflow DRAFT: editing .github/* is blocked in this environment, so the
-# supervisor applies these exact bytes to .github/workflows/mutation.yml after
-# Astra review. It replaces the mutmut runner; the mutmut tools and historical
-# artifacts stay available for now, but the ACTIVE workflow runs gremlins.
+# Mutation testing (pytest-gremlins), report only -- the ACTIVE gremlins
+# workflow. It runs ALONGSIDE the independent mutmut workflow
+# (.github/workflows/mutation-mutmut.yml), not instead of it; every shared
+# resource is namespaced per backend, so a run of one never blocks, overwrites
+# or merges into the other. tools/gremlin_workflow_candidate.yml mirrors these
+# exact bytes and is the copy the gremlins CI tests parse.
 #
-# Behavior preserved from the mutmut workflow it replaces:
+# Behavior shared with the mutmut workflow it coexists with:
 # - push to main: incremental. Each module restores its newest .gremlins_cache
 #   and gremlins reuses cached results; only what the cache can't reuse is run.
 #   The cache NAMESPACE is an outer fingerprint of EVERY tracked repository input
@@ -36,8 +37,9 @@
 #   incomplete tool-error artifact (never a clean-looking subset) and exit
 #   nonzero, so `mutation-report` can only ever describe the whole planned run.
 #
-# Why a new concurrency group: `mutation-gremlins-...` (not `mutation-...`) so
-# an in-flight old mutmut workflow run cannot block the first gremlins run.
+# Concurrency group `mutation-gremlins-...`: disjoint from the mutmut
+# workflow's `mutation-mutmut-...` group, so a run of one active backend never
+# queues behind the other.
 name: mutation
 
 on:
