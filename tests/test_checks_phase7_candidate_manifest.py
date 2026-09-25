@@ -613,6 +613,29 @@ def test_evidence_without_commit_binding_fails_closed(tmp_path):
     assert (p7.EVIDENCE_STALE, "phase:4") in findings_for(manifest, tmp_path)
 
 
+def test_evidence_conflicting_commit_aliases_rejected(tmp_path):
+    """Every present alias must match: a correct ``commit`` cannot mask an
+    older ``candidate_commit``."""
+    manifest = good_tree(tmp_path)
+    row = manifest["phase_evidence"][1]
+    doc = json.loads(Path(row["path"]).read_text())
+    doc["commit"] = COMMIT
+    doc["candidate_commit"] = "b" * 40
+    _rewrite_json(row, doc)
+    assert (p7.EVIDENCE_STALE, "phase:4") in findings_for(manifest, tmp_path)
+
+
+def test_evidence_null_commit_alias_rejected(tmp_path):
+    """A present-but-null alias is a broken binding, not an absent one, and
+    cannot be rescued by another alias naming the candidate commit."""
+    manifest = good_tree(tmp_path)
+    row = manifest["phase_evidence"][1]
+    doc = json.loads(Path(row["path"]).read_text())
+    doc["commit"] = None
+    _rewrite_json(row, doc)
+    assert (p7.EVIDENCE_STALE, "phase:4") in findings_for(manifest, tmp_path)
+
+
 def test_phase_five_release_binding_is_required(tmp_path):
     """Phase 5 evidence that omits the release binding must fail closed."""
     manifest = good_tree(tmp_path)

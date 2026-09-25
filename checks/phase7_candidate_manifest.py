@@ -77,10 +77,12 @@ with ``phase<normalized phase>``). Each referenced evidence file must
 exist, hash correctly, parse as a JSON *object* (a null, list or scalar
 document is a finding, not a skipped check), carry the declared
 ``schema_version``, report exactly the declared ``status`` (a truthy
-boolean in the file is never consulted), bind the manifest's ``commit``
-under one of the commit keys — evidence that names no commit binding fails
-closed — and — for Phase 5 — bind the manifest's ``release_id``, likewise
-required.
+boolean in the file is never consulted), bind the manifest's ``commit``:
+at least one of the commit keys must be present and every commit key
+that is present must be a string equal to that commit — evidence naming
+no binding, a null or non-string binding, or one alias contradicting
+another fails closed — and — for Phase 5 — bind the manifest's
+``release_id``, likewise required.
 
 Usage::
 
@@ -602,14 +604,19 @@ def _check_phase_evidence(rows: Any, findings: _Findings, root: Path,
         if status and doc.get("status") != status:
             findings.add(EVIDENCE_STALE, subject,
                          f"evidence status {doc.get('status')!r} != required {status!r}")
-        bound = next((doc[k] for k in _COMMIT_KEYS if k in doc), None)
-        if bound is None:
+        bindings = {k: doc[k] for k in _COMMIT_KEYS if k in doc}
+        if not bindings:
             findings.add(EVIDENCE_STALE, subject,
                          f"evidence names no candidate commit binding (one of "
                          f"{list(_COMMIT_KEYS)}); missing bindings fail closed")
-        elif bound != commit:
-            findings.add(EVIDENCE_STALE, subject, f"evidence bound to {bound!r}, "
-                                                  f"not this candidate's commit {commit!r}")
+        for key, bound in sorted(bindings.items()):
+            if not isinstance(bound, str):
+                findings.add(EVIDENCE_STALE, subject,
+                             f"evidence binding {key}={bound!r} is not a commit string")
+            elif bound != commit:
+                findings.add(EVIDENCE_STALE, subject,
+                             f"evidence {key}={bound!r}, "
+                             f"not this candidate's commit {commit!r}")
         if phase == "5":
             if "release_id" not in doc:
                 findings.add(REF_MISMATCH, subject,
