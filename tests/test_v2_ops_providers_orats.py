@@ -21,7 +21,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
 from engine.v2.ops import incremental_data as ops_incremental
 from engine.v2.ops.errors import OpsError
-from engine.v2.ops.incremental_data import RefreshParameters, _failure_for_refresh_status
+from engine.v2.ops.incremental_data import RefreshParameters
 from engine.v2.ops.providers.orats_daily_market import orats_daily_market_fetcher
 from tests.ops_support import catalog
 from tests.test_v2_data_manifests import _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF
@@ -111,13 +111,25 @@ def test_complete_response_builds_ported_ticker_rows():
     assert row["src_mcap"] == "orats.cores"
 
 
-def test_both_endpoints_404_is_transient_source():
+def test_both_endpoints_404_is_source_not_final():
     fake = _FakeHttp({"hist/summaries": (404, {}, b"not found"),
                       "hist/cores": (404, {}, b"not found")})
     fetcher = orats_daily_market_fetcher(http_get=fake, api_key="test-key")
     with pytest.raises(OpsError) as exc:
         fetcher(dict(UNIT))
-    assert exc.value.code == "TRANSIENT_SOURCE"
+    assert exc.value.code == "SOURCE_NOT_FINAL"
+    assert "has not published" in str(exc.value)
+    assert SESSION_DATE in str(exc.value)
+
+
+def test_empty_200_is_source_not_final():
+    fake = _FakeHttp({"hist/summaries": (200, {}, _body([])),
+                      "hist/cores": (200, {}, _body([]))})
+    fetcher = orats_daily_market_fetcher(http_get=fake, api_key="test-key")
+    with pytest.raises(OpsError) as exc:
+        fetcher(dict(UNIT))
+    assert exc.value.code == "SOURCE_NOT_FINAL"
+    assert "has not published" in str(exc.value)
 
 
 def test_unauthorized_is_credential_invalid_and_never_echoes_the_key():
@@ -131,13 +143,17 @@ def test_unauthorized_is_credential_invalid_and_never_echoes_the_key():
     assert secret not in str(exc.value)
 
 
-def test_missing_expected_ticker_surfaces_classify_response_partial():
+def test_missing_expected_ticker_is_legitimate_empty_and_extra_rows_are_ignored():
     unit = dict(UNIT, expected_keys=["AAA", "BBB"])
-    fetcher = orats_daily_market_fetcher(http_get=_ok_fake(), api_key="test-key")
-    with pytest.raises(OpsError) as exc:
-        fetcher(unit)
-    assert exc.value.code == _failure_for_refresh_status("partial")
-    assert "partial" in str(exc.value)
+    extra = dict(SUMMARIES_ROW, ticker="ZZZ")
+    fake = _FakeHttp({"hist/summaries": (200, {}, _body([SUMMARIES_ROW, extra])),
+                      "hist/cores": (200, {}, _body([CORES_ROW]))})
+    fetcher = orats_daily_market_fetcher(http_get=fake, api_key="test-key")
+
+    _, kind, _, rows = fetcher(unit)
+
+    assert kind == "complete"
+    assert [row["ticker"] for row in rows] == ["AAA"]
 
 
 def test_load_data_refresh_callback_injects_the_fetcher_without_network(monkeypatch):

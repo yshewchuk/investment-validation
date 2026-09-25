@@ -150,6 +150,10 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # without injection fails closed. Same name and semantics as the
     # ``contracts.operations.FAILURE_CODES`` row.
     "RESOURCE_UNAVAILABLE": ("resource", True),
+    # The daily_market fetch wrapper (engine/v2/data/incremental.py `_fetch_unit`) refuses a
+    # provider response that is neither complete nor a legitimate empty. Same name and
+    # semantics as the ``contracts.operations.FAILURE_CODES`` row.
+    "TRANSIENT_SOURCE": ("source", True),
     "INPUT_CHANGED": ("integrity", True),
     "OBJECT_CORRUPT": ("integrity", False),
     "MANIFEST_CORRUPT": ("integrity", False),

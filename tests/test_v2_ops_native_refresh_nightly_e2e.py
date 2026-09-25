@@ -66,16 +66,18 @@ def _head(conn):
         (SCOPE,)).fetchone()
 
 
-def _build_requests(conn, store, clock, root, catalog_path=None):
+def _build_requests(conn, store, clock, root, catalog_path=None, tickers=(TICKER,),
+                    context_tickers=None):
     """A native nightly plan with no pinned override, then its job requests."""
     catalog_path = catalog_path or str(root / "ops.sqlite")
+    context_tickers = tuple(context_tickers) if context_tickers is not None else tuple(tickers)
     plan = nightly_plan(
         ROOT, SESSION, manifest_ref="artifact:parent",
         expected_population=(TICKER + "|x|" + SESSION,),
-        tickers=(TICKER,), context_tickers=(TICKER,), refresh_mode="native",
+        tickers=tickers, context_tickers=context_tickers, refresh_mode="native",
         catalog_path=catalog_path, objects_root=str(root), clock=clock)
     requests = build_legacy_job_requests(
-        plan, tickers=(TICKER,), context_tickers=(TICKER,),
+        plan, tickers=tickers, context_tickers=context_tickers,
         year_start=plan["year_start"], year_end=plan["year_end"],
         refresh_mode="native", catalog_path=catalog_path,
         objects_root=str(root), conn=conn, store=store, clock=clock)
@@ -93,14 +95,16 @@ def _catalog_at(directory, name):
     return conn, clock, Supervisor(epoch, "boot")
 
 
-def _install_fake_http_fetcher(monkeypatch, *, explode):
+def _install_fake_http_fetcher(monkeypatch, *, explode, summaries=None, cores=None):
     """Swap the worker's argv for a stub that fakes only the ORATS HTTP edge."""
+    summaries = [SUMMARIES_ROW] if summaries is None else list(summaries)
+    cores = [CORES_ROW] if cores is None else list(cores)
     canned = (
         "def fake_http_get(url, *, timeout):\n"
         "    if '/hist/summaries?' in url:\n"
-        "        return (200, {}, json.dumps({'data': [SUMMARY], 'message': 'ok'}).encode())\n"
+        "        return (200, {}, json.dumps({'data': SUMMARIES, 'message': 'ok'}).encode())\n"
         "    if '/hist/cores?' in url:\n"
-        "        return (200, {}, json.dumps({'data': [CORES], 'message': 'ok'}).encode())\n"
+        "        return (200, {}, json.dumps({'data': CORES, 'message': 'ok'}).encode())\n"
         "    raise AssertionError('unexpected url ' + url)\n"
     )
     exploding = (
@@ -108,14 +112,13 @@ def _install_fake_http_fetcher(monkeypatch, *, explode):
         "    raise AssertionError('provider HTTP ran on a cache-only refresh: ' + url)\n"
     )
     stub = (
-        "import functools, json, os, sys\n"
+        "import functools, json, sys\n"
         "import engine.v2.ops.providers as providers\n"
         "from engine.v2.ops.providers import orats_daily_market\n"
         "from engine.v2.ops import worker\n"
-        "SUMMARY = json.loads(%r)\n"
+        "SUMMARIES = json.loads(%r)\n"
         "CORES = json.loads(%r)\n"
-        "os.environ['ORATS_API_KEY'] = 'test-key'\n"
-    ) % (json.dumps(SUMMARIES_ROW), json.dumps(CORES_ROW))
+    ) % (json.dumps(summaries), json.dumps(cores))
     stub += exploding if explode else canned
     stub += (
         "real = orats_daily_market.orats_daily_market_fetcher\n"
@@ -133,8 +136,9 @@ def _install_fake_http_fetcher(monkeypatch, *, explode):
     monkeypatch.setattr(executor.subprocess, "Popen", popen)
 
 
-def _run_native(conn, clock, root, receipt, monkeypatch, *, explode):
-    _install_fake_http_fetcher(monkeypatch, explode=explode)
+def _run_native(conn, clock, root, receipt, monkeypatch, *, explode, summaries=None, cores=None):
+    monkeypatch.setenv("ORATS_API_KEY", "test-key")
+    _install_fake_http_fetcher(monkeypatch, explode=explode, summaries=summaries, cores=cores)
     service = Service(conn, root, registry(), TEST_POLICY, clock=clock, code_source=ROOT)
     service.start()
     try:
@@ -168,7 +172,7 @@ def test_native_nightly_refresh_plan_is_built_and_commits_end_to_end(tmp_path, m
 
     _plan, requests = _build_requests(conn, store, clock, tmp_path)
     request = requests[0]
-    assert request.job.parameters["provider_calls"] == 3
+    assert request.job.parameters["provider_calls"] == 6
     assert request.job.provider_budget_ref == NATIVE_DAILY_MARKET_ACCOUNT
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
@@ -211,10 +215,47 @@ def test_missing_staged_refresh_identity_fails_the_job(tmp_path, monkeypatch):
         service.close()
 
     assert state == "failed"
+    # The no-op staging leaves run_daily_market_refresh without
+    # incremental_refresh_input.json, which returns the data layer's "failed"
+    # status; run_refresh_worker maps that to this exact typed failure.
+    failure = json.loads(conn.execute(
+        "SELECT failure_json FROM jobs WHERE job_id = ?",
+        (receipt.job_id,)).fetchone()[0])
+    assert failure["code"] == "WORKER_FAILED"
+    assert failure["message"] == "incremental refresh did not produce complete coverage"
     unchanged = _head(conn)
     assert (unchanged["snapshot_id"], unchanged["generation"]) == (
         head["snapshot_id"], head["generation"])
     assert conn.execute("SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 0
+
+
+def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
+        tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+
+    missing, extra = "BBB", "ZZZ"
+    _plan, requests = _build_requests(conn, store, clock, tmp_path,
+                                      context_tickers=(TICKER, missing))
+    request = requests[0]
+    assert request.job.parameters["provider_calls"] == 6
+    receipt = submit(conn, registry(), POLICY, request, clock=clock)
+
+    _run_native(conn, clock, tmp_path, receipt, monkeypatch, explode=False,
+                summaries=(SUMMARIES_ROW, dict(SUMMARIES_ROW, ticker=extra)),
+                cores=(CORES_ROW, dict(CORES_ROW, ticker=extra)))
+
+    new_head = _head(conn)
+    assert new_head["generation"] == head["generation"] + 1
+    revisions = conn.execute(
+        "SELECT ticker, session_date FROM data_daily_market_revisions").fetchall()
+    assert [(row["ticker"], row["session_date"]) for row in revisions] == [(TICKER, SESSION)]
+    assert missing not in {row["ticker"] for row in revisions}
+    assert extra not in {row["ticker"] for row in revisions}
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 
 
 def test_second_native_refresh_for_the_same_session_is_cache_only(tmp_path, monkeypatch):
@@ -224,7 +265,7 @@ def test_second_native_refresh_for_the_same_session_is_cache_only(tmp_path, monk
     configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
 
     _first_plan, first_requests = _build_requests(conn, store, clock, tmp_path)
-    assert first_requests[0].job.parameters["provider_calls"] == 3
+    assert first_requests[0].job.parameters["provider_calls"] == 6
     first_receipt = submit(conn, registry(), POLICY, first_requests[0], clock=clock)
     _run_native(conn, clock, tmp_path, first_receipt, monkeypatch, explode=False)
     head_after_first = _head(conn)

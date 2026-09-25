@@ -100,6 +100,14 @@ def test_cache_first_plan_uses_existing_supervisor_and_shared_provider_budget(tm
     assert tuple(reservation) == (3, 0)
 
 
+def test_plan_refresh_reserves_calls_per_unit_for_multi_call_providers():
+    plan = incremental_data.plan_refresh(
+        _snapshot(), (_unit("fetch", "MSFT"),), cached_outcomes={},
+        provider_account="orats-daily-market", max_attempts=3,
+        expected_head_generation=1, calls_per_unit=2)
+    assert plan.provider_calls == 6
+
+
 def test_failed_or_partial_outcomes_cannot_admit_watermark_advancing_commit():
     unit = _unit("r1", "AAPL")
     plan = incremental_data.plan_refresh(

@@ -1084,11 +1084,11 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
         record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})
         raw_bytes = store.read_verified(_artifact_ref(record.object_ref, RAW_SCHEMA_REF))
         fetched.append(_fetched_unit_rows(
-            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows), record))
+            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows, unit), record))
     return tuple(fetched)
 
 
-def _cached_ticker_rows(raw_bytes, merge_rows):
+def _cached_ticker_rows(raw_bytes, merge_rows, unit):
     try:
         parsed = json.loads(raw_bytes)
         summaries = _cached_data_rows(parsed["summaries"])
@@ -1096,7 +1096,8 @@ def _cached_ticker_rows(raw_bytes, merge_rows):
     except (KeyError, TypeError, ValueError):
         raise errors.fail("MANIFEST_CORRUPT",
                           "cached daily_market payload is malformed") from None
-    return merge_rows(summaries, cores)
+    expected = [str(key) for key in unit.get("expected_keys", ())]
+    return merge_rows(summaries, cores, expected_keys=expected)
 
 
 def _cached_data_rows(document):
