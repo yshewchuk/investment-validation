@@ -59,6 +59,23 @@ def _row_without_evidence(row_id):
     ''')
 
 
+def _row_list(row_id, evidences):
+    rendered = ", ".join(f'"{entry}"' for entry in evidences)
+    return textwrap.dedent(f'''
+        [[row]]
+        id = "{row_id}"
+        area = "board"
+        capability = "c"
+        new = []
+        producer = "p"
+        identity = "i"
+        tests = []
+        disposition = "native"
+        owner = "P6-4"
+        evidence = [{rendered}]
+    ''')
+
+
 def _declarations(tmp_path, *blocks):
     path = tmp_path / "capabilities.toml"
     path.write_text("".join(blocks))
@@ -88,12 +105,14 @@ def _check(tmp_path, declarations, *, evidence=None, catalog=None, session=SESSI
         evidence_dir=evidence if evidence is not None else tmp_path / "evidence")
 
 
-def _route_receipt(evidence, *, session=SESSION, routes=(("GET", "/y", 200),)):
+def _route_receipt(evidence, *, session=SESSION, routes=(("GET", "/y", 200),),
+                   generated_at=IN_WINDOW):
     path = evidence / "route_probe" / f"{session}-route_probe.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "schema_version": "route_probe_receipt.v1.0",
         "session": session,
+        "generated_at": generated_at,
         "routes": [{"method": method, "path": concrete, "status": status}
                    for method, concrete, status in routes],
         "all_2xx": all(200 <= status < 300 for _, _, status in routes),
@@ -148,17 +167,16 @@ def test_failed_attempt_inside_the_window_is_not_evidence(tmp_path):
     assert result["rows_uncovered"] == ["job-row"]
 
 
-def test_delivered_outbox_effect_covers_and_names_the_window_limitation(tmp_path):
+def test_delivered_outbox_row_outside_the_window_is_not_evidence(tmp_path):
     declarations = _declarations(tmp_path, _row("effect-row", "job:publication"))
     catalog = _catalog(tmp_path / "catalog.sqlite",
                        outbox=[("e1", "publication", "delivered")])
 
     result = _check(tmp_path, declarations, catalog=catalog)
 
-    assert result["rows_uncovered"] == []
-    assert result["rows"][0]["source"] == "outbox"
-    assert result["rows"][0]["window_checked"] is False
-    assert "window was NOT checked" in result["rows"][0]["detail"]
+    assert result["rows_uncovered"] == ["effect-row"]
+    assert result["rows"][0]["source"] == "job"
+    assert "no succeeded 'publication' attempt inside the window" in result["rows"][0]["detail"]
 
 
 def test_absent_catalog_fails_closed_for_job_rows(tmp_path):
@@ -204,12 +222,24 @@ def test_route_receipt_for_another_session_is_not_cross_counted(tmp_path):
     assert result["rows_uncovered"] == ["route-row"]
 
 
+def test_route_receipt_generated_outside_the_window_is_not_evidence(tmp_path):
+    declarations = _declarations(tmp_path, _row("route-row", "route:GET /y"))
+    evidence = tmp_path / "evidence"
+    _route_receipt(evidence, generated_at=OUT_OF_WINDOW)
+
+    result = _check(tmp_path, declarations, evidence=evidence)
+
+    assert result["rows_uncovered"] == ["route-row"]
+    assert "outside the session window" in result["rows"][0]["detail"]
+
+
 def test_route_receipt_naming_another_session_inside_is_refused(tmp_path):
     declarations = _declarations(tmp_path, _row("route-row", "route:GET /y"))
     evidence = tmp_path / "evidence"
     path = evidence / "route_probe" / f"{SESSION}-route_probe.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"session": "other", "routes": [
+    path.write_text(json.dumps({"session": "other", "generated_at": IN_WINDOW,
+                                "routes": [
         {"method": "GET", "path": "/y", "status": 200}]}))
 
     result = _check(tmp_path, declarations, evidence=evidence)
@@ -273,6 +303,33 @@ def test_ops_subcommand_evidence_matches_the_module_argv(tmp_path):
     result = _check(tmp_path, declarations, evidence=evidence)
 
     assert result["rows_uncovered"] == []
+
+
+def test_list_evidence_needs_every_entry_and_names_the_missing_one(tmp_path):
+    declarations = _declarations(
+        tmp_path, _row_list("tools-row", ["cli:tools/x.py", "cli:tools/y.py"]))
+    evidence = tmp_path / "evidence"
+    _resource_record(evidence, command=["python3", "tools/x.py"], name="x.json")
+
+    result = _check(tmp_path, declarations, evidence=evidence)
+
+    assert result["rows_uncovered"] == ["tools-row"]
+    detail = result["rows"][0]["detail"]
+    assert "tools/y.py" in detail
+    assert "tools/x.py" not in detail
+
+
+def test_list_evidence_is_covered_when_every_entry_ran(tmp_path):
+    declarations = _declarations(
+        tmp_path, _row_list("tools-row", ["cli:tools/x.py", "cli:tools/y.py"]))
+    evidence = tmp_path / "evidence"
+    _resource_record(evidence, command=["python3", "tools/x.py"], name="x.json")
+    _resource_record(evidence, command=["python3", "tools/y.py"], name="y.json")
+
+    result = _check(tmp_path, declarations, evidence=evidence)
+
+    assert result["rows_uncovered"] == []
+    assert result["rows_covered"] == 1
 
 
 def test_unreadable_resource_record_is_reported_not_fatal(tmp_path):

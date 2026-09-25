@@ -23,7 +23,7 @@ real-session evidence.
 In scope: operator setup, the shadow rehearsal runs, controlled-failure and
 restore drills, resource measurement, evidence collection, and the definition
 of a qualified session. Out of scope: scheduling the ten nights (Slice 12;
-see §10), any production-authority change (§6), and any change to the legacy
+see §11), any production-authority change (§6), and any change to the legacy
 publisher (§2).
 
 The tools this runbook points at are built outside it:
@@ -179,8 +179,23 @@ Receipts live under `reports/phase6_evidence/` in this layout:
     reports/phase6_evidence/
       resource_measurement/   # one JSON per measured run (v2b Part 2 recorder)
       route_probe/            # one <session>-route_probe.json per session (v2c)
-      controlled_failure/     # v2a drill receipts (always copied here)
-      qualified_session/      # real-EOD-candidate receipts from the HEAVY RUNS
+      controlled_failure/     # v2a drill receipts (written here only for an
+                              #   --against-real-candidate run; a scratch run
+                              #   lands under its own --artifact-root)
+
+Run the route probe while the preview server is up, and never concurrently
+with another heavy job (§7):
+
+    V2_PROBE_TOKEN=... python3 tools/v2_route_probe.py \
+        --base-url http://127.0.0.1:8765 --session <id> \
+        --evidence-dir reports/phase6_evidence/route_probe
+
+It requests GET routes only; every declared POST route is listed in the
+receipt as `skipped_post` and is never requested. The token is read **only**
+from the `V2_PROBE_TOKEN` environment variable and is never written to the
+receipt or any log — never pass it on the command line. The receipt's
+`generated_at` must fall inside the same session window, or the completeness
+check refuses it as stale.
 
 Each capability row in `tools/phase6_capabilities.toml` declares its own
 `evidence` field, and the completeness check resolves exactly that artifact —
@@ -194,17 +209,18 @@ Part 3** is now
 and reads three real sources, keyed to each row's `evidence` field:
 
 - `job:<kind>` rows: a `succeeded` attempt of that job kind inside the window
-  in the ops catalog (opened read-only), falling back to a `delivered` outbox
-  effect of the same kind; the outbox has no timestamp column, so that
-  fallback is reported with `window_checked: false` rather than silently
-  accepted as in-window evidence;
+  in the ops catalog (opened read-only); a delivered `outbox` row is NEVER
+  evidence — the table carries no timestamp, so it can never be tied to the
+  session;
 - `route:<METHOD> <path>` rows: a 2xx row for that method/path in this
-  session's own `route_probe/<session>-route_probe.json` — a receipt for
-  another session is never cross-counted;
+  session's own `route_probe/<session>-route_probe.json`, whose `generated_at`
+  is ALSO inside the session window — a receipt for another session, or a
+  stale one generated outside the window, is never cross-counted;
 - `cli:<tool>` rows: a `resource_measurement/*.json` record whose `command`
   names that tool, with `exit_code == 0`, `killed == false` and `started_at`
   inside the window (the direct fix for "count only PASS / exit 0 & not
-  killed").
+  killed"). A list value names several entries and requires EVERY one of
+  them.
 
 `exempt` rows and `missing`/`dormant-historical` dispositions never need
 evidence. Rows declared `evidence = "open"` are a known gap: they are
@@ -234,7 +250,61 @@ data-dependent file set no static captured manifest can enumerate
 real captured inputs the same way a real nightly does, never a bare
 barrier-mode stub.
 
-## 10. Qualified sessions
+## 10. CLI capability smoke steps
+
+One real invocation per `cli:` evidence row not already covered by §5 or §9,
+each wrapped in the v2b resource-measurement recorder — never `--help`. The
+recorder's `resource_measurement/*.json` record is what the completeness check
+resolves, and its `peak_rss_gb` is a **sampled lower bound**: `bounded_run.py`
+samples every heartbeat, so the true peak between samples is unrecorded and
+`None` means no full-interval sample was taken at all. Keep the standard cap
+(`--max-rss-gb 8 --max-swap-gb 6 --cores 8`, §7) and the exact command form
+`tools/phase6_capabilities.toml` declares: `python3 -m engine.v2.ops` records
+as the declared `ops <subcommand>` tokens, while a `tools/*.py` entry must be
+invoked by path (`python3 tools/<tool>.py`), never as a `-m` module. The ops
+commands run against the default ops root (`data/operations`); a global
+`--root` cannot precede the subcommand without breaking the declared token
+form.
+
+    # decisions-calibration (cli:ops ledger calibrate)
+    python3 tools/v2_resource_measurement.py --workload-label p6-decisions-calibration \
+        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state warm \
+        --capabilities-covered decisions-calibration \
+        -- python3 -m engine.v2.ops ledger calibrate
+
+    # decisions-status (cli:ops ledger status)
+    python3 tools/v2_resource_measurement.py --workload-label p6-decisions-status \
+        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state warm \
+        --capabilities-covered decisions-status \
+        -- python3 -m engine.v2.ops ledger status
+
+    # books-funding (cli:ops ledger book)
+    python3 tools/v2_resource_measurement.py --workload-label p6-books-funding \
+        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state warm \
+        --capabilities-covered books-funding \
+        -- python3 -m engine.v2.ops ledger book
+
+    # decisions-history-import (cli:ops ledger import-history)
+    python3 tools/v2_resource_measurement.py --workload-label p6-decisions-history-import \
+        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state warm \
+        --capabilities-covered decisions-history-import \
+        -- python3 -m engine.v2.ops ledger import-history \
+            --source-root <legacy-checkout>
+
+    # operations-jobs (cli:ops get)
+    python3 tools/v2_resource_measurement.py --workload-label p6-operations-jobs \
+        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state warm \
+        --capabilities-covered operations-jobs \
+        -- python3 -m engine.v2.ops get <job_id>
+
+    # export-offline-file (cli:tools/v2_dashboard_offline_file.py)
+    python3 tools/v2_resource_measurement.py --workload-label p6-export-offline-file \
+        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state warm \
+        --capabilities-covered export-offline-file \
+        -- python3 tools/v2_dashboard_offline_file.py \
+            --release-root <release-root> --release-id <release_id>
+
+## 11. Qualified sessions
 
 Define, do not schedule. A session is qualified per
 [Phase 7 — Cutover](rearchitecture_phase7_cutover.md) P7-2 only when all of
@@ -259,4 +329,4 @@ Scheduling the ten nights — night count, start date, provider budget, who
 watches — is Slice 12, the next step after this package; it is out of scope
 here and is linked when that slice lands. This runbook only defines what makes
 a session qualified and how each one is measured, backed up and evidenced
-(§5–§9).
+(§5–§10).

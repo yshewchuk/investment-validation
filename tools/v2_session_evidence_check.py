@@ -97,10 +97,6 @@ def parse_instant(text: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _wire(text: str) -> str:
-    return parse_instant(text).strftime(_WIRE)
-
-
 def _is_2xx(status) -> bool:
     return isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300
 
@@ -277,6 +273,132 @@ def _load_resource_records(directory: Path):
     return records, unreadable
 
 
+def _open_detail(reason) -> str:
+    detail = "declared open (known gap, not evidence)"
+    return f"{detail}: {reason}" if isinstance(reason, str) and reason else detail
+
+
+def _evidence_entries(declared_evidence):
+    """The declared entries, or ``None`` when the field is unusable.
+
+    A string with a ``:`` is one entry; a list is several entries, EVERY one
+    of which must be satisfied. Anything else (a bare string, a non-string)
+    fails closed.
+    """
+    if isinstance(declared_evidence, list):
+        return declared_evidence
+    if isinstance(declared_evidence, str) and ":" in declared_evidence:
+        return [declared_evidence]
+    return None
+
+
+def _entry_kinds(declared_evidence) -> set[str]:
+    entries = _evidence_entries(declared_evidence) or []
+    return {entry.partition(":")[0] for entry in entries
+            if isinstance(entry, str) and ":" in entry}
+
+
+def _entry_result(entry, *, conn, catalog_error, job_cache, start_wire, end_wire,
+                  route_receipt, route_detail, records, start, end) -> dict:
+    """``{ok, source, window_checked, detail}`` for one declared entry."""
+    if not isinstance(entry, str) or ":" not in entry:
+        return {"ok": False, "source": None, "window_checked": None,
+                "detail": "no usable evidence field (fails closed)"}
+    source_kind, _, argument = entry.partition(":")
+    if source_kind == "job":
+        if conn is None:
+            return {"ok": False, "source": "job", "window_checked": None,
+                    "detail": f"catalog unavailable: {catalog_error}"}
+        if argument not in job_cache:
+            job_cache[argument] = _job_evidence(conn, argument, start_wire, end_wire)
+        ok, source, window_checked, detail = job_cache[argument]
+        return {"ok": ok, "source": source, "window_checked": window_checked,
+                "detail": detail}
+    if source_kind == "route":
+        method, _, path = argument.partition(" ")
+        if route_receipt is None:
+            return {"ok": False, "source": "route", "window_checked": False,
+                    "detail": route_detail}
+        ok = _route_covered(route_receipt, method, path)
+        return {"ok": ok, "source": "route", "window_checked": False,
+                "detail": (f"{method} {path} answered 2xx in this session's route probe"
+                           if ok else
+                           f"{method} {path} has no 2xx row in this session's route probe")}
+    if source_kind == "cli":
+        ok, detail = _cli_evidence(records, argument, start, end)
+        return {"ok": ok, "source": "cli", "window_checked": True, "detail": detail}
+    return {"ok": False, "source": None, "window_checked": None,
+            "detail": f"unknown evidence kind {source_kind!r} (fails closed)"}
+
+
+def _row_resolution(declared_evidence, context) -> tuple:
+    """``(status, source, window_checked, detail)`` for one declaration row.
+
+    A list value is covered only when EVERY entry is satisfied; the uncovered
+    detail names each missing entry and why it is missing.
+    """
+    entries = _evidence_entries(declared_evidence)
+    if entries is None:
+        return "uncovered", None, None, "no usable evidence field (fails closed)"
+    results = [_entry_result(entry, **context) for entry in entries]
+    missing = [(entry, result) for entry, result in zip(entries, results)
+               if not result["ok"]]
+    if missing:
+        first = missing[0][1]
+        return ("uncovered", first["source"], first["window_checked"],
+                "; ".join(f"{entry!r}: {result['detail']}"
+                          for entry, result in missing))
+    sources = sorted({result["source"] for result in results if result["source"]})
+    return ("covered", "+".join(sources),
+            all(result["window_checked"] for result in results),
+            "; ".join(result["detail"] for result in results))
+
+
+def _resolve_sources(evidence_path, session, start, end, needed, catalog_path):
+    """``(context, unreadable)``: only the sources the declarations need."""
+    conn = None
+    catalog_error = None
+    if "job" in needed:
+        try:
+            conn = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            catalog_error = str(exc)
+    route_receipt = route_detail = None
+    if "route" in needed:
+        route_path = evidence_path / ROUTE_PROBE_DIR / f"{session}-route_probe.json"
+        route_receipt, route_detail = _load_route_receipt(route_path, session, start, end)
+    records: list[dict] = []
+    unreadable: list[str] = []
+    if "cli" in needed:
+        records, unreadable = _load_resource_records(evidence_path / RESOURCE_MEASUREMENT_DIR)
+    context = {
+        "conn": conn,
+        "catalog_error": catalog_error,
+        "job_cache": {},
+        "start_wire": start.strftime(_WIRE),
+        "end_wire": end.strftime(_WIRE),
+        "route_receipt": route_receipt,
+        "route_detail": route_detail,
+        "records": records,
+        "start": start,
+        "end": end,
+    }
+    return context, unreadable
+
+
+def _classify_row(row_id, declared_evidence, disposition, reason, context):
+    """``(status, detail)`` for one row: open/exempt resolved, else evidence."""
+    if declared_evidence == "open":
+        return "open", _detail(row_id, declared_evidence, "open", None, None,
+                               _open_detail(reason))
+    if declared_evidence == "exempt" or disposition in EXEMPT_DISPOSITIONS:
+        why = ("declared exempt" if declared_evidence == "exempt"
+               else f"disposition {disposition!r}")
+        return "exempt", _detail(row_id, declared_evidence, "exempt", None, None, why)
+    status, source, window_checked, detail = _row_resolution(declared_evidence, context)
+    return status, _detail(row_id, declared_evidence, status, source, window_checked, detail)
+
+
 def check(*, session: str, window_start: str, window_end: str, catalog: Path,
           declarations=None, evidence_dir=DEFAULT_EVIDENCE_DIR, root=ROOT) -> dict:
     """Resolve every declaration row's own evidence inside one session window.
@@ -298,106 +420,38 @@ def check(*, session: str, window_start: str, window_end: str, catalog: Path,
 
     declarations_path = root / (declarations or DECLARATIONS)
     declared = load_declarations(declarations_path)
-    evidence_by_id = {row.get("id"): row.get("evidence") for row in declared.get("row", [])}
+    declared_rows = declared.get("row", [])
+    evidence_by_id = {row.get("id"): row.get("evidence") for row in declared_rows}
+    reason_by_id = {row.get("id"): row.get("reason") for row in declared_rows}
     rows = build_document(root=root, declarations=declarations)["rows"]
-    evidence = {row["id"]: evidence_by_id.get(row["id"]) for row in rows}
 
-    job_needed = any(isinstance(ev, str) and ev.startswith("job:") for ev in evidence.values())
-    route_needed = any(isinstance(ev, str) and ev.startswith("route:") for ev in evidence.values())
-    cli_needed = any(isinstance(ev, str) and ev.startswith("cli:") for ev in evidence.values())
-
-    conn = None
-    catalog_error = None
-    if job_needed:
-        try:
-            conn = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
-        except sqlite3.Error as exc:
-            catalog_error = str(exc)
-
-    route_receipt = None
-    route_detail = None
-    if route_needed:
-        route_path = evidence_path / ROUTE_PROBE_DIR / f"{session}-route_probe.json"
-        route_receipt, route_detail = _load_route_receipt(route_path, session, start, end)
-
-    records: list[dict] = []
-    unreadable: list[str] = []
-    if cli_needed:
-        records, unreadable = _load_resource_records(evidence_path / RESOURCE_MEASUREMENT_DIR)
+    needed: set[str] = set()
+    for row in rows:
+        needed |= _entry_kinds(evidence_by_id.get(row["id"]))
+    context, unreadable = _resolve_sources(evidence_path, session, start, end,
+                                           needed, catalog_path)
 
     details: list[dict] = []
     uncovered: list[str] = []
     rows_open: list[str] = []
     exempt = covered = 0
-    start_wire, end_wire = _wire(window_start), _wire(window_end)
-    job_cache: dict[str, tuple] = {}
     try:
         for row in rows:
             row_id = row["id"]
-            declared_evidence = evidence[row_id]
-            disposition = row.get("disposition")
-            if declared_evidence == "open":
-                rows_open.append(row_id)
-                details.append(_detail(row_id, declared_evidence, "open", None, None,
-                                       "declared open (known gap, not evidence)"))
-                continue
-            if declared_evidence == "exempt" or disposition in EXEMPT_DISPOSITIONS:
-                exempt += 1
-                why = ("declared exempt" if declared_evidence == "exempt"
-                       else f"disposition {disposition!r}")
-                details.append(_detail(row_id, declared_evidence, "exempt", None, None, why))
-                continue
-            if isinstance(declared_evidence, list):
-                entries = declared_evidence
-            elif isinstance(declared_evidence, str) and ":" in declared_evidence:
-                entries = [declared_evidence]
-            else:
-                uncovered.append(row_id)
-                details.append(_detail(row_id, declared_evidence, "uncovered", None, None,
-                                       "no usable evidence field (fails closed)"))
-                continue
-            all_ok = True
-            last_source = last_window_checked = None
-            reasons = []
-            for entry in entries:
-                if not isinstance(entry, str) or ":" not in entry:
-                    all_ok = False
-                    reasons.append(f"{entry!r}: no usable evidence field (fails closed)")
-                    continue
-                source_kind, _, argument = entry.partition(":")
-                if source_kind == "job":
-                if conn is None:
-                    ok, source, window_checked = False, "job", None
-                    detail = f"catalog unavailable: {catalog_error}"
-                else:
-                    if argument not in job_cache:
-                        job_cache[argument] = _job_evidence(conn, argument, start_wire, end_wire)
-                    ok, source, window_checked, detail = job_cache[argument]
-            elif source_kind == "route":
-                method, _, path = argument.partition(" ")
-                if route_receipt is None:
-                    ok, source, window_checked, detail = False, "route", False, route_detail
-                else:
-                    ok = _route_covered(route_receipt, method, path)
-                    source, window_checked = "route", False
-                    detail = (f"{method} {path} answered 2xx in this session's route probe"
-                              if ok else
-                              f"{method} {path} has no 2xx row in this session's route probe")
-            elif source_kind == "cli":
-                ok, detail = _cli_evidence(records, argument, start, end)
-                source, window_checked = "cli", True
-            else:
-                ok, source, window_checked = False, None, None
-                detail = f"unknown evidence kind {source_kind!r} (fails closed)"
-            if ok:
+            status, detail = _classify_row(row_id, evidence_by_id.get(row_id),
+                                           row.get("disposition"),
+                                           reason_by_id.get(row_id), context)
+            details.append(detail)
+            if status == "covered":
                 covered += 1
-                details.append(_detail(row_id, declared_evidence, "covered", source,
-                                       window_checked, detail))
-            else:
+            elif status == "uncovered":
                 uncovered.append(row_id)
-                details.append(_detail(row_id, declared_evidence, "uncovered", source,
-                                       window_checked, detail))
+            elif status == "open":
+                rows_open.append(row_id)
+            else:
+                exempt += 1
     finally:
+        conn = context["conn"]
         if conn is not None:
             conn.close()
 

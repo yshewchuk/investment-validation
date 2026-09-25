@@ -285,7 +285,7 @@ evidence = "open"
 area = "research"
 capability = "Preregistered experiment runs through evaluate(): run log, testing ledger, --no-ledger smoke"
 old = ["cli-family:experiments/*/run.py", "writer:engine/evaluate.py::evaluate", "writer:engine/evaluate.py::append_run_log"]
-new = ["cli:ops plan", "py:engine/v2/ops/experiments.py::run_experiment"]
+new = ["cli:ops plan", "py:engine/v2/ops/experiments.py::run_experiment", "effect:experiment_effect"]
 producer = "supervised experiment job: legacy runner via the declared command adapter (EXP-182 only)"
 identity = "spec_hash + input manifest + runner manifest"
 tests = ["tests/test_experiments.py", "tests/test_v2_ops_runner_onboarding.py", "tests/test_evaluate.py"]
@@ -312,7 +312,7 @@ evidence = "exempt"
 area = "research"
 capability = "Replay selected trades on real prices through the same kernel as serving"
 old = ["py:engine/replay.py::replay"]
-new = ["MISSING", "py:engine/v2/scoring/application.py::replay"]
+new = ["MISSING", "py:engine/v2/scoring/application.py::replay", "cli:tools/v2_replay.py"]
 producer = "legacy engine.replay"
 identity = "none"
 tests = ["tests/test_replay.py", "tests/test_v2_scoring_application.py"]
@@ -323,11 +323,11 @@ notes = "v2 application.replay re-scores a frozen decision; research trade repla
 
 [[row]]
 id = "research-tools"
-evidence = "cli:tools/v2_fill_quality.py"
+evidence = ["cli:tools/v2_fill_quality.py", "cli:tools/v2_signal_screen.py"]
 area = "research"
 capability = "Research data tools: real-fill pull and quality, trade table build/prune, signal screen, log diagnostics"
 old = ["cli:engine/data/pulls/polygon_fills.py", "cli:tools/fill_quality.py", "cli:engine/build_trades.py", "cli:tools/reconcile_trades.py", "cli:tools/signal_screen.py", "cli:tools/log_diagnostics.py"]
-new = ["cli:tools/v2_fill_quality.py", "cli:tools/v2_polygon_fills.py", "cli:tools/v2_signal_screen.py"]
+new = ["cli:tools/v2_fill_quality.py", "cli:tools/v2_polygon_fills.py", "cli:tools/v2_signal_screen.py", "cli:tools/v2_build_trades.py", "cli:tools/v2_reconcile_trades.py"]
 producer = "legacy Tier-2 store readers/writers (engine.data.store)"
 identity = "none: read the mutable legacy store"
 tests = ["tests/test_polygon_fills.py", "tests/test_fill_quality.py", "tests/test_build_trades.py", "tests/test_log_diagnostics.py"]
@@ -514,7 +514,8 @@ notes = "Phase 5 owns the lifecycle; P6-2 wires it as an ops job."
 
 [[row]]
 id = "history-analogs"
-evidence = "route:GET /explorer"
+evidence = "open"
+reason = "native history-analogs view in progress (branch p6/s9h); remap to its payload route when it lands"
 area = "history"
 capability = "Historical prints and analog list for a ticker"
 old = ["route:legacy-app GET /api/ticker/{sym}", "view:legacy #/trades/explorer"]
@@ -584,11 +585,11 @@ notes = "Producer is decisions-calibration (`calibrate`, engine/v2/ledger/calibr
 
 [[row]]
 id = "operations-quotas"
-evidence = "route:GET /release/current"
+evidence = "job:incremental_refresh"
 area = "operations"
 capability = "Provider quota state and reserve"
 old = ["py:engine/dashboard/render.py::quota_state"]
-new = ["py:engine/v2/ops/scheduler.py::_reserve_provider", "route:v2-ops GET /release/*"]
+new = ["cli:ops provider-account", "py:engine/v2/ops/scheduler.py::_reserve_provider", "route:v2-ops GET /release/*"]
 producer = "legacy quota_state adapter inside legacy_render; v2 provider_budget enforces but does not publish"
 identity = "meta.json in the release bundle"
 tests = ["tests/test_v2_ops_provider_admission.py", "tests/test_ledger.py"]
@@ -642,7 +643,8 @@ notes = "Not a scrape of a live dashboard: it reads the pinned v2 release direct
 
 [[row]]
 id = "export-remote-delivery"
-evidence = "route:GET /"
+evidence = "open"
+reason = "delivery is a DAG stage label, not a job or effect kind; no session source proves a remote delivery"
 area = "export"
 capability = "Authenticated remote snapshot for phone access (Cloudflare Access), with access probe"
 old = ["nightly:legacy publish", "doc:dashboard/README.md"]
@@ -749,6 +751,10 @@ reason = "Resource-bounded process runner used by every heavy job; infrastructur
 [[excluded]]
 ids = ["cli:tools/mem_sampler.py"]
 reason = "In-process RSS/stack sampler for profiling a run (py-spy cannot attach on this host); diagnostic tooling, not a consumer."
+
+[[excluded]]
+ids = ["cli:tools/v2_controlled_failure_drill.py", "cli:tools/v2_resource_measurement.py", "cli:tools/v2_route_probe.py", "cli:tools/v2_session_evidence_check.py"]
+reason = "P6-6 rehearsal tooling: controlled-failure drill, resource-measurement recorder, route probe and session-evidence completeness check; evidence producers and gates, not board/nightly consumers."
 
 # --------------------------------------------------------- adapter edges
 
