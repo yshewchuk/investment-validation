@@ -198,6 +198,10 @@ tests = [
 why = "Record comparator, tolerances and receipts decide whether two runs agree; a weakened comparison hides a parity break."
 mutate = [
     "engine/v2/diagnosis/*.py",
+    "engine/v2/parity/receipt.py",
+    "engine/v2/parity/record_comparator.py",
+    "engine/v2/parity/stage_plan.py",
+    "engine/v2/parity/tolerance.py",
 ]
 tests = [
     "tests/test_baseline_export.py",
@@ -205,6 +209,20 @@ tests = [
     "tests/test_v2_ops_foundation.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
+]
+
+[modules.parity]
+why = "The shared native-vs-legacy per-dimension comparator and field groups: a weakened comparison hides a parity break in both the nightly report and the Phase 4 checker."
+mutate = [
+    "engine/v2/parity/__init__.py",
+    "engine/v2/parity/dimensions.py",
+]
+tests = [
+    "tests/test_v2_ops_native*.py",
+    "tests/test_phase4_planted_defect_control.py",
+    "tests/test_phase4_numeric_negative_control_states.py",
+    "tests/test_phase4_acceptance_independence.py",
+    "tests/test_v2_scoring_native_entry_rule.py",
 ]
 
 [modules.data_store]

@@ -23,16 +23,24 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from checks import phase4_real, tier0_corpus
 from checks.phase4_real import _numerical_independence_source, _request
 from engine.v2.contracts import PreviewRelease
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.ops import native_shadow_render as ops_shadow
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.native_parity_report import (
+    PARITY_DIMENSIONS,
+    compare_native_vs_legacy,
+    native_parity_handler,
+    write_parity_report,
+)
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
-from engine.v2.ops.nightly import build_nightly_plan
+from engine.v2.ops.nightly import GRAPH, OPTIONAL, build_nightly_plan, run_shadow_nightly
 from engine.v2.scoring import application
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import analog_display_fields
@@ -44,11 +52,13 @@ from engine.v2.serving.native_shadow_render import (
     build_native_bundle_rows,
     shadow_serving_row_source,
 )
+from tests.test_phase4_capture_strict import _artifact, _full_strict_candidate
 from tests.test_v2_serving_projections import (
     _event_row,
     _events_snapshot,
     _preview_input,
 )
+from tools.capture_tier0_corpus import canonical_v2_request, write
 
 _TICKERS = ("PHASE4", "PHASE5")
 _EVENT_DATE = "2026-09-16"
@@ -217,3 +227,144 @@ def test_the_nightly_plan_records_the_shadow_serving_scorer():
     assert native_shadow_serving_mode(plan) == "native"
     legacy = build_nightly_plan(repo, _EVENT_DATE, shadow_serving_scorer="legacy")
     assert native_shadow_serving_mode(legacy) == "legacy"
+
+
+# --------------------------------------------------------------------------
+# spec_ns_c: the per-night parity report (G2) and its G4 corpus control.
+# --------------------------------------------------------------------------
+
+
+def _p4_corpus_comparison_hash(corpus_root: Path) -> str:
+    """The real P4 corpus comparison's own content hash, from real machinery.
+
+    ``checks/phase4_real._native_parity`` is the corpus comparison
+    ``checks/phase4_real.build_evidence`` runs (its ``native_parity`` stage);
+    ``comparison_receipt`` is ``content_hash(rows)`` over every row it
+    compared, so it changes if any hashed corpus payload does.
+    """
+    release, parity = phase4_real._native_parity(tier0_corpus.load(corpus_root))
+    assert parity["population"]["compared"] == 1, release["dispositions"]
+    return release["comparison_receipt"]
+
+
+def _g4_strict_corpus(tmp_path: Path) -> Path:
+    """A real one-pair tier-0 corpus with a strict Phase 4 trace."""
+    path, digest = _artifact(tmp_path)
+    candidate = _full_strict_candidate(
+        fixture_id="case-g4", ticker="AAA", driver_vector={"x": 2.0},
+        gate_vector={"x": 9.0, "n_prior": 5.0}, path=path, digest=digest)
+    checkpoint = candidate["legacy_trace"]["checkpoints"]["source_inputs"]
+    # The frozen bridge verifies each binding's own decision clock against the
+    # request the strict probe derives from the legacy request; align the
+    # fixture bindings with the derived clock rather than the placeholder
+    # default ``_model_binding`` stamps.
+    clock = canonical_v2_request(candidate, "snapshot-1").decision_clock_id
+    for binding in checkpoint["value"]["model_bindings"]:
+        binding["decision_clock"] = clock
+    checkpoint["value"]["native_recipes"]["simulation"] = {
+        "terminal_spots": [95.0, 105.0], "capital_at_risk": 3.0}
+    checkpoint["content_hash"] = content_hash(checkpoint["value"])
+    write(tmp_path / "tier0", [candidate], {}, pd.Timestamp("2026-09-16"),
+          "snapshot-1", strict_trace=True)
+    return tmp_path / "tier0"
+
+
+def _exercise_new_modules(tmp_path: Path) -> None:
+    """Call the new modules the way the nightly seam does -- G4's 'after'."""
+    assert ops_shadow.native_shadow_serving_mode(_NATIVE_PLAN) == "native"
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    report = compare_native_vs_legacy(rows, {key: dict(row) for key, row in rows.items()},
+                                      PARITY_DIMENSIONS)
+    assert report["mismatches"] == []
+    write_parity_report(report, tmp_path / "parity_report.json")
+
+
+def test_g4_p4_corpus_comparison_hash_is_byte_identical_across_the_new_modules(
+        tmp_path, monkeypatch):
+    """G4: exercising the new modules never perturbs what phase4_real hashes.
+
+    The REAL ``checks/phase4_real.py`` corpus comparison runs before and after
+    importing/exercising ``engine.v2.ops.native_shadow_render`` and
+    ``engine.v2.ops.native_parity_report`` in this one test process; its own
+    content hash must be byte-identical across both runs.  Neither module
+    touches ``score.json``'s ``rows``/``ladder`` or any ``ScoreRecord`` field,
+    so a difference here would be a real G4 regression, not a flake.
+    """
+    monkeypatch.setattr("engine.paths.ROOT", tmp_path)
+    corpus_root = _g4_strict_corpus(tmp_path)
+
+    before = _p4_corpus_comparison_hash(corpus_root)
+    _exercise_new_modules(tmp_path)
+    after = _p4_corpus_comparison_hash(corpus_root)
+    assert after == before
+
+
+def test_native_parity_handler_status_is_explicit_and_the_report_is_separate(tmp_path):
+    """The handler returns ``compared``/``not_applicable`` -- never a bool."""
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    report_path = tmp_path / "parity_report.json"
+
+    legacy = native_parity_handler(
+        _LEGACY_PLAN, legacy_rows={}, native_rows=rows,
+        report_path=report_path)({"session": _EVENT_DATE})
+    assert legacy["native_parity"]["status"] == "not_applicable"
+    assert not report_path.exists()  # no native rows -> nothing written
+
+    native = native_parity_handler(
+        _NATIVE_PLAN, legacy_rows={key: dict(row) for key, row in rows.items()},
+        native_rows=rows, report_path=report_path)({"session": _EVENT_DATE})
+    assert native["native_parity"]["status"] == "compared"
+    report = json.loads(report_path.read_text())
+    assert report["schema_version"] == "native_parity_report.v1.0"
+    assert sorted(report["compared"]) == sorted(rows)
+    assert report["only_legacy"] == [] and report["only_native"] == []
+    assert report["mismatches"] == []
+
+
+def test_compare_reports_a_mismatch_without_raising_or_reconciling():
+    """G2: a difference is a return-value finding, never an exception."""
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    key = sorted(rows)[0]
+    legacy = {key: {**rows[key], "exp_pnl_model": rows[key]["exp_pnl_model"] + 1.0}}
+
+    report = compare_native_vs_legacy(legacy, rows, PARITY_DIMENSIONS)
+
+    assert report["compared"] == [key]
+    assert report["mismatches"] and report["mismatches"][0]["row_key"] == key
+    assert report["mismatches"][0]["dimension"] == "simulation"
+    assert "exp_pnl_model" in report["mismatches"][0]["finding_fields"]
+    # No code path copies either side's value into the other row.
+    assert rows[key]["exp_pnl_model"] != legacy[key]["exp_pnl_model"]
+
+
+def test_compare_refuses_an_unknown_dimension_and_write_propagates_oserror(tmp_path):
+    with pytest.raises(OpsError) as error:
+        compare_native_vs_legacy({}, {}, ("not_a_dimension",))
+    assert error.value.code == "INVALID_REQUEST"
+    with pytest.raises(OSError):
+        write_parity_report({"schema_version": "native_parity_report.v1.0"},
+                            tmp_path / "missing" / "parity_report.json")
+
+
+def test_native_parity_stage_runs_optional_in_the_real_shadow_graph(tmp_path):
+    """The stage is in the fixed DAG, optional, and reports through a real run."""
+    assert GRAPH["native_parity"] == ("score",)
+    assert "native_parity" in OPTIONAL
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    source = tmp_path / "source"
+    source.mkdir()
+    private = tmp_path / "private"
+    report_path = private / "parity_report.json"
+    handlers = {stage: (lambda value, stage=stage: {**value, stage: "ok"})
+                for stage in GRAPH}
+    handlers["native_parity"] = native_parity_handler(
+        _NATIVE_PLAN, legacy_rows={key: dict(row) for key, row in rows.items()},
+        native_rows=rows, report_path=report_path)
+
+    receipt = run_shadow_nightly(source, private, _EVENT_DATE, handlers=handlers)
+
+    assert receipt["status"] == "succeeded"
+    stage_receipt = next(row for row in receipt["stages"]
+                         if row["stage_id"] == "native_parity")
+    assert stage_receipt["status"] == "succeeded"
+    assert json.loads(report_path.read_text())["schema_version"] == "native_parity_report.v1.0"

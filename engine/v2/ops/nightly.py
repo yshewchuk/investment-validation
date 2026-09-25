@@ -35,8 +35,16 @@ GRAPH = {
     "projection": ("export", "model_evidence"), "selfcheck": ("projection",),
     "engineering": (), "publication": ("selfcheck", "engineering"),
     "delivery": ("publication",), "backup": ("decision_commit",),
+    # spec_ns_c: the per-night native-vs-legacy parity report, parented on
+    # "score" because that is the last stage whose rows both sides can read.
+    # OPTIONAL on purpose: a parity mismatch (or a report-write failure) is
+    # REPORTED and degrades the receipt (G2), never blocks the shadow board.
+    # The stage stays in the fixed graph in every mode; its handler returns
+    # {"status": "not_applicable"} when the plan serves legacy rows.
+    "native_parity": ("score",),
 }
-OPTIONAL = frozenset({"settlement", "model_evidence", "engineering", "backup"})
+OPTIONAL = frozenset({"settlement", "model_evidence", "engineering", "backup",
+                      "native_parity"})
 
 
 @dataclass(frozen=True)
