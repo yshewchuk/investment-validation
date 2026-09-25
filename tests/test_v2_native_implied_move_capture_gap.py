@@ -15,7 +15,8 @@ the persistent ``_source_bundle["context"]`` dict across calls -- see its
 docstring). Neither field is a scoring answer: absent from
 ``Phase4TraceCollector._source_answer_fields``,
 ``engine/v2/scoring/source_inputs.py``'s ``_ANSWER_FIELDS``, and
-``checks/phase4_frozen_bridge.py``'s ``_ANSWER_FIELDS``.
+``engine/v2/scoring/frozen_inputs.py``'s ``_ANSWER_FIELDS`` (the answer-free
+gate's map, moved out of ``checks/phase4_frozen_bridge.py`` for Phase 6).
 
 ``tools/capture_tier0_corpus.py``'s ``_captured_blocks`` takes
 ``source.get("context")`` into native's ``context`` block verbatim (no

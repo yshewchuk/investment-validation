@@ -14,11 +14,12 @@ this bridge because its pair payloads contain no input_trace; the capture lane
 must emit those traces and sidecars before full-release parity can compare any
 records.
 
-Per-binding feature-vector-to-``InferenceRequest`` construction lives in the
-production module ``engine/v2/scoring/frozen_inputs.py`` (P6-2), so replay and
-future native workers share one implementation; ``binding_feature_row`` and
-``_feature_rows`` below are its public compatibility entrypoints for
-``tools/capture_tier0_corpus.py`` and ``checks/phase4_real.py``, converting
+Per-binding feature-vector-to-``InferenceRequest`` construction (P6-2) and the
+answer-free validation gate (the Phase 6 worker prerequisite) live in the
+production module ``engine/v2/scoring/frozen_inputs.py``, so replay and future
+native workers share one implementation; ``binding_feature_row``,
+``_feature_rows`` and ``_answer_free`` below are its compatibility entrypoints
+for ``tools/capture_tier0_corpus.py`` and ``checks/phase4_real.py``, converting
 ``FrozenInputsError`` to ``FrozenBridgeError`` with an identical message.
 """
 from __future__ import annotations
@@ -51,26 +52,6 @@ _BINDING_KEYS = frozenset({
     "decision_clock_id", "adapter", "feature_order", "output_names", "members",
 })
 _MEMBER_KEYS = frozenset({"name", "resource_id"})
-_ANSWER_FIELDS = {
-    "context": frozenset({"legs", "selected_contracts", "entry_cost", "gate_pass"}),
-    "features": frozenset({
-        "driver_prediction", "forecast_abs_move", "runup_move_prediction",
-        "exp_pnl_sim", "win_sim", "gate_score", "gate_pass",
-    }),
-    "forecast": frozenset({
-        "frozen_outputs", "driver_prediction", "forecast_abs_move",
-        "runup_move_prediction", "pred_iv_crush", "pred_iv_crush_30",
-        "model_fair_pct",
-    }),
-    "analogs": frozenset({"exp_pnl_analog", "win_analog", "ci_low", "ci_high"}),
-    "simulation": frozenset({"exp_pnl_sim", "win_sim", "sim_p10", "sim_p90"}),
-    "gate": frozenset({"frozen_score", "gate_score", "gate_pass", "gate_decision"}),
-    "chooser": frozenset({"chosen_strategy", "chooser_selection"}),
-    "diagnostics": frozenset({
-        "financial_diagnostics", "fair_premium_pct", "premium_vs_fair",
-        "cost_over_width",
-    }),
-}
 
 
 class FrozenBridgeError(ValueError):
@@ -154,15 +135,19 @@ def _verified_artifact(
 
 
 def _answer_free(inputs: NativeScoreInputs) -> None:
-    if inputs.geometry is not None or inputs.pricing is not None:
-        raise FrozenBridgeError("native inputs contain calculated geometry or pricing")
-    for block_name, forbidden in _ANSWER_FIELDS.items():
-        block = getattr(inputs, block_name)
-        found = sorted(str(key) for key in block if str(key) in forbidden)
-        if found:
-            raise FrozenBridgeError(
-                f"native inputs {block_name} contain calculated answers: {found}"
-            )
+    """Replay's answer-free gate, delegated to production.
+
+    Pure delegation to ``engine.v2.scoring.frozen_inputs.validate_answer_free``
+    -- see its docstring for the geometry/pricing refusal and the forbidden
+    block scan that ``prepare_frozen_replay`` runs before building a plan, so
+    a native worker can refuse the same record through the same predicate.
+    ``FrozenInputsError`` arrives and is re-raised as ``FrozenBridgeError``
+    with an identical message.
+    """
+    try:
+        frozen_inputs.validate_answer_free(inputs)
+    except frozen_inputs.FrozenInputsError as exc:
+        raise FrozenBridgeError(str(exc)) from exc
 
 
 def binding_feature_row(

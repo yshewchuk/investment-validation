@@ -9,6 +9,13 @@ one implementation, so capture-side and replay-side rows can never drift
 apart again; the bridge and ``tools/capture_tier0_corpus.py`` keep importing
 ``binding_feature_row`` under its established name.
 
+The answer-free validation gate moved here too as the Phase 6 worker
+prerequisite: a native worker must refuse a record whose captured blocks
+smuggle stage outputs back in as inputs exactly as replay does, so
+``validate_answer_free`` (with the ``_ANSWER_FIELDS`` map the bridge used to
+own privately) is production policy and the bridge's ``_answer_free`` is now a
+delegating compatibility wrapper over it.
+
 Verification of the release sidecar, resource hashes and receipts stays on the
 bridge side: this module reads no files and trusts its caller to hand it a
 verified release and a trace-derived feature mapping. Refusals here raise
@@ -26,10 +33,43 @@ from engine.v2.models.contracts import InferenceRequest, ModelBinding
 from .native_gate_features import GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS
 from .stages import NativeScoreInputs
 
-__all__ = ["FrozenInputsError", "binding_feature_row", "build_inference_requests"]
+__all__ = [
+    "FrozenInputsError",
+    "binding_feature_row",
+    "build_inference_requests",
+    "validate_answer_free",
+]
 
 #: Roles whose feature vector is their own, not the forecast-family merge.
 _ROLE_PRIVATE_VECTORS = frozenset({"gate", "chooser"})
+
+#: ``NativeScoreInputs`` blocks that may carry a calculated answer, and the
+#: key names in each that identify one: an output of the system under test
+#: (a model prediction, a simulation or analog summary, a gate or chooser
+#: decision, a diagnostic, a selected contract set or entry cost) must never
+#: ride in as this run's input, or the frozen comparison is circular. The
+#: map's insertion order is the block scan order ``validate_answer_free``
+#: refuses in.
+_ANSWER_FIELDS = {
+    "context": frozenset({"legs", "selected_contracts", "entry_cost", "gate_pass"}),
+    "features": frozenset({
+        "driver_prediction", "forecast_abs_move", "runup_move_prediction",
+        "exp_pnl_sim", "win_sim", "gate_score", "gate_pass",
+    }),
+    "forecast": frozenset({
+        "frozen_outputs", "driver_prediction", "forecast_abs_move",
+        "runup_move_prediction", "pred_iv_crush", "pred_iv_crush_30",
+        "model_fair_pct",
+    }),
+    "analogs": frozenset({"exp_pnl_analog", "win_analog", "ci_low", "ci_high"}),
+    "simulation": frozenset({"exp_pnl_sim", "win_sim", "sim_p10", "sim_p90"}),
+    "gate": frozenset({"frozen_score", "gate_score", "gate_pass", "gate_decision"}),
+    "chooser": frozenset({"chosen_strategy", "chooser_selection"}),
+    "diagnostics": frozenset({
+        "financial_diagnostics", "fair_premium_pct", "premium_vs_fair",
+        "cost_over_width",
+    }),
+}
 
 
 class FrozenInputsError(ValueError):
@@ -212,3 +252,30 @@ def build_inference_requests(
             rows=(row,),
         ))
     return tuple(requests)
+
+
+def validate_answer_free(inputs: NativeScoreInputs) -> None:
+    """Refuse ``NativeScoreInputs`` that smuggle a calculated answer in.
+
+    A prebuilt geometry or pricing object is refused first -- selected legs,
+    entry cost and the payoff arithmetic they imply are exactly what the
+    geometry and pricing stages exist to derive. Then every block named in
+    ``_ANSWER_FIELDS`` is scanned in that map's insertion order for any key
+    matching a forbidden output name, and the first dirty block is refused by
+    name with its offending keys sorted; a clean sourced-only record passes.
+    Key matching is exact (on ``str(key)``), so a recipe, address or raw
+    market fact carrying a similar name is never caught here -- the
+    ``source_inputs`` builder's own answer boundary owns how those blocks get
+    filled; this gate is what replay (``checks/phase4_frozen_bridge.py``, via
+    its ``_answer_free`` compatibility wrapper) and future native workers
+    share so no execution path scores against its own answers.
+    """
+    if inputs.geometry is not None or inputs.pricing is not None:
+        raise FrozenInputsError("native inputs contain calculated geometry or pricing")
+    for block_name, forbidden in _ANSWER_FIELDS.items():
+        block = getattr(inputs, block_name)
+        found = sorted(str(key) for key in block if str(key) in forbidden)
+        if found:
+            raise FrozenInputsError(
+                f"native inputs {block_name} contain calculated answers: {found}"
+            )
