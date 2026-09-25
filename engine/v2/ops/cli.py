@@ -200,10 +200,11 @@ def _add_decisions_command(commands):
     supersede = decisions_sub.add_parser("supersede")
     supersede.add_argument("--root", default=argparse.SUPPRESS)
     supersede.add_argument("--row-id", required=True,
-                           help="decision_id (native) or row_id (legacy import) being superseded")
+                           help="the target's exact decision_id (prediction:<row_id>) or exact "
+                                "row_id; no prefix or fuzzy match")
     supersede.add_argument("--reason", required=True)
-    supersede.add_argument("--from-json", type=Path, default=None,
-                           help="new decision payload (JSON object); omitted means {}")
+    supersede.add_argument("--from-json", type=Path, required=True,
+                           help="new decision payload (JSON object); must contain row_id")
 
 
 def _add_rescore_command(commands):
@@ -923,7 +924,7 @@ def _decisions_supersede(args, root, conn, clock):
     if not args.reason:
         raise fail("INVALID_REQUEST", "--reason must not be empty")
     try:
-        new_payload = json.loads(args.from_json.read_text()) if args.from_json else {}
+        new_payload = json.loads(args.from_json.read_text())
     except (OSError, json.JSONDecodeError):
         raise fail("INVALID_REQUEST", "--from-json is not a readable JSON document") from None
     new_payload = validated_supersede_payload(new_payload)

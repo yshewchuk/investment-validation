@@ -424,13 +424,22 @@ def resolve_symbol(root: Path, ref: str) -> bool:
 
 
 def _job_kind_names(root: Path) -> set[str]:
-    """The supervised job kinds ``engine/v2/ops/stages.py`` registers.
+    """The supervised job kinds the runtime registry actually allows.
 
     A ``job:<kind>`` declaration names the allowlist entry itself rather than
     a path into the tools, so it resolves against the source that owns the
-    registry. The file is absent only in synthetic trees that claim no job
+    registry. For the real repository root the runtime registry is the one
+    authority -- it also knows every kind built in a loop rather than a
+    literal ``JobKind(...)`` call (the outbox effects, the legacy action
+    family, ``incremental_refresh``). A synthetic test tree gets the AST scan
+    fallback, because importing this checkout's registry would answer for the
+    wrong tree; the file is absent only in synthetic trees that claim no job
     kind, which resolve to the empty set.
     """
+    if root.resolve() == ROOT.resolve():
+        from engine.v2.ops.stages import registry
+
+        return set(registry().names())
     path = root / V2_STAGES
     if not path.is_file():
         return set()
