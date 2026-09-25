@@ -5,6 +5,12 @@ Usage (from the agent worktree root):
   python3 tools/oc_check.py                 tests affected by the diff vs origin/main (changed tests + importers)
   python3 tools/oc_check.py tests/test_a.py [tests/test_b.py::test_x ...]   explicit targets
 
+Test selection (see changed_tests): changed test files, test files that import a
+changed engine/checks/tools module, and -- whenever any engine/checks/tools module
+changed -- every tests/test_*.py carrying a line equal to ALWAYS_RUN_MARKER
+("# land: always-run"), for tests that scan source as text and so never name the
+module they check.
+
 Runs, in order, against the WORKING TREE of the current agent worktree:
   1. the pre-commit gates (hygiene, import layers, code budgets, package READMEs, v2 lint)
   2. the named test files, serially, under bounded_run (1.5 GB cap, 1 GB box floor),
@@ -31,6 +37,7 @@ WORKTREES = MAIN / ".claude" / "worktrees"
 ARG_RE = re.compile(r"^tests/[A-Za-z0-9_/]+\.py(::[A-Za-z0-9_\[\]\-.]+)*$")
 MARKERS = "not needs_data and not needs_corpus and not heavy_host and not browser"
 TAIL = 60
+ALWAYS_RUN_MARKER = "# land: always-run"  # test files carrying this line always run when any engine/checks/tools file changed
 
 
 def refuse(msg):
@@ -94,7 +101,10 @@ def verify(root):
 
 def changed_tests(root):
     """Test files affected by the diff against origin/main: changed test files, plus
-    test files that import a changed engine/checks/tools module."""
+    test files that import a changed engine/checks/tools module, plus (whenever any
+    engine/checks/tools module changed) every tests/test_*.py carrying an
+    ALWAYS_RUN_MARKER line -- for tests that scan source as text (e.g. every
+    fail("CODE") literal in a package) and so never name the module they check."""
     git = ["git", "-C", str(root)]
     base = subprocess.run(git + ["merge-base", "HEAD", "origin/main"], capture_output=True, text=True).stdout.strip()
     diff = subprocess.run(git + ["diff", "--name-only", base or "HEAD"], capture_output=True, text=True).stdout.split()
@@ -108,6 +118,13 @@ def changed_tests(root):
         for t in sorted((root / "tests").glob("test_*.py")):
             rel = f"tests/{t.name}"
             if rel not in picked and pat.search(t.read_text(errors="ignore")):
+                picked.append(rel)
+        for t in sorted((root / "tests").glob("test_*.py")):
+            rel = f"tests/{t.name}"
+            if rel in picked:
+                continue
+            lines = (t.read_text(errors="ignore")).splitlines()
+            if any(line.strip() == ALWAYS_RUN_MARKER for line in lines):
                 picked.append(rel)
     return picked
 

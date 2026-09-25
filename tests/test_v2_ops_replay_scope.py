@@ -6,6 +6,7 @@ harness actually imports. A narrowing is only safe while it stays true, so the
 closure is re-derived here from the import graph rather than trusted.
 """
 from __future__ import annotations
+# land: always-run
 
 import sys
 from pathlib import Path

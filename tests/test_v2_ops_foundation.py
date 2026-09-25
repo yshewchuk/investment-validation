@@ -6,6 +6,7 @@ receipt and baseline manifest, so the golden values below were computed by the
 phase-0 diagnosis copy BEFORE the move and are pinned here, not recomputed.
 """
 from __future__ import annotations
+# land: always-run
 
 import ast
 import sys
