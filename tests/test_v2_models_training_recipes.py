@@ -11,6 +11,7 @@ guard that rigs every scoring path.
 Synthetic in-memory frames and ``tmp_path`` only; never ``data/``.
 """
 from __future__ import annotations
+# land: always-run
 
 import ast
 import dataclasses

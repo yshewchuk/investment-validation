@@ -5,6 +5,7 @@ construction (§4). Those rules are structural claims about source, so they are
 checked against the source rather than trusted.
 """
 from __future__ import annotations
+# land: always-run
 
 import ast
 import dataclasses

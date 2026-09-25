@@ -8,6 +8,7 @@ alone. This file proves both halves together, the same way
 ``tests/test_v2_ops_contracts.py`` proves the Phase 1 contracts.
 """
 from __future__ import annotations
+# land: always-run
 
 import ast
 import dataclasses

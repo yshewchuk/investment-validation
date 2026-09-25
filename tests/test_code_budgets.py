@@ -4,6 +4,7 @@ Both checks are proved by planting what they exist to catch. Asserting only
 that the real tree is green would pass identically if either check did nothing.
 """
 from __future__ import annotations
+# land: always-run
 
 import ast
 import subprocess
