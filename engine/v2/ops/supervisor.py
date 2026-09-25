@@ -37,6 +37,7 @@ from engine.v2.ops.effects_graph import (
     backup_effect,
     effect_scope,
     engineering_gate_effect,
+    experiment_effect,
     ledger_export_effect,
     publication_effect,
     reconcile_publication_status,
@@ -93,10 +94,13 @@ from engine.v2.ops.worker_progress import STEPS_FILENAME, read_new_records
 #: Kinds whose coordinator effect does real, non-idempotent catalog/outbox/
 #: filesystem work every attempt — the generic checkpoint-reuse shortcut
 #: would otherwise skip that work entirely on a cache hit (decision #1).
+#: ``experiment``'s durable attempt record is itself idempotent, but it must
+#: still be attempted on every attempt (and after a cache hit), so it is
+#: listed here too.
 _COORDINATOR_EFFECT_KINDS = frozenset({
     "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
     "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup",
-    "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize"})
+    "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize", "experiment"})
 
 #: Snapshot-backed kinds that write into their legacy tree (attempt-19 fix,
 #: extended 2026-09-15 for ``legacy_model_evidence``): ``legacy_render``
@@ -871,6 +875,8 @@ class Service:
         if claim.spec.kind == "snapshot_import":
             return snapshot_import_effect(self.conn, self.store, claim, refs, clock=self.clock,
                                           keepalive=keepalive)
+        if claim.spec.kind == "experiment":
+            return experiment_effect(self.conn, self.store, claim, refs, clock=self.clock)
         if claim.spec.kind == "legacy_rebuild_candidate":
             return legacy_rebuild_candidate_effect(self.conn, self.store, claim, refs, clock=self.clock)
         return None, ()

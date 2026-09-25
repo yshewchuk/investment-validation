@@ -4,11 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.diagnostics import audit_writes, snapshot_sensitive
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import (
     ExperimentSpec,
+    experiment_plan,
     register_hypothesis,
     run_experiment,
     synthetic_fixture_runner,
@@ -28,6 +30,7 @@ from engine.v2.ops.nightly import (
     graph_order,
     run_shadow_nightly,
 )
+from engine.v2.ops.plans import request_from_plan
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit_graph
 from tests.ops_support import FakeClock, catalog
@@ -206,6 +209,24 @@ def test_primary_registration_conflicts_on_changed_input(tmp_path):
     register_hypothesis(conn, spec, "input-a", mode="primary")
     with pytest.raises(OpsError, match="IDEMPOTENCY_CONFLICT"):
         register_hypothesis(conn, spec, "input-b", mode="primary")
+
+
+def test_request_from_plan_accepts_experiment_and_rejects_unknown_kind(tmp_path):
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps({"experiment_id": "EXP-JOB", "runner": "synthetic"}))
+    plan = experiment_plan(spec_path, smoke=True)
+    store = ArtifactStore(tmp_path)
+    spec_ref = store.publish_bytes(json.dumps(plan["spec_document"], sort_keys=True).encode(),
+                                   schema_ref="experiment_spec.v1.0")
+    plan["parameters"]["input_bindings"] = {"spec.json": spec_ref.artifact_id}
+
+    command = request_from_plan(plan, "key-1")
+    assert command.job.kind == "experiment"
+    assert command.job.checkpoint_contract_ref == "experiment_receipt.v1.0"
+
+    forged = dict(plan, kind="nightly")
+    with pytest.raises(OpsError, match="not enabled for submission"):
+        request_from_plan(forged, "key-2")
 
 
 def test_failure_evidence_carries_no_exception_text(tmp_path):

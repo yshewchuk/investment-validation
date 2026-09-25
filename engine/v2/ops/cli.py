@@ -20,7 +20,7 @@ from engine.v2.foundation import (
 from engine.v2.ops import executor
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import integrity_errors, transaction
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.diagnostics import report as diagnostic_report
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, fail
@@ -559,6 +559,13 @@ def _submit_command(args, root, conn, clock):
     policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
     if plan.get("kind") == "nightly":
         return _submit_nightly(plan, conn, store, policy, clock)
+    if plan.get("kind") == "experiment":
+        spec_ref = store.publish_bytes(json.dumps(plan["spec_document"], sort_keys=True).encode(),
+                                       schema_ref="experiment_spec.v1.0")
+        with transaction(conn):
+            register_artifact(conn, spec_ref, None, clock)
+        plan["input_refs"] = [spec_ref.artifact_id]
+        plan["parameters"]["input_bindings"] = {"spec.json": spec_ref.artifact_id}
     return submit(conn, registry(), policy, request_from_plan(plan, args.idempotency_key), clock=clock)
 
 

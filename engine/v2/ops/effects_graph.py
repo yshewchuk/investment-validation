@@ -48,8 +48,8 @@ from engine.v2.ops.publication import publish_local, stage_release
 from engine.v2.ops.session_resolution import resolve_effective_session
 
 __all__ = ["EXPORT_PURPOSES", "backup_effect", "effect_scope", "engineering_gate_effect",
-           "ledger_export_effect", "publication_effect", "reconcile_publication_status",
-           "write_publication_terminal_status"]
+           "experiment_effect", "ledger_export_effect", "publication_effect",
+           "reconcile_publication_status", "write_publication_terminal_status"]
 
 #: P2-5/D20: only these two purposes are legacy-compatible rows; a
 #: ``research_reconstruction`` row must never reach a legacy-compatible export.
@@ -791,4 +791,41 @@ def backup_effect(conn, store, claim, ops_root, *, clock, fault=None, keepalive=
     with transaction(conn):
         watermark(conn, "nightly", scope, "backup", session, content_hash(manifest), clock=clock,
                  generation=generation)
+    return None, ()
+
+
+# --------------------------------------------------------------------------
+# experiment
+# --------------------------------------------------------------------------
+
+
+def _named_ref(refs, name):
+    for candidate_name, ref in refs:
+        if candidate_name == name:
+            return ref
+    raise fail("VALIDATION_FAILED", "required effect artifact is missing")
+
+
+def experiment_effect(conn, store, claim, refs, *, clock):
+    """P6 slice 10: durably record one smoke experiment attempt after its
+    worker receipt validates. Mirrors backup_effect's shape (a coordinator
+    effect with no watermark/outbox of its own — an experiment run has no
+    generation/session scope to key on).
+
+    ``spec.json`` is re-read from the attempt's OWN durably recorded binding
+    (``attempt_input_bindings``, written once at launch by
+    ``executor._materialize_inputs``): the exact bytes the worker ran, never
+    a re-resolution of the job's live parameters and never a second
+    ``resolve_and_record`` call (those rows are immutable and already exist).
+    """
+    from engine.v2.ops.experiments import experiment_spec_from_document, register_hypothesis
+
+    receipt = json.loads(store.read_verified(_named_ref(refs, "experiment_receipt")))
+    binding = recorded_bindings(conn, claim.attempt_id).get("spec.json")
+    if binding is None:
+        raise fail("VALIDATION_FAILED", "experiment specification is not bound")
+    document = json.loads(store.read_verified(artifact(conn, store, binding.artifact_id)))
+    spec = experiment_spec_from_document(document)
+    register_hypothesis(conn, spec, receipt["input_hash"], mode="smoke",
+                        run_id=claim.attempt_id)
     return None, ()
