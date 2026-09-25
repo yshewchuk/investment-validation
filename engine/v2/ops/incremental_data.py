@@ -41,6 +41,7 @@ UnknownPolicy = Literal["invalidate", "refuse"]
 
 REFRESH_RESULT_PATH = "incremental_refresh_result.json"
 REFRESH_RESULT_SCHEMA = "incremental_refresh_result.v1.0"
+REFRESH_PLAN_SCHEMA = "incremental_refresh_plan.v1.0"
 MAX_REFRESH_IDS = 4096
 MAX_REFRESH_RESULT_BYTES = 1 << 20
 
@@ -76,6 +77,7 @@ class RefreshPlan:
     """Immutable cache-first plan handed to the normal supervisor path."""
 
     parent_snapshot_id: str
+    expected_head_generation: int
     units: tuple[RefreshUnit, ...]
     cached: tuple[AcquisitionOutcome, ...]
     fetch_units: tuple[RefreshUnit, ...]
@@ -87,12 +89,26 @@ class RefreshPlan:
 
 @dataclass(frozen=True)
 class RefreshParameters:
-    """Strict parameters for a supervised incremental refresh job."""
+    """Strict parameters for a supervised incremental refresh job.
+
+    ``catalog_path``/``objects_root``/``scope``/``expected_head_generation``/
+    ``expected_head_snapshot_id``/``table_name`` are the deployment identity the
+    executor stages into ``incremental_refresh_input.json`` (S4A); they come
+    from the admitted, hashed ``JobSpec``, never the environment or a legacy
+    path. The acquired-data fields (raw payloads, revisions, coverage) are the
+    worker callback's own output.
+    """
 
     expected_ids: tuple[str, ...]
     parent_snapshot_id: str
     refresh_plan_hash: str
     provider_calls: int
+    catalog_path: str
+    objects_root: str
+    scope: str
+    expected_head_generation: int
+    expected_head_snapshot_id: str | None = None
+    table_name: str = "daily_market"
     input_bindings: dict[str, str] | None = None
 
 
@@ -285,10 +301,12 @@ def coverage_complete(outcome: AcquisitionOutcome) -> bool:
 
 def plan_refresh(parent_snapshot: SnapshotRef, units: Sequence[RefreshUnit], *,
                  cached_outcomes: Mapping[str, AcquisitionOutcome], provider_account: str | None,
-                 max_attempts: int = 3) -> RefreshPlan:
+                 expected_head_generation: int, max_attempts: int = 3) -> RefreshPlan:
     """Plan cache misses and reserve every possible provider attempt up front."""
     if max_attempts < 1:
         raise fail("INVALID_REQUEST", "refresh max_attempts must be positive")
+    if not isinstance(expected_head_generation, int) or expected_head_generation < 0:
+        raise fail("INVALID_REQUEST", "refresh expected_head_generation must be non-negative")
     ordered = tuple(sorted(units, key=lambda unit: unit.request_id))
     if len({unit.request_id for unit in ordered}) != len(ordered):
         raise fail("INVALID_REQUEST", "refresh request ids must be unique")
@@ -305,13 +323,15 @@ def plan_refresh(parent_snapshot: SnapshotRef, units: Sequence[RefreshUnit], *,
         raise fail("INVALID_REQUEST", "cache misses require a shared provider account")
     payload = {
         "parent_snapshot_id": parent_snapshot.snapshot_id,
+        "expected_head_generation": expected_head_generation,
         "units": [to_document(unit) for unit in ordered],
         "cached_receipts": [outcome.receipt_ref for outcome in cached],
         "provider_account": provider_account, "provider_calls": calls,
         "max_attempts": max_attempts,
     }
     return RefreshPlan(
-        parent_snapshot_id=parent_snapshot.snapshot_id, units=ordered,
+        parent_snapshot_id=parent_snapshot.snapshot_id,
+        expected_head_generation=expected_head_generation, units=ordered,
         cached=tuple(cached), fetch_units=tuple(fetch),
         provider_account=provider_account if calls else None, provider_calls=calls,
         max_attempts=max_attempts, plan_hash=content_hash(payload))
@@ -341,6 +361,25 @@ def _refresh_identity_problems(params: RefreshParameters) -> list[str]:
         problems.append("refresh_plan_hash must be a sha256 content hash")
     if not isinstance(params.provider_calls, int) or not 0 <= params.provider_calls <= 1_000_000:
         problems.append("provider_calls must be between zero and 1000000")
+    problems.extend(_refresh_staging_identity_problems(params))
+    return problems
+
+
+def _refresh_staging_identity_problems(params: RefreshParameters) -> list[str]:
+    """S4A: the attempt's deployment identity must be reproducible and bounded."""
+    problems = []
+    bounded = (("catalog_path", params.catalog_path, 4096),
+               ("objects_root", params.objects_root, 4096),
+               ("scope", params.scope, 128), ("table_name", params.table_name, 128))
+    for name, value, limit in bounded:
+        if not isinstance(value, str) or not value or len(value) > limit:
+            problems.append(f"{name} must be a bounded nonempty string")
+    if not isinstance(params.expected_head_generation, int) \
+            or params.expected_head_generation < 0:
+        problems.append("expected_head_generation must be a non-negative integer")
+    head = params.expected_head_snapshot_id
+    if head is not None and (not isinstance(head, str) or not head or len(head) > 128):
+        problems.append("expected_head_snapshot_id must be a bounded nonempty string")
     return problems
 
 
@@ -363,13 +402,23 @@ def refresh_parameter_problems(job: JobSpec, params: RefreshParameters) -> tuple
 
 def refresh_job_spec(plan: RefreshPlan, *, implementation_ref: str,
                      environment_ref: str, output_namespace: str,
+                     catalog_path: str, objects_root: str,
                      input_bindings: Mapping[str, str] | None = None,
                      input_refs: Sequence[str] = ()) -> JobSpec:
-    """Build a job whose normal scheduler reserves shared provider budget."""
+    """Build a job whose normal scheduler reserves shared provider budget.
+
+    ``catalog_path``/``objects_root`` are the attempt's deployment identity;
+    ``output_namespace`` is also the refresh scope. ``input_refs`` must admit
+    every direct artifact named by ``input_bindings`` (e.g. the bound
+    ``refresh_plan.json``), exactly like every other kind.
+    """
     params = RefreshParameters(
         expected_ids=tuple(unit.request_id for unit in plan.units),
         parent_snapshot_id=plan.parent_snapshot_id,
         refresh_plan_hash=plan.plan_hash, provider_calls=plan.provider_calls,
+        catalog_path=catalog_path, objects_root=objects_root,
+        scope=output_namespace, expected_head_generation=plan.expected_head_generation,
+        expected_head_snapshot_id=plan.parent_snapshot_id,
         input_bindings=dict(input_bindings) if input_bindings is not None else None)
     return JobSpec(
         kind="incremental_refresh", implementation_ref=implementation_ref,
@@ -409,9 +458,15 @@ def run_refresh_worker(parameters: Mapping[str, object], root: Path, *,
 
 
 def _load_data_refresh_callback() -> RefreshCallback:
-    """Resolve the public callback at worker runtime, without data candidate types."""
-    from engine.v2.data.incremental import run_incremental_refresh
-    return run_incremental_refresh
+    """Resolve the public callback at worker runtime, without data candidate types.
+
+    The default is the daily_market fetch wrapper (S4A): it turns the staged
+    identity document and the bound ``refresh_plan.json`` into acquired data
+    through the injected provider fetcher, then delegates to the unchanged
+    ``run_incremental_refresh`` commit path.
+    """
+    from engine.v2.data.incremental import run_daily_market_refresh
+    return run_daily_market_refresh
 
 
 def validate_refresh_result_document(value) -> RefreshCallbackResult:

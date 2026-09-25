@@ -420,6 +420,7 @@ def _plan_command(args, root, conn, clock):
         tickers = _ticker_list(args.tickers)
         context_tickers = _ticker_list(args.context_tickers) or tickers
         population = _read_expected_population(args)
+        from engine.v2.ops.snapshot_stages import _catalog_path
         plan = nightly_plan(Path(__file__).resolve().parents[3], args.as_of,
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
                             tickers=tickers, context_tickers=context_tickers,
@@ -428,7 +429,8 @@ def _plan_command(args, root, conn, clock):
                             input_mode=args.input_mode, full_run=args.full_run,
                             snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
                                                              population),
-                            refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args))
+                            refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
+                            catalog_path=_catalog_path(conn), objects_root=str(root))
     else:
         from engine.v2.ops.experiments import experiment_plan
         plan = experiment_plan(args.spec, smoke=args.no_ledger)
@@ -534,7 +536,9 @@ def _submit_nightly(plan, conn, store, policy, clock):
         expected_population=tuple(plan.get("expected_population", ())),
         include_prerequisites=False, input_mode=plan.get("input_mode", "legacy"),
         snapshot_inputs=plan.get("snapshot_inputs"), full_universe=full_universe,
-        refresh_mode=plan.get("refresh_mode", "legacy"), refresh_plan=plan.get("refresh_plan"))
+        refresh_mode=plan.get("refresh_mode", "legacy"), refresh_plan=plan.get("refresh_plan"),
+        catalog_path=plan.get("catalog_path"), objects_root=plan.get("objects_root"),
+        conn=conn, store=store, clock=clock)
     # 2026-09-14: refuse before submission a plan that would only
     # fail later at claim time (RESOURCE_LIMIT_EXCEEDED) because some
     # job's legacy read set exceeds its resource profile's scratch

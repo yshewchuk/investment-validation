@@ -14,6 +14,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.ops.executor_watchdog import observe, process_info, signal_owned
 from engine.v2.ops.input_bindings import resolve_and_record
 from engine.v2.ops.lifecycle import record_launch
+from engine.v2.ops.refresh_staging import stage_refresh_input
 
 THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                     "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS",
@@ -39,6 +40,9 @@ def launch(conn, claim, kind, store, code_root, *, clock, boot_id, lease_seconds
     only legacy root; ``envelope_extra`` carries kind-specific trusted fields."""
     staging = store.staging_dir(claim.attempt_id)
     _materialize_inputs(conn, claim, store, staging)
+    # S4A: typed, non-artifact refresh identity lands in the same staging dir
+    # ``_materialize_inputs`` writes into, before the worker subprocess exists.
+    stage_refresh_input(claim, staging)
     legacy = str(legacy_root) if legacy_root is not None else str(staging / "legacy")
     env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(code_root), "PYTHONUNBUFFERED": "1",
            "PYTHONDONTWRITEBYTECODE": "1", "LANG": "C.UTF-8",
