@@ -27,8 +27,13 @@ Preflight deliberately never opens artifact bytes. A missing or tampered
 member is verified at inference time exactly as an individual call would, so
 the batch preserves ``score_frozen``'s MODEL_NOT_READY refusal records (P5-2)
 rather than turning them into batch errors. Execution runs inside
-``engine.v2.models.no_fit_guard``, so no request path can fit a model, warm a
-provider or write a cache entry.
+``engine.v2.models.no_fit_guard``: every registered v2 fitting path — each
+one that opens with ``engine.v2.models.no_fit.forbid_fitting`` — refuses to
+run for the block. The guard itself only trips at those registered call
+sites; it does not by itself prevent a provider warm or an arbitrary cache
+write. The batch path's guarantee against those is structural: every request
+runs through ``score_frozen``, which serves only the pinned release's
+hash-verified frozen artifacts and fits or fetches nothing.
 """
 from __future__ import annotations
 

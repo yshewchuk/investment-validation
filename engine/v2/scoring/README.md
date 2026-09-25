@@ -31,9 +31,18 @@ temporary legacy adapter; `financial` owns diagnostics; `identity` owns
 content-addressed request identities; `frozen_batch` is the Phase 6 batch
 boundary that preflights a declared `ScoreBatch` and runs every request
 through `application.score_frozen` under one pinned snapshot, release and
-`FrozenInference`.
+`FrozenInference`; `frozen_inputs` is the Phase 6 (P6-2) production frozen
+inference input builder — `binding_feature_row` decides inclusion for one
+binding from its captured feature vector (nonfinite-tag decoding, non-finite
+omission, gate derived-column deferral, malformed/missing refusal) and
+`build_inference_requests` turns a record's `NativeScoreInputs` and a
+release's bindings into the `InferenceRequest` sequence, reading
+`role_model_inputs` per-role rows or the merged `model_inputs` for
+forecast-family roles. `checks/phase4_frozen_bridge.py` and
+`tools/capture_tier0_corpus.py` are its compatibility callers, so replay and
+future native workers share one implementation.
 
-<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, identity, source_inputs, stages, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs -->
+<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs -->
 
 ## Consumers
 

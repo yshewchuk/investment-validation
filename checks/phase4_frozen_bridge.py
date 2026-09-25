@@ -13,13 +13,19 @@ than from executable inputs. The current 20260912T233551Z corpus cannot use
 this bridge because its pair payloads contain no input_trace; the capture lane
 must emit those traces and sidecars before full-release parity can compare any
 records.
+
+Per-binding feature-vector-to-``InferenceRequest`` construction lives in the
+production module ``engine/v2/scoring/frozen_inputs.py`` (P6-2), so replay and
+future native workers share one implementation; ``binding_feature_row`` and
+``_feature_rows`` below are its public compatibility entrypoints for
+``tools/capture_tier0_corpus.py`` and ``checks/phase4_real.py``, converting
+``FrozenInputsError`` to ``FrozenBridgeError`` with an identical message.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import dataclass, field, replace
-from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -32,6 +38,7 @@ from engine.v2.models import (
     ModelRelease,
 )
 from engine.v2.models.contracts import ArtifactMember
+from engine.v2.scoring import frozen_inputs
 from engine.v2.scoring.stages import NativeScoreInputs
 
 FROZEN_TRACE_SCHEMA = "phase4_frozen_inference.v1.0"
@@ -44,8 +51,6 @@ _BINDING_KEYS = frozenset({
     "decision_clock_id", "adapter", "feature_order", "output_names", "members",
 })
 _MEMBER_KEYS = frozenset({"name", "resource_id"})
-#: Roles whose feature vector is their own, not the forecast-family merge.
-_ROLE_PRIVATE_VECTORS = frozenset({"gate", "chooser"})
 _ANSWER_FIELDS = {
     "context": frozenset({"legs", "selected_contracts", "entry_cost", "gate_pass"}),
     "features": frozenset({
@@ -163,115 +168,20 @@ def _answer_free(inputs: NativeScoreInputs) -> None:
 def binding_feature_row(
     binding: ModelBinding, vector: Mapping[str, Any],
 ) -> tuple[float, ...] | None:
-    """One inference row for ``binding`` from its captured feature ``vector``,
-    or ``None`` when a required feature came back non-finite.
+    """Public compatibility entrypoint for the production builder.
 
-    This is the ONE predicate that decides whether a binding is included,
-    shared by ``_feature_rows`` below (replay, via
-    ``checks/phase4_real.py``) and ``_frozen_runtime`` in
-    ``tools/capture_tier0_corpus.py`` (capture, building the
-    ``resolve_context`` receipt from the same recorded feature vector). The
-    two sides used to duplicate this rule -- capture's copy checked only for
-    a structurally missing feature, never for a non-finite one -- so a trace
-    could assert a binding both included (capture's receipt, which fed the
-    model unconditionally) and omitted (replay's re-derivation from the
-    identical ``role_model_inputs`` the trace itself recorded), a real
-    self-contradiction the runtime-vs-captured-receipt check exists to
-    catch. Reading both sides from this one function is what keeps them
-    from drifting apart again.
-
-    A captured feature that was genuinely non-finite at capture time is
-    tagged ``{"__nonfinite__": repr(value)}`` (contracts §2.1; see
-    ``engine.v2.foundation.canonical.tag_nonfinite``/``untag_nonfinite``) --
-    a real sourced NaN (e.g. no ORATS quote that day), not a dropped column.
-    Decoding it here (rather than letting ``float()`` raise on the dict
-    itself) is what tells a genuinely non-finite captured value apart from
-    an actually-malformed one.
-
-    A binding whose row comes back non-finite yields ``None`` here -- the
-    caller must omit it, never raise. This mirrors
-    ``engine/v2/scoring/frozen_executor.py``'s ``FrozenStageExecutor._row``
-    ("a non-finite value is a missing feature, not an invalid one") and
-    legacy itself: ``engine.score.Scorer._score_model`` flags
-    MISSING_FEATURES and never calls ``.predict`` on a non-finite row, and
-    ``engine.data.features.tier4.ServingModel.predict`` masks an incomplete
-    row to NaN without calling its estimator either way -- neither legacy
-    path ever asks a model to score an incomplete feature vector. On the
-    replay side, omitting the request means ``prepare_frozen_replay`` hands
-    the omission's binding fewer requests than bindings, which
-    ``engine.v2.scoring.application.score_frozen`` already handles (its
-    ``bindings``/``results`` are built FROM ``requests``, not from
-    ``release.bindings``), so the role simply produces no frozen output --
-    read as the native record's own MISSING_FORECAST_OUTPUT for that role,
-    comparable against legacy's own decline, instead of a hard refusal that
-    excludes the whole record from the population before any comparison is
-    even attempted.
-
-    A structurally missing feature name (the key never captured at all) or
-    a genuinely non-numeric value (a string, not a nonfinite tag) both still
-    raise ``FrozenBridgeError`` -- those are not an omission either side
-    should make silently. The one exception: a GATE-role binding whose ONLY
-    absent names are the derived forecast/analog columns (``native_gate_
-    features.GATE_FORECAST_COLUMNS | GATE_ANALOG_COLUMNS``) is a legacy row
-    whose base frame predates the gate feature extension -- defer eager
-    inference (``None``) rather than raise; the native gate stage derives
-    those columns at its own executor.
+    Pure delegation to ``engine.v2.scoring.frozen_inputs.binding_feature_row``
+    -- see its docstring for the inclusion predicate, the nonfinite-tag
+    decoding, the gate derived-column deferral and the omission-vs-refusal
+    rules. ``tools/capture_tier0_corpus.py`` imports this name; it converts
+    the production ``FrozenInputsError`` into ``FrozenBridgeError`` with an
+    identical message so capture's ``StrictTraceCaptureError`` wrapping and
+    replay's refusals keep reading exactly as before.
     """
-    from engine.v2.foundation import untag_nonfinite
-    from engine.v2.scoring.native_gate_features import (
-        GATE_ANALOG_COLUMNS, GATE_FORECAST_COLUMNS,
-    )
-
-    feature_order = tuple(binding.feature_order)
-    missing = [name for name in feature_order if name not in vector]
-
-    # Classify EVERY absent name before touching a single present cell: an
-    # unknown missing base feature is a hard error no matter what the captured
-    # cells happen to hold, so it must be rejected here -- not shadowed by an
-    # early return below the moment a present cell reads non-finite. The only
-    # legal omission is a GATE-role row whose absent names are ALL the derived
-    # forecast/analog columns: a legacy base frame that predates the gate
-    # feature extension, which the native gate stage reconstructs at its own
-    # executor. Mark it for deferral rather than returning, so the present
-    # cells are still validated -- a legal (or illegal) omission must never
-    # hide a malformed captured string.
-    defer = False
-    if missing:
-        base_role = str(binding.role).split(":", 1)[0]
-        derived = set(GATE_FORECAST_COLUMNS) | set(GATE_ANALOG_COLUMNS)
-        if base_role == "gate" and set(missing) <= derived:
-            defer = True
-        else:
-            raise FrozenBridgeError(
-                f"binding {binding.binding_id}: missing feature {missing[0]}"
-            )
-
-    # Validate every cell the vector DID capture. A malformed (non-numeric,
-    # untagged) value is a hard error on either side, never an omission. A
-    # genuinely non-finite captured value omits the binding exactly as a
-    # complete row would -- but accumulate that flag rather than returning
-    # early, so an earlier NaN cannot mask a later malformed cell.
-    values: dict[str, float] = {}
-    nonfinite = False
-    for name in feature_order:
-        if name not in vector:
-            continue
-        raw = vector[name]
-        decoded = untag_nonfinite(raw) if isinstance(raw, Mapping) else raw
-        try:
-            value = float(decoded)
-        except (TypeError, ValueError) as exc:
-            raise FrozenBridgeError(
-                f"binding {binding.binding_id}: nonnumeric feature {name}"
-            ) from exc
-        if not isfinite(value):
-            nonfinite = True
-            continue
-        values[name] = value
-
-    if defer or nonfinite:
-        return None
-    return tuple(values[name] for name in feature_order)
+    try:
+        return frozen_inputs.binding_feature_row(binding, vector)
+    except frozen_inputs.FrozenInputsError as exc:
+        raise FrozenBridgeError(str(exc)) from exc
 
 
 def _feature_rows(
@@ -279,53 +189,19 @@ def _feature_rows(
     bindings: Sequence[ModelBinding],
     release_id: str,
 ) -> tuple[InferenceRequest, ...]:
-    """One inference row per binding, in the binding's own feature order.
+    """Replay's per-binding request construction, delegated to production.
 
-    A strict capture records the row each binding was fed per role
-    (``features.role_model_inputs``): the gate model's vector lives only in
-    its own ``gate_inputs`` checkpoint, never in the merged forecast-family
-    ``model_inputs``, and a same-named column may hold another value there.
-    When the trace carries per-role rows, each binding reads ONLY its own
-    role's row. A trace without them can still feed the forecast-family
-    roles from ``model_inputs`` (the merge refuses a cross-role conflict), but
-    never a gate or chooser binding.
-
-    Per-binding row construction (nonfinite decoding, omission on a
-    non-finite feature) is ``binding_feature_row`` -- see its docstring.
+    Pure delegation to
+    ``engine.v2.scoring.frozen_inputs.build_inference_requests`` -- see its
+    docstring for the ``role_model_inputs`` vs merged ``model_inputs`` rule,
+    the gate/chooser private-vector refusal and the omission of bindings
+    whose row comes back non-finite. Errors arrive as ``FrozenInputsError``
+    and are re-raised as ``FrozenBridgeError`` with an identical message.
     """
-    merged = inputs.features.get("model_inputs")
-    if not isinstance(merged, Mapping):
-        raise FrozenBridgeError("native inputs require features.model_inputs")
-    role_rows = inputs.features.get("role_model_inputs")
-    if role_rows is not None and not isinstance(role_rows, Mapping):
-        raise FrozenBridgeError("features.role_model_inputs: expected object")
-    requests = []
-    for binding in bindings:
-        role = binding.role.split(":", 1)[0]
-        if role_rows is not None:
-            vector = role_rows.get(binding.role, role_rows.get(role))
-            if not isinstance(vector, Mapping):
-                raise FrozenBridgeError(
-                    f"binding {binding.binding_id}: no captured row for role {binding.role}"
-                )
-        elif role in _ROLE_PRIVATE_VECTORS:
-            raise FrozenBridgeError(
-                f"binding {binding.binding_id}: role {role} needs its own captured "
-                "row (features.role_model_inputs); the merged model_inputs is "
-                "not its feature vector"
-            )
-        else:
-            vector = merged
-        row = binding_feature_row(binding, vector)
-        if row is None:
-            continue
-        requests.append(InferenceRequest(
-            release_id=release_id,
-            binding_id=binding.binding_id,
-            feature_order=binding.feature_order,
-            rows=(row,),
-        ))
-    return tuple(requests)
+    try:
+        return frozen_inputs.build_inference_requests(inputs, bindings, release_id)
+    except frozen_inputs.FrozenInputsError as exc:
+        raise FrozenBridgeError(str(exc)) from exc
 
 
 def _verified_release(

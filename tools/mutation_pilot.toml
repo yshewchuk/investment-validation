@@ -437,16 +437,18 @@ tests = [
 ]
 
 [modules.scoring_application]
-why = "Scoring application, financial arithmetic, source inputs and the Phase 6 frozen batch boundary over application.score_frozen: turning source bundles or one declared batch into the scored record; a batch-preflight slip lets one request's bad payload infer after the batch already died."
+why = "Scoring application, financial arithmetic, source inputs, the Phase 6 frozen batch boundary over application.score_frozen and the P6-2 production frozen-input builder: turning source bundles, captured feature vectors or one declared batch into the scored record; a batch-preflight slip lets one request's bad payload infer after the batch already died, and a frozen-input predicate slip feeds a non-finite row to a model or silently omits a binding replay keeps."
 mutate = [
     "engine/v2/scoring/__init__.py",
     "engine/v2/scoring/application.py",
     "engine/v2/scoring/financial.py",
     "engine/v2/scoring/frozen_batch.py",
+    "engine/v2/scoring/frozen_inputs.py",
     "engine/v2/scoring/source_inputs.py",
 ]
 tests = [
     "tests/test_phase4_acceptance_independence.py",
+    "tests/test_phase4_frozen_bridge_rows.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_recalibration_artifact.py",
     "tests/test_v2_scoring_actionable_flags.py",
@@ -455,6 +457,7 @@ tests = [
     "tests/test_v2_scoring_application_track_b.py",
     "tests/test_v2_scoring_financial.py",
     "tests/test_v2_scoring_frozen_batch.py",
+    "tests/test_v2_scoring_frozen_inputs.py",
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/test_v2_scoring_native_payoff.py",
