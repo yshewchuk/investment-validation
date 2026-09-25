@@ -21,6 +21,13 @@ A drill that cannot fail these negative controls would be a rubber stamp,
 not a check. No network, no real provider call, no capture/corpus/mutmut --
 every byte here is built in this process.
 
+This module also exports ``_build_published_fixture`` (with the same
+all-passed gate fabrication helpers ``tests/test_v2_ops_authority.py`` uses):
+the identical real backup fixture plus one release already staged and
+published as ``R0``. ``tools/v2_controlled_failure_drill.py`` imports it to
+rehearse a crash in the window between a ``CURRENT`` pointer swap and its
+catalog acknowledgement.
+
 Usage::
 
     python3 checks/rearchitecture_phase6_restore_drill.py [--artifact-root evidence/]
@@ -39,14 +46,24 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import ScoreRequest  # noqa: E402
 from engine.v2.domain.generation import Pricing, generate, price  # noqa: E402
-from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document  # noqa: E402
+from engine.v2.foundation import (  # noqa: E402
+    ArtifactStore,
+    SystemClock,
+    content_hash,
+    format_timestamp,
+    to_document,
+)
 from engine.v2.ledger.decisions import insert, set_authority  # noqa: E402
 from engine.v2.ledger.export import export_generation  # noqa: E402
 from engine.v2.ops.backup import prepare_backup, run_backup  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.catalog import transaction  # noqa: E402
 from engine.v2.ops.cli import rescore_command  # noqa: E402
+from engine.v2.ops.publication import publish_local, stage_release  # noqa: E402
+from engine.v2.ops.recovery import begin_epoch  # noqa: E402
+from engine.v2.ops.scheduler import Supervisor  # noqa: E402
 from engine.v2.scoring.stages import NativeScoreInputs, STAGE_NAMES, StageReceipt  # noqa: E402
+from tests.ops_support import enqueue_claim  # noqa: E402
 from tools.v2_restore_drill import run_drill  # noqa: E402
 
 STAMP = "2026-09-19T00:00:00.000000Z"
@@ -117,6 +134,84 @@ def _build_fixture(tmp_path: Path) -> tuple[Path, Path, str]:
     run_backup(conn, key="drill-1", owner="operator", target=backup_dir, clock=clock, store=store)
     conn.close()
     return backup_dir, original_export_dir, expected_hash
+
+
+# -- published variant: the same fixture with one live release -----------------
+#
+# The four helpers below are copied verbatim from
+# ``tests/test_v2_ops_authority.py`` (they are test-file-private there, not
+# importable), so the published fixture's gate set is fabricated exactly the
+# way that suite already proves stage_release/publish_local accept one.
+
+
+def _binding(release_id, occurrence, files):
+    return content_hash({"release_id": release_id, "occurrence": occurrence, "files": files})
+
+
+def _gate_receipt(store, kind, status, binding):
+    return store.publish_bytes(json.dumps({"kind": kind, "status": status,
+                                           "input_hash": binding}).encode(),
+                               schema_ref="gate_receipt.v1.0")
+
+
+def _gate(ref, binding):
+    return {"ok": True, "receipt_ref": ref.content_hash, "input_hash": binding,
+            "receipt_artifact": to_document(ref)}
+
+
+def _all_gates(store, release_id, occurrence, files):
+    binding = _binding(release_id, occurrence, files)
+    return {kind: _gate(_gate_receipt(store, kind, "passed", binding), binding)
+            for kind in ("decision", "projection", "security", "engineering")}
+
+
+def _fenced_claim(conn, clock, key):
+    """One real submit/claim/fence claim, reached the same way
+    ``tests/ops_support.py::enqueue_claim`` reaches it. The helper itself is
+    reused directly; this only supplies the supervisor epoch it needs."""
+    epoch_id = begin_epoch(conn, clock=clock, boot_id="controlled-failure", pid=1)
+    claim = enqueue_claim(conn, clock, Supervisor(epoch_id, "controlled-failure"), key=key)
+    if claim is None:
+        raise ValueError("the published fixture could not claim its staging job")
+    return claim
+
+
+def _build_published_fixture(tmp_path: Path) -> tuple[Path, Path, str, Path, Path, Path, object]:
+    """``_build_fixture`` plus one release (``R0``) staged and published, all
+    through real production code: a fenced claim built from the same
+    submit/claim helpers ``tests/ops_support.py`` uses, an all-passed gate set
+    fabricated exactly as ``tests/test_v2_ops_authority.py`` fabricates one,
+    then ``stage_release`` and ``publish_local`` into a fresh
+    ``tmp_path/publication`` target.
+
+    Returns ``(backup_dir, original_export_dir, expected_score_hash,
+    catalog_path, store_root, publication_target, conn_factory)``; the last is
+    a zero-argument callable that reopens the same catalog read/write (fixture
+    setup already closed its own connection).
+    """
+    backup_dir, original_export_dir, expected_score_hash = _build_fixture(tmp_path)
+    clock = SystemClock()
+    conn = open_catalog(tmp_path / "ops.sqlite", clock=clock)
+    try:
+        store = ArtifactStore(tmp_path / "objects")
+        claim = _fenced_claim(conn, clock, key="published-fixture")
+        files = {name: store.publish_bytes((backup_dir / "artifacts" / name).read_bytes(),
+                                           schema_ref=schema)
+                 for name, schema in (("request.json", "score_request.v1.0"),
+                                      ("native_inputs.json", "native_score_inputs.v1.0"))}
+        occurrence = format_timestamp(clock.now())
+        publication_target = tmp_path / "publication"
+        stage_release(conn, store, "R0", occurrence, files, expected_current=None,
+                      gates=_all_gates(store, "R0", occurrence, files), clock=clock, claim=claim)
+        publish_local(conn, claim, store, publication_target, "R0", scope="shadow", clock=clock)
+    finally:
+        conn.close()
+
+    def conn_factory():
+        return open_catalog(tmp_path / "ops.sqlite", clock=SystemClock())
+
+    return (backup_dir, original_export_dir, expected_score_hash, tmp_path / "ops.sqlite",
+            tmp_path / "objects", publication_target, conn_factory)
 
 
 def run_acceptance(artifact_root: Path | None = None) -> dict:
