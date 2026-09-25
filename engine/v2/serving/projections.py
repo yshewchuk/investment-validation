@@ -155,8 +155,15 @@ _V2 = (
     "ALTER TABLE serving_score_summary ADD COLUMN flags TEXT NOT NULL DEFAULT '[]'",
 )
 
+_V3 = (
+    "ALTER TABLE serving_score_summary ADD COLUMN selected_row_ids TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE serving_score_summary ADD COLUMN contributing_row_ids TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE serving_score_summary ADD COLUMN n_analogs INTEGER NOT NULL DEFAULT 0",
+)
+
 #: ``(version, name, statements)`` — one transaction each, numbered 1..n.
-_MIGRATIONS = ((1, "serving_projections", _V1), (2, "serving_score_summary_flags", _V2))
+_MIGRATIONS = ((1, "serving_projections", _V1), (2, "serving_score_summary_flags", _V2),
+               (3, "serving_score_summary_analog_row_ids", _V3))
 
 
 @contextmanager
@@ -364,7 +371,10 @@ def _score_summary_fields(bridge: LegacyScoreBridge) -> dict:
         expected_return_sim=display.get("exp_pnl_sim"),
         chosen_strategy=display.get("chosen_strategy"), chosen_margin=display.get("chosen_margin"),
         menu_size=display.get("menu_size"),
-        flags=json.dumps(list(bridge.display_record.get("flags") or [])))
+        flags=json.dumps(list(bridge.display_record.get("flags") or [])),
+        selected_row_ids=json.dumps(list(display.get("selected_row_ids") or [])),
+        contributing_row_ids=json.dumps(list(display.get("contributing_row_ids") or [])),
+        n_analogs=display.get("n_analogs") or 0)
 
 
 def build_candidate(
@@ -474,14 +484,16 @@ def _write_index(conn: sqlite3.Connection, release: PreviewRelease, findings: Pr
                 "(release_id, score_id, event_id, strategy, verdict, refusal_reason, driver_forecast, "
                 "market_implied_move, entry_premium, expected_return, expected_return_model, "
                 "expected_return_analog, expected_return_sim, chosen_strategy, chosen_margin, "
-                "menu_size, flags, detail_artifact_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "menu_size, flags, selected_row_ids, contributing_row_ids, n_analogs, "
+                "detail_artifact_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (release.release_id, bridge.score_id, bridge.event_ref.event_id, fields["strategy"],
                  fields["verdict"], fields["refusal_reason"], fields["driver_forecast"],
                  fields["market_implied_move"], fields["entry_premium"], fields["expected_return"],
                  fields["expected_return_model"], fields["expected_return_analog"], fields["expected_return_sim"],
                  fields["chosen_strategy"], fields["chosen_margin"], fields["menu_size"],
-                 fields["flags"], detail_refs[bridge.score_id].artifact_id))
+                 fields["flags"], fields["selected_row_ids"], fields["contributing_row_ids"],
+                 fields["n_analogs"], detail_refs[bridge.score_id].artifact_id))
         if fault is not None:
             fault("index_rows_written")
 

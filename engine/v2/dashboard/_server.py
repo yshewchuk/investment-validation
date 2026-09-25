@@ -40,10 +40,12 @@ def _refresh_callback(ops_root):
 
 
 def build_server(*, host, port, token, health_path, release_root, frozen_at,
-                 model_release_root, ops_root=None, calibration_health_path=None):
+                 model_release_root, ops_root=None, calibration_health_path=None,
+                 serving_index_path=None):
     """Compose the operations server exactly as the launcher needs it."""
     return create_server((host, port), token=token, health_path=health_path,
                          release_root=release_root, frozen_at=frozen_at,
                          model_release_root=model_release_root,
                          calibration_health_path=calibration_health_path,
+                         serving_index_path=serving_index_path,
                          submit_refresh=_refresh_callback(ops_root))

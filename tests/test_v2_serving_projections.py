@@ -467,7 +467,8 @@ def test_expected_return_stays_null_when_only_analog_is_present(tmp_path):
 def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
     """A serving.sqlite written by the v1-only code must open through the
     ordinary `connect`/`ensure_schema` path and gain migration 2's working
-    `flags` column rather than refusing or silently lacking it."""
+    `flags` column and migration 3's analog row-id columns rather than
+    refusing or silently lacking them."""
     path = tmp_path / "serving.sqlite"
     old = sqlite3.connect(path, isolation_level=None)
     try:
@@ -487,7 +488,7 @@ def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
     try:
         applied = {int(row[0]) for row in migrated.execute(
             "SELECT version FROM schema_versions WHERE owner = ?", (projections._OWNER,))}
-        assert applied == {1, 2}
+        assert applied == {1, 2, 3}
         migrated.execute(
             "INSERT INTO serving_release (release_id, document_json, findings_json, status, written_at) "
             "VALUES ('r1', '{}', '{}', 'candidate', '2024-01-01T00:00:00Z')")
@@ -498,8 +499,12 @@ def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
             "VALUES ('r1', 's1', 'e1', 'STR-THRU', ?, 'a1')",
             (json.dumps(["OUT_OF_DOMAIN"]),))
         row = migrated.execute(
-            "SELECT flags FROM serving_score_summary WHERE score_id = 's1'").fetchone()
+            "SELECT flags, selected_row_ids, contributing_row_ids, n_analogs "
+            "FROM serving_score_summary WHERE score_id = 's1'").fetchone()
         assert json.loads(row["flags"]) == ["OUT_OF_DOMAIN"]
+        assert json.loads(row["selected_row_ids"]) == []
+        assert json.loads(row["contributing_row_ids"]) == []
+        assert row["n_analogs"] == 0
     finally:
         migrated.close()
 
