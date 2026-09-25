@@ -7,7 +7,7 @@ from engine.v2.foundation import ArtifactError, safe_relative_path
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
-from engine.v2.ops.training import training_job_kind
+from engine.v2.ops.training import promote_job_kind, training_job_kind
 
 
 @dataclass(frozen=True)
@@ -277,6 +277,7 @@ def _core_kinds():
             checkpoint_contract="legacy_materialization_manifest.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
         training_job_kind(),
+        promote_job_kind(),
     ]
 
 

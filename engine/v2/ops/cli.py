@@ -167,9 +167,9 @@ def _add_refresh_mode_arguments(plan):
                            "when omitted the shadow head builds the plan at submission")
 
 
-def _add_training_plan_arguments(plan):
-    """``ops plan training``'s arguments (P6 slice 5). ``--mode`` is already
-    nightly's, hence ``--training-mode``."""
+def _add_operator_plan_arguments(plan):
+    """``ops plan training``/``promote``'s arguments (P6 slice 5). ``--mode``
+    is already nightly's, hence ``--training-mode``."""
     plan.add_argument("--training-mode",
                       choices=("recipe", "state", "board_analog", "trailing_cutoff"))
     plan.add_argument("--recipe", default="")
@@ -179,6 +179,8 @@ def _add_training_plan_arguments(plan):
     plan.add_argument("--strategy", action="append", default=[])
     plan.add_argument("--pairs", default="")
     plan.add_argument("--ticker-chunk", type=int, default=1000)
+    plan.add_argument("--release-root", default="")
+    plan.add_argument("--release-id", default="")
 
 
 def _add_reconcile_command(commands):
@@ -234,7 +236,7 @@ def parser():
                              "checkout (Service's own default) when omitted. Never inferred from "
                              "a plan or manifest -- always exactly what was passed here.")
     plan = commands.add_parser("plan")
-    plan.add_argument("kind", choices=("nightly", "experiment", "training"))
+    plan.add_argument("kind", choices=("nightly", "experiment", "training", "promote"))
     plan.add_argument("--as-of")
     plan.add_argument("--mode", default="shadow", choices=("shadow",))
     plan.add_argument("--spec", type=Path)
@@ -257,7 +259,7 @@ def parser():
     plan.add_argument("--input-mode", default="legacy", choices=("legacy", "snapshot"),
                       help="snapshot: pin one data snapshot head at plan time (P2-6)")
     plan.add_argument("--snapshot-scope", default=None)
-    _add_training_plan_arguments(plan)
+    _add_operator_plan_arguments(plan)
     _add_refresh_mode_arguments(plan)
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
@@ -470,6 +472,9 @@ def _plan_command(args, root, conn, clock):
                              state=args.state or "", alpha=args.alpha,
                              cutoffs=tuple(args.cutoff), strategies=tuple(args.strategy),
                              pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk)
+    elif args.kind == "promote":
+        from engine.v2.ops.training import promote_plan
+        plan = promote_plan(release_root=args.release_root, release_id=args.release_id)
     else:
         from engine.v2.ops.experiments import experiment_plan
         plan = experiment_plan(args.spec, smoke=args.no_ledger)

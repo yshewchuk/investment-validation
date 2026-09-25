@@ -184,6 +184,9 @@ def dispatch(worker, parameters, root, *, envelope=None):
     if worker == "training":
         from engine.v2.ops.training import run_training_worker
         return run_training_worker(parameters, root)
+    if worker == "models_promote":
+        from engine.v2.ops.training import run_promote_worker
+        return run_promote_worker(parameters, root)
     raise ValueError("unsupported worker")
 
 

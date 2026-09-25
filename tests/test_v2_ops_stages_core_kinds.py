@@ -93,10 +93,15 @@ _CASES = {
         max_attempts=1, backoff=(60,), extra_field=("ticker_chunk", 7),
         required={"expected_ids": ["training"], "mode": "state",
                   "state": "paired_residual_pool"}),
+    "models_promote": dict(
+        resource_class="delivery", checkpoint_contract="promote_pointer_state.v1.0",
+        max_attempts=1, backoff=(30,), extra_field=("release_root", "root"),
+        required={"expected_ids": ["models_promote"], "release_root": "root",
+                  "release_id": "r1"}),
 }
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
-                      "legacy_rebuild_candidate", "legacy_materialize")
+                      "legacy_rebuild_candidate", "legacy_materialize", "models_promote")
 
 
 def _extra_params(name):

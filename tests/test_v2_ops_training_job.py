@@ -1,4 +1,5 @@
-"""P6 slice 5 (training half): recipes, frozen states and artifacts as jobs."""
+"""P6 slice 5: recipes, frozen states and artifacts, plus operator promotes, as jobs."""
+import hashlib
 import json
 import subprocess
 import sys
@@ -8,6 +9,18 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.foundation import ArtifactStore, SystemClock
+from engine.v2.models import (
+    ArtifactInventoryMember,
+    ArtifactMember,
+    ModelArtifactInventory,
+    ModelBinding,
+    ModelRelease,
+    ModelReleaseInventory,
+    ReleaseBinding,
+    ReleaseRequirement,
+    current_release,
+    stage_release,
+)
 from engine.v2.models.training import current_recipes
 from engine.v2.ops import cli, executor, stages, training
 from engine.v2.ops.bootstrap import open_catalog
@@ -38,6 +51,38 @@ def _recipe_key(calibration):
         if (recipe.folds.kind == "request_cutoff") == calibration:
             return key.label()
     raise AssertionError("no matching recipe in the registry")
+
+
+def _release_fixture(release_id):
+    """A one-binding synthetic ``ModelRelease`` plus its matching inventory,
+    the same shape ``tests/test_v2_models_deployment.py`` stages."""
+    payload = json.dumps({
+        "schema_version": "linear_estimator.v1.0",
+        "feature_order": ["x"],
+        "outputs": [{"name": "prediction", "intercept": 1.0, "coefficients": [2.0]}],
+    }, sort_keys=True).encode()
+    member_hash = "sha256:" + hashlib.sha256(payload).hexdigest()
+    member = ArtifactMember(name="estimator", path="unused.json", content_hash=member_hash)
+    binding = ModelBinding(
+        binding_id="b1", model_id="m1", role="size", strategy_id="*",
+        decision_clock_id="entry-close", adapter="json-linear.v1",
+        feature_order=("x",), output_names=("prediction",), members=(member,))
+    release = ModelRelease(release_id=release_id, deployment_id="d1", bindings=(binding,))
+
+    inv_member = ArtifactInventoryMember(member_id="m1:estimator", kind="estimator",
+                                         artifact_ref="artifact://m1", content_hash=member_hash)
+    artifact = ModelArtifactInventory(
+        artifact_id="m1", role="size", strategy_ids=("*",), compatible_clock_ids=("entry-close",),
+        target_contract_ref="return.v1", ordered_features=("x",), members=(inv_member,))
+    inv_binding = ReleaseBinding(
+        role="size", strategy_id="*", clock_id="entry-close", artifact_id="m1",
+        ordered_features=("x",), required_member_kinds=("estimator",))
+    inventory = ModelReleaseInventory(
+        release_id=release_id, deployment_id="d1", known_clock_ids=("entry-close",),
+        artifacts=(artifact,), bindings=(inv_binding,),
+        requirements=(ReleaseRequirement(role="size", strategy_id="*", clock_id="entry-close"),),
+        artifact_manifest_ref="manifest://r", evidence_refs=("evidence://r",))
+    return release, inventory, {member_hash: payload}
 
 
 def test_training_kind_is_registered_with_experiment_heavy_profile():
@@ -252,6 +297,125 @@ def test_cli_plan_and_submit_training_never_runs_training_inline(tmp_path, capsy
                      "--idempotency-key", "cli-training-1"]) == 0
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["kind"] == "training"
+    clock = SystemClock()
+    conn = open_catalog(root / "catalog.sqlite", clock=clock)
+    try:
+        row = conn.execute("SELECT state FROM jobs WHERE job_id=?",
+                           (receipt["job_id"],)).fetchone()
+        assert row is not None
+        assert row["state"] == "queued"
+    finally:
+        conn.close()
+
+
+def test_promote_kind_is_registered_with_delivery_profile():
+    kind = stages.registry().get("models_promote")
+    assert kind.resource_classes == frozenset({"delivery"})
+    assert kind.checkpoint_contract == "promote_pointer_state.v1.0"
+    assert kind.store_domains == ()
+    assert kind.retry.max_attempts == 1
+
+
+def test_promote_worker_refuses_when_unstaged(tmp_path):
+    with pytest.raises(OpsError) as excinfo:
+        training.run_promote_worker(
+            {"expected_ids": ["models_promote"], "release_root": str(tmp_path),
+             "release_id": "ghost"}, tmp_path / "staging")
+    assert excinfo.value.code == "VALIDATION_FAILED"
+
+
+def test_promote_worker_promotes_a_staged_release(tmp_path):
+    release, inventory, payloads = _release_fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    result = training.run_promote_worker(
+        {"expected_ids": ["models_promote"], "release_root": str(tmp_path),
+         "release_id": "r1"}, tmp_path)
+    assert result["completed_ids"] == ["models_promote"]
+    assert result["outputs"] == [{"name": "pointer_state", "path": "pointer_state.json",
+                                  "schema": "promote_pointer_state.v1.0"}]
+    document = json.loads((tmp_path / "pointer_state.json").read_text())
+    assert document["release_id"] == "r1"
+    assert current_release(tmp_path).release_id == "r1"
+
+
+def test_training_worker_never_reaches_promote(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("training must never call deployment.promote")
+
+    monkeypatch.setattr("engine.v2.models.deployment.promote", forbidden)
+    params = {"expected_ids": ["training"], "mode": "recipe", "recipe": "nope:*:champion",
+              "state": "", "alpha": None, "cutoffs": [], "strategies": [],
+              "pairs_path": "", "ticker_chunk": 1000}
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(params, tmp_path)
+    assert excinfo.value.code == "VALIDATION_FAILED"
+
+
+def test_promote_never_submitted_by_nightly():
+    source = (REPO / "engine/v2/ops/nightly.py").read_text()
+    assert "models_promote" not in source
+
+
+def test_e2e_submit_training_then_promote_through_supervisor(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    try:
+        _install_tiny_state_worker(monkeypatch)
+        # Same bypass as the training e2e above: the training kind leases
+        # legacy_store/read with no pinned manifest binding, so the launch-time
+        # read-set pin is stubbed; claim-time leasing stays real.
+        monkeypatch.setattr(Service, "_pin_read_set", lambda self, claim: None)
+        plan = training.training_plan(mode="state", state="driver_residual_pool:size")
+        receipt = submit(conn, stages.registry(), POLICY,
+                         request_from_plan(plan, "training-then-promote"), clock=clock)
+        service = Service(conn, tmp_path, stages.registry(), TEST_POLICY, clock=clock,
+                          code_source=REPO)
+        try:
+            service.start()
+            assert run_until(service, conn, receipt.job_id, timeout=90) == "succeeded"
+
+            # The registered candidate is staged by the TEST, not produced by
+            # the training job (assembling one from real training output is
+            # phase5_prepare_release.py's job, out of scope this slice).
+            release, inventory, payloads = _release_fixture("r-e2e")
+            stage_release(tmp_path, release, inventory, payloads)
+
+            promote_plan = training.promote_plan(release_root=str(tmp_path),
+                                                 release_id="r-e2e")
+            promote_receipt = submit(conn, stages.registry(), POLICY,
+                                     request_from_plan(promote_plan, "promote-e2e"), clock=clock)
+            state = run_until(service, conn, promote_receipt.job_id, timeout=90)
+            if state != "succeeded":
+                failure = conn.execute("SELECT failure_json FROM jobs WHERE job_id = ?",
+                                       (promote_receipt.job_id,)).fetchone()[0]
+                attempt = conn.execute(
+                    "SELECT attempt_id FROM attempts WHERE job_id = ? "
+                    "ORDER BY attempt_number DESC LIMIT 1", (promote_receipt.job_id,)).fetchone()
+                diagnostic = service.store.staging_dir(attempt["attempt_id"]) / "diagnostics"
+                stderr = (diagnostic / "worker.stderr")
+                raise AssertionError(f"promote attempt did not succeed: {failure}\n"
+                                     f"{stderr.read_text() if stderr.is_file() else '(no stderr)'}")
+        finally:
+            service.close()
+        assert current_release(tmp_path).release_id == "r-e2e"
+    finally:
+        conn.close()
+
+
+def test_cli_plan_and_submit_promote_never_calls_deployment_inline(tmp_path, capsys, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("promote must not run during plan or submit")
+
+    monkeypatch.setattr("engine.v2.models.deployment.promote", forbidden)
+    root = tmp_path / "ops"
+    assert cli.main(["--root", str(root), "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["--root", str(root), "plan", "promote",
+                     "--release-root", str(tmp_path), "--release-id", "r1"]) == 0
+    plan_ref = json.loads(capsys.readouterr().out)["plan_ref"]
+    assert cli.main(["--root", str(root), "submit", "--plan", plan_ref,
+                     "--idempotency-key", "cli-promote-1"]) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["kind"] == "models_promote"
     clock = SystemClock()
     conn = open_catalog(root / "catalog.sqlite", clock=clock)
     try:

@@ -2,9 +2,10 @@
 
 ``tools/phase5_training_job.py`` is the audited training entry point; this
 module gives its four job functions the ``training`` kind's parameter schema,
-pure validator, plan builder and worker. The promote half lands separately
-(part 2) and builds on this. No bespoke CLI verb: ``ops plan training`` and
-``ops submit`` are the existing generic subcommands.
+pure validator, plan builder and worker. The promote half builds on the same
+wiring: an operator-submitted ``models_promote`` pointer swap, never part of
+the nightly DAG. No bespoke CLI verb: ``ops plan`` and ``ops submit`` are the
+existing generic subcommands.
 """
 from __future__ import annotations
 
@@ -32,6 +33,14 @@ class TrainingParameters:
     ticker_chunk: int = 1000
     #: Unused by the training worker; present for KindRegistry parity with the
     #: other operator-submitted kinds.
+    input_bindings: dict[str, str] | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromoteParameters:
+    expected_ids: tuple[str, ...]        # always ("models_promote",)
+    release_root: str
+    release_id: str
     input_bindings: dict[str, str] | None = None
 
 
@@ -126,6 +135,17 @@ def training_job_kind() -> JobKind:
                    store_domains=(("legacy_store", "read"),))
 
 
+def promote_job_kind() -> JobKind:
+    """The operator-submitted pointer swap. No ``store_domains``:
+    ``deployment.promote`` only touches the release-store path named by the
+    job's own ``release_root`` parameter, never the shared legacy tree."""
+    return JobKind(name="models_promote", worker="models_promote", parameters=PromoteParameters,
+                   resource_classes=frozenset({"delivery"}), effects=("staged",),
+                   retry=RetryPolicy("bounded", 1, (30,)),
+                   checkpoint_contract="promote_pointer_state.v1.0",
+                   namespaces=frozenset({"shadow", "smoke"}))
+
+
 def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategies=(),
                   pairs_path="", ticker_chunk=1000) -> dict:
     from engine.v2.foundation import content_hash
@@ -147,6 +167,25 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
             "environment_ref": content_hash(
                 environment_identity(profile.thread_count or profile.cpu_count)),
             "resource_class": "experiment_heavy"}
+
+
+def promote_plan(*, release_root, release_id) -> dict:
+    from engine.v2.foundation import content_hash
+    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+
+    if not release_root or not release_id:
+        raise fail("INVALID_REQUEST", "promote plan needs a release root and a release id")
+    profile = profile_named(DEFAULT_POLICY, "delivery")
+    params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
+                               release_id=release_id)
+    root3 = Path(__file__).resolve().parents[3]
+    return {"schema_version": "operations_plan.v1.0", "kind": "promote", "mode": "shadow",
+            "effects": ["staged"], "parameters": vars(params), "input_refs": [],
+            "blocked_prerequisites": [], "spec_hash": content_hash(vars(params)),
+            "implementation_ref": content_hash(worker_source_manifest(root3)),
+            "environment_ref": content_hash(
+                environment_identity(profile.thread_count or profile.cpu_count)),
+            "resource_class": "delivery"}
 
 
 def _run_recipe(parameters, out_dir) -> dict:
@@ -219,4 +258,27 @@ def run_training_worker(parameters, root) -> dict:
     (root / "training_result.json").write_text(
         json.dumps(summary, allow_nan=False, sort_keys=True))
     return {"outputs": _output_entries(out_dir),
+            "completed_ids": list(parameters["expected_ids"]), "no_work": False}
+
+
+def run_promote_worker(parameters, root) -> dict:
+    """Run one operator-submitted promote inside its staging root.
+
+    Refusal is free: ``deployment.promote`` already raises
+    ``ReleaseNotStaged`` for an unstaged ``release_id``, so this worker (and
+    therefore the whole job) can only ever succeed against a release an
+    operator staged first. There is no other caller of this worker at all --
+    no nightly stage names ``"models_promote"``; the only path that creates
+    one is a ``submit`` an operator ran by hand.
+    """
+    from engine.v2.foundation import to_document
+    from engine.v2.models import deployment
+
+    try:
+        state = deployment.promote(Path(parameters["release_root"]), parameters["release_id"])
+    except deployment.DeploymentError as exc:
+        raise fail("VALIDATION_FAILED", f"promote refused: {exc}") from exc
+    (Path(root) / "pointer_state.json").write_text(json.dumps(to_document(state), sort_keys=True))
+    return {"outputs": [{"name": "pointer_state", "path": "pointer_state.json",
+                         "schema": "promote_pointer_state.v1.0"}],
             "completed_ids": list(parameters["expected_ids"]), "no_work": False}
