@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import re
+import signal
 import subprocess
 import sys
 import tomllib
@@ -493,7 +494,7 @@ def test_ci_default_enables_debug_for_ops_catalog_state_setup_cfg(tmp_path, monk
     assert "debug = true" not in (other / "setup.cfg").read_text()
 
 
-def _cmd_run(monkeypatch, tmp_path, rc):
+def _cmd_run(monkeypatch, tmp_path, rc, budget=None):
     """Run cmd_run with mutmut's subprocess stubbed; return (rc_out, calls)."""
     work = tmp_path / "work"
     (work / "mutants").mkdir(parents=True)
@@ -510,7 +511,8 @@ def _cmd_run(monkeypatch, tmp_path, rc):
         return types.SimpleNamespace(returncode=rc)
 
     monkeypatch.setattr(pilot.subprocess, "run", fake_run)
-    args = types.SimpleNamespace(module="toy", fresh=False, max_children=None, globs=[])
+    args = types.SimpleNamespace(module="toy", fresh=False, max_children=None, globs=[],
+                                 time_budget_seconds=budget)
     return pilot.cmd_run({"defaults": DIAG_DEFAULTS, "modules": {"toy": {}}}, args), calls
 
 
@@ -538,6 +540,67 @@ def test_cmd_run_no_longer_strips_the_harness_env(monkeypatch, tmp_path):
     assert env["COVERAGE_PROCESS_START"] == "/rc"
     assert env["PYTEST_CURRENT_TEST"] == "t::u (call)"
     assert env["OMP_NUM_THREADS"] == "1"  # the thread pin is still applied
+
+
+def test_cmd_run_passes_the_time_budget_to_the_bounded_runner(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_bounded(cmd, cwd, env, budget):
+        seen.update(cmd=cmd, cwd=cwd, budget=budget)
+        return pilot.TIME_BUDGET_STOP_RC
+
+    monkeypatch.setattr(pilot, "_run_with_time_budget", fake_bounded)
+    rc, calls = _cmd_run(monkeypatch, tmp_path, rc=0, budget=3300)
+    assert rc == pilot.TIME_BUDGET_STOP_RC == -1
+    assert calls == []  # the unbounded subprocess.run path was NOT taken
+    assert seen["budget"] == 3300
+    assert seen["cmd"][:5] == [sys.executable, "-u", "-m", "mutmut", "run"]
+
+
+def test_run_with_time_budget_sigints_at_the_budget_and_reports_the_stop(monkeypatch, tmp_path):
+    waits = []
+
+    class FakeProc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if len(waits) == 1:
+                raise subprocess.TimeoutExpired(cmd="mutmut", timeout=timeout)
+            return 0
+
+    signals = []
+    monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: FakeProc())
+    monkeypatch.setattr(pilot.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(pilot, "SIGINT_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(pilot, "time", types.SimpleNamespace(monotonic=lambda: 1000.0))
+    rc = pilot._run_with_time_budget([sys.executable, "-m", "mutmut", "run"], tmp_path, {}, 30.0)
+    assert rc == pilot.TIME_BUDGET_STOP_RC == -1
+    assert signals == [(4242, signal.SIGINT)]  # clean stop: no SIGKILL
+    assert waits == [30.0, 0.01]  # budget, then the (patched) grace period
+
+
+def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(monkeypatch, tmp_path):
+    waits = []
+
+    class FakeProc:
+        pid = 777
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            if len(waits) <= 2:
+                raise subprocess.TimeoutExpired(cmd="mutmut", timeout=timeout)
+            return -9
+
+    signals = []
+    monkeypatch.setattr(pilot.subprocess, "Popen", lambda cmd, **kw: FakeProc())
+    monkeypatch.setattr(pilot.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(pilot, "SIGINT_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(pilot, "time", types.SimpleNamespace(monotonic=lambda: 0.0))
+    rc = pilot._run_with_time_budget(["mutmut"], tmp_path, {}, 5.0)
+    assert rc == pilot.TIME_BUDGET_STOP_RC == -1
+    assert signals == [(777, signal.SIGINT), (777, signal.SIGKILL)]
+    assert waits == [5.0, 0.01, None]  # budget, grace, then the final reap
 
 
 # -- config and workflow shape ----------------------------------------------------------
@@ -797,9 +860,22 @@ def test_mutmut_workflow_is_report_only():
     run = _step("mutate", lambda s: s.get("id") == "run", MUT_JOBS)
     assert "tools/mutation_pilot.py run" in run["run"] and "--max-children" in run["run"]
     assert "set +e" in run["run"] and "mutation-rc" in run["run"]
+    # per-push runs are time-boxed to 60 minutes (55-minute driver budget) and
+    # the weekly full run keeps its 330-minute step limit (325-minute budget)
+    assert run["timeout-minutes"] == \
+        "${{ needs.plan.outputs.mode == 'incremental' && 60 || 330 }}"
+    assert ('if [ "$MODE" = "incremental" ]; then BUDGET=$((55 * 60)); '
+            'else BUDGET=$((325 * 60)); fi') in run["run"]
+    assert '--time-budget-seconds "$BUDGET"' in run["run"]
     gate = _step("mutate", lambda s: s.get("name", "").startswith("Fail only on a tool error"),
                  MUT_JOBS)
     assert 'rc" != 0' in gate["run"] and "score" not in gate["run"]
+    # the incremental time-box stop (-1) is INCOMPLETE, not a tool error: it is
+    # exempted from the gate; every other nonzero rc -- and every nonzero rc in
+    # full mode, where -1 is a real step-timeout kill -- still fails
+    assert '[ "$rc" = "-1" ] && [ "$MODE" = "incremental" ]' in gate["run"]
+    assert "INCOMPLETE" in gate["run"]
+    assert "exit 0" in gate["run"]
     # a timeout-killed run leaves no rc file: the export gate reads -1, never a
     # silent pass, while survivors/scores never exit nonzero.
     export = _step("mutate", lambda s: s.get("name") == "Export report", MUT_JOBS)["run"]
@@ -924,25 +1000,54 @@ def test_merge_mixed_provenance_is_flagged_under_the_contract(tmp_path):
                for r in merged["failure_reasons"])
 
 
-# A module whose mutmut run exited nonzero (the step-timeout kill is -1) checked
-# only part of its mutants: its report is complete-looking, so the merge must
-# catch the recorded exit code or the aggregate would publish a truncated run as
-# the latest completed full score with a clean exit.
+# A module whose mutmut run exited nonzero checked only part of its mutants: its
+# report is complete-looking, so the merge must catch the recorded exit code or
+# the aggregate would publish a truncated run as the latest completed full score
+# with a clean exit. The per-push time box is the one exception: an incremental
+# run stopped by its own budget records -1 (TIME_BUDGET_STOP_RC), which is
+# INCOMPLETE, not a tool error -- while the same -1 in a full run is a real
+# step-timeout kill and still fails.
 
-@pytest.mark.parametrize("rc,label", [(-1, "TIMEOUT_KILL"), (2, "RUN_INCOMPLETE")])
-def test_merge_propagates_a_failed_module_run_as_an_incomplete_tool_error(tmp_path, rc, label):
+def test_merge_propagates_a_failed_module_run_as_an_incomplete_tool_error(tmp_path):
     a = _module_artifact(tmp_path, "a", ["killed", "survived"])
-    b = _module_artifact(tmp_path, "b", ["killed"], run_exit_code=rc)
+    b = _module_artifact(tmp_path, "b", ["killed"], run_exit_code=2)
     merged = mr.merge_dirs([a, b], tmp_path / "m", ["a", "b"])
     assert not merged["complete"] and merged["tool_error"]
     assert merged["score"] is None  # a partial run never carries a clean aggregate score
     assert merged["total"] == 3  # counts stay auditable for what really arrived
-    assert merged["failed_run_modules"] == {"b": [rc]}  # the affected module, by name
-    assert any(r.startswith(label) and r.split(":")[1].strip().startswith("b's")
+    assert merged["failed_run_modules"] == {"b": [2]}  # the affected module, by name
+    assert any(r.startswith("RUN_INCOMPLETE") and r.split(":")[1].strip().startswith("b's")
                for r in merged["failure_reasons"]), merged["failure_reasons"]
     md = (tmp_path / "m" / "summary.md").read_text()
-    assert label in md and "b" in md and "INCOMPLETE" in md
+    assert "RUN_INCOMPLETE" in md and "b" in md and "INCOMPLETE" in md
     # and the CLI -- the workflow's gate on its rc -- must not read it as success
+    assert mr.main(["merge", "--out", str(tmp_path / "m2"), "--expected-modules", '["a", "b"]',
+                    str(a), str(b)]) == 1
+
+
+def test_merge_an_incremental_time_box_stop_is_incomplete_but_not_a_tool_error(tmp_path):
+    a = _module_artifact(tmp_path, "a", ["killed", "survived"])
+    b = _module_artifact(tmp_path, "b", ["killed"], run_exit_code=-1)  # INFO: incremental mode
+    merged = mr.merge_dirs([a, b], tmp_path / "m", ["a", "b"])
+    assert not merged["complete"] and not merged["tool_error"]
+    assert merged["score"] is None  # still withheld: not a complete measurement
+    assert merged["failed_run_modules"] == {"b": [-1]}
+    md = (tmp_path / "m" / "summary.md").read_text()
+    assert "TIMEOUT_KILL" in md and "b" in md and "INCOMPLETE" in md
+    assert "per-push time box" in md and "not a tool failure" in md
+    # the merge CLI is the report job's gate: a time-box stop passes it
+    assert mr.main(["merge", "--out", str(tmp_path / "m2"), "--expected-modules", '["a", "b"]',
+                    str(a), str(b)]) == 0
+
+
+def test_merge_a_time_box_stop_in_a_full_run_is_still_a_tool_error(tmp_path):
+    full = dict(INFO, mode="full")
+    a = _module_artifact(tmp_path, "a", ["killed", "survived"], info=full)
+    b = _module_artifact(tmp_path, "b", ["killed"], info=full, run_exit_code=-1)
+    merged = mr.merge_dirs([a, b], tmp_path / "m", ["a", "b"])
+    assert not merged["complete"] and merged["tool_error"]
+    assert merged["score"] is None
+    assert merged["failed_run_modules"] == {"b": [-1]}
     assert mr.main(["merge", "--out", str(tmp_path / "m2"), "--expected-modules", '["a", "b"]',
                     str(a), str(b)]) == 1
 

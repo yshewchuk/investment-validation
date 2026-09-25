@@ -19,13 +19,16 @@ With ``--expected-modules`` (the plan job's JSON module list) the merged
 artifact must describe EXACTLY that set, every member of it fully measured: a
 missing, unexpected or duplicated module report -- no module directory at all
 -- or a module whose run exited nonzero (a step-timeout kill is -1) yields an
-incomplete diagnostic (``complete: false``, ``tool_error: true``,
-machine-readable ``failure_reasons``, the affected modules in
-``failed_run_modules``, score withheld) and a nonzero exit, so neither a subset
-nor a timeout-truncated run can be published as the latest completed run.
-Without the contract the merge behaves as before (local and historical merges
-keep working); a module reported twice is an unusable input set either way and
-is refused.
+incomplete diagnostic (``complete: false``, machine-readable
+``failure_reasons``, the affected modules in ``failed_run_modules``, score
+withheld), so neither a subset nor a timeout-truncated run can be published as
+the latest completed run. A nonzero run that is not a tool error -- an
+incremental run stopped by its own per-push time box (``run_exit_code`` -1) --
+stays incomplete and withholds the score but reports ``tool_error: false`` and
+exits zero; the same -1 in a full run is a real step-timeout kill and a tool
+error. Without the contract the merge behaves as before (local and historical
+merges keep working); a module reported twice is an unusable input set either
+way and is refused.
 
 Row fields (schema_version 1); the guide (tests/README.md, "Mutation CI")
 documents each one:
@@ -476,10 +479,14 @@ def merge_dirs(inputs: list[Path], out: Path,
     or duplicated module report, no module directory at all, inputs from more than
     one run/SHA/mode, or a module whose ``run_exit_code`` is nonzero (a step
     timeout kill is -1) make the artifact an incomplete diagnostic --
-    ``complete: false``, ``tool_error: true``, machine-readable
-    ``failure_reasons``, the affected modules named in ``failed_run_modules`` and
-    a withheld score -- so neither a subset nor a timeout-truncated run can ever
-    be read as the latest completed full run. Counts stay auditable for what
+    ``complete: false``, machine-readable ``failure_reasons``, the affected
+    modules named in ``failed_run_modules`` and a withheld score -- so neither a
+    subset nor a timeout-truncated run can ever be read as the latest completed
+    full run. The one exception to ``tool_error`` is the per-push time box: an
+    incremental run stopped by its own budget (``run_exit_code`` -1 with mode
+    ``incremental``) is still incomplete and still withholds its score, but is
+    not a tool error, so it does not fail the gate; the same -1 in a full run
+    (a real step-timeout kill) remains one. Counts stay auditable for what
     really arrived, except when nothing arrived or one module reported twice,
     where every count is null (never a fabricated zero or a silently doubled
     total)."""
@@ -514,12 +521,20 @@ def merge_dirs(inputs: list[Path], out: Path,
         # A module whose mutmut run exited nonzero (a step-timeout kill is -1)
         # checked only part of its mutants: its rows are real but its totals and
         # score are partial. The aggregate must fail rather than publish them as a
-        # complete measurement.
+        # complete measurement. One nonzero code is not a tool error: the per-push
+        # incremental run's own time budget stops mutmut cleanly with
+        # TIME_BUDGET_STOP_RC (-1), so in incremental mode that rc alone makes the
+        # run INCOMPLETE without failing the gate; the same -1 in full mode is a
+        # real step-timeout kill and still fails.
         failed = {}
         for s in summaries:
             if (rc := s.get("run_exit_code")) not in (None, 0):
                 failed.setdefault(s["module"], set()).add(rc)
         failed = {m: sorted(codes) for m, codes in sorted(failed.items())}
+        run_mode = next((s.get("mode") for s in summaries), None)
+        gate_failed = {m: [rc for rc in codes if not (rc == -1 and run_mode == "incremental")]
+                       for m, codes in failed.items()}
+        gate_failed = {m: codes for m, codes in gate_failed.items() if codes}
         contract_violated = not complete_set or bool(mismatch)
         reasons = []
         if not inputs:
@@ -565,7 +580,7 @@ def merge_dirs(inputs: list[Path], out: Path,
                                 "complete_set": complete_set},
             "failed_run_modules": failed,
             "complete": not (contract_violated or bool(failed)),
-            "tool_error": contract_violated or bool(failed),
+            "tool_error": contract_violated or bool(gate_failed),
             "failure_reasons": reasons,
         })
     write_jsonl(out / "results.jsonl", rows)
@@ -603,6 +618,13 @@ def merge_dirs(inputs: list[Path], out: Path,
                                        "UNEXPECTED_MODULES", "DUPLICATE_MODULES",
                                        "RUN_PROVENANCE", "TIMEOUT_KILL",
                                        "RUN_INCOMPLETE"))]
+        elif failed:
+            lines += ["", f"**A planned module hit the per-push time box "
+                      f"({', '.join(failed)}): its results are PARTIAL, so this run is "
+                      "INCOMPLETE -- not a tool failure, and not a valid full run. "
+                      "Score withheld, counts cover only what really arrived.**"]
+            lines += [f"- {r}" for r in merged["failure_reasons"]
+                      if r.startswith(("TIMEOUT_KILL", "RUN_INCOMPLETE"))]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     return merged
 
