@@ -18,6 +18,9 @@ function toQuery(releaseId: string, filters: FilterValues, cursor: string | null
   if (filters.ticker) query.ticker = filters.ticker;
   if (filters.strategy) query.strategy = filters.strategy;
   if (filters.verdict) query.verdict = filters.verdict;
+  if (filters.gate) query.gate = filters.gate;
+  if (filters.outOfDomain) query.out_of_domain = true;
+  if (filters.disabled) query.disabled = true;
   if (filters.date_from) query.date_from = filters.date_from;
   if (filters.date_to) query.date_to = filters.date_to;
   if (cursor) query.cursor = cursor;

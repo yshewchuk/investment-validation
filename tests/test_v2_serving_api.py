@@ -185,12 +185,57 @@ def _set_current(serving_root: Path, release_id: str) -> None:
     _write_publication(serving_root, _ops_release_id(release_id), binding)
 
 
+def _flagged_rows() -> list[dict]:
+    """One unfiltered row, one OUT_OF_DOMAIN row, one UNVALIDATED_STRUCTURE
+    row, one row whose flag carries a ``:detail`` suffix (whole-code matching
+    must not hide it), and one NULL-``gate_pass`` row."""
+    return [
+        _row(ticker="T0", event_date="2024-01-01", strike=100.0),
+        _row(ticker="T1", event_date="2024-01-02", strike=101.0, flags=["OUT_OF_DOMAIN"]),
+        _row(ticker="T2", event_date="2024-01-03", strike=102.0, flags=["UNVALIDATED_STRUCTURE"]),
+        _row(ticker="T3", event_date="2024-01-04", strike=103.0, flags=["OUT_OF_DOMAIN:detail"]),
+        _row(ticker="T4", event_date="2024-01-05", strike=104.0,
+             gate_pass=None, exp_pnl_model=None, win_model=None),
+    ]
+
+
+def _flagged_app(tmp_path):
+    (tmp_path / "phase2").mkdir()
+    conn, store, snap = _events_snapshot(
+        tmp_path / "phase2", [_event_row(f"e{i}", f"T{i}", datetime(2024, 1, i + 1)) for i in range(5)])
+    repo = Repository(conn, store)
+    serving_root = tmp_path / "serving"
+    serving_root.mkdir()
+    serving_store = ArtifactStore(serving_root / "objects")
+    serving_conn = projections.connect(str(serving_root / "serving.sqlite"))
+    rows = _flagged_rows()
+    release = projections.build_candidate(
+        _preview_input(), _score_doc(rows=rows), _bundle(*[_compact(r) for r in rows]),
+        repository=repo, snapshot_ref=snap, store=serving_store, conn=serving_conn,
+        requested_as_of="2024-01-05", resolved_as_of="2024-01-05")
+    serving_conn.close()
+    app = create_app(serving_db=str(serving_root / "serving.sqlite"),
+                     store_root=str(serving_root / "objects"), serving_root=str(serving_root),
+                     token=TOKEN)
+    return app, release
+
+
 @pytest.fixture
 def live(tmp_path):
     app, serving_root, release_a, release_b = _two_release_app(tmp_path)
     server, thread, base = _start(app)
     try:
         yield base, serving_root, release_a, release_b
+    finally:
+        _stop(server, thread)
+
+
+@pytest.fixture
+def flagged(tmp_path):
+    app, release = _flagged_app(tmp_path)
+    server, thread, base = _start(app)
+    try:
+        yield base, release
     finally:
         _stop(server, thread)
 
@@ -384,6 +429,132 @@ def test_verdict_filter_selects_matching_events_and_summaries_consistently(live)
     scores = document["items"][0]["scores"]
     assert scores and all(s["verdict"] == "false" for s in scores)
     assert scores[0]["refusal_reason"] == "gate score below threshold"
+
+
+def test_gate_pass_filter_selects_only_gate_pass_true_rows(live):
+    base, _, release_a, _ = live
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release_a.release_id, "limit": "10", "gate": "pass"})
+    assert code == 200
+    document = json.loads(body)
+    assert document["total_matching"] == 6
+    assert [item["event_ref"]["event_id"] for item in document["items"]] == [
+        "e0", "e1", "e2", "e3", "e4", "e6"]
+    assert all(s["verdict"] == "true" for item in document["items"] for s in item["scores"])
+
+
+def test_gate_fail_filter_selects_only_gate_pass_false_rows(live):
+    base, _, release_a, _ = live
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release_a.release_id, "limit": "10", "gate": "fail"})
+    assert code == 200
+    document = json.loads(body)
+    assert document["total_matching"] == 1
+    assert [item["event_ref"]["event_id"] for item in document["items"]] == ["e5"]
+    assert document["items"][0]["scores"][0]["verdict"] == "false"
+
+
+def test_gate_na_filter_selects_only_null_gate_pass_rows(flagged):
+    base, release = flagged
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "limit": "10", "gate": "na"})
+    assert code == 200
+    document = json.loads(body)
+    assert document["total_matching"] == 1
+    assert [item["event_ref"]["event_id"] for item in document["items"]] == ["e4"]
+    assert document["items"][0]["scores"][0]["verdict"] is None
+
+
+def test_gate_invalid_value_is_422(live):
+    base, _, release_a, _ = live
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release_a.release_id, "gate": "bogus"})
+    assert code == 422
+    assert json.loads(body)["code"] == "INVALID_REQUEST"
+
+
+def test_out_of_domain_default_hides_flagged_rows_and_toggle_shows_them(flagged):
+    base, release = flagged
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "limit": "10"})
+    assert code == 200
+    document = json.loads(body)
+    # e1 (OUT_OF_DOMAIN) and e2 (UNVALIDATED_STRUCTURE) are hidden; e3's
+    # "OUT_OF_DOMAIN:detail" is a different whole code and must stay visible.
+    assert document["total_matching"] == 3
+    assert [item["event_ref"]["event_id"] for item in document["items"]] == ["e0", "e3", "e4"]
+
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "limit": "10",
+                                 "out_of_domain": "true"})
+    assert code == 200
+    shown = json.loads(body)
+    assert shown["total_matching"] == 4
+    assert [item["event_ref"]["event_id"] for item in shown["items"]] == ["e0", "e1", "e3", "e4"]
+
+    # Negative control: the flagged event alone, hidden by the default -> zero.
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "ticker": "T1"})
+    assert code == 200
+    empty = json.loads(body)
+    assert empty["total_matching"] == 0
+    assert empty["items"] == []
+
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "ticker": "T1",
+                                 "out_of_domain": "true"})
+    assert code == 200
+    only = json.loads(body)
+    assert only["total_matching"] == 1
+    assert only["items"][0]["scores"][0]["flags"] == ["OUT_OF_DOMAIN"]
+
+
+def test_disabled_default_hides_flagged_rows_and_toggle_shows_them(flagged):
+    base, release = flagged
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "limit": "10"})
+    assert code == 200
+    document = json.loads(body)
+    assert document["total_matching"] == 3
+    assert [item["event_ref"]["event_id"] for item in document["items"]] == ["e0", "e3", "e4"]
+
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "limit": "10", "disabled": "true"})
+    assert code == 200
+    shown = json.loads(body)
+    assert shown["total_matching"] == 4
+    assert [item["event_ref"]["event_id"] for item in shown["items"]] == ["e0", "e2", "e3", "e4"]
+
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "ticker": "T2"})
+    assert code == 200
+    empty = json.loads(body)
+    assert empty["total_matching"] == 0
+    assert empty["items"] == []
+
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release.release_id, "ticker": "T2",
+                                 "disabled": "true"})
+    assert code == 200
+    only = json.loads(body)
+    assert only["total_matching"] == 1
+    assert only["items"][0]["scores"][0]["flags"] == ["UNVALIDATED_STRUCTURE"]
+
+
+def test_out_of_domain_invalid_value_is_422(live):
+    base, _, release_a, _ = live
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release_a.release_id, "out_of_domain": "maybe"})
+    assert code == 422
+    assert json.loads(body)["code"] == "INVALID_REQUEST"
+
+
+def test_disabled_invalid_value_is_422(live):
+    base, _, release_a, _ = live
+    code, body, _ = _get(base, "/api/v1/events", token=TOKEN,
+                         params={"release_id": release_a.release_id, "disabled": "maybe"})
+    assert code == 422
+    assert json.loads(body)["code"] == "INVALID_REQUEST"
 
 
 def test_limit_above_max_is_clamped_not_rejected(live):

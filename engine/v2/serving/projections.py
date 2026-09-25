@@ -151,8 +151,12 @@ _V1 = (
     "ON serving_score_summary(release_id, event_id)",
 )
 
+_V2 = (
+    "ALTER TABLE serving_score_summary ADD COLUMN flags TEXT NOT NULL DEFAULT '[]'",
+)
+
 #: ``(version, name, statements)`` — one transaction each, numbered 1..n.
-_MIGRATIONS = ((1, "serving_projections", _V1),)
+_MIGRATIONS = ((1, "serving_projections", _V1), (2, "serving_score_summary_flags", _V2))
 
 
 @contextmanager
@@ -359,7 +363,8 @@ def _score_summary_fields(bridge: LegacyScoreBridge) -> dict:
         expected_return_analog=display.get("exp_pnl_analog"),
         expected_return_sim=display.get("exp_pnl_sim"),
         chosen_strategy=display.get("chosen_strategy"), chosen_margin=display.get("chosen_margin"),
-        menu_size=display.get("menu_size"))
+        menu_size=display.get("menu_size"),
+        flags=json.dumps(list(bridge.display_record.get("flags") or [])))
 
 
 def build_candidate(
@@ -469,13 +474,14 @@ def _write_index(conn: sqlite3.Connection, release: PreviewRelease, findings: Pr
                 "(release_id, score_id, event_id, strategy, verdict, refusal_reason, driver_forecast, "
                 "market_implied_move, entry_premium, expected_return, expected_return_model, "
                 "expected_return_analog, expected_return_sim, chosen_strategy, chosen_margin, "
-                "menu_size, detail_artifact_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "menu_size, flags, detail_artifact_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (release.release_id, bridge.score_id, bridge.event_ref.event_id, fields["strategy"],
                  fields["verdict"], fields["refusal_reason"], fields["driver_forecast"],
                  fields["market_implied_move"], fields["entry_premium"], fields["expected_return"],
                  fields["expected_return_model"], fields["expected_return_analog"], fields["expected_return_sim"],
                  fields["chosen_strategy"], fields["chosen_margin"], fields["menu_size"],
-                 detail_refs[bridge.score_id].artifact_id))
+                 fields["flags"], detail_refs[bridge.score_id].artifact_id))
         if fault is not None:
             fault("index_rows_written")
 
@@ -602,23 +608,25 @@ def _score_summary_from_row(row: sqlite3.Row) -> EventScoreSummary:
         expected_return=row["expected_return"], expected_return_model=row["expected_return_model"],
         expected_return_analog=row["expected_return_analog"], expected_return_sim=row["expected_return_sim"],
         chosen_strategy=row["chosen_strategy"],
-        chosen_margin=row["chosen_margin"], menu_size=row["menu_size"])
+        chosen_margin=row["chosen_margin"], menu_size=row["menu_size"],
+        flags=tuple(json.loads(row["flags"])) if row["flags"] is not None else ())
 
 
 def event_scores(conn: sqlite3.Connection, release_id: str, event_id: str, *,
-                 strategy: str | None = None, verdict: str | None = None) -> tuple[EventScoreSummary, ...]:
+                 strategy: str | None = None, verdict: str | None = None,
+                 gate: str | None = None, out_of_domain: bool = False,
+                 disabled: bool = False) -> tuple[EventScoreSummary, ...]:
     """All main-board summaries for one event (§6's `/events/{id}/scores`
-    route wants every one, including refusals); ``strategy``/``verdict``
-    narrow it for the `/events` list's own "matching visible summaries"
-    rule (§6) -- never applied unless the caller asks."""
+    route wants every one, including refusals); ``strategy``/``verdict``/
+    ``gate``/``out_of_domain``/``disabled`` narrow it for the `/events` list's
+    own "matching visible summaries" rule (§6) -- never applied unless the
+    caller asks."""
     where = "release_id = ? AND event_id = ?"
     params: list = [release_id, event_id]
-    if strategy is not None:
-        where += " AND strategy = ?"
-        params.append(strategy)
-    if verdict is not None:
-        where += " AND verdict = ?"
-        params.append(verdict)
+    row_clauses, row_params = _score_row_clauses(strategy, verdict, gate, out_of_domain, disabled)
+    if row_clauses:
+        where += " AND " + " AND ".join(row_clauses)
+        params.extend(row_params)
     rows = conn.execute(f"SELECT * FROM serving_score_summary WHERE {where} ORDER BY score_id",
                         params).fetchall()
     return tuple(_score_summary_from_row(row) for row in rows)
@@ -629,16 +637,20 @@ def get_event(conn: sqlite3.Connection, release_id: str, event_id: str) -> Event
     read API's `/events/{id}/scores` route wraps this."""
     row = conn.execute("SELECT * FROM serving_event_summary WHERE release_id = ? AND event_id = ?",
                        (release_id, event_id)).fetchone()
-    return None if row is None else _event_page_item(conn, release_id, row)
+    return None if row is None else _event_page_item(conn, release_id, row,
+                                                     out_of_domain=True, disabled=True)
 
 
 def _event_page_item(conn: sqlite3.Connection, release_id: str, row: sqlite3.Row, *,
-                     strategy: str | None = None, verdict: str | None = None) -> EventPageItem:
+                     strategy: str | None = None, verdict: str | None = None,
+                     gate: str | None = None, out_of_domain: bool = False,
+                     disabled: bool = False) -> EventPageItem:
     return EventPageItem(
         event_ref=EventRef(event_id=row["event_id"], calendar_revision=row["calendar_revision"]),
         ticker=row["ticker"], event_date=row["event_date"], session=row["session"],
         clock_id=row["clock_id"], readiness=row["readiness"],
-        scores=event_scores(conn, release_id, row["event_id"], strategy=strategy, verdict=verdict))
+        scores=event_scores(conn, release_id, row["event_id"], strategy=strategy, verdict=verdict,
+                            gate=gate, out_of_domain=out_of_domain, disabled=disabled))
 
 
 def _encode_cursor(row: sqlite3.Row) -> str:
@@ -658,7 +670,9 @@ def _decode_cursor(cursor: str | None) -> tuple[str, str, str] | None:
 
 def event_query_hash(release_id: str, *, event_date_from: str | None = None,
                      event_date_to: str | None = None, ticker: str | None = None,
-                     strategy: str | None = None, verdict: str | None = None) -> str:
+                     strategy: str | None = None, verdict: str | None = None,
+                     gate: str | None = None, out_of_domain: bool = False,
+                     disabled: bool = False) -> str:
     """The stable identity of one `/events` query: release plus every
     normalized filter, deliberately excluding ``limit``/``cursor`` -- a page
     size change or a page turn must not look like a different query. The
@@ -668,19 +682,63 @@ def event_query_hash(release_id: str, *, event_date_from: str | None = None,
         "release_id": release_id, "event_date_from": event_date_from,
         "event_date_to": event_date_to, "ticker": ticker,
         "strategy": strategy, "verdict": verdict,
+        "gate": gate, "out_of_domain": out_of_domain, "disabled": disabled,
     })
 
 
+_FLAG_OUT_OF_DOMAIN = "OUT_OF_DOMAIN"
+_FLAG_UNVALIDATED_STRUCTURE = "UNVALIDATED_STRUCTURE"
+
+
+def _score_row_clauses(strategy, verdict, gate, out_of_domain, disabled):
+    """SQL clauses (and their params) narrowing `serving_score_summary` rows -- shared by
+    `_event_filters`'s per-event EXISTS check and `event_scores`'s own per-row WHERE, so gate/
+    flag matching is written exactly once. `gate` is "pass"/"fail"/"na"/None; `out_of_domain`/
+    `disabled` are booleans, default False (legacy default: hidden). Flags are matched as
+    whole codes via SQLite `json_each`, never a LIKE substring match, so a `flags` value like
+    "OUT_OF_DOMAIN:detail" never false-matches "OUT_OF_DOMAIN"."""
+    clauses: list[str] = []
+    params: list = []
+    if strategy is not None:
+        clauses.append("strategy = ?")
+        params.append(strategy)
+    if verdict is not None:
+        clauses.append("verdict = ?")
+        params.append(verdict)
+    if gate is not None:
+        if gate == "pass":
+            clauses.append("verdict = ?")
+            params.append("true")
+        elif gate == "fail":
+            clauses.append("verdict = ?")
+            params.append("false")
+        elif gate == "na":
+            clauses.append("verdict IS NULL")
+        else:
+            raise ServingIndexError(Problem(
+                code="INVALID_REQUEST", category="validation",
+                message="gate must be one of pass, fail, na", details={"gate": gate}))
+    if not out_of_domain:
+        clauses.append("NOT EXISTS (SELECT 1 FROM json_each(flags) WHERE value = ?)")
+        params.append(_FLAG_OUT_OF_DOMAIN)
+    if not disabled:
+        clauses.append("NOT EXISTS (SELECT 1 FROM json_each(flags) WHERE value = ?)")
+        params.append(_FLAG_UNVALIDATED_STRUCTURE)
+    return clauses, params
+
+
 def _event_filters(release_id: str, event_date_from: str | None, event_date_to: str | None,
-                   ticker: str | None, strategy: str | None, verdict: str | None) -> tuple[str, list]:
+                   ticker: str | None, strategy: str | None, verdict: str | None,
+                   gate: str | None = None, out_of_domain: bool = False,
+                   disabled: bool = False) -> tuple[str, list]:
     """The WHERE clause (and its positional params) shared by the page query
     and its unpaginated ``total_matching`` count -- §6: "counts cover the
-    complete filtered population, not the visible page." A strategy/verdict
-    filter selects EVENTS that have at least one matching score row (an
-    ``EXISTS`` against ``serving_score_summary``); which of that event's
+    complete filtered population, not the visible page." A strategy/verdict/
+    gate/flag filter selects EVENTS that have at least one matching score row
+    (an ``EXISTS`` against ``serving_score_summary``); which of that event's
     rows are then shown is ``_event_page_item``'s own filtered
     ``event_scores`` call, kept in sync by construction (both are given the
-    same ``strategy``/``verdict``, never derived independently)."""
+    same filters, never derived independently)."""
     where = "release_id = ?"
     params: list = [release_id]
     if event_date_from is not None:
@@ -692,16 +750,12 @@ def _event_filters(release_id: str, event_date_from: str | None, event_date_to: 
     if ticker is not None:
         where += " AND ticker = ?"
         params.append(ticker)
-    if strategy is not None or verdict is not None:
+    row_clauses, row_params = _score_row_clauses(strategy, verdict, gate, out_of_domain, disabled)
+    if row_clauses:
         clauses = ["release_id = serving_event_summary.release_id",
-                  "event_id = serving_event_summary.event_id"]
-        if strategy is not None:
-            clauses.append("strategy = ?")
-            params.append(strategy)
-        if verdict is not None:
-            clauses.append("verdict = ?")
-            params.append(verdict)
+                   "event_id = serving_event_summary.event_id"] + row_clauses
         where += f" AND EXISTS (SELECT 1 FROM serving_score_summary WHERE {' AND '.join(clauses)})"
+        params.extend(row_params)
     return where, params
 
 
@@ -709,27 +763,33 @@ def list_events(conn: sqlite3.Connection, release_id: str, *,
                 limit: int = DEFAULT_PAGE_SIZE, cursor: str | None = None,
                 event_date_from: str | None = None, event_date_to: str | None = None,
                 ticker: str | None = None, strategy: str | None = None,
-                verdict: str | None = None) -> EventPage:
+                verdict: str | None = None, gate: str | None = None,
+                out_of_domain: bool = False, disabled: bool = False) -> EventPage:
     """§6: bounded, ordered ``event_date, ticker, event_id`` paging with a
-    keyset cursor, and the optional date/ticker/strategy/verdict filters.
-    Integrity-protecting the cursor with a server-held key is P3-2 scope
-    (the read API); this is the bounded query it wraps."""
+    keyset cursor, and the optional date/ticker/strategy/verdict/gate/flag
+    filters. Integrity-protecting the cursor with a server-held key is P3-2
+    scope (the read API); this is the bounded query it wraps."""
     limit = max(1, min(limit, MAX_PAGE_SIZE))
     after = _decode_cursor(cursor)
-    where, params = _event_filters(release_id, event_date_from, event_date_to, ticker, strategy, verdict)
+    where, params = _event_filters(release_id, event_date_from, event_date_to, ticker, strategy,
+                                   verdict, gate, out_of_domain, disabled)
     if after is not None:
         where += " AND (event_date, ticker, event_id) > (?, ?, ?)"
         params = params + list(after)
     rows = conn.execute(
         f"SELECT * FROM serving_event_summary WHERE {where} "
         "ORDER BY event_date, ticker, event_id LIMIT ?", (*params, limit + 1)).fetchall()
-    total_where, total_params = _event_filters(release_id, event_date_from, event_date_to, ticker, strategy, verdict)
+    total_where, total_params = _event_filters(release_id, event_date_from, event_date_to, ticker,
+                                               strategy, verdict, gate, out_of_domain, disabled)
     total = conn.execute(f"SELECT COUNT(*) FROM serving_event_summary WHERE {total_where}",
                          total_params).fetchone()[0]
     page, has_more = rows[:limit], len(rows) > limit
-    items = tuple(_event_page_item(conn, release_id, row, strategy=strategy, verdict=verdict) for row in page)
+    items = tuple(_event_page_item(conn, release_id, row, strategy=strategy, verdict=verdict,
+                                   gate=gate, out_of_domain=out_of_domain, disabled=disabled)
+                  for row in page)
     next_cursor = _encode_cursor(page[-1]) if has_more else None
     query_hash = event_query_hash(release_id, event_date_from=event_date_from, event_date_to=event_date_to,
-                                  ticker=ticker, strategy=strategy, verdict=verdict)
+                                  ticker=ticker, strategy=strategy, verdict=verdict,
+                                  gate=gate, out_of_domain=out_of_domain, disabled=disabled)
     return EventPage(release_id=release_id, query_hash=query_hash, items=items,
                      next_cursor=next_cursor, total_matching=total)

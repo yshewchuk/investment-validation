@@ -75,6 +75,7 @@ export interface EventScoreSummary {
   chosen_strategy: string | null;
   chosen_margin: number | null;
   menu_size: number | null;
+  flags: string[];
   schema_version: SchemaVersion;
 }
 
@@ -164,6 +165,9 @@ export interface EventQuery {
   ticker?: string;
   strategy?: string;
   verdict?: string;
+  gate?: string;
+  out_of_domain?: boolean;
+  disabled?: boolean;
   cursor?: string;
   limit?: number;
 }
