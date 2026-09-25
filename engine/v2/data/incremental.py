@@ -45,7 +45,6 @@ from engine.v2.foundation import (
     artifact_reference,
     canonical_json,
     content_hash,
-    ensure_directory,
     format_timestamp,
     from_document,
     to_document,
@@ -78,7 +77,6 @@ TABLE_NAME = "daily_market"
 FETCH_SOURCE = "daily_market"
 MAX_STAGED_INPUT_BYTES = 64 << 20
 MAX_STAGED_PAYLOADS = 4096
-MAX_RAW_PAYLOAD_BYTES = 32 << 20
 _CATALOG_FAULT_POINTS = frozenset({
     "before_transaction", "after_contracts", "after_objects", "after_fragments",
     "after_dataset_versions", "after_memberships", "after_snapshot",
@@ -992,9 +990,10 @@ def run_daily_market_refresh(parameters, root, *, fetcher=None):
     wrote (``engine.v2.ops.refresh_staging.stage_refresh_input``) plus the bound
     ``refresh_plan.json``. Each planned fetch unit is acquired exactly once
     through ``fetcher(unit) -> (raw_bytes, response_kind, response_meta,
-    ticker_rows)`` -- the sole network edge and the sole test seam. The default
-    fetcher is resolved lazily so importing this module never imports a
-    provider client; a live provider adapter is a separate slice. Acquired
+    ticker_rows)`` -- the sole network edge and the sole test seam. When
+    ``fetcher`` is omitted the ops layer must inject it
+    (``engine.v2.ops.incremental_data._load_data_refresh_callback``): this
+    data-layer wrapper never resolves a provider client. Acquired
     evidence is appended to the same document in place and the unchanged
     :func:`run_incremental_refresh` performs the commit.
     """
@@ -1039,14 +1038,17 @@ def _acquire_refresh_units(parameters, root, document, fetcher):
     units = tuple(plan.get("fetch_units", ()))
     if not units:
         raise errors.fail("INPUT_CHANGED", "refresh plan has no fetch units to acquire")
-    fetch_root = str(document["fetch_root"])
+    if any(str(unit.get("table_name", "")) != str(document.get("table_name", ""))
+           for unit in units):
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "refresh plan table_name does not match the staged refresh identity")
     conn = catalog.sqlite3.connect(str(document["catalog_path"]))
     conn.row_factory = catalog.sqlite3.Row
     try:
         store = ArtifactStore(str(document["objects_root"]))
         contract = _parent_daily_market_contract(conn, parameters.parent_snapshot_id)
         resolved = fetcher or _load_daily_market_fetcher()
-        fetched = tuple(_fetch_unit(conn, store, fetch_root, contract, unit, resolved)
+        fetched = tuple(_fetch_unit(conn, store, contract, unit, resolved)
                         for unit in units)
     finally:
         conn.close()
@@ -1061,7 +1063,7 @@ def _parent_daily_market_contract(conn, parent_snapshot_id):
     return contract
 
 
-def _fetch_unit(conn, store, fetch_root, contract, unit, fetcher):
+def _fetch_unit(conn, store, contract, unit, fetcher):
     raw_bytes, response_kind, response_meta, ticker_rows = fetcher(unit)
     if response_kind not in ("complete", "legitimate_empty"):
         raise errors.fail("TRANSIENT_SOURCE", "daily_market provider response was not complete")
@@ -1072,7 +1074,6 @@ def _fetch_unit(conn, store, fetch_root, contract, unit, fetcher):
         "keys": [str(key) for key in unit.get("expected_keys", ())],
     }
     received_at = format_timestamp(SystemClock().now())
-    _cache_fetched_bytes(fetch_root, request["request_id"], raw_bytes)
     record = cache_raw_receipt(
         conn, store,
         RawPayload(payload=raw_bytes, response_kind=response_kind,
@@ -1083,7 +1084,7 @@ def _fetch_unit(conn, store, fetch_root, contract, unit, fetcher):
         _fetched_revision(contract, unit, row, record.raw_receipt_id, received_at)
         for row in ticker_rows)
     return _FetchedUnit(
-        raw_payload={"payload": raw_bytes.decode(), "response_kind": response_kind,
+        raw_payload={"receipt_id": record.raw_receipt_id, "response_kind": response_kind,
                      "response_meta": dict(response_meta), "source": FETCH_SOURCE,
                      "endpoint": request["table_name"], "request": request,
                      "received_at": received_at},
@@ -1146,20 +1147,8 @@ def _merge_fetched_units(document, contract, fetched):
     document["coverage"] = to_document(_fetched_coverage(contract, fetched))
 
 
-def _cache_fetched_bytes(fetch_root, request_id, raw_bytes):
-    ensure_directory(fetch_root)
-    digest = content_hash({"request_id": request_id}).removeprefix(CONTENT_HASH_PREFIX)[:32]
-    with open(f"{fetch_root.rstrip('/')}/fetch_{digest}.raw", "wb") as stream:
-        stream.write(raw_bytes)
-
-
 def _load_daily_market_fetcher():
-    """Resolve the production provider adapter lazily; S4A wires the seam only.
-
-    Picking and authenticating a live daily_market provider is a separate
-    slice, so the default fails closed rather than silently reading a legacy
-    cache. Tests and the future adapter pass ``fetcher`` explicitly.
-    """
+    """Fail closed: the ops layer injects the provider fetcher (engine.v2.ops.incremental_data._load_data_refresh_callback). The data layer never imports a provider client."""
     raise errors.fail("RESOURCE_UNAVAILABLE",
                       "no daily_market provider adapter is configured")
 
@@ -1290,17 +1279,34 @@ def _generic_revision_from_document(document, contract):
 def _stage_raw_payloads(conn, store, document):
     records = {}
     for item in document.get("raw_payloads", ()):
-        payload = str(item.get("payload", "")).encode()
-        if len(payload) > MAX_RAW_PAYLOAD_BYTES:
-            raise errors.fail("INPUT_CHANGED", "staged raw payload exceeds size limit")
-        record = cache_raw_receipt(
-            conn, store, RawPayload(
-                payload=payload, response_kind=item["response_kind"],
-                response_meta=item.get("response_meta", {})),
-            source=item["source"], endpoint=item["endpoint"],
-            request=item["request"], received_at=item["received_at"])
+        record = _staged_raw_receipt(conn, store, item)
         records[record.raw_receipt_id] = record
     return records
+
+
+def _staged_raw_receipt(conn, store, item):
+    """Resolve one staged raw payload by its receipt id, never embedded bytes.
+
+    The raw bytes live once, content-addressed in the ``ArtifactStore`` (the
+    receipt ``_fetch_unit`` published); the staged document carries only the
+    receipt identity. The catalog row is the source of the receipt metadata.
+    """
+    receipt_id = str(item.get("receipt_id", ""))
+    row = conn.execute(
+        "SELECT * FROM data_raw_receipts WHERE raw_receipt_id = ?",
+        (receipt_id,)).fetchone()
+    if row is None:
+        raise errors.fail("INPUT_CHANGED",
+                          "staged raw payload references an uncached receipt")
+    object_ref = _object_ref_document(row["artifact_ref_json"])
+    store.verify(_artifact_ref(object_ref, RAW_SCHEMA_REF))
+    return RawReceiptRecord(
+        raw_receipt_id=row["raw_receipt_id"], source=row["source"],
+        endpoint=row["endpoint"], request_hash=row["request_hash"],
+        raw_hash=row["raw_hash"], object_ref=object_ref,
+        response_kind=row["response_kind"], request=json.loads(row["request_json"]),
+        response_meta=json.loads(row["response_meta_json"]),
+        received_at=row["received_at"], cache_hit=True)
 
 
 def _stage_normalizations(conn, store, raw_records, revisions, contract_id, clock):
