@@ -8,17 +8,29 @@ snapshot** at layer **7.0** of [system rearchitecture](../../../guides/system_re
 `engine.v2.dashboard`, so nothing in the engine imports it back. It is not a
 row of the §4 owner table; it was added by Phase 6 slice 6 (decision UD-4).
 
+Also snapshot-pinned research tooling: the native replay and the trade table it
+publishes, built on `engine.v2.data.Repository` over committed snapshots rather
+than the legacy mutable store.
+
 Replaces (the store-reaching halves of): `tools/signal_screen.py`,
 `tools/fill_quality.py`, and the read path of
 `engine/data/pulls/polygon_fills.py`. `tools/log_diagnostics.py` is
 deliberately **not** moved: it reads only a CSV transactions log and needs no
-snapshot read, so it has no v2 counterpart.
+snapshot read, so it has no v2 counterpart. It also replaces the replay-over-a
+committed snapshot of `engine/replay.py` and `engine/build_trades.py`'s v2
+write path.
 
 ## Responsibilities
 
 - Pure analysis cores moved verbatim from the legacy research tools.
 - One `resolve_pinned`/`resolve` call per run, with the resulting
   `snapshot_id` threaded through every read and into the output.
+- Plan and price events against one resolved `SnapshotRef`, at a grid of fill
+  alphas, with the same arithmetic the legacy replay uses.
+- Publish replay output as the `trades` table through the generic incremental
+  write path, pinned to the snapshot that produced it.
+- Move provenance onto every row (`engine.v2.research.replay`) so a v2 row is
+  never mistaken for a legacy `engine.replay` row.
 
 ## Non-responsibilities
 
@@ -29,6 +41,10 @@ snapshot read, so it has no v2 counterpart.
   `engine.v2.dashboard` do it instead.
 - **Decide a research conclusion or a verdict** — a person, from the written
   report, does that; these tools only produce the measured table.
+- Fetch or normalize quotes (`engine.v2.data`).
+- Decide whether to trade: selection lives in `engine.v2.scoring`.
+- Mutate the legacy tree: `engine/replay.py` and `engine/build_trades.py` keep
+  publishing exactly as before.
 
 ## Public interface
 
@@ -39,7 +55,10 @@ internal regardless of underscore convention.
 `engine/v2/research/_scan.py` (`read_table`, `resolve_snapshot`, `DEFAULT_SCOPE`)
 is internal shared machinery, not an interface.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run -->
+The replay half: `replay.run`, `replay.replay`, `replay.replay_one`,
+`replay.plan_events`, `replay.to_trades_table`, `_pricing.STRUCTURES`.
+
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.run, replay.replay, replay.replay_one, replay.plan_events, replay.to_trades_table, _pricing.STRUCTURES -->
 
 ## Consumers
 
@@ -48,8 +67,9 @@ a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
 _Nothing inside `engine/` imports this package. Its consumers are the CLI
-leaves `tools/v2_signal_screen.py`, `tools/v2_fill_quality.py` and
-`tools/v2_polygon_fills.py`, which the layering hook does not parse (they are
+leaves `tools/v2_signal_screen.py`, `tools/v2_fill_quality.py`,
+`tools/v2_polygon_fills.py`, `tools/v2_replay.py` and
+`tools/v2_build_trades.py`, which the layering hook does not parse (they are
 not `engine.*` modules)._
 
 <!-- consumers: none -->
@@ -72,6 +92,13 @@ python3 tools/v2_polygon_fills.py --catalog data/catalog.sqlite \
 Each writes a report (parquet/markdown for the first two, JSON for the plan)
 that names the snapshot id it read.
 
+The replay half is driven as a library:
+
+```python
+from engine.v2.research import replay
+result = replay.run(repository, strategies=["STR-THRU"], events=events)
+```
+
 ## Testing
 
 `tests/test_v2_research_tools.py` (tier 0): a synthetic committed snapshot with
@@ -81,3 +108,7 @@ frame; the tool's output carries the pinned snapshot id; an explicit
 `--snapshot-id` still reads the first snapshot after the head has moved; and a
 manifest with deleted fragment membership is refused (`MANIFEST_CORRUPT`)
 rather than read.
+
+`tests/test_v2_research_replay.py` and `tests/test_v2_research_build_trades.py`
+cover the move-parity requirement against legacy `engine.replay` on synthetic
+chains, snapshot pinning, and the refusal paths.

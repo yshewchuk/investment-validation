@@ -307,6 +307,26 @@ PACKAGES: tuple[Package, ...] = (
         ),
     ),
     Package(
+        dotted="engine.v2.research",
+        layer=6.0,
+        label="6",
+        owner="Snapshot-pinned research tooling — native replay and trade publishing",
+        replaces=("engine/replay.py over a committed snapshot",
+                  "engine/build_trades.py's v2 write path"),
+        responsibilities=(
+            "Plan and price events against one resolved SnapshotRef at the fill "
+            "alpha grid, with pricing moved into the package rather than reached "
+            "through a legacy adapter.",
+            "Publish replay output as the trades table through the generic "
+            "incremental write path, pinned to the snapshot that produced it.",
+        ),
+        non_responsibilities=(
+            ("Read the legacy mutable store", "engine.v2.data.Repository"),
+            ("Decide whether to trade", "engine.v2.scoring"),
+        ),
+        orchestrator=True,
+    ),
+    Package(
         dotted="engine.v2.ledger",
         layer=6.0,
         label="6",
