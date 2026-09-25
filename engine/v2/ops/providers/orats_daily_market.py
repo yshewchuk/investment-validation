@@ -112,6 +112,13 @@ def orats_daily_market_fetcher(*, http_get: Callable[..., tuple] | None = None,
         return raw_bytes, response_kind, response_meta, ticker_rows
 
     fetcher.lookback_days = lookback_days
+    # S4B2: the cache-only completion path in the data layer rebuilds
+    # ticker_rows from an already-published raw payload and must merge
+    # summaries/cores exactly as a live fetch does. It cannot import this ops
+    # module (data never imports ops), so the merge callable rides the
+    # fetcher closure the ops layer already injects through
+    # ``incremental_data._load_data_refresh_callback``.
+    fetcher.merge_ticker_rows = _merge_ticker_rows
     return fetcher
 
 

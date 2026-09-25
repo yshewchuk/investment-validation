@@ -33,19 +33,26 @@ def _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan, catalog_path=N
     (``catalog_path``/``objects_root``) so the refresh job's staged input is
     reproducible from the saved plan alone, never re-resolved from whatever
     catalog happens to be open at submit time.
+
+    S4B2: a native plan may omit ``refresh_plan`` entirely. The plan document
+    then records only the mode (and deployment identity) and
+    ``build_legacy_job_requests`` builds the production plan from the shadow
+    head at submission time; a caller-supplied plan remains a strict override.
     """
     if refresh_mode not in ("legacy", "native"):
         raise fail("INVALID_REQUEST", "refresh_mode must be legacy or native")
     if refresh_mode != "native":
         return
+    identity.update(refresh_mode=refresh_mode, catalog_path=catalog_path,
+                    objects_root=objects_root)
+    plan.update(refresh_mode=refresh_mode, catalog_path=catalog_path,
+                objects_root=objects_root)
     if refresh_plan is None:
-        raise fail("INVALID_REQUEST", "native refresh mode needs a pinned refresh plan")
+        return
     from engine.v2.foundation import to_document
     refresh_document = refresh_plan if isinstance(refresh_plan, dict) else to_document(refresh_plan)
-    identity.update(refresh_mode=refresh_mode, refresh_plan_hash=refresh_document.get("plan_hash", ""),
-                    catalog_path=catalog_path, objects_root=objects_root)
-    plan.update(refresh_mode=refresh_mode, refresh_plan=refresh_document,
-                catalog_path=catalog_path, objects_root=objects_root)
+    identity.update(refresh_plan_hash=refresh_document.get("plan_hash", ""))
+    plan.update(refresh_plan=refresh_document)
 
 
 def check_plan(source_root, expected_ids):
@@ -72,11 +79,13 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
     ``refresh_mode`` (R3B-3): ``"legacy"`` (default) leaves the DAG exactly
     as it is today -- no ``refresh`` job is ever submitted; the out-of-band
     ``ops price-refresh`` (``legacy_adapter.invoke_price_refresh``) stays the
-    only refresh path, unchanged. ``"native"`` pins a caller-resolved
+    only refresh path, unchanged. ``"native"`` submits ONE real
+    ``incremental_refresh`` job: an optional caller-resolved
     ``engine.v2.ops.incremental_data.RefreshPlan`` (``refresh_plan``, a
-    ``RefreshPlan`` or its ``to_document()`` form) into this plan document,
-    so ``nightly.build_legacy_job_requests`` submits ONE real
-    ``incremental_refresh`` job built from it. The choice is recorded on the
+    ``RefreshPlan`` or its ``to_document()`` form) is pinned into this plan
+    document as a strict override; when omitted,
+    ``nightly.build_legacy_job_requests`` builds the production plan from the
+    shadow snapshot head at submission time. The choice is recorded on the
     plan itself (``plan["refresh_mode"]``, present only when ``"native"`` --
     absent means legacy, mirroring ``input_mode`` below), so a reader of a
     saved plan or a completed run's jobs can tell which path executed
