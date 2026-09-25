@@ -19,13 +19,11 @@ from engine.v2.ops.fingerprints import (
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
 
-def experiment_plan(spec_path: Path | str, *, smoke=True):
-    """Create an immutable plan for a supervised smoke-mode experiment run."""
+def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | None = None):
+    """Create an immutable plan for a supervised smoke or primary experiment run."""
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
     threads = profile.thread_count or profile.cpu_count
     path = Path(spec_path)
-    if not smoke:
-        raise fail("INVALID_REQUEST", "production experiment activation is disabled")
     if not path.is_file() or path.is_symlink():
         raise fail("INPUT_CHANGED", "experiment specification is missing")
     document = json.loads(path.read_text())
@@ -35,14 +33,17 @@ def experiment_plan(spec_path: Path | str, *, smoke=True):
     runner = document.get("runner")
     if not isinstance(runner, str) or not runner:
         raise fail("INVALID_REQUEST", "experiment specification has no runner")
+    if not smoke:
+        prereg_root = Path(root) if root is not None else Path(__file__).resolve().parents[3]
+        require_preregistration(prereg_root, experiment_spec_from_document(document))
     return {
         "schema_version": "operations_plan.v1.0",
         "kind": "experiment",
-        "mode": "smoke",
+        "mode": "smoke" if smoke else "primary",
         "effects": ["staged"],
         "parameters": {"expected_ids": ["experiment:" + experiment_id],
                        "input_bindings": None,
-                       "runner": runner, "no_ledger": True},
+                       "runner": runner, "no_ledger": smoke},
         "input_refs": [],
         "blocked_prerequisites": [],
         "spec_hash": content_hash(document),
@@ -103,6 +104,34 @@ class ExperimentSpec:
                              "price_source": self.price_source, "runner": self.runner})
 
 
+def planned_row_exists(root: Path | str, experiment_id: str) -> bool:
+    """True iff experiments/LEDGER.csv has a stage="planned" row for
+    experiment_id. Plain CSV read -- no legacy import, no adapter entry
+    (checks/legacy_adapters.json is at its 75/75 ceiling)."""
+    ledger = Path(root) / "experiments" / "LEDGER.csv"
+    if not ledger.is_file():
+        return False
+    import csv
+    with open(ledger, newline="") as fh:
+        return any(row.get("id") == experiment_id and row.get("stage") == "planned"
+                   for row in csv.DictReader(fh))
+
+
+def require_preregistration(root: Path | str, spec: ExperimentSpec) -> None:
+    """Refuse activation (mode="primary") with no PLANNED ledger row for
+    spec.experiment_id. This closes the gap in engine.evaluate's own guard
+    (silently no-ops when there are zero planned rows -- see
+    docs memory prereg-guard-noops-without-planned-row / EXP-173..177),
+    which only ever fires INSIDE the runner subprocess, after real work
+    has already happened. This check runs at plan time, before any job
+    is created."""
+    if not planned_row_exists(root, spec.experiment_id):
+        raise fail("INVALID_REQUEST",
+                   "experiment has no PLANNED ledger row; scaffold it with "
+                   "experiments/new_experiment.py before activating a real run",
+                   details={"experiment_id": spec.experiment_id})
+
+
 @dataclass
 class ExperimentReceipt:
     schema_version: str = "experiment_shadow.v1.0"
@@ -129,6 +158,11 @@ def register_hypothesis(conn, spec: ExperimentSpec, input_hash: str, *, mode="sm
     a retry with the same input returns it, and the same ``spec_hash`` asked
     again with a different input is refused rather than raising the raw
     ``IntegrityError`` a second unconditional insert would produce.
+
+    Returns ``(run_id, created)``: ``created`` is True only for the call that
+    actually inserted the ``experiment_runs`` row, so a coordinator effect can
+    make its own one-shot side effect (the durable ledger append) exactly once
+    across retries.
     """
     from uuid import uuid4
 
@@ -138,7 +172,7 @@ def register_hypothesis(conn, spec: ExperimentSpec, input_hash: str, *, mode="sm
         old = conn.execute("SELECT run_id FROM experiment_runs WHERE spec_hash=? AND input_hash=? AND mode=?",
                            (spec.spec_hash, input_hash, mode)).fetchone()
         if old:
-            return old[0]
+            return old[0], False
         if mode == "primary":
             existing = conn.execute(
                 "SELECT run_id, input_hash FROM hypotheses WHERE spec_hash=?",
@@ -148,13 +182,13 @@ def register_hypothesis(conn, spec: ExperimentSpec, input_hash: str, *, mode="sm
                     raise fail("IDEMPOTENCY_CONFLICT",
                                "hypothesis is already registered with a different input",
                                details={"spec_hash": spec.spec_hash})
-                return existing["run_id"]
+                return existing["run_id"], False
         conn.execute("INSERT INTO experiment_runs VALUES (?,?,?,?,?,?)",
                      (run_id, spec.spec_hash, input_hash, mode, "{}", None))
         if mode == "primary":
             conn.execute("INSERT INTO hypotheses VALUES (?,?,?,?,?)",
                          (spec.spec_hash, input_hash, payload_hash, "{}", run_id))
-    return run_id
+    return run_id, True
 
 
 def record_backup_pending(conn, run_id, error_code):

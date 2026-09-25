@@ -807,7 +807,7 @@ def _named_ref(refs, name):
 
 
 def experiment_effect(conn, store, claim, refs, *, clock):
-    """P6 slice 10: durably record one smoke experiment attempt after its
+    """P6 slice 10/11: durably record one experiment attempt after its
     worker receipt validates. Mirrors backup_effect's shape (a coordinator
     effect with no watermark/outbox of its own — an experiment run has no
     generation/session scope to key on).
@@ -817,6 +817,12 @@ def experiment_effect(conn, store, claim, refs, *, clock):
     ``executor._materialize_inputs``): the exact bytes the worker ran, never
     a re-resolution of the job's live parameters and never a second
     ``resolve_and_record`` call (those rows are immutable and already exist).
+
+    A ``no_ledger=False`` attempt registers a ``primary`` hypothesis and, on
+    the one call that actually created it (``created``), appends the durable
+    "ran" row itself. The worker subprocess never writes the ledger, so a
+    killed-and-retried attempt can never double-append; the idempotent
+    registration is what makes this effect exactly-once across retries.
     """
     from engine.v2.ops.experiments import experiment_spec_from_document, register_hypothesis
 
@@ -826,6 +832,58 @@ def experiment_effect(conn, store, claim, refs, *, clock):
         raise fail("VALIDATION_FAILED", "experiment specification is not bound")
     document = json.loads(store.read_verified(artifact(conn, store, binding.artifact_id)))
     spec = experiment_spec_from_document(document)
-    register_hypothesis(conn, spec, receipt["input_hash"], mode="smoke",
-                        run_id=claim.attempt_id)
+    no_ledger = claim.spec.parameters.get("no_ledger", True)
+    mode = "smoke" if no_ledger else "primary"
+    _run_id, created = register_hypothesis(conn, spec, receipt["input_hash"], mode=mode,
+                                           run_id=claim.attempt_id)
+    if not no_ledger and created:
+        _append_ledger_row(store, spec, receipt)
     return None, ()
+
+
+def _append_ledger_row(store, spec, receipt):
+    """Append the "ran" row for one primary experiment to
+    ``<store.root>/experiments/LEDGER.csv``.
+
+    ``experiments.lib`` is NOT a legacy-adapter dependency (it is a plain
+    data-format helper package outside ``engine.*``, so
+    ``checks/import_layers.py`` records no edge and
+    ``checks/legacy_adapters.json`` stays at 75/75); its ``ledger_append``
+    also carries the append-only prefix check this writer would otherwise
+    have to duplicate. The path is always the operations store root, never the
+    live checkout's own ledger, so a test root writes only inside itself.
+
+    The ``spec_hash`` column is the LEGACY spec identity of the registered
+    runner's ``spec.yaml`` (its file hash, exactly what ``runner_manifest``
+    reports) — never ``spec.spec_hash``, the v2 document hash, which lives in
+    a different identity space. A synthetic runner has no legacy spec, so the
+    column is empty, matching ``experiments.lib.record_evaluation``'s shape
+    for a row with no headline metrics.
+    """
+    from datetime import datetime, timezone
+
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+    from engine.v2.ops.fingerprints import file_hash
+    from experiments.lib import LEDGER_COLUMNS, ledger_append
+
+    root = Path(store.root)
+    entry = RUNNER_INVENTORY.get(spec.runner)
+    spec_hash_value = ""
+    if entry is not None:
+        spec_path = root / entry["spec_source"]
+        if spec_path.is_file() and not spec_path.is_symlink():
+            spec_hash_value = file_hash(spec_path)
+    runner_result = (receipt.get("evidence") or {}).get("runner_result") or {}
+    if not isinstance(runner_result, dict):
+        runner_result = {}
+    headline = runner_result.get("headline")
+    headline = headline if isinstance(headline, dict) else runner_result
+    row = {"id": spec.experiment_id,
+           "spec_hash": spec_hash_value,
+           "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+           "stage": "ran",
+           "oos_mean_mid": headline.get("mean", headline.get("oos_mean_mid", "")),
+           "sharpe_trade": headline.get("sharpe_trade", ""),
+           "promoted": "False"}
+    ledger_append([{name: row[name] for name in LEDGER_COLUMNS}],
+                  path=root / "experiments" / "LEDGER.csv")

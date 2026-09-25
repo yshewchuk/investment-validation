@@ -288,10 +288,18 @@ def _dispatch_effect_receipt(worker, parameters, root):
 
 
 def _dispatch_experiment(parameters, root):
-    """P6 slice 10: run one smoke-mode experiment under admission. Pure
-    function of ``parameters`` and staging, like ``_dispatch_adhoc_rescore``
-    — the runner subprocess writes only inside ``root``, never the shared
-    legacy tree, so this carries no ``store_domains`` lease."""
+    """P6 slice 10: run one experiment under admission. Pure function of
+    ``parameters`` and staging, like ``_dispatch_adhoc_rescore`` — the runner
+    subprocess writes only inside ``root``, never the shared legacy tree, so
+    this carries no ``store_domains`` lease.
+
+    ``no_ledger=False`` (P6 slice 11) selects ``mode="primary"`` for the
+    coordinator's durable registration and ledger append. The runner
+    subprocess itself is ALWAYS invoked through
+    :func:`run_legacy_script`, which hardcodes ``--no-ledger``: a killed and
+    retried attempt must never be able to double-append a CSV, and the one
+    real ledger row is appended by the coordinator effect instead.
+    """
     from engine.v2.ops.experiments import (
         experiment_spec_from_document,
         run_experiment,
@@ -299,8 +307,7 @@ def _dispatch_experiment(parameters, root):
     )
     from engine.v2.ops.legacy_adapter import run_legacy_script
 
-    if not parameters.get("no_ledger", True):
-        raise fail("INVALID_REQUEST", "worker only supports smoke runs")
+    mode = "smoke" if parameters.get("no_ledger", True) else "primary"
     document = json.loads((root / "spec.json").read_text())
     spec = experiment_spec_from_document(document)
     runner_id = parameters["runner"]
@@ -308,12 +315,10 @@ def _dispatch_experiment(parameters, root):
         runner, synthetic = synthetic_fixture_runner, True
     else:
         def runner(*, run_dir, no_ledger):
-            if not no_ledger:
-                raise fail("INVALID_REQUEST", "worker only supports smoke runs")
             completed = run_legacy_script(root, runner_id)
             return {"returncode": completed.returncode}
         synthetic = False
-    receipt = run_experiment(spec, root, root, runner=runner, mode="smoke", synthetic=synthetic)
+    receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise fail("VALIDATION_FAILED", "experiment run did not succeed",

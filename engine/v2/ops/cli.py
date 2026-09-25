@@ -200,6 +200,16 @@ def _add_rescore_command(commands):
                               "already-captured data only, no provider pulls, no fitting")
 
 
+def _add_plan_ledger_arguments(plan):
+    """The experiment plan's smoke/activation opt-ins, split out of
+    :func:`parser` to keep that function under the line budget."""
+    plan.add_argument("--no-ledger", action="store_true")
+    plan.add_argument("--activate-ledger", action="store_true",
+                      help="run a REAL, ledger-writing experiment (requires a "
+                           "PLANNED ledger row). Mutually exclusive with "
+                           "--no-ledger.")
+
+
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", default="data/operations")
@@ -224,7 +234,7 @@ def parser():
     plan.add_argument("--as-of")
     plan.add_argument("--mode", default="shadow", choices=("shadow",))
     plan.add_argument("--spec", type=Path)
-    plan.add_argument("--no-ledger", action="store_true")
+    _add_plan_ledger_arguments(plan)
     plan.add_argument("--input-manifest", type=Path)
     plan.add_argument("--expected-population", type=Path,
                       help="JSON file: a list of 'ticker|strategy|event_date' keys")
@@ -451,6 +461,11 @@ def _plan_command(args, root, conn, clock):
                             catalog_path=_catalog_path(conn), objects_root=str(root))
     else:
         from engine.v2.ops.experiments import experiment_plan
+        if args.no_ledger and args.activate_ledger:
+            raise fail("INVALID_REQUEST",
+                       "--no-ledger and --activate-ledger are mutually exclusive")
+        if not args.no_ledger and not args.activate_ledger:
+            raise fail("INVALID_REQUEST", "production experiment activation is disabled")
         plan = experiment_plan(args.spec, smoke=args.no_ledger)
     ref = save_plan(conn, root, plan, clock=clock)
     return {"plan_ref": ref.artifact_id, "plan": plan}
