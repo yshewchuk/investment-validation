@@ -28,10 +28,11 @@ from pathlib import Path
 import pandas as pd
 
 from engine import paths
-from engine.data import manifest, store, validate
+from engine.data import manifest, rebuild_incremental, store, validate
 from engine.data.features import panel as panel_mod
 from engine.data.features import tier4 as tier4_mod
 from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
+from engine.data.rebuild_cache import InputCache
 
 __all__ = ["rebuild", "RebuildResult", "TABLE_ORDER"]
 
@@ -127,7 +128,8 @@ def build_events_table(sample: int | None = None) -> dict:
     return report
 
 
-def build_daily_table(sample: int | None = None) -> dict:
+def build_daily_table(sample: int | None = None, cache=None) -> dict:
+    """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses."""
     _banner("daily_market")
     tickers = n_daily.list_tickers()
     if sample:
@@ -138,7 +140,10 @@ def build_daily_table(sample: int | None = None) -> dict:
 
     with store.PartitionedWriter("daily_market") as writer:
         for i, ticker in enumerate(tickers, 1):
-            frame, report = n_daily.normalize_ticker(ticker)
+            if cache is None:
+                frame, report = n_daily.normalize_ticker(ticker)
+            else:
+                frame, report = rebuild_incremental.normalize_ticker_cached(ticker, cache)
             if frame.empty:
                 skipped.append(ticker)
             else:
@@ -177,7 +182,74 @@ def build_securities_table() -> dict:
     return report
 
 
-def build_chains_table(sample: int | None = None) -> dict:
+@dataclass
+class _ChainResult:
+    """What one chain source contributes: its frame, validation and kind."""
+
+    chain_kind: str
+    rows: int
+    frame: pd.DataFrame | None
+    validation: validate.ValidationReport
+
+
+def _chain_result(frame: pd.DataFrame, report: dict, label: str, writer) -> _ChainResult | None:
+    """Validate and coerce one parsed source; ``None`` when it has no rows."""
+    if frame.empty:
+        return None
+    clean, vreport = validate.validate_chains(frame, source_file=label)
+    return _ChainResult(report["chain_kind"], len(clean), writer.prepare(clean), vreport)
+
+
+def _chain_stream(sample, cache, fetch_stats: dict):
+    """``(sources, n_legacy, n_fetch)`` for the chains build."""
+    n_fetch = n_chains.count_fetch_sources()
+    if cache is not None:
+        n_legacy = len(n_chains.iter_chain_files())
+        return rebuild_incremental.chain_sources(cache, fetch_stats), n_legacy, n_fetch
+    # (label, parse callable) pairs, legacy first so its rows win the dedupe.
+    sources: list[tuple[str, object]] = [
+        (path.name, ("legacy", path)) for path in n_chains.iter_chain_files()
+    ]
+    n_legacy = len(sources)
+
+    # Chained lazily: the fetch payloads are parsed one at a time as the writer
+    # consumes them, so peak memory is one payload rather than all of them.
+    def _fetch_stream():
+        for source in n_chains.iter_fetch_sources(stats=fetch_stats):
+            yield (source.source_id, ("fetch", source))
+
+    return itertools.chain(iter(sources), _fetch_stream()), n_legacy, n_fetch
+
+
+def _parse_chain_source(kind: str, handle, cache) -> tuple[pd.DataFrame, dict]:
+    if cache is not None:
+        handle = handle[0]
+    if kind == "legacy":
+        return n_chains.normalize_file(handle)
+    return n_chains.normalize_fetch_rows(handle)
+
+
+def _chain_source_result(label, kind, handle, cache, writer):
+    """``(result, ok)`` for one source; ``ok`` is False when it was unreadable."""
+    if kind == "cached":
+        for call in handle.validation.quarantine_calls if handle is not None else ():
+            validate.quarantine(call[0], call[1], call[2])
+        return handle, True
+    try:
+        frame, report = _parse_chain_source(kind, handle, cache)
+    except (ValueError, OSError, EOFError) as exc:
+        validate.quarantine(label, f"unreadable raw payload: {type(exc).__name__}: {exc}")
+        if cache is not None:
+            cache.note_uncached()
+        return None, False
+    result = _chain_result(frame, report, label, writer)
+    if cache is not None:
+        _source, sig, cache_path = handle
+        cache.store(cache_path, sig, label, result)
+    return result, True
+
+
+def build_chains_table(sample: int | None = None, cache=None) -> dict:
     """Build ``option_chains`` from BOTH pull generations.
 
     Legacy wrapped files and Tier-1 fetch-store payloads are one stream here.
@@ -187,20 +259,8 @@ def build_chains_table(sample: int | None = None) -> dict:
     """
     _banner("option_chains")
 
-    # (label, parse callable) pairs, legacy first so its rows win the dedupe.
-    sources: list[tuple[str, object]] = [
-        (path.name, ("legacy", path)) for path in n_chains.iter_chain_files()
-    ]
     fetch_stats: dict = {}
-    n_legacy = len(sources)
-    n_fetch = n_chains.count_fetch_sources()
-    # Chained lazily: the fetch payloads are parsed one at a time as the writer
-    # consumes them, so peak memory is one payload rather than all of them.
-    def _fetch_stream():
-        for source in n_chains.iter_fetch_sources(stats=fetch_stats):
-            yield (source.source_id, ("fetch", source))
-
-    sources = itertools.chain(iter(sources), _fetch_stream())
+    sources, n_legacy, n_fetch = _chain_stream(sample, cache, fetch_stats)
     total = n_legacy + n_fetch
     if sample:
         sources = itertools.islice(sources, sample)
@@ -218,21 +278,15 @@ def build_chains_table(sample: int | None = None) -> dict:
 
     with store.PartitionedWriter("option_chains") as writer:
         for i, (label, (kind, handle)) in enumerate(sources, 1):
-            try:
-                if kind == "legacy":
-                    frame, report = n_chains.normalize_file(handle)
-                else:
-                    frame, report = n_chains.normalize_fetch_rows(handle)
-            except (ValueError, OSError, EOFError) as exc:
+            result, ok = _chain_source_result(label, kind, handle, cache, writer)
+            if not ok:
                 unreadable.append(label)
-                validate.quarantine(label, f"unreadable raw payload: {type(exc).__name__}: {exc}")
                 progress.tick(i)
                 continue
-            if not frame.empty:
-                clean, vreport = validate.validate_chains(frame, source_file=label)
-                batch.merge(vreport)
-                kinds[report["chain_kind"]] = kinds.get(report["chain_kind"], 0) + len(clean)
-                writer.add(clean)
+            if result is not None:
+                batch.merge(result.validation)
+                kinds[result.chain_kind] = kinds.get(result.chain_kind, 0) + result.rows
+                writer.add_prepared(result.frame)
             progress.tick(i, f"rows={writer.rows_written:,}")
         progress.done(total, f"rows={writer.rows_written:,}")
 
@@ -390,20 +444,41 @@ def build_tier4_table(since=None) -> dict:
 # --------------------------------------------------------------------------
 
 
+def _with_cache(table: str, build, incremental: bool):
+    """Run ``build(cache)``, with a per-input cache only when ``incremental``."""
+    if not incremental:
+        return build(None)
+    cache = InputCache(table)
+    report = build(cache)
+    cache.commit()
+    print(f"  {cache.summary()}", flush=True)
+    return report
+
+
 def rebuild(
     tables: tuple[str, ...] = TABLE_ORDER,
     sample: int | None = None,
     tier4_since=None,
+    incremental: bool = False,
 ) -> RebuildResult:
+    """Rebuild the named tables.
+
+    ``incremental=True`` (opt-in; the legacy nightly passes it) reuses cached
+    per-input parses for ``daily_market`` and ``option_chains`` -- see
+    :mod:`engine.data.rebuild_cache`. The outputs are byte-identical to the
+    default full rebuild, which neither reads nor writes that cache.
+    """
     started = time.time()
     paths.ensure_dirs()
     result = RebuildResult()
 
     builders = {
         "events": lambda: build_events_table(sample),
-        "daily": lambda: build_daily_table(sample),
+        "daily": lambda: _with_cache(
+            "daily_market", lambda c: build_daily_table(sample, c), incremental),
         "securities": build_securities_table,
-        "chains": lambda: build_chains_table(sample),
+        "chains": lambda: _with_cache(
+            "option_chains", lambda c: build_chains_table(sample, c), incremental),
         "option_daily": lambda: build_option_daily_table(sample),
         "trades": build_trades_table,
         "panel": build_panel_table,
@@ -441,6 +516,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="limit each table to N source units (tickers/files) — for tests",
     )
+    ap.add_argument(
+        "--incremental",
+        action="store_true",
+        help="reuse cached per-input parses for daily/chains (set "
+        "INVESTING_PLAN_REBUILD_FULL=1 to force a full parse that rewrites the cache)",
+    )
     ap.add_argument("--json", default=None, help="write the run report to this path")
     ap.add_argument(
         "--tier4-since",
@@ -451,7 +532,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     tables = tuple(args.table) if args.table else TABLE_ORDER
-    result = rebuild(tables=tables, sample=args.sample, tier4_since=args.tier4_since)
+    result = rebuild(tables=tables, sample=args.sample, tier4_since=args.tier4_since,
+                     incremental=args.incremental)
     if args.json:
         Path(args.json).write_text(json.dumps(result.as_dict(), indent=1, default=str))
     return 0
