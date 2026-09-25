@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -49,6 +50,7 @@ from engine.v2.ops.calendar_moves_jobs import (
     NATIVE_NASDAQ_ACCOUNT,
     NATIVE_YFINANCE_ACCOUNT,
     cached_unit_outcomes,
+    cached_unit_payloads,
     provider_failure_code,
     record_unit_receipt,
 )
@@ -88,6 +90,8 @@ SESSION_BY_TIME = {
     "time-after-hours": "AMC",
 }
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def horizon_dates(as_of, horizon_days: int, *, calendar=None) -> list[pd.Timestamp]:
     """Trading days in ``[as_of, as_of + horizon_days]``.
@@ -95,17 +99,15 @@ def horizon_dates(as_of, horizon_days: int, *, calendar=None) -> list[pd.Timesta
     Moved from the legacy pull (76-90) with the process-global
     ``trading_calendar()`` lookup made a parameter: the runner injects the
     snapshot-native calendar (``native_trading_calendar``), and a missing
-    calendar falls back to weekdays exactly as the legacy function's own
-    ``except Exception`` branch does.
+    calendar (``None`` -- the snapshot carries no ``daily_market`` session, a
+    condition ``_native_calendar`` catches specifically) falls back to weekdays
+    exactly as the legacy function's own ``except`` branch does. Reading the
+    calendar's own days is never wrapped in a broad catch: a programming error
+    propagates instead of silently degrading the horizon.
     """
     as_of = pd.Timestamp(as_of).normalize()
     end = as_of + pd.Timedelta(days=horizon_days)
-    days = []
-    if calendar is not None:
-        try:
-            days = [d for d in calendar.days if as_of <= d <= end]
-        except Exception:  # a missing calendar must not stop the refresh
-            days = []
+    days = [d for d in calendar.days if as_of <= d <= end] if calendar is not None else []
     if not days:
         days = [d for d in pd.date_range(as_of, end, freq="D") if d.weekday() < 5]
     return list(days)
@@ -224,10 +226,15 @@ def plan_forward_calendar(parent_snapshot, dates, tickers, *, as_of, cached_nasd
 
 
 def _edge_result(fetcher, argument) -> tuple[bytes, str, dict, list]:
-    """Call one provider edge; a raising edge is a classified transient (R1/R3)."""
+    """Call one provider edge; only a network failure is a classified transient.
+
+    The edges classify their own provider responses (R1); a programming error
+    or an ``OpsError`` out of a raising edge propagates (R3), it never becomes
+    a silent outage.
+    """
     try:
         raw, kind, meta, rows = fetcher(argument)
-    except Exception as exc:  # noqa: BLE001 -- classified, never swallowed
+    except (OSError, TimeoutError) as exc:
         return b"", "transient", {"error": type(exc).__name__}, []
     if not isinstance(kind, str):
         return b"", "refused", {}, []
@@ -250,21 +257,55 @@ def _parse_earnings(raw: bytes):
         return None
 
 
-def _fetch_nasdaq(conn, store, fetcher, plan, wanted: set[str], *, received_at: str):
+def _nasdaq_rows_from_payload(raw: bytes) -> list[dict]:
+    """The provider's own ``data.rows`` parser, over a cached receipt's bytes."""
+    from engine.v2.ops.providers.nasdaq_calendar import _rows_field
+
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
+        return []
+    return _rows_field(document) or []
+
+
+def _nasdaq_unit(conn, store, fetcher, unit, cached, *, received_at: str):
+    """One Nasdaq date's rows: a fresh fetch or the cached receipt's bytes.
+
+    Returns ``(kind, rows)``; a fresh parseable payload is recorded as a
+    receipt, so it survives a later unit's failure in the same run (R3).
+    """
     from engine.v2.ops.calendar_moves_jobs import _unit_request
 
+    fresh = unit.request_id not in cached
+    if fresh:
+        raw, kind, _meta, rows = _edge_result(fetcher, _unit_request(unit))
+    else:
+        raw, kind = cached[unit.request_id], "complete"
+        rows = _nasdaq_rows_from_payload(raw)
+    if kind in ("complete", "legitimate_empty"):
+        if not raw or not _parseable_json(raw):
+            kind = "refused"  # unparseable bytes are never cached as complete
+        elif fresh:
+            record_unit_receipt(conn, store, unit, raw, source=NASDAQ_SOURCE,
+                                endpoint="calendar/earnings", received_at=received_at,
+                                response_kind=kind)
+    return kind, (rows if kind == "complete" else [])
+
+
+def _fetch_nasdaq(conn, store, fetcher, plan, wanted: set[str], *, received_at: str):
+    """Every Nasdaq date unit's claims, fresh and cached receipt alike.
+
+    A same-session retry re-reads the 20 good units' cached bytes and fetches
+    only the failed one, yet still builds the claims a clean run would (spec
+    s4c round 3). Returns ``(claims, kinds)``.
+    """
+    cached = cached_unit_payloads(conn, store, plan)
     claims: dict[tuple[str, str], dict] = {}
     kinds: list[str] = []
-    for unit in plan.fetch_units:
+    for unit in plan.units:
         day = unit.expected_keys[0]
-        raw, kind, _meta, rows = _edge_result(fetcher, _unit_request(unit))
-        if kind in ("complete", "legitimate_empty"):
-            if not raw or not _parseable_json(raw):
-                kind = "refused"  # unparseable bytes are never cached as complete
-            else:
-                record_unit_receipt(conn, store, unit, raw, source=NASDAQ_SOURCE,
-                                    endpoint="calendar/earnings", received_at=received_at,
-                                    response_kind=kind)
+        kind, rows = _nasdaq_unit(conn, store, fetcher, unit, cached,
+                                  received_at=received_at)
         kinds.append(kind)
         if kind != "complete":
             continue
@@ -276,28 +317,42 @@ def _fetch_nasdaq(conn, store, fetcher, plan, wanted: set[str], *, received_at: 
     return claims, kinds
 
 
+def _yfinance_unit(conn, store, fetcher, unit, cached, *, received_at: str):
+    """One ticker's earnings frame: a fresh fetch or the cached receipt's bytes."""
+    fresh = unit.request_id not in cached
+    if fresh:
+        raw, kind, _meta, _rows = _edge_result(fetcher, unit.expected_keys[0])
+    else:
+        raw, kind = cached[unit.request_id], "complete"
+    frame = (_parse_earnings(raw)
+             if raw and kind in ("complete", "legitimate_empty") else None)
+    if kind == "complete" and frame is None:
+        kind = "refused"
+    if frame is not None and kind in ("complete", "legitimate_empty") and fresh:
+        record_unit_receipt(conn, store, unit, raw, source=YFINANCE_SOURCE,
+                            endpoint="earnings", received_at=received_at,
+                            response_kind=kind)
+    return frame, kind
+
+
 def _fetch_yfinance(conn, store, fetcher, plan, claims: dict, *, received_at: str) -> list[str]:
     """Warm and read the per-ticker yfinance earnings CSV.
 
     The legacy pull only warmed this cache here and left the session parse to
     ``engine.calendar.load_yfinance_earnings`` at rebuild time; this store is
     that read, moved into the job that owns the fetch (same CSV columns, same
-    ``session`` mapping). Bytes are parsed BEFORE they are cached (R2); the
-    unit kinds are returned so the caller can fail the job on any
-    transient/refused/not_final unit (R3).
+    ``session`` mapping). Every unit in the plan is applied -- a fresh fetch or
+    the cached complete receipt re-read by receipt -- so a same-session retry
+    resolves the same claims a clean run would. Bytes are parsed BEFORE they
+    are cached (R2); the unit kinds are returned so the caller can fail the job
+    on any transient/refused/not_final unit (R3).
     """
+    cached = cached_unit_payloads(conn, store, plan)
     kinds: list[str] = []
-    for unit in plan.fetch_units:
+    for unit in plan.units:
         ticker = unit.expected_keys[0]
-        raw, kind, _meta, _rows = _edge_result(fetcher, ticker)
-        frame = (_parse_earnings(raw)
-                 if raw and kind in ("complete", "legitimate_empty") else None)
-        if kind == "complete" and frame is None:
-            kind = "refused"
-        if frame is not None and kind in ("complete", "legitimate_empty"):
-            record_unit_receipt(conn, store, unit, raw, source=YFINANCE_SOURCE,
-                                endpoint="earnings", received_at=received_at,
-                                response_kind=kind)
+        frame, kind = _yfinance_unit(conn, store, fetcher, unit, cached,
+                                     received_at=received_at)
         kinds.append(kind)
         if frame is None or frame.empty or "session" not in frame.columns:
             continue
@@ -444,9 +499,19 @@ def _cached_yfinance(conn, units) -> dict:
 
 
 def _native_calendar(repository, parent):
+    """The pinned snapshot's own trading calendar, or ``None`` for the fallback.
+
+    ``native_trading_calendar`` raises ``ValueError`` when the snapshot carries
+    no ``daily_market`` session; that one specific error is the weekday
+    fallback, and it is logged here so the job diagnostics name it instead of
+    the horizon silently changing shape.
+    """
     try:
         return native_trading_calendar(daily_by_ticker(repository, parent.snapshot))
-    except ValueError:  # no daily_market session in the snapshot: weekday fallback
+    except ValueError:
+        _LOGGER.warning(
+            "forward_calendar: pinned snapshot has no daily_market session; "
+            "using the weekday calendar fallback")
         return None
 
 
@@ -457,11 +522,15 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
     Never calls ``engine.data.rebuild.rebuild``: the claims merge into the
     existing ``earnings_events`` contract through ``generic_incremental``
     against the pinned parent snapshot. The horizon calendar comes from that
-    snapshot's own ``daily_market`` dates; each source's units are planned
-    cache-first, so a unit backed by a durable complete receipt never reaches
-    the provider again (spec R2), and any unit that ends transient/refused/
-    not_final fails the job with its typed code before anything is committed
-    (spec R3).
+    snapshot's own ``daily_market`` dates (a snapshot without one logs the
+    weekday fallback); each source's units are planned cache-first, so a unit
+    backed by a durable complete receipt never reaches the provider again
+    (spec R2), and any unit that ends transient/refused/not_final fails the
+    job with its typed code before anything is committed (spec R3). A
+    same-session retry rebuilds EVERY unit's claims -- fresh fetches plus the
+    cached complete receipts re-read by receipt -- so it commits exactly what a
+    clean single run would, while a run whose units are all cache-satisfied is
+    a no-op.
     """
     root = Path(root)
     document = _input_document(root)
@@ -500,6 +569,14 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
         if code:
             raise fail(code, "forward calendar provider response was not complete")
         if not claims:
+            return RefreshCallbackResult(
+                status="noop", completed_ids=tuple(sorted(wanted)), coverage_advanced=False,
+                parent_snapshot_id=parameters.parent_snapshot_id,
+                refresh_plan_hash=parameters.refresh_plan_hash)
+        if not nasdaq_plan.fetch_units and not yfinance_plan.fetch_units:
+            # Every fed unit is already cached and its claims committed by an
+            # earlier same-session run: rebuilding the identical claims would
+            # only mint another identical generation, so this run is a no-op.
             return RefreshCallbackResult(
                 status="noop", completed_ids=tuple(sorted(wanted)), coverage_advanced=False,
                 parent_snapshot_id=parameters.parent_snapshot_id,

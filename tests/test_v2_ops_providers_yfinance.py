@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 
 import pandas as pd
+import pytest
 
 from engine.v2.ops.providers import PROVIDER_CREDENTIAL_VARIABLES, provider_credentials
 from engine.v2.ops.providers.yfinance_edge import (
@@ -75,9 +76,28 @@ def test_earnings_fetcher_is_a_legitimate_empty_for_no_frame():
 
 def test_earnings_fetcher_classifies_a_library_error_as_transient():
     def boom(ticker):
-        raise RuntimeError("zoo of types")
+        raise ConnectionError("network down")
 
     raw, kind, _meta, _rows = yfinance_earnings_fetcher(earnings_fn=boom)("AAA")
+    assert (raw, kind) == (b"", "transient")
+
+
+def test_a_programming_error_is_never_classified_transient():
+    """Narrowed catch (spec fix 3): only network/library errors are transient."""
+    def boom(ticker):
+        raise TypeError("bad call signature")
+
+    with pytest.raises(TypeError):
+        yfinance_history_fetcher(history_fn=boom)("AAA")
+    with pytest.raises(TypeError):
+        yfinance_earnings_fetcher(earnings_fn=boom)("AAA")
+
+
+def test_a_library_value_error_is_transient():
+    def boom(ticker):
+        raise ValueError("pandas parse failed")
+
+    raw, kind, _meta, _rows = yfinance_history_fetcher(history_fn=boom)("AAA")
     assert (raw, kind) == (b"", "transient")
 
 

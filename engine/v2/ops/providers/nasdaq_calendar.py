@@ -12,8 +12,10 @@ Classification (spec R1) happens HERE, before the store caches anything: a
 2xx with the documented ``data.rows`` list is ``complete`` (rows) or
 ``legitimate_empty`` (no rows), a 2xx whose body does not parse to that shape
 is ``refused``, 404 is ``not_final`` (the date is not published yet), 429 and
-5xx are ``transient``, any other non-2xx is ``refused``, and a raised network
-error is ``transient`` -- never a silently empty row list.
+5xx are ``transient``, 401/403 (and only those) are ``credential_invalid``,
+any other non-2xx is ``refused`` (bad source data), and a raised network error
+is ``transient`` -- never a silently empty row list. A programming error out of
+``http_get`` propagates, it is never classified as an outage.
 
 The URL builder and the ``data.rows`` parser are ported from
 ``engine/data/sources/nasdaq.py`` and the legacy pull's own ``_nasdaq_rows``;
@@ -67,7 +69,10 @@ def nasdaq_calendar_fetcher(*, http_get: Callable[..., tuple] | None = None) \
         try:
             status, _headers, body = request(_nasdaq_url({"date": day}),
                                              timeout=REQUEST_TIMEOUT_SECONDS)
-        except Exception as exc:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+        except (OSError, TimeoutError) as exc:
+            # Network errors only: requests' RequestException is an OSError
+            # subclass, so the default client is covered; anything else (a
+            # TypeError, an OpsError) is a programming error and propagates.
             return b"", "transient", {"error": type(exc).__name__, "date": day}, []
         document = _json_document(body)
         kind = _response_kind(status, document)
@@ -114,7 +119,13 @@ def _nasdaq_rows(document: Any) -> list[dict]:
 
 
 def _response_kind(status: int, document: Any) -> str:
-    """R1 classification of one Nasdaq response, before anything is cached."""
+    """R1 classification of one Nasdaq response, before anything is cached.
+
+    401/403 alone is ``credential_invalid``; an unparseable body or any other
+    non-2xx is ``refused`` (bad source data, non-retryable).
+    """
+    if status in (401, 403):
+        return "credential_invalid"
     if status == 404:
         return "not_final"
     if status == 429 or status >= 500:

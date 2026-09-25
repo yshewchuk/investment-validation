@@ -66,6 +66,7 @@ __all__ = [
     "run_incremental_refresh",
     "daily_market_logical_key",
     "load_daily_market_rows",
+    "load_raw_receipt",
     "merge_daily_market",
     "revision_content_hash",
     "select_revision_winners",
@@ -576,6 +577,23 @@ def cache_raw_receipt(conn: Any, store: ArtifactStore, payload: RawPayload,
              record.response_kind, canonical_json(_jsonable(record.request)),
              canonical_json(_jsonable(record.response_meta)), record.received_at))
     return record
+
+
+def load_raw_receipt(conn: Any, store: ArtifactStore, receipt_id: str) -> bytes:
+    """Read and verify one cached receipt's bytes by its receipt id.
+
+    The S4C calendar/moves stores rebuild a same-session retry's claims and
+    fragments from the receipts a failed attempt already cached, so the retry
+    commits exactly what a clean single run would; the bytes are re-hashed
+    against the receipt's own object ref before they are trusted.
+    """
+    row = conn.execute(
+        "SELECT artifact_ref_json FROM data_raw_receipts WHERE raw_receipt_id = ?",
+        (receipt_id,)).fetchone()
+    if row is None:
+        raise errors.fail("INPUT_CHANGED", "cached raw receipt is missing")
+    object_ref = _object_ref_document(row["artifact_ref_json"])
+    return store.read_verified(_artifact_ref(object_ref, RAW_SCHEMA_REF))
 
 
 def cache_normalization(conn: Any, store: ArtifactStore,

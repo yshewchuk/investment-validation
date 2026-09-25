@@ -45,6 +45,7 @@ from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
 from engine.v2.ops.calendar_moves_jobs import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     cached_unit_outcomes,
+    cached_unit_payloads,
     provider_failure_code,
     record_unit_receipt,
 )
@@ -230,14 +231,15 @@ def fetch_history(fetcher, ticker: str) -> tuple[np.ndarray, np.ndarray] | None:
 def _history_result(fetcher, ticker: str) -> tuple[bytes, str]:
     """Call the provider edge once and return ``(raw, response_kind)``.
 
-    The edge classifies its own HTTP/library failures (R1); a raising edge is
-    an outage and is classified ``transient`` here rather than silently
+    The edge classifies its own HTTP/library failures (R1); only a network
+    exception out of a raising edge is classified ``transient`` here -- a
+    programming error or an ``OpsError`` propagates rather than being silently
     treated as "no history" (R3). The caller aggregates kinds and fails the
     job when any unit ends non-complete.
     """
     try:
         raw, kind, _meta, _rows = fetcher(str(ticker))
-    except Exception:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+    except (OSError, TimeoutError):
         return b"", "transient"
     if not isinstance(kind, str):
         return b"", "refused"
@@ -345,6 +347,19 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
 # --------------------------------------------------------------------------
 
 
+def _committed_targets(parent, targets) -> tuple[str, ...]:
+    """The wanted tickers whose rows the pinned snapshot already committed.
+
+    A cache-only rerun commits nothing, so its ``completed_ids`` is only the
+    units whose rows are already in the parent snapshot's ``computed_moves``
+    fragments -- never the whole target list on faith.
+    """
+    committed = {record.partition_key for record in parent.records
+                 if record.table_contract_ref.contract_id
+                 == COMPUTED_MOVES_CONTRACT.contract_id}
+    return tuple(ticker for ticker in targets if ticker in committed)
+
+
 def _input_document(root: Path) -> dict | None:
     path = root / INPUT_PATH
     if not path.is_file():
@@ -374,9 +389,12 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
     budget through ``incremental_data.plan_refresh`` per ticker, and commits
     one new snapshot carrying every other table forward alongside a fresh
     ``computed_moves`` dataset version. A unit already backed by a durable raw
-    receipt is a cache hit: it is never re-fetched, so a second same-catalog
-    run is a no-op with no provider call. Never touches ``INVESTING_PLAN_ROOT``
-    or any legacy path.
+    receipt is a cache hit: it is never re-fetched. A same-session retry
+    rebuilds EVERY unit's fragment -- the fresh fetches plus the cached
+    complete receipts re-read by receipt -- so it commits exactly what a clean
+    single run would, while a run whose units are all cache-satisfied is a
+    no-op with no provider call. Never touches ``INVESTING_PLAN_ROOT`` or any
+    legacy path.
     """
     root = Path(root)
     document = _input_document(root)
@@ -405,14 +423,21 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
                 endpoint=COMPUTED_MOVES_TABLE_NAME),
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(document["expected_head_generation"]))
+        if not plan.fetch_units:
+            # Every wanted receipt is already complete and committed: a rerun
+            # has no work, and never refetches a cache hit (spec R2).
+            return RefreshCallbackResult(
+                status="noop", completed_ids=_committed_targets(parent, targets),
+                coverage_advanced=False, parent_snapshot_id=parameters.parent_snapshot_id,
+                refresh_plan_hash=plan.plan_hash)
         fragment_records, attempts = _capture_targets(
-            conn, store, plan.fetch_units, fetcher, clock,
+            conn, store, plan, fetcher, clock,
             events_by_ticker=_group_by_ticker(events),
             daily_by_ticker=_group_by_ticker(daily))
         if not fragment_records:
             return RefreshCallbackResult(
-                status="noop", completed_ids=tuple(targets), coverage_advanced=False,
-                parent_snapshot_id=parameters.parent_snapshot_id,
+                status="noop", completed_ids=_committed_targets(parent, targets),
+                coverage_advanced=False, parent_snapshot_id=parameters.parent_snapshot_id,
                 refresh_plan_hash=plan.plan_hash)
 
         request_hash = content_hash({
@@ -426,41 +451,58 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
                                        parameters.parent_snapshot_id),
             generation=int(document["expected_head_generation"]), request_hash=request_hash)
         return RefreshCallbackResult(
-            status="complete", completed_ids=tuple(targets), coverage_advanced=True,
-            parent_snapshot_id=parameters.parent_snapshot_id,
+            status="complete", completed_ids=tuple(sorted(fragment_records)),
+            coverage_advanced=True, parent_snapshot_id=parameters.parent_snapshot_id,
             refresh_plan_hash=plan.plan_hash,
             candidate_snapshot_id=receipt.resulting_head_snapshot_id)
     finally:
         conn.close()
 
 
-def _capture_targets(conn, store, units, fetcher, clock, *, events_by_ticker,
-                     daily_by_ticker):
-    """Acquire and stage one fragment per fetch unit, exactly once.
+def _unit_history(conn, store, unit, fetcher, cached, *, created_at):
+    """One unit's parsed Close series, from the edge or a cached receipt.
 
-    Both source frames were scanned once by the caller and are indexed here by
-    ticker; the provider edge is called once per uncached unit. Bytes are
-    parsed/validated BEFORE they are cached (R2): an unparseable payload is
-    ``refused`` and never recorded, a ``legitimate_empty`` payload is recorded
-    with its own kind (and never reused), and any unit that ends
+    A unit in the plan's cache set is never re-fetched (spec R2): its verified
+    receipt bytes are re-parsed instead, so a same-session retry rebuilds the
+    series a clean run had. Only a fresh unit's bytes are cached, and only
+    after they parse (R2). Returns ``(series, kind, fresh)``.
+    """
+    fresh = unit.request_id not in cached
+    if fresh:
+        raw, kind = _history_result(fetcher, unit.expected_keys[0])
+    else:
+        raw, kind = cached[unit.request_id], "complete"
+    series = (_parse_history(raw) if raw and kind in ("complete", "legitimate_empty")
+              else None)
+    if kind == "complete" and series is None:
+        kind = "refused"
+    if series is not None and fresh:
+        record_unit_receipt(conn, store, unit, raw, source=COMPUTED_MOVES_TABLE_NAME,
+                            endpoint=COMPUTED_MOVES_TABLE_NAME, received_at=created_at,
+                            response_kind=kind)
+    return series, kind, fresh
+
+
+def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
+                     daily_by_ticker):
+    """Acquire and stage one fragment per unit, fresh or cached, exactly once.
+
+    The caller reaches this only when the plan has at least one fresh fetch, and
+    EVERY wanted unit is rebuilt here -- the fresh fetches plus the cached
+    ``complete`` receipts re-read and re-parsed by receipt -- so a same-session
+    retry commits exactly what a clean single run would. Any unit that ends
     transient/refused/not_final fails the whole job (R3) after every unit has
-    been attempted.
+    been attempted, with the good receipts already cached.
     """
     created_at = clock.now().isoformat()
+    cached = cached_unit_payloads(conn, store, plan)
     fragment_records, attempts, kinds = {}, [], []
-    for unit in units:
+    for unit in plan.units:
         ticker = unit.expected_keys[0]
         capture_id = "capture_" + content_hash(
             {"ticker": ticker, "created_at_request": created_at}).removeprefix("sha256:")[:32]
-        raw, kind = _history_result(fetcher, ticker)
-        series = (_parse_history(raw) if raw and kind in ("complete", "legitimate_empty")
-                  else None)
-        if kind == "complete" and series is None:
-            kind = "refused"
-        if series is not None:
-            record_unit_receipt(conn, store, unit, raw, source=COMPUTED_MOVES_TABLE_NAME,
-                                endpoint=COMPUTED_MOVES_TABLE_NAME, received_at=created_at,
-                                response_kind=kind)
+        series, kind, fresh = _unit_history(conn, store, unit, fetcher, cached,
+                                            created_at=created_at)
         kinds.append(kind)
         if series is None:
             attempts.append({"capture_id": capture_id, "ticker": ticker,
@@ -489,7 +531,8 @@ def _capture_targets(conn, store, units, fetcher, clock, *, events_by_ticker,
         fragment_records[ticker] = _write_ticker_fragment(store, ticker, rows,
                                                           request_hash=request_hash)
         attempts.append({"capture_id": capture_id, "ticker": ticker,
-                         "created_at": created_at, "outcome": "added"})
+                         "created_at": created_at,
+                         "outcome": "added" if fresh else "cached"})
     code = provider_failure_code(kinds)
     if code:
         raise fail(code, "computed moves provider response was not complete")

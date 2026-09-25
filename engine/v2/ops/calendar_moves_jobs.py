@@ -51,20 +51,27 @@ MAX_PROVIDER_CALLS = 1_000_000
 
 #: S4C failure semantics (spec R1): every provider edge returns one of these
 #: kinds. Only ``complete`` may ever be reused from the durable raw cache (R2).
-RESPONSE_KINDS = ("complete", "legitimate_empty", "not_final", "transient", "refused")
+#: ``credential_invalid`` is the provider's own 401/403; ``refused`` is every
+#: other unusable answer (unparseable body, non-auth 4xx).
+RESPONSE_KINDS = ("complete", "legitimate_empty", "not_final", "transient",
+                  "refused", "credential_invalid")
 #: The response kinds that are real, parseable payloads: a receipt records its
 #: own kind, but ``cached_unit_outcomes`` reuses only ``complete``.
 CACHEABLE_RESPONSE_KINDS = ("complete", "legitimate_empty")
 #: kind -> the registered failure code that ends the job. ``complete`` and
 #: ``legitimate_empty`` are successful unit outcomes; ``transient`` is
-#: retryable, ``refused`` and ``not_final`` are not silently retried.
+#: retryable, ``refused``/``credential_invalid``/``not_final`` are not silently
+#: retried. A body that fails to parse is ``SOURCE_INVALID`` (bad source data),
+#: never ``CREDENTIAL_INVALID`` -- only the 401/403 kind is that.
 _FAILURE_CODE_BY_RESPONSE_KIND = {
     "not_final": "SOURCE_NOT_FINAL",
     "transient": "TRANSIENT_SOURCE",
-    "refused": "CREDENTIAL_INVALID",
+    "refused": "SOURCE_INVALID",
+    "credential_invalid": "CREDENTIAL_INVALID",
 }
 #: Higher is worse, so a mixed run reports the failure that cannot be retried.
-_FAILURE_SEVERITY = {"TRANSIENT_SOURCE": 0, "SOURCE_NOT_FINAL": 1, "CREDENTIAL_INVALID": 2}
+_FAILURE_SEVERITY = {"TRANSIENT_SOURCE": 0, "SOURCE_NOT_FINAL": 1,
+                     "SOURCE_INVALID": 2, "CREDENTIAL_INVALID": 3}
 
 __all__ = [
     "COMPUTED_MOVES_REFRESH_ACTION",
@@ -80,6 +87,7 @@ __all__ = [
     "RESPONSE_KINDS",
     "CalendarMovesParameters",
     "cached_unit_outcomes",
+    "cached_unit_payloads",
     "calendar_moves_job_spec",
     "calendar_moves_parameter_problems",
     "computed_moves_job_kind",
@@ -95,8 +103,10 @@ def provider_failure_code(kinds) -> str | None:
     """The worst typed failure code among unit response kinds, or ``None``.
 
     Spec R3: any unit that ends ``transient`` fails the job with
-    ``TRANSIENT_SOURCE`` (retryable); ``refused`` fails it with a non-retryable
-    code; a run that is all-``complete``/``legitimate_empty`` has no failure.
+    ``TRANSIENT_SOURCE`` (retryable); ``refused`` fails it with the
+    non-retryable ``SOURCE_INVALID`` and ``credential_invalid`` (a provider
+    401/403) with ``CREDENTIAL_INVALID``; a run that is all-``complete``/
+    ``legitimate_empty`` has no failure.
     """
     worst = None
     for kind in kinds:
@@ -303,6 +313,25 @@ def cached_unit_outcomes(conn, units: Sequence, *, source: str, endpoint: str) -
             request_id=unit.request_id, receipt_ref=hit[0], raw_hash=hit[1],
             cache_hit=True)
     return outcomes
+
+
+def cached_unit_payloads(conn, store, plan) -> dict[str, bytes]:
+    """Verified bytes of every cache-hit unit in one plan, keyed by request id.
+
+    A same-session retry must rebuild every wanted unit's claims/fragments, not
+    only the units it fetches fresh: the plan's cache set holds exactly the
+    units whose durable receipt is ``complete`` (spec R2), so re-reading those
+    bytes by receipt reconstructs the rows a clean single run would have
+    parsed.
+    """
+    from engine.v2.data.incremental import load_raw_receipt
+
+    payloads: dict[str, bytes] = {}
+    for outcome in plan.cached:
+        if outcome.receipt_ref is None:
+            continue
+        payloads[outcome.request_id] = load_raw_receipt(conn, store, outcome.receipt_ref)
+    return payloads
 
 
 # --------------------------------------------------------------------------

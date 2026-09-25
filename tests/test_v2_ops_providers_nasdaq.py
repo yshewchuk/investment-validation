@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from engine.v2.ops.providers import PROVIDER_CREDENTIAL_VARIABLES, provider_credentials
 from engine.v2.ops.providers.nasdaq_calendar import (
     BASE_URL,
@@ -81,8 +83,14 @@ def test_a_404_is_not_final_not_complete():
     assert rows == []
 
 
-def test_a_403_is_refused():
+def test_a_403_is_credential_invalid_not_a_generic_refusal():
     fetcher = nasdaq_calendar_fetcher(http_get=_FakeHttp(status=403, body=b"forbidden"))
+    _raw, kind, _meta, _rows = fetcher(dict(UNIT))
+    assert kind == "credential_invalid"
+
+
+def test_a_400_is_refused_bad_source_data_not_a_credential_failure():
+    fetcher = nasdaq_calendar_fetcher(http_get=_FakeHttp(status=400, body=b"bad request"))
     _raw, kind, _meta, _rows = fetcher(dict(UNIT))
     assert kind == "refused"
 
@@ -101,6 +109,15 @@ def test_a_network_error_is_transient_not_an_empty_row_list():
     raw, kind, meta, rows = fetcher(dict(UNIT))
     assert (raw, kind, rows) == (b"", "transient", [])
     assert meta["error"] == "TimeoutError"
+
+
+def test_a_programming_error_out_of_http_get_propagates():
+    def boom(url, *, timeout):
+        raise TypeError("bad call signature")
+
+    fetcher = nasdaq_calendar_fetcher(http_get=boom)
+    with pytest.raises(TypeError):
+        fetcher(dict(UNIT))
 
 
 def test_the_unmetered_account_needs_no_credentials(monkeypatch):

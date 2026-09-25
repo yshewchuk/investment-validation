@@ -19,10 +19,12 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 from engine import calendar as legacy_calendar
 from engine import paths
+from engine.v2.data import objects
 from engine.v2.data.computed_moves import native_trading_calendar
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
@@ -110,17 +112,17 @@ _DAILY_COMMON = dict(spot=100.0, iv10=30.0, iv30=32.0, exern_iv10=29.0, exern_iv
                      src_spot="orats", src_iv="orats", src_mcap="orats")
 
 
-def _daily_rows() -> list[dict]:
+def _daily_rows(tickers=TICKERS) -> list[dict]:
     days = pd.bdate_range("2026-08-03", "2026-12-01")
     return [dict(ticker=ticker, date=day.to_pydatetime(), year=2026, **_DAILY_COMMON)
-            for ticker in TICKERS for day in days]
+            for ticker in tickers for day in days]
 
 
 def _commit_parent(conn, store, clock, *, daily_rows=None, tickers=TICKERS):
     contracts = {"daily_market": contract_for("daily_market"),
                  "earnings_events": contract_for("earnings_events")}
     dm_ref = contract_ref_for(contracts["daily_market"])
-    rows = _daily_rows() if daily_rows is None else daily_rows
+    rows = _daily_rows(tickers) if daily_rows is None else daily_rows
     dm_records = [publish_and_inspect(store, contracts["daily_market"], dm_ref, rows, "2026")]
     ee_ref = contract_ref_for(contracts["earnings_events"])
     ee_records = []
@@ -608,7 +610,7 @@ def test_legitimate_empty_receipts_are_recorded_but_never_reused(tmp_path):
     assert len(calls) == 2 * first_calls
 
 
-def test_a_refused_response_is_not_cached_and_fails_non_retryably(tmp_path):
+def test_a_credential_invalid_response_is_not_cached_and_fails_non_retryably(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
@@ -617,7 +619,7 @@ def test_a_refused_response_is_not_cached_and_fails_non_retryably(tmp_path):
                        as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
 
     def forbidden(unit):
-        return b"forbidden", "refused", {"status": 403}, []
+        return b"forbidden", "credential_invalid", {"status": 403}, []
 
     with pytest.raises(OpsError) as exc:
         forward_calendar_store.run_forward_calendar_refresh(
@@ -665,7 +667,7 @@ def test_unparseable_computed_moves_bytes_are_never_cached(tmp_path):
     with pytest.raises(OpsError) as exc:
         computed_moves_store.run_computed_moves_refresh(
             _store_parameters(tmp_path, head), tmp_path, fetcher=garbage)
-    assert exc.value.code == "CREDENTIAL_INVALID"
+    assert exc.value.code == "SOURCE_INVALID"
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'computed_moves'"
                         ).fetchone()[0] == 0
 
@@ -685,7 +687,7 @@ def test_unparseable_nasdaq_bytes_are_never_cached(tmp_path):
         forward_calendar_store.run_forward_calendar_refresh(
             _store_parameters(tmp_path, head), tmp_path, nasdaq_fetcher=garbage,
             earnings_fetcher=_empty_earnings)
-    assert exc.value.code == "CREDENTIAL_INVALID"
+    assert exc.value.code == "SOURCE_INVALID"
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'nasdaq'"
                         ).fetchone()[0] == 0
 
@@ -780,3 +782,179 @@ def test_target_selection_uses_as_of_not_the_wall_clock(tmp_path, monkeypatch):
         repository, head["snapshot_id"], as_of=SESSION)
     assert targets == sorted(TICKERS)
     assert report["scoreable_on_orats_calendar"] == len(TICKERS)
+
+
+# --------------------------------------------------------------------------
+# 7. a same-session retry rebuilds every unit, cached receipts included
+# --------------------------------------------------------------------------
+
+
+RETRY_TICKERS = tuple(f"CM{index:02d}" for index in range(21))
+
+
+def _fixed_system_clock(monkeypatch, module, clock):
+    monkeypatch.setattr(module, "SystemClock", lambda: clock)
+
+
+def _fragment_rows(conn, store, snapshot_id, table_name):
+    resolved = Repository(conn, store).resolve_full(snapshot_id)
+    contract_id = next(item.contract_id for item in resolved.contracts
+                       if item.table_name == table_name)
+    rows = []
+    for record in resolved.records:
+        if record.table_contract_ref.contract_id != contract_id:
+            continue
+        rows.extend(pq.read_table(objects.verify_object_path(store, record.object_ref)).to_pylist())
+    return rows
+
+
+def _row_key(row):
+    return (str(row.get("ticker")), str(row.get("event_date")))
+
+
+def _prepared_root(root, tickers):
+    root.mkdir()
+    conn, clock, _ = catalog(root)
+    store = ArtifactStore(root)
+    _commit_parent(conn, store, clock, tickers=tickers)
+    return conn, clock, store
+
+
+def test_computed_moves_retry_commits_every_cached_unit(tmp_path, monkeypatch):
+    """20 good units + 1 transient, then the transient recovers: the retry
+    commits the same rows a clean single run over all 21 units would, and
+    refetches only the one unit that failed."""
+    retry_root = tmp_path / "cm-retry"
+    clean_root = tmp_path / "cm-clean"
+    retry_conn, retry_clock, retry_store = _prepared_root(retry_root, RETRY_TICKERS)
+    head = _head(retry_conn)
+    _write_store_input(retry_root, "computed_moves_refresh_input.json", head,
+                       as_of=SESSION, all_scoreable=True)
+    parameters = _store_parameters(retry_root, head, expected_ids=RETRY_TICKERS)
+
+    frame = _history_frame()
+    calls, failing = [], {RETRY_TICKERS[-1]}
+
+    def history(ticker):
+        calls.append(ticker)
+        if ticker in failing:
+            raise TimeoutError("transient outage")
+        return frame.to_csv().encode(), "complete", {}, []
+
+    _fixed_system_clock(monkeypatch, computed_moves_store, retry_clock)
+    with pytest.raises(OpsError) as exc:
+        computed_moves_store.run_computed_moves_refresh(parameters, retry_root,
+                                                        fetcher=history)
+    assert exc.value.code == "TRANSIENT_SOURCE"
+    assert len(calls) == len(RETRY_TICKERS)
+    assert retry_conn.execute(
+        "SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'computed_moves'"
+    ).fetchone()[0] == len(RETRY_TICKERS) - 1
+    assert _head(retry_conn)["generation"] == head["generation"]
+
+    failing.clear()
+    calls.clear()
+    retried = computed_moves_store.run_computed_moves_refresh(parameters, retry_root,
+                                                             fetcher=history)
+    assert retried.status == "complete"
+    assert tuple(retried.completed_ids) == RETRY_TICKERS
+    assert calls == [RETRY_TICKERS[-1]]  # the 20 cached units were not refetched
+
+    clean_conn, clean_clock, clean_store = _prepared_root(clean_root, RETRY_TICKERS)
+    clean_head = _head(clean_conn)
+    _write_store_input(clean_root, "computed_moves_refresh_input.json", clean_head,
+                       as_of=SESSION, all_scoreable=True)
+    _fixed_system_clock(monkeypatch, computed_moves_store, clean_clock)
+    clean = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(clean_root, clean_head, expected_ids=RETRY_TICKERS), clean_root,
+        fetcher=lambda ticker: (frame.to_csv().encode(), "complete", {}, []))
+    assert clean.status == "complete"
+
+    retry_rows = _fragment_rows(retry_conn, retry_store, _head(retry_conn)["snapshot_id"],
+                                "computed_moves")
+    clean_rows = _fragment_rows(clean_conn, clean_store, _head(clean_conn)["snapshot_id"],
+                                "computed_moves")
+    assert sorted(retry_rows, key=_row_key) == sorted(clean_rows, key=_row_key)
+
+
+def test_forward_calendar_retry_commits_every_cached_unit(tmp_path, monkeypatch):
+    """20 good date units + 1 transient, then it recovers: the retry rebuilds
+    the cached Nasdaq date receipts AND the cached yfinance receipt, commits
+    the committed-row set a clean single run would, and fetches only the unit
+    that failed."""
+    retry_root = tmp_path / "fc-retry"
+    clean_root = tmp_path / "fc-clean"
+    retry_conn, retry_clock, retry_store = _prepared_root(retry_root, TICKERS)
+    head = _head(retry_conn)
+    repository = Repository(retry_conn, retry_store)
+    parent = repository.resolve(head["snapshot_id"])
+    dates = forward_calendar_store.horizon_dates(
+        SESSION, 30, calendar=native_trading_calendar(
+            forward_calendar_store.daily_by_ticker(repository, parent)))
+    assert len(dates) == 21
+    bad_day = str(dates[-1].date())
+    _write_store_input(retry_root, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=30, tickers=[TICKER])
+    parameters = _store_parameters(retry_root, head, expected_ids=(TICKER,))
+
+    body = _nasdaq_body(time="time-not-supplied")
+    nasdaq_calls, earnings_calls = [], []
+    failing = {bad_day}
+
+    def nasdaq(unit):
+        nasdaq_calls.append(unit["partition_key"])
+        if unit["partition_key"] in failing:
+            raise TimeoutError("transient outage")
+        rows = [{"symbol": TICKER, "time": "time-not-supplied"}]
+        return body, "complete", {"status": 200}, rows
+
+    earnings = pd.DataFrame([{"ticker": TICKER, "event_date": SESSION,
+                              "annc_tod": "1650", "session": "AMC"}])
+
+    def earn(ticker):
+        earnings_calls.append(ticker)
+        return earnings.to_csv(index=False).encode(), "complete", {}, []
+
+    _fixed_system_clock(monkeypatch, forward_calendar_store, retry_clock)
+    with pytest.raises(OpsError) as exc:
+        forward_calendar_store.run_forward_calendar_refresh(
+            parameters, retry_root, nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert exc.value.code == "TRANSIENT_SOURCE"
+    assert len(nasdaq_calls) == 21
+    assert earnings_calls == [TICKER]
+    assert retry_conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 21
+    assert _head(retry_conn)["generation"] == head["generation"]
+
+    failing.clear()
+    nasdaq_calls.clear()
+    earnings_calls.clear()
+    retried = forward_calendar_store.run_forward_calendar_refresh(
+        parameters, retry_root, nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert retried.status == "complete"
+    assert tuple(retried.completed_ids) == (TICKER,)
+    assert nasdaq_calls == [bad_day]
+    assert earnings_calls == []  # its receipt was re-read, not refetched
+
+    clean_conn, clean_clock, clean_store = _prepared_root(clean_root, TICKERS)
+    clean_head = _head(clean_conn)
+    _write_store_input(clean_root, "forward_calendar_refresh_input.json", clean_head,
+                       as_of=SESSION, horizon_days=30, tickers=[TICKER])
+    clean_calls = []
+
+    def clean_nasdaq(unit):
+        clean_calls.append(unit["partition_key"])
+        rows = [{"symbol": TICKER, "time": "time-not-supplied"}]
+        return body, "complete", {"status": 200}, rows
+
+    _fixed_system_clock(monkeypatch, forward_calendar_store, clean_clock)
+    clean = forward_calendar_store.run_forward_calendar_refresh(
+        _store_parameters(clean_root, clean_head, expected_ids=(TICKER,)), clean_root,
+        nasdaq_fetcher=clean_nasdaq, earnings_fetcher=earn)
+    assert clean.status == "complete"
+    assert len(clean_calls) == 21
+
+    retry_rows = _fragment_rows(retry_conn, retry_store, _head(retry_conn)["snapshot_id"],
+                                "earnings_events")
+    clean_rows = _fragment_rows(clean_conn, clean_store, _head(clean_conn)["snapshot_id"],
+                                "earnings_events")
+    assert sorted(retry_rows, key=_row_key) == sorted(clean_rows, key=_row_key)

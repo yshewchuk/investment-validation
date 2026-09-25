@@ -9,9 +9,11 @@ session-parsing work that was already there); the default callables port
 conversion the BMO/AMC derivation depends on.
 
 Classification (spec R1) happens HERE: a real frame is ``complete``, an
-empty/absent frame is ``legitimate_empty``, and an exception out of the
-library call is ``transient`` -- never swallowed into an empty history (R3).
-The returned tuple is the ORATS-shaped
+empty/absent frame is ``legitimate_empty``, and a network/library exception
+(``OSError``/``TimeoutError``/``ValueError`` -- pandas parsing inside the
+default callables raises the last) is ``transient``, never swallowed into an
+empty history (R3). A programming error (``TypeError``, ``AttributeError``, an
+``OpsError``) propagates. The returned tuple is the ORATS-shaped
 ``(raw_bytes, response_kind, response_meta, rows)``; the store parses the CSV
 and re-validates it before caching (R2).
 
@@ -41,7 +43,9 @@ def yfinance_history_fetcher(*, history_fn: Callable[[str], pd.DataFrame] | None
     def fetcher(ticker: str):
         try:
             frame = (history_fn or _default_history)(str(ticker))
-        except Exception as exc:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+        except (OSError, TimeoutError, ValueError) as exc:
+            # Network/library errors only (see the module docstring): a
+            # programming error must never read as a transient outage.
             return b"", "transient", {"error": type(exc).__name__}, []
         if frame is None or frame.empty:
             return b"", "legitimate_empty", {}, []
@@ -65,7 +69,8 @@ def yfinance_earnings_fetcher(*, earnings_fn: Callable[[str], pd.DataFrame] | No
     def fetcher(ticker: str):
         try:
             frame = (earnings_fn or _default_earnings)(str(ticker))
-        except Exception as exc:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+        except (OSError, TimeoutError, ValueError) as exc:
+            # Network/library errors only (see the module docstring).
             return b"", "transient", {"error": type(exc).__name__}, []
         if frame is None or frame.empty:
             return b"", "legitimate_empty", {}, []

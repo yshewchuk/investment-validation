@@ -169,7 +169,11 @@ def test_provider_failure_code_orders_mixed_kinds():
     assert provider_failure_code(("complete", "legitimate_empty")) is None
     assert provider_failure_code(("complete", "transient")) == "TRANSIENT_SOURCE"
     assert provider_failure_code(("transient", "not_final")) == "SOURCE_NOT_FINAL"
-    assert provider_failure_code(("transient", "refused")) == "CREDENTIAL_INVALID"
+    # An unparseable body (refused) is bad source data, never a credential
+    # problem; only the provider's own 401/403 kind is CREDENTIAL_INVALID.
+    assert provider_failure_code(("transient", "refused")) == "SOURCE_INVALID"
+    assert provider_failure_code(("refused", "not_final")) == "SOURCE_INVALID"
+    assert provider_failure_code(("transient", "credential_invalid")) == "CREDENTIAL_INVALID"
 
 
 def test_worker_rejects_a_result_bound_to_another_plan(tmp_path):
