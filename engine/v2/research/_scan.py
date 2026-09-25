@@ -7,18 +7,28 @@ a sentinel bound invented out of thin air. Every read therefore stays inside
 ``Repository.scan``'s bounded-scan contract (§8.2): no ``read_table()``
 convenience, no implicit "latest".
 
-The table contract's ``maximum_result_rows`` caps ONE partition's scan. A
-partition whose manifest row count exceeds its own table's cap refuses loudly
-with ``RESULT_LIMIT_EXCEEDED`` rather than silently truncating; partition the
-table more finely in that case. The shipped Tier-2 tables are partitioned by
-year and this suffices for them.
+The table contract's ``maximum_result_rows`` caps ONE scan, and a real year
+partition can exceed it (``option_chains`` carries 2.1M-4.3M rows in every
+year 2018-2026 against a 2,000,000 cap). Each partition is therefore scanned
+as its calendar months, and a month that still exceeds the cap is scanned as
+its days; only a single day that still exceeds the cap refuses loudly with
+``RESULT_LIMIT_EXCEEDED`` rather than silently truncating. Every split keeps
+the one ``snapshot_id`` the caller resolved.
+
+A caller's ``key_filter`` is threaded into every one of those scans, so a
+reader that needs only specific keys (``fill_quality`` needs only the traded
+contracts' chain rows) never reads a whole table to discard most of it.
+
+Frames are assembled with ``batch.to_pandas()`` per Arrow batch and one
+``pd.concat``; converting each batch to a list of Python dicts first would
+cost multiples of the frame it produces, so this module does not.
 
 Internal to the package: nothing here is part of ``engine.v2.research``'s
 public interface.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -50,13 +60,15 @@ def next_representable(value: str) -> str:
 
 
 def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
-               *, partition_keys=None) -> pd.DataFrame:
+               *, partition_keys=None, key_filter=()) -> pd.DataFrame:
     """Every row of ``table_name`` in ``snapshot_ref``, projected to ``columns``.
 
     ``partition_keys`` restricts the read to those manifest partitions (the
-    Tier-2 tables are partitioned by year). A table absent from the snapshot,
-    or one whose fragments carry no recorded time bounds, refuses with
-    ``CONTRACT_MISMATCH`` rather than scanning a guess.
+    Tier-2 tables are partitioned by year). ``key_filter`` is a tuple of
+    ``KeyPredicate`` values carried into every scan, so a caller that needs
+    only specific keys reads only rows that can match them. A table absent
+    from the snapshot, or one whose fragments carry no recorded time bounds,
+    refuses with ``CONTRACT_MISMATCH`` rather than scanning a guess.
     """
     if table_name not in snapshot_ref.table_versions:
         raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
@@ -66,28 +78,104 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
     if partition_keys is not None:
         wanted = {str(key) for key in partition_keys}
         records = [record for record in records if record.partition_key in wanted]
-    rows: list[dict] = []
+    frames: list[pd.DataFrame] = []
     for partition in dict.fromkeys(record.partition_key for record in records):
         group = [record for record in records if record.partition_key == partition]
-        rows.extend(_scan_partition(repository, snapshot_ref, table_name, contract, columns, group))
-    return pd.DataFrame(rows, columns=list(columns))
+        frames.extend(_scan_partition(repository, snapshot_ref, table_name, contract, columns,
+                                      group, key_filter=tuple(key_filter)))
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=list(columns))
+    return pd.concat(frames, ignore_index=True)
 
 
 def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
-                    columns, records: list) -> list[dict]:
+                    columns, records: list, *, key_filter) -> list[pd.DataFrame]:
+    """One partition's rows: a scan per calendar month, its days on overflow.
+
+    A month whose row count exceeds the contract's ``maximum_result_rows``
+    raises ``RESULT_LIMIT_EXCEEDED`` from the repository; that month is then
+    rescanned one day at a time. A day that still exceeds the cap propagates
+    the error — the table needs finer partitions than this rule can supply.
+    """
     interval = _partition_interval(contract, table_name, records)
-    row_bound = max(1, sum(record.row_count for record in records))
-    result_cap = min(row_bound, contract.maximum_result_rows)
-    batch_cap = min(result_cap, contract.maximum_batch_rows)
+    frames: list[pd.DataFrame] = []
+    for month in _calendar_intervals(interval, "month"):
+        try:
+            frames.append(_scan_interval(repository, snapshot_ref, table_name, contract,
+                                         columns, key_filter, month))
+        except errors.DataError as exc:
+            if exc.code != "RESULT_LIMIT_EXCEEDED":
+                raise
+            days = _calendar_intervals(month, "day")
+            if not days:
+                raise
+            for day in days:
+                frames.append(_scan_interval(repository, snapshot_ref, table_name, contract,
+                                             columns, key_filter, day))
+    return frames
+
+
+def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
+                   columns, key_filter, interval: TimeInterval) -> pd.DataFrame:
+    """One bounded scan over ``interval``, as a frame of ``columns``."""
+    result_cap = contract.maximum_result_rows
+    batch_cap = min(contract.maximum_batch_rows, result_cap)
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id,
         table_contract_ref=snapshot_ref.table_versions[table_name].table_contract_ref,
-        columns=tuple(columns), key_filter=(), time_interval=interval,
+        columns=tuple(columns), key_filter=tuple(key_filter), time_interval=interval,
         order_by=contract.primary_key, max_batch_rows=batch_cap, max_result_rows=result_cap)
-    rows: list[dict] = []
-    for batch in repository.scan(query, table_name=table_name):
-        rows.extend(batch.to_pylist())
-    return rows
+    batches = [batch.to_pandas() for batch in repository.scan(query, table_name=table_name)]
+    if not batches:
+        return pd.DataFrame(columns=list(columns))
+    return pd.concat(batches, ignore_index=True)
+
+
+def _calendar_intervals(interval: TimeInterval, step: str) -> list[TimeInterval]:
+    """``interval`` cut at calendar boundaries (``"month"`` or ``"day"``),
+    keeping the half-open shape and the source bound's own encoding."""
+    start = _parse_bound(interval.start_inclusive)
+    end = _parse_bound(interval.end_exclusive)
+    if start is None or end is None or start >= end:
+        return []
+    wire = (time_formats.is_naive_timestamp(interval.start_inclusive)
+            or time_formats.is_naive_timestamp(interval.end_exclusive))
+    intervals: list[TimeInterval] = []
+    cursor = start
+    while cursor < end:
+        stop = min(_next_boundary(cursor, step), end)
+        intervals.append(TimeInterval(
+            column=interval.column,
+            start_inclusive=_format_bound(cursor, wire),
+            end_exclusive=_format_bound(stop, wire)))
+        cursor = stop
+    return intervals
+
+
+def _next_boundary(value: datetime, step: str) -> datetime:
+    """The next calendar boundary strictly after ``value`` for ``step``."""
+    if step == "day":
+        return value + timedelta(days=1)
+    return (value.replace(day=1) + timedelta(days=32)).replace(day=1)
+
+
+def _parse_bound(value: str | None) -> datetime | None:
+    """A recorded time bound as a naive UTC datetime (bare dates at midnight)."""
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _format_bound(value: datetime, wire: bool) -> str:
+    """A boundary back in the interval's own encoding: naive-timestamp wire
+    form when the partition bounds use it, a bare date otherwise."""
+    if wire:
+        return time_formats.format_naive_timestamp(value)
+    return value.date().isoformat()
 
 
 def _partition_interval(contract, table_name: str, records: list) -> TimeInterval:

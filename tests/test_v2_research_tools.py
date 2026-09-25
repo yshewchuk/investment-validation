@@ -23,20 +23,22 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime
+import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.data.pulls import polygon_fills as legacy_polygon_fills  # noqa: E402
-from engine.v2.contracts.data import TableContractRef  # noqa: E402
+from engine.v2.contracts.data import KeyPredicate, TableContractRef  # noqa: E402
 from engine.v2.data import manifests  # noqa: E402
 from engine.v2.data.catalog import commit_snapshot  # noqa: E402
-from engine.v2.data.errors import DataError  # noqa: E402
+from engine.v2.data.errors import DataError, fail  # noqa: E402
 from engine.v2.data.objects import inspect_fragment  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactStore, content_hash  # noqa: E402
@@ -45,6 +47,7 @@ from engine.v2.ops.catalog import connect as ops_connect  # noqa: E402
 from engine.v2.research import fill_quality as v2_fill_quality  # noqa: E402
 from engine.v2.research import polygon_fills as v2_polygon_fills  # noqa: E402
 from engine.v2.research import signal_screen as v2_signal_screen  # noqa: E402
+from engine.v2.research._scan import read_table  # noqa: E402
 from tests.ops_support import FakeClock  # noqa: E402
 from tests.test_v2_data_manifests import (  # noqa: E402
     IRH_A,
@@ -430,3 +433,105 @@ def test_polygon_fills_refuses_a_corrupt_manifest(tmp_path):
                              out_dir=tmp_path / "reports", scope="shadow")
     assert err.value.code == "MANIFEST_CORRUPT"
     corrupt.close()
+
+
+# --------------------------------------------------------------------------
+# _scan.read_table: year partitions split by month, months by day
+# --------------------------------------------------------------------------
+
+
+class _CappedScanRepository:
+    """The ``Repository.scan`` surface, refusing any interval above ``cap`` rows."""
+
+    def __init__(self, rows: list[dict], *, cap: int, table_name: str = "option_chains"):
+        self.cap = cap
+        self.rows = rows
+        self.calls: list[object] = []
+        self.snapshot = types.SimpleNamespace(
+            snapshot_id="snap-scale",
+            table_versions={table_name: types.SimpleNamespace(table_contract_ref="ref")})
+        self.contract = types.SimpleNamespace(
+            primary_key=("ticker", "obs_date"), observation_time_column="obs_date",
+            maximum_batch_rows=8, maximum_result_rows=64)
+
+    def table_contract(self, snapshot_ref, table_name):
+        return self.contract
+
+    def fragment_records(self, snapshot_ref, table_name):
+        records = []
+        for year in sorted({row["obs_date"].year for row in self.rows}):
+            in_year = [row for row in self.rows if row["obs_date"].year == year]
+            records.append(types.SimpleNamespace(
+                partition_key=str(year), row_count=len(in_year),
+                time_min=min(row["obs_date"] for row in in_year).strftime("%Y-%m-%d"),
+                time_max=max(row["obs_date"] for row in in_year).strftime("%Y-%m-%d")))
+        return records
+
+    def scan(self, query, *, table_name):
+        self.calls.append(query)
+        start = datetime.fromisoformat(query.time_interval.start_inclusive)
+        end = datetime.fromisoformat(query.time_interval.end_exclusive)
+        selected = [row for row in self.rows
+                    if start <= row["obs_date"] < end
+                    and all(row.get(p.column) in p.values for p in query.key_filter)]
+        if len(selected) > self.cap:
+            raise fail("RESULT_LIMIT_EXCEEDED", "interval exceeds the fake cap")
+        if selected:
+            yield pa.RecordBatch.from_pylist(selected)
+
+
+def _scale_rows() -> list[dict]:
+    """Twelve rows in the first two days of January, six rows on March 9."""
+    rows = [{"ticker": f"T{day}{i:02d}", "obs_date": datetime(2024, 1, day)}
+            for day, count in ((5, 6), (6, 6)) for i in range(count)]
+    rows.extend({"ticker": f"M{i}", "obs_date": datetime(2024, 3, 9)} for i in range(6))
+    return rows
+
+
+def _call_intervals(repository) -> list[tuple[datetime, datetime]]:
+    return [(datetime.fromisoformat(call.time_interval.start_inclusive),
+             datetime.fromisoformat(call.time_interval.end_exclusive))
+            for call in repository.calls]
+
+
+def test_read_table_splits_a_partition_by_month_then_day():
+    repository = _CappedScanRepository(_scale_rows(), cap=8)
+    frame = read_table(repository, repository.snapshot, "option_chains",
+                       ("ticker", "obs_date"))
+
+    assert len(frame) == 18
+    assert set(frame["ticker"]) == {row["ticker"] for row in repository.rows}
+    assert all(call.snapshot_id == "snap-scale" for call in repository.calls)
+
+    intervals = _call_intervals(repository)
+    assert intervals[0] == (datetime(2024, 1, 5), datetime(2024, 2, 1))
+    day_calls = [span for span in intervals if span[1] - span[0] == timedelta(days=1)]
+    assert [span[0] for span in day_calls[:2]] == [datetime(2024, 1, 5), datetime(2024, 1, 6)]
+    assert (datetime(2024, 3, 1), datetime(2024, 3, 10)) in intervals
+
+
+def test_read_table_surfaces_the_error_when_a_day_still_exceeds_the_cap():
+    repository = _CappedScanRepository(_scale_rows(), cap=5)
+    with pytest.raises(DataError) as err:
+        read_table(repository, repository.snapshot, "option_chains", ("ticker", "obs_date"))
+
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    intervals = _call_intervals(repository)
+    assert any(span[1] - span[0] <= timedelta(days=1) for span in intervals)
+
+
+def test_read_table_passes_a_key_filter_into_every_scan():
+    predicate = KeyPredicate(column="ticker", operator="in", values=("T501",))
+    repository = _CappedScanRepository(_scale_rows(), cap=64)
+    frame = read_table(repository, repository.snapshot, "option_chains",
+                       ("ticker", "obs_date"), key_filter=(predicate,))
+
+    assert list(frame["ticker"]) == ["T501"]
+    assert all(call.key_filter == (predicate,) for call in repository.calls)
+
+
+def test_scan_module_never_builds_rows_with_to_pylist():
+    source = (ROOT / "engine" / "v2" / "research" / "_scan.py").read_text()
+    assert "to_pylist" not in source
+    assert "to_pandas()" in source
+    assert "pd.concat" in source

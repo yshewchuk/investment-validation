@@ -30,11 +30,13 @@ trade a day is not an alpha you can execute.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from engine.v2.contracts.data import KeyPredicate
 from engine.v2.data import errors
 from engine.v2.research._scan import DEFAULT_SCOPE, read_table, resolve_snapshot
 
@@ -80,10 +82,52 @@ def read_option_daily(repository, snapshot_ref) -> pd.DataFrame:
     return read_table(repository, snapshot_ref, OPTION_DAILY_TABLE, OPTION_DAILY_COLUMNS)
 
 
-def read_option_chains(repository, snapshot_ref, *, years=None) -> pd.DataFrame:
+#: The OCC contract-id shape :func:`contract_ticker_column` writes (and the
+#: pull's legacy ``option_ticker`` writes): parsed back here so the chain read
+#: can be pinned to the traded contracts without importing the legacy pull.
+_CONTRACT_TICKER_RE = re.compile(
+    r"^O:(?P<ticker>.+)(?P<yymmdd>\d{6})(?P<right>[CP])(?P<strike>\d{8})$")
+
+
+def _contract_components(contract_ticker: str) -> tuple[str, str, str]:
+    """``(ticker, expiry, right)`` parsed from one OCC contract id."""
+    match = _CONTRACT_TICKER_RE.match(contract_ticker)
+    if match is None:
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "option_daily carries a contract_ticker that is not OCC-shaped")
+    yymmdd = match["yymmdd"]
+    return (match["ticker"], f"20{yymmdd[:2]}-{yymmdd[2:4]}-{yymmdd[4:]}", match["right"])
+
+
+def _chain_key_filter(trades: pd.DataFrame) -> tuple[KeyPredicate, ...]:
+    """The ``option_chains`` key filter covering the traded contract-days.
+
+    ``strike`` is a float64 column and ``KeyPredicate.values`` excludes floats
+    (component contracts §2.1), so the filter pins every other primary-key
+    component; the join on ``(contract_ticker, obs_date)`` still enforces
+    exact contract identity on whatever the scan returns.
+    """
+    if trades.empty:
+        return ()
+    tickers, expiries, rights = set(), set(), set()
+    for contract in trades["contract_ticker"].dropna():
+        ticker, expiry, right = _contract_components(str(contract))
+        tickers.add(ticker)
+        expiries.add(expiry)
+        rights.add(right)
+    obs_dates = {pd.Timestamp(value).strftime("%Y-%m-%d")
+                 for value in trades["obs_date"].dropna()}
+    columns = (("ticker", tickers), ("obs_date", obs_dates),
+               ("expiry", expiries), ("right", rights))
+    return tuple(KeyPredicate(column=column, operator="in", values=tuple(sorted(values)))
+                 for column, values in columns if values)
+
+
+def read_option_chains(repository, snapshot_ref, *, years=None,
+                       key_filter=()) -> pd.DataFrame:
     """ORATS EOD quotes, read through the pinned snapshot (optionally by year)."""
     return read_table(repository, snapshot_ref, OPTION_CHAIN_TABLE, OPTION_CHAIN_COLUMNS,
-                      partition_keys=years)
+                      partition_keys=years, key_filter=key_filter)
 
 
 def join_quotes_and_trades(trades: pd.DataFrame, quotes: pd.DataFrame) -> pd.DataFrame:
@@ -117,12 +161,17 @@ def join_quotes_and_trades(trades: pd.DataFrame, quotes: pd.DataFrame) -> pd.Dat
 
 def join_from_snapshot(repository, snapshot_ref) -> pd.DataFrame:
     """The legacy flow, split at its two store reads: read both tables from the
-    pinned snapshot, then run the pure join on the resulting frames."""
+    pinned snapshot, then run the pure join on the resulting frames.
+
+    The chain read carries a key filter for the traded contract-days, so a
+    year-sized chain table is not read in full to discard almost all of it.
+    """
     trades = read_option_daily(repository, snapshot_ref)
     if trades.empty:
         return trades
     years = sorted({int(y) for y in trades["obs_date"].dt.year})
-    quotes = read_option_chains(repository, snapshot_ref, years=years)
+    quotes = read_option_chains(repository, snapshot_ref, years=years,
+                                key_filter=_chain_key_filter(trades))
     return join_quotes_and_trades(trades, quotes)
 
 

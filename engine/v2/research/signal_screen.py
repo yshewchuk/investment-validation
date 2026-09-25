@@ -194,8 +194,6 @@ def mcap_slice(feats: pd.DataFrame, names: tuple[str, ...]) -> pd.DataFrame:
 
 
 def _md(table: pd.DataFrame) -> str:
-    if table.empty:
-        return "_no rows_"
     try:
         return table.to_markdown(index=False)
     except ImportError:
