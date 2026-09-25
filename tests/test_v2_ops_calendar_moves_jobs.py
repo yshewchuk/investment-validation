@@ -163,6 +163,15 @@ def test_worker_maps_a_failed_status_to_its_own_message(tmp_path):
         "forward calendar refresh did not produce complete coverage"
 
 
+def test_provider_failure_code_orders_mixed_kinds():
+    from engine.v2.ops.calendar_moves_jobs import provider_failure_code
+
+    assert provider_failure_code(("complete", "legitimate_empty")) is None
+    assert provider_failure_code(("complete", "transient")) == "TRANSIENT_SOURCE"
+    assert provider_failure_code(("transient", "not_final")) == "SOURCE_NOT_FINAL"
+    assert provider_failure_code(("transient", "refused")) == "CREDENTIAL_INVALID"
+
+
 def test_worker_rejects_a_result_bound_to_another_plan(tmp_path):
     def stale(parameters, root):
         return RefreshCallbackResult(

@@ -3,7 +3,9 @@
 The injectable seam is ``history_fn``/``earnings_fn`` (a canned DataFrame), the
 library-call equivalent of ``http_get``; the default callables import
 ``yfinance`` lazily, so importing this module and constructing either fetcher
-touches no network and no heavy dependency.
+touches no network and no heavy dependency. Classification (spec R1) is the
+provider's own job: a real frame is ``complete``, an empty frame is
+``legitimate_empty``, and a raised library error is ``transient``.
 """
 from __future__ import annotations
 
@@ -29,7 +31,8 @@ def _history_frame() -> pd.DataFrame:
 
 def test_history_fetcher_returns_the_csv_the_store_parses():
     fetcher = yfinance_history_fetcher(history_fn=lambda ticker: _history_frame())
-    raw = fetcher("AAA")
+    raw, kind, _meta, _rows = fetcher("AAA")
+    assert kind == "complete"
     frame = pd.read_csv(io.BytesIO(raw))
     assert "Close" in frame.columns
     assert len(frame) == 7
@@ -37,9 +40,19 @@ def test_history_fetcher_returns_the_csv_the_store_parses():
     assert frame.columns[0] not in ("Open", "Close")
 
 
-def test_history_fetcher_is_none_for_an_empty_frame():
+def test_history_fetcher_is_a_legitimate_empty_for_an_empty_frame():
     fetcher = yfinance_history_fetcher(history_fn=lambda ticker: pd.DataFrame())
-    assert fetcher("AAA") is None
+    raw, kind, _meta, rows = fetcher("AAA")
+    assert (raw, kind, rows) == (b"", "legitimate_empty", [])
+
+
+def test_history_fetcher_classifies_a_library_error_as_transient():
+    def boom(ticker):
+        raise ConnectionError("network down")
+
+    raw, kind, meta, rows = yfinance_history_fetcher(history_fn=boom)("AAA")
+    assert (raw, kind, rows) == (b"", "transient", [])
+    assert meta["error"] == "ConnectionError"
 
 
 def test_earnings_fetcher_returns_the_parsed_columns_the_store_reads():
@@ -47,14 +60,25 @@ def test_earnings_fetcher_returns_the_parsed_columns_the_store_reads():
                            "annc_tod": "1650", "session": "AMC"}],
                          columns=["ticker", "event_date", "annc_tod", "session"])
     fetcher = yfinance_earnings_fetcher(earnings_fn=lambda ticker: frame)
-    parsed = pd.read_csv(io.BytesIO(fetcher("AAA")))
+    raw, kind, _meta, _rows = fetcher("AAA")
+    assert kind == "complete"
+    parsed = pd.read_csv(io.BytesIO(raw))
     assert list(parsed.columns) == ["ticker", "event_date", "annc_tod", "session"]
     assert parsed.iloc[0]["session"] == "AMC"
 
 
-def test_earnings_fetcher_is_none_for_an_empty_frame():
+def test_earnings_fetcher_is_a_legitimate_empty_for_no_frame():
     fetcher = yfinance_earnings_fetcher(earnings_fn=lambda ticker: None)
-    assert fetcher("AAA") is None
+    raw, kind, _meta, _rows = fetcher("AAA")
+    assert (raw, kind) == (b"", "legitimate_empty")
+
+
+def test_earnings_fetcher_classifies_a_library_error_as_transient():
+    def boom(ticker):
+        raise RuntimeError("zoo of types")
+
+    raw, kind, _meta, _rows = yfinance_earnings_fetcher(earnings_fn=boom)("AAA")
+    assert (raw, kind) == (b"", "transient")
 
 
 def test_the_ported_session_mapping_matches_the_legacy_cutoff():

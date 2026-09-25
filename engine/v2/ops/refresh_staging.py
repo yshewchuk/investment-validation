@@ -38,12 +38,12 @@ def stage_refresh_input(claim, staging: Path) -> None:
     name = REFRESH_INPUT_DOCUMENT_NAMES.get(kind)
     if name is None:
         return
-    document = (_daily_document(claim) if kind == "incremental_refresh"
+    document = (_daily_document(claim, staging) if kind == "incremental_refresh"
                 else _calendar_moves_document(claim))
     (staging / name).write_text(canonical_json(document))
 
 
-def _daily_document(claim) -> dict:
+def _daily_document(claim, staging: Path) -> dict:
     params = from_document(RefreshParameters, claim.spec.parameters)
     return {
         "catalog_path": params.catalog_path,
@@ -52,6 +52,7 @@ def _daily_document(claim) -> dict:
         "expected_head_generation": params.expected_head_generation,
         "expected_head_snapshot_id": params.expected_head_snapshot_id,
         "table_name": params.table_name,
+        "fetch_root": str(staging / "fetch"),
     }
 
 

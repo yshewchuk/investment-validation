@@ -36,10 +36,13 @@ from engine.v2.ops import (
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.calendar_moves_jobs import (
     COMPUTED_MOVES_REFRESH_ACTION,
+    DEFAULT_HORIZON_DAYS,
     FORWARD_CALENDAR_REFRESH_ACTION,
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     NATIVE_NASDAQ_ACCOUNT,
+    CalendarMovesParameters,
 )
+from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import build_legacy_job_requests
 from engine.v2.ops.plans import nightly_plan
 from engine.v2.ops.profiles import MIB
@@ -299,7 +302,15 @@ def test_native_forward_calendar_refresh_e2e(tmp_path, monkeypatch):
     configure_account(conn, NATIVE_NASDAQ_ACCOUNT, 1, remaining=200, live_reserve=1)
 
     request = _build_requests(conn, store, clock, tmp_path)[FORWARD_CALENDAR_REFRESH_ACTION]
-    assert request.job.parameters["provider_calls"] > 0
+    repository = Repository(conn, store)
+    parent = repository.resolve(head["snapshot_id"])
+    calendar = native_trading_calendar(
+        forward_calendar_store.daily_by_ticker(repository, parent))
+    dates = forward_calendar_store.horizon_dates(
+        SESSION, DEFAULT_HORIZON_DAYS, calendar=calendar)
+    # R6: every provider request is reserved -- the Nasdaq discovery calls AND
+    # the yfinance session-confirmation calls the store can make this run.
+    assert request.job.parameters["provider_calls"] == (len(dates) + len(TICKERS)) * 3
     assert request.job.provider_budget_ref == NATIVE_NASDAQ_ACCOUNT
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
@@ -486,13 +497,14 @@ def test_computed_moves_scan_once_per_run(tmp_path, monkeypatch):
     (root / "computed_moves_refresh_input.json").write_text(json.dumps({
         "catalog_path": str(tmp_path / "ops.sqlite"), "objects_root": str(tmp_path),
         "scope": SCOPE, "expected_head_generation": head["generation"],
-        "expected_head_snapshot_id": head["snapshot_id"], "all_scoreable": True}))
-    from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+        "expected_head_snapshot_id": head["snapshot_id"], "all_scoreable": True,
+        "as_of": SESSION}))
 
     parameters = CalendarMovesParameters(
         expected_ids=TICKERS, parent_snapshot_id=head["snapshot_id"],
         refresh_plan_hash="sha256:" + "b" * 64, catalog_path=str(tmp_path / "ops.sqlite"),
-        objects_root=str(tmp_path), scope=SCOPE, expected_head_generation=head["generation"])
+        objects_root=str(tmp_path), scope=SCOPE, expected_head_generation=head["generation"],
+        as_of=SESSION)
 
     calls = collections.Counter()
     real_scan = computed_moves_store._scan_rows
@@ -506,7 +518,8 @@ def test_computed_moves_scan_once_per_run(tmp_path, monkeypatch):
     frame = pd.DataFrame({"Close": payload["closes"]},
                          index=pd.to_datetime(payload["dates"]))
     result = computed_moves_store.run_computed_moves_refresh(
-        parameters, root, fetcher=lambda ticker: frame.to_csv().encode())
+        parameters, root,
+        fetcher=lambda ticker: (frame.to_csv().encode(), "complete", {}, []))
 
     assert result.status == "complete"
     assert tuple(result.completed_ids) == TICKERS
@@ -534,3 +547,236 @@ def test_provider_account_cli_admits_new_accounts(tmp_path, capsys):
             assert provider_credentials({"provider_account": account}) == {}
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# 6. failure semantics and per-session unit ids (spec R1-R6)
+# --------------------------------------------------------------------------
+
+
+def _write_store_input(root, name, head, **extra):
+    document = {"catalog_path": str(root / "ops.sqlite"), "objects_root": str(root),
+                "scope": SCOPE, "expected_head_generation": head["generation"],
+                "expected_head_snapshot_id": head["snapshot_id"], **extra}
+    (root / name).write_text(json.dumps(document))
+    return document
+
+
+def _store_parameters(root, head, *, expected_ids=TICKERS):
+    return CalendarMovesParameters(
+        expected_ids=expected_ids, parent_snapshot_id=head["snapshot_id"],
+        refresh_plan_hash="sha256:" + "b" * 64, catalog_path=str(root / "ops.sqlite"),
+        objects_root=str(root), scope=SCOPE, expected_head_generation=head["generation"])
+
+
+def _nasdaq_body(*, ticker=TICKER, time="time-after-hours"):
+    return json.dumps({"data": {"rows": [{"symbol": ticker, "time": time}]}}).encode()
+
+
+def _empty_earnings(ticker):
+    return b"", "legitimate_empty", {}, []
+
+
+def test_legitimate_empty_receipts_are_recorded_but_never_reused(tmp_path):
+    """Spec R2: a legitimate-empty receipt keeps its own kind and is refetched."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    _write_store_input(tmp_path, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    parameters = _store_parameters(tmp_path, head)
+    calls = []
+    body = json.dumps({"data": {"rows": []}}).encode()
+
+    def nasdaq(unit):
+        calls.append(unit["partition_key"])
+        return body, "legitimate_empty", {"status": 200}, []
+
+    first = forward_calendar_store.run_forward_calendar_refresh(
+        parameters, tmp_path, nasdaq_fetcher=nasdaq, earnings_fetcher=_empty_earnings)
+    assert first.status == "noop"
+    first_calls = len(calls)
+    assert first_calls > 0
+    kinds = {row["response_kind"] for row in conn.execute(
+        "SELECT response_kind FROM data_raw_receipts WHERE source = 'nasdaq'")}
+    assert kinds == {"legitimate_empty"}
+
+    second = forward_calendar_store.run_forward_calendar_refresh(
+        parameters, tmp_path, nasdaq_fetcher=nasdaq, earnings_fetcher=_empty_earnings)
+    assert second.status == "noop"
+    assert len(calls) == 2 * first_calls
+
+
+def test_a_refused_response_is_not_cached_and_fails_non_retryably(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    _write_store_input(tmp_path, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+
+    def forbidden(unit):
+        return b"forbidden", "refused", {"status": 403}, []
+
+    with pytest.raises(OpsError) as exc:
+        forward_calendar_store.run_forward_calendar_refresh(
+            _store_parameters(tmp_path, head), tmp_path, nasdaq_fetcher=forbidden,
+            earnings_fetcher=_empty_earnings)
+    assert exc.value.code == "CREDENTIAL_INVALID"
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'nasdaq'"
+                        ).fetchone()[0] == 0
+    assert _head(conn)["generation"] == head["generation"]
+
+
+def test_all_transient_units_fail_with_transient_source_and_no_result(tmp_path):
+    """Spec R3: a network outage on every unit can never be a noop/complete."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    _write_store_input(tmp_path, "computed_moves_refresh_input.json", head,
+                       as_of=SESSION, all_scoreable=True)
+
+    def down(ticker):
+        raise TimeoutError("network down")
+
+    with pytest.raises(OpsError) as exc:
+        computed_moves_store.run_computed_moves_refresh(
+            _store_parameters(tmp_path, head), tmp_path, fetcher=down)
+    assert exc.value.code == "TRANSIENT_SOURCE"
+    assert not (tmp_path / "computed_moves_refresh_result.json").is_file()
+    assert _head(conn)["generation"] == head["generation"]
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'computed_moves'"
+                        ).fetchone()[0] == 0
+
+
+def test_unparseable_computed_moves_bytes_are_never_cached(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    _write_store_input(tmp_path, "computed_moves_refresh_input.json", head,
+                       as_of=SESSION, all_scoreable=True)
+
+    def garbage(ticker):
+        return b"not,a,close\n1,2\n", "complete", {}, []
+
+    with pytest.raises(OpsError) as exc:
+        computed_moves_store.run_computed_moves_refresh(
+            _store_parameters(tmp_path, head), tmp_path, fetcher=garbage)
+    assert exc.value.code == "CREDENTIAL_INVALID"
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'computed_moves'"
+                        ).fetchone()[0] == 0
+
+
+def test_unparseable_nasdaq_bytes_are_never_cached(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    _write_store_input(tmp_path, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+
+    def garbage(unit):
+        return b"not-json", "complete", {"status": 200}, []
+
+    with pytest.raises(OpsError) as exc:
+        forward_calendar_store.run_forward_calendar_refresh(
+            _store_parameters(tmp_path, head), tmp_path, nasdaq_fetcher=garbage,
+            earnings_fetcher=_empty_earnings)
+    assert exc.value.code == "CREDENTIAL_INVALID"
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'nasdaq'"
+                        ).fetchone()[0] == 0
+
+
+def _history_frame() -> pd.DataFrame:
+    payload = _canned_history()
+    return pd.DataFrame({"Close": payload["closes"]},
+                        index=pd.to_datetime(payload["dates"]))
+
+
+def test_a_new_session_refetches_computed_moves(tmp_path):
+    """Spec R4: unit ids carry the as_of, so a later session refetches."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    frame = _history_frame()
+    calls = []
+
+    def history(ticker):
+        calls.append(ticker)
+        return frame.to_csv().encode(), "complete", {}, []
+
+    _write_store_input(tmp_path, "computed_moves_refresh_input.json", head,
+                       as_of=SESSION, all_scoreable=True)
+    first = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(tmp_path, head), tmp_path, fetcher=history)
+    assert first.status == "complete"
+    assert sorted(calls) == sorted(TICKERS)
+    after = _head(conn)
+    assert after["generation"] == head["generation"] + 1
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts WHERE source = 'computed_moves'"
+                        ).fetchone()[0] == len(TICKERS)
+
+    calls.clear()
+    _write_store_input(tmp_path, "computed_moves_refresh_input.json", after,
+                       as_of="2026-11-23", all_scoreable=True)
+    second = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(tmp_path, after), tmp_path, fetcher=history)
+    assert second.status == "complete"
+    assert sorted(calls) == sorted(TICKERS)
+
+
+def test_a_new_session_refetches_nasdaq_dates(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    rows = [{"symbol": TICKER, "time": "time-after-hours"}]
+    calls = []
+
+    def nasdaq(unit):
+        calls.append(unit["partition_key"])
+        return _nasdaq_body(), "complete", {"status": 200}, rows
+
+    _write_store_input(tmp_path, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    first = forward_calendar_store.run_forward_calendar_refresh(
+        _store_parameters(tmp_path, head), tmp_path, nasdaq_fetcher=nasdaq,
+        earnings_fetcher=_empty_earnings)
+    assert first.status == "complete"
+    first_calls = len(calls)
+    assert first_calls > 0
+    after = _head(conn)
+    assert after["generation"] == head["generation"] + 1
+
+    calls.clear()
+    _write_store_input(tmp_path, "forward_calendar_refresh_input.json", after,
+                       as_of="2026-11-23", horizon_days=7, tickers=list(TICKERS))
+    second = forward_calendar_store.run_forward_calendar_refresh(
+        _store_parameters(tmp_path, after), tmp_path, nasdaq_fetcher=nasdaq,
+        earnings_fetcher=_empty_earnings)
+    assert second.status == "complete"
+    assert len(calls) == first_calls
+
+
+def test_target_selection_uses_as_of_not_the_wall_clock(tmp_path, monkeypatch):
+    """Spec R5: a frozen clock far from as_of must not move the targets."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    repository = Repository(conn, store)
+
+    class FrozenTimestamp(pd.Timestamp):
+        @classmethod
+        def today(cls):
+            return cls("2023-01-02")
+
+    monkeypatch.setattr(pd, "Timestamp", FrozenTimestamp)
+    targets, report = computed_moves_store.target_tickers_from_snapshot(
+        repository, head["snapshot_id"], as_of=SESSION)
+    assert targets == sorted(TICKERS)
+    assert report["scoreable_on_orats_calendar"] == len(TICKERS)

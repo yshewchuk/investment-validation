@@ -8,6 +8,13 @@ one call. This is the v2 network edge for that endpoint, shaped exactly like
 concept here -- the endpoint is unmetered and keyless -- so nothing is read
 from the environment.
 
+Classification (spec R1) happens HERE, before the store caches anything: a
+2xx with the documented ``data.rows`` list is ``complete`` (rows) or
+``legitimate_empty`` (no rows), a 2xx whose body does not parse to that shape
+is ``refused``, 404 is ``not_final`` (the date is not published yet), 429 and
+5xx are ``transient``, any other non-2xx is ``refused``, and a raised network
+error is ``transient`` -- never a silently empty row list.
+
 The URL builder and the ``data.rows`` parser are ported from
 ``engine/data/sources/nasdaq.py`` and the legacy pull's own ``_nasdaq_rows``;
 the browser user-agent lives in the default client, never on the URL.
@@ -19,7 +26,6 @@ import urllib.parse
 from typing import Any, Callable, Mapping
 
 from engine.v2.ops.errors import fail
-from engine.v2.ops.incremental_data import classify_response
 
 __all__ = ["BASE_URL", "REQUEST_TIMEOUT_SECONDS", "SESSION_BY_TIME", "nasdaq_calendar_fetcher"]
 
@@ -49,7 +55,8 @@ def nasdaq_calendar_fetcher(*, http_get: Callable[..., tuple] | None = None) \
 
     The returned tuple is ``(raw_bytes, response_kind, response_meta, rows)``
     -- the same shape ``orats_daily_market_fetcher`` uses, so the shared raw
-    receipt cache can mark a unit as fetched.
+    receipt cache can mark a unit as fetched. ``rows`` is only non-empty for a
+    ``complete`` response.
     """
 
     def fetcher(unit):
@@ -57,11 +64,15 @@ def nasdaq_calendar_fetcher(*, http_get: Callable[..., tuple] | None = None) \
             raise fail("INVALID_REQUEST", "nasdaq fetcher only serves earnings_events")
         request = http_get or _requests_get
         day = str(unit["partition_key"])
-        status, _headers, body = request(_nasdaq_url({"date": day}),
-                                         timeout=REQUEST_TIMEOUT_SECONDS)
-        rows = _nasdaq_rows(body)
-        outcome = _classify(unit, status, rows)
-        return body, outcome.kind, {"status": int(status), "date": day}, rows
+        try:
+            status, _headers, body = request(_nasdaq_url({"date": day}),
+                                             timeout=REQUEST_TIMEOUT_SECONDS)
+        except Exception as exc:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+            return b"", "transient", {"error": type(exc).__name__, "date": day}, []
+        document = _json_document(body)
+        kind = _response_kind(status, document)
+        rows = _nasdaq_rows(document) if kind in ("complete", "legitimate_empty") else []
+        return body, kind, {"status": int(status), "date": day}, rows
 
     return fetcher
 
@@ -81,23 +92,36 @@ def _nasdaq_url(params: Mapping[str, Any]) -> str:
     return f"{url}?{urllib.parse.urlencode(query)}" if query else url
 
 
-def _nasdaq_rows(body: Any) -> list[dict]:
-    """The ``data.rows`` list of one response; ``[]`` on anything malformed."""
+def _json_document(body: Any) -> Any:
     try:
-        payload = json.loads(body.decode("utf-8"))
+        return json.loads(body.decode("utf-8"))
     except (AttributeError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
-        return []
-    data = payload.get("data") if isinstance(payload, dict) else None
+        return None
+
+
+def _rows_field(document: Any) -> list[dict] | None:
+    """The ``data.rows`` list of one response, or ``None`` for any other shape."""
+    data = document.get("data") if isinstance(document, dict) else None
     rows = data.get("rows") if isinstance(data, dict) else None
-    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        return None
+    return [row for row in rows if isinstance(row, dict)]
 
 
-def _classify(unit: dict, status: int, rows: list[dict]):
-    expected = tuple(str(key) for key in unit.get("expected_keys", ()))
-    request_id = str(unit.get("request_id", ""))
-    if 200 <= status < 300:
-        returned = expected if rows else ()
-        empty = () if rows else expected
-        return classify_response(status, expected, returned_keys=returned,
-                                 empty_keys=empty, final=True, request_id=request_id)
-    return classify_response(status, expected, final=True, request_id=request_id)
+def _nasdaq_rows(document: Any) -> list[dict]:
+    """The parsed ``data.rows`` list; ``[]`` on anything malformed."""
+    return _rows_field(document) or []
+
+
+def _response_kind(status: int, document: Any) -> str:
+    """R1 classification of one Nasdaq response, before anything is cached."""
+    if status == 404:
+        return "not_final"
+    if status == 429 or status >= 500:
+        return "transient"
+    if not 200 <= status < 300:
+        return "refused"
+    rows = _rows_field(document)
+    if rows is None:
+        return "refused"  # a 2xx without the documented shape is not usable data
+    return "complete" if rows else "legitimate_empty"

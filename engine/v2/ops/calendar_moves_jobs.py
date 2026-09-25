@@ -49,6 +49,23 @@ MAX_CALENDAR_MOVES_IDS = 4096
 MAX_IDENTITY_LENGTH = 128
 MAX_PROVIDER_CALLS = 1_000_000
 
+#: S4C failure semantics (spec R1): every provider edge returns one of these
+#: kinds. Only ``complete`` may ever be reused from the durable raw cache (R2).
+RESPONSE_KINDS = ("complete", "legitimate_empty", "not_final", "transient", "refused")
+#: The response kinds that are real, parseable payloads: a receipt records its
+#: own kind, but ``cached_unit_outcomes`` reuses only ``complete``.
+CACHEABLE_RESPONSE_KINDS = ("complete", "legitimate_empty")
+#: kind -> the registered failure code that ends the job. ``complete`` and
+#: ``legitimate_empty`` are successful unit outcomes; ``transient`` is
+#: retryable, ``refused`` and ``not_final`` are not silently retried.
+_FAILURE_CODE_BY_RESPONSE_KIND = {
+    "not_final": "SOURCE_NOT_FINAL",
+    "transient": "TRANSIENT_SOURCE",
+    "refused": "CREDENTIAL_INVALID",
+}
+#: Higher is worse, so a mixed run reports the failure that cannot be retried.
+_FAILURE_SEVERITY = {"TRANSIENT_SOURCE": 0, "SOURCE_NOT_FINAL": 1, "CREDENTIAL_INVALID": 2}
+
 __all__ = [
     "COMPUTED_MOVES_REFRESH_ACTION",
     "COMPUTED_MOVES_RESULT_PATH",
@@ -60,16 +77,34 @@ __all__ = [
     "NATIVE_COMPUTED_MOVES_ACCOUNT",
     "NATIVE_NASDAQ_ACCOUNT",
     "NATIVE_YFINANCE_ACCOUNT",
+    "RESPONSE_KINDS",
     "CalendarMovesParameters",
     "cached_unit_outcomes",
     "calendar_moves_job_spec",
     "calendar_moves_parameter_problems",
     "computed_moves_job_kind",
     "forward_calendar_job_kind",
+    "provider_failure_code",
     "record_unit_receipt",
     "run_computed_moves_worker",
     "run_forward_calendar_worker",
 ]
+
+
+def provider_failure_code(kinds) -> str | None:
+    """The worst typed failure code among unit response kinds, or ``None``.
+
+    Spec R3: any unit that ends ``transient`` fails the job with
+    ``TRANSIENT_SOURCE`` (retryable); ``refused`` fails it with a non-retryable
+    code; a run that is all-``complete``/``legitimate_empty`` has no failure.
+    """
+    worst = None
+    for kind in kinds:
+        code = _FAILURE_CODE_BY_RESPONSE_KIND.get(kind)
+        if code is not None and (worst is None
+                                 or _FAILURE_SEVERITY[code] > _FAILURE_SEVERITY[worst]):
+            worst = code
+    return worst
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -219,9 +254,15 @@ def record_unit_receipt(conn, store, unit, payload: bytes, *, source: str, endpo
     ``cache_raw_receipt`` is the data layer's own idempotent raw cache: the
     receipt identity is a hash of ``(source, endpoint, request, raw)``, so a
     replay of the same bytes returns the existing row and publishes nothing.
+    Only a real, parseable payload (spec R2) may be cached at all: a
+    ``refused``/``transient``/``not_final`` response is never stored, and the
+    recorded kind is what ``cached_unit_outcomes`` later reads back.
     """
     from engine.v2.data.incremental import RawPayload, cache_raw_receipt
 
+    if response_kind not in CACHEABLE_RESPONSE_KINDS:
+        raise fail("INVALID_REQUEST",
+                   "only a complete or legitimately empty provider response may be cached")
     return cache_raw_receipt(
         conn, store,
         RawPayload(payload=payload, response_kind=response_kind, response_meta={}),
@@ -234,13 +275,19 @@ def cached_unit_outcomes(conn, units: Sequence, *, source: str, endpoint: str) -
 
     Both the nightly plan builders and the stores themselves call this, so a
     second same-catalog run plans (and acquires) exactly zero provider calls.
+    Only a receipt whose recorded ``response_kind`` is ``complete`` is reused
+    (spec R2): a ``legitimate_empty`` payload is refetched on the next run, and
+    ``not_final``/``transient``/``refused`` receipts were never cached.
     """
     from engine.v2.ops.incremental_data import classify_response
 
     hits: dict[str, tuple[str, str]] = {}
     for row in conn.execute(
-            "SELECT request_json, raw_receipt_id, raw_hash FROM data_raw_receipts "
-            "WHERE source = ? AND endpoint = ?", (source, endpoint)):
+            "SELECT request_json, raw_receipt_id, raw_hash, response_kind "
+            "FROM data_raw_receipts WHERE source = ? AND endpoint = ?",
+            (source, endpoint)):
+        if row["response_kind"] != "complete":
+            continue
         try:
             request = json.loads(row["request_json"])
         except (TypeError, ValueError):

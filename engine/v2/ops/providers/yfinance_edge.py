@@ -8,6 +8,13 @@ session-parsing work that was already there); the default callables port
 ``engine/data/sources/yf.py``'s bodies verbatim, including the US/Eastern
 conversion the BMO/AMC derivation depends on.
 
+Classification (spec R1) happens HERE: a real frame is ``complete``, an
+empty/absent frame is ``legitimate_empty``, and an exception out of the
+library call is ``transient`` -- never swallowed into an empty history (R3).
+The returned tuple is the ORATS-shaped
+``(raw_bytes, response_kind, response_meta, rows)``; the store parses the CSV
+and re-validates it before caching (R2).
+
 Nothing here imports ``yfinance`` at module import time -- the default
 callables import it lazily, so importing this module (and constructing the
 callback) touches no network and no heavy dependency.
@@ -28,14 +35,17 @@ BMO_CUTOFF = 1200
 
 
 def yfinance_history_fetcher(*, history_fn: Callable[[str], pd.DataFrame] | None = None) \
-        -> Callable[[str], bytes | None]:
-    """Return the ``fetcher(ticker) -> csv_bytes`` seam the moves store calls."""
+        -> Callable[[str], tuple]:
+    """Return the ``fetcher(ticker) -> (csv_bytes, kind, meta, rows)`` seam."""
 
     def fetcher(ticker: str):
-        frame = (history_fn or _default_history)(str(ticker))
+        try:
+            frame = (history_fn or _default_history)(str(ticker))
+        except Exception as exc:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+            return b"", "transient", {"error": type(exc).__name__}, []
         if frame is None or frame.empty:
-            return None
-        return frame.to_csv().encode()
+            return b"", "legitimate_empty", {}, []
+        return frame.to_csv().encode(), "complete", {"rows": int(len(frame))}, []
 
     return fetcher
 
@@ -49,14 +59,17 @@ def _default_history(ticker: str) -> pd.DataFrame:
 
 
 def yfinance_earnings_fetcher(*, earnings_fn: Callable[[str], pd.DataFrame] | None = None) \
-        -> Callable[[str], bytes | None]:
-    """Return the ``fetcher(ticker) -> csv_bytes`` seam the calendar store calls."""
+        -> Callable[[str], tuple]:
+    """Return the ``fetcher(ticker) -> (csv_bytes, kind, meta, rows)`` seam."""
 
     def fetcher(ticker: str):
-        frame = (earnings_fn or _default_earnings)(str(ticker))
+        try:
+            frame = (earnings_fn or _default_earnings)(str(ticker))
+        except Exception as exc:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+            return b"", "transient", {"error": type(exc).__name__}, []
         if frame is None or frame.empty:
-            return None
-        return frame.to_csv(index=False).encode()
+            return b"", "legitimate_empty", {}, []
+        return frame.to_csv(index=False).encode(), "complete", {"rows": int(len(frame))}, []
 
     return fetcher
 
@@ -67,14 +80,12 @@ def _default_earnings(ticker: str) -> pd.DataFrame:
     The session is derived here because it depends on the index being
     converted to US/Eastern first: a naive hour read would put every BMO print
     on the wrong side of the cutoff for half the year. No data (delisted or
-    never covered) is an empty frame, exactly like the legacy 404.
+    never covered) is an empty frame; a raised library error is the fetcher's
+    ``transient`` classification, never swallowed here (spec R3).
     """
     import yfinance
 
-    try:
-        frame = yfinance.Ticker(ticker).get_earnings_dates(limit=EARNINGS_LIMIT)
-    except Exception:  # yfinance raises a zoo of types for "no data"
-        frame = None
+    frame = yfinance.Ticker(ticker).get_earnings_dates(limit=EARNINGS_LIMIT)
 
     rows = []
     if frame is not None and len(frame):

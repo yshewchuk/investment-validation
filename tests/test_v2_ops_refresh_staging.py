@@ -57,6 +57,6 @@ def test_staged_document_is_byte_identical_across_calls_and_environment(tmp_path
 def test_kind_without_a_registered_document_stages_nothing(tmp_path):
     staging = tmp_path / "staging"
     staging.mkdir()
-    claim = SimpleNamespace(spec=SimpleNamespace(kind="computed_moves_refresh", parameters={}))
+    claim = SimpleNamespace(spec=SimpleNamespace(kind="incremental_backfill", parameters={}))
     stage_refresh_input(claim, staging)
     assert list(staging.iterdir()) == []

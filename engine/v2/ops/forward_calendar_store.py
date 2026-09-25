@@ -49,6 +49,7 @@ from engine.v2.ops.calendar_moves_jobs import (
     NATIVE_NASDAQ_ACCOUNT,
     NATIVE_YFINANCE_ACCOUNT,
     cached_unit_outcomes,
+    provider_failure_code,
     record_unit_receipt,
 )
 from engine.v2.ops.errors import fail
@@ -169,20 +170,32 @@ def resolve_session_claims(claims: dict) -> tuple[str | None, str | None]:
     return session, session_src
 
 
-def date_units(dates) -> tuple[RefreshUnit, ...]:
-    return tuple(RefreshUnit(
-        request_id="nasdaq:calendar/earnings:" + str(pd.Timestamp(day).date()),
-        table_name=TABLE_NAME, partition_key=str(pd.Timestamp(day).date()),
-        expected_keys=(str(pd.Timestamp(day).date()),)) for day in dates)
+def _as_of_day(as_of) -> str:
+    """The job's as_of date as ``YYYY-MM-DD``; a missing as_of is refused (R4/R5)."""
+    day = pd.Timestamp(as_of).normalize()
+    if pd.isna(day):
+        raise fail("INVALID_REQUEST", "forward calendar refresh needs an as_of date")
+    return str(day.date())
 
 
-def ticker_units(tickers) -> tuple[RefreshUnit, ...]:
+def date_units(dates, *, as_of) -> tuple[RefreshUnit, ...]:
+    """One Nasdaq discovery unit per date; the as_of is part of every id (R4)."""
+    day = _as_of_day(as_of)
     return tuple(RefreshUnit(
-        request_id="yfinance:earnings:" + str(ticker), table_name=TABLE_NAME,
+        request_id="nasdaq:calendar/earnings:" + str(pd.Timestamp(item).date()) + ":" + day,
+        table_name=TABLE_NAME, partition_key=str(pd.Timestamp(item).date()),
+        expected_keys=(str(pd.Timestamp(item).date()),)) for item in dates)
+
+
+def ticker_units(tickers, *, as_of) -> tuple[RefreshUnit, ...]:
+    """One yfinance confirmation unit per ticker; as_of is in the id (R4)."""
+    day = _as_of_day(as_of)
+    return tuple(RefreshUnit(
+        request_id="yfinance:earnings:" + str(ticker) + ":" + day, table_name=TABLE_NAME,
         partition_key=str(ticker), expected_keys=(str(ticker),)) for ticker in tickers)
 
 
-def plan_forward_calendar(parent_snapshot, dates, tickers, *, cached_nasdaq=None,
+def plan_forward_calendar(parent_snapshot, dates, tickers, *, as_of, cached_nasdaq=None,
                           cached_yfinance=None, max_attempts: int = 3,
                           expected_head_generation: int = 0):
     """The two cache-first RefreshPlans this job reserves budget for.
@@ -194,11 +207,11 @@ def plan_forward_calendar(parent_snapshot, dates, tickers, *, cached_nasdaq=None
     runner executes the Nasdaq plan first and builds the yfinance plan from
     the tickers still missing a session.
     """
-    nasdaq = plan_refresh(parent_snapshot, date_units(dates),
+    nasdaq = plan_refresh(parent_snapshot, date_units(dates, as_of=as_of),
                           cached_outcomes=dict(cached_nasdaq or {}),
                           provider_account=NATIVE_NASDAQ_ACCOUNT, max_attempts=max_attempts,
                           expected_head_generation=expected_head_generation)
-    yfinance = plan_refresh(parent_snapshot, ticker_units(tickers),
+    yfinance = plan_refresh(parent_snapshot, ticker_units(tickers, as_of=as_of),
                             cached_outcomes=dict(cached_yfinance or {}),
                             provider_account=NATIVE_YFINANCE_ACCOUNT, max_attempts=max_attempts,
                             expected_head_generation=expected_head_generation)
@@ -210,49 +223,83 @@ def plan_forward_calendar(parent_snapshot, dates, tickers, *, cached_nasdaq=None
 # --------------------------------------------------------------------------
 
 
+def _edge_result(fetcher, argument) -> tuple[bytes, str, dict, list]:
+    """Call one provider edge; a raising edge is a classified transient (R1/R3)."""
+    try:
+        raw, kind, meta, rows = fetcher(argument)
+    except Exception as exc:  # noqa: BLE001 -- classified, never swallowed
+        return b"", "transient", {"error": type(exc).__name__}, []
+    if not isinstance(kind, str):
+        return b"", "refused", {}, []
+    return (raw or b""), kind, dict(meta or {}), list(rows or ())
+
+
+def _parseable_json(raw: bytes) -> bool:
+    """The store re-validates bytes before caching them (spec R2)."""
+    try:
+        json.loads(raw.decode("utf-8"))
+    except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
+        return False
+    return True
+
+
+def _parse_earnings(raw: bytes):
+    try:
+        return pd.read_csv(io.BytesIO(raw))
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
 def _fetch_nasdaq(conn, store, fetcher, plan, wanted: set[str], *, received_at: str):
     from engine.v2.ops.calendar_moves_jobs import _unit_request
 
     claims: dict[tuple[str, str], dict] = {}
+    kinds: list[str] = []
     for unit in plan.fetch_units:
         day = unit.expected_keys[0]
-        try:
-            raw, _kind, _meta, rows = fetcher(_unit_request(unit))
-        except Exception:  # one bad date must not cost the other twenty
+        raw, kind, _meta, rows = _edge_result(fetcher, _unit_request(unit))
+        if kind in ("complete", "legitimate_empty"):
+            if not raw or not _parseable_json(raw):
+                kind = "refused"  # unparseable bytes are never cached as complete
+            else:
+                record_unit_receipt(conn, store, unit, raw, source=NASDAQ_SOURCE,
+                                    endpoint="calendar/earnings", received_at=received_at,
+                                    response_kind=kind)
+        kinds.append(kind)
+        if kind != "complete":
             continue
-        record_unit_receipt(conn, store, unit, raw, source=NASDAQ_SOURCE,
-                            endpoint="calendar/earnings", received_at=received_at)
         for row in rows:
             ticker = str(row.get("symbol") or "").strip()
             if not ticker or (wanted and ticker not in wanted):
                 continue
             claims.setdefault((ticker, day), {})["nasdaq"] = SESSION_BY_TIME.get(row.get("time"))
-    return claims
+    return claims, kinds
 
 
-def _fetch_yfinance(conn, store, fetcher, plan, claims: dict, *, received_at: str) -> None:
+def _fetch_yfinance(conn, store, fetcher, plan, claims: dict, *, received_at: str) -> list[str]:
     """Warm and read the per-ticker yfinance earnings CSV.
 
     The legacy pull only warmed this cache here and left the session parse to
     ``engine.calendar.load_yfinance_earnings`` at rebuild time; this store is
     that read, moved into the job that owns the fetch (same CSV columns, same
-    ``session`` mapping).
+    ``session`` mapping). Bytes are parsed BEFORE they are cached (R2); the
+    unit kinds are returned so the caller can fail the job on any
+    transient/refused/not_final unit (R3).
     """
+    kinds: list[str] = []
     for unit in plan.fetch_units:
         ticker = unit.expected_keys[0]
-        try:
-            raw = fetcher(ticker)
-        except Exception:  # a name yfinance cannot answer for stays session-less
-            continue
-        if not raw:
-            continue
-        record_unit_receipt(conn, store, unit, raw, source=YFINANCE_SOURCE,
-                            endpoint="earnings", received_at=received_at)
-        try:
-            frame = pd.read_csv(io.BytesIO(raw))
-        except (ValueError, OSError, AttributeError):
-            continue
-        if frame.empty or "session" not in frame.columns:
+        raw, kind, _meta, _rows = _edge_result(fetcher, ticker)
+        frame = (_parse_earnings(raw)
+                 if raw and kind in ("complete", "legitimate_empty") else None)
+        if kind == "complete" and frame is None:
+            kind = "refused"
+        if frame is not None and kind in ("complete", "legitimate_empty"):
+            record_unit_receipt(conn, store, unit, raw, source=YFINANCE_SOURCE,
+                                endpoint="earnings", received_at=received_at,
+                                response_kind=kind)
+        kinds.append(kind)
+        if frame is None or frame.empty or "session" not in frame.columns:
             continue
         for key, claim in claims.items():
             if key[0] != ticker:
@@ -260,6 +307,7 @@ def _fetch_yfinance(conn, store, fetcher, plan, claims: dict, *, received_at: st
             match = frame[frame["event_date"].astype(str).str[:10] == key[1]]
             if not match.empty:
                 claim["yfinance"] = match.iloc[-1]["session"]
+    return kinds
 
 
 # --------------------------------------------------------------------------
@@ -305,10 +353,14 @@ def _merged_row(existing, ticker: str, day: str, claims: dict, *, updated_at: st
 def _revision(contract, row: dict, *, received_at: str) -> incremental_tables.GenericRevision:
     logical_key = incremental_tables.logical_key_for_row(contract, row)
     payload = incremental_tables.revision_hash(logical_key=logical_key, row=row, deleted=False)
+    # Microsecond resolution: a later session's correction must outrank the same
+    # key's retained revision even when both commits happen in the same second
+    # (second-resolution ordinals tie and the equal-rank guard then refuses).
     candidate = RevisionCandidate(
         revision_id="fwd_cal_" + payload.removeprefix("sha256:")[:32],
         logical_key=logical_key, source="forward_calendar", source_priority=0,
-        finality="final", revision_ordinal=int(pd.Timestamp(received_at).timestamp()),
+        finality="final",
+        revision_ordinal=int(pd.Timestamp(received_at).timestamp() * 1_000_000),
         received_at=received_at, content_hash=payload)
     return incremental_tables.GenericRevision(candidate=candidate, row=row, deleted=False)
 
@@ -406,8 +458,10 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
     existing ``earnings_events`` contract through ``generic_incremental``
     against the pinned parent snapshot. The horizon calendar comes from that
     snapshot's own ``daily_market`` dates; each source's units are planned
-    cache-first, so a unit backed by a durable raw receipt never reaches the
-    provider again.
+    cache-first, so a unit backed by a durable complete receipt never reaches
+    the provider again (spec R2), and any unit that ends transient/refused/
+    not_final fails the job with its typed code before anything is committed
+    (spec R3).
     """
     root = Path(root)
     document = _input_document(root)
@@ -422,25 +476,29 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
         store = ArtifactStore(document["objects_root"])
         repository = Repository(conn, store)
         parent = repository.resolve_full(parameters.parent_snapshot_id)
-        as_of = pd.Timestamp(document.get("as_of") or parameters.as_of).normalize()
+        as_of = _as_of_day(document.get("as_of") or parameters.as_of)
         horizon = int(document.get("horizon_days", 21))
         wanted = {str(ticker) for ticker in (document.get("tickers") or parameters.tickers)}
         dates = horizon_dates(as_of, horizon, calendar=_native_calendar(repository, parent))
         received_at = clock.now().isoformat()
 
-        nasdaq_units = date_units(dates)
+        nasdaq_units = date_units(dates, as_of=as_of)
         nasdaq_plan, _ = plan_forward_calendar(
-            parent.snapshot, dates, (), cached_nasdaq=_cached_nasdaq(conn, nasdaq_units))
-        claims = _fetch_nasdaq(conn, store, nasdaq_fetcher, nasdaq_plan, wanted,
-                               received_at=received_at)
+            parent.snapshot, dates, (), as_of=as_of,
+            cached_nasdaq=_cached_nasdaq(conn, nasdaq_units))
+        claims, nasdaq_kinds = _fetch_nasdaq(conn, store, nasdaq_fetcher, nasdaq_plan, wanted,
+                                             received_at=received_at)
         pending = sorted({ticker for (ticker, _day), sources in claims.items()
                           if not sources.get("nasdaq")})
-        yfinance_units = ticker_units(pending)
+        yfinance_units = ticker_units(pending, as_of=as_of)
         _, yfinance_plan = plan_forward_calendar(
-            parent.snapshot, (), pending,
+            parent.snapshot, (), pending, as_of=as_of,
             cached_yfinance=_cached_yfinance(conn, yfinance_units))
-        _fetch_yfinance(conn, store, earnings_fetcher, yfinance_plan, claims,
-                        received_at=received_at)
+        yfinance_kinds = _fetch_yfinance(conn, store, earnings_fetcher, yfinance_plan, claims,
+                                         received_at=received_at)
+        code = provider_failure_code((*nasdaq_kinds, *yfinance_kinds))
+        if code:
+            raise fail(code, "forward calendar provider response was not complete")
         if not claims:
             return RefreshCallbackResult(
                 status="noop", completed_ids=tuple(sorted(wanted)), coverage_advanced=False,

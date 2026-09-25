@@ -45,6 +45,7 @@ from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
 from engine.v2.ops.calendar_moves_jobs import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     cached_unit_outcomes,
+    provider_failure_code,
     record_unit_receipt,
 )
 from engine.v2.ops.errors import fail
@@ -76,6 +77,18 @@ _ARROW_SCHEMA = pa.schema([
 
 _CONTRACT_REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id,
                                  definition_hash=COMPUTED_MOVES_CONTRACT.definition_hash)
+
+
+def _as_of_day(as_of) -> str:
+    """The job's as_of date as ``YYYY-MM-DD``; a missing as_of is refused.
+
+    Spec R4/R5: the as_of is part of every unit id and the only date selection
+    may use, so it is required, never defaulted to the wall clock.
+    """
+    day = pd.Timestamp(as_of).normalize()
+    if pd.isna(day):
+        raise fail("INVALID_REQUEST", "computed moves refresh needs an as_of date")
+    return str(day.date())
 
 
 # --------------------------------------------------------------------------
@@ -132,7 +145,8 @@ def _group_by_ticker(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
 def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str, *,
                                  all_scoreable: bool = True, since=None,
                                  oquants_tickers=(), events: pd.DataFrame | None = None,
-                                 daily: pd.DataFrame | None = None) -> tuple[list[str], dict]:
+                                 daily: pd.DataFrame | None = None,
+                                 as_of) -> tuple[list[str], dict]:
     """The legacy ``target_tickers`` rule, read through the v2 snapshot.
 
     Same selection as ``engine.data.pulls.computed_moves.target_tickers``:
@@ -142,17 +156,19 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
     (the v2 catalog carries no oquants moves table); it only matters for
     ``all_scoreable=False``. ``events``/``daily`` are the caller's already
     scanned frames (spec s4c Rewrite 3); omitted, this scans once itself.
+    ``as_of`` is the job's own session date (spec R5): selection NEVER reads
+    the wall clock, so the store's plan hash equals the nightly's.
     """
     if events is None or daily is None:
         snapshot = repository.resolve(parent_snapshot_id)
         scanned_events, scanned_daily = _scan_once(repository, snapshot)
         events = scanned_events if events is None else events
         daily = scanned_daily if daily is None else daily
-    today = pd.Timestamp.today().normalize()
+    day = _as_of_day(as_of)
     if events.empty:
         scoreable: set[str] = set()
     else:
-        hist = events[pd.to_datetime(events["event_date"]) < today]
+        hist = events[pd.to_datetime(events["event_date"]) < day]
         counts = hist.groupby("ticker")["event_date"].size()
         scoreable = set(counts[counts >= MIN_SCOREABLE].index)
     dm_tickers = set(daily["ticker"].astype(str)) if not daily.empty else set()
@@ -177,10 +193,16 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
     return targets, report
 
 
-def computed_moves_units(targets) -> tuple[RefreshUnit, ...]:
-    """One cacheable unit per target ticker -- the job's coverage denominator."""
+def computed_moves_units(targets, *, as_of) -> tuple[RefreshUnit, ...]:
+    """One cacheable unit per target ticker -- the job's coverage denominator.
+
+    The as_of date is part of the request id (spec R4): each session refetches
+    its own units, so a later as_of never reuses a previous session's receipt.
+    """
+    day = _as_of_day(as_of)
     return tuple(RefreshUnit(
-        request_id="computed_moves:" + str(ticker), table_name=COMPUTED_MOVES_TABLE_NAME,
+        request_id="computed_moves:" + str(ticker) + ":" + day,
+        table_name=COMPUTED_MOVES_TABLE_NAME,
         partition_key=str(ticker), expected_keys=(str(ticker),)) for ticker in targets)
 
 
@@ -193,27 +215,33 @@ def fetch_history(fetcher, ticker: str) -> tuple[np.ndarray, np.ndarray] | None:
     """yfinance Close series (split-adjusted, not dividend-adjusted).
 
     ``fetcher(ticker)`` is the injected provider edge (the ops layer binds
-    ``yfinance_history_fetcher()``); it returns the CSV bytes yfinance writes
-    or ``None`` for a name with no usable history. The DST/normalize fix and
-    the per-ticker failure guard are moved verbatim from
-    ``engine.data.pulls.computed_moves.fetch_history`` (137-198); the only
-    change is that the exception guard is a broad ``Exception`` because the
-    legacy ``FetchError`` import is a legacy-only symbol this layer may not
-    reach -- one delisted ticker is a fact about that name, never a reason to
-    abandon the universe.
+    ``yfinance_history_fetcher()``); it returns
+    ``(raw_bytes, response_kind, response_meta, rows)`` and classifies its own
+    failures (spec R1). Only a ``complete`` response with parseable bytes is a
+    history; a ``legitimate_empty`` name, a transient outage and unparseable
+    bytes all yield ``None`` here, and the caller owns failing the job (R3).
     """
-    raw = _history_payload(fetcher, ticker)
-    if raw is None:
+    raw, kind = _history_result(fetcher, ticker)
+    if kind != "complete":
         return None
     return _parse_history(raw)
 
 
-def _history_payload(fetcher, ticker: str) -> bytes | None:
+def _history_result(fetcher, ticker: str) -> tuple[bytes, str]:
+    """Call the provider edge once and return ``(raw, response_kind)``.
+
+    The edge classifies its own HTTP/library failures (R1); a raising edge is
+    an outage and is classified ``transient`` here rather than silently
+    treated as "no history" (R3). The caller aggregates kinds and fails the
+    job when any unit ends non-complete.
+    """
     try:
-        raw = fetcher(str(ticker))
-    except Exception:  # noqa: BLE001 -- one name must not stop the run.
-        return None
-    return raw or None
+        raw, kind, _meta, _rows = fetcher(str(ticker))
+    except Exception:  # noqa: BLE001 -- R1/R3: classified, never swallowed
+        return b"", "transient"
+    if not isinstance(kind, str):
+        return b"", "refused"
+    return (raw or b""), kind
 
 
 def _parse_history(raw: bytes) -> tuple[np.ndarray, np.ndarray] | None:
@@ -364,11 +392,12 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
         repository = Repository(conn, store)
         parent = repository.resolve_full(parameters.parent_snapshot_id)
         events, daily = _scan_once(repository, parent.snapshot)
+        as_of = document.get("as_of") or parameters.as_of
         targets, _selection = target_tickers_from_snapshot(
             repository, parameters.parent_snapshot_id,
             all_scoreable=bool(document.get("all_scoreable", True)),
-            since=document.get("since"), events=events, daily=daily)
-        units = computed_moves_units(targets)
+            since=document.get("since"), events=events, daily=daily, as_of=as_of)
+        units = computed_moves_units(targets, as_of=as_of)
         plan = plan_refresh(
             parent.snapshot, units,
             cached_outcomes=cached_unit_outcomes(
@@ -410,24 +439,34 @@ def _capture_targets(conn, store, units, fetcher, clock, *, events_by_ticker,
     """Acquire and stage one fragment per fetch unit, exactly once.
 
     Both source frames were scanned once by the caller and are indexed here by
-    ticker; the provider edge is called once per uncached unit and its bytes
-    are written to the durable raw cache before parsing, so the unit can never
-    be fetched twice in this catalog.
+    ticker; the provider edge is called once per uncached unit. Bytes are
+    parsed/validated BEFORE they are cached (R2): an unparseable payload is
+    ``refused`` and never recorded, a ``legitimate_empty`` payload is recorded
+    with its own kind (and never reused), and any unit that ends
+    transient/refused/not_final fails the whole job (R3) after every unit has
+    been attempted.
     """
     created_at = clock.now().isoformat()
-    fragment_records, attempts = {}, []
+    fragment_records, attempts, kinds = {}, [], []
     for unit in units:
         ticker = unit.expected_keys[0]
         capture_id = "capture_" + content_hash(
             {"ticker": ticker, "created_at_request": created_at}).removeprefix("sha256:")[:32]
-        raw = _history_payload(fetcher, ticker)
-        if raw is not None:
+        raw, kind = _history_result(fetcher, ticker)
+        series = (_parse_history(raw) if raw and kind in ("complete", "legitimate_empty")
+                  else None)
+        if kind == "complete" and series is None:
+            kind = "refused"
+        if series is not None:
             record_unit_receipt(conn, store, unit, raw, source=COMPUTED_MOVES_TABLE_NAME,
-                                endpoint=COMPUTED_MOVES_TABLE_NAME, received_at=created_at)
-        series = _parse_history(raw) if raw is not None else None
+                                endpoint=COMPUTED_MOVES_TABLE_NAME, received_at=created_at,
+                                response_kind=kind)
+        kinds.append(kind)
         if series is None:
             attempts.append({"capture_id": capture_id, "ticker": ticker,
-                             "created_at": created_at, "outcome": "no_history"})
+                             "created_at": created_at,
+                             "outcome": ("no_history" if kind == "legitimate_empty"
+                                         else kind)})
             continue
         events = events_by_ticker.get(ticker)
         if events is None:
@@ -451,4 +490,7 @@ def _capture_targets(conn, store, units, fetcher, clock, *, events_by_ticker,
                                                           request_hash=request_hash)
         attempts.append({"capture_id": capture_id, "ticker": ticker,
                          "created_at": created_at, "outcome": "added"})
+    code = provider_failure_code(kinds)
+    if code:
+        raise fail(code, "computed moves provider response was not complete")
     return fragment_records, attempts

@@ -16,8 +16,11 @@ from engine.v2.ops.forward_calendar_store import (
     horizon_dates,
     plan_forward_calendar,
     resolve_session_claims,
+    ticker_units,
 )
 from engine.v2.ops.incremental_data import classify_response
+
+AS_OF = "2026-09-18"
 
 
 def _snapshot(snapshot_id="snap-parent"):
@@ -74,11 +77,12 @@ def test_horizon_dates_falls_back_to_weekdays_without_a_calendar():
 def test_provider_calls_go_through_the_shared_budget():
     dates = [pd.Timestamp("2026-09-21"), pd.Timestamp("2026-09-22"),
              pd.Timestamp("2026-09-23")]
-    units = date_units(dates)
+    units = date_units(dates, as_of=AS_OF)
     nasdaq_cached = {units[0].request_id: _cached(units[0])}
 
     nasdaq, yfinance = plan_forward_calendar(
-        _snapshot(), dates, ("AAPL",), cached_nasdaq=nasdaq_cached, cached_yfinance={})
+        _snapshot(), dates, ("AAPL",), as_of=AS_OF, cached_nasdaq=nasdaq_cached,
+        cached_yfinance={})
 
     assert nasdaq.provider_calls == len(nasdaq.fetch_units) * nasdaq.max_attempts == 2 * 3
     assert nasdaq.provider_account == "nasdaq"
@@ -86,16 +90,26 @@ def test_provider_calls_go_through_the_shared_budget():
     assert yfinance.provider_account == "yfinance"
 
 
+def test_unit_ids_carry_the_as_of_date():
+    """Spec R4: a new session's units are new ids, so its receipts are refetched."""
+    [day_unit] = date_units([pd.Timestamp("2026-09-21")], as_of=AS_OF)
+    assert day_unit.request_id == "nasdaq:calendar/earnings:2026-09-21:" + AS_OF
+    [ticker_unit] = ticker_units(["AAPL"], as_of=AS_OF)
+    assert ticker_unit.request_id == "yfinance:earnings:AAPL:" + AS_OF
+    [next_day] = date_units([pd.Timestamp("2026-09-21")], as_of="2026-09-19")
+    assert next_day.request_id != day_unit.request_id
+
+
 def test_no_provider_call_when_all_cached():
     """Every unit has a satisfying cached outcome: zero reserved calls and
     the fake fetcher is never touched (cache-first, not fetch-then-discard)."""
     dates = [pd.Timestamp("2026-09-21"), pd.Timestamp("2026-09-22"),
              pd.Timestamp("2026-09-23")]
-    units = date_units(dates)
+    units = date_units(dates, as_of=AS_OF)
     cached = {unit.request_id: _cached(unit) for unit in units}
 
     nasdaq, _yfinance = plan_forward_calendar(
-        _snapshot(), dates, (), cached_nasdaq=cached, cached_yfinance={})
+        _snapshot(), dates, (), as_of=AS_OF, cached_nasdaq=cached, cached_yfinance={})
     assert nasdaq.provider_calls == 0
     assert nasdaq.fetch_units == ()
 

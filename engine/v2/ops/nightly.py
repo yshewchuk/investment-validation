@@ -617,11 +617,12 @@ def _build_native_computed_moves_plan(plan, context_tickers, *, catalog_path, ob
     if ("earnings_events" not in snapshot.table_versions
             or "daily_market" not in snapshot.table_versions):
         return None
+    as_of = plan["session"]
     targets, _report = computed_moves_store.target_tickers_from_snapshot(
-        repository, head["snapshot_id"], all_scoreable=True)
+        repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
     if not targets:
         return None
-    units = computed_moves_store.computed_moves_units(targets)
+    units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
     refresh_plan = incremental_data.plan_refresh(
         snapshot, units,
         cached_outcomes=cached_unit_outcomes(
@@ -637,9 +638,14 @@ def _build_native_forward_calendar_plan(plan, context_tickers, *, catalog_path, 
     """S4C: the production forward-calendar Nasdaq ``RefreshPlan``.
 
     One ``RefreshUnit`` per session date in ``[session, session + horizon]``,
-    resolved from the pinned snapshot's own ``daily_market`` sessions; the
-    yfinance session-confirmation calls are unmetered and planned inside the
-    store. Returns ``(RefreshPlan, expected_ids)`` -- expected ids are the
+    resolved from the pinned snapshot's own ``daily_market`` sessions. Every
+    provider request the job can make is counted in the plan the scheduler
+    reserves (spec R6): when a Nasdaq discovery call is due, the yfinance
+    session-confirmation units are planned alongside it on the job's single
+    budget account, so the reserved calls cover the whole run. A run whose
+    Nasdaq units are all cache-satisfied makes no yfinance call at all (the
+    confirmation pass only runs for freshly fetched claims), so it reserves
+    nothing. Returns ``(RefreshPlan, expected_ids)`` -- expected ids are the
     wanted tickers, the store's own coverage denominator -- or ``None`` when
     there is no head, no session, or no ticker to plan for.
     """
@@ -664,16 +670,26 @@ def _build_native_forward_calendar_plan(plan, context_tickers, *, catalog_path, 
             forward_calendar_store.daily_by_ticker(repository, snapshot))
     except ValueError:
         return None
+    as_of = plan["session"]
     dates = forward_calendar_store.horizon_dates(
-        plan["session"], DEFAULT_HORIZON_DAYS, calendar=calendar)
+        as_of, DEFAULT_HORIZON_DAYS, calendar=calendar)
     tickers = tuple(sorted(set(context_tickers)))
     if not dates or not tickers:
         return None
-    units = forward_calendar_store.date_units(dates)
+    nasdaq_units = forward_calendar_store.date_units(dates, as_of=as_of)
+    nasdaq_cached = cached_unit_outcomes(
+        conn, nasdaq_units, source="nasdaq", endpoint="calendar/earnings")
+    nasdaq_plan = incremental_data.plan_refresh(
+        snapshot, nasdaq_units, cached_outcomes=nasdaq_cached,
+        provider_account=NATIVE_NASDAQ_ACCOUNT,
+        expected_head_generation=head["generation"])
+    if not nasdaq_plan.fetch_units:
+        return nasdaq_plan, tickers
+    yfinance_units = forward_calendar_store.ticker_units(tickers, as_of=as_of)
+    cached = {**nasdaq_cached, **cached_unit_outcomes(
+        conn, yfinance_units, source="yfinance", endpoint="earnings")}
     refresh_plan = incremental_data.plan_refresh(
-        snapshot, units,
-        cached_outcomes=cached_unit_outcomes(
-            conn, units, source="nasdaq", endpoint="calendar/earnings"),
+        snapshot, (*nasdaq_units, *yfinance_units), cached_outcomes=cached,
         provider_account=NATIVE_NASDAQ_ACCOUNT,
         expected_head_generation=head["generation"])
     return refresh_plan, tickers
