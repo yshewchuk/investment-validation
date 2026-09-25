@@ -175,14 +175,40 @@ def _generation_pin(plan):
 
 
 def _publication_bindings(keys):
-    return {"bundle.tar": _job_output("projection", keys),
-            "selfcheck.json": _job_output("selfcheck", keys),
-            "engineering_gate.json": _job_output("engineering_gate", keys),
-            # P2-C03: the independent anchor for "which session does this
-            # release speak for" — never trust the decisions watermark's own
-            # occurrence alone (a stale one for the wrong session must still
-            # refuse the decision gate; see effects_graph.publication_effect).
-            "finality.json": _job_output("finality", keys)}
+    bindings = {"bundle.tar": _job_output("projection", keys),
+                "selfcheck.json": _job_output("selfcheck", keys),
+                # P2-C03: the independent anchor for "which session does this
+                # release speak for" — never trust the decisions watermark's own
+                # occurrence alone (a stale one for the wrong session must still
+                # refuse the decision gate; see effects_graph.publication_effect).
+                "finality.json": _job_output("finality", keys)}
+    if "engineering_gate" in keys:
+        bindings["engineering_gate.json"] = _job_output("engineering_gate", keys)
+    return bindings
+
+
+def _decision_bindings(keys):
+    """The decisions job's inputs; ``decision_evidence`` is bound only when the
+    sequence built it (the production DAG always does)."""
+    bindings = {"score.json": _job_output("score", keys),
+                "finality.json": _job_output("finality", keys)}
+    if "decision_evidence" in keys:
+        bindings["decision_plan.json"] = keys["decision_evidence"] + "#decision_plan"
+        bindings["decision_evidence.json"] = keys["decision_evidence"] + "#decision_evidence"
+    return bindings
+
+
+def _render_bindings(keys, prior_selfcheck_ref):
+    """The render job's inputs, with the ledger generation and the optional
+    prior selfcheck bound only when the sequence carries them."""
+    bindings = {"score.json": _job_output("score", keys),
+                "model_evidence.json": _job_output("model_evidence", keys),
+                "finality.json": _job_output("finality", keys)}
+    if "ledger_export" in keys:
+        bindings["ledger_generation.tar"] = _job_output("ledger_export", keys)
+    if prior_selfcheck_ref:
+        bindings["prior_selfcheck.json"] = prior_selfcheck_ref
+    return bindings
 
 
 def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_scope="",
@@ -209,26 +235,13 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
         # this binding is exactly the no-op the check exists to prevent.
         params["input_bindings"]["features.json"] = _job_output("features", keys)
     if action == "legacy_decisions":
-        params["input_bindings"] = {
-            "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
-            "decision_plan.json": keys["decision_evidence"] + "#decision_plan",
-            "decision_evidence.json": keys["decision_evidence"] + "#decision_evidence"}
+        params["input_bindings"] = _decision_bindings(keys)
     if action == "legacy_render":
         # P2-5/Task5: the ledger generation is the verified output of the
         # ``ledger_export`` stage (never a staged mutable ledger copy) —
         # exactly the generation the export coordinator tarred and verified
         # by reading it back through the compatibility reader.
-        params["input_bindings"] = {"score.json": _job_output("score", keys),
-                                     "model_evidence.json": _job_output("model_evidence", keys),
-                                     "finality.json": _job_output("finality", keys),
-                                     "ledger_generation.tar": _job_output("ledger_export", keys)}
-        if prior_selfcheck_ref:
-            # P2-C08: optional -- a previous run's committed selfcheck
-            # artifact, bound as a direct ref (no job in this plan produces
-            # it: this run's own selfcheck stage runs strictly after render).
-            # Absent by default, so render's binding set is unchanged unless
-            # a caller opts in.
-            params["input_bindings"]["prior_selfcheck.json"] = prior_selfcheck_ref
+        params["input_bindings"] = _render_bindings(keys, prior_selfcheck_ref)
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     if action == "legacy_decision_replay":

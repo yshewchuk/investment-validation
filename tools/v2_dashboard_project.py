@@ -37,6 +37,7 @@ predate the real adapter; it leaves ``--preview-input``'s own
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import sys
@@ -114,10 +115,46 @@ def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
     return bundle
 
 
+def _contract_key(key):
+    """A JSON object key back to the tuple contract ``to_document`` stringified."""
+    if not isinstance(key, str):
+        return key
+    try:
+        parsed = ast.literal_eval(key)
+    except (SyntaxError, ValueError):
+        return key
+    return parsed if isinstance(parsed, tuple) else key
+
+
+def _with_contract_quote_keys(document: dict) -> dict:
+    """Rehydrate ``context["quotes"]``'s ``(right, strike, expiry)`` keys.
+
+    ``price`` looks those contracts up by tuple; ``to_document`` writes every
+    mapping key as a string and JSON cannot carry a tuple, so a document
+    round-tripped from a real ``NativeScoreInputs`` loses the pricing lookup
+    unless the keys are restored here.  Every other field already survives the
+    round trip.
+    """
+    context = document.get("context")
+    quotes = context.get("quotes") if isinstance(context, dict) else None
+    if not isinstance(quotes, dict):
+        return document
+    restored = {_contract_key(key): value for key, value in quotes.items()}
+    return {**document, "context": {**context, "quotes": restored}}
+
+
 def _load_native_inputs(path: Path) -> dict[str, tuple[ScoreRequest, NativeScoreInputs]]:
+    """Decode the same documents ``ops rescore`` accepts, through its loader.
+
+    ``NativeScoreInputs`` carries ``Mapping[...]`` blocks (and a typed model
+    layer) ``from_document`` cannot reconstruct, so this composes the ops
+    layer's own canonical decoder rather than a second one here.
+    """
+    from engine.v2.ops.cli import _load_native_score_inputs
+
     doc = json.loads(path.read_text())
     return {key: (from_document(ScoreRequest, pair["request"]),
-                  from_document(NativeScoreInputs, pair["inputs"]))
+                  _load_native_score_inputs(_with_contract_quote_keys(pair["inputs"])))
             for key, pair in sorted(doc.items())}
 
 

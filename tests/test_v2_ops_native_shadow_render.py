@@ -408,6 +408,17 @@ def test_parity_dimensions_cover_all_five_field_groups():
                                  "simulation", "verdicts")
 
 
+def test_parity_compares_forecasts_and_financial_diagnostics():
+    rows = _native_rows()
+    key = sorted(rows)[0]
+    for field, dimension in (("driver_prediction", "forecasts"),
+                             ("entry_cost_pct", "financial_diagnostics")):
+        legacy = {key: {**rows[key], field: (rows[key].get(field) or 0.0) + 1.0}}
+        report = compare_native_vs_legacy(legacy, rows, PARITY_DIMENSIONS)
+        assert [item["dimension"] for item in report["mismatches"]] == [dimension], field
+        assert field in report["mismatches"][0]["finding_fields"]
+
+
 def _all_but_parity():
     return {stage: (lambda value, stage=stage: {**value, stage: "ok"})
             for stage in GRAPH if stage != "native_parity"}
