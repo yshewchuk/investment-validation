@@ -383,7 +383,8 @@ def _run_calendar_moves_worker(parameters, root, *, kind, result_path, schema, l
     incremental_data._validate_refresh_binding(params, result)
     incremental_data._validate_refresh_coverage(params, result)
     incremental_data._validate_refresh_status(result)
-    (root / result_path).write_text(canonical_json(to_document(result)))
+    (root / result_path).write_text(canonical_json(
+        incremental_data.refresh_result_document(result)))
     if result.status not in ("complete", "noop"):
         raise fail(incremental_data._failure_for_refresh_status(result.status), failure_message)
     return {

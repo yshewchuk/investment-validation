@@ -33,6 +33,7 @@ from engine.v2.ops import (
     computed_moves_store,
     executor,
     forward_calendar_store,
+    incremental_data,
     refresh_staging,
 )
 from engine.v2.ops.bootstrap import open_catalog
@@ -105,6 +106,16 @@ def _event_rows(ticker: str, year: int) -> list[dict]:
             for day in _EVENT_DAYS if day.startswith(str(year))]
 
 
+def _orats_event(ticker: str, day: str) -> dict:
+    """One already-committed ORATS earnings event, without either forward flag."""
+    return dict(event_id=f"EE_{ticker}_{day}", ticker=ticker,
+                event_date=datetime.fromisoformat(day), year=int(day[:4]), annc_tod="0800",
+                session="BMO", session_src="orats", src_orats=True, src_oquants=False,
+                src_nasdaq=False, src_yfinance=False, date_agree=True, date_conflict=False,
+                event_cluster_id=f"{ticker}_{day}", claim_count=1,
+                reconciliation="reconciled")
+
+
 _DAILY_COMMON = dict(spot=100.0, iv10=30.0, iv30=32.0, exern_iv10=29.0, exern_iv30=31.0,
                      implied_move=5.0, implied_reconstructed=False, rvol30=28.0, skew=1.1,
                      contango=0.5, fwd90_30=33.0, fexern90_30=34.0, iee=0.2, mcap_usd=1e9,
@@ -118,7 +129,7 @@ def _daily_rows(tickers=TICKERS) -> list[dict]:
             for ticker in tickers for day in days]
 
 
-def _commit_parent(conn, store, clock, *, daily_rows=None, tickers=TICKERS):
+def _commit_parent(conn, store, clock, *, daily_rows=None, tickers=TICKERS, extra_events=()):
     contracts = {"daily_market": contract_for("daily_market"),
                  "earnings_events": contract_for("earnings_events")}
     dm_ref = contract_ref_for(contracts["daily_market"])
@@ -130,6 +141,9 @@ def _commit_parent(conn, store, clock, *, daily_rows=None, tickers=TICKERS):
         year_rows = [row for ticker in tickers for row in _event_rows(ticker, year)]
         ee_records.append(publish_and_inspect(
             store, contracts["earnings_events"], ee_ref, year_rows, str(year)))
+    if extra_events:
+        ee_records.append(publish_and_inspect(
+            store, contracts["earnings_events"], ee_ref, list(extra_events), "2026"))
     commit_tables(conn, clock, {"earnings_events": ee_records, "daily_market": dm_records},
                   contracts, store=store)
 
@@ -215,6 +229,91 @@ def _install_calendar_stub(monkeypatch, *, explode):
         "raise SystemExit(worker.main())\n"))
 
 
+def _install_history_commit_fault_stub(monkeypatch, root):
+    """First worker attempt: providers run, then the fenced commit fails with a
+    retryable typed error after writing a marker; every later attempt sees the
+    marker and explodes if any provider is touched (the retry must be cached)."""
+    marker = root / "computed-moves-commit-failed-once"
+    body = (
+        "import pathlib\n"
+        "from engine.v2.ops.errors import fail\n"
+        "import engine.v2.ops.computed_moves_store as cm_store\n"
+        "PAYLOAD = json.loads(%r)\n"
+        "FRAME = pd.DataFrame({'Close': PAYLOAD['closes']},\n"
+        "                     index=pd.to_datetime(PAYLOAD['dates']))\n"
+        "MARKER = pathlib.Path(%r)\n"
+        "def fake_history_fn(ticker):\n"
+        "    return FRAME\n"
+        "def exploding_history_fn(ticker):\n"
+        "    raise AssertionError('provider ran on the cached retry: ' + ticker)\n"
+        "def boom(point):\n"
+        "    raise fail('TRANSIENT_SOURCE', 'injected commit failure')\n"
+        "if MARKER.exists():\n"
+        "    history_fn = exploding_history_fn\n"
+        "else:\n"
+        "    history_fn = fake_history_fn\n"
+        "    real_commit = cm_store.data_catalog.commit_snapshot\n"
+        "    def failing_commit(*args, **kwargs):\n"
+        "        MARKER.write_text('1')\n"
+        "        kwargs['fault'] = boom\n"
+        "        return real_commit(*args, **kwargs)\n"
+        "    cm_store.data_catalog.commit_snapshot = failing_commit\n"
+        "patched = functools.partial(yfinance_edge.yfinance_history_fetcher,\n"
+        "                            history_fn=history_fn)\n"
+        "providers.yfinance_history_fetcher = patched\n"
+        "raise SystemExit(worker.main())\n"
+        % (json.dumps(_canned_history()), str(marker))
+    )
+    _swap_worker(monkeypatch, _worker_stub_prelude() + body)
+
+
+def _install_calendar_commit_fault_stub(monkeypatch, root):
+    """The forward-calendar mirror of ``_install_history_commit_fault_stub``:
+    first attempt fetches then fails at the fenced commit, later attempts are
+    cache-only and explode on any provider call."""
+    marker = root / "forward-calendar-commit-failed-once"
+    earnings = {"ticker": TICKER, "event_date": SESSION, "annc_tod": "1650", "session": "AMC"}
+    body = (
+        "import pathlib\n"
+        "from engine.v2.ops.errors import fail\n"
+        "import engine.v2.ops.forward_calendar_store as fc_store\n"
+        "EARNINGS = pd.DataFrame([json.loads(%r)],\n"
+        "                        columns=['ticker', 'event_date', 'annc_tod', 'session'])\n"
+        "MARKER = pathlib.Path(%r)\n"
+        "def fake_http_get(url, *, timeout):\n"
+        "    row = {'symbol': %r, 'time': 'time-not-supplied'}\n"
+        "    payload = {'data': {'rows': [row]}, 'message': 'ok'}\n"
+        "    return (200, {}, json.dumps(payload).encode())\n"
+        "def fake_earnings_fn(ticker):\n"
+        "    return EARNINGS if ticker == %r else None\n"
+        "def exploding_http_get(url, *, timeout):\n"
+        "    raise AssertionError('nasdaq ran on the cached retry: ' + url)\n"
+        "def exploding_earnings_fn(ticker):\n"
+        "    raise AssertionError('yfinance ran on the cached retry: ' + ticker)\n"
+        "def boom(point):\n"
+        "    raise fail('TRANSIENT_SOURCE', 'injected commit failure')\n"
+        "if MARKER.exists():\n"
+        "    http_get, earnings_fn = exploding_http_get, exploding_earnings_fn\n"
+        "else:\n"
+        "    http_get, earnings_fn = fake_http_get, fake_earnings_fn\n"
+        "    real_commit = fc_store.generic_incremental.commit_generic_table_candidate\n"
+        "    def failing_commit(*args, **kwargs):\n"
+        "        MARKER.write_text('1')\n"
+        "        kwargs['fault'] = boom\n"
+        "        return real_commit(*args, **kwargs)\n"
+        "    fc_store.generic_incremental.commit_generic_table_candidate = failing_commit\n"
+        "nasdaq = functools.partial(nasdaq_calendar.nasdaq_calendar_fetcher,\n"
+        "                           http_get=http_get)\n"
+        "providers.nasdaq_calendar_fetcher = nasdaq\n"
+        "earnings = functools.partial(yfinance_edge.yfinance_earnings_fetcher,\n"
+        "                             earnings_fn=earnings_fn)\n"
+        "providers.yfinance_earnings_fetcher = earnings\n"
+        "raise SystemExit(worker.main())\n"
+        % (json.dumps(earnings), str(marker), TICKER, TICKER)
+    )
+    _swap_worker(monkeypatch, _worker_stub_prelude() + body)
+
+
 def _worker_stub_prelude() -> str:
     return (
         "import functools, json, sys\n"
@@ -244,6 +343,29 @@ def _run_native(conn, clock, root, receipt, monkeypatch, install):
     service.start()
     try:
         state = run_until(service, conn, receipt.job_id, timeout=300)
+        if state != "succeeded":
+            _raise_attempt_failure(conn, service, receipt.job_id, state)
+    finally:
+        service.close()
+
+
+def _run_native_with_retry(conn, clock, root, receipt, monkeypatch, install):
+    """Run the real supervisor path, letting a retryable worker failure retry.
+
+    ``install`` is a one-argument stub installer: the first attempt fails at
+    its commit, the retry runs from the durable receipts and must succeed.
+    """
+    install(monkeypatch)
+    service = Service(conn, root, registry(), RUN_POLICY, clock=clock, code_source=ROOT)
+    service.start()
+    try:
+        states = ("succeeded", "failed", "retry_wait")
+        state = run_until(service, conn, receipt.job_id, timeout=300, states=states)
+        for _ in range(4):
+            if state != "retry_wait":
+                break
+            clock.advance(70)
+            state = run_until(service, conn, receipt.job_id, timeout=300, states=states)
         if state != "succeeded":
             _raise_attempt_failure(conn, service, receipt.job_id, state)
     finally:
@@ -365,11 +487,14 @@ def test_second_computed_moves_refresh_for_the_same_catalog_is_cache_only(tmp_pa
                 lambda monkeypatch, explode: _install_history_stub(monkeypatch, explode=True))
 
     head_after_second = _head(conn)
-    assert (head_after_second["snapshot_id"], head_after_second["generation"]) == (
-        head_after_first["snapshot_id"], head_after_first["generation"])
+    # The cache-only rerun reaches no provider at all (the fetcher above would
+    # explode). It rebuilds its own capture from the durable receipts and the
+    # commit layer decides the result: a fresh wall-clock capture differs from
+    # the committed one, so the head advances instead of a false no-op.
+    assert head_after_second["generation"] == head_after_first["generation"] + 1
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == receipts
     assert conn.execute(
-        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == captures
+        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == captures + len(TICKERS)
 
 
 def test_second_forward_calendar_refresh_for_the_same_catalog_is_cache_only(tmp_path, monkeypatch):
@@ -393,9 +518,11 @@ def test_second_forward_calendar_refresh_for_the_same_catalog_is_cache_only(tmp_
                 lambda monkeypatch, explode: _install_calendar_stub(monkeypatch, explode=True))
 
     head_after_second = _head(conn)
-    assert (head_after_second["snapshot_id"], head_after_second["generation"]) == (
-        head_after_first["snapshot_id"], head_after_first["generation"])
-    assert conn.execute("SELECT COUNT(*) FROM data_table_revisions").fetchone()[0] == revisions
+    # Same cache-only rebuild as the computed_moves control above: zero
+    # provider calls, and the rebuilt claims carry a fresh received_at, so the
+    # commit layer sees a real change and the head advances.
+    assert head_after_second["generation"] == head_after_first["generation"] + 1
+    assert conn.execute("SELECT COUNT(*) FROM data_table_revisions").fetchone()[0] > revisions
 
 
 @pytest.mark.parametrize("kind,account,message", [
@@ -1138,3 +1265,310 @@ def test_forward_calendar_retry_after_commit_failure_rebuilds_every_cached_unit(
     assert retry_conn.execute(
         "SELECT COUNT(*) FROM data_table_revisions WHERE table_name = 'earnings_events'"
     ).fetchone()[0] == revisions
+
+
+# --------------------------------------------------------------------------
+# 8. key presence is not content: the commit layer decides the no-op
+# --------------------------------------------------------------------------
+
+
+def test_computed_moves_retry_commits_today_over_a_prior_as_of(tmp_path, monkeypatch):
+    """A prior as_of's committed partition is not today's content: the retry
+    after a failed commit rebuilds from cache and commits today's rows."""
+    root = tmp_path / "cm-prior-asof"
+    root.mkdir()
+    conn, clock, _ = catalog(root)
+    store = ArtifactStore(root)
+    _commit_parent(conn, store, clock)
+    frame = _history_frame()
+    calls = []
+
+    def history(ticker):
+        calls.append(ticker)
+        return frame.to_csv().encode(), "complete", {}, []
+
+    _fixed_system_clock(monkeypatch, computed_moves_store, clock)
+
+    head = _head(conn)
+    _write_store_input(root, "computed_moves_refresh_input.json", head,
+                       as_of="2026-11-19", all_scoreable=True)
+    prior = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(root, head), root, fetcher=history)
+    assert prior.status == "complete"
+    prior_head = _head(conn)
+    prior_rows = _fragment_rows(conn, store, prior_head["snapshot_id"], "computed_moves")
+    assert sorted({row["ticker"] for row in prior_rows}) == sorted(TICKERS)
+
+    clock.advance(60)  # today's capture is a different run from yesterday's
+    calls.clear()
+    _write_store_input(root, "computed_moves_refresh_input.json", prior_head,
+                       as_of=SESSION, all_scoreable=True)
+    state = {"fail": True}
+    real_commit = computed_moves_store.data_catalog.commit_snapshot
+
+    def commit(*args, **kwargs):
+        if state["fail"]:
+            kwargs["fault"] = _injected_commit_fault
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(computed_moves_store.data_catalog, "commit_snapshot", commit)
+    with pytest.raises(OpsError) as exc:
+        computed_moves_store.run_computed_moves_refresh(
+            _store_parameters(root, prior_head), root, fetcher=history)
+    assert exc.value.code == "INPUT_CHANGED"
+    assert sorted(calls) == sorted(TICKERS)  # every unit fetched, then the commit failed
+    assert _head(conn)["generation"] == prior_head["generation"]
+
+    state["fail"] = False
+    calls.clear()
+    retried = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(root, prior_head), root, fetcher=history)
+    assert retried.status == "complete"  # never a false no-op over yesterday's partition
+    assert tuple(retried.completed_ids) == TICKERS
+    assert calls == []  # every unit was rebuilt from its cached receipt
+    after = _head(conn)
+    assert after["generation"] == prior_head["generation"] + 1
+    today_rows = _fragment_rows(conn, store, after["snapshot_id"], "computed_moves")
+    assert sorted({row["ticker"] for row in today_rows}) == sorted(TICKERS)
+    assert {row["capture_id"] for row in today_rows} != {
+        row["capture_id"] for row in prior_rows}  # today's rows, not yesterday's
+
+
+def test_forward_calendar_retry_commits_over_existing_orats_rows(tmp_path, monkeypatch):
+    """An ORATS-committed row for the same key is not this run's content: the
+    retry after a failed commit rebuilds from cache and merges the forward
+    claims into it."""
+    root = tmp_path / "fc-orats"
+    root.mkdir()
+    conn, clock, _ = catalog(root)
+    store = ArtifactStore(root)
+    horizon = [str(day.date()) for day in pd.bdate_range(SESSION, "2026-11-27")]
+    _commit_parent(conn, store, clock,
+                   extra_events=[_orats_event(TICKER, day) for day in horizon])
+    head = _head(conn)
+    repository = Repository(conn, store)
+    parent = repository.resolve(head["snapshot_id"])
+    dates = forward_calendar_store.horizon_dates(
+        SESSION, 7, calendar=native_trading_calendar(
+            forward_calendar_store.daily_by_ticker(repository, parent)))
+    assert [str(day.date()) for day in dates] == horizon
+
+    _write_store_input(root, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    parameters = _store_parameters(root, head, expected_ids=TICKERS)
+    nasdaq_calls, earnings_calls = [], []
+    earnings = pd.DataFrame([{"ticker": TICKER, "event_date": SESSION,
+                              "annc_tod": "1650", "session": "AMC"}])
+
+    def nasdaq(unit):
+        nasdaq_calls.append(unit["partition_key"])
+        time = "time-not-supplied" if unit["partition_key"] == SESSION else "time-after-hours"
+        rows = [{"symbol": TICKER, "time": time}]
+        return json.dumps({"data": {"rows": rows}}).encode(), "complete", {"status": 200}, rows
+
+    def earn(ticker):
+        earnings_calls.append(ticker)
+        return earnings.to_csv(index=False).encode(), "complete", {}, []
+
+    state = {"fail": True}
+    real_commit = forward_calendar_store.generic_incremental.commit_generic_table_candidate
+
+    def commit(*args, **kwargs):
+        if state["fail"]:
+            kwargs["fault"] = _injected_commit_fault
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(forward_calendar_store.generic_incremental,
+                        "commit_generic_table_candidate", commit)
+    _fixed_system_clock(monkeypatch, forward_calendar_store, clock)
+
+    with pytest.raises(OpsError) as exc:
+        forward_calendar_store.run_forward_calendar_refresh(
+            parameters, root, nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert exc.value.code == "INPUT_CHANGED"
+    assert len(nasdaq_calls) == len(horizon)
+    assert earnings_calls == [TICKER]
+    assert _head(conn)["generation"] == head["generation"]
+
+    state["fail"] = False
+    nasdaq_calls.clear()
+    earnings_calls.clear()
+    retried = forward_calendar_store.run_forward_calendar_refresh(
+        parameters, root, nasdaq_fetcher=nasdaq, earnings_fetcher=earn)
+    assert retried.status == "complete"  # never a false no-op over the ORATS rows
+    assert tuple(retried.completed_ids) == TICKERS
+    assert nasdaq_calls == [] and earnings_calls == []
+    after = _head(conn)
+    assert after["generation"] == head["generation"] + 1
+    rows_after = _fragment_rows(conn, store, after["snapshot_id"], "earnings_events")
+    session_row = next(row for row in rows_after
+                       if row["ticker"] == TICKER and str(row["event_date"])[:10] == SESSION)
+    assert session_row["src_yfinance"] is True
+    assert session_row["session_src"] == "orats"  # the committed source still wins
+    nasdaq_row = next(row for row in rows_after
+                      if row["ticker"] == TICKER and str(row["event_date"])[:10] == horizon[1])
+    assert nasdaq_row["src_nasdaq"] is True
+
+
+def test_computed_moves_rerun_after_a_commit_is_noop(tmp_path, monkeypatch):
+    """A same-clock rerun rebuilds the identical fragment, so the commit layer
+    itself reports noop and nothing new is written."""
+    root = tmp_path / "cm-noop"
+    root.mkdir()
+    conn, clock, _ = catalog(root)
+    store = ArtifactStore(root)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    _write_store_input(root, "computed_moves_refresh_input.json", head,
+                       as_of=SESSION, all_scoreable=True)
+    frame = _history_frame()
+    calls = []
+
+    def history(ticker):
+        calls.append(ticker)
+        return frame.to_csv().encode(), "complete", {}, []
+
+    _fixed_system_clock(monkeypatch, computed_moves_store, clock)
+    first = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(root, head), root, fetcher=history)
+    assert first.status == "complete"
+    after = _head(conn)
+    captures = conn.execute("SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0]
+
+    calls.clear()
+    _write_store_input(root, "computed_moves_refresh_input.json", after,
+                       as_of=SESSION, all_scoreable=True)
+    noop = computed_moves_store.run_computed_moves_refresh(
+        _store_parameters(root, after), root, fetcher=history)
+    assert noop.status == "noop"
+    assert tuple(noop.completed_ids) == TICKERS
+    assert noop.candidate_snapshot_id is None
+    assert calls == []
+    assert (_head(conn)["snapshot_id"], _head(conn)["generation"]) == (
+        after["snapshot_id"], after["generation"])
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == captures
+
+
+def test_forward_calendar_rerun_after_a_commit_is_noop(tmp_path, monkeypatch):
+    """A same-clock rerun merges back to the parent's own rows, so the commit
+    layer itself reports noop and nothing new is written."""
+    root = tmp_path / "fc-noop"
+    root.mkdir()
+    conn, clock, _ = catalog(root)
+    store = ArtifactStore(root)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    _write_store_input(root, "forward_calendar_refresh_input.json", head,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    rows = [{"symbol": ticker, "time": "time-after-hours"} for ticker in TICKERS]
+    body = json.dumps({"data": {"rows": rows}}).encode()
+    calls = []
+
+    def nasdaq(unit):
+        calls.append(unit["partition_key"])
+        return body, "complete", {"status": 200}, rows
+
+    _fixed_system_clock(monkeypatch, forward_calendar_store, clock)
+    first = forward_calendar_store.run_forward_calendar_refresh(
+        _store_parameters(root, head, expected_ids=TICKERS), root,
+        nasdaq_fetcher=nasdaq, earnings_fetcher=_empty_earnings)
+    assert first.status == "complete"
+    after = _head(conn)
+    revisions = conn.execute(
+        "SELECT COUNT(*) FROM data_table_revisions WHERE table_name = 'earnings_events'"
+    ).fetchone()[0]
+
+    calls.clear()
+    _write_store_input(root, "forward_calendar_refresh_input.json", after,
+                       as_of=SESSION, horizon_days=7, tickers=list(TICKERS))
+    noop = forward_calendar_store.run_forward_calendar_refresh(
+        _store_parameters(root, after, expected_ids=TICKERS), root,
+        nasdaq_fetcher=nasdaq, earnings_fetcher=_empty_earnings)
+    assert noop.status == "noop"
+    assert tuple(noop.completed_ids) == TICKERS
+    assert noop.candidate_snapshot_id is None
+    assert calls == []
+    assert (_head(conn)["snapshot_id"], _head(conn)["generation"]) == (
+        after["snapshot_id"], after["generation"])
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_table_revisions WHERE table_name = 'earnings_events'"
+    ).fetchone()[0] == revisions
+
+
+# --------------------------------------------------------------------------
+# 9. the commit-failure-then-retry case through the real worker path
+# --------------------------------------------------------------------------
+
+
+def test_computed_moves_commit_failure_retries_through_the_worker_path(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    configure_account(conn, NATIVE_COMPUTED_MOVES_ACCOUNT, 1, remaining=20, live_reserve=1)
+    request = _build_requests(conn, store, clock, tmp_path)[COMPUTED_MOVES_REFRESH_ACTION]
+    receipt = submit(conn, registry(), POLICY, request, clock=clock)
+
+    _run_native_with_retry(conn, clock, tmp_path, receipt, monkeypatch,
+                           lambda mp: _install_history_commit_fault_stub(mp, tmp_path))
+
+    assert _head(conn)["generation"] == head["generation"] + 1
+    attempt = conn.execute(
+        "SELECT attempt_id, attempt_number FROM attempts WHERE job_id = ? "
+        "ORDER BY attempt_number DESC LIMIT 1", (receipt.job_id,)).fetchone()
+    assert attempt["attempt_number"] == 2  # the first attempt failed at its commit
+    result_path = ArtifactStore(tmp_path).staging_dir(attempt["attempt_id"]) / \
+        "computed_moves_refresh_result.json"
+    document = json.loads(result_path.read_text())
+    result = incremental_data.validate_refresh_result_document(document)
+    assert result.status == "complete"
+    assert tuple(result.completed_ids) == TICKERS
+    assert "warnings" not in document  # no degradation, and no empty key either
+
+
+def test_forward_calendar_commit_failure_retries_through_the_worker_path(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    configure_account(conn, NATIVE_NASDAQ_ACCOUNT, 1, remaining=200, live_reserve=1)
+    request = _build_requests(conn, store, clock, tmp_path)[FORWARD_CALENDAR_REFRESH_ACTION]
+    receipt = submit(conn, registry(), POLICY, request, clock=clock)
+
+    _run_native_with_retry(conn, clock, tmp_path, receipt, monkeypatch,
+                           lambda mp: _install_calendar_commit_fault_stub(mp, tmp_path))
+
+    assert _head(conn)["generation"] == head["generation"] + 1
+    attempt = conn.execute(
+        "SELECT attempt_id, attempt_number FROM attempts WHERE job_id = ? "
+        "ORDER BY attempt_number DESC LIMIT 1", (receipt.job_id,)).fetchone()
+    assert attempt["attempt_number"] == 2  # the first attempt failed at its commit
+    result_path = ArtifactStore(tmp_path).staging_dir(attempt["attempt_id"]) / \
+        "forward_calendar_refresh_result.json"
+    document = json.loads(result_path.read_text())
+    result = incremental_data.validate_refresh_result_document(document)
+    assert result.status == "complete"
+    assert tuple(result.completed_ids) == TICKERS
+    assert "warnings" not in document  # no degradation, and no empty key either
+
+
+def test_refresh_result_document_omits_empty_warnings_and_round_trips():
+    from engine.v2.foundation import canonical_json
+
+    base = dict(status="noop", completed_ids=("AAA",), coverage_advanced=False,
+                parent_snapshot_id="snap-parent", refresh_plan_hash="sha256:" + "a" * 64,
+                candidate_snapshot_id=None)
+    clean = incremental_data.RefreshCallbackResult(**base)
+    document = incremental_data.refresh_result_document(clean)
+    assert "warnings" not in document
+    before_warnings = {"schema_version": incremental_data.REFRESH_RESULT_SCHEMA, **base}
+    assert canonical_json(document) == canonical_json(before_warnings)
+    assert incremental_data.validate_refresh_result_document(document).warnings == ()
+
+    warned = incremental_data.RefreshCallbackResult(
+        **base, warnings=("weekday calendar fallback: no daily_market session",))
+    warned_document = incremental_data.refresh_result_document(warned)
+    assert warned_document["warnings"] == ["weekday calendar fallback: no daily_market session"]
+    assert incremental_data.validate_refresh_result_document(
+        warned_document).warnings == warned.warnings

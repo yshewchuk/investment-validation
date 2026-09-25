@@ -288,7 +288,18 @@ def _write_ticker_fragment(store: ArtifactStore, ticker: str, rows: list[dict], 
 
 
 def _insert_captures(conn: sqlite3.Connection, attempts: list[dict]) -> None:
+    """Record this run's captures once; a capture already logged is not re-logged.
+
+    ``capture_id`` is content-derived from the unit's ticker and the run's own
+    ``created_at``, so an id already in the append-only log is the same capture
+    (a rerun that rebuilt it from the durable receipt), never a new one.
+    """
     for attempt in attempts:
+        existing = conn.execute(
+            "SELECT 1 FROM data_computed_moves_captures WHERE capture_id = ?",
+            (attempt["capture_id"],)).fetchone()
+        if existing is not None:
+            continue
         conn.execute(
             "INSERT INTO data_computed_moves_captures "
             "(capture_id, ticker, created_at, contract_id, outcome) VALUES (?, ?, ?, ?, ?)",
@@ -350,9 +361,9 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
 def _committed_targets(parent, targets) -> tuple[str, ...]:
     """The wanted tickers whose rows the pinned snapshot already committed.
 
-    A cache-only rerun commits nothing, so its ``completed_ids`` is only the
-    units whose rows are already in the parent snapshot's ``computed_moves``
-    fragments -- never the whole target list on faith.
+    Only the empty-rebuild edge needs this: when no fragment could be built at
+    all there is no commit to ask, so the parent's own rows are the honest
+    completed ids. Every other run's ids come from the committed fragments.
     """
     committed = {record.partition_key for record in parent.records
                  if record.table_contract_ref.contract_id
@@ -360,11 +371,17 @@ def _committed_targets(parent, targets) -> tuple[str, ...]:
     return tuple(ticker for ticker in targets if ticker in committed)
 
 
-def _noop_result(parameters, completed_ids, plan_hash) -> RefreshCallbackResult:
-    """A truthful rerun result: nothing committed, nothing advanced."""
+def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
+    """A truthful rerun result: nothing committed, nothing advanced.
+
+    The plan hash is the job's own binding (``parameters.refresh_plan_hash``),
+    never a recomputed plan: a retry sees its units already cached, so its
+    recomputed plan is not the plan the job reserved budget for.
+    """
     return RefreshCallbackResult(
         status="noop", completed_ids=completed_ids, coverage_advanced=False,
-        parent_snapshot_id=parameters.parent_snapshot_id, refresh_plan_hash=plan_hash)
+        parent_snapshot_id=parameters.parent_snapshot_id,
+        refresh_plan_hash=parameters.refresh_plan_hash)
 
 
 def _input_document(root: Path) -> dict | None:
@@ -399,9 +416,10 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
     receipt is a cache hit: it is never re-fetched. A same-session retry
     rebuilds EVERY unit's fragment -- the fresh fetches plus the cached
     complete receipts re-read by receipt -- so it commits exactly what a clean
-    single run would, while a run whose units are all cache-satisfied is a
-    no-op with no provider call. Never touches ``INVESTING_PLAN_ROOT`` or any
-    legacy path.
+    single run would. Whether the result is a no-op is decided only by the
+    commit: a candidate whose fragments equal the parent's resolves back to
+    the parent snapshot, and committed-key presence is never mistaken for this
+    run's content. Never touches ``INVESTING_PLAN_ROOT`` or any legacy path.
     """
     root = Path(root)
     document = _input_document(root)
@@ -430,20 +448,14 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
                 endpoint=COMPUTED_MOVES_TABLE_NAME),
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(document["expected_head_generation"]))
-        if not plan.fetch_units:
-            # A cached receipt is not a committed row: a commit that failed
-            # leaves the receipt durable while the fragment is absent. Only a
-            # rerun whose wanted rows are ALL already committed is a no-op;
-            # anything missing falls through and is rebuilt from cache.
-            committed = _committed_targets(parent, targets)
-            if len(committed) == len(targets):
-                return _noop_result(parameters, committed, plan.plan_hash)
         fragment_records, attempts = _capture_targets(
             conn, store, plan, fetcher, clock,
             events_by_ticker=_group_by_ticker(events),
             daily_by_ticker=_group_by_ticker(daily))
         if not fragment_records:
-            return _noop_result(parameters, _committed_targets(parent, targets), plan.plan_hash)
+            # Nothing could be rebuilt at all: the committed generation is the
+            # parent's own, so its rows are the only honest completed ids.
+            return _noop_result(parameters, _committed_targets(parent, targets))
 
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],
@@ -455,10 +467,17 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
             expected_head=document.get("expected_head_snapshot_id",
                                        parameters.parent_snapshot_id),
             generation=int(document["expected_head_generation"]), request_hash=request_hash)
+        if receipt.resulting_head_snapshot_id == parent.snapshot.snapshot_id:
+            # The commit layer's own result decides: the candidate resolved
+            # back to the parent snapshot, so the head did not move and
+            # nothing was committed. Key presence in the parent is never
+            # consulted -- yesterday's partition or a cached receipt is not
+            # today's committed content.
+            return _noop_result(parameters, tuple(sorted(fragment_records)))
         return RefreshCallbackResult(
             status="complete", completed_ids=tuple(sorted(fragment_records)),
             coverage_advanced=True, parent_snapshot_id=parameters.parent_snapshot_id,
-            refresh_plan_hash=plan.plan_hash,
+            refresh_plan_hash=parameters.refresh_plan_hash,
             candidate_snapshot_id=receipt.resulting_head_snapshot_id)
     finally:
         conn.close()

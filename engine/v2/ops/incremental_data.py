@@ -138,6 +138,21 @@ class RefreshCallbackResult:
     schema_version: str = REFRESH_RESULT_SCHEMA
 
 
+def refresh_result_document(result: RefreshCallbackResult) -> dict:
+    """The staged result document; an empty ``warnings`` is omitted.
+
+    ``warnings`` is degradation evidence, not a field every run has. Omitting
+    it when empty keeps every result document without a degradation
+    byte-identical to what the schema produced before the field existed (and
+    any hash over those bytes unchanged); a reader of a document without the
+    key gets the field's own empty default.
+    """
+    document = to_document(result)
+    if not result.warnings:
+        document.pop("warnings", None)
+    return document
+
+
 class RefreshCallback(Protocol):
     """Structural boundary implemented by the data layer."""
 

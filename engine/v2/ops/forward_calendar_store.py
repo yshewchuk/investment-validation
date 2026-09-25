@@ -19,8 +19,8 @@ pinned snapshot's own ``daily_market`` sessions (``data.computed_moves.
 native_trading_calendar``, extending with ported pure rules) instead of the
 legacy ``GSPC_DAILY`` CSV, and both network edges are the injected
 ``nasdaq_calendar_fetcher``/``yfinance_earnings_fetcher``, whose acquired
-bytes are cached as raw receipts so a second same-catalog run is a no-op with
-zero provider calls.
+bytes are cached as raw receipts so a second same-catalog run makes zero
+provider calls and commits exactly the rows its receipts rebuild.
 
 The pure functions are testable without a catalog or a network; the runner is
 the impure orchestrator.
@@ -539,8 +539,10 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
     transient/refused/not_final fails the job with its typed code before
     anything is committed (spec R3). A same-session retry rebuilds EVERY unit's
     claims -- fresh fetches plus the cached complete receipts re-read by
-    receipt -- so it commits exactly what a clean single run would, while a run
-    whose rebuilt claims are already committed rows is a no-op.
+    receipt -- so it commits exactly what a clean single run would. Whether the
+    result is a no-op is decided only by the commit itself: a candidate whose
+    merged rows equal the parent's resolves back to the parent snapshot, and
+    key presence in the parent is never mistaken for this run's content.
     """
     root = Path(root)
     document = _input_document(root)
@@ -583,21 +585,18 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
             return _result(parameters, status="noop", completed_ids=tuple(sorted(wanted)),
                            coverage_advanced=False, warnings=warnings)
         existing = _existing_index(repository, parent)
-        if (not nasdaq_plan.fetch_units and not yfinance_plan.fetch_units
-                and all(key in existing for key in claims)):
-            # Every rebuilt claim is already a committed row in the pinned
-            # parent: rebuilding identical claims would only mint another
-            # identical generation, so this run is a no-op. A cached receipt is
-            # NOT a committed row -- a commit that failed leaves the receipt
-            # durable while the row is absent, so that case falls through and
-            # is rebuilt from its receipt and committed here.
-            return _result(parameters, status="noop", completed_ids=tuple(sorted(wanted)),
-                           coverage_advanced=False, warnings=warnings)
         receipt = _commit_claims(conn, store, parent, claims, existing,
                                  scope=str(document["scope"]), clock=clock, document=document)
+        if receipt is None or receipt.resulting_head_snapshot_id == parent.snapshot.snapshot_id:
+            # The commit layer's own result decides: a candidate whose merged
+            # rows equal the parent's resolves back to the parent snapshot, so
+            # the head did not move and nothing was committed. Key presence in
+            # the parent is never consulted -- a cached receipt or a foreign
+            # source's row is not this run's committed content.
+            return _result(parameters, status="noop", completed_ids=tuple(sorted(wanted)),
+                           coverage_advanced=False, warnings=warnings)
         return _result(parameters, status="complete", completed_ids=tuple(sorted(wanted)),
                        coverage_advanced=True, warnings=warnings,
-                       candidate_snapshot_id=(receipt.resulting_head_snapshot_id
-                                              if receipt else None))
+                       candidate_snapshot_id=receipt.resulting_head_snapshot_id)
     finally:
         conn.close()
