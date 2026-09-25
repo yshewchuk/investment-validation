@@ -20,8 +20,8 @@ LABEL = "test-workload"
 WORKLOAD = ["python3", "-c", "print('workload')"]
 
 
-def _watchdog(rss_gb: float) -> str:
-    return (f"[watchdog]   1.0m rss {rss_gb:5.2f}G pss ({rss_gb:.2f}G vm, 2 procs) "
+def _watchdog(rss_gb: float, elapsed_min: float = 1.0) -> str:
+    return (f"[watchdog]   {elapsed_min:.1f}m rss {rss_gb:5.2f}G pss ({rss_gb:.2f}G vm, 2 procs) "
             f"= 10% of cap; swap  0.00G; box free 5.00G")
 
 
@@ -69,6 +69,35 @@ def test_no_watchdog_line_records_null_not_zero(tmp_path, stub):
     stub(["[bounded] command: workload", "plain output, no heartbeat"], 0)
 
     assert _measure(tmp_path)["peak_rss_gb"] is None
+
+
+def test_watchdog_rss_values_ignores_the_startup_reading():
+    assert rm.watchdog_rss_values(_watchdog(0.01, elapsed_min=0.0)) == []
+
+
+def test_watchdog_rss_values_keeps_only_full_interval_readings():
+    output = "\n".join([_watchdog(0.01, elapsed_min=0.0),
+                        _watchdog(1.23, elapsed_min=1.0)])
+
+    assert rm.watchdog_rss_values(output) == [1.23]
+
+
+def test_measure_fast_clean_exit_has_no_false_peak(tmp_path, monkeypatch):
+    monkeypatch.setattr(rm, "_stream",
+                        lambda command: ([_watchdog(0.01, elapsed_min=0.0) + "\n"], 0))
+
+    record = _measure(tmp_path)
+
+    assert record["peak_rss_gb"] is None
+    assert record["exit_code"] == 0
+    assert record["killed"] is False
+
+
+def test_measure_uses_a_real_reading_not_the_startup_artifact(tmp_path, monkeypatch):
+    monkeypatch.setattr(rm, "_stream", lambda command: (
+        [_watchdog(0.01, elapsed_min=0.0) + "\n", _watchdog(2.5, elapsed_min=2.0) + "\n"], 0))
+
+    assert _measure(tmp_path)["peak_rss_gb"] == 2.5
 
 
 # ---------------------------------------------------------- kill classification

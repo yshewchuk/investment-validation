@@ -8,11 +8,13 @@ This recorder never reimplements the watchdog. It launches
 while capturing it (so a long real nightly stays watchable), and derives the
 two values only the child's own log can supply:
 
-* ``peak_rss_gb`` -- the maximum ``rss <N.NNG> pss`` reading across every
-  ``[watchdog]`` line ``bounded_run.py`` printed. ``bounded_run.py`` keeps no
-  peak of its own, so this is parsed from the captured output. ``None`` when
-  no watchdog line ever appeared; ``0.0`` would claim a measurement that was
-  never taken.
+* ``peak_rss_gb`` -- a LOWER BOUND: the maximum ``rss <N.NNG> pss`` reading
+  across the ``[watchdog]`` lines ``bounded_run.py`` printed, sampled only
+  every ``HEARTBEAT_MINUTES`` minutes, so the true peak between samples is
+  unrecorded. ``bounded_run.py`` keeps no peak of its own, so this is parsed
+  from the captured output. ``None`` both when no watchdog line ever appeared
+  AND when the only line(s) seen were the unconditional ``elapsed=0.0``
+  startup reading; ``0.0`` would claim a measurement that was never taken.
 * ``kill_reason`` -- for a child that exited 137, which of the watchdog's
   literal breach strings appeared (``BOX FLOOR BREACH``, ``SWAP BREACH``,
   ``CAP BREACH``, in the watchdog's own precedence). ``None`` for any other
@@ -58,6 +60,7 @@ __all__ = [
     "DEFAULT_EVIDENCE_DIR",
     "CACHE_STATES",
     "HEAVY_JOB_PATTERNS",
+    "HEARTBEAT_MINUTES",
     "KILL_REASONS",
     "parse_free_available_gb",
     "collect_contention",
@@ -82,7 +85,7 @@ HEAVY_JOB_PATTERNS = (
 #: bounded_run.py's three watchdog breach strings, in the watchdog's own order.
 KILL_REASONS = ("BOX FLOOR BREACH", "SWAP BREACH", "CAP BREACH")
 
-_WATCHDOG_RSS = re.compile(r"\[watchdog\].*?\brss\s+(\d+\.\d+)G\s+pss")
+_WATCHDOG_RSS = re.compile(r"\[watchdog\]\s+([\d.]+)m\s+rss\s+(\d+\.\d+)G\s+pss")
 _LABEL = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -125,9 +128,20 @@ def collect_contention(pgrep=_pgrep) -> dict:
     return {"other_heavy_jobs": {name: pgrep(pattern) for name, pattern in HEAVY_JOB_PATTERNS}}
 
 
+#: bounded_run.py's HEARTBEAT_S (tools/bounded_run.py:109), in minutes. The
+#: watchdog's own first-iteration heartbeat fires at elapsed=0.0 regardless of
+#: this interval (its ``last_beat`` starts at -inf) -- that reading is a
+#: startup artifact, not a real periodic sample, so it is excluded here.
+HEARTBEAT_MINUTES = 1.0
+
+
 def watchdog_rss_values(output: str) -> list[float]:
-    """Every ``rss N.NNG pss`` reading on a captured ``[watchdog]`` line."""
-    return [float(match.group(1)) for match in _WATCHDOG_RSS.finditer(output)]
+    """Every ``rss N.NNG pss`` reading from a REAL heartbeat interval --
+    excludes bounded_run.py's unconditional elapsed=0.0 first-iteration
+    reading, which fires before the child has grown to its true RSS and is
+    not a periodic sample."""
+    return [float(rss) for elapsed, rss in _WATCHDOG_RSS.findall(output)
+            if float(elapsed) >= HEARTBEAT_MINUTES]
 
 
 def classify_kill(output: str, exit_code: int) -> str | None:
@@ -213,6 +227,10 @@ def measure(workload_label, max_rss_gb, cache_state, command, *,
         "cores": cores,
         "max_rss_gb_cap": max_rss_gb,
         "max_swap_gb_cap": max_swap_gb,
+        # None (not 0.0) when no full-interval sample exists -- see
+        # HEARTBEAT_MINUTES; a returned value is a LOWER BOUND (bounded_run.py
+        # only samples every HEARTBEAT_S, so the true peak between samples is
+        # unrecorded).
         "peak_rss_gb": max(rss_values) if rss_values else None,
         "exit_code": exit_code,
         "killed": exit_code == 137,
