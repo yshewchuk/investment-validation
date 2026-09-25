@@ -4,6 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
+from engine.v2.ops.calendar_moves_jobs import (
+    computed_moves_job_kind,
+    forward_calendar_job_kind,
+)
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
@@ -210,6 +214,11 @@ def _core_kinds():
     a plain, static enumeration."""
     return [
         refresh_job_kind(),
+        # S4C: the two natively-owned calendar/moves refresh kinds. They read
+        # only the immutable object store and a read-only catalog connection,
+        # so neither carries a legacy-store lease.
+        computed_moves_job_kind(),
+        forward_calendar_job_kind(),
         JobKind(
             name="artifact_check", worker="artifact_check", parameters=CheckParameters,
             resource_classes=frozenset({"delivery"}), effects=("staged",),

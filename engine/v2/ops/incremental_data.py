@@ -478,6 +478,28 @@ def _load_data_refresh_callback() -> RefreshCallback:
                              fetcher=orats_daily_market_fetcher())
 
 
+def _load_computed_moves_refresh_callback() -> RefreshCallback:
+    """S4C: resolve the computed_moves callback and its yfinance history edge.
+
+    Same lazy shape as ``_load_data_refresh_callback``: constructing the
+    fetcher reads nothing and touches no network, and the data-owning store is
+    imported only when the worker actually dispatches this kind.
+    """
+    from engine.v2.ops.computed_moves_store import run_computed_moves_refresh
+    from engine.v2.ops.providers import yfinance_history_fetcher
+    return functools.partial(run_computed_moves_refresh,
+                             fetcher=yfinance_history_fetcher())
+
+
+def _load_forward_calendar_refresh_callback() -> RefreshCallback:
+    """S4C: resolve the forward_calendar callback and its two network edges."""
+    from engine.v2.ops.forward_calendar_store import run_forward_calendar_refresh
+    from engine.v2.ops.providers import nasdaq_calendar_fetcher, yfinance_earnings_fetcher
+    return functools.partial(run_forward_calendar_refresh,
+                             nasdaq_fetcher=nasdaq_calendar_fetcher(),
+                             earnings_fetcher=yfinance_earnings_fetcher())
+
+
 def validate_refresh_result_document(value) -> RefreshCallbackResult:
     """Strictly decode the data callback's small, versioned evidence document."""
     document = to_document(value) if isinstance(value, RefreshCallbackResult) else value
