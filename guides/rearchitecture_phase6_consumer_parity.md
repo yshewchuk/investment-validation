@@ -268,6 +268,7 @@ Adapter edges per owner: 8A 2, P3B 12, P4 36, P5 9, P6-2 7, P6-3 9, P6-4 15, P6-
 - `cli:tools/phase4_targeted_replay.py`<br>`cli:tools/phase5_calibration_keys.py`<br>`cli:tools/phase5_inventory.py`<br>`cli:tools/phase5_prepare_release.py`<br>`cli:tools/prepare_phase4_tier4_caches.py`<br>`cli:tools/phase6_inventory.py`: Phase 4/5/6 migration preparation, inventory and targeted replay diagnostic tooling; evidence producers, not production consumers.
 - `cli:tools/bounded_run.py`: Resource-bounded process runner used by every heavy job; infrastructure, not a capability.
 - `cli:tools/mem_sampler.py`: In-process RSS/stack sampler for profiling a run (py-spy cannot attach on this host); diagnostic tooling, not a consumer.
+- `cli:tools/v2_controlled_failure_drill.py`<br>`cli:tools/v2_resource_measurement.py`<br>`cli:tools/v2_session_evidence_check.py`: P6-6 rehearsal tooling: controlled-failure drill, resource-measurement recorder and session-evidence completeness check; evidence producers and gates, not board/nightly consumers.
 
 #### Active adapter and read-set inventory
 
