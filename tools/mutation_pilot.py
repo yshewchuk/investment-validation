@@ -249,10 +249,17 @@ def cmd_list(cfg: dict, _args) -> int:
 
 def cmd_matrix(cfg: dict, args) -> int:
     """JSON list of the modules a CI run covers: every enabled module, or the
-    comma-separated ``--only`` subset (an unknown or excluded name is an error)."""
+    comma-separated ``--only`` subset (an unknown or excluded name is an error).
+    A value that names NOTHING (``--only ,``) is an error too, never an empty
+    matrix: only an absent/blank ``--only`` means "every enabled module", so a
+    mistyped subset cannot quietly reduce the run to zero modules (GitHub
+    renders a dispatched empty input as the empty string)."""
     names = enabled_modules(cfg)
     if args.only and args.only.strip():
         wanted = [n.strip() for n in args.only.split(",") if n.strip()]
+        if not wanted:
+            sys.exit(f"--only {args.only!r} names no module; pass an empty --only for "
+                     f"every enabled module ({', '.join(names)})")
         bad = [n for n in wanted if n not in names]
         if bad:
             sys.exit(f"not enabled modules: {bad}; enabled: {', '.join(names)}")

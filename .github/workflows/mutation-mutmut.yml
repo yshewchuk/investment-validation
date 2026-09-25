@@ -1,0 +1,277 @@
+# Mutation testing (mutmut), report only -- the second, INDEPENDENT backend.
+# Guide: tests/README.md, "Mutation CI".
+#
+# The gremlins workflow (.github/workflows/mutation.yml) is unchanged: it owns
+# the `mutation` name, the `mutation-report` aggregate artifact (what
+# tools/mutation_report.py reads by default) and the `mutation-gremlins-*`
+# concurrency/cache namespaces. This workflow is the mutmut re-addition of
+# 07a7974, adapted to coexist with it: every shared resource carries a
+# `mutation-mutmut` prefix, so a run of one backend never blocks, overwrites or
+# is merged into the other's results.
+#
+# Behavior (same shape as the gremlins workflow, mutmut's own state model):
+# - push to main: incremental. Each module restores its newest cached mutmut
+#   state (*.meta verdicts, mutmut-stats.json, the driver's test digest) and
+#   re-tests only functions whose source changed (plus survived/no-tests
+#   verdicts, when the module's tests changed). mutmut 3 keeps verdicts whose
+#   function hash is unchanged, so a cache hit skips finished mutants.
+# - weekly schedule (staggered after the gremlins full run), and
+#   workflow_dispatch by default: full, from scratch (no restore: the runner
+#   starts without state, so every mutant is re-decided). Dispatch with
+#   fresh=false for an incremental run, and `modules` for a subset.
+# - Scores never fail a job. A job fails ONLY when the tool does: a nonzero
+#   mutmut exit code (clean-run or worker failure), a step timeout, or an
+#   export that cannot read the module's state. Survivors/score are
+#   report-only. Every module job uploads report/<module>/ (results.jsonl,
+#   summary.json, summary.md) as `mutation-mutmut-module-<module>`; the
+#   `report` job merges every module into one `mutation-mutmut-report`
+#   artifact. Like the gremlins `report` job it does so even when the merge
+#   exits nonzero: merge's rc is captured, the summary it did write is
+#   appended, the artifact is uploaded with always(), and only then does the
+#   job fail on that rc.
+# - The merge is given the plan's module list (--expected-modules) and is
+#   called even when ZERO module artifacts were downloaded, because a matrix
+#   job that died before its export/upload would otherwise leave a subset that
+#   publishes as a valid full run: a missing, extra or duplicated module set
+#   makes merge write an incomplete tool-error artifact (never a clean-looking
+#   subset) and exit nonzero, so `mutation-mutmut-report` can only ever
+#   describe the whole planned run.
+#
+# mutmut needs no cache fingerprint of its own beyond the key below: its state
+# is keyed by the backend version, Python, the toml hash and the module, and
+# every function's verdict is validated against that function's source hash
+# inside the restored state, so changed code is re-tested even on a cache hit.
+name: mutation-mutmut
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 22 * * 0"  # Sundays 22:23 UTC: full run, staggered after the gremlins one
+  workflow_dispatch:
+    inputs:
+      fresh:
+        description: "Full run from scratch (skip the cache restore). Untick for incremental."
+        type: boolean
+        default: true
+      modules:
+        description: "Comma-separated module subset (empty: every enabled module)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Separate from the gremlins group (mutation-gremlins-...), so a mutmut run
+# never queues behind -- or cancels -- a gremlins run on the same ref.
+concurrency:
+  group: mutation-mutmut-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The phase-0 environment lock (requirements.txt header: "python 3.14.4").
+  # mutmut 3.8.0 supports Python 3.14 (the mutmut era of mutation CI ran on it).
+  PYTHON_VERSION: "3.14.4"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.plan.outputs.modules }}
+      mode: ${{ steps.plan.outputs.mode }}
+      mutmut: ${{ steps.plan.outputs.mutmut }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          FRESH: ${{ inputs.fresh }}
+          ONLY: ${{ inputs.modules }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
+            mode=incremental
+          else
+            mode=full
+          fi
+          mutmut=$(sed -n 's/^mutmut==\([^ ]*\).*/\1/p' requirements-dev.txt)
+          test -n "$mutmut"
+          # Assign in its own command, never inside the echo: the exit status of
+          # `echo "modules=$(...)"` is echo's, so a failing matrix command would
+          # write an empty module list and the step would still pass. Under
+          # `set -e` a command substitution in a plain assignment does abort, and
+          # `mutation_pilot.py matrix --only ,` refuses instead of emitting the
+          # empty matrix that would silently skip the whole matrix job.
+          modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY")
+          {
+            echo "modules=$modules"
+            echo "mode=$mode"
+            echo "mutmut=$mutmut"
+          } >> "$GITHUB_OUTPUT"
+
+  mutate:
+    needs: plan
+    if: needs.plan.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.plan.outputs.modules) }}
+    env:
+      MODULE: ${{ matrix.module }}
+      MODE: ${{ needs.plan.outputs.mode }}
+      # tools/mutation_pilot.py's default home; the cache paths below match it.
+      STATE: ~/.cache/investing-plan-mutation-pilot/${{ matrix.module }}/mutants
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the push's base commit, to find the functions it changed
+      - id: py
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - id: key
+        run: >-
+          echo "prefix=mutation-mutmut${{ needs.plan.outputs.mutmut }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('tools/mutation_pilot.toml') }}-${{ matrix.module }}-"
+          >> "$GITHUB_OUTPUT"
+      # Only mutmut's state is cached -- a namespace fully separate from the
+      # gremlins workflow's .gremlins_cache keys (mutation-gremlins...):
+      # per-file verdicts and function hashes (*.meta), test stats and the
+      # driver's test digest. The work copy and the mutated files are rebuilt
+      # from the checkout; unchanged functions keep their verdicts because
+      # mutmut compares function hashes, not mtimes, once the mutated file is
+      # missing. A full run skips this restore and so starts from scratch.
+      - name: Restore mutmut state
+        if: needs.plan.outputs.mode == 'incremental'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.STATE }}/**/*.meta
+            ${{ env.STATE }}/mutmut-stats.json
+            ${{ env.STATE }}/mutation-ci-state.json
+          key: ${{ steps.key.outputs.prefix }}${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ steps.key.outputs.prefix }}
+      - name: Run mutmut
+        id: run
+        timeout-minutes: 330
+        run: |
+          set -euo pipefail
+          date +%s > "$RUNNER_TEMP/mutation-start"
+          set +e
+          python -u tools/mutation_pilot.py run "$MODULE" --max-children "$(nproc)"
+          echo "$?" > "$RUNNER_TEMP/mutation-rc"
+          set -e
+      - name: Export report
+        if: always() && steps.key.outcome == 'success'
+        env:
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          set -euo pipefail
+          rc=$(cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1)  # -1: killed by the step timeout
+          start=$(cat "$RUNNER_TEMP/mutation-start" 2>/dev/null || date +%s)
+          # set -e: mutation_results.py export is the gate for a module whose
+          # state cannot be read at all; a nonzero mutmut rc still writes an
+          # honest partial artifact (run_exit_code recorded) and is failed on
+          # below. Survivors/score never exit nonzero.
+          python tools/mutation_results.py export "$MODULE" --out "report/$MODULE" --mode "$MODE" \
+            ${BEFORE:+--changed-base "$BEFORE"} --run-exit-code "$rc" --elapsed "$(( $(date +%s) - start ))"
+          cat "report/$MODULE/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.key.outcome == 'success'
+        with:
+          name: mutation-mutmut-module-${{ matrix.module }}
+          path: report/${{ matrix.module }}/
+          retention-days: 90
+          if-no-files-found: warn
+      # Saved even after a timeout, so the next run resumes the partial state.
+      - name: Save mutmut state
+        if: always() && steps.key.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.STATE }}/**/*.meta
+            ${{ env.STATE }}/mutmut-stats.json
+            ${{ env.STATE }}/mutation-ci-state.json
+          key: ${{ steps.key.outputs.prefix }}${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Fail only on a tool error, never on scores
+        if: always() && steps.key.outcome == 'success'
+        run: |
+          rc=$(cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1)
+          if [ "$rc" != 0 ]; then echo "::error::mutmut run exited $rc"; exit 1; fi
+
+  report:
+    needs: [plan, mutate]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    env:
+      # The plan's module list, passed to merge as a variable (never interpolated
+      # into the script text), so a module set that is not exactly the one the
+      # plan scheduled cannot be published as a valid full run.
+      EXPECTED_MODULES: ${{ needs.plan.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-mutmut-module-*
+          path: modules
+      - name: Merge module reports
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dirs=(modules/mutation-mutmut-module-*)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            # Not "nothing to do, pass": the plan expected modules and none of
+            # them uploaded. merge is called with no input directories, writes an
+            # incomplete diagnostic artifact against EXPECTED_MODULES, and exits
+            # nonzero -- the job fails in the gate step below.
+            echo "::warning::no mutation-mutmut-module-* artifacts were downloaded; merging against the expected module list anyway"
+          fi
+          # Capture merge's rc, do NOT let `set -e` skip the rest: merge writes a
+          # diagnostic summary and then exits nonzero when a module is missing,
+          # unexpected, duplicated or the inputs are not one run. The
+          # consolidated artifact and that summary are the whole point of the
+          # report job, so they must survive the nonzero rc; the job fails on it
+          # only in the gate step below.
+          set +e
+          python tools/mutation_results.py merge --out merged \
+            --expected-modules "$EXPECTED_MODULES" "${dirs[@]}"
+          echo "$?" > "$RUNNER_TEMP/mutmut-merge-rc"
+          set -e
+          if [ -f merged/summary.md ]; then
+            cat merged/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            rc=$(cat "$RUNNER_TEMP/mutmut-merge-rc")
+            # No summary means nothing was consolidated: that is a failure even
+            # when merge's own exit code said otherwise.
+            if [ "$rc" = 0 ]; then
+              echo "::error::merge exited 0 but wrote no merged/summary.md"
+              echo 1 > "$RUNNER_TEMP/mutmut-merge-rc"
+            fi
+          fi
+      # always(): the partial/failed merge output is exactly what triage needs,
+      # so the artifact goes up whether or not the merge succeeded.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-mutmut-report
+          path: merged/
+          retention-days: 90
+          if-no-files-found: warn
+      - name: Fail only on a merge error, never on scores
+        if: always()
+        run: |
+          rc=$(cat "$RUNNER_TEMP/mutmut-merge-rc" 2>/dev/null || echo -1)
+          if [ "$rc" != 0 ]; then echo "::error::report merge exited $rc"; exit 1; fi

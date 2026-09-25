@@ -208,11 +208,46 @@ What to know before reading a score:
 
 ## Mutation CI
 
-`.github/workflows/mutation.yml` runs the modules in
-`tools/mutation_pilot.toml` on GitHub Actions, one matrix job per enabled
-module, with `--max-children $(nproc)` (4 on a standard runner). It only
-reports. Scores never fail a job. A job fails only when the tool does: mutmut's
-clean test run fails, or the run hits its 330-minute step timeout.
+Mutation CI runs on GitHub Actions with TWO INDEPENDENT backends side by side:
+`.github/workflows/mutation.yml` (pytest-gremlins, the gremlins workflow) and
+`.github/workflows/mutation-mutmut.yml` (mutmut, added back alongside it, not
+in place of it). Both run one matrix job per enabled module of
+`tools/mutation_pilot.toml`, on pushes to main (incremental), on a weekly full
+schedule, and on manual dispatch; neither queues behind, cancels, caches over
+or merges into the other -- every shared resource is namespaced per backend:
+
+| workflow | backend | concurrency group | cache namespace | module artifacts | aggregate artifact |
+|---|---|---|---|---|---|
+| `mutation.yml` | pytest-gremlins 1.9.0 (`tools/gremlin_pilot.py`) | `mutation-gremlins-<ref>` | `mutation-gremlins<ver>-...` (per-module tracked-input fingerprint) over `.gremlins_cache` | `mutation-module-<module>` | `mutation-report` |
+| `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-<ref>` | `mutation-mutmut<ver>-py<ver>-<toml hash>-<module>-...` over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
+
+**The two scores measure different things and are never comparable.** mutmut's
+score is (killed + timeout) / checked -- every mutant the run considered,
+`no_tests` counting against it; gremlins' is (zapped + timeout) /
+(total - pardoned), with errored gremlins counted as checked but never killed,
+and the operator sets and mutation semantics differ between the tools.
+`tools/mutation_report.py --history` prints `--` instead of a delta across the
+two identities, and `checks/mutation_ratchet.py` refuses a cross-backend
+comparison outright (`MUTATION_BACKEND_MISMATCH`). Each backend's own
+week-over-week trend is the meaningful number. Access paths: the gremlins
+aggregate stays `mutation-report` -- what `tools/mutation_report.py` reads by
+default, unchanged -- and the mutmut aggregate is `mutation-mutmut-report`,
+readable with `tools/mutation_report.py --backend mutmut` (or
+`gh run download --workflow mutation-mutmut.yml -n mutation-mutmut-report`).
+
+In both workflows scores never fail a job; a job fails only when the tool
+does. And in both, the `report` job's merge is handed the plan's module list
+(`--expected-modules`) and refuses to publish a clean-looking subset as the
+complete run: a missing, extra or duplicated module report -- or nothing
+downloaded at all -- yields an incomplete tool-error diagnostic with the score
+withheld, and the job fails.
+
+The rest of this section is the mutmut workflow's own contract (the gremlins
+one is documented under "Backend: pytest-gremlins" below).
+`.github/workflows/mutation-mutmut.yml` runs mutmut per module with
+`--max-children $(nproc)` (4 on a standard runner). A job fails only when
+mutmut's clean test run fails, its state cannot be exported, or the run hits
+its 330-minute step timeout.
 
 - **Diagnosing a failed stats run.** When mutmut's clean/stats run fails it
   prints only `failed to collect stats. runner returned 1` and swallows the
@@ -236,7 +271,7 @@ clean test run fails, or the run hits its 330-minute step timeout.
 | trigger | mode | state |
 |---|---|---|
 | push to main | incremental | restores the module's newest cached mutmut state |
-| weekly (Sun 05:23 UTC) | full | no restore: every mutant from scratch |
+| weekly (gremlins Sun 05:23 UTC, mutmut Sun 22:23 UTC — staggered) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
 
 - **Scope.** All of `engine/v2`, split into 23 modules plus the six pilot
@@ -260,7 +295,9 @@ clean test run fails, or the run hits its 330-minute step timeout.
   `mutants/**/*.meta`, `mutmut-stats.json` and the driver's
   `mutation-ci-state.json`. The key is
   `mutation-mutmut<ver>-py<ver>-<hash of mutation_pilot.toml>-<module>-<sha>-<run id>-<attempt>`.
-  Restore uses the same key without the sha, so each run gets the newest
+  The `mutation-mutmut` namespace never touches the gremlins workflow's
+  `mutation-gremlins` keys or cache paths. Restore uses the same key without
+  the sha, so each run gets the newest
   state. The work copy and mutated files are rebuilt from the checkout. mutmut
   then keeps every verdict whose function hash is unchanged. Editing the toml,
   bumping mutmut or changing Python restarts every module.
@@ -275,13 +312,20 @@ clean test run fails, or the run hits its 330-minute step timeout.
 
 ### Report files
 
-Each job uploads `mutation-module-<module>` (90 days). It holds
+Each job uploads `mutation-mutmut-module-<module>` (90 days). It holds
 `results.jsonl`, `summary.json` and `summary.md`, which is also the job
 summary. The job summary shows the score table and each untriaged survivor in
 a function the push changed (`git diff <before>..<sha>`), with its diff. Runs
 that are not pushes list the survivors this run re-tested instead. The
-`report` job merges every module into one `mutation-report` artifact
-(90 days).
+`report` job merges every module into one `mutation-mutmut-report` artifact
+(90 days), gated by the plan's module list: the merge runs even when zero
+module artifacts arrived, and marks the aggregate `complete: false` /
+`tool_error: true` (score withheld, counts null when nothing or a duplicate
+arrived) with `MISSING_MODULES` / `UNEXPECTED_MODULES` / `DUPLICATE_MODULES` /
+`NO_MODULE_REPORTS` reasons and a nonzero exit whenever the reported set is
+not exactly the planned one -- and, like the gremlins merge, when the inputs
+are not one run/SHA/mode. The `report` job still uploads the diagnostic
+artifact (always()) before failing on that exit.
 
 `results.jsonl` has one row per mutant, including mutants a run did not
 re-test. Its fields (`schema_version` 1):
@@ -309,7 +353,10 @@ and a `modules` map.
 
 ### Backend: pytest-gremlins (`tools/gremlin_results.py`)
 
-The CI migration branch replaces mutmut with **pytest-gremlins 1.9.0**. One
+The gremlins workflow (`.github/workflows/mutation.yml`) is the primary report
+backend -- it owns the `mutation-report` aggregate that
+`tools/mutation_report.py` reads by default -- and since the dual-backend CI
+it runs ALONGSIDE the independent mutmut workflow, not instead of it. One
 run per module writes the raw report `coverage/gremlins/gremlins.json`
 (top-level `summary`, `files`, `results`); `tools/gremlin_results.py export`
 converts it into the same `results.jsonl` / `summary.json` / `summary.md`
@@ -377,7 +424,8 @@ Per-module mutation-score ratchet, mirroring
 rewrites the baseline (`--output` only ever writes a fresh measurement to
 review and commit as the new baseline by hand). It never runs mutmut --
 `--dir` points it at an already-produced report directory (the merged
-`mutation-report` CI artifact, or `mutation_results.py merge` output).
+`mutation-report` / `mutation-mutmut-report` CI artifact, or
+`mutation_results.py merge` output).
 
 - **Full runs only.** It refuses to compare unless BOTH the measurement and
   the baseline have `mode: "full"` (`MUTATION_MEASUREMENT_NOT_FULL` /
@@ -409,14 +457,20 @@ review and commit as the new baseline by hand). It never runs mutmut --
 
 ### Querying: `tools/mutation_report.py`
 
-By default it reads the latest completed main run's `mutation-report`. It
-fetches with `gh` into `~/.cache/investing-plan-mutation-report/<run id>/`
+By default it reads the latest completed main run's `mutation-report` (the
+gremlins workflow). `--backend mutmut` points the remote sources -- the
+default, `--run`, `--sha` and `--history` -- at the independent mutmut
+workflow's runs and its `mutation-mutmut-report` artifact instead; the
+gremlins default is unchanged. It fetches with `gh` into
+`~/.cache/investing-plan-mutation-report/<run id>/`
 (`MUTATION_REPORT_CACHE`; paths inside the repo are refused). `--run ID`,
 `--sha SHA` and `--dir PATH` choose another source. `--local [MODULE ...]` is
 offline and reads the pilot's own work copies.
 
     # untriaged survivors in one module, with diffs
     python3 tools/mutation_report.py --module ops_decisions --untriaged --diff
+    # the same question of the MUTMUT backend (its own runs + mutation-mutmut-report)
+    python3 tools/mutation_report.py --backend mutmut --module ops_decisions --untriaged --diff
     # survivors and no-tests mutants under scoring, as CSV
     python3 tools/mutation_report.py --file 'engine/v2/scoring/*' --status survived,no_tests --format csv
     # one function's mutants in one run, as JSON lines

@@ -12,7 +12,17 @@ Commands::
 
     python3 tools/mutation_results.py export MODULE --out DIR [--mode M]
             [--changed-base SHA] [--run-exit-code N] [--elapsed S]
-    python3 tools/mutation_results.py merge --out DIR IN_DIR [IN_DIR ...]
+    python3 tools/mutation_results.py merge --out DIR [--expected-modules JSON]
+            IN_DIR [IN_DIR ...]
+
+With ``--expected-modules`` (the plan job's JSON module list) the merged
+artifact must describe EXACTLY that module set: a missing, unexpected or
+duplicated module report -- or no module directory at all -- yields an
+incomplete diagnostic (``complete: false``, ``tool_error: true``, machine-
+readable ``failure_reasons``, score withheld) and a nonzero exit, so a subset
+can never be published as the latest completed run. Without the contract the
+merge behaves as before (local and historical merges keep working); a module
+reported twice is an unusable input set either way and is refused.
 
 Row fields (schema_version 1); the guide (tests/README.md, "Mutation CI")
 documents each one:
@@ -351,6 +361,43 @@ def _pct(score: float | None) -> str:
     return "--" if score is None else f"{100 * score:.1f}%"
 
 
+class MergeError(Exception):
+    """An unusable merge input set or a broken module contract: refuse, never crash."""
+
+
+def null_block() -> dict:
+    """A score block where nothing can be honestly stated: every count is null,
+    never a fabricated zero over an empty or ambiguous module set."""
+    return {"total": None, **{s: None for s in STATUSES}, "checked": None,
+            "score": None, "survived_untriaged": None}
+
+
+def _num(v) -> str:
+    return "--" if v is None else str(v)
+
+
+def parse_expected_modules(raw: str | None) -> list[str] | None:
+    """The plan's module contract -> a list of distinct module names, or ``None``
+    when no contract was given. Mirrors ``gremlin_results.parse_expected_modules``:
+    anything that is not a JSON array of names is a broken contract and a refusal,
+    never a silent "expected nothing"."""
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        raise MergeError("--expected-modules is empty: the plan published no module list")
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MergeError(f"--expected-modules is not valid JSON: {exc}") from exc
+    if not isinstance(doc, list) or not all(isinstance(m, str) and m for m in doc):
+        raise MergeError(f"--expected-modules must be a JSON array of module names, "
+                         f"got {text!r}")
+    if (dup := [m for m, n in Counter(doc).items() if n > 1]):
+        raise MergeError(f"--expected-modules lists duplicate module(s): {sorted(dup)}")
+    return doc
+
+
 def markdown(summary: dict, rows: list[dict], changed: set[tuple[str, str]] | None,
              *, limit: int = 40) -> str:
     """Job summary: score table, then survivors in the changed functions."""
@@ -415,29 +462,114 @@ def export_module(work: Path, module: str, files: list[str], out: Path, *, mode:
     return summary
 
 
-def merge_dirs(inputs: list[Path], out: Path) -> dict:
-    """Concatenate per-module results and merge their summaries into ``out``."""
+def merge_dirs(inputs: list[Path], out: Path,
+               expected: list[str] | None = None) -> dict:
+    """Concatenate per-module results and merge their summaries into ``out``.
+
+    Without ``expected`` this is the historical/local merge, unchanged -- a
+    module reported twice is refused, because there is no honest way to pick one.
+    With ``expected`` (the plan job's module list) the merged artifact must
+    describe EXACTLY that set: a missing, unexpected or duplicated module report,
+    no module directory at all, or inputs from more than one run/SHA/mode make the
+    artifact an incomplete diagnostic -- ``complete: false``, ``tool_error: true``,
+    machine-readable ``failure_reasons`` and a withheld score -- so a subset can
+    never be read as the latest completed full run. Counts stay auditable for what
+    really arrived, except when nothing arrived or one module reported twice,
+    where every count is null (never a fabricated zero or a silently doubled
+    total)."""
     out.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, Path] = {}
+    duplicates: dict[str, list[Path]] = {}
     summaries, rows = [], []
     for d in inputs:
         if (d / "summary.json").exists():
-            summaries.append(json.loads((d / "summary.json").read_text()))
+            s = json.loads((d / "summary.json").read_text())
+            name = s["module"]
+            if name in seen:
+                if expected is None:
+                    raise MergeError(f"module {name!r} appears in both {seen[name]} and {d}")
+                duplicates.setdefault(name, [seen[name]]).append(d)
+            else:
+                seen[name] = d
+            summaries.append(s)
         if (d / "results.jsonl").exists():
             rows.extend(read_jsonl(d / "results.jsonl"))
     rows.sort(key=lambda r: (r["module"], r["file"], r["mutant_name"]))
     merged = merge_summaries(summaries)
+    if expected is not None:
+        present = sorted(seen)
+        missing = [m for m in expected if m not in seen]
+        unexpected = [m for m in present if m not in set(expected)]
+        complete_set = bool(summaries) and not (missing or unexpected or duplicates)
+        mismatch = []
+        for key in ("run_id", "sha", "mode"):
+            if len(vals := {s.get(key) for s in summaries}) > 1:
+                mismatch.append(f"{key}s {sorted(map(str, vals))}")
+        contract_violated = not complete_set or bool(mismatch)
+        reasons = []
+        if not inputs:
+            reasons.append("NO_MODULE_REPORTS: no module artifact directory was downloaded")
+        if missing:
+            reasons.append(f"MISSING_MODULES: expected {len(expected)} module(s), "
+                           f"{len(seen)} reported; no report for {', '.join(missing)}")
+        if unexpected:
+            reasons.append(f"UNEXPECTED_MODULES: report(s) outside the expected set: "
+                           f"{', '.join(unexpected)}")
+        for name, dirs in sorted(duplicates.items()):
+            reasons.append(f"DUPLICATE_MODULES: {name} reported by "
+                           + " + ".join(str(d) for d in sorted(dirs, key=str))
+                           + "; no single report to attribute")
+        if mismatch:
+            reasons.append("RUN_PROVENANCE_MISMATCH: " + "; ".join(mismatch))
+        if not summaries or duplicates:
+            # Nothing honest to aggregate: null counts, not zeros over an empty
+            # set and not a total that silently double-counts.
+            merged = {**merged, **null_block()}
+        elif contract_violated:
+            # Counts cover only what really arrived; no input measurement made
+            # this score, so it is withheld rather than recomputed.
+            merged = {**merged, "score": None}
+        # A duplicated module has no single honest entry: the ambiguity lives in
+        # ``module_contract.duplicate``, not resolved to whichever dir read first.
+        merged["modules"] = {k: v for k, v in merged["modules"].items()
+                             if k not in duplicates}
+        merged.update({
+            "expected_modules": list(expected),
+            "module_contract": {"expected": list(expected), "present": present,
+                                "missing": missing, "unexpected": unexpected,
+                                "duplicate": {n: sorted(str(d) for d in ds)
+                                              for n, ds in sorted(duplicates.items())},
+                                "complete_set": complete_set},
+            "complete": not contract_violated,
+            "tool_error": contract_violated,
+            "failure_reasons": reasons,
+        })
     write_jsonl(out / "results.jsonl", rows)
     (out / "summary.json").write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
-    lines = [f"### Mutation testing: all modules ({merged.get('mode')})", "",
+    lines = [f"### Mutation testing: all modules (mutmut, {merged.get('mode')})", "",
              "| module | total | killed | survived | no tests | skipped | untriaged | score |",
              "|---|---:|---:|---:|---:|---:|---:|---:|"]
     for name, b in merged["modules"].items():
-        lines.append(f"| `{name}` | {b['total']} | {b['killed']} | {b['survived']} | "
-                     f"{b['no_tests']} | {b['skipped']} | {b['survived_untriaged']} | "
+        lines.append(f"| `{name}` | {_num(b['total'])} | {_num(b['killed'])} | {_num(b['survived'])} | "
+                     f"{_num(b['no_tests'])} | {_num(b['skipped'])} | {_num(b['survived_untriaged'])} | "
                      f"{_pct(b['score'])} |")
-    lines.append(f"| **all** | {merged['total']} | {merged['killed']} | {merged['survived']} | "
-                 f"{merged['no_tests']} | {merged['skipped']} | {merged['survived_untriaged']} | "
+    lines.append(f"| **all** | {_num(merged['total'])} | {_num(merged['killed'])} | "
+                 f"{_num(merged['survived'])} | {_num(merged['no_tests'])} | "
+                 f"{_num(merged['skipped'])} | {_num(merged['survived_untriaged'])} | "
                  f"{_pct(merged['score'])} |")
+    if expected is not None:
+        lines += ["", f"Expected modules ({len(expected)}): {', '.join(expected) or '(none)'}",
+                  f"Reported modules ({len(seen)}): {', '.join(present) or '(none)'}"]
+        if merged["tool_error"]:
+            lines += ["", "**The module reports that arrived are NOT the set the plan "
+                      "expected -- this is not a valid full run. Score withheld, counts "
+                      "cover only what really arrived, and the artifact is marked "
+                      "INCOMPLETE (tool failure) so no consumer can read it as the "
+                      "latest completed run.**"]
+            lines += [f"- {r}" for r in merged["failure_reasons"]
+                      if r.startswith(("NO_MODULE_REPORTS", "MISSING_MODULES",
+                                       "UNEXPECTED_MODULES", "DUPLICATE_MODULES",
+                                       "RUN_PROVENANCE"))]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     return merged
 
@@ -458,12 +590,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-diffs", action="store_true")
     p = sub.add_parser("merge", help="merge per-module outputs into one report")
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("inputs", nargs="+", type=Path)
+    p.add_argument("--expected-modules", default=None,
+                   help="JSON array of the module names the plan expects; a report set "
+                        "that is not exactly this list is an incomplete tool error")
+    # nargs="*": the report job calls merge even when the download found no
+    # module directory at all, so the expected-module contract can write the
+    # incomplete diagnostic instead of the job passing on an empty set.
+    p.add_argument("inputs", nargs="*", type=Path)
     args = parser.parse_args(argv)
     if args.cmd == "merge":
-        merged = merge_dirs(args.inputs, args.out)
-        print(f"merged {len(merged['modules'])} modules, {merged['total']} mutants -> {args.out}")
-        return 0
+        try:
+            merged = merge_dirs(args.inputs, args.out,
+                                parse_expected_modules(args.expected_modules))
+        except MergeError as exc:
+            print(f"mutation_results: refusing to merge: {exc}", file=sys.stderr)
+            return 2
+        print(f"merged {len(merged['modules'])} modules, {_num(merged['total'])} mutants "
+              f"(score {_pct(merged['score'])}, "
+              f"{'TOOL FAILURE' if merged.get('tool_error') else 'clean'}) -> {args.out}")
+        for reason in merged.get("failure_reasons", []):
+            print(f"mutation_results: {reason}", file=sys.stderr)
+        return 1 if merged.get("tool_error") else 0
     cfg = pilot.load_config()
     files = pilot.mutate_files(cfg, args.module)
     summary = export_module(pilot.home() / args.module, args.module, files, args.out,

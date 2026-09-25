@@ -631,8 +631,9 @@ def test_workflow_pins_python_and_mutmut():
                 assert step["with"]["python-version"] == "${{ env.PYTHON_VERSION }}"
 
 
-def _step(job, predicate):
-    return next(s for s in JOBS[job]["steps"] if predicate(s))
+def _step(job, predicate, jobs=None):
+    jobs = JOBS if jobs is None else jobs
+    return next(s for s in jobs[job]["steps"] if predicate(s))
 
 
 def test_workflow_cache_key_and_restore_policy():
@@ -691,3 +692,292 @@ def test_workflow_is_report_only():
     download = _step("report", lambda s: str(s.get("uses", "")).startswith("actions/download"))
     assert download["with"]["pattern"] == "mutation-module-*"  # never the merged artifact
     assert tomllib.loads((ROOT / "tools" / "mutation_pilot.toml").read_text())  # parses
+
+
+# -- dual CI: the independent mutmut workflow (mutation-mutmut.yml) --------------------
+#
+# Both backends must keep running with their DISTINCT results: separate
+# concurrency groups, cache namespaces, module artifacts and aggregate
+# artifacts, so neither workflow can block, overwrite or silently merge into
+# the other. Same contract as the gremlins workflow: push -> incremental,
+# weekly/dispatch -> full, scores report-only, tool errors fail, and the
+# aggregate refuses to publish anything but the planned module set as complete.
+
+MUT_YML = ROOT / ".github" / "workflows" / "mutation-mutmut.yml"
+MUTMUT = yaml.safe_load(MUT_YML.read_text())
+MUT_JOBS = MUTMUT["jobs"]
+
+
+def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
+    on = MUTMUT.get("on", MUTMUT.get(True))  # PyYAML reads a bare `on` as True
+    assert on["push"]["branches"] == ["main"]
+    assert on["schedule"] and "cron" in on["schedule"][0]
+    assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
+    assert MUTMUT["concurrency"]["group"] == "mutation-mutmut-${{ github.ref }}"
+    gremlin_on = WORKFLOW.get("on", WORKFLOW.get(True))
+    assert MUTMUT["concurrency"]["group"] != WORKFLOW["concurrency"]["group"]
+    assert MUTMUT["permissions"] == {"contents": "read"}
+    # weekly FULL on both, staggered so the two full runs do not queue at once
+    mut_cron = on["schedule"][0]["cron"].split()
+    gre_cron = gremlin_on["schedule"][0]["cron"].split()
+    assert mut_cron != gre_cron and mut_cron[2:] == gre_cron[2:]  # same day, other time
+    plan = MUT_JOBS["plan"]["steps"][-1]["run"]
+    assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
+
+
+def test_mutmut_plan_step_uses_the_mutmut_driver_and_gates_its_own_failure():
+    plan = MUT_JOBS["plan"]["steps"][-1]["run"]
+    assert "set -euo pipefail" in plan
+    assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY")' in plan
+    assert "gremlin_pilot" not in plan  # the mutmut runner, not the gremlins one
+    # the list is assigned, then echoed by name: an interpolated command
+    # substitution inside the echo would hide its failure behind echo's rc
+    assert 'echo "modules=$modules"' in plan
+    assert 'mutmut=$(sed -n' in plan and 'echo "mutmut=$(' not in plan
+    # matrix --only refuses a names-nothing value (below), so a mistyped subset
+    # aborts the plan instead of publishing the empty matrix.
+    assert MUT_JOBS["mutate"]["if"] == "needs.plan.outputs.modules != '[]'"
+
+
+def test_mutmut_matrix_refuses_a_names_nothing_subset_not_an_empty_matrix(capsys):
+    enabled = pilot.enabled_modules(CFG)
+
+    class Args:
+        only = ","
+    with pytest.raises(SystemExit):  # GitHub renders a dispatched empty input as ""
+        pilot.cmd_matrix(CFG, Args)
+    Args.only = " , , "
+    with pytest.raises(SystemExit):
+        pilot.cmd_matrix(CFG, Args)
+    Args.only = "   "  # blank -- and only blank -- still means every enabled module
+    pilot.cmd_matrix(CFG, Args)
+    assert json.loads(capsys.readouterr().out) == enabled
+
+
+def test_mutmut_workflow_caches_only_mutmut_state_in_its_own_namespace():
+    key = _step("mutate", lambda s: s.get("id") == "key", MUT_JOBS)["run"]
+    for part in ("needs.plan.outputs.mutmut", "steps.py.outputs.python-version",
+                 "hashFiles('tools/mutation_pilot.toml')", "matrix.module"):
+        assert part in key, part
+    assert "mutation-mutmut" in key
+    restore = _step("mutate", lambda s: str(s.get("uses", "")).startswith("actions/cache/restore"),
+                    MUT_JOBS)
+    save = _step("mutate", lambda s: str(s.get("uses", "")).startswith("actions/cache/save"),
+                 MUT_JOBS)
+    prefix = "${{ steps.key.outputs.prefix }}"
+    exact = prefix + "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert restore["with"]["key"] == exact == save["with"]["key"]
+    assert restore["with"]["restore-keys"] == prefix
+    assert restore["if"] == "needs.plan.outputs.mode == 'incremental'"  # full: no restore
+    assert "always()" in save["if"]
+    paths = restore["with"]["path"].splitlines()
+    assert paths == save["with"]["path"].splitlines()
+    assert all("STATE" in p for p in paths)  # mutmut's work-copy state only...
+    assert not any("gremlins" in p or "GREMLINS" in p for p in paths)  # ...never the .gremlins_cache
+    # the gremlins key prefix cannot collide: different version source AND name
+    gre_key = _step("mutate", lambda s: s.get("id") == "key")["run"]
+    assert "mutation-gremlins" in gre_key and "mutation-mutmut${{ needs.plan.outputs.mutmut }}" in key
+
+
+def test_mutmut_workflow_is_report_only():
+    run = _step("mutate", lambda s: s.get("id") == "run", MUT_JOBS)
+    assert "tools/mutation_pilot.py run" in run["run"] and "--max-children" in run["run"]
+    assert "set +e" in run["run"] and "mutation-rc" in run["run"]
+    gate = _step("mutate", lambda s: s.get("name", "").startswith("Fail only on a tool error"),
+                 MUT_JOBS)
+    assert 'rc" != 0' in gate["run"] and "score" not in gate["run"]
+    # a timeout-killed run leaves no rc file: the export gate reads -1, never a
+    # silent pass, while survivors/scores never exit nonzero.
+    export = _step("mutate", lambda s: s.get("name") == "Export report", MUT_JOBS)["run"]
+    assert "tools/mutation_results.py export" in export
+    assert '--run-exit-code "$rc"' in export
+    assert 'cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1' in export
+    uploads = [s for j in MUT_JOBS.values() for s in j["steps"]
+               if str(s.get("uses", "")).startswith("actions/upload-artifact")]
+    assert {u["with"]["retention-days"] for u in uploads} == {90}
+    assert {u["with"]["name"] for u in uploads} == {"mutation-mutmut-module-${{ matrix.module }}",
+                                                    "mutation-mutmut-report"}
+    assert all("always()" in u["if"] for u in uploads)
+
+
+def test_mutmut_report_job_gates_the_merge_on_the_planned_module_set():
+    assert MUT_JOBS["report"]["env"]["EXPECTED_MODULES"] == "${{ needs.plan.outputs.modules }}"
+    download = _step("report", lambda s: str(s.get("uses", "")).startswith("actions/download"),
+                     MUT_JOBS)
+    assert download["with"]["pattern"] == "mutation-mutmut-module-*"  # never the merged one
+    merge = _step("report", lambda s: s.get("name") == "Merge module reports", MUT_JOBS)["run"]
+    assert "tools/mutation_results.py merge" in merge
+    assert '--expected-modules "$EXPECTED_MODULES"' in merge
+    assert 'echo "$?" > "$RUNNER_TEMP/mutmut-merge-rc"' in merge  # rc captured, not short-circuited
+    assert "set +e" in merge and "set -e" in merge
+    # the diagnostic artifact must survive the nonzero merge rc: uploaded with
+    # always(), and only the LAST step fails the job on that rc.
+    steps = MUT_JOBS["report"]["steps"]
+    upload = next(s for s in steps if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    gate = steps[-1]
+    assert "always()" in upload["if"] and upload["with"]["name"] == "mutation-mutmut-report"
+    assert gate["name"].startswith("Fail only on a merge error") and 'rc" != 0' in gate["run"]
+    assert "always()" in gate["if"]
+
+
+def test_the_two_workflows_own_disjoint_artifact_names():
+    """One workflow can never download, merge or overwrite the other's output."""
+    def upload_names(jobs):
+        return {s["with"]["name"] for j in jobs.values() for s in j["steps"]
+                if str(s.get("uses", "")).startswith("actions/upload-artifact")}
+    gre_uploads, mut_uploads = upload_names(JOBS), upload_names(MUT_JOBS)
+    assert gre_uploads & mut_uploads == set()  # mutation-report != mutation-mutmut-report
+    gre_pattern = _step("report", lambda s: str(s.get("uses", "")).startswith("actions/download"))
+    mut_pattern = _step("report", lambda s: str(s.get("uses", "")).startswith("actions/download"),
+                        MUT_JOBS)
+    assert gre_pattern["with"]["pattern"] != mut_pattern["with"]["pattern"]
+    assert WORKFLOW["name"] != MUTMUT["name"]
+
+
+# -- merge expected-modules contract: the aggregate can never lie about scope ----------
+
+def _module_artifact(tmp_path: Path, name: str, statuses, info=None, tag=None):
+    """A directory in the shape the mutate job uploads (summary.json + results)."""
+    info = info or INFO
+    rows = [_row(name, "a.py", "f", s, name=f"{tag or name}{i}") for i, s in enumerate(statuses)]
+    d = tmp_path / (tag or name)
+    d.mkdir()
+    mr.write_jsonl(d / "results.jsonl", rows)
+    (d / "summary.json").write_text(json.dumps(mr.summarize(rows, name, info, ["a.py"])))
+    return d
+
+
+def test_merge_with_the_exact_planned_set_is_a_valid_run(tmp_path):
+    a = _module_artifact(tmp_path, "a", ["killed", "survived"])
+    b = _module_artifact(tmp_path, "b", ["killed", "timeout"])
+    merged = mr.merge_dirs([a, b], tmp_path / "m", ["a", "b"])
+    assert merged["complete"] and not merged["tool_error"] and merged["failure_reasons"] == []
+    assert merged["score"] == 0.75 and merged["total"] == 4
+    assert merged["expected_modules"] == ["a", "b"]
+    assert merged["module_contract"] == {"expected": ["a", "b"], "present": ["a", "b"],
+                                         "missing": [], "unexpected": [], "duplicate": {},
+                                         "complete_set": True}
+
+
+def test_merge_missing_a_planned_module_is_never_a_clean_report(tmp_path):
+    """The whole point: a module whose job died before uploading must not let a
+    subset publish as the latest completed run."""
+    a = _module_artifact(tmp_path, "a", ["killed", "killed"])
+    merged = mr.merge_dirs([a], tmp_path / "m", ["a", "b", "c"])
+    assert not merged["complete"] and merged["tool_error"]
+    assert merged["score"] is None  # withheld: no input measurement made this number
+    assert merged["total"] == 2  # counts stay auditable for what really arrived
+    assert any(r.startswith("MISSING_MODULES") and "b, c" in r for r in merged["failure_reasons"])
+    assert merged["module_contract"]["missing"] == ["b", "c"]
+    md = (tmp_path / "m" / "summary.md").read_text()
+    assert "NOT the set the plan expected" in md and "MISSING_MODULES" in md
+
+
+def test_merge_reports_a_module_the_plan_never_scheduled(tmp_path):
+    a = _module_artifact(tmp_path, "a", ["killed"])
+    x = _module_artifact(tmp_path, "stale", ["survived"])  # e.g. an old artifact name
+    merged = mr.merge_dirs([a, x], tmp_path / "m", ["a"])
+    assert merged["tool_error"] and merged["score"] is None
+    assert any(r.startswith("UNEXPECTED_MODULES") and "stale" in r for r in merged["failure_reasons"])
+    assert merged["module_contract"]["unexpected"] == ["stale"]
+
+
+def test_merge_with_no_module_directories_writes_a_null_diagnostic(tmp_path):
+    merged = mr.merge_dirs([], tmp_path / "m", ["a", "b"])
+    assert merged["tool_error"] and not merged["complete"]
+    assert merged["total"] is None and merged["score"] is None  # null, never a fabricated zero
+    assert any(r.startswith("NO_MODULE_REPORTS") for r in merged["failure_reasons"])
+    assert any(r.startswith("MISSING_MODULES") for r in merged["failure_reasons"])
+
+
+def test_merge_duplicate_module_report_against_the_contract_is_a_diagnostic(tmp_path):
+    a1 = _module_artifact(tmp_path, "a", ["killed"], tag="a1")
+    a2 = _module_artifact(tmp_path, "a", ["killed", "killed"], tag="a2")
+    merged = mr.merge_dirs([a1, a2], tmp_path / "m", ["a"])
+    assert merged["tool_error"] and merged["total"] is None  # no honest aggregate exists
+    assert "a" not in merged["modules"]  # not resolved to whichever dir read first
+    assert any(r.startswith("DUPLICATE_MODULES") for r in merged["failure_reasons"])
+    assert set(merged["module_contract"]["duplicate"]["a"]) == {str(a1), str(a2)}
+
+
+def test_merge_mixed_provenance_is_flagged_under_the_contract(tmp_path):
+    a = _module_artifact(tmp_path, "a", ["killed"])
+    b = _module_artifact(tmp_path, "b", ["killed"], info=dict(INFO, run_id="8"))
+    merged = mr.merge_dirs([a, b], tmp_path / "m", ["a", "b"])
+    assert merged["tool_error"] and merged["score"] is None
+    assert any(r.startswith("RUN_PROVENANCE_MISMATCH") and "run_ids" in r
+               for r in merged["failure_reasons"])
+
+
+def test_merge_without_a_contract_keeps_the_historical_shape(tmp_path):
+    a = _module_artifact(tmp_path, "a", ["killed", "survived"])
+    b = _module_artifact(tmp_path, "b", ["killed"])
+    merged = mr.merge_dirs([a, b], tmp_path / "m")
+    assert {"complete", "tool_error", "failure_reasons", "module_contract",
+            "expected_modules"} & set(merged) == set()
+    assert merged["score"] == round(2 / 3, 4)
+    with pytest.raises(mr.MergeError):  # no contract to attribute the ambiguity to
+        mr.merge_dirs([a, _module_artifact(tmp_path, "a", ["killed"], tag="dup")], tmp_path / "m2")
+
+
+@pytest.mark.parametrize("raw", ["", "not json", '{"a": 1}', '["a", "a"]', '"a"'])
+def test_a_broken_contract_is_refused_not_treated_as_no_contract(raw):
+    with pytest.raises(mr.MergeError):
+        mr.parse_expected_modules(raw)
+    assert mr.parse_expected_modules(None) is None
+
+
+def test_merge_cli_exit_codes(tmp_path):
+    a = _module_artifact(tmp_path, "a", ["killed"])
+    b = _module_artifact(tmp_path, "b", ["killed"])
+    assert mr.main(["merge", "--out", str(tmp_path / "x0"), "--expected-modules", '["a", "b"]',
+                    str(a), str(b)]) == 0
+    assert mr.main(["merge", "--out", str(tmp_path / "x1"), "--expected-modules", '["a", "b"]',
+                    str(a)]) == 1  # incomplete diagnostic -> the report job fails
+    assert mr.main(["merge", "--out", str(tmp_path / "x2"), "--expected-modules", "[]"]) == 1
+    assert mr.main(["merge", "--out", str(tmp_path / "x3"), "--expected-modules", "broken"]) == 2
+
+
+# -- mutation_report.py: select the mutmut workflow without moving the default ---------
+
+def test_report_default_is_the_gremlins_workflow_and_artifact():
+    assert rep.DEFAULT_BACKEND == "gremlins"
+    assert rep.backend_sources("gremlins") == ("mutation.yml", "mutation-report")
+    assert (rep.WORKFLOW, rep.ARTIFACT) == ("mutation.yml", "mutation-report")
+    assert rep.backend_sources("mutmut") == ("mutation-mutmut.yml", "mutation-mutmut-report")
+    with pytest.raises(SystemExit):
+        rep.backend_sources("nonsense")
+
+
+def test_report_cli_backend_selects_the_workflow_and_artifact(monkeypatch, tmp_path):
+    monkeypatch.setenv("MUTATION_REPORT_CACHE", str(tmp_path / "cache"))
+    calls = []
+
+    def fake_gh(args, repo):
+        calls.append(["gh", *args])
+        workflow = args[args.index("--workflow") + 1]
+        # distinct run ids, so the gremlins fetch never answers from the mutmut
+        # run's cache directory (and vice versa)
+        return [{"databaseId": 42 if workflow == "mutation.yml" else 43}]
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        dest = Path(cmd[cmd.index("-D") + 1])
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "summary.json").write_text("{}")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rep, "gh_json", fake_gh)
+    monkeypatch.setattr(rep.subprocess, "run", fake_run)
+    monkeypatch.setattr(mr, "read_jsonl", lambda p: [])
+
+    assert rep.main([]) == 0  # default: unchanged gremlins behavior
+    assert calls[0][calls[0].index("--workflow") + 1] == "mutation.yml"
+    assert calls[1][calls[1].index("-n") + 1] == "mutation-report"
+    calls.clear()
+    assert rep.main(["--backend", "mutmut"]) == 0
+    assert calls[0][calls[0].index("--workflow") + 1] == "mutation-mutmut.yml"
+    assert calls[1][calls[1].index("-n") + 1] == "mutation-mutmut-report"
+    calls.clear()
+    assert rep.main(["--backend", "mutmut", "--history", "1"]) == 0  # trend follows the backend
+    assert calls and calls[0][calls[0].index("--workflow") + 1] == "mutation-mutmut.yml"

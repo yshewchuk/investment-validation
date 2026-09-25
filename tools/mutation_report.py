@@ -7,14 +7,25 @@ pytest-gremlins (``tools/gremlin_results.py``), whose ``diff``/``triage``/
 ``excluded`` (pardoned) while never carrying ``no_tests``/``skipped``.
 
 By default reads the merged ``mutation-report`` artifact of the latest
-completed run of ``.github/workflows/mutation.yml`` on main, fetched with
-``gh`` into a cache directory outside the repo
+completed run of ``.github/workflows/mutation.yml`` (the pytest-gremlins
+workflow) on main, fetched with ``gh`` into a cache directory outside the repo
 (``$MUTATION_REPORT_CACHE``, default ``~/.cache/investing-plan-mutation-report``).
-Each run's artifact holds every mutant, not only the ones it re-tested, so the
-latest run is a complete picture.
+``--backend mutmut`` reads the independent mutmut workflow's runs and its
+``mutation-mutmut-report`` artifact instead (see Sources). Each run's artifact
+holds every mutant, not only the ones it re-tested, so the latest run is a
+complete picture.
 
 Sources (pick one; default: latest main run)::
 
+    --backend gremlins|mutmut
+                          which mutation workflow and aggregate artifact to
+                          read: ``gremlins`` (the default) is the
+                          ``mutation.yml`` workflow's ``mutation-report``;
+                          ``mutmut`` is the independent
+                          ``mutation-mutmut.yml`` workflow's
+                          ``mutation-mutmut-report``. Only remote sources
+                          (default, --run, --sha, --history) select a backend;
+                          --dir and --local read what they are pointed at.
     --run ID            that workflow run
     --sha SHA           the latest run for that commit
     --dir PATH          a directory with results.jsonl (an artifact, or
@@ -50,10 +61,25 @@ sys.path.insert(0, str(REPO / "tools"))
 import gremlin_results as gr  # noqa: E402
 import mutation_results as mr  # noqa: E402
 
-WORKFLOW = "mutation.yml"
-ARTIFACT = "mutation-report"
+# The two independent mutation workflows. The gremlins one keeps the historical
+# default (mutation.yml / mutation-report); --backend mutmut selects the
+# separate workflow and aggregate artifact so neither ever shadows the other.
+BACKENDS = {
+    "gremlins": ("mutation.yml", "mutation-report"),
+    "mutmut": ("mutation-mutmut.yml", "mutation-mutmut-report"),
+}
+WORKFLOW, ARTIFACT = BACKENDS["gremlins"]
+DEFAULT_BACKEND = "gremlins"
 CSV_FIELDS = [f for f in mr.ROW_FIELDS if f != "triage"] + ["triage_verdict", "triage_note",
                                                            "triage_stale"]
+
+
+def backend_sources(backend: str) -> tuple[str, str]:
+    """(workflow file, aggregate artifact) for one backend name."""
+    try:
+        return BACKENDS[backend]
+    except KeyError:  # argparse restricts the choices; this is the API-call path
+        sys.exit(f"unknown backend {backend!r}; known: {', '.join(BACKENDS)}")
 
 
 # -- sources -----------------------------------------------------------------------
@@ -79,9 +105,9 @@ _RUN_FIELDS = "databaseId,headSha,headBranch,event,createdAt,conclusion,status"
 
 
 def list_runs(limit: int, repo: str | None, *, sha: str | None = None,
-              branch: str | None = "main") -> list[dict]:
-    """Completed runs of the mutation workflow, newest first."""
-    args = ["run", "list", "--workflow", WORKFLOW, "--status", "completed",
+              branch: str | None = "main", workflow: str = WORKFLOW) -> list[dict]:
+    """Completed runs of one mutation workflow, newest first."""
+    args = ["run", "list", "--workflow", workflow, "--status", "completed",
             "--limit", str(limit), "--json", _RUN_FIELDS]
     if sha:
         args += ["--commit", sha]
@@ -90,18 +116,18 @@ def list_runs(limit: int, repo: str | None, *, sha: str | None = None,
     return gh_json(args, repo)
 
 
-def fetch_run(run_id: str, repo: str | None) -> Path | None:
+def fetch_run(run_id: str, repo: str | None, artifact: str = ARTIFACT) -> Path | None:
     """The run's merged artifact, downloaded once and cached by run id; None
     when the run has none (e.g. its plan job failed, or retention expired)."""
     dest = cache_dir() / str(run_id)
     if (dest / "summary.json").exists():
         return dest
     dest.mkdir(parents=True, exist_ok=True)
-    cmd = ["gh", "run", "download", str(run_id), "-n", ARTIFACT, "-D", str(dest)]
+    cmd = ["gh", "run", "download", str(run_id), "-n", artifact, "-D", str(dest)]
     cmd += ["-R", repo] if repo else []
     proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
     if proc.returncode != 0 or not (dest / "summary.json").exists():
-        print(f"note: no {ARTIFACT} artifact for run {run_id}: {proc.stderr.strip()[:200]}",
+        print(f"note: no {artifact} artifact for run {run_id}: {proc.stderr.strip()[:200]}",
               file=sys.stderr)
         return None
     return dest
@@ -123,20 +149,20 @@ def local_rows(modules: list[str]) -> list[dict]:
     return rows
 
 
-def resolve_dirs(args) -> list[Path]:
+def resolve_dirs(args, workflow: str, artifact: str) -> list[Path]:
     if args.dir:
         return args.dir
     if args.run:
-        found = fetch_run(args.run, args.repo)
+        found = fetch_run(args.run, args.repo, artifact)
         if found is None:
-            sys.exit(f"run {args.run} has no {ARTIFACT} artifact")
+            sys.exit(f"run {args.run} has no {artifact} artifact")
         return [found]
     # Newest first; skip a run whose merged artifact is missing.
-    for meta in list_runs(5, args.repo, sha=args.sha):
-        found = fetch_run(meta["databaseId"], args.repo)
+    for meta in list_runs(5, args.repo, sha=args.sha, workflow=workflow):
+        found = fetch_run(meta["databaseId"], args.repo, artifact)
         if found is not None:
             return [found]
-    sys.exit("no completed mutation run with a report found"
+    sys.exit(f"no completed {workflow} run with a report found"
              + (f" for {args.sha}" if args.sha else " on main"))
 
 
@@ -243,7 +269,7 @@ def merge_history(runs: list[tuple[dict, dict]], modules=()) -> list[dict]:
     return rows
 
 
-def history(args, modules) -> list[dict]:
+def history(args, modules, workflow: str, artifact: str) -> list[dict]:
     if args.dir:
         pairs = [({"databaseId": json.loads((d / "summary.json").read_text()).get("run_id"),
                    "createdAt": None}, json.loads((d / "summary.json").read_text()))
@@ -253,8 +279,8 @@ def history(args, modules) -> list[dict]:
             meta["createdAt"] = f"{i:06d}"
     else:
         pairs = []
-        for meta in list_runs(args.history, args.repo):
-            found = fetch_run(meta["databaseId"], args.repo)
+        for meta in list_runs(args.history, args.repo, workflow=workflow):
+            found = fetch_run(meta["databaseId"], args.repo, artifact)
             if found is not None:
                 pairs.append((meta, json.loads((found / "summary.json").read_text())))
     return merge_history(pairs, modules)
@@ -332,6 +358,9 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--dir", type=Path, action="append", help="local results directory")
     src.add_argument("--local", nargs="*", metavar="MODULE", default=None,
                      help="offline: rows from the pilot's work copies")
+    p.add_argument("--backend", choices=tuple(BACKENDS), default=DEFAULT_BACKEND,
+                   help="which mutation workflow/artifact to read remotely "
+                        "(default: gremlins = mutation.yml / mutation-report)")
     p.add_argument("--repo", default=None, help="OWNER/REPO for gh (default: this checkout's)")
     p.add_argument("--module", action="append")
     p.add_argument("--file", action="append")
@@ -345,16 +374,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=None)
     args = p.parse_args(argv)
     modules = _split(args.module)
+    workflow, artifact = backend_sources(args.backend)
 
     if args.history:
-        rows = history(args, modules)
+        rows = history(args, modules, workflow, artifact)
         emit(rows[-args.limit:] if args.limit else rows, args.format, show_diff=False,
              history_rows=True)
         return 0
     if args.local is not None:
         rows = local_rows(args.local)
     else:
-        rows = [row for d in resolve_dirs(args) for row in mr.read_jsonl(d / "results.jsonl")]
+        rows = [row for d in resolve_dirs(args, workflow, artifact)
+                for row in mr.read_jsonl(d / "results.jsonl")]
     changed = changed_since(rows, args.changed_since) if args.changed_since else None
     try:
         rows = filter_rows(rows, modules=modules, files=_split(args.file),
