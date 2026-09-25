@@ -329,6 +329,27 @@ def _validate_date(value: str | None, field_name: str) -> None:
         raise ApiError(422, _problem("INVALID_REQUEST", "validation", f"{field_name} must be YYYY-MM-DD"))
 
 
+_GATE_VALUES = ("pass", "fail", "na")
+
+
+def _validate_gate(value: str | None) -> None:
+    if value is not None and value not in _GATE_VALUES:
+        raise ApiError(422, _problem("INVALID_REQUEST", "validation",
+                                     "gate must be one of pass, fail, na"))
+
+
+def _parse_bool_flag(raw: str | None, field_name: str) -> bool:
+    if raw is None:
+        return False
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    raise ApiError(422, _problem("INVALID_REQUEST", "validation",
+                                 f"{field_name} must be true or false"))
+
+
 # --------------------------------------------------------------------------
 # operations status -- §6/§5.5 items 2-3: the sidecar ``publication_effect``
 # writes into the publisher's scope root, read like ``_read_projection_
@@ -392,10 +413,14 @@ def _require_release(conn, release_id: str) -> None:
 def _events_response(serving_db, resolve_current, cursor_key: bytes, response: Response, request: Request, *,
                      release_id: str | None, event_date_from: str | None, event_date_to: str | None,
                      ticker: str | None, strategy: str | None, verdict: str | None,
+                     gate: str | None, out_of_domain: str | None, disabled: str | None,
                      limit: str | None, cursor: str | None) -> dict:
     explicit = release_id is not None
     _validate_date(event_date_from, "date_from")
     _validate_date(event_date_to, "date_to")
+    _validate_gate(gate)
+    out_of_domain_value = _parse_bool_flag(out_of_domain, "out_of_domain")
+    disabled_value = _parse_bool_flag(disabled, "disabled")
     limit_value = _parse_limit(limit)
     conn = _open(serving_db)
     try:
@@ -407,12 +432,14 @@ def _events_response(serving_db, resolve_current, cursor_key: bytes, response: R
         _require_release(conn, release_id)
         expected_hash = projections.event_query_hash(
             release_id, event_date_from=event_date_from, event_date_to=event_date_to,
-            ticker=ticker, strategy=strategy, verdict=verdict)
+            ticker=ticker, strategy=strategy, verdict=verdict, gate=gate,
+            out_of_domain=out_of_domain_value, disabled=disabled_value)
         raw_cursor = _validated_raw_cursor(cursor, cursor_key, release_id, expected_hash)
         page = projections.list_events(
             conn, release_id, limit=limit_value, cursor=raw_cursor,
             event_date_from=event_date_from, event_date_to=event_date_to,
-            ticker=ticker, strategy=strategy, verdict=verdict)
+            ticker=ticker, strategy=strategy, verdict=verdict, gate=gate,
+            out_of_domain=out_of_domain_value, disabled=disabled_value)
     finally:
         conn.close()
     document = _event_page_document(page, cursor_key)
@@ -557,6 +584,8 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
     def events_route(request: Request, response: Response, release_id: str | None = None,
                      date_from: str | None = None, date_to: str | None = None,
                      ticker: str | None = None, strategy: str | None = None, verdict: str | None = None,
+                     gate: str | None = None, out_of_domain: str | None = None,
+                     disabled: str | None = None,
                      limit: str | None = None, cursor: str | None = None):
         # `date_from`/`date_to` are `ui/src/api/client.ts` `EventQuery`'s own
         # names; `_events_response`'s internal `event_date_from`/
@@ -564,7 +593,8 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
         return _events_response(serving_db, resolve_current, cursor_key, response, request,
                                 release_id=release_id, event_date_from=date_from,
                                 event_date_to=date_to, ticker=ticker, strategy=strategy,
-                                verdict=verdict, limit=limit, cursor=cursor)
+                                verdict=verdict, gate=gate, out_of_domain=out_of_domain,
+                                disabled=disabled, limit=limit, cursor=cursor)
 
     @app.get("/api/v1/events/{event_id}/scores", dependencies=auth)
     def event_scores_route(event_id: str, request: Request, response: Response,

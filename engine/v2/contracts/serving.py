@@ -61,7 +61,7 @@ PREVIEW_RELEASE_V1 = "preview_release.v1.0"
 LEGACY_SCORE_BRIDGE_V1 = "legacy_score_bridge.v1.0"
 EVENT_PAGE_V1 = "event_page.v1.0"
 EVENT_PAGE_ITEM_V1 = "event_page_item.v1.0"
-EVENT_SCORE_SUMMARY_V1 = "event_score_summary.v1.1"
+EVENT_SCORE_SUMMARY_V1 = "event_score_summary.v1.2"
 PROJECTION_FINDINGS_V1 = "projection_findings.v1.0"
 ROW_IDENTITY_V1 = "row_identity.v1.0"
 FINDING_V1 = "finding.v1.0"
@@ -198,6 +198,8 @@ class EventScoreSummary:
     between rendered values" the guide (§5.2/§5.3) refuses. The field stays
     for a future reader that reproduces ``pnlCell`` faithfully; until then
     ``expected_return_model``/``_analog``/``_sim`` are the honest read.
+
+    ``flags`` (v1.2 addition): the rendered row's own exact flag codes, copied verbatim.
     """
 
     score_id: str
@@ -214,6 +216,7 @@ class EventScoreSummary:
     chosen_strategy: str | None = None
     chosen_margin: float | None = None
     menu_size: int | None = None
+    flags: tuple[str, ...] = ()
     schema_version: str = EVENT_SCORE_SUMMARY_V1
 
 

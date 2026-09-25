@@ -4,6 +4,9 @@ export interface FilterValues {
   ticker: string;
   strategy: string;
   verdict: string;
+  gate: string;
+  outOfDomain: boolean;
+  disabled: boolean;
   date_from: string;
   date_to: string;
 }
@@ -12,6 +15,9 @@ export const EMPTY_FILTERS: FilterValues = {
   ticker: "",
   strategy: "",
   verdict: "",
+  gate: "",
+  outOfDomain: false,
+  disabled: false,
   date_from: "",
   date_to: "",
 };
@@ -59,6 +65,34 @@ export function EventFilters({ value, onApply }: Props) {
           value={draft.verdict}
           onChange={(event) => setDraft({ ...draft, verdict: event.target.value })}
           placeholder="e.g. enter"
+        />
+      </label>
+      <label>
+        Gate
+        <select
+          value={draft.gate}
+          onChange={(event) => setDraft({ ...draft, gate: event.target.value })}
+        >
+          <option value="">All</option>
+          <option value="pass">Pass</option>
+          <option value="fail">Fail</option>
+          <option value="na">N/A</option>
+        </select>
+      </label>
+      <label>
+        Show out-of-domain
+        <input
+          type="checkbox"
+          checked={draft.outOfDomain}
+          onChange={(event) => setDraft({ ...draft, outOfDomain: event.target.checked })}
+        />
+      </label>
+      <label>
+        Show disabled structures
+        <input
+          type="checkbox"
+          checked={draft.disabled}
+          onChange={(event) => setDraft({ ...draft, disabled: event.target.checked })}
         />
       </label>
       <label>

@@ -12,6 +12,7 @@ import sys
 import hashlib
 import json
 import dataclasses
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -456,6 +457,51 @@ def test_expected_return_stays_null_when_only_analog_is_present(tmp_path):
     assert summary.expected_return_model is None
     assert summary.expected_return_analog == 0.08
     assert summary.expected_return_sim is None
+
+
+# --------------------------------------------------------------------------
+# schema migration: a v1-only serving.sqlite gains v2's `flags` column
+# --------------------------------------------------------------------------
+
+
+def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
+    """A serving.sqlite written by the v1-only code must open through the
+    ordinary `connect`/`ensure_schema` path and gain migration 2's working
+    `flags` column rather than refusing or silently lacking it."""
+    path = tmp_path / "serving.sqlite"
+    old = sqlite3.connect(path, isolation_level=None)
+    try:
+        old.execute(projections._SCHEMA_VERSIONS_DDL)
+        for statement in projections._V1:
+            old.execute(statement)
+        version, name, statements = projections._MIGRATIONS[0]
+        old.execute(
+            "INSERT INTO schema_versions (owner, version, name, checksum, applied_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (projections._OWNER, version, name,
+             projections._checksum(version, name, statements), "2024-01-01T00:00:00Z"))
+    finally:
+        old.close()
+
+    migrated = projections.connect(str(path))
+    try:
+        applied = {int(row[0]) for row in migrated.execute(
+            "SELECT version FROM schema_versions WHERE owner = ?", (projections._OWNER,))}
+        assert applied == {1, 2}
+        migrated.execute(
+            "INSERT INTO serving_release (release_id, document_json, findings_json, status, written_at) "
+            "VALUES ('r1', '{}', '{}', 'candidate', '2024-01-01T00:00:00Z')")
+        migrated.execute("INSERT INTO serving_object (artifact_id, ref_json) VALUES ('a1', '{}')")
+        migrated.execute(
+            "INSERT INTO serving_score_summary "
+            "(release_id, score_id, event_id, strategy, flags, detail_artifact_id) "
+            "VALUES ('r1', 's1', 'e1', 'STR-THRU', ?, 'a1')",
+            (json.dumps(["OUT_OF_DOMAIN"]),))
+        row = migrated.execute(
+            "SELECT flags FROM serving_score_summary WHERE score_id = 's1'").fetchone()
+        assert json.loads(row["flags"]) == ["OUT_OF_DOMAIN"]
+    finally:
+        migrated.close()
 
 
 # --------------------------------------------------------------------------
