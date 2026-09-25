@@ -534,13 +534,13 @@ id = "operations-quotas"
 area = "operations"
 capability = "Provider quota state and reserve"
 old = ["py:engine/dashboard/render.py::quota_state"]
-new = ["py:engine/v2/ops/provider_budget.py::reserve", "route:v2-ops GET /release/*"]
+new = ["py:engine/v2/ops/scheduler.py::_reserve_provider", "route:v2-ops GET /release/*"]
 producer = "legacy quota_state adapter inside legacy_render; v2 provider_budget enforces but does not publish"
 identity = "meta.json in the release bundle"
 tests = ["tests/test_v2_ops_provider_admission.py", "tests/test_ledger.py"]
 disposition = "compatibility-adapter"
 owner = "P6-4"
-notes = "The displayed quota comes from the legacy store; v2 account-level budget state is not shown anywhere."
+notes = "The displayed quota comes from the legacy store; v2 account-level budget state is not shown anywhere. Reached in production from scheduler.claim (engine/v2/ops/scheduler.py ~325). provider_budget.reserve has no production caller; removal is Phase 8A."
 
 [[row]]
 id = "operations-jobs"
