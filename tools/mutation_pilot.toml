@@ -775,6 +775,7 @@ mutate = [
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/incremental_data.py",
+    "engine/v2/ops/training.py",
 ]
 tests = [
     "tests/test_v2_data_incremental_persistence.py",
@@ -795,6 +796,7 @@ tests = [
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
+    "tests/test_v2_ops_training_job.py",
     "tests/test_v2_ops_worker_typed_failures.py",
 ]
 

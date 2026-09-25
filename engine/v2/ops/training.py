@@ -31,8 +31,14 @@ class TrainingParameters:
     strategies: tuple[str, ...] = ()
     pairs_path: str = ""
     ticker_chunk: int = 1000
-    #: Unused by the training worker; present for KindRegistry parity with the
-    #: other operator-submitted kinds.
+    #: The pinned legacy read set, ``{"legacy_manifest.json": <artifact id>}``,
+    #: exactly like every ``legacy_*`` stage's own binding (``nightly.
+    #: _stage_inputs``): the supervisor's launch-time ``_pin_read_set`` copies
+    #: the manifest's ``file_refs`` into ``staging/legacy`` so the dataset
+    #: builders read the real panel/tier4 inputs through ``INVESTING_PLAN_ROOT``.
+    #: ``None`` on a plan whose operator named no manifest -- such a plan is
+    #: blocked for submission (see :func:`training_plan`) rather than failing
+    #: ``INPUT_CHANGED`` at launch.
     input_bindings: dict[str, str] | None = None
 
 
@@ -147,22 +153,36 @@ def promote_job_kind() -> JobKind:
 
 
 def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategies=(),
-                  pairs_path="", ticker_chunk=1000) -> dict:
+                  pairs_path="", ticker_chunk=1000, manifest_ref=None) -> dict:
+    """Build an operator-submitted ``training`` plan.
+
+    ``manifest_ref`` is the pinned ``legacy_input_manifest.v1.0`` artifact the
+    worker's legacy read set is staged from, exactly like a nightly stage's own
+    ``legacy_manifest.json`` binding. Without it the job has no declared read
+    set and the supervisor's launch-time ``_pin_read_set`` refuses
+    ``INPUT_CHANGED``, so such a plan carries the same blocked prerequisites a
+    manifest-less nightly plan does and can never be submitted.
+    """
     from engine.v2.foundation import content_hash
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
-    params = TrainingParameters(expected_ids=("training",), mode=mode, recipe=recipe, state=state,
-                               alpha=alpha, cutoffs=tuple(cutoffs), strategies=tuple(strategies),
-                               pairs_path=pairs_path, ticker_chunk=ticker_chunk)
+    params = TrainingParameters(
+        expected_ids=("training",), mode=mode, recipe=recipe, state=state,
+        alpha=alpha, cutoffs=tuple(cutoffs), strategies=tuple(strategies),
+        pairs_path=pairs_path, ticker_chunk=ticker_chunk,
+        input_bindings=({"legacy_manifest.json": manifest_ref} if manifest_ref else None))
     problems = training_parameter_problems(None, params)
     if problems:
         raise fail("INVALID_REQUEST", "training plan is invalid",
                    details={"problems": list(problems)})
     root3 = Path(__file__).resolve().parents[3]
     return {"schema_version": "operations_plan.v1.0", "kind": "training", "mode": "shadow",
-            "effects": ["staged"], "parameters": vars(params), "input_refs": [],
-            "blocked_prerequisites": [], "spec_hash": content_hash(vars(params)),
+            "effects": ["staged"], "parameters": vars(params),
+            "input_refs": [manifest_ref] if manifest_ref else [],
+            "blocked_prerequisites": [] if manifest_ref else [
+                "frozen_legacy_input_manifest", "adapter_parity_receipt"],
+            "spec_hash": content_hash(vars(params)),
             "implementation_ref": content_hash(worker_source_manifest(root3)),
             "environment_ref": content_hash(
                 environment_identity(profile.thread_count or profile.cpu_count)),
@@ -175,6 +195,10 @@ def promote_plan(*, release_root, release_id) -> dict:
 
     if not release_root or not release_id:
         raise fail("INVALID_REQUEST", "promote plan needs a release root and a release id")
+    # Absolute at plan time: the worker's cwd is its code snapshot
+    # (``executor.launch``), so a relative path would promote somewhere the
+    # operator never named.
+    release_root = str(Path(release_root).expanduser().resolve())
     profile = profile_named(DEFAULT_POLICY, "delivery")
     params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
                                release_id=release_id)
@@ -195,6 +219,7 @@ def _run_recipe(parameters, out_dir) -> dict:
         recipe = job.current_recipes()[job._key(parameters["recipe"])]
     except (KeyError, ValueError):
         raise fail("VALIDATION_FAILED", "recipe is not a current training recipe") from None
+    job._guard("tools.phase5_training_job._run_recipe:" + recipe.recipe_id)
     dataset = job.build_dataset(recipe, pairs_path=parameters["pairs_path"] or None)
     extra = ({"cutoffs": tuple(parameters["cutoffs"]), "alpha": parameters["alpha"]}
              if recipe.folds.kind == "request_cutoff" else {})
@@ -224,36 +249,67 @@ def _output_entries(out_dir: Path) -> list[dict]:
     return entries
 
 
+def _tool_failure(error: SystemExit):
+    """Map a ``tools.phase5_training_job`` ``SystemExit`` refusal to a typed
+    ``OpsError``. Messages are written here, fixed, and never interpolate the
+    tool's own text (it may name a path)."""
+    text = str(error)
+    if text.startswith("RESUME_MISMATCH"):
+        return fail("CHECKPOINT_INCOMPATIBLE",
+                    "training output already exists with different content")
+    if "tier4_forecasts is missing" in text:
+        return fail("FEATURES_MISSING",
+                    "tier4 forecasts are missing; lineage cannot be attached")
+    if "no dataset builder" in text:
+        return fail("INVALID_REQUEST", "recipe has no dataset builder")
+    return fail("VALIDATION_FAILED", "training tool refused the job")
+
+
+def _dispatch_mode(job, mode, parameters, out_dir) -> dict:
+    if mode == "recipe":
+        return _run_recipe(parameters, out_dir)
+    if mode == "state":
+        return job.run_state_job(
+            parameters["state"], out_dir, plan_only=False,
+            cutoff=parameters["cutoffs"][0] if parameters["cutoffs"] else None,
+            ticker_chunk=parameters["ticker_chunk"])
+    if mode == "board_analog":
+        _known, trade_rows = job._replay_strategies()
+        _check_board_analog_budget(job, trade_rows)
+        return job.run_board_analog_job(
+            out_dir, alpha=parameters["alpha"], cutoffs=parameters["cutoffs"],
+            strategies=parameters["strategies"] or None, plan_only=False)
+    if mode == "trailing_cutoff":
+        return job.run_trailing_cutoff_job(out_dir, as_of=parameters["cutoffs"],
+                                           plan_only=False)
+    raise fail("INVALID_REQUEST", "unknown training mode", details={"mode": mode})
+
+
 def run_training_worker(parameters, root) -> dict:
     """Run one training job inside its staging root.
 
     Always ``plan_only=False``: an ops job never previews. ``--plan-only``
     remains the local CLI's escape hatch (it refuses for ``--state`` jobs).
+    Every refusal the tool can raise is mapped to a typed ``OpsError`` here --
+    a bare ``SystemExit`` would otherwise surface as an untyped
+    ``WORKER_FAILED`` the operator cannot branch on.
     """
+    from engine.v2.models import RuntimeFitForbidden
+    from engine.v2.models.training import TrainingRefused
     from tools import phase5_training_job as job
 
     root = Path(root)
     out_dir = root / "training"
-    mode = parameters["mode"]
-    if mode == "recipe":
-        summary = _run_recipe(parameters, out_dir)
-    elif mode == "state":
-        summary = job.run_state_job(
-            parameters["state"], out_dir, plan_only=False,
-            cutoff=parameters["cutoffs"][0] if parameters["cutoffs"] else None,
-            ticker_chunk=parameters["ticker_chunk"])
-    elif mode == "board_analog":
-        _known, trade_rows = job._replay_strategies()
-        _check_board_analog_budget(job, trade_rows)
-        summary = job.run_board_analog_job(
-            out_dir, alpha=parameters["alpha"], cutoffs=parameters["cutoffs"],
-            strategies=parameters["strategies"] or None, plan_only=False)
-    elif mode == "trailing_cutoff":
-        summary = job.run_trailing_cutoff_job(out_dir, as_of=parameters["cutoffs"],
-                                              plan_only=False)
-    else:
-        raise fail("INVALID_REQUEST", "unknown training mode",
-                   details={"mode": mode})
+    try:
+        summary = _dispatch_mode(job, parameters["mode"], parameters, out_dir)
+    except SystemExit as exc:
+        raise _tool_failure(exc) from exc
+    except TrainingRefused as exc:
+        raise fail("CHECKPOINT_INCOMPATIBLE", "training receipt refused",
+                   details={"issues": sorted({issue.code for issue in exc.issues})}) from exc
+    except RuntimeFitForbidden as exc:
+        raise fail("VALIDATION_FAILED",
+                   "runtime fitting is forbidden during a training job") from exc
     out_dir.mkdir(parents=True, exist_ok=True)
     (root / "training_result.json").write_text(
         json.dumps(summary, allow_nan=False, sort_keys=True))

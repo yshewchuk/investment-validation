@@ -471,7 +471,8 @@ def _plan_command(args, root, conn, clock):
         plan = training_plan(mode=args.training_mode, recipe=args.recipe or "",
                              state=args.state or "", alpha=args.alpha,
                              cutoffs=tuple(args.cutoff), strategies=tuple(args.strategy),
-                             pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk)
+                             pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk,
+                             manifest_ref=_read_input_manifest_ref(args, root, conn, clock))
     elif args.kind == "promote":
         from engine.v2.ops.training import promote_plan
         plan = promote_plan(release_root=args.release_root, release_id=args.release_id)

@@ -80,7 +80,7 @@ failure rather than a stale sentence.
 No v2 package imports this one (and none below layer 6 may). The real-data
 entry point is `tools/phase5_training_job.py`, which is not a v2 package.
 
-<!-- consumers: none -->
+<!-- consumers: engine.v2.ops -->
 
 ## Usage
 
