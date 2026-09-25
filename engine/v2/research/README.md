@@ -29,6 +29,8 @@ write path.
   alphas, with the same arithmetic the legacy replay uses.
 - Publish replay output as the `trades` table through the generic incremental
   write path, pinned to the snapshot that produced it.
+- Reconcile the published `trades` table to the canonical event universe,
+  tombstoning only the non-canonical simulated rows.
 - Move provenance onto every row (`engine.v2.research.replay`) so a v2 row is
   never mistaken for a legacy `engine.replay` row.
 
@@ -53,12 +55,17 @@ the `checks/import_layers.py` hook (which only parses `engine*` importers), so
 no `engine` package is observed importing this one; everything else here is
 internal regardless of underscore convention.
 `engine/v2/research/_scan.py` (`read_table`, `resolve_snapshot`, `DEFAULT_SCOPE`)
-is internal shared machinery, not an interface.
+is internal shared machinery, not an interface. The replay path's split
+modules (`_snapshot`, `_pricing`, `_plan`, `_chains`, `_trades_table`,
+`_trades_revisions`, `_trades_publish`, `_replay_run`, `_build_run`) are
+internal too.
 
-The replay half: `replay.run`, `replay.replay`, `replay.replay_one`,
-`replay.plan_events`, `replay.to_trades_table`, `_pricing.STRUCTURES`.
+The replay half: `replay.replay`, `replay.replay_one`, `_replay_run.run`,
+`_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
+`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
+`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.run, replay.replay, replay.replay_one, replay.plan_events, replay.to_trades_table, _pricing.STRUCTURES -->
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES -->
 
 ## Consumers
 
@@ -68,9 +75,9 @@ failure rather than a stale sentence.
 
 _Nothing inside `engine/` imports this package. Its consumers are the CLI
 leaves `tools/v2_signal_screen.py`, `tools/v2_fill_quality.py`,
-`tools/v2_polygon_fills.py`, `tools/v2_replay.py` and
-`tools/v2_build_trades.py`, which the layering hook does not parse (they are
-not `engine.*` modules)._
+`tools/v2_polygon_fills.py`, `tools/v2_replay.py`,
+`tools/v2_build_trades.py` and `tools/v2_reconcile_trades.py`, which the
+layering hook does not parse (they are not `engine.*` modules)._
 
 <!-- consumers: none -->
 
@@ -95,8 +102,15 @@ that names the snapshot id it read.
 The replay half is driven as a library:
 
 ```python
-from engine.v2.research import replay
-result = replay.run(repository, strategies=["STR-THRU"], events=events)
+from engine.v2.research import _replay_run
+result = _replay_run.run(repository, strategies=["STR-THRU"], events=events)
+```
+
+Reconciliation is its own library entrypoint and CLI:
+
+```python
+from engine.v2.research import reconcile_trades
+report = reconcile_trades.run(repository, scope="shadow")
 ```
 
 ## Testing
@@ -112,3 +126,6 @@ rather than read.
 `tests/test_v2_research_replay.py` and `tests/test_v2_research_build_trades.py`
 cover the move-parity requirement against legacy `engine.replay` on synthetic
 chains, snapshot pinning, and the refusal paths.
+`tests/test_v2_research_reconcile_trades.py` covers the canonical-event prune:
+non-canonical rows tombstoned, everything else byte-identical, the pinned
+snapshot recorded, and an explicit `--snapshot-id` honoured.

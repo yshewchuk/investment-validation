@@ -21,7 +21,7 @@ from engine.v2.contracts.data import DatasetManifest  # noqa: E402
 from engine.v2.data import catalog, manifests  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.research import _snapshot, build_trades, replay  # noqa: E402
+from engine.v2.research import _build_run, _plan, _snapshot, build_trades  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
     contract_for,
@@ -111,10 +111,10 @@ def test_rebuild_tombstones_only_the_rebuilt_strategys_vanished_rows(tmp_path, m
     conn, clock, store = catalog_and_store(tmp_path)
     parent = _commit_all(conn, clock, store, trades_rows=_initial_trades(),
                          receipt_id="r1")
-    monkeypatch.setattr(replay, "trading_calendar", lambda: _calendar())
+    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
 
-    outcome = build_trades.run(
+    outcome = _build_run.run(
         repository, strategies=["STR-THRU"], reports_dir=tmp_path / "reports",
         stamp="t1",
     )
@@ -143,15 +143,15 @@ def test_rebuild_refuses_a_stale_expected_head_rather_than_overwriting(tmp_path,
     conn, clock, store = catalog_and_store(tmp_path)
     parent = _commit_all(conn, clock, store, trades_rows=_initial_trades(),
                          receipt_id="r1")
-    monkeypatch.setattr(replay, "trading_calendar", lambda: _calendar())
+    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
 
-    build_trades.run(repository, strategies=["STR-THRU"],
-                     reports_dir=tmp_path / "reports", stamp="t1")
+    _build_run.run(repository, strategies=["STR-THRU"],
+                   reports_dir=tmp_path / "reports", stamp="t1")
     advanced = repository.resolve_pinned("shadow")
 
     with pytest.raises(DataError) as err:
-        build_trades.run(
+        _build_run.run(
             repository, strategies=["STR-THRU"],
             snapshot_id=parent.snapshot_id, reports_dir=tmp_path / "stale",
             stamp="stale",
@@ -165,11 +165,11 @@ def test_rebuild_dry_run_writes_nothing(tmp_path, monkeypatch):
     conn, clock, store = catalog_and_store(tmp_path)
     parent = _commit_all(conn, clock, store, trades_rows=_initial_trades(),
                          receipt_id="r1")
-    monkeypatch.setattr(replay, "trading_calendar", lambda: _calendar())
+    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
 
-    outcome = build_trades.run(repository, strategies=["STR-THRU"],
-                               reports_dir=None, dry_run=True)
+    outcome = _build_run.run(repository, strategies=["STR-THRU"],
+                             reports_dir=None, dry_run=True)
     assert outcome["committed"] is False
     assert repository.resolve_pinned("shadow").snapshot_id == parent.snapshot_id
     conn.close()

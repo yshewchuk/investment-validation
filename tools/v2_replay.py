@@ -23,9 +23,8 @@ from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.research import _snapshot
+from engine.v2.research import _replay_run, _snapshot
 from engine.v2.research._pricing import STRUCTURES
-from engine.v2.research import replay as replay_tool
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -52,10 +51,10 @@ def main(argv: list[str] | None = None) -> int:
         snapshot = _snapshot.resolve_snapshot(
             repository, scope=scope, snapshot_id=args.snapshot_id
         )
-        events = replay_tool._events_frame(
+        events = _replay_run.events_frame(
             repository, snapshot, years=args.years
         )
-        outcome = replay_tool.run(
+        outcome = _replay_run.run(
             repository, strategies=strategies, events=events,
             reports_dir=args.reports_dir, scope=scope,
             snapshot_id=args.snapshot_id,

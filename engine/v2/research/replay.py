@@ -10,22 +10,34 @@ edges are rewritten: ``store.iter_table("option_chains", ...)`` becomes
 snapshot never changes under a run, so there is nothing to invalidate and no
 reason to hold global state).
 
+The pieces this module used to carry live beside it, split out to keep every
+module inside the §4.3 fan-out budget with no behaviour change:
+
+* event planning in :mod:`engine.v2.research._plan`;
+* chain reads and the availability filter in :mod:`engine.v2.research._chains`;
+* the per-trade record and the Tier-2 table in
+  :mod:`engine.v2.research._trades_table`;
+* the tool entrypoint (``run``) in :mod:`engine.v2.research._replay_run`.
+
 The pricing primitives the legacy replay imported from ``engine.structures`` /
 ``engine.fills`` / ``engine.calendar`` live in
 ``engine.v2.research._pricing`` (supervisor decision: no legacy adapter).
 """
 from __future__ import annotations
 
-import json
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-import numpy as np
 import pandas as pd
 
-from engine.v2.research import _snapshot
+from engine.v2.research._chains import (
+    ChainIndex,
+    filter_plan_by_availability,
+    load_chain_index,
+    read_chain_keys,
+)
+from engine.v2.research._plan import SKIP_REASONS, plan_events
 from engine.v2.research._pricing import (
     MIN_MEANINGFUL_COST,
     STRUCTURES,
@@ -37,27 +49,15 @@ from engine.v2.research._pricing import (
     execution_variant_label,
     price_structure,
     structure_return,
-    trading_calendar,
 )
-from engine.v2.research._snapshot import read_table
+from engine.v2.research._trades_table import _trade_record
 
 __all__ = [
     "ALPHA_GRID",
     "SKIP_REASONS",
-    "ReplayPlan",
-    "plan_events",
-    "ChainIndex",
-    "read_chain_keys",
-    "read_chains_for_years",
-    "load_chain_index",
-    "filter_plan_by_availability",
+    "ReplayResult",
     "replay_one",
     "replay",
-    "ReplayResult",
-    "legs_spot_dte",
-    "legs_exit_spot",
-    "to_trades_table",
-    "run",
 ]
 
 #: Fill alphas every replayed trade is priced at. Worst / mid / best are the
@@ -66,218 +66,9 @@ __all__ = [
 #: pricing is a handful of arithmetic on rows already in memory.
 ALPHA_GRID: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
 
-#: Why a planned trade produced no row. Counted rather than dropped: a replay
-#: that silently loses 40% of its candidates is a replay whose headline number
-#: is about the surviving 60%, and nobody can see which 60% that was.
-SKIP_REASONS = (
-    "no_entry_chain",
-    "no_exit_chain",
-    # Only ever non-zero for a structure decided before it enters: when the
-    # decision close is the entry close, an event without a decision chain has
-    # already been counted as `no_entry_chain`.
-    "no_decision_chain",
-    "structure_unresolved",
-    "expiry_gone_at_exit",
-    "bad_quote",
-    "no_session",
-    "calendar_out_of_range",
-    "zero_cost",
-)
-
 
 def _log(message: str) -> None:
     print(f"  [replay] {message}", flush=True)
-
-
-# --------------------------------------------------------------------------
-# planning — pure calendar arithmetic, no quotes
-# --------------------------------------------------------------------------
-
-
-@dataclass
-class ReplayPlan:
-    """Which dates each event would be traded on, before any chain is touched."""
-
-    frame: pd.DataFrame
-    skipped: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def chain_keys(self) -> set[tuple[str, pd.Timestamp]]:
-        """Every (ticker, date) chain this plan needs loaded."""
-        keys = set(zip(self.frame["ticker"], self.frame["entry_date"]))
-        keys |= set(zip(self.frame["ticker"], self.frame["exit_date"]))
-        if "decision_date" in self.frame.columns:
-            keys |= set(zip(self.frame["ticker"], self.frame["decision_date"]))
-        return keys
-
-    @property
-    def years(self) -> list[int]:
-        dates = pd.concat([self.frame["entry_date"], self.frame["exit_date"]])
-        return sorted(pd.to_datetime(dates).dt.year.unique().tolist())
-
-
-def plan_events(
-    structure: Structure,
-    events: pd.DataFrame,
-    calendar: TradingCalendar | None = None,
-) -> ReplayPlan:
-    """Resolve every event's entry and exit dates for ``structure``."""
-    cal = calendar or trading_calendar()
-    rows: list[dict] = []
-    skipped = {reason: 0 for reason in SKIP_REASONS}
-
-    for event in events.itertuples(index=False):
-        session = getattr(event, "session", None)
-        if session is None or (isinstance(session, float) and np.isnan(session)) or pd.isna(session):
-            skipped["no_session"] += 1
-            continue
-        event_date = pd.Timestamp(event.event_date).normalize()
-        try:
-            window = cal.resolve_offsets(
-                event_date, str(session), structure.entry_offset, structure.exit_offset,
-                decision_offset=structure.decision_offset,
-            )
-        except KeyError:
-            skipped["calendar_out_of_range"] += 1
-            continue
-        rows.append(
-            {
-                "event_id": getattr(event, "event_id", f"{event.ticker}_{event_date.date()}"),
-                "ticker": str(event.ticker),
-                "event_date": event_date,
-                "session": str(session),
-                "decision_date": window.decision_date,
-                "entry_date": window.entry_date,
-                "exit_date": window.exit_date,
-                "last_pre_print": window.last_pre_print,
-                "first_post_print": window.first_post_print,
-            }
-        )
-
-    frame = pd.DataFrame(
-        rows,
-        columns=[
-            "event_id", "ticker", "event_date", "session", "decision_date",
-            "entry_date", "exit_date", "last_pre_print", "first_post_print",
-        ],
-    )
-    if len(frame):
-        frame = frame.sort_values(["ticker", "event_date"]).reset_index(drop=True)
-    return ReplayPlan(frame=frame, skipped=skipped)
-
-
-# --------------------------------------------------------------------------
-# chain access — rewritten over Repository/read_table
-# --------------------------------------------------------------------------
-
-_CHAIN_COLUMNS = (
-    "ticker", "obs_date", "expiry", "dte", "strike", "right",
-    "bid", "ask", "delta", "spot", "quote_repaired",
-)
-
-
-class ChainIndex:
-    """``(ticker, obs_date)`` → chain rows, loaded once for a whole replay."""
-
-    def __init__(self, groups: Mapping[tuple[str, pd.Timestamp], pd.DataFrame]):
-        self._groups = dict(groups)
-
-    def __len__(self) -> int:
-        return len(self._groups)
-
-    def __contains__(self, key) -> bool:
-        return (str(key[0]), pd.Timestamp(key[1]).normalize()) in self._groups
-
-    def get(self, ticker: str, obs_date) -> pd.DataFrame | None:
-        return self._groups.get((str(ticker), pd.Timestamp(obs_date).normalize()))
-
-    @property
-    def keys(self):
-        return self._groups.keys()
-
-
-def read_chain_keys(repository, snapshot_ref) -> set[tuple[str, pd.Timestamp]]:
-    """Every (ticker, obs_date) the snapshot's option_chains table holds.
-
-    Rewrite of ``engine/replay.py``'s ``available_chain_keys`` — no
-    module-level cache (that cache is a legacy hot-reload guard tied to a
-    mutable store; a pinned snapshot never changes under a run, so there is
-    nothing to invalidate and no reason to hold global state).
-    """
-    frame = read_table(repository, snapshot_ref, "option_chains", ("ticker", "obs_date"))
-    return set(zip(frame["ticker"].astype(str), pd.to_datetime(frame["obs_date"])))
-
-
-def read_chains_for_years(repository, snapshot_ref, years) -> pd.DataFrame:
-    """option_chains rows for ``years``, projected to ``_CHAIN_COLUMNS``."""
-    return read_table(repository, snapshot_ref, "option_chains", _CHAIN_COLUMNS,
-                      partition_keys=[str(y) for y in years])
-
-
-def load_chain_index(repository, snapshot_ref, keys) -> ChainIndex:
-    """Load exactly the chains a plan needs, one year partition at a time.
-
-    Rewrite of ``engine/replay.py``'s ``load_chain_index``. ``keys`` is
-    REQUIRED (no store-wide default); years are derived from ``keys``,
-    matching the legacy function's own
-    ``years = sorted({d.year for _, d in wanted})``.
-    """
-    wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
-    if not wanted:
-        return ChainIndex({})
-    years = sorted({d.year for _, d in wanted})
-    tickers = {t for t, _ in wanted}
-    frame = read_chains_for_years(repository, snapshot_ref, years)
-    frame = frame[frame["ticker"].isin(tickers)]
-    frame["obs_date"] = pd.to_datetime(frame["obs_date"])
-    key_index = pd.MultiIndex.from_arrays([frame["ticker"], frame["obs_date"]])
-    frame = frame[key_index.isin(wanted)]
-    groups = {(str(k[0]), pd.Timestamp(k[1])): g.reset_index(drop=True)
-              for k, g in frame.groupby(["ticker", "obs_date"], sort=False)}
-    _log(f"chain index: {len(groups):,} of {len(wanted):,} requested keys present")
-    return ChainIndex(groups)
-
-
-def filter_plan_by_availability(plan: ReplayPlan, available: set) -> ReplayPlan:
-    """Drop planned events whose decision, entry or exit chain is not present.
-
-    Rewrite of ``engine/replay.py``'s ``filter_plan_by_availability`` with
-    ``available`` required: the legacy default was the store-reaching
-    ``available_chain_keys()`` call this slice removes. A v2 caller resolves
-    it once via :func:`read_chain_keys` and passes it explicitly.
-    """
-    if plan.frame.empty:
-        return plan
-    keys = available
-    frame = plan.frame
-    has_entry = np.array(
-        [(t, d) in keys for t, d in zip(frame["ticker"], frame["entry_date"])]
-    )
-    has_exit = np.array(
-        [(t, d) in keys for t, d in zip(frame["ticker"], frame["exit_date"])]
-    )
-    if "decision_date" in frame.columns:
-        has_decision = np.array(
-            [(t, d) in keys for t, d in zip(frame["ticker"], frame["decision_date"])]
-        )
-    else:
-        has_decision = np.ones(len(frame), dtype=bool)
-    skipped = dict(plan.skipped)
-    skipped["no_entry_chain"] = skipped.get("no_entry_chain", 0) + int((~has_entry).sum())
-    skipped["no_exit_chain"] = skipped.get("no_exit_chain", 0) + int(
-        (has_entry & ~has_exit).sum()
-    )
-    skipped["no_decision_chain"] = skipped.get("no_decision_chain", 0) + int(
-        (has_entry & has_exit & ~has_decision).sum()
-    )
-    keep = has_entry & has_exit & has_decision
-    return ReplayPlan(frame=frame[keep].reset_index(drop=True), skipped=skipped)
-
-
-# The legacy module's `latest_chain_date` / `_CHAIN_DATES_BY_TICKER` are not
-# moved: they exist only for scoring an UPCOMING event against the newest held
-# chain, which is legacy-score board behavior, not replay over a pinned
-# snapshot. Nothing in this slice reads them.
 
 
 # --------------------------------------------------------------------------
@@ -480,75 +271,6 @@ def _price_alphas(
     return rows, None
 
 
-def _trade_record(
-    plan_row: Mapping,
-    ticker: str,
-    decision_date,
-    alpha: float,
-    quoted_cost: float,
-    spot_decision: float,
-    dte_decision: int | None,
-    result: Mapping,
-    entry,
-    exit_,
-    entry_rows: pd.DataFrame,
-    exit_rows: pd.DataFrame,
-    include_legs: bool,
-) -> dict:
-    """Stage 4: the result record for one priced (event, alpha)."""
-    return {
-        "event_id": plan_row["event_id"],
-        "ticker": ticker,
-        "event_date": plan_row["event_date"],
-        "session": plan_row["session"],
-        "decision_date": decision_date,
-        "entry_date": plan_row["entry_date"],
-        "exit_date": plan_row["exit_date"],
-        "fill_alpha": float(alpha),
-        #: What the board would have QUOTED at the decision close, mid.
-        #: NaN when the decision is the entry, where the two are the
-        #: same number by construction.
-        "quoted_cost": quoted_cost,
-        "spot_decision": spot_decision,
-        "dte_decision": dte_decision,
-        "entry_cost": result["cost"],
-        "exit_value": result["exit_value"],
-        "pnl": result["pnl"],
-        "ret": result["ret"],
-        "spot_entry": entry.spot,
-        "spot_exit": exit_.spot,
-        **({"entry_legs": [
-            {"name": leg.name, "right": leg.right, "side": leg.side,
-             "qty": leg.qty, "strike": leg.strike, "expiry": leg.expiry,
-             "bid": leg.bid, "ask": leg.ask, "price": leg.price}
-            for leg in entry.legs
-        ]} if include_legs else {}),
-        "strike": entry.legs[0].strike,
-        "expiry": entry.legs[0].expiry,
-        "dte_entry": int(entry.legs[0].dte),
-        "n_legs": len(entry.legs),
-        "wide_market": entry.any_wide_market or exit_.any_wide_market,
-        "quote_repaired": bool(
-            entry_rows.get("quote_repaired", pd.Series(dtype=bool)).any()
-            or exit_rows.get("quote_repaired", pd.Series(dtype=bool)).any()
-        ),
-        # The Tier-2 schema has no column for spot, and every consumer
-        # that quotes a value per unit of spot (the payoff fit, the
-        # moneyness bucket) needs the one the trade was actually priced
-        # against — not a spot re-read later from a different table.
-        "legs": json.dumps(
-            {
-                "spot_entry": entry.spot,
-                "spot_exit": exit_.spot,
-                "dte_entry": int(entry.legs[0].dte),
-                "entry": entry.to_dict()["legs"],
-                "exit": exit_.to_dict()["legs"],
-            },
-            default=str,
-        ),
-    }
-
-
 # --------------------------------------------------------------------------
 # orchestration
 # --------------------------------------------------------------------------
@@ -690,165 +412,3 @@ def _empty_trades() -> pd.DataFrame:
         "dte_entry", "n_legs", "wide_market", "quote_repaired", "legs",
     ]
     return pd.DataFrame({c: pd.Series(dtype="object") for c in columns})
-
-
-# --------------------------------------------------------------------------
-# Tier-2 handoff
-# --------------------------------------------------------------------------
-
-
-def legs_spot_dte(trades: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-    """Recover entry spot and DTE from the stored ``legs`` blob."""
-    spots = np.full(len(trades), np.nan)
-    dtes = np.full(len(trades), np.nan)
-    if "legs" not in trades.columns:
-        return pd.Series(spots, index=trades.index), pd.Series(dtes, index=trades.index)
-
-    for i, blob in enumerate(trades["legs"].to_numpy()):
-        if not isinstance(blob, str):
-            continue
-        try:
-            doc = json.loads(blob)
-        except ValueError:
-            continue
-        if not isinstance(doc, dict):
-            continue
-        spots[i] = _as_float(doc.get("spot_entry"))
-        dte = doc.get("dte_entry")
-        if dte is None:
-            legs = doc.get("entry") or []
-            dte = legs[0].get("dte") if legs else None
-        dtes[i] = _as_float(dte)
-    return pd.Series(spots, index=trades.index), pd.Series(dtes, index=trades.index)
-
-
-def legs_exit_spot(trades: pd.DataFrame) -> pd.Series:
-    """Recover the exit spot stored beside the pinned exit legs."""
-    spots = np.full(len(trades), np.nan)
-    if "legs" not in trades.columns:
-        return pd.Series(spots, index=trades.index)
-    for index, blob in enumerate(trades["legs"].to_numpy()):
-        if not isinstance(blob, str):
-            continue
-        try:
-            document = json.loads(blob)
-        except ValueError:
-            continue
-        if isinstance(document, dict):
-            spots[index] = _as_float(document.get("spot_exit"))
-    return pd.Series(spots, index=trades.index)
-
-
-def _as_float(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float("nan")
-
-
-def to_trades_table(results: Sequence[ReplayResult]) -> pd.DataFrame:
-    """Shape replay output into the Tier-2 ``trades`` schema.
-
-    ``trade_id`` carries the alpha, because the schema's primary key is the
-    trade id and one event priced at five alphas is five rows.
-    """
-    frames = []
-    for result in results:
-        if not len(result.trades):
-            continue
-        trades = result.trades
-        out = pd.DataFrame(
-            {
-                "trade_id": (
-                    trades["strategy"] + ":" + trades["variant"] + ":"
-                    + trades["ticker"] + ":"
-                    + pd.to_datetime(trades["event_date"]).dt.strftime("%Y%m%d") + ":a"
-                    + (trades["fill_alpha"].astype(float) * 100).round().astype(int).astype(str)
-                ),
-                "kind": "sim",
-                "strategy": trades["strategy"],
-                "variant": trades["variant"],
-                "ticker": trades["ticker"],
-                "event_id": trades["event_id"],
-                "event_date": pd.to_datetime(trades["event_date"]),
-                "year": pd.to_datetime(trades["event_date"]).dt.year,
-                "legs": trades["legs"],
-                "entry_date": pd.to_datetime(trades["entry_date"]),
-                "exit_date": pd.to_datetime(trades["exit_date"]),
-                "strike": trades["strike"].astype(float),
-                "expiry": pd.to_datetime(trades["expiry"]),
-                "fill_alpha": trades["fill_alpha"].astype(float),
-                "entry_cost": trades["entry_cost"].astype(float),
-                "exit_value": trades["exit_value"].astype(float),
-                "ret": trades["ret"].astype(float),
-                "provenance": "engine.replay",
-            }
-        )
-        frames.append(out)
-    if not frames:
-        columns = [
-            "trade_id", "kind", "strategy", "variant", "ticker", "event_id",
-            "event_date", "year", "legs", "entry_date", "exit_date", "strike",
-            "expiry", "fill_alpha", "entry_cost", "exit_value", "ret", "provenance",
-        ]
-        return pd.DataFrame({name: pd.Series(dtype="object") for name in columns})
-    return pd.concat(frames, ignore_index=True)
-
-
-# --------------------------------------------------------------------------
-# the tool entrypoint
-# --------------------------------------------------------------------------
-
-
-def _events_frame(repository, snapshot_ref, years=None) -> pd.DataFrame:
-    """The event universe for a replay: earnings_events with a known session.
-
-    This is ``engine/build_trades.py``'s ``event_universe`` body split at its
-    one store read (the same technique ``fill_quality.join_from_snapshot``
-    used), with the v2 table read in place of the legacy one.
-    """
-    events = _snapshot.read_table(
-        repository, snapshot_ref, "earnings_events",
-        ["event_id", "ticker", "event_date", "session"],
-    )
-    events = events[events["session"].notna()].copy()
-    events["event_date"] = pd.to_datetime(events["event_date"])
-    if years is not None:
-        wanted = {int(y) for y in years}
-        events = events[events["event_date"].dt.year.isin(wanted)]
-    return events.sort_values(["ticker", "event_date"]).reset_index(drop=True)
-
-
-def run(repository, *, strategies: Sequence[str], events: pd.DataFrame,
-        reports_dir: Path = Path("reports"), scope: str = _snapshot.DEFAULT_SCOPE,
-        snapshot_id: str | None = None, stamp: str | None = None) -> dict:
-    """Replay every strategy against one pinned snapshot and write a report.
-
-    The returned ``trades`` frame is stamped with ``provenance =
-    "engine.v2.research.replay"`` (overwriting the legacy ``engine.replay``
-    marker ``to_trades_table`` writes) and with the snapshot id that produced
-    it, so a v2 row can never be mistaken for a legacy-replay row.
-    """
-    snapshot = _snapshot.resolve_snapshot(repository, scope=scope, snapshot_id=snapshot_id)
-    results = [replay(repository, snapshot, s, events) for s in strategies]
-    trades = to_trades_table(results)
-    if len(trades):
-        trades["provenance"] = "engine.v2.research.replay"
-        trades["snapshot_id"] = snapshot.snapshot_id
-
-    stamp = stamp or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    reports_dir = Path(reports_dir)
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    path = reports_dir / f"replay_{stamp}.json"
-    report = {
-        "snapshot_id": snapshot.snapshot_id,
-        "generated_at": stamp,
-        "results": [result.as_dict() for result in results],
-    }
-    path.write_text(json.dumps(report, indent=2, sort_keys=True))
-    return {
-        "snapshot_id": snapshot.snapshot_id,
-        "results": [result.as_dict() for result in results],
-        "trades": trades,
-        "path": str(path),
-    }

@@ -25,7 +25,7 @@ from engine.v2.contracts.data import DatasetManifest  # noqa: E402
 from engine.v2.data import catalog, manifests  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.research import _pricing, replay  # noqa: E402
+from engine.v2.research import _chains, _plan, _pricing, _replay_run, replay  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
     contract_for,
@@ -70,8 +70,8 @@ def _chain(ticker, obs_date, *, call=(2.0, 2.4), put=(1.0, 1.4), spot=100.0):
     return pd.DataFrame(rows)
 
 
-def _index() -> replay.ChainIndex:
-    return replay.ChainIndex(
+def _index() -> _chains.ChainIndex:
+    return _chains.ChainIndex(
         {
             ("TEST", pd.Timestamp("2024-05-02")): _chain("TEST", "2024-05-02"),
             ("TEST", pd.Timestamp("2024-05-03")): _chain("TEST", "2024-05-03"),
@@ -251,10 +251,10 @@ def test_replay_output_carries_pinned_snapshot_id(tmp_path, monkeypatch):
     conn, clock, store = catalog_and_store(tmp_path)
     snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
                    event_rows=_event_rows(), receipt_id="r1")
-    monkeypatch.setattr(replay, "trading_calendar", lambda: _calendar())
+    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
-    events = replay._events_frame(repository, snap)
-    outcome = replay.run(
+    events = _replay_run.events_frame(repository, snap)
+    outcome = _replay_run.run(
         repository, strategies=["STR-THRU"], events=events,
         reports_dir=tmp_path / "reports", snapshot_id=snap.snapshot_id,
         stamp="slice7",
@@ -277,15 +277,15 @@ def test_replay_explicit_snapshot_id_ignores_a_moved_head(tmp_path, monkeypatch)
                      event_rows=_event_rows(), receipt_id="r2",
                      expected_head=first.snapshot_id, generation=1)
     assert second.snapshot_id != first.snapshot_id
-    monkeypatch.setattr(replay, "trading_calendar", lambda: _calendar())
+    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
-    events = replay._events_frame(repository, first)
+    events = _replay_run.events_frame(repository, first)
 
-    pinned = replay.run(repository, strategies=["STR-THRU"], events=events,
-                        reports_dir=tmp_path / "pinned", snapshot_id=first.snapshot_id,
-                        stamp="pinned")
-    head = replay.run(repository, strategies=["STR-THRU"], events=events,
-                      reports_dir=tmp_path / "head", scope="shadow", stamp="head")
+    pinned = _replay_run.run(repository, strategies=["STR-THRU"], events=events,
+                             reports_dir=tmp_path / "pinned", snapshot_id=first.snapshot_id,
+                             stamp="pinned")
+    head = _replay_run.run(repository, strategies=["STR-THRU"], events=events,
+                           reports_dir=tmp_path / "head", scope="shadow", stamp="head")
 
     # alpha=0 exit value sells the exit bid: FIRST's 3.0+2.0, not SECOND's 5.0+2.0.
     pinned_exit = pinned["trades"].loc[pinned["trades"]["fill_alpha"] == 0.0, "exit_value"]
@@ -307,11 +307,11 @@ def test_replay_refuses_a_corrupt_manifest(tmp_path, monkeypatch):
         (snap.snapshot_id,)).fetchone()[0]
     conn.execute("DELETE FROM data_version_fragments WHERE dataset_version_id = ?",
                  (dsv_id,))
-    monkeypatch.setattr(replay, "trading_calendar", lambda: _calendar())
+    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
     with pytest.raises(DataError) as err:
-        replay.run(repository, strategies=["STR-THRU"], events=_events(),
-                   reports_dir=tmp_path / "reports", snapshot_id=snap.snapshot_id)
+        _replay_run.run(repository, strategies=["STR-THRU"], events=_events(),
+                        reports_dir=tmp_path / "reports", snapshot_id=snap.snapshot_id)
     assert err.value.code == "MANIFEST_CORRUPT"
     conn.close()
 
@@ -326,7 +326,7 @@ def test_replay_missing_chain_index_entry_refuses_not_partial():
     bad_chain = _chain("TEST", "2024-05-03")
     bad_chain["bid"] = np.nan
     bad_chain["ask"] = np.nan
-    index = replay.ChainIndex(
+    index = _chains.ChainIndex(
         {
             ("TEST", pd.Timestamp("2024-05-02")): _chain("TEST", "2024-05-02"),
             ("TEST", pd.Timestamp("2024-05-03")): bad_chain,

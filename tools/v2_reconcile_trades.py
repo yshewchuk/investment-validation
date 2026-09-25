@@ -1,13 +1,15 @@
-"""Replay strategies over one pinned snapshot and publish the v2 trades table.
+"""Reconcile the v2 ``trades`` table to the canonical event universe.
 
 Example::
 
-    python3 tools/v2_build_trades.py --catalog private/ops/catalog.sqlite \
-        --store-root private/ops/objects --scope shadow --strategy STR-THRU
+    python3 tools/v2_reconcile_trades.py --catalog private/ops/catalog.sqlite \
+        --store-root private/ops/objects --scope shadow
 
-The legacy ``engine/build_trades.py`` and ``tools/reconcile_trades.py`` are
-untouched; this writes a NEW dataset version of the same ``trades`` table
-under the snapshot scope alongside them.
+The v2 counterpart of ``tools/reconcile_trades.py``: it tombstones only the
+non-canonical simulated rows as a new ``trades`` dataset version under the
+snapshot scope. The legacy tool and the legacy mutable table are untouched;
+``--snapshot-id`` reconciles the pinned snapshot instead of the scope head
+(use ``--dry-run`` when the head has moved).
 """
 from __future__ import annotations
 
@@ -23,8 +25,7 @@ from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.research import _build_run, _snapshot
-from engine.v2.research._pricing import STRUCTURES
+from engine.v2.research import _snapshot, reconcile_trades
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -34,25 +35,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--scope", default=_snapshot.DEFAULT_SCOPE)
     parser.add_argument("--snapshot-id", default=None)
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
-    parser.add_argument("--strategy", action="append", choices=sorted(STRUCTURES),
-                        default=None, help="repeatable; default is every strategy")
-    parser.add_argument("--years", nargs="*", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true",
-                        help="plan and price, commit nothing")
+                        help="compute the removals, commit nothing")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    strategies = args.strategy or sorted(STRUCTURES)
     conn = open_catalog(args.catalog, clock=SystemClock())
     try:
         repository = Repository(conn, ArtifactStore(args.store_root))
         scope = _snapshot.DEFAULT_SCOPE if args.scope is None else args.scope
-        outcome = _build_run.run(
-            repository, strategies=strategies, years=args.years, scope=scope,
-            snapshot_id=args.snapshot_id, reports_dir=args.reports_dir,
-            dry_run=args.dry_run,
+        outcome = reconcile_trades.run(
+            repository, scope=scope, snapshot_id=args.snapshot_id,
+            reports_dir=args.reports_dir, dry_run=args.dry_run,
         )
     except DataError as exc:
         print(
@@ -63,8 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
 
-    summary = {key: value for key, value in outcome.items() if key != "trades"}
-    print(json.dumps(summary, sort_keys=True, default=str))
+    print(json.dumps(outcome, sort_keys=True, default=str))
     return 0
 
 
