@@ -437,11 +437,12 @@ tests = [
 ]
 
 [modules.scoring_application]
-why = "Scoring application, financial arithmetic and source inputs: turning source bundles into the scored record."
+why = "Scoring application, financial arithmetic, source inputs and the Phase 6 frozen batch boundary over application.score_frozen: turning source bundles or one declared batch into the scored record; a batch-preflight slip lets one request's bad payload infer after the batch already died."
 mutate = [
     "engine/v2/scoring/__init__.py",
     "engine/v2/scoring/application.py",
     "engine/v2/scoring/financial.py",
+    "engine/v2/scoring/frozen_batch.py",
     "engine/v2/scoring/source_inputs.py",
 ]
 tests = [
@@ -453,6 +454,7 @@ tests = [
     "tests/test_v2_scoring_application_canonical.py",
     "tests/test_v2_scoring_application_track_b.py",
     "tests/test_v2_scoring_financial.py",
+    "tests/test_v2_scoring_frozen_batch.py",
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/test_v2_scoring_native_payoff.py",
