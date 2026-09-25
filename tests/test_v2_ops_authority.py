@@ -183,6 +183,71 @@ def test_o18_planted_defects_write_no_predictions_and_settlement_proceeds(tmp_pa
     assert _counts(conn) == {"decisions": 3, "outbox": 2, "watermarks": 1, "releases": 0}
 
 
+def test_ops5_all_rows_diverge_with_no_prior_watermark_enqueues_nothing(tmp_path):
+    """OPS-5: when every candidate row diverges from content already present
+    under the same decision_id (e.g. a legacy history bootstrap import that
+    never wrote a "decisions" watermark -- see
+    ``ledger_history_import.import_history``), and no prior "decisions"
+    watermark exists for this (scope, session) either, the generation must
+    not enqueue export/release_intent or advance the watermark: it would
+    point export at content this generation never actually committed.
+    """
+    conn, clock, supervisor = catalog(tmp_path)
+    _authority(conn)
+    input_hash = content_hash({"snapshot": "candidate-scores"})
+    claim = _claim(conn, clock, supervisor, input_hash)
+
+    # Pre-existing decision for the same decision_id ("prediction:r1"), as if
+    # imported by ``ledger_history_import`` before this catalog's nightly
+    # ever ran -- a different logical_key and payload, and critically no
+    # "decisions" watermark row at all.
+    with transaction(conn):
+        insert(conn, logical_key="legacy-import:r1", decision_id="prediction:r1",
+              payload={"row_id": "r1", "event_id": "legacy-e1", "imported": True},
+              purpose="shadow", kind="prediction", validations={}, created_at=STAMP)
+    assert _counts(conn) == {"decisions": 1, "outbox": 0, "watermarks": 0, "releases": 0}
+
+    candidates = [_row(input_hash)]
+    context = _strict_context(candidates, input_hash)
+    validated = validate_candidates(candidates, context)
+    receipts = commit_decisions(conn, claim, candidates, context, validated, clock=clock)
+
+    assert receipts == []
+    # No export/release_intent jobs, no decisions watermark, and one durable
+    # divergence recorded -- the pre-existing decision is untouched.
+    assert _counts(conn) == {"decisions": 1, "outbox": 0, "watermarks": 0, "releases": 0}
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 1
+
+
+def test_ops5_one_committing_row_still_advances_watermark_and_jobs(tmp_path):
+    """Same shape as the all-diverge case above, but one candidate row is
+    genuinely new: this generation DID commit something for this session, so
+    export/release_intent and the watermark advance exactly as before the
+    OPS-5 fix."""
+    conn, clock, supervisor = catalog(tmp_path)
+    _authority(conn)
+    input_hash = content_hash({"snapshot": "candidate-scores"})
+    claim = _claim(conn, clock, supervisor, input_hash)
+
+    with transaction(conn):
+        insert(conn, logical_key="legacy-import:r1", decision_id="prediction:r1",
+              payload={"row_id": "r1", "event_id": "legacy-e1", "imported": True},
+              purpose="shadow", kind="prediction", validations={}, created_at=STAMP)
+
+    candidates = [_row(input_hash), _row(input_hash, row_id="r2", event_id="e2")]
+    context = _strict_context(candidates, input_hash)
+    validated = validate_candidates(candidates, context)
+    receipts = commit_decisions(conn, claim, candidates, context, validated, clock=clock)
+
+    assert len(receipts) == 1
+    assert receipts[0]["decision_id"] == "prediction:r2"
+    kinds = sorted(row[0] for row in conn.execute("SELECT kind FROM outbox"))
+    assert kinds == ["export", "release_intent"]
+    mark = conn.execute("SELECT pipeline,scope,stage,occurrence FROM watermarks").fetchone()
+    assert tuple(mark) == ("nightly", "shadow", "decisions", "2026-09-12")
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 1
+
+
 def test_o19_cancelled_or_changed_candidate_cannot_commit(tmp_path):
     conn, clock, supervisor = catalog(tmp_path)
     _authority(conn)

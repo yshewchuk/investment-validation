@@ -172,18 +172,41 @@ def _commit_row_or_diverge(conn, context, row, generation_ref, *, clock):
         return None
 
 
-def _advance_decisions_watermark(conn, context, candidates, *, clock):
+def _advance_decisions_watermark(conn, context, candidates, receipts, *, clock):
     """Enqueue export/release_intent and advance the "decisions" watermark --
-    unless an earlier generation already completed this exact (scope,
-    session) with different content, in which case none of the three runs
-    (guide §5.5 item 1): a second generation's own release_key almost always
-    differs from the first's even when no individual row diverged (it is
-    derived from THIS generation's own plan/evidence artifacts), and
-    advancing anything here would either IDEMPOTENCY_CONFLICT the watermark
-    or point export at content this generation never actually committed.
-    Leaving the first generation's watermark in place is what makes it
-    authoritative.
+    unless either guard below says this generation has nothing to point them
+    at (OPS-5).
+
+    Guard 1 (pre-existing): an earlier generation already completed this
+    exact (scope, session) with different content, in which case none of the
+    three runs (guide §5.5 item 1): a second generation's own release_key
+    almost always differs from the first's even when no individual row
+    diverged (it is derived from THIS generation's own plan/evidence
+    artifacts), and advancing anything here would either
+    IDEMPOTENCY_CONFLICT the watermark or point export at content this
+    generation never actually committed. Leaving the first generation's
+    watermark in place is what makes it authoritative.
+
+    Guard 2 (OPS-5 fix): every candidate row diverged from content already
+    committed under a DIFFERENT decision_id path -- ``receipts`` is empty
+    even though ``candidates`` was not. This is reachable with no prior
+    "decisions" watermark for this (scope, session) at all: legacy history
+    bootstrap (``ledger_history_import.import_history`` ->
+    ``engine.v2.ledger.decisions.import_lines`` -> ``_import_decision_id``)
+    can insert a ``decisions`` row keyed ``"prediction:" + row_id`` for a
+    trade that predates this catalog, without ever writing a "decisions"
+    watermark (it has none to write). A later shadow nightly whose candidate
+    computes the same decision_id then diverges on every row via
+    ``_commit_row_or_diverge``, so guard 1's ``prior is None`` check above
+    would otherwise wave it through, enqueuing export/release_intent and
+    writing a watermark whose release_key names content this generation
+    never actually committed -- ``effects_graph.ledger_export_effect`` trusts
+    watermark presence as proof decisions exist. A true no-entry night
+    (``candidates`` itself empty, nothing scheduled) is unaffected: it still
+    commits vacuously and still advances, exactly as before.
     """
+    if candidates and not receipts:
+        return
     validated_hash = content_hash({
         "candidate": context.get("candidate_content_hash", content_hash(candidates)),
         "plan": context.get("plan_artifact_id"), "evidence": context.get("evidence_artifact_id"),
@@ -235,7 +258,7 @@ def commit_decisions_in_transaction(conn, claim, candidates, context, *, clock):
     receipts = [receipt for receipt in
                (_commit_row_or_diverge(conn, context, row, generation_ref, clock=clock)
                 for row in candidates) if receipt is not None]
-    _advance_decisions_watermark(conn, context, candidates, clock=clock)
+    _advance_decisions_watermark(conn, context, candidates, receipts, clock=clock)
     return receipts
 
 
@@ -563,18 +586,6 @@ def _record_status_change_divergence(conn, *, decision_id, row_id, payload, pred
                + str(session) + "; the first committed observation for this session stays "
                "authoritative",
         created_at=format_timestamp(clock.now()))
-
-
-def _stamp_date(value):
-    """A bare ``date`` for a date-or-datetime string, or ``None`` -- used
-    only to compare a recorded exit date against a settlement session, never
-    to reconstruct a timestamp."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
-    except (TypeError, ValueError):
-        return None
 
 
 def _stamp_date(value):
