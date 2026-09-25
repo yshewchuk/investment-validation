@@ -178,21 +178,40 @@ Receipts live under `reports/phase6_evidence/` in this layout:
 
     reports/phase6_evidence/
       resource_measurement/   # one JSON per measured run (v2b Part 2 recorder)
+      route_probe/            # one <session>-route_probe.json per session (v2c)
       controlled_failure/     # v2a drill receipts (always copied here)
       qualified_session/      # real-EOD-candidate receipts from the HEAVY RUNS
 
-Every receipt carries a `capabilities_covered` list whose ids are row ids from
-`tools/phase6_capabilities.toml` — see v2a's corrected id list (for example
-the single `research-tools` row covering both research tools, and
-`nightly-publish`/`nightly-backup` for the controlled-failure drill; there are
-no per-tool sub-ids).
+Each capability row in `tools/phase6_capabilities.toml` declares its own
+`evidence` field, and the completeness check resolves exactly that artifact —
+it no longer unions `capabilities_covered` from every JSON under the evidence
+root (that scan counted FAIL receipts as coverage). The check built in **v2b
+Part 3** is now
 
-The pass/fail gate on "every inventory row has evidence" is the completeness
-check built in **v2b Part 3** — `python3 tools/v2_session_evidence_check.py
---json` — cross-referenced here rather than renumbered or duplicated. It
-unions every `capabilities_covered` under the evidence root, exempts rows
-whose disposition is `missing` or `dormant-historical`, and exits 0 only when
-every other row is covered.
+    python3 tools/v2_session_evidence_check.py --session <id> \
+        --window-start <iso> --window-end <iso> --catalog <ops.sqlite> --json
+
+and reads three real sources, keyed to each row's `evidence` field:
+
+- `job:<kind>` rows: a `succeeded` attempt of that job kind inside the window
+  in the ops catalog (opened read-only), falling back to a `delivered` outbox
+  effect of the same kind; the outbox has no timestamp column, so that
+  fallback is reported with `window_checked: false` rather than silently
+  accepted as in-window evidence;
+- `route:<METHOD> <path>` rows: a 2xx row for that method/path in this
+  session's own `route_probe/<session>-route_probe.json` — a receipt for
+  another session is never cross-counted;
+- `cli:<tool>` rows: a `resource_measurement/*.json` record whose `command`
+  names that tool, with `exit_code == 0`, `killed == false` and `started_at`
+  inside the window (the direct fix for "count only PASS / exit 0 & not
+  killed").
+
+`exempt` rows and `missing`/`dormant-historical` dispositions never need
+evidence. Rows declared `evidence = "open"` are a known gap: they are
+reported as OPEN and the check FAILs (exit 1) while any remain — open is never
+counted as covered and never reported as uncovered. A row whose declaration
+has no `evidence` key fails closed; a broken JSON receipt is named under
+`unreadable_evidence_files` and the scan carries on.
 
 ## 9. Real-scale research-tools smoke
 
@@ -226,6 +245,13 @@ the following hold:
 - selfcheck, engineering and publication all succeeded;
 - repeated attempts count once, never as two sessions;
 - missing sessions stay unknown — do not substitute or backfill;
+- the session's route probe (`tools/v2_route_probe.py` against the running
+  preview server) and the evidence-completeness check both use the SAME
+  `--session` id and window as the qualified-session receipt; a qualified
+  session with `rows_uncovered` non-empty is not fully evidenced even if
+  scoring/selfcheck/publish all passed — report which rows, don't block the
+  session's trading validity on it (evidence completeness and trading
+  correctness are separate gates);
 - **manual CPU placement disqualifies a run** — only `bounded_run.py`'s
   automatic admission counts.
 
