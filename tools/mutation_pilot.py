@@ -85,13 +85,16 @@ def stats_debug_enabled(module: str, env: dict[str, str] | None = None) -> bool:
     explicit value it is on only for the ``ops_legacy`` shard under CI
     (``GITHUB_ACTIONS=true``), the one run whose clean/stats step is known to
     fail; every other CI shard and every local run stays quiet.
-    ``ops_catalog_state`` now shares that CI-only default.
+    ``ops_catalog_state`` and ``ops_runtime`` now share that CI-only default.
     """
     source = os.environ if env is None else env
     if "MUTATION_PILOT_DEBUG" in source:
         return source["MUTATION_PILOT_DEBUG"].strip().lower() in ("1", "true", "yes", "on")
     if (source.get("GITHUB_ACTIONS", "").strip().lower() == "true"
             and module == "ops_catalog_state"):
+        return True
+    if (source.get("GITHUB_ACTIONS", "").strip().lower() == "true"
+            and module == "ops_runtime"):
         return True
     return (source.get("GITHUB_ACTIONS", "").strip().lower() == "true"
             and module == "ops_legacy")
