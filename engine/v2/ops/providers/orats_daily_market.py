@@ -11,10 +11,10 @@ The row builder ports the per-row field mapping of
 ``engine/data/normalize/n_daily.py::normalize_ticker`` (ORATS decimal IVs to
 vol points, the three-era ``mktCap`` conversion, the ``src_*`` provenance
 columns) verbatim rather than importing that legacy module. It does not walk
-back over recent sessions: a market-wide date that 404s on both endpoints is a
-``TRANSIENT_SOURCE`` refusal so the job's own retry policy owns that decision,
-and the unused ``lookback_days`` parameter is kept for a future caller that
-plans one unit per candidate date.
+back over recent sessions: a market-wide date that is not published yet (404 on
+both endpoints, or a 2xx with no rows) is a ``SOURCE_NOT_FINAL`` refusal so the
+job's own retry policy owns that decision, and the unused ``lookback_days``
+parameter is kept for a future caller that plans one unit per candidate date.
 """
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def orats_daily_market_fetcher(*, http_get: Callable[..., tuple] | None = None,
             request, CORES_ENDPOINT, session_date, token)
         summaries_kind = _classify(unit, summaries_status, summaries_body).kind
         cores_kind = _classify(unit, cores_status, cores_body).kind
-        response_kind = _overall_kind(summaries_kind, cores_kind)
+        response_kind = _overall_kind(summaries_kind, cores_kind, session_date)
         raw_bytes = canonical_json({
             "summaries": _json_document(summaries_body),
             "cores": _json_document(cores_body),
@@ -108,7 +108,8 @@ def orats_daily_market_fetcher(*, http_get: Callable[..., tuple] | None = None,
         response_meta = {"summaries_status": int(summaries_status),
                          "cores_status": int(cores_status), "trade_date": session_date}
         ticker_rows = _merge_ticker_rows(
-            _data_rows(summaries_body), _data_rows(cores_body))
+            _data_rows(summaries_body), _data_rows(cores_body),
+            expected_keys=tuple(str(key) for key in unit.get("expected_keys", ())))
         return raw_bytes, response_kind, response_meta, ticker_rows
 
     fetcher.lookback_days = lookback_days
@@ -161,17 +162,29 @@ def _provider_tickers(body: Any) -> tuple[str, ...]:
 
 
 def _classify(unit: dict, status: int, body: Any):
-    return classify_response(
-        status, requested_keys=tuple(str(key) for key in unit.get("expected_keys", ())),
-        returned_keys=_provider_tickers(body), final=True, credential_page=False,
-        request_id=str(unit.get("request_id", "")))
+    expected = tuple(str(key) for key in unit.get("expected_keys", ()))
+    present = set(_provider_tickers(body))
+    request_id = str(unit.get("request_id", ""))
+    if 200 <= status < 300 and not present:
+        # A published date always carries market rows; an empty 2xx is not final.
+        return classify_response(status, expected, final=False, request_id=request_id)
+    if status == 404:
+        # _response_kind checks 404 before final, so pass 200 to force not_final.
+        return classify_response(200, expected, final=False, request_id=request_id)
+    returned = tuple(key for key in expected if key in present)
+    empty = tuple(key for key in expected if key not in present)
+    return classify_response(status, expected, returned_keys=returned,
+                             empty_keys=empty, final=True, request_id=request_id)
 
 
-def _overall_kind(summaries_kind: str, cores_kind: str) -> str:
+def _overall_kind(summaries_kind: str, cores_kind: str, trade_date: str) -> str:
     if summaries_kind == cores_kind == "complete":
         return "complete"
     if summaries_kind == cores_kind == "empty":
         return "legitimate_empty"
+    if summaries_kind == cores_kind == "not_final":
+        raise fail("SOURCE_NOT_FINAL",
+                   f"ORATS has not published tradeDate={trade_date} yet")
     raise fail(_failure_code(summaries_kind, cores_kind),
                f"orats daily_market response was not complete "
                f"(summaries={summaries_kind}, cores={cores_kind})")
@@ -187,11 +200,15 @@ def _failure_code(*kinds: str) -> str:
 
 
 def _merge_ticker_rows(summaries_rows: Sequence[Mapping[str, Any]],
-                       cores_rows: Sequence[Mapping[str, Any]]) -> list[dict]:
+                       cores_rows: Sequence[Mapping[str, Any]],
+                       expected_keys: Sequence[str] | None = None) -> list[dict]:
     summaries = _rows_by_ticker(summaries_rows)
     cores = _rows_by_ticker(cores_rows)
+    allowed = None if expected_keys is None else {str(key) for key in expected_keys}
     rows = []
     for ticker in sorted(set(summaries) | set(cores)):
+        if allowed is not None and ticker not in allowed:
+            continue
         summary, core = summaries.get(ticker), cores.get(ticker)
         session_date = _trade_date(summary) or _trade_date(core)
         if session_date:

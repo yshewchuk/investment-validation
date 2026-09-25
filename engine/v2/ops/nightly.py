@@ -23,6 +23,10 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 #: (``ops provider-account``); planning never creates one.
 NATIVE_DAILY_MARKET_ACCOUNT = "orats-daily-market"
 
+#: One daily_market fetch unit costs two ORATS calls (``hist/summaries`` and
+#: ``hist/cores``), so the reserved provider budget must count both.
+ORATS_CALLS_PER_DAILY_MARKET_UNIT = 2
+
 GRAPH = {
     "refresh": (), "finality": ("refresh",), "features": ("finality",),
     "score": ("features",), "decision_validation": ("score",),
@@ -552,7 +556,8 @@ def _build_native_refresh_plan(plan, context_tickers, *, catalog_path, objects_r
         Repository(conn).resolve(head["snapshot_id"]), (unit,),
         cached_outcomes=_native_cached_outcome(conn, unit),
         provider_account=NATIVE_DAILY_MARKET_ACCOUNT,
-        expected_head_generation=head["generation"])
+        expected_head_generation=head["generation"],
+        calls_per_unit=ORATS_CALLS_PER_DAILY_MARKET_UNIT)
 
 
 def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref,

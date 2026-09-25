@@ -23,15 +23,17 @@ The ORATS fetcher raises ops-level acquisition codes (`CREDENTIAL_INVALID`,
 ## Public interface
 
 `orats_daily_market` provides `orats_daily_market_fetcher` and its
-`SUMMARY_FIELDS` mapping.
+`SUMMARY_FIELDS` mapping; the package exports `provider_credentials` and its
+`PROVIDER_CREDENTIAL_VARIABLES` account table.
 
-<!-- public-interface: orats_daily_market_fetcher, SUMMARY_FIELDS -->
+<!-- public-interface: orats_daily_market_fetcher, SUMMARY_FIELDS, provider_credentials, PROVIDER_CREDENTIAL_VARIABLES -->
 
 ## Consumers
 
 `engine.v2.ops.incremental_data` injects the native ORATS fetcher through
-`_load_data_refresh_callback`; no other production package imports this
-subpackage.
+`_load_data_refresh_callback`; `engine.v2.ops.executor` copies the job's
+provider account credentials into the worker environment at launch. No other
+production package imports this subpackage.
 
 <!-- consumers: engine.v2.ops -->
 
