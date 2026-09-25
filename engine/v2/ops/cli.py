@@ -591,6 +591,27 @@ def _submit_nightly(plan, conn, store, policy, clock):
             "jobs": [to_document(item) for item in receipts]}
 
 
+def _recheck_experiment_preregistration(plan):
+    """Re-bind a primary experiment plan's spec at submit.
+
+    The plan records the checkout root its pre-registration check read
+    (``preregistration_root``); this recomputes the registered runner's
+    legacy ``spec.yaml`` hash with the SAME
+    ``experiments.legacy_spec_hash`` the PLANNED row used and refuses with
+    ``SPEC_CHANGED`` when it no longer matches -- a spec edited after
+    planning never reaches a job.
+    """
+    from engine.v2.ops.experiments import (
+        default_checkout_root,
+        experiment_spec_from_document,
+        require_preregistration,
+    )
+
+    recorded = plan.get("preregistration_root")
+    checkout_root = Path(recorded) if recorded else default_checkout_root()
+    require_preregistration(checkout_root, experiment_spec_from_document(plan["spec_document"]))
+
+
 def _submit_command(args, root, conn, clock):
     store = ArtifactStore(root)
     ref = artifact(conn, store, args.plan)
@@ -599,6 +620,8 @@ def _submit_command(args, root, conn, clock):
     if plan.get("kind") == "nightly":
         return _submit_nightly(plan, conn, store, policy, clock)
     if plan.get("kind") == "experiment":
+        if plan.get("parameters", {}).get("no_ledger", True) is False:
+            _recheck_experiment_preregistration(plan)
         spec_ref = store.publish_bytes(json.dumps(plan["spec_document"], sort_keys=True).encode(),
                                        schema_ref="experiment_spec.v1.0")
         with transaction(conn):

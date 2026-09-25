@@ -30,6 +30,7 @@ __all__ = [
     "EXPERIMENTS_DIR",
     "LEDGER_PATH",
     "LEDGER_COLUMNS",
+    "LEDGER_OPTIONAL_COLUMNS",
     "LedgerError",
     "verify_append",
     "ledger_read",
@@ -53,6 +54,15 @@ LEDGER_COLUMNS = [
     "id", "spec_hash", "date", "stage",
     "oos_mean_mid", "sharpe_trade", "promoted",
 ]
+
+#: Columns appended after ``LEDGER_COLUMNS`` when a ledger is first created
+#: (P6 review fix: a ran row with no headline metrics records
+#: ``metrics_source: unavailable`` in ``notes``). An existing ledger keeps its
+#: own header byte-for-byte -- ``ledger_append`` writes the file's actual
+#: fieldnames, so a pre-existing 7-column ledger is never rewritten or
+#: corrupted -- and ``ledger_read`` fills an absent optional column as "".
+#: Writers may omit these keys; they default to "".
+LEDGER_OPTIONAL_COLUMNS = ["notes"]
 
 #: The 0-50 range belongs to the pre-engine research tree.
 FIRST_NUMBER = 101
@@ -92,7 +102,7 @@ def ledger_ensure(path: Path | None = None) -> Path:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         buf = io.StringIO()
-        csv.DictWriter(buf, fieldnames=LEDGER_COLUMNS).writeheader()
+        csv.DictWriter(buf, fieldnames=[*LEDGER_COLUMNS, *LEDGER_OPTIONAL_COLUMNS]).writeheader()
         path.write_bytes(buf.getvalue().encode())
     return path
 
@@ -109,7 +119,23 @@ def ledger_read(path: Path | None = None) -> pd.DataFrame:
     missing = [c for c in LEDGER_COLUMNS if c not in frame.columns]
     if missing:
         raise LedgerError(f"LEDGER.csv is missing columns {missing} — refusing to work with it")
+    for column in LEDGER_OPTIONAL_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
     return frame
+
+
+def _ledger_fieldnames(path: Path) -> list[str]:
+    """The fieldnames one append must use: the file's own header if it has
+    one, else the full new-ledger header. An existing 7-column ledger is
+    never given an 8th field (that would corrupt it); a new one gets the
+    optional columns."""
+    if path.exists():
+        with open(path, newline="") as fh:
+            header = next(csv.reader(fh), None)
+        if header:
+            return header
+    return [*LEDGER_COLUMNS, *LEDGER_OPTIONAL_COLUMNS]
 
 
 def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None) -> int:
@@ -124,16 +150,17 @@ def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None) -
     path = Path(path or LEDGER_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     before = path.read_bytes() if path.exists() else b""
+    fieldnames = _ledger_fieldnames(path)
 
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=LEDGER_COLUMNS, extrasaction="ignore")
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     if not before:
         writer.writeheader()
     for row in rows:
         missing = [c for c in LEDGER_COLUMNS if c not in row]
         if missing:
             raise LedgerError(f"ledger row missing columns {missing}: {row}")
-        writer.writerow({c: row[c] for c in LEDGER_COLUMNS})
+        writer.writerow({c: row.get(c, "") for c in fieldnames})
 
     with open(path, "ab") as fh:
         fh.write(buf.getvalue().encode())

@@ -1,6 +1,7 @@
 """Supervised legacy experiment integration for smoke and isolated runs."""
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from dataclasses import dataclass, field
@@ -19,6 +20,17 @@ from engine.v2.ops.fingerprints import (
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
 
+def default_checkout_root() -> Path:
+    """The code checkout whose ``experiments/`` tree owns pre-registration.
+
+    One expression, used by the plan-time check and by the CLI's submit-time
+    re-check when a plan carries no recorded root. The coordinator's own
+    append resolves the same checkout from ``Service.store_root`` (which
+    defaults to ``code_source``), never from the operations store root.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
 def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | None = None):
     """Create an immutable plan for a supervised smoke or primary experiment run."""
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
@@ -33,10 +45,7 @@ def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | Non
     runner = document.get("runner")
     if not isinstance(runner, str) or not runner:
         raise fail("INVALID_REQUEST", "experiment specification has no runner")
-    if not smoke:
-        prereg_root = Path(root) if root is not None else Path(__file__).resolve().parents[3]
-        require_preregistration(prereg_root, experiment_spec_from_document(document))
-    return {
+    plan = {
         "schema_version": "operations_plan.v1.0",
         "kind": "experiment",
         "mode": "smoke" if smoke else "primary",
@@ -53,6 +62,14 @@ def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | Non
         "resource_class": "experiment_heavy",
         "spec_document": document,
     }
+    if not smoke:
+        # A primary plan records the one checkout root its pre-registration
+        # check read. ``ops submit`` re-checks against this exact path, so a
+        # plan and its submission can never bind two different ledgers.
+        checkout_root = Path(root) if root is not None else default_checkout_root()
+        require_preregistration(checkout_root, experiment_spec_from_document(document))
+        plan["preregistration_root"] = str(checkout_root)
+    return plan
 
 
 def experiment_spec_from_document(document: dict) -> ExperimentSpec:
@@ -104,31 +121,101 @@ class ExperimentSpec:
                              "price_source": self.price_source, "runner": self.runner})
 
 
-def planned_row_exists(root: Path | str, experiment_id: str) -> bool:
-    """True iff experiments/LEDGER.csv has a stage="planned" row for
-    experiment_id. Plain CSV read -- no legacy import, no adapter entry
-    (checks/legacy_adapters.json is at its 75/75 ceiling)."""
-    ledger = Path(root) / "experiments" / "LEDGER.csv"
+def experiments_ledger_path(repo_root: Path | str) -> Path:
+    """The one resolver for the pre-registration ledger.
+
+    Always under a *checkout* root -- the tree that owns the PLANNED row and
+    the registered runner's ``spec.yaml`` -- never the operations store root
+    (``ArtifactStore.root``, by default ``data/operations``). The plan-time
+    check and the coordinator's durable "ran" append both resolve through
+    this one function, so the row they read and the row they write can never
+    be two different files.
+    """
+    return Path(repo_root) / "experiments" / "LEDGER.csv"
+
+
+def planned_rows(repo_root: Path | str, experiment_id: str) -> list[dict]:
+    """Every ``stage="planned"`` ledger row for ``experiment_id``.
+
+    Plain CSV read -- no legacy import, no adapter entry
+    (``checks/legacy_adapters.json`` is at its 75/75 ceiling).
+    """
+    ledger = experiments_ledger_path(repo_root)
     if not ledger.is_file():
-        return False
+        return []
     import csv
     with open(ledger, newline="") as fh:
-        return any(row.get("id") == experiment_id and row.get("stage") == "planned"
-                   for row in csv.DictReader(fh))
+        return [row for row in csv.DictReader(fh)
+                if row.get("id") == experiment_id and row.get("stage") == "planned"]
+
+
+def planned_row_exists(root: Path | str, experiment_id: str) -> bool:
+    """True iff the checkout ledger has a PLANNED row for ``experiment_id``."""
+    return bool(planned_rows(root, experiment_id))
+
+
+def legacy_spec_hash(spec: dict) -> str:
+    """The planned row's ``spec_hash``, by the same algorithm.
+
+    ``experiments.lib.spec_hash`` delegates to the (legacy)
+    ``engine.evaluate.spec_hash``; importing that module from ``engine/v2``
+    would need an adapter entry at the 75/75 ceiling, so the pure algorithm
+    is copied here byte-for-byte: everything except ``id`` and
+    ``preregistered_at``, canonical ``json.dumps``, sha256.
+    ``tests/test_experiments.py`` pins the two implementations to the same
+    answer, and this is what makes planned and ran rows join.
+    """
+    document = {key: value for key, value in spec.items()
+                if key not in ("id", "preregistered_at")}
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def registered_spec_hash(checkout_root: Path | str, spec: ExperimentSpec) -> str | None:
+    """The legacy pre-registration hash of the registered runner's spec.yaml.
+
+    ``None`` for a runner with no audited spec source (the synthetic
+    fixture): there is no legacy spec identity to bind. Resolved under the
+    *checkout*, so the row's ``spec_hash`` is never empty just because the
+    operations store root has no ``experiments/`` tree.
+    """
+    entry = RUNNER_INVENTORY.get(spec.runner)
+    if entry is None:
+        return None
+    spec_path = Path(checkout_root) / entry["spec_source"]
+    if not spec_path.is_file() or spec_path.is_symlink():
+        raise fail("INPUT_CHANGED",
+                   "registered runner's pre-registered specification is missing or indirect")
+    from experiments.lib import load_spec
+    return legacy_spec_hash(load_spec(spec_path))
 
 
 def require_preregistration(root: Path | str, spec: ExperimentSpec) -> None:
     """Refuse activation (mode="primary") with no PLANNED ledger row for
-    spec.experiment_id. This closes the gap in engine.evaluate's own guard
-    (silently no-ops when there are zero planned rows -- see
-    docs memory prereg-guard-noops-without-planned-row / EXP-173..177),
-    which only ever fires INSIDE the runner subprocess, after real work
-    has already happened. This check runs at plan time, before any job
-    is created."""
-    if not planned_row_exists(root, spec.experiment_id):
+    spec.experiment_id, and refuse a spec that no longer hashes to the
+    registered row's ``spec_hash``.
+
+    The first half closes the gap in engine.evaluate's own guard (it
+    silently no-ops when there are zero planned rows -- see docs memory
+    prereg-guard-noops-without-planned-row / EXP-173..177), which only ever
+    fires INSIDE the runner subprocess, after real work has already
+    happened. The second half binds the spec: the same
+    :func:`legacy_spec_hash` the planned row was written with is recomputed
+    here at plan time AND again at submit, so a spec edited after
+    registration is refused before any job exists. A synthetic runner has
+    no legacy spec to compare and checks only the row's existence.
+    """
+    rows = planned_rows(root, spec.experiment_id)
+    if not rows:
         raise fail("INVALID_REQUEST",
                    "experiment has no PLANNED ledger row; scaffold it with "
                    "experiments/new_experiment.py before activating a real run",
+                   details={"experiment_id": spec.experiment_id})
+    expected = registered_spec_hash(root, spec)
+    if expected is not None and expected not in {row.get("spec_hash") for row in rows}:
+        raise fail("SPEC_CHANGED",
+                   "experiment specification changed after pre-registration; scaffold a "
+                   "new experiment for the changed hypothesis",
                    details={"experiment_id": spec.experiment_id})
 
 
@@ -148,6 +235,40 @@ class ExperimentReceipt:
         return self.__dict__.copy()
 
 
+def register_hypothesis_in_transaction(conn, spec: ExperimentSpec, input_hash: str, *,
+                                       mode="smoke", run_id=None):
+    """The body of :func:`register_hypothesis`, without its own transaction.
+
+    The experiment coordinator effect runs inside the fenced
+    ``commit_attempt`` transaction (``catalog.transaction`` refuses a nested
+    one outright), so the registration has to be available in that shape.
+    """
+    from uuid import uuid4
+
+    run_id = run_id or "exp_run_" + uuid4().hex
+    payload_hash = content_hash({"spec": spec.spec_hash, "input": input_hash})
+    old = conn.execute("SELECT run_id FROM experiment_runs WHERE spec_hash=? AND input_hash=? AND mode=?",
+                       (spec.spec_hash, input_hash, mode)).fetchone()
+    if old:
+        return old[0], False
+    if mode == "primary":
+        existing = conn.execute(
+            "SELECT run_id, input_hash FROM hypotheses WHERE spec_hash=?",
+            (spec.spec_hash,)).fetchone()
+        if existing:
+            if existing["input_hash"] != input_hash:
+                raise fail("IDEMPOTENCY_CONFLICT",
+                           "hypothesis is already registered with a different input",
+                           details={"spec_hash": spec.spec_hash})
+            return existing["run_id"], False
+    conn.execute("INSERT INTO experiment_runs VALUES (?,?,?,?,?,?)",
+                 (run_id, spec.spec_hash, input_hash, mode, "{}", None))
+    if mode == "primary":
+        conn.execute("INSERT INTO hypotheses VALUES (?,?,?,?,?)",
+                     (spec.spec_hash, input_hash, payload_hash, "{}", run_id))
+    return run_id, True
+
+
 def register_hypothesis(conn, spec: ExperimentSpec, input_hash: str, *, mode="smoke",
                         run_id=None):
     """Reserve one economic run; identical retries return its run ID.
@@ -159,36 +280,13 @@ def register_hypothesis(conn, spec: ExperimentSpec, input_hash: str, *, mode="sm
     again with a different input is refused rather than raising the raw
     ``IntegrityError`` a second unconditional insert would produce.
 
-    Returns ``(run_id, created)``: ``created`` is True only for the call that
-    actually inserted the ``experiment_runs`` row, so a coordinator effect can
-    make its own one-shot side effect (the durable ledger append) exactly once
-    across retries.
+    Returns ``(run_id, created)``. ``created`` is deliberately NOT what
+    decides the ledger append: a retry after a partially completed effect
+    must still find the one run and append the missing row.
     """
-    from uuid import uuid4
-
-    run_id = run_id or "exp_run_" + uuid4().hex
-    payload_hash = content_hash({"spec": spec.spec_hash, "input": input_hash})
     with transaction(conn):
-        old = conn.execute("SELECT run_id FROM experiment_runs WHERE spec_hash=? AND input_hash=? AND mode=?",
-                           (spec.spec_hash, input_hash, mode)).fetchone()
-        if old:
-            return old[0], False
-        if mode == "primary":
-            existing = conn.execute(
-                "SELECT run_id, input_hash FROM hypotheses WHERE spec_hash=?",
-                (spec.spec_hash,)).fetchone()
-            if existing:
-                if existing["input_hash"] != input_hash:
-                    raise fail("IDEMPOTENCY_CONFLICT",
-                               "hypothesis is already registered with a different input",
-                               details={"spec_hash": spec.spec_hash})
-                return existing["run_id"], False
-        conn.execute("INSERT INTO experiment_runs VALUES (?,?,?,?,?,?)",
-                     (run_id, spec.spec_hash, input_hash, mode, "{}", None))
-        if mode == "primary":
-            conn.execute("INSERT INTO hypotheses VALUES (?,?,?,?,?)",
-                         (spec.spec_hash, input_hash, payload_hash, "{}", run_id))
-    return run_id, True
+        return register_hypothesis_in_transaction(conn, spec, input_hash,
+                                                  mode=mode, run_id=run_id)
 
 
 def record_backup_pending(conn, run_id, error_code):
@@ -342,6 +440,10 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
         receipt.evidence["error_code"] = type(exc).__name__
         if isinstance(exc, OpsError):
             receipt.evidence["failure_code"] = exc.code
+            # The typed problem's details (e.g. a runner's nonzero returncode
+            # and stderr tail) survive the status capture so the worker can
+            # re-raise them into the private diagnostics path.
+            receipt.evidence["failure_details"] = dict(exc.problem.details)
         return receipt.as_dict()
     if mode == "primary" and backup is not None and not synthetic:
         try:

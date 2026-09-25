@@ -16,10 +16,13 @@ from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import experiment_plan
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+from engine.v2.ops.input_bindings import resolve_and_record
+from engine.v2.ops.lifecycle import Outcome, commit_attempt
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.submission import NamespacePolicy, submit
 from engine.v2.ops.supervisor import Service
-from tests.ops_support import TEST_POLICY, catalog, run_until
+from tests.ops_support import TEST_POLICY, catalog, run_until, sample
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -107,6 +110,69 @@ def test_activation_succeeds_with_planned_row(tmp_path):
     assert plan["parameters"]["expected_ids"] == ["experiment:x"]
 
 
+REGISTERED_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+
+
+def _registered_checkout(tmp_path, experiment_id="EXP-182"):
+    """A tmp checkout with a registered runner, its legacy spec.yaml and a
+    PLANNED ledger row whose spec_hash is the legacy ``experiments.lib`` hash."""
+    from experiments import lib
+
+    checkout = tmp_path / "checkout"
+    runner = checkout / REGISTERED_RUNNER
+    runner.parent.mkdir(parents=True)
+    runner.write_text("if __name__ == '__main__':\n    pass\n")
+    legacy_spec = runner.parent / "spec.yaml"
+    legacy_spec.write_text("id: EXP-182\nprimary_spec:\n  x: 1\n")
+    lib.ledger_append([{"id": experiment_id,
+                        "spec_hash": lib.spec_hash(lib.load_spec(legacy_spec)),
+                        "date": "2026-01-01", "stage": "planned",
+                        "oos_mean_mid": "", "sharpe_trade": "", "promoted": "False"}],
+                      path=checkout / "experiments" / "LEDGER.csv")
+    return checkout, legacy_spec
+
+
+def test_plan_refuses_a_spec_edited_after_preregistration(tmp_path):
+    """Review fix item 4: the registered runner's legacy spec.yaml must still
+    hash to the PLANNED row's spec_hash at plan time."""
+    checkout, legacy_spec = _registered_checkout(tmp_path)
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(_spec_document(
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER)))
+
+    plan = experiment_plan(spec_path, smoke=False, root=checkout)
+    assert plan["mode"] == "primary"
+    assert plan["preregistration_root"] == str(checkout)
+
+    legacy_spec.write_text("id: EXP-182\nprimary_spec:\n  x: 2\n")
+    with pytest.raises(OpsError) as excinfo:
+        experiment_plan(spec_path, smoke=False, root=checkout)
+    assert excinfo.value.code == "SPEC_CHANGED"
+
+
+def test_submit_refuses_a_spec_edited_after_preregistration(tmp_path, monkeypatch, capsys):
+    """Review fix item 4: the same binding is recomputed at submit, from the
+    checkout root the plan recorded."""
+    checkout, legacy_spec = _registered_checkout(tmp_path)
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(_spec_document(
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER)))
+    monkeypatch.setattr(experiments, "default_checkout_root", lambda: checkout)
+
+    ops = tmp_path / "ops"
+    assert cli.main(["--root", str(ops), "init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["--root", str(ops), "plan", "experiment", "--spec", str(spec_path),
+                     "--activate-ledger"]) == 0
+    plan_ref = json.loads(capsys.readouterr().out)["plan_ref"]
+
+    legacy_spec.write_text("id: EXP-182\nprimary_spec:\n  x: 2\n")
+    assert cli.main(["--root", str(ops), "submit", "--plan", plan_ref,
+                     "--idempotency-key", "k"]) == 2
+    problem = json.loads(capsys.readouterr().out)
+    assert problem["code"] == "SPEC_CHANGED"
+
+
 def test_cli_activate_ledger_and_no_ledger_are_mutually_exclusive(tmp_path, capsys):
     assert cli.main(["--root", str(tmp_path), "init"]) == 0
     capsys.readouterr()
@@ -160,20 +226,58 @@ def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path
     assert "--no-ledger" in commands[0]
 
 
-def test_experiment_effect_appends_ledger_row_once_on_retry(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
+def test_worker_refuses_a_legacy_runner_that_exits_nonzero_after_the_report(tmp_path):
+    """Review fix item 3: a registered runner that writes REPORT.md and then
+    exits 1 is a typed failure -- never a success with whatever report it
+    happened to leave behind -- and its stderr tail travels in the details."""
+    runner_id = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+    runner_path = tmp_path / runner_id
+    runner_path.parent.mkdir(parents=True)
+    runner_path.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "Path('REPORT.md').write_text('# half a report\\n\\n"
+        "*Generated by engine.report v1.0.*\\n')\n"
+        "print('runner exploded', file=sys.stderr)\n"
+        "sys.exit(1)\n")
+    (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
+    (tmp_path / "spec.json").write_text(json.dumps(_spec_document(runner=runner_id)))
+
+    with pytest.raises(OpsError) as excinfo:
+        worker.dispatch("experiment",
+                        {"expected_ids": ["experiment:x"], "runner": runner_id,
+                         "no_ledger": True}, tmp_path)
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["returncode"] == 1
+    assert "runner exploded" in excinfo.value.problem.details["stderr_tail"]
+    assert not (tmp_path / "experiments" / "LEDGER.csv").exists(), \
+        "the worker never appends a ran row"
+
+
+def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path,
+                                                                        monkeypatch):
+    """Review fix item 1: the ops root and the checkout are DIFFERENT tmp
+    dirs, and the ran row lands in the checkout ledger only -- never beside
+    the catalog. ``store_root`` is the checkout; the Service's ``code_source``
+    stays the real repo so the launch manifest still matches."""
+    ops_root, checkout = tmp_path / "ops", tmp_path / "checkout"
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    _planned_ledger(ledger)
+    ops_root.mkdir()
+    conn, clock, _ = catalog(ops_root)
     calls = []
     real_effect = effects_graph.experiment_effect
 
-    def spy(conn, store, claim, refs, *, clock):
-        calls.append((conn, store, claim, refs, clock))
-        return real_effect(conn, store, claim, refs, clock=clock)
+    def spy(conn, store, claim, refs, *, clock, code_source, store_root=None):
+        calls.append((conn, store, claim, refs, clock, code_source, store_root))
+        return real_effect(conn, store, claim, refs, clock=clock, code_source=code_source,
+                           store_root=store_root)
 
     monkeypatch.setattr(supervisor, "experiment_effect", spy)
     try:
-        job = _submit_experiment(conn, tmp_path, clock, "primary-1", no_ledger=False)
-        service = Service(conn, tmp_path, stages.registry(), TEST_POLICY, clock=clock,
-                          code_source=REPO)
+        job = _submit_experiment(conn, ops_root, clock, "primary-1", no_ledger=False)
+        service = Service(conn, ops_root, stages.registry(), TEST_POLICY, clock=clock,
+                          code_source=REPO, store_root=checkout)
         try:
             service.start()
             assert run_until(service, conn, job.job_id, timeout=90) == "succeeded"
@@ -181,13 +285,103 @@ def test_experiment_effect_appends_ledger_row_once_on_retry(tmp_path, monkeypatc
             service.close()
         assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
-        ledger = tmp_path / "experiments" / "LEDGER.csv"
-        assert _ledger_rows(ledger) == [{"id": "x", "stage": "ran"}]
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "ran"}]
+        assert not (ops_root / "experiments").exists(), \
+            "the ledger is never written beside the operations catalog"
 
-        conn_, store, claim, refs, clock_ = calls[-1]
-        real_effect(conn_, store, claim, refs, clock=clock_)
-        real_effect(conn_, store, claim, refs, clock=clock_)
-        assert _ledger_rows(ledger) == [{"id": "x", "stage": "ran"}]
+        conn_, store, claim, refs, clock_, code_source, store_root = calls[-1]
+        assert store_root == checkout
+        effect, extra_refs = real_effect(conn_, store, claim, refs, clock=clock_,
+                                         code_source=code_source, store_root=store_root)
+        assert extra_refs == ()
+        for _ in range(2):  # two retries: still exactly one row
+            with transaction(conn_):
+                effect(conn_)
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "ran"}]
+    finally:
+        conn.close()
+
+
+def _claimed_primary_effect(tmp_path, key="primary-fence"):
+    """A real claimed attempt + the coordinator's commit closure, plus the
+    checkout ledger it appends to. Returns ``(conn, clock, claim, effect, checkout)``."""
+    ops_root, checkout = tmp_path / "ops", tmp_path / "checkout"
+    _planned_ledger(checkout / "experiments" / "LEDGER.csv")
+    ops_root.mkdir()
+    conn, clock, supervisor_ = catalog(ops_root)
+    _submit_experiment(conn, ops_root, clock, key, no_ledger=False)
+    claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                       supervisor=supervisor_, clock=clock, registry=stages.registry())
+    assert claim is not None
+    store = ArtifactStore(ops_root)
+    resolve_and_record(conn, store, claim)
+    receipt_ref = store.publish_bytes(
+        json.dumps({"input_hash": "input-" + key, "evidence": {}}).encode(),
+        schema_ref="experiment_receipt.v1.0")
+    with transaction(conn):
+        register_artifact(conn, receipt_ref, None, clock)
+    effect, extra_refs = effects_graph.experiment_effect(
+        conn, store, claim, [("experiment_receipt", receipt_ref)], clock=clock,
+        code_source=REPO, store_root=checkout)
+    assert extra_refs == ()
+    return conn, clock, claim, effect, checkout
+
+
+def test_experiment_effect_lost_fence_appends_no_ran_row(tmp_path):
+    """Review fix item 2b: a commit refused before its effects run (a stale
+    fence) never appends the ran row."""
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(tmp_path)
+    try:
+        with pytest.raises(OpsError) as excinfo:
+            commit_attempt(conn, claim.attempt_id, claim.fence + 1,
+                           Outcome(True, "verified_dead", 0), clock=clock,
+                           effects=lambda txn: effect(txn))
+        assert excinfo.value.code == "LEASE_LOST"
+        assert _ledger_rows(checkout / "experiments" / "LEDGER.csv") == [
+            {"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_experiment_effect_retry_after_crash_appends_exactly_one_row(tmp_path, monkeypatch):
+    """Review fix item 2a/2c: a crash between register and append rolls the
+    whole commit back; the retry appends exactly one row, and two more retries
+    do not append another."""
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(tmp_path, key="primary-crash")
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    real_append = effects_graph._append_ledger_row
+    crashed = []
+
+    def flaky(txn, checkout_root, spec, receipt, *, run_id):
+        if not crashed:
+            crashed.append(True)
+            raise RuntimeError("crash after register, before append")
+        return real_append(txn, checkout_root, spec, receipt, run_id=run_id)
+
+    monkeypatch.setattr(effects_graph, "_append_ledger_row", flaky)
+    try:
+        with pytest.raises(RuntimeError):
+            commit_attempt(conn, claim.attempt_id, claim.fence,
+                           Outcome(True, "verified_dead", 0), clock=clock,
+                           effects=lambda txn: effect(txn))
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"}]
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+
+        monkeypatch.setattr(effects_graph, "_append_ledger_row", real_append)
+        commit_attempt(conn, claim.attempt_id, claim.fence,
+                       Outcome(True, "verified_dead", 0), clock=clock,
+                       effects=lambda txn: effect(txn))
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "ran"}]
+        with transaction(conn):
+            effect(conn)
+        with transaction(conn):
+            effect(conn)
+        assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
+                                        {"id": "x", "stage": "ran"}]
     finally:
         conn.close()
 
@@ -324,7 +518,10 @@ def test_cli_experiment_with_stale_thread_count_is_refused_input_changed(
                           code_source=REPO)
         try:
             service.start()
-            service.tick()
+            # Wait through admission (host-dependent) rather than a single
+            # tick: the refusal happens at launch, and a queued job has no
+            # attempt row yet.
+            assert run_until(service, conn, job_id, timeout=90) == "failed"
         finally:
             service.close()
         failure = json.loads(conn.execute("SELECT failure_json FROM attempts WHERE job_id=?",

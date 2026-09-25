@@ -876,7 +876,8 @@ class Service:
             return snapshot_import_effect(self.conn, self.store, claim, refs, clock=self.clock,
                                           keepalive=keepalive)
         if claim.spec.kind == "experiment":
-            return experiment_effect(self.conn, self.store, claim, refs, clock=self.clock)
+            return experiment_effect(self.conn, self.store, claim, refs, clock=self.clock,
+                                     code_source=self.code_source, store_root=self.store_root)
         if claim.spec.kind == "legacy_rebuild_candidate":
             return legacy_rebuild_candidate_effect(self.conn, self.store, claim, refs, clock=self.clock)
         return None, ()
