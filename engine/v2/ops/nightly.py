@@ -87,7 +87,7 @@ def _implementation(root: Path) -> str:
 
 
 def build_nightly_plan(source_root: Path | str, session: str, *, mode="shadow",
-                       read_set=(), clock=None) -> dict:
+                       read_set=(), clock=None, shadow_serving_scorer="native") -> dict:
     if mode != "shadow":
         raise fail("INVALID_REQUEST", "production nightly activation is disabled")
     from engine.v2.foundation import SystemClock, format_timestamp
@@ -99,7 +99,12 @@ def build_nightly_plan(source_root: Path | str, session: str, *, mode="shadow",
             # it for the real CLI path; every stage built off this SAME plan
             # dict (including a retry) carries this one value.
             "decision_clock": format_timestamp(clock.now()),
-            "read_set": list(read_set), "effects": ["private_shadow_artifacts"]}
+            "read_set": list(read_set), "effects": ["private_shadow_artifacts"],
+            # G5 (spec_ns_b): the shadow-serving scorer is an explicit plan
+            # record, read by ``native_shadow_serving_mode`` -- never an env
+            # var or a CLI flag with no plan behind it.  Additive by default:
+            # the value only changes how the shadow board renders its rows.
+            "shadow_serving_scorer": shadow_serving_scorer}
 
 
 def _legacy_action(stage):
