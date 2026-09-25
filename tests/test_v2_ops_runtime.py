@@ -244,6 +244,27 @@ def test_live_window_unknown_heavy_refused_against_first_not_yet_ended_window():
     assert live_window_reason(policy, unknown_heavy, tuesday_morning) is not None
 
 
+def test_live_window_single_weekday_reaches_next_weeks_occurrence():
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from engine.v2.contracts import LiveWindow
+    from engine.v2.ops.resources import live_window_reason
+
+    # A single-weekday window seen from after it closes that day: the only
+    # occurrence left is NEXT week's same weekday, seven days out -- the far
+    # edge the +7 scan offset must still reach.
+    window = LiveWindow(name="live_session", weekdays=(2,), start_utc="13:30", end_utc="20:00")
+    policy = replace(DEFAULT_POLICY, live_windows=(window,))
+    tuesday_night = datetime(2026, 9, 15, 21, 0, tzinfo=timezone.utc)   # Tue, 1 h after close
+
+    unknown_heavy = replace(DEFAULT_POLICY.profiles[0], heavy=True, estimated_seconds=None)
+    eight_days = replace(DEFAULT_POLICY.profiles[0], estimated_seconds=8 * 24 * 3600)
+
+    assert live_window_reason(policy, unknown_heavy, tuesday_night) is not None
+    assert live_window_reason(policy, eight_days, tuesday_night) is not None
+
+
 # ---------------------------------------------------------------------------
 # plans.request_from_plan: the boundary where a saved plan document becomes a
 # submission command. Its only caller is ``ops submit`` for non-nightly plans

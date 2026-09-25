@@ -150,11 +150,11 @@ def _live_window_occurrences(now: datetime, start: time, end: time,
                              weekdays: tuple[int, ...]):
     """Yield ``(begin, finish)`` for every occurrence of one live window that
     falls on a configured weekday and has not yet ended, scanning offsets
-    -1..+6 in increasing order (offset -1 so a window that started yesterday
+    -1..+7 in increasing order (offset -1 so a window that started yesterday
     and crosses midnight is still seen). Occurrences with ``finish <= now``
     are skipped, so the FIRST occurrence yielded -- the one the conservative
     unknown-duration rule anchors to -- is the first that has not ended."""
-    for offset in range(-1, 7):
+    for offset in range(-1, 8):
         day = now.date() + timedelta(days=offset)
         if day.isoweekday() not in weekdays:
             continue

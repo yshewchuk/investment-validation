@@ -138,6 +138,7 @@ def _model_release_document(root: Path) -> tuple[HTTPStatus, dict]:
         return HTTPStatus.SERVICE_UNAVAILABLE, {
             "schema_version": MODEL_RELEASE_VIEW_V1, "status": "unavailable",
             "reason_code": MODEL_RELEASE_POINTER_UNRESOLVED, "release_id": pointer.release_id,
+            "board_binding": None, "board_binding_reason": MODEL_RELEASE_NOT_BOUND,
         }
     members = [
         {
