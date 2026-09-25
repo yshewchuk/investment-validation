@@ -335,13 +335,15 @@ def _cached_request_id():
     return "eod-" + CACHED_SESSION + "-market"
 
 
-def _seed_market_pull(conn, store, clock, response_kind):
+def _seed_market_pull(conn, store, clock, response_kind, payload=b"{}"):
     """One raw receipt keyed by the exact request document ``_fetch_unit``
-    builds, so ``_native_cached_outcome``'s ``content_hash`` lookup finds it."""
+    builds, so ``_native_cached_outcome``'s ``content_hash`` lookup finds it.
+    The payload distinguishes the receipt identity (the receipt id hashes the
+    raw hash), so two pulls of one request store two rows."""
     from engine.v2.data.incremental import FETCH_SOURCE, RawPayload, cache_raw_receipt
     return cache_raw_receipt(
         conn, store,
-        RawPayload(payload=b"{}", response_kind=response_kind, response_meta={}),
+        RawPayload(payload=payload, response_kind=response_kind, response_meta={}),
         source=FETCH_SOURCE, endpoint="daily_market",
         request={"request_id": _cached_request_id(), "table_name": "daily_market",
                  "partition_key": CACHED_SESSION, "keys": [CACHED_TICKER]},
@@ -379,6 +381,24 @@ def test_cached_outcome_reverifies_a_legitimate_empty_pull(tmp_path):
     assert [unit.request_id for unit in refresh_plan.fetch_units] == [_cached_request_id()]
     assert refresh_plan.cached == ()
     assert refresh_plan.provider_calls == 6
+
+
+def test_cached_outcome_selects_the_later_complete_receipt(tmp_path):
+    """A date first pulled ``legitimate_empty`` and LATER pulled complete
+    must reuse the cache: the lookup selects the newer complete receipt
+    instead of the oldest (empty) row, so the unit is not re-fetched."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    _seed_market_pull(conn, store, clock, "legitimate_empty")
+    clock.advance(3600)
+    _seed_market_pull(conn, store, clock, "complete", payload=b'{"AAPL": 1}')
+
+    refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
+    assert refresh_plan.fetch_units == ()
+    assert [outcome.kind for outcome in refresh_plan.cached] == ["complete"]
+    assert refresh_plan.cached[0].cache_hit is True
+    assert refresh_plan.provider_calls == 0
 
 
 def test_cached_outcome_still_reuses_a_complete_pull(tmp_path):

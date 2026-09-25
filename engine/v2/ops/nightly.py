@@ -519,7 +519,9 @@ def _native_cached_outcome(conn, unit):
                "partition_key": unit.partition_key, "keys": list(unit.expected_keys)}
     row = conn.execute(
         "SELECT raw_receipt_id, raw_hash, response_kind FROM data_raw_receipts "
-        "WHERE source = ? AND endpoint = ? AND request_hash = ?",
+        "WHERE source = ? AND endpoint = ? AND request_hash = ? "
+        "AND response_kind = 'complete' "
+        "ORDER BY received_at DESC",
         (FETCH_SOURCE, unit.table_name, content_hash(request))).fetchone()
     if row is None or row["response_kind"] != "complete":
         return {}
