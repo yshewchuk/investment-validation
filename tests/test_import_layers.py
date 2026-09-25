@@ -9,6 +9,7 @@ proved by planting the violation it exists to catch — not by asserting the
 real tree is green, which it would also be if the check did nothing.
 """
 from __future__ import annotations
+# land: always-run
 
 import subprocess
 import sys

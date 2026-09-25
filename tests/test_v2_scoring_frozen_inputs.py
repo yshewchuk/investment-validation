@@ -22,6 +22,7 @@ those extractions:
   asserted directly here for the scoring package).
 """
 from __future__ import annotations
+# land: always-run
 
 import ast
 import sys

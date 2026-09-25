@@ -33,6 +33,7 @@ Current design, mirroring :data:`MODEL_PICKLE_MODULES`:
   end in ``.py``, a different, already-declared-elsewhere concern).
 """
 from __future__ import annotations
+# land: always-run
 
 import re
 from pathlib import Path

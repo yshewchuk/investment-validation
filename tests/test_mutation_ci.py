@@ -4,6 +4,7 @@ Data-free and mutmut-free: every mutmut state file here is synthetic, written
 in the layout mutmut 3.8 uses (``mutants/<file>.meta``, ``mutmut-stats.json``).
 """
 from __future__ import annotations
+# land: always-run
 
 import csv
 import io
