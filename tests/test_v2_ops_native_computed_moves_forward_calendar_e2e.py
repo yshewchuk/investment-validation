@@ -53,7 +53,7 @@ from engine.v2.ops.provider_budget import configure_account
 from engine.v2.ops.providers import PROVIDER_CREDENTIAL_VARIABLES, provider_credentials
 from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.stages import registry
-from engine.v2.ops.submission import NamespacePolicy, submit
+from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from engine.v2.ops.supervisor import Service
 from tests.data_scan_support import (
     commit_tables,
@@ -424,6 +424,8 @@ def test_native_forward_calendar_refresh_e2e(tmp_path, monkeypatch):
     _commit_parent(conn, store, clock)
     head = _head(conn)
     configure_account(conn, NATIVE_NASDAQ_ACCOUNT, 1, remaining=200, live_reserve=1)
+    monkeypatch.setattr("engine.v2.ops.nightly._build_native_computed_moves_plan",
+                        lambda *args, **kwargs: None)
 
     request = _build_requests(conn, store, clock, tmp_path)[FORWARD_CALENDAR_REFRESH_ACTION]
     repository = Repository(conn, store)
@@ -465,6 +467,38 @@ def test_native_forward_calendar_refresh_e2e(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
+def test_native_forward_calendar_depends_on_computed_moves_in_the_same_batch(tmp_path):
+    """Both native calendar/moves jobs have real work in one submission batch:
+    the forward calendar carries an explicit dependency on computed_moves, so
+    their order against the shared shadow head is deterministic."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+
+    by_kind = _build_requests(conn, store, clock, tmp_path)
+    computed = by_kind[COMPUTED_MOVES_REFRESH_ACTION]
+    forward = by_kind[FORWARD_CALENDAR_REFRESH_ACTION]
+
+    assert forward.job.dependency_job_ids == (
+        job_id_for("shadow", computed.idempotency_key),)
+
+
+def test_native_forward_calendar_has_no_dependency_when_computed_moves_has_no_work(
+        tmp_path, monkeypatch):
+    """computed_moves_refresh builds no request (no scoreable target): there is
+    no shared head to race against, so the forward calendar is unchanged."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    monkeypatch.setattr("engine.v2.ops.nightly._build_native_computed_moves_plan",
+                        lambda *args, **kwargs: None)
+
+    by_kind = _build_requests(conn, store, clock, tmp_path)
+
+    assert COMPUTED_MOVES_REFRESH_ACTION not in by_kind
+    assert by_kind[FORWARD_CALENDAR_REFRESH_ACTION].job.dependency_job_ids == ()
+
+
 def test_second_computed_moves_refresh_for_the_same_catalog_is_cache_only(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
@@ -502,6 +536,8 @@ def test_second_forward_calendar_refresh_for_the_same_catalog_is_cache_only(tmp_
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     configure_account(conn, NATIVE_NASDAQ_ACCOUNT, 1, remaining=200, live_reserve=1)
+    monkeypatch.setattr("engine.v2.ops.nightly._build_native_computed_moves_plan",
+                        lambda *args, **kwargs: None)
 
     first = _build_requests(conn, store, clock, tmp_path)[FORWARD_CALENDAR_REFRESH_ACTION]
     receipt = submit(conn, registry(), POLICY, first, clock=clock)
@@ -537,6 +573,9 @@ def test_missing_staged_identity_fails_with_the_kinds_own_message(
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     configure_account(conn, account, 1, remaining=200, live_reserve=1)
+    if kind == FORWARD_CALENDAR_REFRESH_ACTION:
+        monkeypatch.setattr("engine.v2.ops.nightly._build_native_computed_moves_plan",
+                            lambda *args, **kwargs: None)
     request = _build_requests(conn, store, clock, tmp_path)[kind]
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
@@ -1533,6 +1572,8 @@ def test_forward_calendar_commit_failure_retries_through_the_worker_path(tmp_pat
     _commit_parent(conn, store, clock)
     head = _head(conn)
     configure_account(conn, NATIVE_NASDAQ_ACCOUNT, 1, remaining=200, live_reserve=1)
+    monkeypatch.setattr("engine.v2.ops.nightly._build_native_computed_moves_plan",
+                        lambda *args, **kwargs: None)
     request = _build_requests(conn, store, clock, tmp_path)[FORWARD_CALENDAR_REFRESH_ACTION]
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 

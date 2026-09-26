@@ -394,8 +394,9 @@ def _merged_row(existing, ticker: str, day: str, claims: dict, *, updated_at: st
     if row.get("session") is not None and row.get("session_src"):
         attributed[str(row["session_src"])] = row["session"]
     for source in ("nasdaq", "yfinance"):
-        if claims.get(source):
+        if source in claims:
             row[f"src_{source}"] = True
+        if claims.get(source):
             attributed[source] = claims[source]
     session, session_src = resolve_session_claims(attributed)
     row["session"] = session
@@ -464,7 +465,9 @@ def _commit_claims(conn, store, parent, claims: dict, existing: dict, *, scope, 
                                                parent.snapshot.snapshot_id),
         expected_head_generation=int(document["expected_head_generation"]), clock=clock,
         request_hash=content_hash({"kind": "forward_calendar_generation", "scope": scope,
-                                   "base": parent.snapshot.snapshot_id}))
+                                   "base": parent.snapshot.snapshot_id,
+                                   "revisions": sorted(r.candidate.revision_id
+                                                       for r in revisions)}))
 
 
 # --------------------------------------------------------------------------

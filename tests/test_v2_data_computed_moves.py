@@ -54,6 +54,22 @@ def test_build_rows_include_skipped_events():
     assert all(row["capture_id"] == "capture_test" for row in rows)
 
 
+def test_build_rows_skipped_first_event_never_shifts_the_ordinal():
+    dates = ["2024-01-01", "2024-01-03", "2024-01-04", "2024-01-05",
+             "2024-01-08", "2024-01-09"]
+    events = pd.DataFrame({"event_date": pd.to_datetime(dates),
+                           "session": ["BMO"] * len(dates)})
+    daily = _daily(dates, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+    rows = build_rows("AAPL", events, _SESSIONS, _CLOSES, daily,
+                      computed_at="2026-09-25T00:00:00+00:00",
+                      source_hash="sha256:" + "a" * 64, capture_id="capture_test")
+
+    assert [row["skipped"] for row in rows] == [True] + [False] * 5
+    assert rows[0]["quarter_ordinal"] == 0  # the sentinel, never a real ordinal
+    assert rows[1]["quarter_ordinal"] == 1  # not shifted by the earlier skip
+
+
 def test_build_rows_empty_below_five_computable():
     dates = ["2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"]
     events = pd.DataFrame({"event_date": pd.to_datetime(dates),

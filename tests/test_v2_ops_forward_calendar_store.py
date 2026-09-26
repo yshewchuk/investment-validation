@@ -65,6 +65,18 @@ def test_claims_carry_session_priority_same_as_legacy():
     assert set(SESSION_BY_TIME.values()) == {"BMO", "AMC"}
 
 
+def test_merged_row_marks_a_sessionless_nasdaq_claim_without_attributing_it():
+    """Nasdaq listed the event but SESSION_BY_TIME resolved no session: the row
+    still records src_nasdaq, and nasdaq never becomes the session source."""
+    row = forward_calendar_store._merged_row(
+        None, "AAPL", "2026-09-21", {"nasdaq": None},
+        updated_at="2026-09-18T00:00:00+00:00")
+
+    assert row["src_nasdaq"] is True
+    assert row["session"] is None
+    assert row["session_src"] is None
+
+
 def test_horizon_dates_falls_back_to_weekdays_without_a_calendar():
     days = horizon_dates(pd.Timestamp("2026-09-18"), 7)
     assert [str(day.date()) for day in days] == [

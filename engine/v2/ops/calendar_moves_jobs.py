@@ -216,7 +216,8 @@ def forward_calendar_job_kind() -> JobKind:
 def calendar_moves_job_spec(kind: str, plan, parameters: CalendarMovesParameters, *,
                             implementation_ref: str, environment_ref: str,
                             output_namespace: str, catalog_path: str, objects_root: str,
-                            input_bindings=None, input_refs=()) -> JobSpec:
+                            input_bindings=None, input_refs=(),
+                            dependency_job_ids=()) -> JobSpec:
     """The job a native calendar/moves plan becomes (S4C).
 
     ``expected_ids`` is the caller's own coverage denominator and stays what it
@@ -237,7 +238,8 @@ def calendar_moves_job_spec(kind: str, plan, parameters: CalendarMovesParameters
         environment_ref=environment_ref, parameters=to_document(params),
         input_refs=tuple(input_refs), output_namespace=output_namespace,
         resource_class="io_fetch", provider_budget_ref=plan.provider_account,
-        retry_policy_ref="bounded", checkpoint_contract_ref=_schema_for(kind))
+        retry_policy_ref="bounded", checkpoint_contract_ref=_schema_for(kind),
+        dependency_job_ids=tuple(dependency_job_ids))
 
 
 def _schema_for(kind: str) -> str:

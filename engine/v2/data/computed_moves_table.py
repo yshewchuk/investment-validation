@@ -56,7 +56,9 @@ _COLUMNS = (
                                "before event_date"),
     ColumnContract(name="quarter_ordinal", physical_type="int64", nullable=False,
                    observation_time_semantics="ordinal of the event within its calendar "
-                                              "year, as the legacy computed-moves pull labels it"),
+                                              "year, as the legacy computed-moves pull labels it"
+                                              " (0 on a skipped row -- the ordinal is meaningful "
+                                              "only when skipped is False)"),
     ColumnContract(name="skipped", physical_type="bool", nullable=False,
                    null_policy="the event could not be bracketed: a missing close on either "
                                "side, or a P→Q window wider than MAX_GAP_CALENDAR_DAYS"),

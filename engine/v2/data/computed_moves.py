@@ -82,6 +82,9 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
     The computation is the legacy ``build_ticker`` body verbatim: the
     session-aware close-to-close realized move, the panel as-of implied move
     (last EOD row strictly before the print), and a per-calendar-year ordinal.
+    A skipped row's quarter_ordinal is always 0 -- it never occupies a slot in
+    the per-year count, matching legacy's silence on skipped events; the
+    ordinal is meaningful only when skipped is False.
     The only changed thing is the return: a list of contract-shaped rows
     instead of one oquants document per ticker. Fewer than five computable
     events returns ``[]`` -- the same admission rule the legacy function
@@ -100,7 +103,7 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
         if m is None:
             rows.append(_row(
                 ticker, str(r.event_date)[:10], realized=None, implied=None,
-                quarter=year_seen.get(year, 0) + 1, skipped=True, computed_at=computed_at,
+                quarter=0, skipped=True, computed_at=computed_at,
                 source_hash=source_hash, capture_id=capture_id))
             continue
         # panel as-of convention: the last EOD row strictly before the print

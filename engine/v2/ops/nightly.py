@@ -742,7 +742,7 @@ def _build_native_forward_calendar_plan(plan, context_tickers, *, catalog_path, 
 
 def _native_calendar_moves_request(plan, key, kind, implementation_ref, environment_ref,
                                    catalog_path, objects_root, conn, store, clock,
-                                   context_tickers):
+                                   context_tickers, *, dependency_job_ids=()):
     """S4C: build one calendar/moves job, or ``None`` when it has no work."""
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
 
@@ -771,12 +771,13 @@ def _native_calendar_moves_request(plan, key, kind, implementation_ref, environm
     return _refresh_submit_request(
         key, refresh_plan_obj, kind, implementation_ref, environment_ref,
         catalog_path=catalog_path, objects_root=objects_root,
-        conn=conn, store=store, clock=clock, parameters=parameters)
+        conn=conn, store=store, clock=clock, parameters=parameters,
+        dependency_job_ids=dependency_job_ids)
 
 
 def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref,
                             *, catalog_path, objects_root, conn=None, store=None, clock=None,
-                            parameters=None):
+                            parameters=None, dependency_job_ids=()):
     """R3B-3/S4C: the native refresh job, built by the stage's own contract --
     ``incremental_data.refresh_job_spec`` for the daily_market kind, or
     ``calendar_moves_jobs.calendar_moves_job_spec`` for the two S4C kinds --
@@ -822,7 +823,8 @@ def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, env
             kind, refresh_plan_obj, parameters, implementation_ref=implementation_ref,
             environment_ref=environment_ref, output_namespace="shadow",
             catalog_path=catalog_path, objects_root=objects_root,
-            input_bindings=bindings or None, input_refs=input_refs)
+            input_bindings=bindings or None, input_refs=input_refs,
+            dependency_job_ids=dependency_job_ids)
     return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
 
 
@@ -875,7 +877,7 @@ def _native_refresh_request(plan, key, refresh_plan_obj, kind, implementation_re
 
 def _native_request_for(kind, plan, key, refresh_plan_obj, implementation_ref,
                         environment_ref, catalog_path, objects_root, conn, store, clock,
-                        context_tickers):
+                        context_tickers, *, dependency_job_ids=()):
     """S4C: dispatch one native refresh stage to its kind's own builder."""
     if kind == NATIVE_REFRESH_ACTION:
         return _native_refresh_request(
@@ -883,7 +885,8 @@ def _native_request_for(kind, plan, key, refresh_plan_obj, implementation_ref,
             catalog_path, objects_root, conn, store, clock)
     return _native_calendar_moves_request(
         plan, key, kind, implementation_ref, environment_ref,
-        catalog_path, objects_root, conn, store, clock, context_tickers)
+        catalog_path, objects_root, conn, store, clock, context_tickers,
+        dependency_job_ids=dependency_job_ids)
 
 
 def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, year_end,
@@ -957,23 +960,30 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
         refresh_mode, refresh_plan, plan=plan, context_tickers=context_tickers,
         catalog_path=catalog_path, objects_root=objects_root, conn=conn, store=store, clock=clock)
     implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
-    requests = []
-    keys = {}
+    requests, keys = [], {}
     plan_identity = _plan_identity(plan, input_refs)
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
     effect_scope = effect_scope_for(tickers, full_universe)
     stages = _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode)
+    submitted_native: set[str] = set()
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
         keys[stage] = job_id_for("shadow", key)
         kind = _action_for(stage, refresh_mode=refresh_mode)
         if kind in _NATIVE_REFRESH_ACTIONS:
+            dependency_job_ids = (
+                (keys[COMPUTED_MOVES_REFRESH_ACTION],)
+                if kind == FORWARD_CALENDAR_REFRESH_ACTION
+                and COMPUTED_MOVES_REFRESH_ACTION in submitted_native
+                else ())
             request = _native_request_for(
                 kind, plan, key, refresh_plan_obj, implementation_ref, environment_ref,
-                catalog_path, objects_root, conn, store, clock, context_tickers)
+                catalog_path, objects_root, conn, store, clock, context_tickers,
+                dependency_job_ids=dependency_job_ids)
             if request is not None:
                 requests.append(request)
+                submitted_native.add(kind)
             continue
         requests.append(_stage_request_for(
             stage, kind, plan, key, keys, tickers=tickers, year_start=year_start,
