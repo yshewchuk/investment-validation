@@ -13,6 +13,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 import types
 from pathlib import Path
@@ -1526,6 +1527,168 @@ def test_real_toml_inert_allowlist_is_the_small_docs_only_list():
     # silently through an unrelated toml edit.
     cfg2 = pilot.load_config()
     assert cfg2["pr_selection"]["inert"] == ["*.md", "docs/*", "guides/*"]
+
+
+def test_is_inert_changed_path_respects_inert_skip():
+    cfg2 = _sel_cfg()
+    cfg2["pr_selection"]["inert_skip"] = ["engine/dashboard/static/*.md"]
+    assert pilot.is_inert_changed_path(cfg2, "docs/readme.md") is True
+    assert pilot.is_inert_changed_path(cfg2, "engine/dashboard/static/notes.md") is False
+
+
+def test_real_toml_inert_skip_carves_dashboard_static_out_of_the_md_pattern():
+    assert CFG["pr_selection"]["inert_skip"] == ["engine/dashboard/static/*.md"]
+    assert pilot.is_inert_changed_path(CFG, "engine/dashboard/static/notes.md") is False
+    # README.md/ARCHITECTURE.md elsewhere are still inert -- only the
+    # dashboard's fingerprinted static asset tree is carved out.
+    assert pilot.is_inert_changed_path(CFG, "README.md") is True
+    assert pilot.is_inert_changed_path(CFG, "engine/v2/foundation/README.md") is True
+
+
+def test_a_md_file_under_dashboard_static_selects_every_enabled_module():
+    names = pilot.enabled_modules(CFG)
+    assert pilot.changed_modules(CFG, names, ["engine/dashboard/static/CHANGELOG.md"]) == names
+
+
+# -- reverse import closure ---------------------------------------------------
+
+def test_build_import_graph_resolves_a_package_import_through_its_init(tmp_path, monkeypatch):
+    (tmp_path / "engine" / "pkg").mkdir(parents=True)
+    (tmp_path / "engine" / "pkg" / "__init__.py").write_text(
+        "from engine.pkg.inner import thing\n")
+    (tmp_path / "engine" / "pkg" / "inner.py").write_text("thing = 1\n")
+    (tmp_path / "engine" / "user.py").write_text("import engine.pkg\n")
+    tracked = ["engine/pkg/__init__.py", "engine/pkg/inner.py", "engine/user.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    # user.py imports the PACKAGE (engine.pkg) -> resolves to its __init__.py
+    # -> whose own `from engine.pkg.inner import thing` reaches inner.py, so
+    # the closure from user.py would reach inner.py transitively.
+    assert "engine/pkg/__init__.py" in graph["engine/user.py"]
+    assert "engine/pkg/inner.py" in graph["engine/pkg/__init__.py"]
+    assert graph["engine/pkg/inner.py"] == set()
+
+
+def test_build_import_graph_resolves_relative_imports(tmp_path, monkeypatch):
+    (tmp_path / "engine" / "a" / "b").mkdir(parents=True)
+    (tmp_path / "engine" / "a" / "__init__.py").write_text("")
+    (tmp_path / "engine" / "a" / "sibling.py").write_text("X = 1\n")
+    (tmp_path / "engine" / "a" / "b" / "__init__.py").write_text("")
+    (tmp_path / "engine" / "a" / "b" / "mod.py").write_text(
+        "from .. import sibling\nfrom . import other\n")
+    (tmp_path / "engine" / "a" / "b" / "other.py").write_text("Y = 1\n")
+    tracked = ["engine/a/__init__.py", "engine/a/sibling.py", "engine/a/b/__init__.py",
+               "engine/a/b/mod.py", "engine/a/b/other.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    # `from ..` (level 2) reaches the sibling module one package up;
+    # `from .` (level 1) reaches the module in mod.py's own package.
+    assert {"engine/a/sibling.py", "engine/a/b/other.py"} <= graph["engine/a/b/mod.py"]
+
+
+def test_build_import_graph_ignores_imports_outside_engine_and_tests(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "user.py").write_text(
+        "import os\nimport tools.mutation_pilot\nfrom checks import layer_map\n")
+    tracked = ["engine/user.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/user.py"] == set()
+
+
+def test_build_import_graph_raises_on_a_syntax_error(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "broken.py").write_text("def broken(:\n    pass\n")
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    with pytest.raises(SyntaxError):
+        pilot.build_import_graph(["engine/broken.py"])
+
+
+def test_changed_modules_falls_back_to_selecting_all_when_the_graph_build_raises(monkeypatch):
+    cfg2 = _sel_cfg()
+
+    def boom(*_a, **_k):
+        raise SyntaxError("engine/a.py: invalid syntax")
+
+    monkeypatch.setattr(pilot, "build_import_graph", boom)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha", "beta"]
+
+
+def test_module_dependency_closure_follows_edges_transitively():
+    graph = {
+        "engine/a.py": {"engine/b.py"},
+        "engine/b.py": {"engine/c.py"},
+        "engine/c.py": set(),
+        "tests/test_a.py": {"engine/a.py"},
+    }
+    cfg2 = _sel_cfg()  # alpha: mutate=[engine/a.py], tests=[tests/test_a.py]
+    closure = pilot.module_dependency_closure(cfg2, "alpha", graph)
+    assert closure == {"engine/a.py", "engine/b.py", "engine/c.py", "tests/test_a.py"}
+
+
+def test_changed_modules_selects_a_module_that_only_transitively_depends_on_the_changed_path():
+    # alpha does not OWN engine/c.py, but alpha's own test file imports
+    # alpha's source file, which imports engine/c.py transitively -- alpha
+    # must still be selected.
+    graph = {
+        "engine/a.py": {"engine/c.py"},
+        "engine/b.py": set(),
+        "engine/c.py": set(),
+        "tests/test_a.py": {"engine/a.py"},
+        "tests/test_b.py": set(),
+    }
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/c.py"], graph=graph) == ["alpha"]
+
+
+def test_artifacts_change_selects_every_module_whose_tests_transitively_import_foundation():
+    # The Opus-blocking counterexample this round fixes: the pre-fix rule
+    # selected ONLY ['foundation'] for engine/v2/foundation/artifacts.py,
+    # even though 27 other enabled modules' tests import
+    # engine.v2.foundation (whose own __init__.py re-exports names from
+    # artifacts.py, so the import graph reaches artifacts.py from any test
+    # that imports the package).
+    names = pilot.enabled_modules(CFG)
+    selected = pilot.changed_modules(CFG, names, ["engine/v2/foundation/artifacts.py"])
+    assert "foundation" in selected
+
+    tracked_tests = _tracked("tests")
+    real_dependents = set()
+    for name in names:
+        for rel in pilot.test_files(CFG, name, tracked_tests):
+            if "engine.v2.foundation" in (ROOT / rel).read_text():
+                real_dependents.add(name)
+                break
+    assert len(real_dependents) >= 10, "expected many real dependents for this assertion to mean anything"
+    assert real_dependents <= set(selected)
+    assert len(selected) > 1  # NOT just ['foundation'] -- the defect this round fixes
+
+
+def test_domain_valuation_init_change_selects_its_dependents():
+    names = pilot.enabled_modules(CFG)
+    selected = set(pilot.changed_modules(CFG, names, ["engine/v2/domain/valuation/__init__.py"]))
+    assert "domain_features" in selected  # owns it directly (glob ownership)
+    # engine/v2/scoring/stages.py and engine/v2/scoring/financial.py both
+    # `from engine.v2.domain.valuation import ...` -- their owning modules
+    # must be selected too, even though neither owns the changed path.
+    assert "scoring_stages" in selected
+    assert "scoring_application" in selected
+
+
+def test_a_leaf_module_change_selects_only_that_module():
+    # engine/v2/research/*.py is imported by nothing outside the research
+    # module itself, so its dependency closure never reaches into any other
+    # module's tests/sources -- the changed path selects exactly its owner.
+    names = pilot.enabled_modules(CFG)
+    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == ["research"]
+
+
+def test_import_graph_build_is_fast():
+    start = time.monotonic()
+    graph = pilot.build_import_graph()
+    elapsed = time.monotonic() - start
+    assert elapsed < 5.0, f"import graph build took {elapsed:.2f}s (budget: 5s)"
+    assert len(graph) > 100
 
 
 # -- mutate job summary: mutant-level cache reuse vs re-tested this run ------

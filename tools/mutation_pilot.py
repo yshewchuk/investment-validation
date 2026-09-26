@@ -35,6 +35,7 @@ tests changed since the last run, and writes ``prerun-snapshot.json`` so
 from __future__ import annotations
 
 import argparse
+import ast
 import filecmp
 import fnmatch
 import hashlib
@@ -155,8 +156,9 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
     return expand(module_cfg(cfg, name).get("tests", []), tracked)
 
 
-# -- PR module selection: module ownership, else the inert allowlist, else --
-# -- every enabled module (never zero for an unrecognized path) --------------
+# -- PR module selection: module ownership, transitive dependency, else the --
+# -- inert allowlist, else every enabled module (never zero for an          --
+# -- unrecognized path) -------------------------------------------------------
 #
 # `changed_modules` decides, per pull_request run, which enabled modules a
 # changed-file list can affect. The rule is "select ALL unless proven safe to
@@ -165,38 +167,62 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
 # quietly select zero modules. Per changed path, in order:
 #   1. some ENABLED module's own `mutate`/`tests` patterns match it
 #      (`module_owns_changed_path`, checked against the bare path string, so
-#      a deleted/renamed-away owned file still matches) -> that module is
-#      selected.
+#      a deleted/renamed-away owned file still matches), OR the path is in
+#      that module's DEPENDENCY SET (`module_dependency_closure`: the
+#      transitive closure, over a static `ast` import graph of every tracked
+#      engine/**/*.py and tests/**/*.py file, of the imports reachable from
+#      the module's own `mutate` files plus its `tests` files) -> that
+#      module is selected. A module that OWNS a changed path is not
+#      necessarily the only one whose DEPENDENCY SET contains it: e.g.
+#      engine/v2/foundation/artifacts.py is owned by `foundation`, but every
+#      module whose tests or sources import `engine.v2.foundation`
+#      (transitively, through that package's `__init__.py`, which re-exports
+#      names from `artifacts.py`) has it in their dependency set too, and is
+#      selected alongside `foundation`.
 #   2. else it is on the small, docs-only inert allowlist
-#      (`tools/mutation_pilot.toml`'s `[pr_selection] inert`) -> it selects
-#      nothing.
-#   3. else (unrecognized: no ENABLED module owns it, and it is not inert)
-#      -> every requested module is selected, immediately, for the whole
-#      changed-file list.
+#      (`tools/mutation_pilot.toml`'s `[pr_selection] inert`, minus
+#      `[pr_selection] inert_skip`) -> it selects nothing.
+#   3. else (unrecognized: no ENABLED module owns or transitively depends on
+#      it, and it is not inert) -> every requested module is selected,
+#      immediately, for the whole changed-file list.
 # An EXCLUDED module's ownership (e.g. `contracts` owning
 # `engine/v2/__init__.py`) does NOT count as "some module owns it" in step 1
 # -- an excluded module never runs, so a path only an excluded module claims
 # is exactly as unexplained as one no module claims, and must still fall
-# through to "select everything".
+# through to "select everything". Excluded modules are never given a
+# dependency set either (`module_dependency_closure` is only computed for
+# `enabled_modules(cfg)`).
+#
+# Fail safe: if the import graph cannot be built (a `.py` file under
+# engine/tests fails to parse -- including a changed file with a syntax
+# error, since the graph is built from the current on-disk tree -- or any
+# other exception while building it), `changed_modules` selects every
+# requested module immediately and prints why, rather than silently falling
+# back to ownership-only selection.
 #
 # This governs both backends (gremlin_pilot.select_modules delegates to this
 # function unchanged) and, by the same "unrecognized -> everything" rule,
 # selects every enabled module when a PR changes the selector itself:
 # tools/mutation_pilot.py, tools/gremlin_pilot.py, tools/mutation_results.py,
 # tools/mutation_pilot.toml, or either mutation workflow file are none of
-# them module-owned or on the inert allowlist.
+# them module-owned, dependency-owned, or on the inert allowlist.
 
 def is_inert_changed_path(cfg: dict, path: str) -> bool:
     """True if `path` matches the PR-selection inert allowlist
     (`tools/mutation_pilot.toml`'s `[pr_selection] inert`, fnmatch patterns
-    where `*` also matches `/`, same convention as `mutate`/`tests`/`skip`).
-    Kept small and docs-only on purpose: anything the mutation-tested code
-    (engine/v2) might read at runtime, or a test might load as a fixture,
-    must NOT be on this list, or a real defect could hide behind a skipped
-    run. Checked against the bare path string, so a deleted/renamed-away
-    inert file still matches."""
-    patterns = cfg.get("pr_selection", {}).get("inert", [])
-    return any(fnmatch.fnmatchcase(path, pat) for pat in patterns)
+    where `*` also matches `/`, same convention as `mutate`/`tests`/`skip`)
+    and does NOT match `[pr_selection] inert_skip` (patterns carved back out
+    of the allowlist: e.g. a `.md` file under `engine/dashboard/static/` is a
+    fingerprinted code asset, not documentation, even though it matches the
+    broad `*.md` pattern). Kept small and docs-only on purpose: anything the
+    mutation-tested code (engine/v2) might read at runtime, or a test might
+    load as a fixture, must NOT be on this list, or a real defect could hide
+    behind a skipped run. Checked against the bare path string, so a
+    deleted/renamed-away inert file still matches."""
+    section = cfg.get("pr_selection", {})
+    if any(fnmatch.fnmatchcase(path, pat) for pat in section.get("inert_skip", [])):
+        return False
+    return any(fnmatch.fnmatchcase(path, pat) for pat in section.get("inert", []))
 
 
 def read_changed_files(path: str) -> list[str]:
@@ -243,22 +269,175 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
     return False
 
 
-def changed_modules(cfg: dict, names: list[str], changed: list[str]) -> list[str]:
+# -- reverse import closure: what could a changed file affect? ---------------
+#
+# `build_import_graph` parses (never executes) every tracked engine/**/*.py
+# and tests/**/*.py file with `ast` and resolves each `import`/`from ...
+# import` statement to a repo file: `import x.y` and `from x.y import z`
+# resolve the dotted name `x.y` to `x/y.py`, or, if that is a package, to
+# `x/y/__init__.py`; a relative import (`from . import z` / `from ..pkg
+# import z`) resolves against the importing file's own package first. Only
+# names rooted at `engine` or `tests` resolve to a graph node -- anything
+# else (the standard library, a third-party package, `tools`, `checks`,
+# `experiments`, ...) is simply not part of this graph, the same as it was
+# never `mutate`/`tests`-owned by any module.
+_GRAPH_ROOTS = ["engine", "tests"]
+
+
+def _resolve_dotted(dotted: str, tracked_set: set[str]) -> str | None:
+    """`dotted` (e.g. "engine.v2.foundation" or "engine.v2.foundation.artifacts")
+    resolved to a tracked repo file, or None. A package name resolves to its
+    `__init__.py`; anything not rooted at `engine`/`tests` is out of scope."""
+    if not dotted:
+        return None
+    parts = dotted.split(".")
+    if parts[0] not in ("engine", "tests"):
+        return None
+    as_module = "/".join(parts) + ".py"
+    if as_module in tracked_set:
+        return as_module
+    as_package = "/".join(parts) + "/__init__.py"
+    if as_package in tracked_set:
+        return as_package
+    return None
+
+
+def _relative_base(rel: str, level: int) -> str | None:
+    """The dotted package name `level` steps up from the package containing
+    `rel` (`ast.ImportFrom.level`: 1 means "this package", matching Python's
+    own relative-import semantics -- the package containing a plain module OR
+    a package's own `__init__.py` is the dotted name of its parent directory
+    either way). None if `level` climbs above the tracked tree's own root
+    (an import this graph cannot resolve)."""
+    dir_parts = rel.split("/")[:-1]
+    climb = level - 1
+    if climb > len(dir_parts):
+        return None
+    return ".".join(dir_parts[: len(dir_parts) - climb])
+
+
+def _join_dotted(base: str, tail: str | None) -> str:
+    if not tail:
+        return base
+    return f"{base}.{tail}" if base else tail
+
+
+def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
+    """Static import graph over every tracked engine/**/*.py and
+    tests/**/*.py file: maps each file to the set of tracked files it
+    imports (resolved via `_resolve_dotted`). Every tracked file is a key,
+    even one with no resolvable imports (an empty set), so `module_
+    dependency_closure` can always look it up. Raises `SyntaxError` (via
+    `ast.parse`) on the first file that fails to parse -- a real syntax
+    error in the current tree, never swallowed into a silently partial
+    graph; `changed_modules` treats that as "select every module"."""
+    tracked = tracked if tracked is not None else [
+        p for p in _tracked(_GRAPH_ROOTS) if p.endswith(".py")]
+    tracked_set = set(tracked)
+    graph: dict[str, set[str]] = {rel: set() for rel in tracked}
+    for rel in tracked:
+        source = (REPO / rel).read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source, filename=rel)
+        except SyntaxError as exc:
+            raise SyntaxError(f"{rel}: {exc}") from exc
+        edges = graph[rel]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    target = _resolve_dotted(alias.name, tracked_set)
+                    if target:
+                        edges.add(target)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = _relative_base(rel, node.level)
+                    dotted = _join_dotted(base, node.module) if base is not None else None
+                else:
+                    dotted = node.module or ""
+                if dotted:
+                    target = _resolve_dotted(dotted, tracked_set)
+                    if target:
+                        edges.add(target)
+                    for alias in node.names:
+                        sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set)
+                        if sub:
+                            edges.add(sub)
+    return graph
+
+
+def _closure_roots(mod: dict, tracked_set: set[str]) -> set[str]:
+    """Module `mod`'s own `tests`/`mutate` (minus `skip`) glob patterns,
+    expanded against `tracked_set`. Unlike `expand`, a pattern matching
+    nothing here is NOT an error: this powers dependency-closure roots,
+    which must tolerate a `tracked_set` that does not happen to contain one
+    of the module's configured files (e.g. a unit-test fixture, or a graph
+    built from a narrower tree) without raising -- ownership
+    (`module_owns_changed_path`) is unaffected either way, since it never
+    consults a tracked list."""
+    test_pats, mutate_pats = mod.get("tests", []), mod["mutate"]
+    skip_pats = mod.get("skip", [])
+    out: set[str] = set()
+    for p in tracked_set:
+        if any(fnmatch.fnmatchcase(p, pat) for pat in test_pats):
+            out.add(p)
+            continue
+        if any(fnmatch.fnmatchcase(p, pat) for pat in mutate_pats) and \
+                not any(fnmatch.fnmatchcase(p, pat) for pat in skip_pats):
+            out.add(p)
+    return out
+
+
+def module_dependency_closure(cfg: dict, name: str, graph: dict[str, set[str]],
+                              tracked_set: set[str] | None = None) -> set[str]:
+    """Every file module `name` transitively imports: the closure of
+    `graph`'s edges starting from `name`'s own `mutate` files plus `tests`
+    files (`_closure_roots`). This is a FORWARD dependency set -- what
+    `name` relies on -- and `changed_modules` uses it in REVERSE: a changed
+    path in this set means code `name`'s own tests exercise has changed, so
+    `name`'s cached mutation verdict may now be stale even though `name`
+    does not OWN that path."""
+    tracked_set = tracked_set if tracked_set is not None else set(graph)
+    seen: set[str] = set()
+    stack = list(_closure_roots(module_cfg(cfg, name), tracked_set))
+    while stack:
+        f = stack.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        stack.extend(graph.get(f, ()))
+    return seen
+
+
+def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
+                    graph: dict[str, set[str]] | None = None) -> list[str]:
     """The subset of ``names`` (already ``--only``-filtered) a changed-file
     list selects, under the "select ALL unless proven safe to skip" rule
     documented above. An empty ``changed`` selects nothing -- a PR with no
     diff is not "select everything"; that is the one intentional
     zero-selection default. Any other unrecognized path selects every name
-    in ``names``, never zero."""
+    in ``names``, never zero. ``graph`` is normally left ``None`` (built
+    fresh via `build_import_graph`); tests pass a small synthetic graph to
+    exercise the closure rule without depending on this repo's real files."""
     changed_set = set(changed)
     if not changed_set:
         return []
     enabled = enabled_modules(cfg)
+    if graph is None:
+        try:
+            graph = build_import_graph()
+        except Exception as exc:
+            print(f"[mutation_pilot] import graph build failed "
+                  f"({type(exc).__name__}: {exc}); selecting every enabled "
+                  f"module for the whole changed-file list", flush=True)
+            return list(names)
+    tracked_set = set(graph)
+    dep_sets = {n: module_dependency_closure(cfg, n, graph, tracked_set) for n in enabled}
     owned: set[str] = set()
     for path in changed_set:
-        owners = [n for n in enabled if module_owns_changed_path(cfg, n, path)]
-        if owners:
-            owned.update(owners)
+        selectors = {n for n in enabled
+                     if module_owns_changed_path(cfg, n, path) or path in dep_sets[n]}
+        if selectors:
+            owned.update(selectors)
             continue
         if is_inert_changed_path(cfg, path):
             continue
@@ -649,12 +828,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("matrix", help="JSON list of enabled modules, for the CI matrix")
     p.add_argument("--only", default="", help="comma-separated subset")
     p.add_argument("--changed-files", default="", metavar="PATH",
-                   help="path to a NUL-delimited changed-file list (git diff -z --name-only); "
-                        "when given, a path an enabled module owns selects only that module, "
-                        "a path on the inert allowlist selects nothing, and any other path "
-                        "selects every enabled module (never zero on an unrecognized change); "
-                        "a path that is not an existing file is a hard failure, not a silent "
-                        "empty selection. Omitted/blank: unchanged behavior.")
+                   help="path to a NUL-delimited changed-file list (git diff -z --no-renames "
+                        "--name-only); when given, a path selects every enabled module that "
+                        "owns it OR transitively depends on it (a static ast import-graph "
+                        "closure), a path on the inert allowlist selects nothing, and any "
+                        "other path selects every enabled module (never zero on an "
+                        "unrecognized change, and never zero if the import graph itself "
+                        "cannot be built); a path that is not an existing file is a hard "
+                        "failure, not a silent empty selection. Omitted/blank: unchanged "
+                        "behavior.")
     p = sub.add_parser("count")
     p.add_argument("modules", nargs="*")
     p = sub.add_parser("run")

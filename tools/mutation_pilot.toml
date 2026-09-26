@@ -40,11 +40,19 @@
 # never reads at runtime, and no test loads as a fixture. Deliberately tiny
 # and docs-only -- fnmatch patterns, `*` also matches `/` (the same
 # convention `mutate`/`tests`/`skip` use above). A changed path that matches
-# NEITHER a module's own `mutate`/`tests` patterns NOR one of these selects
-# EVERY enabled module (tools/mutation_pilot.py's changed_modules), never
-# zero: this list is the ONLY way a pull_request run can skip a module, so
-# widening it carelessly could hide a real defect behind a skipped run.
+# NEITHER a module's own `mutate`/`tests` patterns/dependency set NOR one of
+# these selects EVERY enabled module (tools/mutation_pilot.py's
+# changed_modules), never zero: this allowlist (minus `inert_skip` below) is
+# the ONLY way a pull_request run can skip a module, so widening it
+# carelessly could hide a real defect behind a skipped run.
 inert = ["*.md", "docs/*", "guides/*"]
+# Patterns carved back OUT of `inert` above: a path matching one of these is
+# never inert even though it also matches `inert`. `engine/dashboard/static/`
+# is the dashboard's built, fingerprinted asset tree (served bytes, not
+# documentation), so a `.md` file there must not be waved through by the
+# broad `*.md` pattern the way a real README.md or ARCHITECTURE.md elsewhere
+# still is.
+inert_skip = ["engine/dashboard/static/*.md"]
 
 [defaults]
 # Per-mutant timeout. mutmut sets an RLIMIT_CPU of
