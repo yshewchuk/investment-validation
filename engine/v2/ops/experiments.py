@@ -69,6 +69,7 @@ def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | Non
         checkout_root = Path(root) if root is not None else default_checkout_root()
         require_preregistration(checkout_root, experiment_spec_from_document(document))
         plan["preregistration_root"] = str(checkout_root)
+        plan["parameters"]["preregistration_root"] = str(checkout_root)
     return plan
 
 

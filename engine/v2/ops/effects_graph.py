@@ -835,6 +835,7 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
     from engine.v2.ops.experiments import (
         experiment_spec_from_document,
         register_hypothesis_in_transaction,
+        require_preregistration,
     )
 
     receipt = json.loads(store.read_verified(_named_ref(refs, "experiment_receipt")))
@@ -847,6 +848,16 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
     checkout_root = Path(store_root) if store_root is not None else Path(code_source)
 
     def _commit(txn):
+        if mode == "primary":
+            recorded_root = claim.spec.parameters.get("preregistration_root")
+            if recorded_root is None:
+                raise fail("INVALID_REQUEST",
+                           "primary experiment has no preregistration root")
+            if Path(recorded_root).resolve() != checkout_root.resolve():
+                raise fail("INVALID_REQUEST",
+                           "primary experiment checkout differs from its "
+                           "preregistration root")
+            require_preregistration(checkout_root, spec)
         run_id, _created = register_hypothesis_in_transaction(
             txn, spec, receipt["input_hash"], mode=mode, run_id=claim.attempt_id)
         if mode == "primary":

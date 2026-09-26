@@ -275,7 +275,8 @@ def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path
 
     monkeypatch.setattr(supervisor, "experiment_effect", spy)
     try:
-        job = _submit_experiment(conn, ops_root, clock, "primary-1", no_ledger=False)
+        job = _submit_experiment(conn, ops_root, clock, "primary-1", no_ledger=False,
+                                 preregistration_root=checkout)
         service = Service(conn, ops_root, stages.registry(), TEST_POLICY, clock=clock,
                           code_source=REPO, store_root=checkout)
         try:
@@ -311,7 +312,8 @@ def _claimed_primary_effect(tmp_path, key="primary-fence"):
     _planned_ledger(checkout / "experiments" / "LEDGER.csv")
     ops_root.mkdir()
     conn, clock, supervisor_ = catalog(ops_root)
-    _submit_experiment(conn, ops_root, clock, key, no_ledger=False)
+    _submit_experiment(conn, ops_root, clock, key, no_ledger=False,
+                       preregistration_root=checkout)
     claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
                        supervisor=supervisor_, clock=clock, registry=stages.registry())
     assert claim is not None
@@ -403,7 +405,8 @@ def test_experiment_plan_names_a_runner_and_experiment_heavy_profile(tmp_path):
         experiment_plan(spec_path, smoke=True)
 
 
-def _submit_experiment(conn, root, clock, key, *, document=None, no_ledger=True):
+def _submit_experiment(conn, root, clock, key, *, document=None, no_ledger=True,
+                       preregistration_root=None):
     document = document or _spec_document()
     store = ArtifactStore(root)
     spec_ref = store.publish_bytes(json.dumps(document, sort_keys=True).encode(),
@@ -411,15 +414,18 @@ def _submit_experiment(conn, root, clock, key, *, document=None, no_ledger=True)
     with transaction(conn):
         register_artifact(conn, spec_ref, None, clock)
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
+    parameters = {"expected_ids": ["experiment:x"],
+                  "input_bindings": {"spec.json": spec_ref.artifact_id},
+                  "runner": "synthetic", "no_ledger": no_ledger}
+    if preregistration_root is not None:
+        parameters["preregistration_root"] = str(preregistration_root)
     job = JobSpec(
         kind="experiment",
         implementation_ref=content_hash(worker_source_manifest(REPO)),
         spec_hash=content_hash(document),
         environment_ref=content_hash(
             environment_identity(profile.thread_count or profile.cpu_count)),
-        parameters={"expected_ids": ["experiment:x"],
-                    "input_bindings": {"spec.json": spec_ref.artifact_id},
-                    "runner": "synthetic", "no_ledger": no_ledger},
+        parameters=parameters,
         input_refs=(spec_ref.artifact_id,), output_namespace="shadow",
         resource_class="experiment_heavy", retry_policy_ref="bounded",
         checkpoint_contract_ref="experiment_receipt.v1.0")
