@@ -40,6 +40,19 @@ owner = "P6-2"
 notes = "build_nightly_plan refuses any mode but shadow; the graph's stages still call legacy through legacy_* actions."
 
 [[row]]
+id = "nightly-scheduling"
+area = "nightly"
+capability = "Native shadow nightly scheduling: ORATS-finality-gated trigger, retry window, missed-deadline handling"
+old = ["cron:dashboard/README.md legacy nightly line (unchanged)"]
+new = ["cli:engine/v2/ops/nightly_trigger.py", "systemd:ops/systemd/native-nightly-trigger.timer"]
+producer = "systemd timer -> nightly_trigger.run_trigger -> ops plan/submit nightly (shadow)"
+identity = "as_of date; state file reports/phase6/nightly_trigger/<as_of>.json"
+tests = ["tests/test_v2_ops_nightly_trigger.py"]
+disposition = "native"
+owner = "P6-6"
+notes = "Legacy nightly's own cron schedule is untouched; this only schedules the parallel shadow-mode qualification run."
+
+[[row]]
 id = "nightly-refresh"
 area = "nightly"
 capability = "Nightly data refresh: calendar, chains, prices, history backfill, computed moves"
@@ -162,13 +175,12 @@ id = "decisions-supersede"
 area = "decisions"
 capability = "Reasoned superseding entry for an immutable bad decision"
 old = ["writer:engine/ledger.py::supersede"]
-new = ["py:engine/v2/ledger/decisions.py::insert"]
-producer = "decisions.insert with supersedes + supersede_reason"
+new = ["cli:ops decisions", "cli:ops decisions supersede", "job:decisions_supersede", "py:engine/v2/ops/decision_commit.py::commit_supersede"]
+producer = "ops decisions supersede CLI -> decisions_supersede job -> decision_commit.commit_supersede"
 identity = "decision_id chain"
 tests = ["tests/test_v2_ops_authority.py", "tests/test_ledger.py"]
 disposition = "native"
 owner = "P6-3"
-notes = "Both sides are Python callables with no operator command; parity of access."
 
 [[row]]
 id = "decisions-settlement"
@@ -485,13 +497,13 @@ id = "history-analogs"
 area = "history"
 capability = "Historical prints and analog list for a ticker"
 old = ["route:legacy-app GET /api/ticker/{sym}", "view:legacy #/trades/explorer"]
-new = ["route:v2-ops GET /explorer", "route:v2-ops GET /release/*"]
-producer = "legacy ticker payload inside the compatibility bundle"
-identity = "compatibility bundle inside the published release_id"
-tests = ["tests/test_dashboard.py", "tests/test_analogs.py"]
-disposition = "compatibility-adapter"
+new = ["route:v2-ops GET /analogs", "route:v2-ops GET /analogs.json", "route:v2-ops GET /explorer", "route:v2-ops GET /release/*", "py:engine/v2/serving/analog_projection.py::analog_document"]
+producer = "legacy ticker payload inside the compatibility bundle; native analog row ids persisted on serving_score_summary by the scoring analog stage, projected by engine/v2/serving/analog_projection.py"
+identity = "compatibility bundle inside the published release_id; release_id + event_id for the native analog view (row ids and a count only)"
+tests = ["tests/test_dashboard.py", "tests/test_analogs.py", "tests/test_v2_serving_analogs.py", "tests/test_v2_dashboard_preview_analogs.py"]
+disposition = "native"
 owner = "P6-4"
-notes = "v2 projections carry only n_analogs/win_analog-style fields; the history and analog list exist only in the legacy ticker payload."
+notes = "S9H adds the native per-event analog view: GET /analogs.json?release_id=&event_id=&strategy= reads every score/strategy's selected_row_ids/contributing_row_ids/n_analogs straight off the serving_score_summary rows (read-only: a GET never migrates the index) and returns row ids and a count only (no recomputed PnL/win-rate/CI), refusing an unknown pair as EVENT_NOT_FOUND; GET /analogs is the small page that fetches it. The legacy explorer ticker payload stays the row's compatibility path: v2 projections carry only n_analogs/win_analog-style fields; the history and analog list exist only in the legacy ticker payload."
 
 # ------------------------------------------------------------- operations
 
@@ -550,7 +562,7 @@ id = "operations-quotas"
 area = "operations"
 capability = "Provider quota state and reserve"
 old = ["py:engine/dashboard/render.py::quota_state"]
-new = ["py:engine/v2/ops/scheduler.py::_reserve_provider", "route:v2-ops GET /release/*"]
+new = ["py:engine/v2/ops/scheduler.py::_reserve_provider", "route:v2-ops GET /release/*", "cli:ops provider-account"]
 producer = "legacy quota_state adapter inside legacy_render; v2 provider_budget enforces but does not publish"
 identity = "meta.json in the release bundle"
 tests = ["tests/test_v2_ops_provider_admission.py", "tests/test_ledger.py"]

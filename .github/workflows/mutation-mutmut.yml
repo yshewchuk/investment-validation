@@ -165,12 +165,13 @@ jobs:
           restore-keys: ${{ steps.key.outputs.prefix }}
       - name: Run mutmut
         id: run
-        timeout-minutes: 330
+        timeout-minutes: ${{ needs.plan.outputs.mode == 'incremental' && 60 || 330 }}
         run: |
           set -euo pipefail
           date +%s > "$RUNNER_TEMP/mutation-start"
           set +e
-          python -u tools/mutation_pilot.py run "$MODULE" --max-children "$(nproc)"
+          if [ "$MODE" = "incremental" ]; then BUDGET=$((52 * 60)); else BUDGET=$((322 * 60)); fi
+          python -u tools/mutation_pilot.py run "$MODULE" --max-children "$(nproc)" --time-budget-seconds "$BUDGET"
           echo "$?" > "$RUNNER_TEMP/mutation-rc"
           set -e
       - name: Export report
@@ -209,6 +210,10 @@ jobs:
         if: always() && steps.key.outcome == 'success'
         run: |
           rc=$(cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1)
+          if [ "$rc" = "124" ] && [ "$MODE" = "incremental" ]; then
+            echo "::notice::mutmut run hit the per-push time box; module is INCOMPLETE (TIME_BUDGET_STOP), not a tool error"
+            exit 0
+          fi
           if [ "$rc" != 0 ]; then echo "::error::mutmut run exited $rc"; exit 1; fi
 
   report:

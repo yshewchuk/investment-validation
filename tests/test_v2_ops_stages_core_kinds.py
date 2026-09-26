@@ -98,10 +98,15 @@ _CASES = {
         max_attempts=1, backoff=(30,), extra_field=("release_root", "root"),
         required={"expected_ids": ["models_promote"], "release_root": "root",
                   "release_id": "r1"}),
+    "decisions_supersede": dict(
+        resource_class="io_fetch",
+        checkpoint_contract="decisions_supersede_receipt.v1.0",
+        max_attempts=2, backoff=(5, 30), extra_field=("reason", "x")),
 }
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
-                      "legacy_rebuild_candidate", "legacy_materialize", "models_promote")
+                      "legacy_rebuild_candidate", "legacy_materialize",
+                      "models_promote", "decisions_supersede")
 
 
 def _extra_params(name):

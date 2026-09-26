@@ -161,9 +161,18 @@ class PartitionedWriter:
 
     def add(self, df: pd.DataFrame) -> None:
         """Buffer a frame, flushing every year once the global cap is reached."""
+        self.add_prepared(self.prepare(df))
+
+    def prepare(self, df: pd.DataFrame | None) -> pd.DataFrame | None:
+        """The coerced frame :meth:`add` would buffer, or ``None`` for no rows."""
         if df is None or len(df) == 0:
+            return None
+        return coerce(df, self.name)
+
+    def add_prepared(self, out: pd.DataFrame | None) -> None:
+        """Buffer a frame already passed through :meth:`prepare`."""
+        if out is None:
             return
-        out = coerce(df, self.name)
         part_col = self.schema.partition_by
         for year, chunk in out.groupby(part_col, sort=True):
             year = int(year)

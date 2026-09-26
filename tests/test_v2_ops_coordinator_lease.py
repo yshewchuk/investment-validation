@@ -34,7 +34,18 @@ from tests.ops_support import (
     catalog,
     enqueue_claim,
     request,
+    sample,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_capacity(monkeypatch):
+    """Admission must not depend on the live host's free memory: a loaded box left
+    the job queued (MEMORY_HEADROOM) and no attempt row was ever created."""
+    import engine.v2.ops.supervisor as supervisor_module
+    monkeypatch.setattr(supervisor_module, "sample_capacity",
+                        lambda root, *, clock: sample(clock))
+
 
 #: Real-process recovery: reconcile's ownership proof scans this host's live
 #: process table, so it runs in the serial xdist group (see tests/conftest.py).
@@ -107,7 +118,9 @@ def test_lost_lease_survives_serve_and_recovery_settles_it(tmp_path, monkeypatch
     serve(service, once=True)  # must return normally: no LEASE_LOST escapes
     assert seen["committed"] is False
     attempt = _row(conn, "SELECT * FROM attempts WHERE job_id = ?", job.job_id)
-    assert attempt["state"] == "recovery_pending"
+    job_now = dict(_row(conn, "SELECT * FROM jobs WHERE job_id = ?", job.job_id))
+    assert attempt is not None, f"no attempt was created; job row: {job_now}"
+    assert attempt["state"] == "recovery_pending", (dict(attempt), job_now)
     job_row = _row(conn, "SELECT * FROM jobs WHERE job_id = ?", job.job_id)
     assert job_row["state"] == "running" and job_row["fence"] == attempt["fence"] + 1
     assert _row(conn, "SELECT COUNT(*) FROM attempt_outputs")[0] == 0

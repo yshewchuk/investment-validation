@@ -16,14 +16,14 @@ from engine.v2.models.deployment import (
     resolve_release,
 )
 
-from . import derivation_projection, release_media
+from . import analog_projection, derivation_projection, release_media
 
 HTTPStatus = http.HTTPStatus
 
-__all__ = ["OperationsHandler", "create_server", "derivation_page_document",
-           "model_release_page_document", "shell_document"]
+__all__ = ["OperationsHandler", "analogs_page_document", "create_server",
+           "derivation_page_document", "model_release_page_document", "shell_document"]
 
-_VIEWS = ("board", "explorer", "book", "models", "derivation", "flags")
+_VIEWS = ("board", "explorer", "book", "models", "derivation", "analogs", "flags")
 
 MODEL_RELEASE_VIEW_V1 = "model_release_view.v1.0"
 MODEL_RELEASE_NOT_CONFIGURED = "MODEL_RELEASE_NOT_CONFIGURED"
@@ -104,7 +104,7 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     """
     frozen = frozen_at or "unknown"
     routes = ("/#/trades/board", "/#/trades/explorer", "/#/trades/book", "/#/models/modelx",
-              "/derivation", "/#/models/health")
+              "/derivation", "/analogs", "/#/models/health")
     views = "".join(f'<a href="{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
     html = f'''<!doctype html><meta charset="utf-8"><title>Operations shell</title>
 <style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
@@ -272,6 +272,50 @@ load();
     return html.encode()
 
 
+def analogs_page_document() -> bytes:
+    """Small standalone page for the native history-analogs document (S9H).
+
+    Two query inputs (``release_id``, ``event_id``) because analogs are
+    per-event, not scope-global like strategies. Fetches ``/analogs.json``
+    client-side -- the SAME document the JSON route serves -- and renders it
+    with ``textContent`` only (no ``innerHTML``, nothing here builds HTML out
+    of server data). A refusal renders as an explicit message, never an empty
+    table.
+    """
+    html = '''<!doctype html><meta charset="utf-8"><title>History analogs</title>
+<style>body{margin:0;font:14px sans-serif;padding:16px}#summary.refused{color:#a33}
+form{margin:8px 0}label{margin-right:8px}pre{background:#f4f4f4;padding:8px;overflow:auto}</style>
+<h1>History analogs</h1>
+<form id="lookup"><label>release <input id="release" autocomplete="off"></label><label>event <input id="event" autocomplete="off"></label><button type="submit">load</button></form>
+<div id="summary">enter a release and event id</div>
+<pre id="detail"></pre>
+<script>
+async function load(releaseId, eventId){
+  const summary=document.querySelector('#summary'), detail=document.querySelector('#detail');
+  try{
+    const r=await fetch('/analogs.json?release_id='+encodeURIComponent(releaseId)+'&event_id='+encodeURIComponent(eventId),{credentials:'same-origin'});
+    const j=await r.json();
+    detail.textContent=JSON.stringify(j,null,2);
+    if(j.status==='available'){
+      summary.textContent=j.analogs.length+' score(s) for event '+j.event_id;
+      summary.className='';
+    } else {
+      summary.textContent='no analogs: '+(j.reason_code||'UNKNOWN');
+      summary.className='refused';
+    }
+  }catch(e){
+    summary.textContent='history analogs unavailable';
+    summary.className='refused';
+  }
+}
+document.querySelector('#lookup').addEventListener('submit',function(event){
+  event.preventDefault();
+  load(document.querySelector('#release').value, document.querySelector('#event').value);
+});
+</script>'''
+    return html.encode()
+
+
 class OperationsHandler(http.server.BaseHTTPRequestHandler):
     """Handler factory state is assigned by ``create_server``; no ops imports."""
 
@@ -283,12 +327,11 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         if path == "/health.json":
             return self._artifact(config, _read_health, config.health_path, auth=True)
         if path == "/calibration-health.json":
-            if config.calibration_health_path is None:
-                return self._send(HTTPStatus.SERVICE_UNAVAILABLE, b"not configured\n", "text/plain")
-            return self._artifact(config, _read_calibration_health,
-                                  config.calibration_health_path, auth=True)
-        if path == "/derivation":
-            return self._send(HTTPStatus.OK, derivation_page_document(), "text/html")
+            return self._calibration_health_route(config)
+        if path in ("/derivation", "/analogs"):
+            page = {"/derivation": derivation_page_document,
+                    "/analogs": analogs_page_document}[path]
+            return self._send(HTTPStatus.OK, page(), "text/html")
         if path == "/" or path.lstrip("/") in _VIEWS:
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
         if path.startswith("/legacy/"):
@@ -299,6 +342,8 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, model_release_page_document(), "text/html")
         if path == "/derivation.json":
             return self._derivation_json_route(config)
+        if path == "/analogs.json":
+            return self._analogs_json_route(config)
         if path.startswith("/actions/whatif/"):
             return self._whatif_result_route(config, path)
         if path == "/release/current.json":
@@ -414,6 +459,12 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         except (ArtifactError, OSError, ValueError):
             return self._send(HTTPStatus.NOT_FOUND, b"unknown release\n", "text/plain")
 
+    def _calibration_health_route(self, config):
+        if config.calibration_health_path is None:
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE, b"not configured\n", "text/plain")
+        return self._artifact(config, _read_calibration_health,
+                              config.calibration_health_path, auth=True)
+
     def _model_release_json_route(self, config):
         if not self._authorized():
             return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
@@ -432,6 +483,37 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
         query = parse_qs(urlsplit(self.path).query)
         strategy_id = (query.get("strategy_id") or [None])[0]
         status, document = derivation_projection.derivation_document(strategy_id)
+        body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        return self._send(status, body, "application/json")
+
+    def _analogs_json_route(self, config):
+        if not self._authorized():
+            return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
+        query = parse_qs(urlsplit(self.path).query)
+        release_id = (query.get("release_id") or [None])[0]
+        event_id = (query.get("event_id") or [None])[0]
+        strategy = (query.get("strategy") or [None])[0]
+        if not release_id or not event_id:
+            return self._send(HTTPStatus.BAD_REQUEST,
+                              b"release_id and event_id are required\n", "text/plain")
+        if config.serving_index_path is None:
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE,
+                              b"analogs not configured\n", "text/plain")
+        try:
+            conn = analog_projection.open_read_only(config.serving_index_path)
+        except analog_projection.ServingIndexError as exc:
+            return self._send_document(*analog_projection.index_refusal(exc.reason_code))
+        try:
+            if not analog_projection.index_is_current(conn):
+                return self._send_document(*analog_projection.index_refusal(
+                    analog_projection.SERVING_INDEX_OUTDATED))
+            status, document = analog_projection.analog_document(
+                conn, None, release_id, event_id, strategy)
+        finally:
+            conn.close()
+        return self._send_document(status, document)
+
+    def _send_document(self, status, document):
         body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         return self._send(status, body, "application/json")
 
@@ -487,7 +569,8 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
 def create_server(address, *, token: str, health_path: Path | str, release_root: Path | str,
                   frozen_at: str = "unknown", submit_refresh=None, submit_whatif=None,
                   fetch_whatif=None, model_release_root: Path | str | None = None,
-                  calibration_health_path: Path | str | None = None):
+                  calibration_health_path: Path | str | None = None,
+                  serving_index_path: Path | str | None = None):
     config = type("Config", (), {"token": token, "health_path": Path(health_path),
                                   "release_root": Path(release_root), "frozen_at": frozen_at,
                                   "submit_refresh": submit_refresh, "submit_whatif": submit_whatif,
@@ -497,7 +580,10 @@ def create_server(address, *, token: str, health_path: Path | str, release_root:
                                                           else None),
                                   "calibration_health_path": (Path(calibration_health_path)
                                                                if calibration_health_path is not None
-                                                               else None)})
+                                                               else None),
+                                  "serving_index_path": (Path(serving_index_path)
+                                                         if serving_index_path is not None
+                                                         else None)})
     server = http.server.ThreadingHTTPServer(address, OperationsHandler)
     server.config = config
     return server
