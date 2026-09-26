@@ -1359,7 +1359,8 @@ def run_nightly(
                     "kind": "tier4_gap_partial",
                     "detail": (f"Tier 4 gap-fill left {n} event(s) beyond its backfill "
                                f"window unfilled (null forecast) in {sorted(partial)}; "
-                               "a full Tier-4 rebuild closes it.")[:300],
+                               "a full Tier-4 rebuild with no --since closes "
+                               "out-of-window gaps.")[:300],
                 })
         except Exception as exc:
             report.steps["tiers"] = {"degraded": True,

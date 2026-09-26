@@ -806,7 +806,7 @@ def _carried_prefix(
     if missing.empty:
         stale = len(have) - len(prefix_keys)
         if stale > 0:
-            _log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
+            log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
         return merged.drop(columns=["_merge"]), cut, missing.copy()
 
     unscored = missing[missing["event_date"] < FIRST_FOLD]
@@ -850,7 +850,7 @@ def _carried_prefix(
 
     stale = len(have2) - len(carried)
     if stale > 0:
-        _log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
+        log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
     return carried, effective_cut, unfilled
 
 
@@ -897,6 +897,7 @@ def build_producer(
     existing: pd.DataFrame | None = None,
     log: Callable[[str], None] = _log,
     report: dict | None = None,
+    cuts: dict | None = None,
 ) -> pd.DataFrame:
     """One producer's column group, for every Tier-3 event.
 
@@ -946,6 +947,8 @@ def build_producer(
                     {"ticker": t, "event_date": pd.Timestamp(d).date().isoformat()}
                     for t, d in unfilled_gap[["ticker", "event_date"]].to_numpy()
                 ]
+        if cuts is not None:
+            cuts[model.produces] = cut
 
     folds = sorted({f for f in scorable["fold_start"].unique() if pd.Timestamp(f) >= FIRST_FOLD})
     if cut is not None:
@@ -1092,12 +1095,13 @@ def build_forecasts(
         raise Tier4Error(f"unknown producer(s) {unknown}; known: {list(FEATURE_MODELS)}")
 
     table = keys.copy()
+    producer_cuts: dict[str, pd.Timestamp] = {}
     for name in PRODUCES:
         if name in wanted:
             model = (models or {}).get(name) or feature_model(name)
             group = build_producer(
                 panel, model, keys=keys, since=since, existing=existing, log=log,
-                report=report,
+                report=report, cuts=producer_cuts,
             )
         elif existing is not None:
             group = _normalize_group(
@@ -1111,9 +1115,18 @@ def build_forecasts(
     # recomputed everything from `cut` forward against TODAY's panel and left
     # the prefix as it was, so stamping the whole table would erase the
     # evidence of the stitch — which is the one thing this column is for.
+    #
+    # `cut` here must be the EARLIEST cut any producer actually ran from, not
+    # the requested one: a gap-fill widens one producer's cut backward past
+    # `requested_cut` to recompute a fold against TODAY's panel, and a row in
+    # that widened span is not "carried" even though its event_date is still
+    # before `requested_cut`. Restoring the old snapshot there would stamp a
+    # freshly recomputed row with stale provenance.
     table["tier3_snapshot"] = snapshot
     if since is not None and existing is not None:
-        cut = pd.Timestamp(fold_start_of([pd.Timestamp(since)]).iloc[0])
+        requested_cut = pd.Timestamp(fold_start_of([pd.Timestamp(since)]).iloc[0])
+        ran_cuts = [c for c in producer_cuts.values() if c is not None]
+        cut = min(ran_cuts) if ran_cuts else requested_cut
         carried = existing.loc[
             existing["event_date"] < cut, ["ticker", "event_date", "tier3_snapshot"]
         ]

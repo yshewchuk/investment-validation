@@ -359,6 +359,56 @@ class TestPrefixGapBackfill:
         gap = report["pred_abs_move"]["out_of_window_gap"]
         assert {"ticker": old_ticker, "event_date": old_date.date().isoformat()} in gap
 
+    def test_snapshot_is_not_backdated_past_the_effective_cut(self, panel, built):
+        """A gap-fill widens the producer's cut BACKWARD past the requested
+        `since`, to recompute a fold against TODAY's panel. Before the fix,
+        `build_forecasts` restored the OLD `tier3_snapshot` for every row
+        before the REQUESTED cut, including the widened span it had just
+        recomputed with the NEW panel — mislabeling freshly recomputed rows
+        with stale provenance. Rows from the effective (widened) cut onward
+        must carry the NEW snapshot; only rows still before the effective cut
+        may carry the OLD one.
+
+        `gap_date = 2014-04-15` and `since = 2014-07-01` are chosen so the
+        widened effective cut (`max(fold_start(gap_date), fold_start(since -
+        BACKFILL_WINDOW_MONTHS))`) lands on 2014-04-01 for both terms — a
+        3-month span (April, May, June) strictly before `since` that the
+        pre-fix code would have mis-stamped.
+        """
+        since = "2014-07-01"
+        gap_date = pd.Timestamp("2014-04-15")
+        gap_ticker = built.loc[
+            (built["event_date"] == gap_date) & built["pred_abs_move"].notna(), "ticker"
+        ].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == gap_ticker) & (built["event_date"] == gap_date))
+        ]
+
+        rebuilt = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since,
+            existing=thinned, tier3_snapshot="different", log=lambda _m: None,
+        )
+
+        effective_cut = pd.Timestamp("2014-04-01")
+        requested_cut = pd.Timestamp(since)
+
+        before = rebuilt[rebuilt["event_date"] < effective_cut]
+        assert len(before) > 0
+        assert before["tier3_snapshot"].eq("snap").all()
+
+        widened_span = rebuilt[
+            (rebuilt["event_date"] >= effective_cut) & (rebuilt["event_date"] < requested_cut)
+        ]
+        assert len(widened_span) > 0
+        assert widened_span["tier3_snapshot"].eq("different").all(), (
+            "rows recomputed by the gap-fill's widened cut must carry the "
+            "NEW snapshot, not the carried-over old one"
+        )
+
+        after = rebuilt[rebuilt["event_date"] >= requested_cut]
+        assert len(after) > 0
+        assert after["tier3_snapshot"].eq("different").all()
+
 
 class TestTotalityAndNulls:
     def test_every_tier3_event_gets_a_row(self, panel, built):
