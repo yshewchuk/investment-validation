@@ -69,8 +69,11 @@ permissions:
 # Separate from the gremlins group (mutation-gremlins-...), so a mutmut run
 # never queues behind -- or cancels -- a gremlins run on the same ref.
 concurrency:
-  group: mutation-mutmut-${{ github.ref }}
-  cancel-in-progress: false
+  # pull_request only: a per-PR group with cancel-in-progress true, mirroring
+  # the gremlins workflow's own group above. push, schedule and
+  # workflow_dispatch keep the exact old group and stay non-cancelling.
+  group: mutation-mutmut-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The phase-0 environment lock (requirements.txt header: "python 3.14.4").
