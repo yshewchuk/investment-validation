@@ -82,7 +82,9 @@ Callers: `engine.v2.dashboard._server`'s lazy, documented import of
 package per the root doc's §1); `experiments/*` runners submitting plans;
 `checks/rearchitecture_*.py` verification scripts (read-only inspection);
 and the `tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package
-above layer 7.0, and no legacy `engine/**` module, imports this package.
+above layer 7.0 imports this package, and no legacy `engine/**` module
+does either — none except the documented lazy `engine.v2.dashboard._server`
+caller of `cli.refresh_action` noted above.
 
 ## External systems and libraries
 

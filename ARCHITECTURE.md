@@ -124,13 +124,15 @@ can.
   but `foundation` imports `contracts`, so they cannot be peers in an
   enforced strictly-less-than check.
 - **`domain/simulation` (4.5) vs. the other three domain packages (4.0).**
-  A layer check can enforce *direction* between layers but never a
-  prohibition *between peers on the same layer* — three components on one
-  layer 4 could import each other freely, and "the scenario builder must
-  not price a position" would rest on discipline alone. Putting the
-  simulator on 4.5, strictly above the three 4.0 peers, makes that
-  structural: the simulator may import generation/scenarios/valuation, and
-  they cannot import each other or the simulator.
+  The checker enforces strictly downward imports between distinct
+  packages: an imported package must have a lower layer number than its
+  importer, so equal-layer peers can never import each other — the three
+  4.0 packages (generation/scenarios/valuation) cannot import one another
+  without any separate hand-written rule. The split exists so
+  `domain/simulation`, which needs to import all three, is not itself an
+  equal-layer peer barred from doing so: at 4.5, strictly above the three
+  4.0 packages, it may import generation/scenarios/valuation, while they
+  cannot import it (or each other).
 - **A known open contradiction, recorded rather than silently resolved:**
   the §4.1 table gives `features` "may import 0-1", but system_rearchitecture.md's
   prose says "features may import inference but never training." Read
@@ -242,7 +244,7 @@ flowchart LR
     end
     subgraph V2["engine/v2/* (native, shadow-only)"]
         CLI["engine/v2/ops CLI"] --> SUP["supervisor.Service (serve)"]
-        SUP --> DAG["nightly job graph<br/>(nightly.py GRAPH)"]
+        SUP --> DAG["submitted DAG stages<br/>(nightly.py _DAG_STAGES,<br/>include_prerequisites=False)"]
         DAG --> PUB["shadow publication /<br/>delivery (private artifacts)"]
         DASH["engine.v2.dashboard._server"] -. "lazy import:<br/>cli.refresh_action" .-> CLI
     end

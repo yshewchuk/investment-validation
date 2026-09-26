@@ -86,7 +86,10 @@ def test_gitignore_admits_architecture_md_anywhere():
 
 
 def test_docs_dir_still_admits_plain_markdown():
-    assert not _is_ignored("docs/COMPONENT_ARCHITECTURE_TEMPLATE.md")
+    # Use an untracked probe path, not the tracked template file: `git
+    # check-ignore` reports a tracked path as not-ignored regardless of the
+    # allow rule, so a tracked-file assertion here would pass vacuously.
+    assert not _is_ignored("docs/coderabbit_allow_rule_probe.md")
 
 
 def test_config_has_no_duplicate_mapping_keys():
