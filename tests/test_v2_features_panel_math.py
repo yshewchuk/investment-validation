@@ -262,3 +262,147 @@ def test_daily_state_lookup_missing_values_are_absent_keys():
         "exern_iv30_d10",
     ):
         assert key not in result
+
+
+def test_causal_ema_and_history_features_with_nan_match_legacy():
+    for span in (2, 4, 8, 12):
+        history = [float(i) for i in range(1, span + 1)]
+        history[1] = float("nan")
+        ported = panel_math._causal_ema(list(history), span)
+        legacy = legacy_causal_ema(list(history), span)
+        assert (ported is None and legacy is None) or (
+            math.isnan(ported) and math.isnan(legacy)
+        )
+
+    prior_moves = [1.0, float("nan"), 3.0, -2.0]
+    prior_abs = [1.0, float("nan"), 3.0, 2.0]
+    ported_out = panel_math.history_features(prior_moves, prior_abs)
+    legacy_out = legacy_history_features(prior_moves, prior_abs)
+    assert ported_out.keys() == legacy_out.keys()
+    for key in ported_out:
+        p, l = ported_out[key], legacy_out[key]
+        if isinstance(p, float) and math.isnan(p):
+            assert isinstance(l, float) and math.isnan(l)
+        else:
+            assert p == l
+
+
+def test_anchor_index_empty_matches_legacy():
+    series_dates = np.array(
+        pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]).values
+    )
+    event_dates = np.array(pd.to_datetime([]).values)
+    as_of_dates = np.array(pd.to_datetime([]).values)
+
+    ported_no_asof = panel_math._anchor_index(series_dates, event_dates, None)
+    legacy_no_asof = legacy_anchor_index(series_dates, event_dates, None)
+    assert np.array_equal(ported_no_asof, legacy_no_asof)
+
+    ported_with_asof = panel_math._anchor_index(
+        series_dates, event_dates, as_of_dates
+    )
+    legacy_with_asof = legacy_anchor_index(series_dates, event_dates, as_of_dates)
+    assert np.array_equal(ported_with_asof, legacy_with_asof)
+
+
+def test_add_implied_history_empty_and_single_row_match_legacy():
+    empty_df = pd.DataFrame(
+        {
+            "ticker": pd.Series([], dtype="object"),
+            "date": pd.Series([], dtype="datetime64[ns]"),
+            "or_implied": pd.Series([], dtype="float64"),
+        }
+    )
+    ported_empty = panel_math.add_implied_history(empty_df)
+    legacy_empty = legacy_add_implied_history(empty_df)
+    pd.testing.assert_frame_equal(
+        ported_empty[["mean_prior_or_implied"]],
+        legacy_empty[["mean_prior_or_implied"]],
+    )
+
+    single_row_df = pd.DataFrame(
+        {
+            "ticker": ["AAA"],
+            "date": pd.to_datetime(["2024-01-02"]),
+            "or_implied": [0.05],
+        }
+    )
+    ported_single = panel_math.add_implied_history(single_row_df)
+    legacy_single = legacy_add_implied_history(single_row_df)
+    pd.testing.assert_frame_equal(
+        ported_single[["mean_prior_or_implied"]],
+        legacy_single[["mean_prior_or_implied"]],
+    )
+    assert math.isnan(ported_single.loc[0, "mean_prior_or_implied"])
+
+
+def test_daily_state_lookup_empty_and_single_row_match_legacy():
+    assert panel_math.daily_state_lookup([], pd.Timestamp("2024-01-02")) == {}
+
+    daily = _daily_frame_with_missing_surface_row()
+    single_row_daily = daily.iloc[[0]].reset_index(drop=True)
+    decision_date = single_row_daily.loc[0, "date"]
+
+    requests = pd.DataFrame({"ticker": ["AAA"], "as_of": [decision_date]})
+    legacy_row = legacy_daily_state_frame(
+        requests, daily=single_row_daily, as_of_column="as_of"
+    ).iloc[0]
+
+    rows = single_row_daily.to_dict("records")
+    ported = panel_math.daily_state_lookup(rows, decision_date)
+
+    assert _normalize_legacy_state_row(legacy_row) == ported
+
+
+def test_is_present_treats_numpy_float32_nan_as_absent():
+    rows = [
+        {
+            "date": pd.Timestamp("2024-01-02"),
+            "src_iv": np.float32("nan"),
+            "implied_move": 0.10,
+            "iv10": 0.20,
+            "iv30": 0.30,
+            "exern_iv10": 0.40,
+            "exern_iv30": 0.50,
+            "iee": 0.60,
+            "skew": 0.70,
+            "contango": 0.80,
+            "fwd90_30": 0.90,
+            "fexern90_30": 1.00,
+            "rvol30": 1.10,
+            "spot": 100.0,
+            "mcap_log": 5.0,
+        },
+        {
+            "date": pd.Timestamp("2024-01-03"),
+            "src_iv": 1.0,
+            "implied_move": np.float32("nan"),
+            "iv10": 0.21,
+            "iv30": 0.31,
+            "exern_iv10": 0.41,
+            "exern_iv30": 0.51,
+            "iee": 0.61,
+            "skew": 0.71,
+            "contango": 0.81,
+            "fwd90_30": 0.91,
+            "fexern90_30": 1.01,
+            "rvol30": 1.11,
+            "spot": 101.0,
+            "mcap_log": 5.1,
+        },
+    ]
+
+    # The first row's src_iv is a numpy float32 NaN, so it must be treated
+    # as ineligible (not a surface row) exactly like a built-in NaN would be.
+    result_at_first_date = panel_math.daily_state_lookup(
+        rows, pd.Timestamp("2024-01-02")
+    )
+    assert result_at_first_date == {}
+
+    # The second row's implied_move is a numpy float32 NaN; it must not
+    # appear as a fabricated NaN in the output.
+    result_at_second_date = panel_math.daily_state_lookup(
+        rows, pd.Timestamp("2024-01-03")
+    )
+    assert "im" not in result_at_second_date
+    assert result_at_second_date.get("iv10") == 0.21

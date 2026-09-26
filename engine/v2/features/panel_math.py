@@ -126,7 +126,7 @@ def _is_present(value: object) -> bool:
     """True unless ``value`` is None or a NaN float (numpy or built-in)."""
     if value is None:
         return False
-    if isinstance(value, float) and math.isnan(value):
+    if isinstance(value, (float, np.floating)) and math.isnan(value):
         return False
     return True
 
