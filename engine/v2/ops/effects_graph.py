@@ -930,10 +930,12 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
     from experiments.lib import LEDGER_COLUMNS, ledger_append
 
     ledger = experiments_ledger_path(checkout_root)
-    if _ran_row_exists(ledger, spec.experiment_id):
-        return
     mean, sharpe = _ledger_metrics(receipt)
     available = mean not in ("", None) or sharpe not in ("", None)
+    if _ran_row_exists(ledger, spec.experiment_id):
+        if not available:
+            _mark_metrics_source(conn, run_id, "unavailable")
+        return
     row = {"id": spec.experiment_id,
            "spec_hash": registered_spec_hash(checkout_root, spec) or "",
            "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),

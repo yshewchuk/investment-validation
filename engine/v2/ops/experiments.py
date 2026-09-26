@@ -66,7 +66,7 @@ def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | Non
         # A primary plan records the one checkout root its pre-registration
         # check read. ``ops submit`` re-checks against this exact path, so a
         # plan and its submission can never bind two different ledgers.
-        checkout_root = Path(root) if root is not None else default_checkout_root()
+        checkout_root = (Path(root) if root is not None else default_checkout_root()).resolve()
         require_preregistration(checkout_root, experiment_spec_from_document(document))
         plan["preregistration_root"] = str(checkout_root)
         plan["parameters"]["preregistration_root"] = str(checkout_root)
