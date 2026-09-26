@@ -6,9 +6,14 @@ Replaces the formatting half of legacy `dashboard/render.py` and
 `engine/dashboard/ARCHITECTURE.md`, for the board this package does not
 replace yet. This package never writes `dashboard/published/**` — it only
 composes and starts the serving preview; the legacy package owns
-publication to that path (`publish_bundle`), which is excluded from
-CodeRabbit review by `.coderabbit.yaml`'s `path_filters` and from the
-secret scan by `checks/repo_hygiene.py`.
+publication to that path (`publish_bundle`), which `.coderabbit.yaml`'s
+`path_filters` excludes from CodeRabbit review (it is a runtime artifact,
+not committed source). It is not excluded from a secret scan:
+`checks/repo_hygiene.py`'s `check_bundle` is the dedicated fail-closed
+scanner for the published bundle's own content, called from the
+publication security gate (`engine/v2/ops/effects_graph.py`'s
+`_security_gate`) — stricter than the ordinary committed-source scan
+(`check_files`), not an exemption from one.
 
 ## Purpose
 
