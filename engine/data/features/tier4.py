@@ -848,8 +848,9 @@ def _carried_prefix(
     if len(unfilled):
         detail += (
             f"; {len(unfilled):,} event(s) still uncovered beyond the "
-            f"{BACKFILL_WINDOW_MONTHS}-month backfill window — proceeding with a "
-            f"null forecast for them: "
+            f"{BACKFILL_WINDOW_MONTHS}-month backfill window — left ABSENT from "
+            f"the table (flagged tier4_gap_partial; no --since rebuild covers "
+            f"them, only a full Tier-4 rebuild with no --since closes them): "
             f"{list(map(tuple, unfilled[['ticker', 'event_date']].head(10).to_numpy()))}"
         )
     log(detail)
