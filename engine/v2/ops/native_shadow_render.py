@@ -25,7 +25,7 @@ AST).
 """
 from __future__ import annotations
 
-from engine.v2.contracts.serving import SHADOW_SERVING_SCORERS, shadow_serving_scorer
+from engine.v2.foundation.typed import SHADOW_SERVING_SCORERS, shadow_serving_scorer
 from engine.v2.ops.errors import fail
 
 __all__ = ["SHADOW_SERVING_SCORERS", "native_shadow_serving_mode"]

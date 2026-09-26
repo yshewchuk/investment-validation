@@ -36,7 +36,6 @@ from engine.v2.contracts.data import EventRef, ObjectRef
 __all__ = [
     "DEFAULT_SHADOW_SERVING_SCORER",
     "SHADOW_SERVING_SCORERS",
-    "shadow_serving_scorer",
     "EVENT_PAGE_ITEM_V1",
     "EVENT_PAGE_V1",
     "EVENT_SCORE_SUMMARY_V1",
@@ -320,13 +319,3 @@ SHADOW_SERVING_SCORERS = ("native", "legacy")
 #: The shadow board's default scorer when a plan carries no explicit value.
 DEFAULT_SHADOW_SERVING_SCORER = "native"
 
-
-def shadow_serving_scorer(plan) -> str | None:
-    """The plan's shadow-serving scorer, or ``None`` when it is not allowed.
-
-    Pure lookup: each caller raises its own layer's typed refusal on ``None``
-    (``OpsError`` in ops, ``NativeShadowConfigError`` in serving), so the two
-    halves can never disagree about the allowed values or the default.
-    """
-    mode = plan.get("shadow_serving_scorer", DEFAULT_SHADOW_SERVING_SCORER)
-    return mode if mode in SHADOW_SERVING_SCORERS else None

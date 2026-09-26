@@ -46,7 +46,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from engine.v2.contracts import ScoreRequest
-from engine.v2.contracts.serving import SHADOW_SERVING_SCORERS, shadow_serving_scorer
+from engine.v2.foundation.typed import SHADOW_SERVING_SCORERS, shadow_serving_scorer
 from engine.v2.scoring.application import score_one
 from engine.v2.scoring.stages import NativeScoreInputs, analog_display_fields
 
