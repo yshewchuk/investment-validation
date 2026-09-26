@@ -29,9 +29,7 @@
 !/README.md
 !/RECOVERY.md
 !/EARNINGS_VOL_PROGRAM_PLAN.md
-!/docs/*.md
-!/docs/design/*.md
-!/**/ARCHITECTURE.md
+!ARCHITECTURE.md
 !/guides/*.md
 !/engine/**/*.md
 !/checks/*.md

@@ -17,10 +17,20 @@ wiring anything to call it.
   `engine.v2.contracts.scoring.FeatureRecipe`: recipe id/version, its
   `input_contracts`, `output_columns`, `source_scope`/`history_scope`,
   `observation_cutoff_rule`, `fallback_policy`, `determinism_policy`).
-- `FeatureContextPlanner.request(...)` — builds a causal `FeatureRequest`
-  from event refs, a snapshot ref, and recipe refs, enforcing that every
-  timestamp involved is explicit and timezone-aware
-  (`engine.v2.contracts.scoring.FeatureRequest`/`FeatureFrame`).
+- `FeatureContextPlanner.request(...)` — builds a `FeatureRequest` from
+  event refs, a snapshot ref, and recipe refs. It resolves every
+  `recipe_ref` against the registry (`FeatureRegistry.get`, raising
+  `KeyError` for an unknown id) and records each event's `decision_at` and
+  visibility as decision contexts on the request; it does **not** itself
+  check any timestamp for timezone-awareness or causal ordering
+  (`engine.v2.contracts.scoring.FeatureRequest`).
+- `FeatureContextPlanner.frame(...)` — turns that `FeatureRequest` plus
+  rows of already-computed values into an immutable `FeatureFrame`. The
+  timezone and causal-cutoff checks live here, not in `request()`: every
+  row's `observed_at` and its event's `decision_at` must each be an
+  explicit, timezone-aware timestamp, and `observed_at` must be
+  on-or-before the decision cutoff, or the call raises
+  `FeatureContextError` (`engine.v2.contracts.scoring.FeatureFrame`).
 - `panel_math` — five pure functions with no `FeatureRecipe`/`FeatureFrame`
   wrapping of their own (see below). Nothing in this package or any other
   yet constructs a `FeatureRecipe` or calls `FeatureContextPlanner` for
@@ -72,8 +82,14 @@ wiring anything to call it.
   fabricated `NaN`/`0.0` — this is a new function, not a copy, and it
   follows this package's answer-free/no-fabrication convention instead of
   legacy's DataFrame-NaN one.
-- `FeatureContextPlanner.request`: an immutable `FeatureFrame`/
-  `FeatureRequest` pair with content-hashed provenance.
+- `FeatureContextPlanner.request`: a `FeatureRequest` alone — event refs,
+  per-event decision contexts, the snapshot ref, and the resolved recipe
+  refs. No `FeatureFrame` and no content hash yet; those are `frame()`'s
+  outputs, not `request()`'s.
+- `FeatureContextPlanner.frame`: the `FeatureFrame` — immutable, with
+  content-hashed `frame_ref`/`schema_ref`/`row_keys_ref`/`values_hash`/
+  `null_mask_hash`, built only after every row has passed the causal
+  timestamp check described above.
 
 ## Dependencies and callers
 
@@ -88,13 +104,15 @@ wiring anything to call it.
 - Consumer: `engine.v2.scoring` imports `default_feature_registry` to
   resolve feature scopes and recipe identities before scoring
   (`engine/v2/scoring/application.py`).
-- `panel_math` has no consumer yet. The chain it is built for is
-  `engine/v2/ops/native_feature_job.py` (a new job kind, not yet built) →
-  a per-row feature orchestrator in this package (not yet built, planned
-  as `board_features.py`) → `panel_math` plus a sibling market-state
-  module that reuses `panel_math._anchor_index` (not yet built). Until
-  those land and are wired into the nightly graph, `panel_math` is inert:
-  it has unit tests of its own but cannot affect a board row.
+- `panel_math` has no consumer yet. The chain it is built for is: **Part D**
+  (`engine/v2/ops/native_feature_job.py`, a new job kind, not yet built) —
+  the future caller of the whole chain — → Part C, a per-row feature
+  orchestrator in this package (not yet built, planned as
+  `board_features.py`) → `panel_math` (this change, Part A) plus a sibling
+  market-state module (Part A2, not yet built) that reuses
+  `panel_math._anchor_index`. Until those land and are wired into the
+  nightly graph, `panel_math` is inert: it has unit tests of its own but
+  cannot affect a board row.
 - The correctness check planned to exercise `panel_math` beyond its unit
   tests is a parity proof tool (this package's `engine.v2.parity`
   counterpart), not yet built, that will call these functions directly on
@@ -109,6 +127,21 @@ new pattern. No network, filesystem, or database access anywhere in
 `panel_math`.
 
 ## Failure semantics
+
+`context.py`/`recipes.py` are not pure math and do raise:
+
+- `FeatureRegistry.get(recipe_id)` raises `KeyError(recipe_id)` for an
+  unregistered id. `FeatureContextPlanner.request` calls `get` for every
+  `recipe_ref` it is given, so an unknown recipe id fails `request()`
+  itself, before any frame is built.
+- `FeatureContextPlanner.frame(...)` raises `FeatureContextError` (a
+  `ValueError` subclass) for: a row whose `event_id` is not one of the
+  request's own events; a missing, blank, or non-ISO timestamp on either a
+  row's `observed_at` or its event's `decision_at`; a timestamp with no
+  timezone (`tzinfo`/`utcoffset` absent); and a row whose `observed_at` is
+  after its event's `decision_at` cutoff. None of these are caught or
+  retried internally — every raise propagates straight to the caller, which
+  is expected to have validated its inputs before calling `frame()`.
 
 `panel_math` is pure math with no I/O, so most of the 4c template is "does
 not apply" by construction rather than a policy choice:

@@ -406,3 +406,41 @@ def test_is_present_treats_numpy_float32_nan_as_absent():
     )
     assert "im" not in result_at_second_date
     assert result_at_second_date.get("iv10") == 0.21
+
+
+def test_daily_state_lookup_nan_lag_reference_matches_legacy():
+    # Row 11 (2024-01-18) stays IV-bearing (src_iv untouched) so it remains
+    # in `surface`, but its implied_move value -- the value the im_d1 lag at
+    # decision date row 12 (2024-01-19) would read as its PRIOR reference --
+    # is NaN. Row 1's src_iv is already NaN in this fixture (excluding it
+    # from `surface` entirely), which is a different code path from the one
+    # this test targets: here the row stays in `surface`, only one field's
+    # value on it is NaN.
+    daily = _daily_frame_with_missing_surface_row()
+    daily.loc[11, "implied_move"] = np.nan
+    decision_date = daily.loc[12, "date"]
+
+    requests = pd.DataFrame({"ticker": ["AAA"], "as_of": [decision_date]})
+    legacy_row = legacy_daily_state_frame(
+        requests, daily=daily, as_of_column="as_of"
+    ).iloc[0]
+
+    rows = daily[daily["ticker"] == "AAA"].to_dict("records")
+    ported = panel_math.daily_state_lookup(rows, decision_date)
+
+    # Legacy fabricates NaN for the affected lag column (plain numpy
+    # subtraction against a NaN prior value); normalizing NaN to an absent
+    # key -- exactly what daily_state_lookup itself does -- makes the two
+    # match.
+    assert _normalize_legacy_state_row(legacy_row) == ported
+
+    # Pin the exact behavior directly, independent of legacy's own
+    # DataFrame-NaN convention: the d1 lag whose PRIOR reference value is
+    # NaN must be an absent key...
+    assert "im_d1" not in ported
+    # ...while the current row's own value, and the lags whose prior
+    # reference is unaffected (d5 reads row 7, d10 reads row 2 -- neither
+    # touched above), are all still present.
+    assert ported.get("im") == pytest.approx(daily.loc[12, "implied_move"])
+    assert "im_d5" in ported
+    assert "im_d10" in ported
