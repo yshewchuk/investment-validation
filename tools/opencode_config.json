@@ -48,32 +48,36 @@
     "prune": true,
     "reserved": 20000
   },
-  "models": {
-    "openrouter/deepseek/deepseek-v4.1-flash": {
-      "options": {
-        "skip-title": true
-      },
-      "limit": {
-        "context": 160000,
-        "output": 32000
-      }
-    },
-    "openrouter/qwen/qwen3.8-flash": {
-      "options": {
-        "skip-title": true
-      },
-      "limit": {
-        "context": 160000,
-        "output": 32000
-      }
-    },
-    "openrouter/z-ai/glm-5.3": {
-      "options": {
-        "skip-title": true
-      },
-      "limit": {
-        "context": 160000,
-        "output": 32000
+  "provider": {
+    "openrouter": {
+      "models": {
+        "deepseek/deepseek-v4.1-flash": {
+          "options": {
+            "skip-title": true
+          },
+          "limit": {
+            "context": 160000,
+            "output": 32000
+          }
+        },
+        "qwen/qwen3.8-flash": {
+          "options": {
+            "skip-title": true
+          },
+          "limit": {
+            "context": 160000,
+            "output": 32000
+          }
+        },
+        "z-ai/glm-5.3": {
+          "options": {
+            "skip-title": true
+          },
+          "limit": {
+            "context": 160000,
+            "output": 32000
+          }
+        }
       }
     }
   }
