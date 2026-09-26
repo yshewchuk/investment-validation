@@ -30,6 +30,25 @@ def test_run_bounded_passes_a_resource_wait_below_its_own_timeout(tmp_path, monk
     assert float(argv[argv.index("--max-wait-s") + 1]) < seen["timeout"]
 
 
+def test_run_bounded_keeps_the_resource_wait_below_a_short_timeout(tmp_path, monkeypatch):
+    # A 60 s floor would make --max-wait-s equal to (not below) a 60 s
+    # timeout; the fix floors at 0 instead so the invariant holds even here.
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"], seen["timeout"] = command, kwargs["timeout"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(parity.subprocess, "run", fake_run)
+    parity.run_bounded(["/usr/bin/python3", "-c", "pass"], max_rss_gb=1.0,
+                       cwd=tmp_path, env=dict(os.environ), timeout=60)
+    argv = seen["command"]
+    assert "--max-wait-s" in argv
+    wait = float(argv[argv.index("--max-wait-s") + 1])
+    assert wait < seen["timeout"]
+    assert wait == 0.0
+
+
 def test_exceeding_a_tiny_rss_cap_is_reported_as_a_clean_137_not_a_hang(tmp_path):
     # The child HOLDS the allocation: a watchdog that samples every poll_s
     # cannot see a spike that is allocated and freed between two samples, and
