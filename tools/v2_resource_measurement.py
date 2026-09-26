@@ -55,6 +55,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tools.bounded_run import MAX_SWAP_DEFAULT_GB  # noqa: E402
+
 __all__ = [
     "SCHEMA_VERSION",
     "BOUNDED_RUN",
@@ -137,12 +139,23 @@ HEARTBEAT_MINUTES = 1.0
 
 
 def watchdog_rss_values(output: str) -> list[float]:
-    """Every ``rss N.NNG pss`` reading from a REAL heartbeat interval --
-    excludes bounded_run.py's unconditional elapsed=0.0 first-iteration
+    """Every ``rss N.NNG pss`` reading that is a REAL sample -- excludes only
+    bounded_run.py's unconditional elapsed=0.0 first-iteration heartbeat
     reading, which fires before the child has grown to its true RSS and is
-    not a periodic sample."""
-    return [float(rss) for elapsed, rss in _WATCHDOG_RSS.findall(output)
-            if float(elapsed) >= HEARTBEAT_MINUTES]
+    not a periodic sample. A WARNING or cap/swap breach line is checked on
+    every poll (not only on the heartbeat interval), so those readings are
+    kept even before the first HEARTBEAT_MINUTES heartbeat."""
+    values: list[float] = []
+    for line in output.splitlines():
+        match = _WATCHDOG_RSS.search(line)
+        if match is None:
+            continue
+        elapsed, rss = match.groups()
+        is_flagged = "WARNING" in line or any(reason in line for reason in KILL_REASONS)
+        if float(elapsed) < HEARTBEAT_MINUTES and not is_flagged:
+            continue
+        values.append(float(rss))
+    return values
 
 
 def classify_kill(output: str, exit_code: int) -> str | None:
@@ -245,7 +258,7 @@ def measure(workload_label, max_rss_gb, cache_state, command, *,
         "heavy": heavy,
         "cores": cores,
         "max_rss_gb_cap": max_rss_gb,
-        "max_swap_gb_cap": max_swap_gb,
+        "max_swap_gb_cap": max_swap_gb if max_swap_gb is not None else MAX_SWAP_DEFAULT_GB,
         # None (not 0.0) when no full-interval sample exists -- see
         # HEARTBEAT_MINUTES; a returned value is a LOWER BOUND (bounded_run.py
         # only samples every HEARTBEAT_S, so the true peak between samples is

@@ -241,6 +241,7 @@ def test_after_good_release_retry_ops_error_is_a_fail_not_a_refusal(tmp_path, mo
 
     assert receipt["verdict"] == "FAIL"
     assert receipt["retry"]["delivered"] is False
+    assert receipt["retry"]["error"] == "STALE_EXPECTATION"
 
 
 def test_before_any_release_retry_ops_error_is_a_fail_not_a_refusal(tmp_path, monkeypatch):
@@ -261,3 +262,4 @@ def test_before_any_release_retry_ops_error_is_a_fail_not_a_refusal(tmp_path, mo
         scenario="before-any-release", scratch_root=tmp_path / "scratch")
 
     assert receipt["verdict"] == "FAIL"
+    assert receipt["retry"]["error"] == "STALE_EXPECTATION"

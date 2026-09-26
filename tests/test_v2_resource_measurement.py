@@ -82,6 +82,22 @@ def test_watchdog_rss_values_keeps_only_full_interval_readings():
     assert rm.watchdog_rss_values(output) == [1.23]
 
 
+def test_watchdog_rss_values_keeps_an_early_cap_breach_reading():
+    early_breach = (f"[watchdog]    0.0m rss  1.90G pss (1.90G vm, 2 procs) "
+                    f"= 95% of cap; swap  0.00G; box free 5.00G"
+                    f" — CAP BREACH, killing tree")
+
+    assert rm.watchdog_rss_values(early_breach) == [1.90]
+
+
+def test_watchdog_rss_values_keeps_an_early_warning_reading():
+    early_warning = (f"[watchdog]    0.0m rss  1.90G pss (1.90G vm, 2 procs) "
+                     f"= 95% of cap; swap  0.00G; box free 5.00G"
+                     f" — WARNING, approaching cap")
+
+    assert rm.watchdog_rss_values(early_warning) == [1.90]
+
+
 def test_measure_fast_clean_exit_has_no_false_peak(tmp_path, monkeypatch):
     monkeypatch.setattr(rm, "_stream",
                         lambda command: ([_watchdog(0.01, elapsed_min=0.0) + "\n"], 0))
@@ -283,6 +299,14 @@ def test_record_has_the_declared_schema_and_fields(tmp_path, stub):
     assert record["wall_seconds"] >= 0
     assert record["started_at"] <= record["ended_at"]
     assert set(record["contention"]) == {"other_heavy_jobs"}
+
+
+def test_max_swap_gb_cap_defaults_to_bounded_runs_own_default(tmp_path, stub):
+    stub([_watchdog(0.5)], 0)
+
+    record = _measure(tmp_path)
+
+    assert record["max_swap_gb_cap"] == rm.MAX_SWAP_DEFAULT_GB
 
 
 def test_collect_contention_records_agents_md_bracket_patterns(monkeypatch):

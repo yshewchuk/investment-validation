@@ -210,6 +210,7 @@ def _run_after_good_release(deployment: _Deployment) -> dict:
         },
         "retry": {
             "delivered": retry["delivered"],
+            "error": retry.get("error"),
             "published_at": retry_published_at,
             "current": final_current,
         },
@@ -258,11 +259,13 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
             (row["effect_id"],)).fetchone()["state"]
         current_after_crash = publication.current(target)
 
+        retry_error = None
         try:
             retry_manifest = run_backup(conn, key=key, owner="controlled-failure-drill",
                                         target=deployment.backup_root, clock=clock, store=store)
-        except OpsError:
+        except OpsError as exc:
             retry_manifest = None
+            retry_error = exc.code
         state_after_retry = conn.execute(
             "SELECT state FROM outbox WHERE effect_id=?",
             (row["effect_id"],)).fetchone()["state"]
@@ -291,6 +294,7 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
         },
         "retry": {
             "manifest_matches": retry_manifest == manifest,
+            "error": retry_error,
             "outbox_state": state_after_retry,
             "current": current_final,
         },
