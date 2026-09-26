@@ -95,3 +95,11 @@ def test_sanitize_reason_redacts_a_tmp_path():
 def test_sanitize_reason_does_not_mangle_a_url():
     clean = "rebuilding the training set raised ConnectionError: GET http://example.com/api/v1 failed"
     assert _sanitize_reason(clean) == clean
+
+
+def test_sanitize_reason_does_not_mangle_a_url_whose_path_looks_like_a_local_root():
+    """The regression this fixes: a URL's LATER path segment (not just the
+    text right after "://") must not be redacted just because it happens to
+    spell a known local-path root name."""
+    clean = "rebuilding the training set raised ConnectionError: GET http://example.com/tmp/file failed"
+    assert _sanitize_reason(clean) == clean

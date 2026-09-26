@@ -50,11 +50,13 @@ from engine import paths
 #: built from arbitrary exception text and must be scrubbed regardless of
 #: why the rebuild failed.
 #: Known absolute-path roots on this box worth redacting beyond /root/ (e.g.
-#: a scratchpad or worktree path under /tmp), while never matching a URL's
-#: path component -- (?<!/) excludes a second slash immediately following
-#: another slash, so "http://x/y" never matches at either "/".
+#: a scratchpad or worktree path under /tmp). Matched per-token (see
+#: _sanitize_reason) so a URL is never touched -- the lookbehind trick alone
+#: is not enough: it only protects the "://" position itself, and a URL's
+#: LATER path segments (http://example.com/tmp/file) still look exactly like
+#: a bare local path from where this pattern would match.
 _ABS_PATH_RE = re.compile(
-    r"(?<!/)/(?:root|tmp|home|var|etc|usr|opt|mnt|srv|workspace)(?:/\S*)?",
+    r"/(?:root|tmp|home|var|etc|usr|opt|mnt|srv|workspace)(?:/\S*)?",
     re.IGNORECASE,
 )
 
@@ -65,10 +67,21 @@ def _sanitize_reason(text: str) -> str:
     ``paths.ROOT`` is relativized (still informative); anything else under a
     known local path root (``/root/``, ``/tmp/``, etc.) is redacted
     generically, since it is host-local and never meaningful to a reader of
-    the published dashboard."""
+    the published dashboard -- except inside a URL, which is left untouched
+    entirely (a whitespace-delimited token containing ``://`` is never a
+    local filesystem path, and mangling one loses real information, e.g. an
+    upstream API endpoint that happens to share a path segment name like
+    ``/tmp/`` or ``/var/`` with a local root)."""
     root = str(paths.ROOT)
     text = text.replace(root, "<repo>")
-    return _ABS_PATH_RE.sub("<local path>", text)
+
+    def _redact_token(match: "re.Match") -> str:
+        token = match.group(0)
+        if "://" in token:
+            return token
+        return _ABS_PATH_RE.sub("<local path>", token)
+
+    return re.sub(r"\S+", _redact_token, text)
 
 
 __all__ = ["build_model_evidence", "evidence_path", "load_model_evidence", "DECILES"]
