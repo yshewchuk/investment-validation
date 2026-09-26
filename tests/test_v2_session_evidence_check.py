@@ -163,6 +163,21 @@ def test_window_end_with_no_fraction_covers_the_whole_last_second(tmp_path):
     assert result["rows"][0]["source"] == "job"
 
 
+def test_window_end_with_explicit_zero_fraction_is_not_widened(tmp_path):
+    declarations = _declarations(tmp_path, _row("job-row", "job:legacy_score"))
+    catalog = _catalog(tmp_path / "catalog.sqlite", jobs=[("j1", "legacy_score")],
+                       attempts=[("a1", "j1", "succeeded", "2026-09-25T23:59:59.412000Z")])
+
+    result = sec.check(
+        session=SESSION, window_start=START, window_end="2026-09-25T23:59:59.000000Z",
+        catalog=catalog, declarations=declarations, evidence_dir=tmp_path / "evidence")
+
+    assert result["rows_uncovered"] == ["job-row"]
+    assert result["rows_covered"] == 0
+    assert result["rows"][0]["status"] == "uncovered"
+    assert result["rows"][0]["source"] == "job"
+
+
 def test_succeeded_attempt_outside_the_window_is_not_evidence(tmp_path):
     declarations = _declarations(tmp_path, _row("job-row", "job:legacy_score"))
     catalog = _catalog(tmp_path / "catalog.sqlite", jobs=[("j1", "legacy_score")],
