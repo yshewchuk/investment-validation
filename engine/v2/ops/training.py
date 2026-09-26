@@ -150,7 +150,21 @@ def promote_job_kind() -> JobKind:
     no locking of its own, so a shared write lease on the
     ``deployment_pointer`` domain serializes every ``models_promote``
     claim against every other one, globally, regardless of which
-    ``release_root`` each names (2026-09-26 CodeRabbit finding)."""
+    ``release_root`` each names (2026-09-26 CodeRabbit finding).
+
+    ``effects=("staged",)`` understates this: the job swaps the live
+    DEPLOYED pointer, not a staging artifact. Left as ``"staged"``
+    deliberately rather than invented on the spot -- a repo-wide grep
+    (``engine/``, ``checks/``, ``tools/``) for ``.effects`` finds every
+    ``JobKind`` in the codebase (``stages.py``, ``incremental_data.py``,
+    ``training.py``'s own ``training_job_kind``) declaring exactly
+    ``("staged",)`` and no reader of the field anywhere (see
+    ``tests/test_v2_ops_stages_core_kinds.py``'s module docstring); there is
+    no existing ``"deployed"``/``"pointer_swap"`` vocabulary value to reach
+    for instead, and coining a one-off value for this single kind would make
+    it look like a real, consumed distinction when the field is otherwise
+    pure documentation. Revisit if/when something starts reading
+    ``JobKind.effects``."""
     return JobKind(name="models_promote", worker="models_promote", parameters=PromoteParameters,
                    resource_classes=frozenset({"delivery"}), effects=("staged",),
                    retry=RetryPolicy("bounded", 1, (30,)),
