@@ -424,6 +424,17 @@ def check(*, session: str, window_start: str, window_end: str, catalog: Path,
     start, end = parse_instant(window_start), parse_instant(window_end)
     if end < start:
         raise ValueError(f"--window-end {window_end!r} is before --window-start {window_start!r}")
+    if end.microsecond == 0:
+        # An inclusive --window-end with no fractional seconds (the runbook's
+        # own example, "...T23:59:59Z") must cover the whole last second, not
+        # just its exact zero-microsecond instant: otherwise a succeeded
+        # attempt at "...T23:59:59.412000Z" -- inside the documented window --
+        # sorts above the bound in both the SQL BETWEEN in _resolve_sources
+        # and the datetime comparison in _in_window, and is wrongly reported
+        # uncovered. Bumping end itself (rather than patching each comparison
+        # site separately) fixes every downstream use: end_wire, context["end"],
+        # and every _in_window(..., end) call.
+        end = end.replace(microsecond=999999)
     catalog_path = Path(catalog)
     if not catalog_path.is_absolute():
         catalog_path = root / catalog_path

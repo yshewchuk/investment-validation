@@ -148,6 +148,43 @@ def test_optional_flags_reach_the_child_only_when_given(tmp_path, stub):
     assert _child_argv(argv_path) == ["--max-rss-gb", "2.0", "--", *WORKLOAD]
 
 
+def test_stream_kills_the_child_when_stdout_forwarding_fails(monkeypatch):
+    import subprocess as _subprocess
+
+    from tools import v2_resource_measurement as rm
+
+    class _BrokenStdout:
+        def __iter__(self):
+            yield "one line\n"
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _BrokenStdout()
+            self.returncode = 0
+            self.terminated = False
+            self.waited = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+
+    fake_proc = _FakeProc()
+    monkeypatch.setattr(_subprocess, "Popen", lambda *a, **k: fake_proc)
+
+    def _raise_write(_line):
+        raise BrokenPipeError("stdout closed")
+
+    monkeypatch.setattr(rm.sys.stdout, "write", _raise_write)
+
+    with pytest.raises(BrokenPipeError):
+        rm._stream(["python3", "-c", "pass"])
+
+    assert fake_proc.terminated is True
+    assert fake_proc.waited is True
+
+
 # -------------------------------------------------------------------- record
 
 
@@ -160,6 +197,17 @@ def test_writes_one_timestamped_record_equal_to_the_returned_one(tmp_path, stub)
     assert len(files) == 1
     assert files[0].name.endswith("Z.json")
     assert json.loads(files[0].read_text()) == record
+
+
+def test_stamp_has_microsecond_precision_so_same_second_runs_do_not_collide():
+    from datetime import datetime, timezone
+
+    from tools import v2_resource_measurement as rm
+
+    a = rm._stamp(datetime(2026, 9, 25, 12, 0, 0, 1, tzinfo=timezone.utc))
+    b = rm._stamp(datetime(2026, 9, 25, 12, 0, 0, 2, tzinfo=timezone.utc))
+    assert a != b
+    assert a.endswith("Z") and b.endswith("Z")
 
 
 def test_record_has_the_declared_schema_and_fields(tmp_path, stub):

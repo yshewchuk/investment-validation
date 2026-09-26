@@ -159,7 +159,7 @@ def _iso(moment: datetime) -> str:
 
 
 def _stamp(moment: datetime) -> str:
-    return moment.strftime("%Y%m%dT%H%M%SZ")
+    return moment.strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def _bounded_argv(bounded_run: Path, max_rss_gb, max_swap_gb, cores, cpu_set,
@@ -176,7 +176,14 @@ def _bounded_argv(bounded_run: Path, max_rss_gb, max_swap_gb, cores, cpu_set,
 
 
 def _stream(command: list[str]) -> tuple[list[str], int]:
-    """Run the child, echoing each captured line as it arrives."""
+    """Run the child, echoing each captured line as it arrives.
+
+    If forwarding to this process's own stdout raises (a closed pipe, a
+    write error), the child is terminated rather than left running: without
+    this, a parent-side write failure would fall straight to ``proc.wait()``
+    with no signal ever sent, and the child (and whatever heavy-job
+    reservation it holds) could keep running indefinitely.
+    """
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
     lines: list[str] = []
@@ -186,8 +193,15 @@ def _stream(command: list[str]) -> tuple[list[str], int]:
             lines.append(line)
             sys.stdout.write(line)
             sys.stdout.flush()
-    finally:
-        proc.wait()
+    except BaseException:
+        proc.terminate()
+        try:
+            proc.wait(timeout=40)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise
+    proc.wait()
     return lines, proc.returncode
 
 

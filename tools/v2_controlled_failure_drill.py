@@ -235,9 +235,10 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
                 "drill will not report on an unexercised crash window")
 
         manifest_path = deployment.backup_root / (key + ".manifest.json")
-        manifest = json.loads(manifest_path.read_text())
         manifest_present = manifest_path.is_file()
-        manifest_verified = _manifest_is_consistent(manifest, deployment.backup_root, key)
+        manifest = json.loads(manifest_path.read_text()) if manifest_present else None
+        manifest_verified = manifest_present and _manifest_is_consistent(
+            manifest, deployment.backup_root, key)
         row = conn.execute(
             "SELECT effect_id, claim_token, claimed_by, state FROM outbox "
             "WHERE kind='backup' AND logical_key=?", (key,)).fetchone()

@@ -166,11 +166,11 @@ def _all_gates(store, release_id, occurrence, files):
 
 def _fenced_claim(conn, clock, key):
     """One real submit/claim/fence claim, reached the same way
-    ``tests/ops_support.py::enqueue_claim`` reaches it. The helper itself is
-    reused directly (imported lazily here, not at module level, so this
-    checks/ module never depends on tests/ at import time); this only
-    supplies the supervisor epoch it needs."""
-    from tests.ops_support import enqueue_claim
+    ``tools/v2_ops_fixtures.py::enqueue_claim`` reaches it (that module has no
+    dependency on ``tests/``, so this checks/ module and the drills that call
+    it work without ``tests/`` installed); this only supplies the supervisor
+    epoch it needs."""
+    from tools.v2_ops_fixtures import enqueue_claim
     epoch_id = begin_epoch(conn, clock=clock, boot_id="controlled-failure", pid=1)
     claim = enqueue_claim(conn, clock, Supervisor(epoch_id, "controlled-failure"), key=key)
     if claim is None:
