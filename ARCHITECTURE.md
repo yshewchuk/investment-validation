@@ -155,19 +155,22 @@ a panel. Three rules, each blocking on its own:
    imported by nothing.
 2. **v2 reaches legacy only through declared adapters.** Every
    `engine/v2/** -> engine/*` edge is a named entry in
-   `checks/legacy_adapters.json` (75 entries currently), confined to one
-   adapter module per package (e.g. `engine/v2/ops/legacy_adapter.py`). An
-   undeclared legacy import fails the check. Each entry states its reason,
-   its read/write sets, credentials, hidden subprocesses, retry behaviour,
-   and its removal phase — an adapter is a tracked, temporary bridge, not a
-   permanent seam.
+   `checks/legacy_adapters.json` (that file's own `count` field is the
+   current, maintained entry count — not repeated here since it changes
+   with every adapter review), confined to one adapter module per package
+   (e.g. `engine/v2/ops/legacy_adapter.py`). An undeclared legacy import
+   fails the check. Each entry states its reason, its read/write sets,
+   credentials, hidden subprocesses, retry behaviour, and its removal
+   phase — an adapter is a tracked, temporary bridge, not a permanent
+   seam.
 3. **Legacy never imports v2.** The legacy tree runs the board unchanged and
    must not acquire a dependency on code still being proved.
 
 The legacy tree itself is measured once, for the record, against this same
-layering (17 upward edges in 5 groups — see `system_rearchitecture.md` §4.2)
-and then left alone; those edges are not a backlog, they are evidence the
-layering is necessary, and v2 must not reproduce any of them.
+layering — see `guides/system_rearchitecture.md` §4.2 for the current edge
+count and grouping (derived from the layer numbers `checks/layer_map.py`
+maintains) — and then left alone; those edges are not a backlog, they are
+evidence the layering is necessary, and v2 must not reproduce any of them.
 
 Every `engine/v2/*` package also carries a README with a fixed section order
 (`Ownership`, `Responsibilities`, `Non-responsibilities`, `Public interface`,

@@ -54,15 +54,26 @@ all optional; each unlocks exactly one route (`/models/release.json`,
 `/calibration-health.json`, `POST /actions/refresh`, `GET /analogs.json`
 respectively) and none is ever inferred from `--release-root` or
 `--health-path` — omitting one keeps that route's own explicit
-"not configured" refusal (see Failure semantics). Whatever roots are
-configured are read via `engine.v2.serving`'s bounded/paginated reads,
-never a direct file read of scoring/evaluation/ledger data.
+"not configured" refusal (see Failure semantics). `--release-root`,
+`--health-path`, `--model-release-root`, `--calibration-health-path` and
+`--serving-index-path` are serving roots: they are read via
+`engine.v2.serving`'s bounded/paginated reads, never by directly reading
+scoring/evaluation/ledger data. `--ops-root` is not a serving read at
+all — it names a job root, not a data root: when configured, `_server.py`'s
+`_refresh_callback` passes it straight to `engine.v2.ops.cli.refresh_action`
+to submit a shadow nightly plan (see Dependencies for what that call does
+and does not do).
 
 ## Outputs
 
-The operations-server HTTP responses `create_server` builds (health,
-release data, calibration health) and, when a refresh root is configured,
-queued refresh job ids from `POST /actions/refresh`.
+The operations-server HTTP responses `create_server` builds — health,
+release data, calibration health, and, when `--serving-index-path` is
+configured, `GET /analogs.json`'s per-event analog document (each
+score/strategy's persisted analog row ids and count, keyed by
+`release_id`/`event_id` query params, or a refusal — not configured,
+unreadable, outdated, no rows for that event, or missing query params) —
+and, when a refresh root is configured, queued refresh job ids from
+`POST /actions/refresh`.
 
 ## Dependencies
 
