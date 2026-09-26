@@ -1,0 +1,7 @@
+[Unit]
+Description=Native shadow nightly trigger (ORATS-finality-gated ops plan/submit)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/investing-plan
+ExecStart=/usr/bin/python3 tools/bounded_run.py --max-rss-gb 8 --max-swap-gb 6 --cores 8 -- /usr/bin/python3 -m engine.v2.ops.nightly_trigger

@@ -41,8 +41,10 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import tomllib
 from collections import Counter
 from pathlib import Path
@@ -331,6 +333,72 @@ def cmd_count(cfg: dict, args) -> int:
     return 0
 
 
+# Sentinel `cmd_run` reports for a run THIS SCRIPT stopped on purpose because
+# its time budget ran out -- the SAME value the CI export step's own fallback
+# (`cat mutation-rc 2>/dev/null || echo -1`) already writes when GitHub's step
+# timeout kills the whole step before the "echo $?" line can run. Reusing -1
+# 124, not -1: the exit code is written to a shell file and re-read as text
+# (mutation-rc in the workflow), where -1 is already claimed for "no rc file at
+# all" (a missing or GitHub-killed step, via `|| echo -1`) -- an ambiguity a
+# clean stop must not share. 124 matches coreutils `timeout`'s own convention
+# for "the command was still running when the time budget expired" and gives
+# mutation_results.py's TIME_BUDGET_STOP handling (partial results, a withheld
+# score, the module named in `failed_run_modules`, exempted from the gate only
+# in incremental mode) an unambiguous code of its own to key off.
+TIME_BUDGET_STOP_RC = 124
+# How long to let mutmut's own KeyboardInterrupt unwind (stop_all_workers +
+# shutdown/drain of the fork server, per mutmut/__main__.py's `run` command)
+# after SIGINT before concluding it is stuck and escalating to SIGKILL.
+SIGINT_GRACE_SECONDS = 180
+
+
+def _run_with_time_budget(cmd: list[str], cwd: Path, env: dict, budget_s: float) -> int:
+    """Run ``cmd`` for at most ``budget_s`` seconds; return its exit code if it
+    finishes in time, or ``TIME_BUDGET_STOP_RC`` if this function had to stop it.
+
+    mutmut's ``run`` command catches ``KeyboardInterrupt`` (SIGINT) and does a
+    clean shutdown: it stops in-flight workers, drains what already finished
+    and returns normally (verified in mutmut 3.8's ``mutmut/__main__.py``,
+    ``except KeyboardInterrupt: ... runner.stop_all_workers() / finally:
+    runner.shutdown()``). Mutants already decided before the stop were already
+    flushed to their ``.meta`` file the moment each one finished
+    (``_register_mutant_result`` calls ``mutation_data.save()`` per result, not
+    only at the end), so a clean stop loses at most the handful of mutants that
+    were still in flight. SIGTERM is NOT used for this: mutmut installs no
+    handler for it, so Python's default SIGTERM action kills the process
+    immediately with no unwind -- indistinguishable from a hard kill, and
+    exactly what relying on GitHub's own step timeout would deliver instead of
+    a clean stop.
+    """
+    start = time.monotonic()
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, start_new_session=True)
+    try:
+        return proc.wait(timeout=budget_s)
+    except subprocess.TimeoutExpired:
+        pass
+    elapsed = time.monotonic() - start
+    print(f"[mutation_pilot] time budget of {budget_s:.0f}s reached after {elapsed:.0f}s; "
+          f"sending SIGINT for a clean stop (mutants already decided stay on disk)", flush=True)
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    try:
+        real_rc = proc.wait(timeout=SIGINT_GRACE_SECONDS)
+        print(f"[mutation_pilot] mutmut stopped cleanly after SIGINT (its own exit code "
+              f"{real_rc}); reporting {TIME_BUDGET_STOP_RC} (TIME_BUDGET_STOP, not a tool error)",
+              flush=True)
+    except subprocess.TimeoutExpired:
+        print(f"[mutation_pilot] mutmut did not exit within {SIGINT_GRACE_SECONDS}s of SIGINT; "
+              f"escalating to SIGKILL", flush=True)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    return TIME_BUDGET_STOP_RC
+
+
 def cmd_run(cfg: dict, args) -> int:
     from mutation_results import SNAPSHOT_NAME, snapshot
 
@@ -364,7 +432,10 @@ def cmd_run(cfg: dict, args) -> int:
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         env[var] = "1"
-    rc = subprocess.run(cmd, cwd=work, env=env).returncode
+    if args.time_budget_seconds:
+        rc = _run_with_time_budget(cmd, work, env, args.time_budget_seconds)
+    else:
+        rc = subprocess.run(cmd, cwd=work, env=env).returncode
     # On a first run mutants/ did not exist before mutmut; record the digest now
     # so the next run compares against this one.
     reset_on_test_change(work, [], digest)
@@ -469,6 +540,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("module")
     p.add_argument("globs", nargs="*", help="mutant-name globs (default: all)")
     p.add_argument("--max-children", type=int, default=None)
+    p.add_argument("--time-budget-seconds", type=float, default=None,
+                   help="stop mutmut cleanly (SIGINT) after this many seconds instead of "
+                        "letting it run unbounded; returns TIME_BUDGET_STOP_RC (124)")
     p.add_argument("--fresh", action="store_true", help="delete the work copy and its results first")
     p = sub.add_parser("report")
     p.add_argument("modules", nargs="*")
