@@ -19,6 +19,7 @@ from engine.v2.ops.calendar_moves_jobs import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     NATIVE_NASDAQ_ACCOUNT,
     cached_unit_outcomes,
+    cached_unit_payloads,
 )
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import fail
@@ -647,10 +648,13 @@ def _build_native_forward_calendar_plan(plan, context_tickers, *, catalog_path, 
     provider request the job can make is counted in the plan the scheduler
     reserves (spec R6): when a Nasdaq discovery call is due, the yfinance
     session-confirmation units are planned alongside it on the job's single
-    budget account, so the reserved calls cover the whole run. A run whose
-    Nasdaq units are all cache-satisfied makes no yfinance call at all (the
-    confirmation pass only runs for freshly fetched claims), so it reserves
-    nothing. Returns ``(RefreshPlan, expected_ids)`` -- expected ids are the
+    budget account, so the reserved calls cover the whole run. A fresh Nasdaq
+    fetch always reserves yfinance for every ticker (conservative); an
+    all-cached Nasdaq plan re-derives the same pending set the store would
+    compute from the cached receipts (no network call) and reserves yfinance
+    only for tickers whose cached Nasdaq claim does not resolve a session, so a
+    genuinely cache-complete rerun still reserves and makes zero calls. Returns
+    ``(RefreshPlan, expected_ids)`` -- expected ids are the
     wanted tickers, the store's own coverage denominator -- or ``None`` when
     there is no head, no session, or no ticker to plan for.
     """
@@ -688,9 +692,25 @@ def _build_native_forward_calendar_plan(plan, context_tickers, *, catalog_path, 
         snapshot, nasdaq_units, cached_outcomes=nasdaq_cached,
         provider_account=NATIVE_NASDAQ_ACCOUNT,
         expected_head_generation=head["generation"])
-    if not nasdaq_plan.fetch_units:
-        return nasdaq_plan, tickers
-    yfinance_units = forward_calendar_store.ticker_units(tickers, as_of=as_of)
+    if nasdaq_plan.fetch_units:
+        yfinance_units = forward_calendar_store.ticker_units(tickers, as_of=as_of)
+    else:
+        cached_payloads = cached_unit_payloads(conn, store, nasdaq_plan)
+        claims: dict[tuple[str, str], dict] = {}
+        for unit in nasdaq_units:
+            day = unit.expected_keys[0]
+            raw = cached_payloads.get(unit.request_id)
+            if raw is None:
+                continue
+            for row in forward_calendar_store._nasdaq_rows_from_payload(raw):
+                ticker = str(row.get("symbol") or "").strip()
+                if not ticker or ticker not in set(tickers):
+                    continue
+                claims.setdefault((ticker, day), {})["nasdaq"] = \
+                    forward_calendar_store.SESSION_BY_TIME.get(row.get("time"))
+        pending = sorted({ticker for (ticker, _day), sources in claims.items()
+                          if not sources.get("nasdaq")})
+        yfinance_units = forward_calendar_store.ticker_units(pending, as_of=as_of)
     cached = {**nasdaq_cached, **cached_unit_outcomes(
         conn, yfinance_units, source="yfinance", endpoint="earnings")}
     refresh_plan = incremental_data.plan_refresh(

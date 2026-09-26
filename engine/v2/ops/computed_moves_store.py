@@ -185,8 +185,11 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
     }
     if since is not None:
         since = pd.Timestamp(since).normalize()
-        recent = events[pd.to_datetime(events["event_date"]) >= since]
-        printed = set(recent["ticker"].astype(str))
+        if events.empty:
+            printed: set[str] = set()
+        else:
+            recent = events[pd.to_datetime(events["event_date"]) >= since]
+            printed = set(recent["ticker"].astype(str))
         targets = [ticker for ticker in targets if ticker in printed]
         report["since"] = str(since.date())
         report["printed_since"] = len(printed)
@@ -260,6 +263,8 @@ def _parse_history(raw: bytes) -> tuple[np.ndarray, np.ndarray] | None:
     ok = dates.notna() & np.isfinite(closes) & (closes > 0)
     dates = dates[ok].to_numpy(dtype="datetime64[ns]")
     closes = closes[ok]
+    if closes.size == 0:
+        return None
     order = np.argsort(dates, kind="stable")
     return dates[order], closes[order]
 
@@ -460,7 +465,8 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],
             "base_snapshot_id": parent.snapshot.snapshot_id,
-            "tickers": sorted(fragment_records)})
+            "fragments": {ticker: record.fragment_id
+                          for ticker, record in sorted(fragment_records.items())}})
         receipt = _commit_generation(
             conn, store, str(document["scope"]), parent=parent,
             records_by_ticker=fragment_records, attempts=attempts, clock=clock,

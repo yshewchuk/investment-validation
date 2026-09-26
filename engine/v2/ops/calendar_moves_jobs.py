@@ -17,7 +17,6 @@ them like any other account.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
 from typing import Sequence
 
@@ -289,29 +288,24 @@ def cached_unit_outcomes(conn, units: Sequence, *, source: str, endpoint: str) -
     (spec R2): a ``legitimate_empty`` payload is refetched on the next run, and
     ``not_final``/``transient``/``refused`` receipts were never cached.
     """
+    from engine.v2.data.incremental import _jsonable
+    from engine.v2.foundation import content_hash
     from engine.v2.ops.incremental_data import classify_response
 
-    hits: dict[str, tuple[str, str]] = {}
-    for row in conn.execute(
-            "SELECT request_json, raw_receipt_id, raw_hash, response_kind "
-            "FROM data_raw_receipts WHERE source = ? AND endpoint = ?",
-            (source, endpoint)):
-        if row["response_kind"] != "complete":
-            continue
-        try:
-            request = json.loads(row["request_json"])
-        except (TypeError, ValueError):
-            continue
-        hits[str(request.get("request_id"))] = (row["raw_receipt_id"], row["raw_hash"])
     outcomes = {}
     for unit in units:
-        hit = hits.get(unit.request_id)
-        if hit is None:
+        request_hash = content_hash(_jsonable(dict(_unit_request(unit))))
+        row = conn.execute(
+            "SELECT raw_receipt_id, raw_hash, response_kind FROM data_raw_receipts "
+            "WHERE source = ? AND endpoint = ? AND request_hash = ? "
+            "ORDER BY received_at DESC LIMIT 1",
+            (source, endpoint, request_hash)).fetchone()
+        if row is None or row["response_kind"] != "complete":
             continue
         outcomes[unit.request_id] = classify_response(
             200, unit.expected_keys, returned_keys=unit.expected_keys,
-            request_id=unit.request_id, receipt_ref=hit[0], raw_hash=hit[1],
-            cache_hit=True)
+            request_id=unit.request_id, receipt_ref=row["raw_receipt_id"],
+            raw_hash=row["raw_hash"], cache_hit=True)
     return outcomes
 
 
