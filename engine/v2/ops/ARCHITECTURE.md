@@ -195,13 +195,18 @@ from it before returning.
 
 ```mermaid
 flowchart LR
-    A["ops CLI subcommand"] --> B["submit() / submit_graph()"]
-    B --> C["catalog (sqlite):<br/>job row + lease"]
-    C --> D["worker subprocess<br/>(trivial for export/engineering/<br/>publication/backup)"]
+    A["ops CLI: submit() / submit_graph()"] --> B["catalog (sqlite):<br/>queued job row"]
+    B -.->|"separately running supervisor<br/>(ops serve)"| C["Service.tick:<br/>claim_next (lease)"]
+    C --> D["Service._launch:<br/>worker subprocess<br/>(trivial for export/engineering/<br/>publication/backup)"]
     D --> E["supervisor.Service.<br/>_coordinator_effect"]
     E --> F["effects_graph.py:<br/>real catalog/outbox/filesystem write"]
 ```
 
+`submit()`/`submit_graph()` only inserts a `queued` (or `blocked`) job
+row in one transaction; it never claims a lease or launches a worker.
+Claiming and launching happen later, in a separately running supervisor
+process (`ops serve`'s `Service.tick`, via its `claim_next` call), which
+is the only path that acquires a job's lease before calling `_launch`.
 The worker process for the four coordinator-effect job kinds never
 touches the catalog directly; all real state change for those kinds
 happens in `effects_graph.py`, called from the coordinator, not the

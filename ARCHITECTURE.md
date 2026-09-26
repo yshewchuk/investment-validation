@@ -243,10 +243,12 @@ flowchart LR
         LN["engine.dashboard.nightly<br/>(cron/manual)"] --> LB["legacy board / ledger /<br/>dashboard/published/**"]
     end
     subgraph V2["engine/v2/* (native, shadow-only)"]
-        CLI["engine/v2/ops CLI"] --> SUP["supervisor.Service (serve)"]
+        SUBMIT["engine/v2/ops CLI: submit"] --> QUEUE["catalog (sqlite):<br/>queued jobs"]
+        SERVE["engine/v2/ops CLI: serve"] --> SUP["supervisor.Service"]
+        SUP -- "claim + lease" --> QUEUE
         SUP --> DAG["submitted DAG stages<br/>(nightly.py _DAG_STAGES,<br/>include_prerequisites=False)"]
         DAG --> PUB["shadow publication /<br/>delivery (private artifacts)"]
-        DASH["engine.v2.dashboard._server"] -. "lazy import:<br/>cli.refresh_action" .-> CLI
+        DASH["engine.v2.dashboard._server"] -. "lazy import:<br/>cli.refresh_action" .-> SUBMIT
     end
     Tools["tools/*, experiments/*"] --> Legacy
     Tools --> V2

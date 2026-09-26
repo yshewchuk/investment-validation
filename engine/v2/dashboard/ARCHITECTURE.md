@@ -88,12 +88,17 @@ no direct filesystem, database or third-party API access of its own.
     is ever called. Neither reaches the serving layer.
   - **Serving-time, in `engine.v2.serving` (not this package)**: an
     omitted *optional* root (`--model-release-root`,
-    `--calibration-health-path`, `--ops-root`, `--serving-index-path`)
-    is passed straight through to `create_server`, whose own typed
-    responses answer the request at call time — e.g. the read-only 503
-    "refresh not configured" when no refresh callback is wired. This
-    package adds no missing-input handling of its own beyond the two
-    launcher checks above.
+    `--calibration-health-path`, `--serving-index-path`) is passed
+    straight through to `create_server`, whose own typed responses
+    answer the request at call time — e.g. the read-only 503
+    "refresh not configured" when no refresh callback is wired.
+    `--ops-root` is the one exception: this package's own
+    `_server.py::_refresh_callback` converts it to a bound
+    `submit_refresh` callable, or to `None` when the root is missing or
+    empty, before `create_server` ever sees it — `create_server` still
+    answers the same read-only 503 when that callback is `None`. This
+    package adds no other missing-input handling of its own beyond the
+    two launcher checks above.
 - **Cache / retry / transaction / partial write** — none: this package
   holds no durable state of its own; every read goes through
   `engine.v2.serving`'s own semantics.
