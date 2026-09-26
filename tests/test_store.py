@@ -154,6 +154,52 @@ class TestStreamingWriter:
         store.write_table(frame, "option_chains")
         assert store.table_stats("option_chains").rows == len(frame)
 
+    def test_read_table_releases_partitions_before_coerce(self, store, monkeypatch):
+        # The nightly died at its 8 GB cap because read_table held the per-year
+        # partitions alive while coerce() copied the concat result. Evidence
+        # that the partitions are gone: a weakref to each frame the (patched)
+        # iter_table yielded must be dead by the time coerce is called.
+        import gc
+        import weakref
+
+        store.write_table(make_chains(), "option_chains")
+        real_iter_table = store.iter_table
+        real_coerce = store.coerce
+
+        def check(columns):
+            refs: list = []
+            copies: list = []
+
+            def fake_iter_table(name, *, years=None, columns=None):
+                for year in (2023, 2024):
+                    part = make_chains(years=(year,), per_year=2)
+                    copies.append(part.copy())
+                    refs.append(weakref.ref(part))
+                    yield year, part
+
+            def spy_coerce(df, name, **kwargs):
+                gc.collect()
+                assert refs, "no partitions were yielded"
+                assert [ref() is None for ref in refs] == [True] * len(refs)
+                return real_coerce(df, name, **kwargs)
+
+            monkeypatch.setattr(store, "iter_table", fake_iter_table)
+            monkeypatch.setattr(store, "coerce", spy_coerce)
+            try:
+                out = store.read_table("option_chains", columns=columns)
+            finally:
+                monkeypatch.setattr(store, "iter_table", real_iter_table)
+                monkeypatch.setattr(store, "coerce", real_coerce)
+            expected = real_coerce(
+                pd.concat(copies, ignore_index=True),
+                "option_chains",
+                only=list(columns) if columns else None,
+            )
+            pd.testing.assert_frame_equal(out, expected)
+
+        check(None)
+        check(["ticker", "obs_date", "strike"])
+
 
 class TestStats:
     def test_stats_describe_the_written_table(self, store):

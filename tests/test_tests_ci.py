@@ -30,7 +30,10 @@ def test_workflow_concurrency():
         workflow = yaml.safe_load(f)
 
     concurrency = workflow.get("concurrency", {})
-    assert concurrency.get("group") == "tests-${{ github.ref }}"
+    assert concurrency.get("group") == (
+        "tests-${{ github.event_name == 'pull_request' "
+        "&& github.event.pull_request.number || github.ref }}"
+    )
     assert concurrency.get("cancel-in-progress") is True
 
 
