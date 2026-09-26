@@ -519,6 +519,61 @@ def test_cmd_matrix_prints_the_json_list(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == ["foundation", "canonical"]
 
 
+# -- --changed-files: PR module selection delegates to mutation_pilot --------
+#
+# gremlin_pilot reuses mutation_pilot's changed_modules/read_changed_files
+# unchanged (same shared-input rule governs both backends' matrices, exactly
+# as it already reuses the module partition). These tests pin the WIRING --
+# that select_modules/cmd_matrix pass the flag through -- not the selection
+# rule itself, which tests/test_mutation_ci.py already covers in full.
+
+def test_select_modules_without_changed_files_is_unaffected(monkeypatch):
+    monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])
+    assert gp.select_modules(cfg()) == ["foundation", "canonical"]
+    assert gp.select_modules(cfg(), "", "") == ["foundation", "canonical"]
+
+
+def test_select_modules_changed_files_delegates_to_pilot_changed_modules(monkeypatch):
+    monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])
+    seen = {}
+
+    def fake_changed_modules(cfg_, names, changed):
+        seen["names"], seen["changed"] = names, changed
+        return ["foundation"]
+
+    monkeypatch.setattr(gp.pilot, "read_changed_files", lambda p: ["engine/x.py"] if p else [])
+    monkeypatch.setattr(gp.pilot, "changed_modules", fake_changed_modules)
+    result = gp.select_modules(cfg(), "", "some/path.txt")
+    assert result == ["foundation"]
+    assert seen == {"names": ["foundation", "canonical"], "changed": ["engine/x.py"]}
+
+
+def test_select_modules_changed_files_applies_after_only_filtering(monkeypatch):
+    monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])
+    monkeypatch.setattr(gp.pilot, "read_changed_files", lambda p: ["x"])
+    # changed_modules never sees "canonical": --only already dropped it
+    monkeypatch.setattr(gp.pilot, "changed_modules",
+                        lambda cfg_, names, changed: names)
+    assert gp.select_modules(cfg(), "foundation", "some/path.txt") == ["foundation"]
+
+
+def test_cmd_matrix_passes_changed_files_through(monkeypatch, capsys):
+    monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])
+    monkeypatch.setattr(gp.pilot, "read_changed_files", lambda p: ["engine/x.py"] if p else [])
+    monkeypatch.setattr(gp.pilot, "changed_modules", lambda cfg_, names, changed: ["foundation"])
+    args = types.SimpleNamespace(only="", changed_files="some/path.txt")
+    assert gp.cmd_matrix(cfg(), args) == 0
+    import json
+    assert json.loads(capsys.readouterr().out) == ["foundation"]
+
+
+def test_cmd_matrix_missing_changed_files_attr_keeps_old_behavior(monkeypatch, capsys):
+    monkeypatch.setattr(gp.pilot, "enabled_modules", lambda cfg_: ["foundation", "canonical"])
+    assert gp.cmd_matrix(cfg(), types.SimpleNamespace(only="")) == 0
+    import json
+    assert json.loads(capsys.readouterr().out) == ["foundation", "canonical"]
+
+
 def test_gremlin_shares_the_mutant_toml_module_map():
     # One partition governs both backends: the gremlin config IS mutation_pilot's.
     import mutation_pilot as pilot

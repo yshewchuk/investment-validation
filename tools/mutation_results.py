@@ -416,6 +416,11 @@ def markdown(summary: dict, rows: list[dict], changed: set[tuple[str, str]] | No
         out.append(f"| {label} | {b['total']} | {b['killed']} | {b['survived']} | {b['no_tests']} "
                    f"| {b['timeout']} | {b['suspicious']} | {b['skipped']} | {_pct(b['score'])} |")
     out.append("")
+    if summary.get("retested_this_run") is not None and summary.get("total") is not None:
+        reused = summary["total"] - summary["retested_this_run"]
+        out.append(f"**cache reuse**: {reused} of {summary['total']} mutant(s) reused "
+                    f"from cache, {summary['retested_this_run']} re-tested this run.")
+        out.append("")
     if summary.get("run_exit_code") not in (None, 0):
         out += [f"**mutmut exited {summary['run_exit_code']}**: results are partial.", ""]
     live = [r for r in rows if r["status"] in ("survived", "no_tests") and not is_triaged(r)]

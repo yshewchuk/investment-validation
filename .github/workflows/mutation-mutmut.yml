@@ -87,6 +87,11 @@ jobs:
       mutmut: ${{ steps.plan.outputs.mutmut }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # pull_request only: full history for the changed-file diff below;
+          # push/schedule/dispatch keep the default shallow checkout (depth
+          # 1) -- byte-identical to before.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -95,6 +100,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           FRESH: ${{ inputs.fresh }}
           ONLY: ${{ inputs.modules }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = "push" ] || [ "$EVENT" = "pull_request" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
@@ -104,13 +110,23 @@ jobs:
           fi
           mutmut=$(sed -n 's/^mutmut==\([^ ]*\).*/\1/p' requirements-dev.txt)
           test -n "$mutmut"
+          # pull_request only: narrow the matrix to the modules the PR's diff
+          # can actually affect, mirroring the gremlins workflow's plan job.
+          # push/schedule/dispatch never set CHANGED_ARGS, so the matrix
+          # command below stays byte-identical to before.
+          CHANGED_ARGS=""
+          if [ "$EVENT" = "pull_request" ]; then
+            CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
+            git diff --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
+            CHANGED_ARGS="--changed-files $CHANGED_FILE"
+          fi
           # Assign in its own command, never inside the echo: the exit status of
           # `echo "modules=$(...)"` is echo's, so a failing matrix command would
           # write an empty module list and the step would still pass. Under
           # `set -e` a command substitution in a plain assignment does abort, and
           # `mutation_pilot.py matrix --only ,` refuses instead of emitting the
           # empty matrix that would silently skip the whole matrix job.
-          modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY")
+          modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)
           {
             echo "modules=$modules"
             echo "mode=$mode"

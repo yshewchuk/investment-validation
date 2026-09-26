@@ -700,6 +700,7 @@ def test_matrix_is_built_from_the_toml(capsys):
 def test_workflow_triggers_and_concurrency():
     on = WORKFLOW.get("on", WORKFLOW.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
+    assert on["pull_request"]["branches"] == ["main"]
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
     # a NEW group, so an in-flight old mutmut run cannot block the first gremlins run
@@ -707,6 +708,30 @@ def test_workflow_triggers_and_concurrency():
     assert WORKFLOW["permissions"] == {"contents": "read"}
     plan = JOBS["plan"]["steps"][-1]["run"]
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
+
+
+def test_gremlins_plan_checks_out_full_history_only_for_pull_request():
+    # fetch-depth 0 is needed to diff against the PR base sha; push/schedule/
+    # dispatch keep the default shallow depth (1) -- byte-identical to before,
+    # since the ternary's false branch is a literal 1, not an omitted default.
+    checkout = JOBS["plan"]["steps"][0]
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["with"]["fetch-depth"] == \
+        "${{ github.event_name == 'pull_request' && 0 || 1 }}"
+
+
+def test_gremlins_plan_narrows_the_matrix_on_pull_request_via_changed_files():
+    plan_step = JOBS["plan"]["steps"][-1]
+    assert plan_step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    plan = plan_step["run"]
+    # push/schedule/dispatch: CHANGED_ARGS stays empty, so the matrix command is
+    # byte-identical to the pre-selection command (no --changed-files at all,
+    # since an empty unquoted expansion contributes zero argv words).
+    assert 'CHANGED_ARGS=""' in plan
+    assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
+    assert 'git diff --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'CHANGED_ARGS="--changed-files' in plan
+    assert 'modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
 
 
 def test_workflow_pins_python_and_mutmut():
@@ -800,6 +825,7 @@ MUT_JOBS = MUTMUT["jobs"]
 def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
     on = MUTMUT.get("on", MUTMUT.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
+    assert on["pull_request"]["branches"] == ["main"]
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
     assert MUTMUT["concurrency"]["group"] == "mutation-mutmut-${{ github.ref }}"
@@ -814,10 +840,28 @@ def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
 
 
+def test_mutmut_plan_checks_out_full_history_only_for_pull_request():
+    checkout = MUT_JOBS["plan"]["steps"][0]
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["with"]["fetch-depth"] == \
+        "${{ github.event_name == 'pull_request' && 0 || 1 }}"
+
+
+def test_mutmut_plan_narrows_the_matrix_on_pull_request_via_changed_files():
+    plan_step = MUT_JOBS["plan"]["steps"][-1]
+    assert plan_step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    plan = plan_step["run"]
+    assert 'CHANGED_ARGS=""' in plan
+    assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
+    assert 'git diff --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'CHANGED_ARGS="--changed-files' in plan
+    assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
+
+
 def test_mutmut_plan_step_uses_the_mutmut_driver_and_gates_its_own_failure():
     plan = MUT_JOBS["plan"]["steps"][-1]["run"]
     assert "set -euo pipefail" in plan
-    assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY")' in plan
+    assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
     assert "gremlin_pilot" not in plan  # the mutmut runner, not the gremlins one
     # the list is assigned, then echoed by name: an interpolated command
     # substitution inside the echo would hide its failure behind echo's rc
@@ -1252,3 +1296,120 @@ def test_report_cli_two_backends_same_run_id_read_their_own_downloads(monkeypatc
         rep.main(["--backend", "mutmut", "--run", "123"])
     assert seen == ["mutation-report"] and calls[-1][calls[-1].index("-n") + 1] == \
         "mutation-mutmut-report"
+
+
+# -- PR module selection: shared inputs vs module-owned sources/tests --------
+#
+# A module is selected by `matrix --changed-files` when the changed-file list
+# intersects its own mutate_files/test_files, OR a "shared input" that is
+# deliberately treated as touching every module: the dependency locks
+# (requirements.txt, requirements-dev.txt), the mutation config
+# (tools/mutation_pilot.toml), and the shared tests/ helpers -- tests/conftest.py
+# and any other direct tests/*.py file that is not itself a test_*.py file,
+# exactly the rule tests_digest already applies per-module, generalised
+# repo-wide. This is deliberately narrower than cache_fingerprint (which hashes
+# EVERY tracked file for cache-correctness, including unrelated docs): a
+# PR-selection rule that always selected everything would defeat its own
+# purpose, and a docs-only or workflow-only PR is meant to select nothing.
+
+def _sel_cfg():
+    return {"defaults": {}, "modules": {
+        "alpha": {"why": "x", "mutate": ["engine/a.py"], "tests": ["tests/test_a.py"]},
+        "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
+    }}
+
+
+_SEL_TRACKED_ENGINE = ["engine/a.py", "engine/b.py"]
+_SEL_TRACKED_TESTS = ["tests/test_a.py", "tests/test_b.py", "tests/conftest.py", "tests/helpers.py"]
+
+
+def test_shared_test_helpers_are_non_test_prefixed_direct_children():
+    assert pilot.shared_test_helpers(_SEL_TRACKED_TESTS) == ["tests/conftest.py", "tests/helpers.py"]
+    # a nested file is never "direct", regardless of its name
+    nested = _SEL_TRACKED_TESTS + ["tests/sub/helper.py"]
+    assert pilot.shared_test_helpers(nested) == ["tests/conftest.py", "tests/helpers.py"]
+
+
+def test_shared_inputs_covers_locks_config_and_test_helpers():
+    assert pilot.shared_inputs(_SEL_TRACKED_TESTS) == {
+        "requirements.txt", "requirements-dev.txt", "tools/mutation_pilot.toml",
+        "tests/conftest.py", "tests/helpers.py"}
+
+
+def test_read_changed_files_strips_blanks_and_handles_missing(tmp_path):
+    assert pilot.read_changed_files("") == []
+    assert pilot.read_changed_files(str(tmp_path / "nope.txt")) == []
+    f = tmp_path / "changed.txt"
+    f.write_text("engine/a.py\n\n  \ntests/test_b.py\n")
+    assert pilot.read_changed_files(str(f)) == ["engine/a.py", "tests/test_b.py"]
+
+
+def test_changed_modules_selects_only_the_owning_module():
+    cfg2 = _sel_cfg()
+    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"], **kw) == ["alpha"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_b.py"], **kw) == ["beta"]
+
+
+def test_changed_modules_a_shared_input_selects_every_incoming_name():
+    cfg2 = _sel_cfg()
+    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
+    for changed in (["requirements.txt"], ["requirements-dev.txt"],
+                    ["tools/mutation_pilot.toml"], ["tests/conftest.py"], ["tests/helpers.py"]):
+        assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed, **kw) == ["alpha", "beta"]
+
+
+def test_changed_modules_respects_the_incoming_names_subset():
+    # beta's own file changed, but beta was already excluded (e.g. by --only)
+    cfg2 = _sel_cfg()
+    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
+    assert pilot.changed_modules(cfg2, ["alpha"], ["engine/b.py"], **kw) == []
+
+
+def test_changed_modules_unrelated_or_empty_change_selects_nothing():
+    cfg2 = _sel_cfg()
+    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["docs/readme.md"], **kw) == []
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], [], **kw) == []
+
+
+def test_cmd_matrix_changed_files_narrows_the_matrix(tmp_path, monkeypatch, capsys):
+    cfg2 = _sel_cfg()
+    monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
+    monkeypatch.setattr(pilot, "_tracked",
+                        lambda paths: _SEL_TRACKED_ENGINE if paths == ["engine"] else _SEL_TRACKED_TESTS)
+    changed = tmp_path / "changed.txt"
+    changed.write_text("engine/a.py\n")
+    args = types.SimpleNamespace(only="", changed_files=str(changed))
+    assert pilot.cmd_matrix(cfg2, args) == 0
+    assert json.loads(capsys.readouterr().out) == ["alpha"]
+
+
+def test_cmd_matrix_without_changed_files_is_unaffected(monkeypatch, capsys):
+    cfg2 = _sel_cfg()
+    monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
+    args = types.SimpleNamespace(only="", changed_files="")
+    assert pilot.cmd_matrix(cfg2, args) == 0
+    assert json.loads(capsys.readouterr().out) == ["alpha", "beta"]
+
+
+def test_cmd_matrix_accepts_missing_changed_files_attr_for_backward_compatibility(monkeypatch, capsys):
+    # older call sites (and the pre-existing tests above) build an
+    # `args` namespace with no `changed_files` at all; that must keep working.
+    cfg2 = _sel_cfg()
+    monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
+    args = types.SimpleNamespace(only="")
+    assert pilot.cmd_matrix(cfg2, args) == 0
+    assert json.loads(capsys.readouterr().out) == ["alpha", "beta"]
+
+
+# -- mutate job summary: mutant-level cache reuse vs re-tested this run ------
+
+def test_markdown_reports_cache_reuse_counts():
+    rows = [_row("m", "a.py", "f", "killed", retested=True, name="n1"),
+            _row("m", "a.py", "f", "survived", retested=False, name="n2"),
+            _row("m", "a.py", "g", "survived", retested=False, name="n3")]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert s["retested_this_run"] == 1
+    md = mr.markdown(s, rows, None)
+    assert "**cache reuse**: 2 of 3 mutant(s) reused from cache, 1 re-tested this run." in md
