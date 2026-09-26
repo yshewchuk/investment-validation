@@ -349,8 +349,15 @@ def summarize(rows: list[dict], module: str, info: dict, files: list[str], **ext
     # the very first run). A group with even one such row must report None
     # too, not silently coerce it to 0 -- 0 claims "definitely 0 re-tested",
     # a different (and false) fact than "we don't know".
+    # A skipped mutant is excluded from `checked` (score_block) because it
+    # was never run, this run or any prior one -- but build_rows() can still
+    # mark it retested_this_run=True whenever the mutmut config fingerprint
+    # changed. It must be excluded here too, or this count can exceed
+    # `checked` and markdown's `reused = checked - retested` understates
+    # cache reuse (or goes negative).
     retested = (None if any(r["retested_this_run"] is None for r in rows)
-                else sum(1 for r in rows if r["retested_this_run"]))
+                else sum(1 for r in rows
+                         if r["retested_this_run"] and r["status"] != "skipped"))
     return {"schema_version": SCHEMA_VERSION, **info, "module": module, **extra,
             **score_block(_counts(rows)),
             "retested_this_run": retested,

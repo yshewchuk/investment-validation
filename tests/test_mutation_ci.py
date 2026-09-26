@@ -186,7 +186,7 @@ def test_summary_counts_and_scores_per_module_and_file():
     assert s["files"]["a.py"]["score"] == round(2 / 3, 4)
     assert s["files"]["b.py"]["score"] == 0.0
     assert s["files"]["c.py"]["score"] is None and s["files"]["c.py"]["total"] == 0
-    assert s["run_exit_code"] == 0 and s["retested_this_run"] == 5
+    assert s["run_exit_code"] == 0 and s["retested_this_run"] == 4  # b.py/h is skipped: excluded
 
 
 def test_merge_combines_modules_and_totals(tmp_path):
@@ -1370,6 +1370,34 @@ def test_changed_modules_a_deleted_own_test_file_still_selects_its_module():
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_a.py"], **kw) == ["alpha"]
 
 
+def test_changed_modules_a_deleted_own_source_file_still_selects_its_module():
+    # alpha's mutate (source) file, engine/a.py, was deleted by this PR:
+    # git diff --name-only reports it in `changed`, but it is gone from the
+    # tree, so it is absent from tracked_engine (as _tracked(["engine"])
+    # would return post-deletion). alpha must still be selected from the
+    # changed path alone -- the source-side mirror of the test above, which
+    # only covered a deleted OWNED TEST file, not a deleted OWNED SOURCE file.
+    cfg2 = _sel_cfg()
+    tracked_engine_without_a = ["engine/b.py"]
+    kw = dict(tracked_engine=tracked_engine_without_a, tracked_tests=_SEL_TRACKED_TESTS)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"], **kw) == ["alpha"]
+
+
+def test_changed_modules_a_deleted_own_source_file_selects_via_glob_ownership():
+    # gamma owns its sources through a glob pattern (engine/pkg/*.py), not an
+    # explicit path list, unlike alpha/beta above. A deleted file under that
+    # glob must still select gamma from the changed path alone --
+    # module_owns_changed_path's fnmatch check treats a glob and a literal
+    # path the same way, so ownership style must not change the outcome.
+    cfg2 = {"defaults": {}, "modules": {
+        "gamma": {"why": "x", "mutate": ["engine/pkg/*.py"], "tests": ["tests/test_g.py"]},
+        "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
+    }}
+    tracked_engine_glob = ["engine/pkg/keep.py", "engine/b.py"]  # engine/pkg/gone.py deleted
+    kw = dict(tracked_engine=tracked_engine_glob, tracked_tests=_SEL_TRACKED_TESTS)
+    assert pilot.changed_modules(cfg2, ["gamma", "beta"], ["engine/pkg/gone.py"], **kw) == ["gamma"]
+
+
 def test_module_owns_changed_path_matches_tests_and_mutate_minus_skip():
     cfg2 = _sel_cfg()
     assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_a.py") is True
@@ -1485,6 +1513,21 @@ def test_markdown_excludes_skipped_mutants_from_cache_reuse_denominator():
     rows = [_row("m", "a.py", "f", "killed", retested=True, name="n1"),
             _row("m", "a.py", "f", "survived", retested=False, name="n2"),
             _row("m", "a.py", "g", "skipped", retested=False, name="n3")]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert (s["total"], s["checked"], s["retested_this_run"]) == (3, 2, 1)
+    md = mr.markdown(s, rows, None)
+    assert "**cache reuse**: 1 of 2 mutant(s) reused from cache, 1 re-tested this run." in md
+
+
+def test_summarize_excludes_a_retested_skipped_mutant_from_the_retested_count():
+    # Unlike the test above, this skipped mutant itself has
+    # retested_this_run=True -- build_rows() sets that whenever the mutmut
+    # config fingerprint changed, even though the mutant was never actually
+    # run. It must still not count toward retested_this_run, or the count
+    # can exceed `checked` and markdown's cache-reuse line understates reuse.
+    rows = [_row("m", "a.py", "f", "killed", retested=True, name="n1"),
+            _row("m", "a.py", "f", "survived", retested=False, name="n2"),
+            _row("m", "a.py", "g", "skipped", retested=True, name="n3")]
     s = mr.summarize(rows, "m", INFO, ["a.py"])
     assert (s["total"], s["checked"], s["retested_this_run"]) == (3, 2, 1)
     md = mr.markdown(s, rows, None)
