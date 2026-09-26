@@ -31,13 +31,20 @@
 !/EARNINGS_VOL_PROGRAM_PLAN.md
 !/guides/*.md
 !/docs/*.md
-!/docs/design/*.md
 !/engine/**/*.md
 !/checks/*.md
 !/tests/*.md
 !/tools/*.md
 !/tools/opencode_config.json
 !/tools/opencode_review_config.json
+
+# Per-component architecture docs: `ARCHITECTURE.md` at the repo root, or
+# next to any component's code, at any depth (no leading slash -- git
+# matches a slash-free pattern's basename at every level, not just the
+# root). This admits exactly that one filename; a sibling doc with any
+# other name under a directory not already allow-listed above stays
+# blocked by the default-deny, same as before.
+!ARCHITECTURE.md
 
 # ── ui/ (React/TypeScript client): narrow explicit allowlist ─────────────
 # TypeScript and JSON are not allowed globally above (only py/yaml/toml/

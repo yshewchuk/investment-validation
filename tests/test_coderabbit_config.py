@@ -1,11 +1,13 @@
-"""Structural checks for .coderabbit.yaml (spec_coderabbit_config).
+"""Structural checks for .coderabbit.yaml and the ARCHITECTURE.md docs
+(spec_coderabbit_config).
 
-Tier 0: parses the checked-in config and the repo tree only. No network, no
-data, no fitting.
+Tier 0: parses the checked-in config, the repo tree and .gitignore only. No
+network, no data, no fitting.
 """
 from __future__ import annotations
 # land: always-run
 
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -19,15 +21,23 @@ def _load_config():
         return yaml.safe_load(fh)
 
 
+def _is_ignored(relative_path: str) -> bool:
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", relative_path],
+        cwd=ROOT, check=False,
+    )
+    return result.returncode == 0
+
+
 def test_config_parses_as_a_mapping():
     config = _load_config()
     assert isinstance(config, dict)
 
 
-def test_code_guidelines_load_architecture_doc():
+def test_code_guidelines_load_architecture_docs():
     config = _load_config()
     patterns = config["knowledge_base"]["code_guidelines"]["filePatterns"]
-    assert "docs/ARCHITECTURE.md" in patterns
+    assert "**/ARCHITECTURE.md" in patterns
 
 
 def test_path_instructions_globs_match_existing_files():
@@ -38,3 +48,20 @@ def test_path_instructions_globs_match_existing_files():
         pattern = entry["path"]
         matches = [p for p in ROOT.glob(pattern) if p.is_file()]
         assert matches, f"path_instructions pattern {pattern!r} matches no existing file"
+
+
+def test_gitignore_admits_architecture_md_anywhere():
+    # Root and nested component docs must be trackable...
+    for rel in ("ARCHITECTURE.md", "engine/v2/ops/ARCHITECTURE.md",
+               "engine/v2/dashboard/ARCHITECTURE.md",
+               "engine/dashboard/ARCHITECTURE.md",
+               "brand_new_component/ARCHITECTURE.md"):
+        assert not _is_ignored(rel), f"{rel} should be admitted by .gitignore"
+    # ...but the same rule must not open the door to an unrelated file with
+    # a different name in a directory that has no allowlist of its own.
+    for rel in ("brand_new_component/NOTES.md", "brand_new_component/README.md"):
+        assert _is_ignored(rel), f"{rel} should still be blocked by the default-deny"
+
+
+def test_docs_dir_still_admits_plain_markdown():
+    assert not _is_ignored("docs/COMPONENT_ARCHITECTURE_TEMPLATE.md")

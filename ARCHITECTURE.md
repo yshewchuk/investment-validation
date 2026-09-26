@@ -1,14 +1,28 @@
 # Architecture
 
-This document is the architectural model reviewers (human or CodeRabbit) use
-to judge a change: does it sit in the right layer, does it point the right
-way, is it reachable from production, and does it respect the invariants
-below. It is derived from the enforced source (`checks/layer_map.py`,
+This is the root architecture document: the whole system at a high level —
+what each component owns, the layer map and enforced dependency direction,
+the production entrypoints and job graph, and the invariants and
+anti-patterns that hold across every component. Reviewers (human or
+CodeRabbit) use it, together with the touched component's own
+`ARCHITECTURE.md` (see `docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`), to judge
+a change: does it sit in the right layer, does it point the right way, is
+it reachable from production, and does it respect the invariants below.
+
+It is derived from the enforced source (`checks/layer_map.py`,
 `checks/import_layers.py`, `checks/legacy_adapters.json`,
 `engine/v2/ops/nightly.py`) and from `guides/system_rearchitecture.md`, not
 guessed. Where a guide and the enforced code disagree, the enforced code
-wins and the disagreement is noted below — a design doc must not repeat a
-stale guide claim as if it were current.
+wins and the disagreement is noted below — an architecture-doc update must
+not repeat a stale guide claim as if it were current.
+
+Component detail moves out of this document as each component gets its own
+`ARCHITECTURE.md` next to its code (e.g. `engine/v2/ops/ARCHITECTURE.md`).
+This PR gives that detailed treatment to `engine/v2/ops` and both
+dashboards (`engine/v2/dashboard`, `engine/dashboard`); the rest of
+`engine/v2/**` and legacy `engine/**` are still documented only here, at
+the level this root doc covers, until a follow-up PR gives them their own
+component doc.
 
 ## 1. Two trees
 
@@ -21,11 +35,17 @@ stale guide claim as if it were current.
   never by moving a legacy file across. It starts at zero exemptions on
   every layering rule; there is no legacy backlog to work through inside
   v2.
-- **`checks/*` and `tests/*`.** Verification and dev tooling. No production
-  package (`engine/v2/**`, and legacy `engine/**`) may import `checks/` —
-  enforced by `checks/import_layers.py`'s "production packages cannot
-  depend on verification or test code" and by `check_runtime_edges`'s
-  undeclared-process-edge rule.
+- **`checks/*` and `tests/*`.** Verification and dev tooling.
+  `checks/import_layers.py`'s two rules here both gate on `_is_v2(module)`
+  first, so they cover only `engine/v2/**` importers, never legacy
+  `engine/**`: "production packages cannot depend on verification or test
+  code" fires when a v2 module imports `checks.*`/`tests.*`;
+  `check_runtime_edges` fires when a v2 module calls a dynamic-import
+  primitive (`__import__`, `importlib.import_module`, etc.) or calls
+  `subprocess.*`/`os.system`/`os.popen` outside the two declared process
+  owners (`engine.v2.ops.executor`, `engine.v2.ops.legacy_adapter`). A
+  legacy module importing `checks/` or `tests/`, or shelling out from
+  outside those two modules, is not enforced against by either rule.
 - **`tools/*` and `experiments/*`.** Operator CLIs and the research program.
   Both may call into `engine/v2` and legacy `engine`, but neither is a
   production package other packages depend on.
@@ -59,9 +79,9 @@ can.
 | 6.0 / 7.0 | `engine/v2/research/` | store-reaching halves of `signal_screen.py`, `fill_quality.py`, `polygon_fills.py`'s read path | Snapshot-pinned research CLIs. **Guide vs. enforced code disagree here**: `system_rearchitecture.md`'s §4 owner table lists it at layer 6; `checks/layer_map.py` declares it twice (6.0 and 7.0) and `package_of`'s dict keeps the *last* definition, so the enforced layer is 7.0. Treat 7.0 as authoritative for any dependency check. |
 | 6.5 | `engine/v2/parity/` | numeric field groups + comparator from `checks/phase4_real.py` | The record comparator core the Phase 4 checker and the nightly parity report both call. `only_imports=(0.5,)` — it needs nothing above foundation. See §5. |
 | 7.0 | `engine/v2/serving/` | data half of `dashboard/render.py`, `earnings_app.py` | Bounded/paginated reads over saved records, the §6.4 financial display values, immutable release publication. |
-| 7.0 | `engine/v2/ops/` | new supervisor/catalog, `dashboard/nightly.py`, `bounded_run.py` | Durable jobs, leases, retry history, resource admission, the nightly job graph. See §4. |
+| 7.0 | `engine/v2/ops/` | new supervisor/catalog, `dashboard/nightly.py`, `bounded_run.py` | Durable jobs, leases, retry history, resource admission, the nightly job graph — see §4 and `engine/v2/ops/ARCHITECTURE.md`. |
 | 7.5 | `engine/v2/diagnosis/` | `dashboard/selfcheck.py`, the parity comparators | **Sink**: reads every layer's artifacts; imported by nothing. Re-exports `engine/v2/parity`'s comparator under its historical module names. |
-| 8.0 | `engine/v2/dashboard/`, `ui/` | formatting half of `render.py`, `dashboard/static/` | UI only. `only_imports=(7.0,)` — stricter than "below 8": it may import layer 7 *and nothing else*, not layers 0-6 directly. |
+| 8.0 | `engine/v2/dashboard/`, `ui/` | formatting half of `render.py`, `dashboard/static/` | UI only. `only_imports=(7.0,)` — stricter than "below 8": it may import layer 7 *and nothing else*, not layers 0-6 directly. See `engine/v2/dashboard/ARCHITECTURE.md`. |
 
 ### 2.1 Two splits that are load-bearing, not cosmetic
 
@@ -83,8 +103,9 @@ can.
   at 2). `checks/layer_map.py` enforces the table, not the prose, and the
   question of how Tier-4 feature materialization reaches a frozen model
   artifact without a direct features→models edge is left to the phase that
-  writes it. A design doc that adds a features→models import must address
-  this contradiction explicitly, not assume the prose settles it.
+  writes it. Any change that adds a features→models import must address
+  this contradiction explicitly in this doc, not assume the prose settles
+  it.
 
 ## 3. Enforced import direction
 
@@ -118,21 +139,19 @@ Every `engine/v2/*` package also carries a README with a fixed section order
 importing anything else — including a name with no leading underscore — fails
 that check. Its `Consumers` list is checked against the real import graph: a
 claimed consumer that does not import, or an omitted one that does, is a
-failure rather than a stale sentence. A design doc that adds a new public
-name or a new consumer must update that package's README in the same change.
+failure rather than a stale sentence. A change that adds a new public name
+or a new consumer must update that package's README in the same change.
 
 ## 4. Production entrypoints and the job graph
 
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
   today. Its own module docstring states the load-bearing order: refresh →
   validate → score → ledger → render → selfcheck → publish → flags → backup,
-  each step gating the next. It stays unchanged until Phase 7 cutover.
+  each step gating the next. It stays unchanged until Phase 7 cutover. See
+  `engine/dashboard/ARCHITECTURE.md` for the full per-step detail.
 - **v2 supervisor — `python3 -m engine.v2.ops`.** The operator interface is
-  the versioned command protocol this CLI exposes (`engine/v2/ops/cli.py`):
-  `init`/`doctor`/`health`, `serve` (starts the supervisor loop), `plan`,
-  `submit`, `get`/`logs`/`cancel`/`resume`/`explain`, `snapshot`
-  `plan-import`/`submit`/`promote`/`rollback`, `ledger import-history`,
-  `price-history capture`, `price-refresh`, `reconcile`, `rescore`. No other
+  the versioned command protocol `engine/v2/ops/cli.py` exposes; see
+  `engine/v2/ops/ARCHITECTURE.md` for the full subcommand tree. No other
   production package imports `engine.v2.ops` Python modules directly; they
   consume versioned artifacts through this protocol instead. The one
   documented exception is `engine.v2.dashboard._server`'s lazy import of
@@ -140,26 +159,18 @@ name or a new consumer must update that package's README in the same change.
   server's `POST /actions/refresh` — it queues jobs and returns job ids; it
   never starts the supervisor loop or executes inline.
 - **v2 nightly job graph — `engine/v2/ops/nightly.py`.** `GRAPH` declares
-  each stage's parents (`refresh` → `finality` → `features` → `score` →
-  `decision_validation` → `decision_commit`/`settlement`,
-  `features` → `model_evidence`, `decision_commit` → `export` → `projection`
-  ← `model_evidence`, `projection` → `selfcheck`, `selfcheck`/`engineering`
-  → `publication` → `delivery`, `decision_commit` → `backup`, and the
-  optional `native_parity` off `score`). `graph_order()` derives a
-  deterministic topological order from `GRAPH`; nobody hand-maintains a
-  separate ordered list. `OPTIONAL` marks stages whose failure degrades the
-  receipt but never blocks the graph (`settlement`, `model_evidence`,
-  `engineering`, `backup`, `native_parity`).
-  **`NO_JOB_STAGES`** (currently `{"native_parity"}`) names stages that are
-  in `GRAPH` for planning and receipt purposes but that *never become a
-  submitted job* in production — `build_nightly_plan`'s stage list is
-  filtered against it. **A stage listed in `NO_JOB_STAGES` runs nowhere in
-  production even though it appears in every plan and every graph-shaped
-  diagram.** Coordinator-side effects for `export`, `engineering`,
-  `publication` and `backup` live in `engine/v2/ops/effects_graph.py`,
-  called from `supervisor.Service._coordinator_effect` — the trivial worker
-  for each of those four job kinds never touches the catalog; all real
-  catalog/outbox/filesystem work happens in the coordinator-side function.
+  each stage's parents; `graph_order()` derives a deterministic topological
+  order from it, so nobody hand-maintains a separate ordered list. See
+  `engine/v2/ops/ARCHITECTURE.md` for the full stage graph and its
+  `OPTIONAL`/`NO_JOB_STAGES` markings. **The one trap worth stating here**:
+  `NO_JOB_STAGES` (currently `{"native_parity"}`) names a stage that is in
+  `GRAPH` for planning and receipt purposes but that *never becomes a
+  submitted job* in production — the filter is applied where the real job
+  list is built (`_stage_sequence`, called from `build_legacy_job_requests`),
+  not where the plan document is built (`build_nightly_plan`), so the
+  plan's own `"order"` field still lists `native_parity` unfiltered. A
+  stage listed in `NO_JOB_STAGES` runs nowhere in production even though it
+  appears in every plan and every graph-shaped diagram.
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
@@ -172,9 +183,32 @@ name or a new consumer must update that package's README in the same change.
   sufficient for reachability. `refresh_action` and `score_batch` both
   passed this check while unreachable from any production entrypoint,
   because nothing in the matrix asked "and something in the graph above
-  actually calls it." A design doc's production call path (§7) must trace
-  the real chain — entrypoint → stage → module → new code — not cite a
-  passing inventory row as proof.
+  actually calls it." An architecture-doc update's production call path
+  must trace the real chain — entrypoint → stage → module → new code — not
+  cite a passing inventory row as proof.
+
+### 4.1 Production flow
+
+```mermaid
+flowchart LR
+    subgraph Legacy["engine/* (legacy, frozen until cutover)"]
+        LN["engine.dashboard.nightly<br/>(cron/manual)"] --> LB["legacy board / ledger /<br/>dashboard/published/**"]
+    end
+    subgraph V2["engine/v2/* (native, shadow-only)"]
+        CLI["engine/v2/ops CLI"] --> SUP["supervisor.Service (serve)"]
+        SUP --> DAG["nightly job graph<br/>(nightly.py GRAPH)"]
+        DAG --> PUB["shadow publication /<br/>delivery (private artifacts)"]
+        DASH["engine.v2.dashboard._server"] -. "lazy import:<br/>cli.refresh_action" .-> CLI
+    end
+    Tools["tools/*, experiments/*"] --> Legacy
+    Tools --> V2
+```
+
+This is the production shape only — which entrypoint starts which run —
+not the internal stage dependencies (§4's `GRAPH` bullet and
+`engine/v2/ops/ARCHITECTURE.md` cover those). `build_nightly_plan` refuses
+any `mode` other than `"shadow"`: the v2 side is shadow-only end to end,
+and nothing on this diagram writes to the legacy board.
 
 ## 5. Invariants
 
@@ -215,12 +249,18 @@ name or a new consumer must update that package's README in the same change.
 - **Failure semantics are stated, not implied.** Every new or changed
   stage/effect states its behaviour for: a missing input, a cache, a retry,
   a transaction, a partial write, and idempotency (the 4c R1–R6 template —
-  see `docs/design/TEMPLATE.md`). "It raises" is not a failure semantic.
+  see `docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`). "It raises" is not a
+  failure semantic.
 - **Nothing published carries a local path or raw exception text.**
   `engine/v2/ops/worker.py`'s convention is the model: a caught traceback is
   written to a private per-attempt file and never put on the result pipe or
   any artifact a release can reach. A `Problem` carries a code and a
   message, never a formatted stack trace or an absolute filesystem path.
+  Any other free-text field that can reach a published bundle — a
+  `degraded_reason`, a flag's `detail` string, an exception's `str()` — is
+  the same leak path and must be sanitised before it is written; it is not
+  exempt just because it looks like a short message rather than a stack
+  trace.
 - **Experiments default to `--no-ledger` for smoke runs.** `LEDGER.csv` is a
   multiple-testing record, not a run log, and runners dedupe on spec hash —
   a smoke-test row can permanently occupy the slot the real run needed. A
@@ -246,8 +286,8 @@ second inventory of the same kind.
   discovery tool that asks "does this dotted name import and exist" and
   reports success is answering a weaker question than "does something on a
   production path call this." See `tools/phase6_inventory.py` above — it is
-  the right shape of check with the wrong bar; a design doc must show the
-  actual call chain, not point at a green row.
+  the right shape of check with the wrong bar; an architecture-doc update
+  must show the actual call chain, not point at a green row.
 - **A comparator that compares a system against itself, or against a
   mutated copy of its own output.** A "parity" test that feeds the native
   path's own prior output back in as the expected value, or diffs a record
@@ -268,27 +308,52 @@ second inventory of the same kind.
   append in place, and a process crash between the two leaves them
   disagreeing about what happened. Keep the durable side-effect and the
   transactional write on two sides of an explicit commit-then-append (or
-  append-then-commit-with-replay) boundary, and say in the design doc which
-  side wins if the process dies between them.
+  append-then-commit-with-replay) boundary, and say in the component's
+  `ARCHITECTURE.md` which side wins if the process dies between them.
+- **A new idempotency key that collides with an existing legacy row.** A
+  key scheme checked for uniqueness only against other native writers, not
+  against the legacy rows sharing its table/file/keyspace. Example: an
+  experiment ledger "ran" row keyed `(experiment_id, stage)` that a legacy
+  run already wrote under the same key — the real run then silently reuses,
+  is refused, or overwrites a slot it never wrote to. A new idempotency key
+  must be checked against whatever legacy already put in that keyspace, not
+  just against sibling native rows.
+- **A failure or finding waved off as "pre-existing" without checking the
+  real baseline.** `main` may already be red, or `tools/phase6_inventory.py`
+  may already carry `UNOWNED` rows; that is not license to add another one.
+  Compare the PR's own test failures and inventory findings against main's
+  *current* run, not against "green" — a failure or an `UNOWNED` row that is
+  new versus main is a defect this PR introduced, even though the baseline
+  it branched from was not clean to begin with.
+- **A `pull_request`-triggered workflow with no `concurrency` group.**
+  Every push to an open PR re-triggers its workflows; without a
+  `concurrency` group (keyed on the ref/PR) and `cancel-in-progress: true`,
+  older runs queue up behind newer ones instead of being cancelled, burning
+  CI minutes on a result a newer push already superseded.
 
-## 7. Writing a design doc
+## 7. Writing an architecture-doc update
 
-Every non-trivial change gets a `docs/design/<YYYY-MM-DD>-<slug>.md` before
-any code is written, using `docs/design/TEMPLATE.md`'s section order:
-Context (with a link to the spec); Decisions (options considered, choice,
-why); Layers & modules touched, with dependency direction checked against
-§2-§3 above; Production call path, entrypoint → ... → new code, per §4 (if
-nothing in production reaches it, say so and why); Changed interfaces and
-every caller of each, found by grep including callers outside the diff;
-Failure semantics per the 4c R1–R6 template; Invariants touched, citing the
-specific §5 bullet; Test plan, one test per acceptance criterion plus how
-that test could fail; Out of scope; and, if the implementation deviates
-from the doc, a "Changed during implementation" note added in the same push
-that deviates.
+There is no per-task design doc. A non-trivial change updates architecture
+documentation directly, before or alongside the code: this root doc for a
+cross-cutting change (a new layer, a new invariant, a change to the
+production entrypoints or job graph), and/or the touched component's
+`ARCHITECTURE.md` (`docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`'s section
+order) for anything scoped to one component — changed interfaces,
+dependencies, inputs/outputs, or failure semantics. The task's options
+considered and the reasoning for the choice made go in the PR body, not in
+a separate file that outlives the PR and drifts from the code it once
+described: a doc that lives beside code that keeps changing stays current,
+a doc written once per task and never touched again does not.
+
+A PR that changes a component's public interface, its dependencies, its
+inputs/outputs, or its failure semantics without updating that component's
+`ARCHITECTURE.md` in the same PR is incomplete, even if the code and tests
+are otherwise correct.
 
 A change under ~50 lines with no new interface or behaviour (a typo, a CI
 flag, a one-line fix) is exempt and says so in its PR body instead
-("Design: n/a (trivial)" plus the reason).
+("Docs: n/a (trivial)" plus the reason).
 
-Every design doc and this document itself are public: no strategy
-thresholds, gate-logic numbers, edge figures, or local filesystem paths.
+Every `ARCHITECTURE.md` — this one and every component's — is public: no
+strategy thresholds, gate-logic numbers, edge figures, or local filesystem
+paths.
