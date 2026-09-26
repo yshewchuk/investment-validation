@@ -190,6 +190,23 @@ def _add_provider_account_command(commands):
                           help="calls held back from ordinary admission")
 
 
+def _add_decisions_command(commands):
+    """``ops decisions supersede`` — submits a decisions_supersede job;
+    the coordinator commit (decision_commit.commit_supersede) does the
+    real write, never this process."""
+    decisions = commands.add_parser("decisions")
+    decisions.add_argument("--root", default=argparse.SUPPRESS)
+    decisions_sub = decisions.add_subparsers(dest="decisions_command", required=True)
+    supersede = decisions_sub.add_parser("supersede")
+    supersede.add_argument("--root", default=argparse.SUPPRESS)
+    supersede.add_argument("--row-id", required=True,
+                           help="the target's exact decision_id (prediction:<row_id>) or exact "
+                                "row_id; no prefix or fuzzy match")
+    supersede.add_argument("--reason", required=True)
+    supersede.add_argument("--from-json", type=Path, required=True,
+                           help="new decision payload (JSON object); must contain row_id")
+
+
 def _add_rescore_command(commands):
     """The read-only ``ops rescore`` subparser (see :func:`rescore_command`)."""
     rescore = commands.add_parser("rescore")
@@ -272,6 +289,7 @@ def parser():
     _add_provider_account_command(commands)
     _add_snapshot_commands(commands)
     _add_ledger_commands(commands)
+    _add_decisions_command(commands)
     _add_price_refresh_command(commands)
     _add_price_history_commands(commands)
     for name in ("get", "logs", "cancel", "resume", "explain"):
@@ -533,6 +551,8 @@ def dispatch(args, root, conn, clock):
         return snapshot_command(args, root, conn, clock)
     if args.command == "ledger":
         return ledger_command(args, root, conn, clock)
+    if args.command == "decisions":
+        return decisions_command(args, root, conn, clock)
     if args.command == "price-history":
         return price_history_command(args, root, conn, clock)
     if args.command == "provider-account":
@@ -919,6 +939,51 @@ def ledger_command(args, root, conn, clock):
                   details={"source_root": str(args.source_root)})
     return import_history(conn, root, args.source_root, through=through,
                           dry_run=args.dry_run, clock=clock)
+
+
+def decisions_command(args, root, conn, clock):
+    """``ops decisions supersede`` — submits, never writes the ledger."""
+    if args.decisions_command == "supersede":
+        return _decisions_supersede(args, root, conn, clock)
+
+
+def _decisions_supersede(args, root, conn, clock):
+    """Submit one ``decisions_supersede`` job for the coordinator to commit.
+
+    The payload is validated here, before submission, with the same rules
+    ``decisions.insert`` applies (``validated_supersede_payload``);
+    ``commit_supersede`` re-applies them under the fence. This process
+    never calls ``insert`` itself.
+    """
+    from engine.v2.contracts import JobSpec, SubmitRequest
+    from engine.v2.ops.decision_commit import validated_supersede_payload
+    from engine.v2.ops.profiles import profile_named
+
+    if not args.reason:
+        raise fail("INVALID_REQUEST", "--reason must not be empty")
+    try:
+        new_payload = json.loads(args.from_json.read_text())
+    except (OSError, json.JSONDecodeError):
+        raise fail("INVALID_REQUEST", "--from-json is not a readable JSON document") from None
+    new_payload = validated_supersede_payload(new_payload)
+    profile = profile_named(DEFAULT_POLICY, "io_fetch")
+    repo_root = Path(__file__).resolve().parents[3]
+    job = JobSpec(
+        kind="decisions_supersede",
+        implementation_ref=content_hash(worker_source_manifest(repo_root)),
+        spec_hash=None,
+        environment_ref=content_hash(environment_identity(profile.thread_count or profile.cpu_count)),
+        parameters={"expected_ids": ["decisions_supersede"], "old_decision_id": args.row_id,
+                    "reason": args.reason, "new_payload": new_payload},
+        input_refs=(), output_namespace="shadow", resource_class="io_fetch",
+        retry_policy_ref="bounded", checkpoint_contract_ref="decisions_supersede_receipt.v1.0")
+    idempotency_key = content_hash({"old_decision_id": args.row_id, "reason": args.reason,
+                                    "new_payload": new_payload})
+    policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+    receipt = submit(conn, registry(), policy, SubmitRequest(
+        namespace="shadow", idempotency_key=idempotency_key, principal="operator", job=job),
+        clock=clock)
+    return to_document(receipt)
 
 
 def capture_command(args):

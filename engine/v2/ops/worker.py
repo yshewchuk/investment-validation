@@ -167,7 +167,8 @@ def dispatch(worker, parameters, root, *, envelope=None):
         return _dispatch_adhoc_rescore(parameters, root)
     if worker in ("snapshot_import", "legacy_rebuild_candidate"):
         return _dispatch_snapshot_import(worker, parameters, root)
-    if worker in ("ledger_export", "engineering_gate", "publication", "backup"):
+    if worker in ("ledger_export", "engineering_gate", "publication", "backup",
+                  "decisions_supersede"):
         return _dispatch_effect_receipt(worker, parameters, root)
     if worker == "artifact_check":
         output = root / "receipt.json"
@@ -263,12 +264,14 @@ def _dispatch_snapshot_import(worker, parameters, root):
 def _dispatch_effect_receipt(worker, parameters, root):
     """Trivial pure worker for a coordinator-driven effect stage (P2-5/Task5).
 
-    ``ledger_export``, ``engineering_gate``, ``publication`` and ``backup``
-    never touch the catalog or the outbox from inside a subprocess; all of
-    that real work happens in the supervisor's coordinator effect
-    (``engine.v2.ops.effects_graph``), after this attempt's tiny receipt is
-    validated, inside the same fenced finish path every other coordinator
-    effect uses. This worker only proves the attempt ran.
+    ``ledger_export``, ``engineering_gate``, ``publication``, ``backup`` and
+    P6-3's ``decisions_supersede`` never touch the catalog or the outbox from
+    inside a subprocess; all of that real work happens in the supervisor's
+    coordinator effect (``engine.v2.ops.effects_graph``, or
+    ``engine.v2.ops.decision_commit.commit_supersede`` for the last), whose
+    returned closure the supervisor runs inside the fenced ``commit_attempt``
+    transaction -- exactly like every other coordinator effect. This worker
+    only proves the attempt ran.
 
     The output is named ``<kind>_receipt``, never the bare kind name: the
     coordinator effect for ``ledger_export``/``engineering_gate`` publishes

@@ -115,3 +115,26 @@ def test_opencode_config_denies_the_dangerous_edits_and_everything_else():
     assert config["permission"]["bash"]["*"] == "deny"
     assert config["permission"]["edit"]["tools/oc_check.py"] == "deny"
     assert config["permission"]["edit"][".oc_logs/*"] == "deny"
+
+def test_bounded_run_exit_75_is_a_resource_wait_not_a_test_failure(monkeypatch, capsys):
+    done = subprocess.CompletedProcess([], 75, "", "[bounded] RESOURCE WAIT timed out\n")
+    monkeypatch.setattr(oc_check.subprocess, "run", lambda *a, **k: done)
+    monkeypatch.setattr(oc_check, "STEPS", [])
+    assert oc_check.run("pytest", ["x"], {}, 1) is False
+    out = capsys.readouterr().out
+    assert "resource wait timed out (bounded_run exit 75)" in out and "box busy, retry" in out
+    assert "FAIL" not in out
+    assert oc_check.STEPS[-1]["result"] == "RESOURCE WAIT TIMEOUT"
+
+
+def test_exit_75_from_a_gate_is_still_a_plain_failure(monkeypatch, capsys):
+    done = subprocess.CompletedProcess([], 75, "", "")
+    monkeypatch.setattr(oc_check.subprocess, "run", lambda *a, **k: done)
+    monkeypatch.setattr(oc_check, "STEPS", [])
+    assert oc_check.run("hygiene", ["x"], {}, 1) is False
+    assert "FAIL (rc=75)" in capsys.readouterr().out
+
+
+def test_pytest_step_bounds_its_resource_wait_below_its_own_timeout():
+    source = (ROOT / "tools" / "oc_check.py").read_text()
+    assert '"--max-wait-s", "600"' in source

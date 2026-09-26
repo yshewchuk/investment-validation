@@ -133,27 +133,41 @@ def iter_orats_rows(
         stats.setdefault("unreadable", 0)
 
     for entry in iter_cached("orats", endpoint, root=root):
-        if stats is not None:
-            stats["scanned"] += 1
-        try:
-            payload = entry.json()
-        except (OSError, EOFError, ValueError) as exc:
-            if stats is not None:
-                stats["unreadable"] += 1
-            _flag_bad_payload(entry.source_id, "unreadable fetch-store body",
-                              f"{type(exc).__name__}: {exc}")
-            continue
-        shape, rows = payload_shape(payload)
-        if shape == "unrecognized":
-            if stats is not None:
-                stats["unrecognized"] += 1
-            _flag_bad_payload(entry.source_id, "unrecognized ORATS envelope",
-                              f"payload type {type(payload).__name__}")
-            continue
-        if not rows:
-            if stats is not None:
-                stats["empty"] += 1
-            continue
-        if stats is not None:
-            stats["payloads"] += 1
-        yield SourceRows(entry.source_id, rows, entry.params)
+        outcome, source = classify_entry(entry, stats)
+        if outcome == "payload":
+            yield source
+
+
+def count_outcome(stats: dict | None, outcome: str) -> None:
+    """Record one scanned entry's outcome in ``stats`` (see :func:`iter_orats_rows`)."""
+    if stats is None:
+        return
+    stats["scanned"] = stats.get("scanned", 0) + 1
+    key = {"payload": "payloads"}.get(outcome, outcome)
+    stats[key] = stats.get(key, 0) + 1
+
+
+def classify_entry(entry, stats: dict | None = None) -> tuple[str, SourceRows | None]:
+    """Parse one cached entry: ``(outcome, rows)``, counting and flagging as it goes.
+
+    ``outcome`` is ``payload`` (rows returned), ``empty``, ``unreadable`` or
+    ``unrecognized``; the last two are quarantine-flagged.
+    """
+    try:
+        payload = entry.json()
+    except (OSError, EOFError, ValueError) as exc:
+        count_outcome(stats, "unreadable")
+        _flag_bad_payload(entry.source_id, "unreadable fetch-store body",
+                          f"{type(exc).__name__}: {exc}")
+        return "unreadable", None
+    shape, rows = payload_shape(payload)
+    if shape == "unrecognized":
+        count_outcome(stats, "unrecognized")
+        _flag_bad_payload(entry.source_id, "unrecognized ORATS envelope",
+                          f"payload type {type(payload).__name__}")
+        return "unrecognized", None
+    if not rows:
+        count_outcome(stats, "empty")
+        return "empty", None
+    count_outcome(stats, "payload")
+    return "payload", SourceRows(entry.source_id, rows, entry.params)
