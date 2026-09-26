@@ -16,6 +16,8 @@ import sqlite3
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from tools import v2_session_evidence_check as sec
 from tools.phase6_inventory import DECLARATIONS, load_declarations
 
@@ -176,6 +178,31 @@ def test_window_end_with_explicit_zero_fraction_is_not_widened(tmp_path):
     assert result["rows_covered"] == 0
     assert result["rows"][0]["status"] == "uncovered"
     assert result["rows"][0]["source"] == "job"
+
+
+def test_window_start_inside_widened_final_second_is_accepted(tmp_path):
+    declarations = _declarations(tmp_path, _row("job-row", "job:legacy_score"))
+    catalog = _catalog(tmp_path / "catalog.sqlite", jobs=[("j1", "legacy_score")],
+                       attempts=[("a1", "j1", "succeeded", "2026-09-25T23:59:59.500000Z")])
+
+    result = sec.check(
+        session=SESSION, window_start="2026-09-25T23:59:59.412000Z",
+        window_end="2026-09-25T23:59:59Z",
+        catalog=catalog, declarations=declarations, evidence_dir=tmp_path / "evidence")
+
+    assert result["rows_uncovered"] == []
+    assert result["rows_covered"] == 1
+
+
+def test_reversed_window_still_rejected_after_widening(tmp_path):
+    declarations = _declarations(tmp_path, _row("job-row", "job:legacy_score"))
+
+    with pytest.raises(ValueError):
+        sec.check(
+            session=SESSION, window_start="2026-09-26T00:00:01Z",
+            window_end="2026-09-25T23:59:59Z",
+            catalog=_catalog(tmp_path / "catalog.sqlite"),
+            declarations=declarations, evidence_dir=tmp_path / "evidence")
 
 
 def test_succeeded_attempt_outside_the_window_is_not_evidence(tmp_path):

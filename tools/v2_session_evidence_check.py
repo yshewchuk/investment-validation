@@ -422,8 +422,6 @@ def check(*, session: str, window_start: str, window_end: str, catalog: Path,
     if not evidence_path.is_absolute():
         evidence_path = root / evidence_path
     start, end = parse_instant(window_start), parse_instant(window_end)
-    if end < start:
-        raise ValueError(f"--window-end {window_end!r} is before --window-start {window_start!r}")
     if "." not in window_end:
         # An inclusive --window-end with no fractional seconds at all (the
         # runbook's own example, "...T23:59:59Z") must cover the whole last
@@ -439,6 +437,8 @@ def check(*, session: str, window_start: str, window_end: str, catalog: Path,
         # separately) fixes every downstream use: end_wire, context["end"],
         # and every _in_window(..., end) call.
         end = end.replace(microsecond=999999)
+    if end < start:
+        raise ValueError(f"--window-end {window_end!r} is before --window-start {window_start!r}")
     catalog_path = Path(catalog)
     if not catalog_path.is_absolute():
         catalog_path = root / catalog_path
