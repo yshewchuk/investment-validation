@@ -1059,6 +1059,16 @@ REGISTERED_RUNNERS = frozenset({
     "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
 })
 
+#: Wall-clock budget for one registered legacy runner subprocess. Sized to
+#: the experiment_heavy resource profile (profiles.py: 5 CPUs, 5.5 GiB,
+#: 10 GiB scratch, heavy+disk_heavy) -- long enough for a full OOS
+#: evaluation pass over the registered runner's declared folds, short
+#: enough that a hung subprocess is reclaimed within one nightly window.
+#: 3600s carries over unchanged from slice 10; no runner has been timed at
+#: real economic scale yet, so it stays until a real primary run's
+#: wall-clock is measured.
+LEGACY_RUNNER_TIMEOUT_S = 3600
+
 
 def run_legacy_script(root, script, args=()):
     """Run a registered legacy runner in a private root with smoke protection."""
@@ -1073,7 +1083,7 @@ def run_legacy_script(root, script, args=()):
     import subprocess
     command = [sys.executable, "-u", str(script_path), "--no-ledger"]
     return subprocess.run(command, cwd=base, check=False,
-                          capture_output=True, text=True, timeout=3600)
+                          capture_output=True, text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
 
 
 # --------------------------------------------------------------------------

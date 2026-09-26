@@ -20,11 +20,20 @@ Regression coverage for the 2026-09-15 memory fixes:
 """
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
 from engine.data import store
-from engine.dashboard.model_evidence import _release_free_pages, _replay_trades, _run_isolated
+from engine.dashboard.model_evidence import (
+    EVIDENCE_SCHEMA_VERSION,
+    _release_free_pages,
+    _replay_trades,
+    _run_isolated,
+    build_model_evidence,
+    evidence_path,
+)
 
 
 def _trades_row(trade_id, year, provenance, ticker="AAPL"):
@@ -132,3 +141,51 @@ def test_run_isolated_passes_kwargs_through():
     ok, value = _run_isolated(_isolated_add, a=10, b=32)
     assert ok is True
     assert value["result"] == 42
+
+
+# --------------------------------------------------------------------------
+# build_model_evidence's cache-hit rule must also check EVIDENCE_SCHEMA_VERSION,
+# not just the artifact-sha256 fingerprint (2026-09-26 fix: a champion's cached
+# reason string could carry an absolute local path from before _sanitize_reason
+# existed, and the artifact_sha256 the fingerprint is keyed on never changed
+# when that fix landed, so the fingerprint alone could never see it).
+# --------------------------------------------------------------------------
+
+class _EmptyRegistry:
+    """A registry with no champions -- keeps this test about the cache-hit
+    rule itself, not about running a real champion's dataset rebuild."""
+
+    entries = []
+
+
+def test_build_model_evidence_ignores_a_cache_entry_from_an_older_schema_version(tmp_root):
+    path = evidence_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stale = {
+        "generated_at": "2026-09-16T00:00:00+00:00",
+        "fingerprint": {},  # matches _EmptyRegistry's empty champion set
+        "models": {"stale-marker": "should never be returned"},
+    }
+    path.write_text(json.dumps(stale))
+
+    out = build_model_evidence(registry=_EmptyRegistry())
+
+    assert out["schema_version"] == EVIDENCE_SCHEMA_VERSION
+    assert out["models"] != stale["models"]
+    assert out["generated_at"] != stale["generated_at"]
+
+
+def test_build_model_evidence_reuses_a_cache_entry_matching_the_current_schema_version(tmp_root):
+    path = evidence_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = {
+        "generated_at": "2026-09-26T00:00:00+00:00",
+        "fingerprint": {},
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "models": {"cached-marker": "should be returned as-is"},
+    }
+    path.write_text(json.dumps(fresh))
+
+    out = build_model_evidence(registry=_EmptyRegistry())
+
+    assert out == fresh

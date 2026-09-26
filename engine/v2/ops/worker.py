@@ -296,11 +296,62 @@ def _dispatch_effect_receipt(worker, parameters, root):
             "no_work": not parameters["expected_ids"]}
 
 
+def _runner_headline(root):
+    """The headline metrics a legacy runner wrote into its own results JSON.
+
+    ``engine.evaluate`` writes ``results/metrics_<hash>.json`` (its
+    ``headline`` block is exactly what ``experiments.lib.record_evaluation``
+    puts in the ledger); a runner that writes no such file yields ``{}`` and
+    the coordinator's ran row records ``metrics_source: unavailable``.
+    """
+    results = Path(root) / "results"
+    if not results.is_dir():
+        return {}
+    for path in sorted(results.glob("metrics_*.json")):
+        try:
+            document = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        headline = document.get("headline") if isinstance(document, dict) else None
+        if not isinstance(headline, dict):
+            continue
+        return {"mean": headline.get("mean", ""),
+                "sharpe_trade": headline.get("sharpe_trade", "")}
+    return {}
+
+
+def _experiment_failure(receipt):
+    """The typed ``OpsError`` for a failed experiment attempt.
+
+    The runner's own typed problem (code + details, e.g. a nonzero
+    returncode's stderr tail) is carried through the receipt so it survives
+    ``run_experiment``'s status capture and reaches ``worker.main``'s private
+    ``failure_details.json`` -- never the public failure message.
+    """
+    evidence = receipt.get("evidence") or {}
+    details = {"status": receipt["status"], "error_code": evidence.get("error_code")}
+    details.update(evidence.get("failure_details") or {})
+    return fail(evidence.get("failure_code") or "VALIDATION_FAILED",
+                "experiment run did not succeed", details=details)
+
+
 def _dispatch_experiment(parameters, root):
-    """P6 slice 10: run one smoke-mode experiment under admission. Pure
-    function of ``parameters`` and staging, like ``_dispatch_adhoc_rescore``
-    — the runner subprocess writes only inside ``root``, never the shared
-    legacy tree, so this carries no ``store_domains`` lease."""
+    """P6 slice 10: run one experiment under admission. Pure function of
+    ``parameters`` and staging, like ``_dispatch_adhoc_rescore`` — the runner
+    subprocess writes only inside ``root``, never the shared legacy tree, so
+    this carries no ``store_domains`` lease.
+
+    ``no_ledger=False`` (P6 slice 11) selects ``mode="primary"`` for the
+    coordinator's durable registration and ledger append. The runner
+    subprocess itself is ALWAYS invoked through
+    :func:`run_legacy_script`, which hardcodes ``--no-ledger``: a killed and
+    retried attempt must never be able to double-append a CSV, and the one
+    real ledger row is appended by the coordinator effect instead.
+
+    A registered legacy runner that exits nonzero is a typed failure, never
+    a success with whatever REPORT.md it happened to write first; its stderr
+    tail travels in the problem's details.
+    """
     from engine.v2.ops.experiments import (
         experiment_spec_from_document,
         run_experiment,
@@ -308,8 +359,7 @@ def _dispatch_experiment(parameters, root):
     )
     from engine.v2.ops.legacy_adapter import run_legacy_script
 
-    if not parameters.get("no_ledger", True):
-        raise fail("INVALID_REQUEST", "worker only supports smoke runs")
+    mode = "smoke" if parameters.get("no_ledger", True) else "primary"
     document = json.loads((root / "spec.json").read_text())
     spec = experiment_spec_from_document(document)
     runner_id = parameters["runner"]
@@ -317,17 +367,17 @@ def _dispatch_experiment(parameters, root):
         runner, synthetic = synthetic_fixture_runner, True
     else:
         def runner(*, run_dir, no_ledger):
-            if not no_ledger:
-                raise fail("INVALID_REQUEST", "worker only supports smoke runs")
             completed = run_legacy_script(root, runner_id)
-            return {"returncode": completed.returncode}
+            if completed.returncode != 0:
+                raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
+                           details={"returncode": completed.returncode,
+                                    "stderr_tail": (completed.stderr or "")[-2000:]})
+            return {"returncode": completed.returncode, "headline": _runner_headline(root)}
         synthetic = False
-    receipt = run_experiment(spec, root, root, runner=runner, mode="smoke", synthetic=synthetic)
+    receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
-        raise fail("VALIDATION_FAILED", "experiment run did not succeed",
-                   details={"status": receipt["status"],
-                            "error_code": receipt["evidence"].get("error_code")})
+        raise _experiment_failure(receipt)
     expected = parameters["expected_ids"]
     return {"outputs": [{"name": "experiment_receipt", "path": "experiment_receipt.json",
                          "schema": "experiment_receipt.v1.0"}],

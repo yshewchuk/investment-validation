@@ -52,9 +52,17 @@ GRAPH = {
     # the refresh stage.
     "computed_moves_refresh": ("refresh",),
     "forward_calendar_refresh": ("refresh",),
+    # spec_ns_c: the per-night native-vs-legacy parity report, parented on
+    # "score" because that is the last stage whose rows both sides can read.
+    # OPTIONAL on purpose: a parity mismatch (or a report-write failure) is
+    # REPORTED and degrades the receipt (G2), never blocks the shadow board.
+    # The stage stays in the fixed graph in every mode; its handler returns
+    # {"status": "not_applicable"} when the plan serves legacy rows.
+    "native_parity": ("score",),
 }
 OPTIONAL = frozenset({"settlement", "model_evidence", "engineering", "backup",
-                      "computed_moves_refresh", "forward_calendar_refresh"})
+                      "computed_moves_refresh", "forward_calendar_refresh",
+                      "native_parity"})
 
 
 @dataclass(frozen=True)
@@ -105,7 +113,7 @@ def _implementation(root: Path) -> str:
 
 
 def build_nightly_plan(source_root: Path | str, session: str, *, mode="shadow",
-                       read_set=(), clock=None) -> dict:
+                       read_set=(), clock=None, shadow_serving_scorer="native") -> dict:
     if mode != "shadow":
         raise fail("INVALID_REQUEST", "production nightly activation is disabled")
     from engine.v2.foundation import SystemClock, format_timestamp
@@ -117,7 +125,12 @@ def build_nightly_plan(source_root: Path | str, session: str, *, mode="shadow",
             # it for the real CLI path; every stage built off this SAME plan
             # dict (including a retry) carries this one value.
             "decision_clock": format_timestamp(clock.now()),
-            "read_set": list(read_set), "effects": ["private_shadow_artifacts"]}
+            "read_set": list(read_set), "effects": ["private_shadow_artifacts"],
+            # G5 (spec_ns_b): the shadow-serving scorer is an explicit plan
+            # record, read by ``native_shadow_serving_mode`` -- never an env
+            # var or a CLI flag with no plan behind it.  Additive by default:
+            # the value only changes how the shadow board renders its rows.
+            "shadow_serving_scorer": shadow_serving_scorer}
 
 
 def _legacy_action(stage):
@@ -194,12 +207,32 @@ def _generation_pin(plan):
 def _publication_bindings(keys):
     return {"bundle.tar": _job_output("projection", keys),
             "selfcheck.json": _job_output("selfcheck", keys),
-            "engineering_gate.json": _job_output("engineering_gate", keys),
             # P2-C03: the independent anchor for "which session does this
             # release speak for" — never trust the decisions watermark's own
             # occurrence alone (a stale one for the wrong session must still
             # refuse the decision gate; see effects_graph.publication_effect).
-            "finality.json": _job_output("finality", keys)}
+            "finality.json": _job_output("finality", keys),
+            "engineering_gate.json": _job_output("engineering_gate", keys)}
+
+
+def _decision_bindings(keys):
+    """The decisions job's inputs, including the decision evidence pair."""
+    return {"score.json": _job_output("score", keys),
+            "finality.json": _job_output("finality", keys),
+            "decision_plan.json": keys["decision_evidence"] + "#decision_plan",
+            "decision_evidence.json": keys["decision_evidence"] + "#decision_evidence"}
+
+
+def _render_bindings(keys, prior_selfcheck_ref):
+    """The render job's inputs: the ledger generation is always bound, and the
+    optional prior selfcheck only when the caller supplies one."""
+    bindings = {"score.json": _job_output("score", keys),
+                "model_evidence.json": _job_output("model_evidence", keys),
+                "finality.json": _job_output("finality", keys),
+                "ledger_generation.tar": _job_output("ledger_export", keys)}
+    if prior_selfcheck_ref:
+        bindings["prior_selfcheck.json"] = prior_selfcheck_ref
+    return bindings
 
 
 def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_scope="",
@@ -226,26 +259,13 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
         # this binding is exactly the no-op the check exists to prevent.
         params["input_bindings"]["features.json"] = _job_output("features", keys)
     if action == "legacy_decisions":
-        params["input_bindings"] = {
-            "score.json": _job_output("score", keys), "finality.json": _job_output("finality", keys),
-            "decision_plan.json": keys["decision_evidence"] + "#decision_plan",
-            "decision_evidence.json": keys["decision_evidence"] + "#decision_evidence"}
+        params["input_bindings"] = _decision_bindings(keys)
     if action == "legacy_render":
         # P2-5/Task5: the ledger generation is the verified output of the
         # ``ledger_export`` stage (never a staged mutable ledger copy) —
         # exactly the generation the export coordinator tarred and verified
         # by reading it back through the compatibility reader.
-        params["input_bindings"] = {"score.json": _job_output("score", keys),
-                                     "model_evidence.json": _job_output("model_evidence", keys),
-                                     "finality.json": _job_output("finality", keys),
-                                     "ledger_generation.tar": _job_output("ledger_export", keys)}
-        if prior_selfcheck_ref:
-            # P2-C08: optional -- a previous run's committed selfcheck
-            # artifact, bound as a direct ref (no job in this plan produces
-            # it: this run's own selfcheck stage runs strictly after render).
-            # Absent by default, so render's binding set is unchanged unless
-            # a caller opts in.
-            params["input_bindings"]["prior_selfcheck.json"] = prior_selfcheck_ref
+        params["input_bindings"] = _render_bindings(keys, prior_selfcheck_ref)
     if action == "legacy_selfcheck":
         params["input_bindings"] = {"bundle.tar": _job_output("projection", keys)}
     if action == "legacy_decision_replay":
@@ -806,8 +826,15 @@ def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, env
     return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
 
 
+#: GRAPH stages that are never submitted as worker jobs: ``native_parity``
+#: (spec_ns_c) is a report over rows the shadow run already holds, run by its
+#: ``run_shadow_nightly`` handler; there is no ``legacy_native_parity`` kind.
+NO_JOB_STAGES = frozenset({"native_parity"})
+
+
 def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
     stages = tuple(plan["order"]) if include_prerequisites else _DAG_STAGES
+    stages = tuple(stage for stage in stages if stage not in NO_JOB_STAGES)
     if snapshot is not None:
         stages = ("materialize",) + stages
     if refresh_mode == "native":
@@ -979,13 +1006,38 @@ def _run_stage(stage, handler, value, input_hash):
                    details={"stage": stage, "error": type(exc).__name__}) from exc
 
 
+def _registered_handlers(handlers, plan, parity_rows, private: Path) -> dict:
+    """The caller's handlers plus the nightly's own ``native_parity`` handler.
+
+    ``native_parity`` is registered here, never left to each caller, so the
+    stage is never ``NOT_CONFIGURED``: a ``"legacy"`` plan reports
+    ``not_applicable`` and a ``"native"`` plan (the default when no plan is
+    given) compares ``parity_rows`` -- ``(legacy_rows, native_rows)`` -- into
+    ``<private>/native_parity_report.json``.  A caller's own handler wins.
+    """
+    from engine.v2.ops.native_parity_report import native_parity_handler
+    registered = dict(handlers or {})
+    if "native_parity" not in registered:
+        legacy_rows, native_rows = parity_rows if parity_rows is not None else ({}, {})
+        registered["native_parity"] = native_parity_handler(
+            plan if plan is not None else {}, legacy_rows=legacy_rows,
+            native_rows=native_rows, report_path=private / "native_parity_report.json")
+    return registered
+
+
 def run_shadow_nightly(source_root: Path | str, private_root: Path | str,
                        session: str, *, handlers: dict[str, Callable] | None = None,
-                       read_set=(), initial=None, receipt_path=None) -> dict:
-    """Execute the real coarse graph using private copies and stage receipts."""
-    handlers = handlers or {}
+                       read_set=(), initial=None, receipt_path=None,
+                       plan: dict | None = None, parity_rows=None) -> dict:
+    """Execute the real coarse graph using private copies and stage receipts.
+
+    ``plan`` (``build_nightly_plan``'s document) carries the G5
+    ``shadow_serving_scorer`` switch the registered ``native_parity`` handler
+    reads; ``parity_rows`` is ``(legacy_rows, native_rows)`` for native mode.
+    """
     source = Path(source_root).resolve()
     private = Path(private_root).resolve()
+    handlers = _registered_handlers(handlers, plan, parity_rows, private)
     receipt = NightlyReceipt(session=session)
     receipt.read_set = copy_read_set(source, private / "legacy", tuple(read_set))
     value = initial if initial is not None else {"session": session}

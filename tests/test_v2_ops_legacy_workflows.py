@@ -186,9 +186,10 @@ def test_smoke_registration_holds_no_hypothesis_and_retries_idempotently(tmp_pat
     conn, _, _ = catalog(tmp_path)
     spec = ExperimentSpec("EXP-D1", "smoke-only", "fixture", ("fixture",), 1,
                           ("fold-1",), {}, "synthetic")
-    run_id = register_hypothesis(conn, spec, "input-a", mode="smoke")
+    run_id, created = register_hypothesis(conn, spec, "input-a", mode="smoke")
+    assert created is True
     assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0
-    assert register_hypothesis(conn, spec, "input-a", mode="smoke") == run_id
+    assert register_hypothesis(conn, spec, "input-a", mode="smoke") == (run_id, False)
     assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
 
 
@@ -196,10 +197,11 @@ def test_primary_registration_reuses_run_id_after_a_smoke_retry(tmp_path):
     conn, _, _ = catalog(tmp_path)
     spec = ExperimentSpec("EXP-D1B", "smoke-then-primary", "fixture", ("fixture",), 1,
                           ("fold-1",), {}, "synthetic")
-    smoke_id = register_hypothesis(conn, spec, "input-a", mode="smoke")
-    primary_id = register_hypothesis(conn, spec, "input-a", mode="primary")
+    smoke_id, _ = register_hypothesis(conn, spec, "input-a", mode="smoke")
+    primary_id, created = register_hypothesis(conn, spec, "input-a", mode="primary")
     assert primary_id != smoke_id
-    assert register_hypothesis(conn, spec, "input-a", mode="primary") == primary_id
+    assert created is True
+    assert register_hypothesis(conn, spec, "input-a", mode="primary") == (primary_id, False)
     assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 1
 
 

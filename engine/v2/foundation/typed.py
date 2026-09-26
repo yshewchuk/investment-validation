@@ -23,7 +23,11 @@ import re
 import types
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-__all__ = ["DocumentError", "from_document", "parse_schema_version", "to_document"]
+from engine.v2.contracts.serving import DEFAULT_SHADOW_SERVING_SCORER, SHADOW_SERVING_SCORERS
+
+__all__ = ["DEFAULT_SHADOW_SERVING_SCORER", "SHADOW_SERVING_SCORERS",
+           "DocumentError", "from_document", "parse_schema_version", "to_document",
+           "shadow_serving_scorer"]
 
 _VERSION = re.compile(r"^(?P<family>[a-z][a-z0-9_]*)\.v(?P<major>\d+)\.(?P<minor>\d+)$")
 _SCALARS: dict[type, tuple[type, ...]] = {
@@ -183,3 +187,18 @@ def _json_value(value: Any, path: str) -> Any:
     if isinstance(value, dict) and all(isinstance(k, str) for k in value):
         return {k: _json_value(v, f"{path}.{k}") for k, v in value.items()}
     raise DocumentError("BAD_TYPE", path, f"{type(value).__name__} is not JSON")
+
+
+def shadow_serving_scorer(plan) -> str | None:
+    """The plan's shadow-serving scorer, or ``None`` when it is not allowed.
+
+    Pure lookup, shared by ``engine.v2.ops.native_shadow_render`` and
+    ``engine.v2.serving.native_shadow_render`` -- layer-7 peers that cannot
+    import each other. Each caller raises its own layer's typed refusal on
+    ``None`` (``OpsError`` in ops, ``NativeShadowConfigError`` in serving), so
+    the two halves can never disagree about the allowed values or the default.
+    Lives here (foundation, layer 0.5) rather than in ``engine.v2.contracts``
+    because contracts defines no functions (``test_contracts_define_no_functions``).
+    """
+    mode = plan.get("shadow_serving_scorer", DEFAULT_SHADOW_SERVING_SCORER)
+    return mode if mode in SHADOW_SERVING_SCORERS else None
