@@ -282,6 +282,17 @@ def test_stamp_has_microsecond_precision_so_same_second_runs_do_not_collide():
     assert a.endswith("Z") and b.endswith("Z")
 
 
+def test_iso_keeps_microsecond_precision_so_runs_across_a_fractional_window_boundary_stay_distinguishable():
+    from datetime import datetime, timezone
+
+    just_before = rm._iso(datetime(2026, 9, 25, 23, 59, 59, 412000, tzinfo=timezone.utc))
+    just_after = rm._iso(datetime(2026, 9, 25, 23, 59, 59, 412001, tzinfo=timezone.utc))
+
+    assert just_before != just_after
+    assert just_before.endswith("Z") and just_after.endswith("Z")
+    assert "." in just_before and "." in just_after
+
+
 def test_record_has_the_declared_schema_and_fields(tmp_path, stub):
     stub([_watchdog(0.5)], 0)
 

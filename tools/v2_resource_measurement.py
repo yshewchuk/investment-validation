@@ -169,7 +169,7 @@ def classify_kill(output: str, exit_code: int) -> str | None:
 
 
 def _iso(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _stamp(moment: datetime) -> str:
