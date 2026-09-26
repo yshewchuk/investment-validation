@@ -85,6 +85,15 @@ class StagePlan:
     plan_id: str
     stages: tuple[Stage, ...]
 
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for stage in self.stages:
+            for name in stage.depends_on:
+                if name not in seen:
+                    raise ValueError(
+                        f"stage {stage.stage_id!r} depends_on unknown/self/forward stage {name!r}")
+            seen.add(stage.stage_id)
+
     def stage_ids(self) -> tuple[str, ...]:
         return tuple(s.stage_id for s in self.stages) + (UNASSIGNED,)
 

@@ -173,6 +173,8 @@ def build_native_bundle_rows(
         observations: list = []
         record = score_one(request, inputs, observer=observations.append)
         key = native_row_key(replace(record, event_ref=_event_ref(record, inputs)))
+        if key in rows:
+            raise ValueError(f"duplicate native row key {key!r}")
         rows[key] = _display_row(record, inputs, observations)
     return rows
 
