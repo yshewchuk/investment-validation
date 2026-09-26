@@ -57,11 +57,50 @@ drift, quota below reserve) and a backup sync.
 
 ## Dependencies
 
-Imports observed in this package: `engine.data.throttle` (quota guard),
-`engine.score` (`LADDER_STEP`), `engine.jsonio` (`json_safe`) — all legacy
-`engine/*` modules. **No file in this package imports `engine.v2`**,
-matching the root doc §3 rule 3 ("legacy never imports v2") — verified by
-grep, not assumed.
+Imports observed in this package, top-level and lazy (mechanically walked
+by `.oc_logs/import_scan.py`, an `ast` walk over every `.py` file that
+reports every `engine.*` import at any depth, including inside function
+bodies) — 24 distinct legacy `engine.*` modules in total, not 3:
+
+- Top-level: `engine.paths` (all four of `model_evidence.py`/`nightly.py`/
+  `publish.py`/`render.py`), `engine.data.throttle` (quota guard, also
+  lazy in `nightly.py`), `engine.score` (`LADDER_STEP` and others, also
+  lazy in several functions), `engine.jsonio` (`json_safe`).
+- Lazy (function-local) only, never at module top level: `engine.calendar`
+  (`model_evidence.py::_dataset_for`, `nightly.py::_date_change_flag`/
+  `_panel_staleness_flags`/`refresh_forward_chains`/`run_nightly`);
+  `engine.data` (`model_evidence.py::_daily_subset`/`_replay_trades`,
+  `nightly.py::_panel_staleness_flags`/`_recently_printed`/`run_nightly`/
+  `validate_refresh`, `render.py::freshness_summary`); `engine.data.fetch`
+  (`nightly.py::backfill_ticker_history`/`refresh_calendar_data`/
+  `refresh_forward_chains`/`run_nightly`); `engine.data.finality`
+  (`nightly.py::run_nightly`); `engine.data.pulls`
+  (`nightly.py::run_nightly`); `engine.data.pulls.forward_calendar`
+  (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
+  (`nightly.py::refresh_calendar_data`/`run_nightly`); `engine.data.schemas`
+  (`model_evidence.py::_replay_trades`); `engine.entry_rules`
+  (`render.py::build_strategies`); `engine.features`
+  (`model_evidence.py::_champion_block_impl`/`_dataset_for`,
+  `nightly.py::_panel_staleness_flags`/`run_nightly`,
+  `render.py::build_strategies`/`size_model_mae_from_ledger`);
+  `engine.fills` (`nightly.py::strike_ladder`,
+  `selfcheck.py::reconstruct_request`); `engine.forecast_sizing`
+  (`nightly.py::strike_ladder`); `engine.ledger`
+  (`nightly.py::_calibration_flag`/`run_nightly`,
+  `render.py::build_health`/`size_model_mae_from_ledger`);
+  `engine.models.registry` (`model_evidence.py::build_model_evidence`,
+  `render.py::build_meta`/`build_strategies`); `engine.models.training`
+  and `engine.models.training.train_all`
+  (`model_evidence.py::_dataset_for`); `engine.payoff`
+  (`render.py::build_strategies`); `engine.portfolio`
+  (`render.py::build_book`); `engine.replay`
+  (`nightly.py::refresh_forward_chains`); `engine.structure_registry`
+  (`render.py::build_meta`/`build_strategies`); `engine.structures`
+  (`nightly.py::strike_ladder`, `render.py::build_meta`/`build_strategies`).
+
+**No file in this package imports `engine.v2`**, matching the root doc §3
+rule 3 ("legacy never imports v2") — verified by the same mechanical scan
+(zero `engine.v2*` hits), not assumed.
 
 Callers: the legacy nightly cron/manual trigger; `engine/v2/ops`'s
 declared adapter (`checks/legacy_adapters.json`) reuses several `render.py`

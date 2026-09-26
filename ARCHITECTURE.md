@@ -247,7 +247,7 @@ flowchart LR
         SERVE["engine/v2/ops CLI: serve"] --> SUP["supervisor.Service"]
         SUP -- "claim + lease" --> QUEUE
         SUP --> DAG["submitted DAG stages<br/>(nightly.py _DAG_STAGES,<br/>include_prerequisites=False)"]
-        DAG --> PUB["shadow publication /<br/>delivery (private artifacts)"]
+        DAG --> PUB["shadow publication<br/>(private artifacts)"]
         DASH["engine.v2.dashboard._server"] -. "lazy import:<br/>cli.refresh_action" .-> SUBMIT
     end
     Tools["tools/*, experiments/*"] --> Legacy
@@ -256,8 +256,13 @@ flowchart LR
 
 This is the production shape only — which entrypoint starts which run —
 not the internal stage dependencies (§4's `GRAPH` bullet and
-`engine/v2/ops/ARCHITECTURE.md` cover those). `build_nightly_plan` refuses
-any `mode` other than `"shadow"`: the v2 side is shadow-only end to end,
+`engine/v2/ops/ARCHITECTURE.md` cover those). `"delivery"` is a resource
+class shared by `ledger_export`/`engineering_gate`/`publication`/`backup`
+(`nightly.py`'s resource-class lookup), and a node in the shadow-only
+`GRAPH` (`publication --> delivery`) — it is not one of `_DAG_STAGES`,
+so the diagram above does not show it as a submitted production stage.
+`build_nightly_plan` refuses any `mode` other than `"shadow"`: the v2 side
+is shadow-only end to end,
 and nothing on this diagram writes to the legacy board.
 
 ## 5. Invariants

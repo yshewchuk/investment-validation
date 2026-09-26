@@ -42,7 +42,13 @@ Launcher contract (`preview.py::_parse_args`/`run`): `--release-root` and
 `--health-path` are required by argparse — omitting either exits with
 code 2 before any server is built. The `V2_DASHBOARD_TOKEN` env var is
 required by `run()` — a missing token raises `SystemExit` before
-`build_server`/`create_server` runs at all. `--model-release-root`,
+`build_server`/`create_server` runs at all. The launcher is loopback-only
+by default (`is_loopback`, true for a literal loopback address or
+`localhost`; `0.0.0.0` — every interface, not one — is treated as NOT
+loopback): `run()` refuses a non-loopback `--host` with `SystemExit`
+("refusing non-loopback host ... without --allow-non-loopback") unless
+`--allow-non-loopback` is also passed, mirroring `engine/v2/serving/api.py`'s
+own `--allow-non-loopback` guard on its server entrypoint. `--model-release-root`,
 `--calibration-health-path`, `--ops-root` and `--serving-index-path` are
 all optional; each unlocks exactly one route (`/models/release.json`,
 `/calibration-health.json`, `POST /actions/refresh`, `GET /analogs.json`

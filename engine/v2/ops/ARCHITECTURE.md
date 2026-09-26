@@ -56,25 +56,68 @@ the coordinator-effect functions in `effects_graph.py`.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
-- Coordinator-side effects for `export`, `engineering`, `publication` and
-  `backup` (catalog/outbox/filesystem writes), via `effects_graph.py`,
-  called from `supervisor.Service._coordinator_effect` — the worker for
-  each of those four job kinds is trivial; the real write happens on the
-  coordinator side, never inside the worker subprocess.
+- Coordinator-side effects for every kind in
+  `supervisor._COORDINATOR_EFFECT_KINDS` (14 kinds, cited by name rather
+  than copied here since the list can drift: `legacy_decisions`,
+  `legacy_settlement`, `legacy_render`, `legacy_selfcheck`,
+  `decision_evidence`, `ledger_export`, `engineering_gate`, `publication`,
+  `backup`, `snapshot_import`, `legacy_rebuild_candidate`,
+  `legacy_materialize`, `experiment`, `decisions_supersede`) —
+  catalog/outbox/filesystem writes dispatched from
+  `supervisor.Service._coordinator_effect`; the worker subprocess for each
+  of these kinds is trivial, the real write happens on the coordinator
+  side. That dispatch calls into several modules, not only
+  `effects_graph.py`: `effects_graph.py` supplies `backup_effect`,
+  `engineering_gate_effect`, `experiment_effect`, `ledger_export_effect`
+  and `publication_effect` (5 of the 14); `decision_commit.py` supplies
+  `commit_decisions_in_transaction` (`legacy_decisions`, called from a
+  commit closure defined directly in `supervisor.py`, not in
+  `effects_graph.py`) and `commit_supersede` (`decisions_supersede`);
+  `snapshot_promotion.py` supplies `legacy_rebuild_candidate_effect` and
+  `snapshot_import_effect`; `snapshot_stages.py` supplies
+  `materialize_effect` (`legacy_materialize`); `legacy_settlement` and
+  `decision_evidence` are handled by `supervisor.py`'s own
+  `_settlement_effect`/`_verify_decision_evidence`. "All real state change
+  happens in `effects_graph.py`" is not accurate — treat it as one of
+  several coordinator-effect implementation modules, not the only one.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
 
 ## Dependencies
 
-Imports observed in this package's own source: `engine.v2.contracts`
-(0.0), `engine.v2.foundation` (0.5), `engine.v2.data` (1.0),
-`engine.v2.ledger` (6.0), `engine.v2.parity` (6.5) — all strictly below
-this package's own layer (7.0), per the root doc's §2 rule. It does not
-import its layer-7.0 peers `engine.v2.serving` or `engine.v2.research`, or
-anything above it (`engine.v2.diagnosis` at 7.5, `engine.v2.dashboard` at
-8.0). Legacy reads go through the one declared adapter module,
-`engine/v2/ops/legacy_adapter.py` (`checks/legacy_adapters.json`).
+Imports observed in this package's own source, top-level and lazy
+(mechanically walked by `.oc_logs/import_scan.py`, an `ast` walk over
+every `.py` file that reports every `engine.*` import at any depth,
+including inside function bodies):
+
+- Top-level: `engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5),
+  `engine.v2.data` (1.0), `engine.v2.ledger` (6.0), `engine.v2.parity`
+  (6.5) — all strictly below this package's own layer (7.0), per the root
+  doc's §2 rule.
+- Lazy, function-local: `engine.v2.contracts` also appears lazily
+  (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
+  `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
+  `engine.v2.ledger` also have lazy call sites (`cli.py`, `bootstrap.py`)
+  in addition to their top-level ones; `engine.v2.models` is lazy-only
+  (`cli.py::_restored_model_block` — `payoff_artifact`,
+  `cli.py::rescore_command` — `no_fit`, `worker.py::_dispatch_adhoc_rescore`
+  — `no_fit`, both layer 3.5); `engine.v2.domain.generation` is lazy-only
+  (`cli.py::_load_native_score_inputs` — `Geometry`/`Pricing`, layer 2.0);
+  `engine.v2.scoring` is lazy-only (`cli.py::_load_native_score_inputs` —
+  `stages`, `cli.py::rescore_command` and `worker.py::_dispatch_adhoc_rescore`
+  — `application.score_one`, layer 4.0). All three lazy-only imports back
+  `rescore`/ad-hoc-rescore's read-only re-score path (root doc's CLI list,
+  `rescore --request --native-inputs`), still strictly below layer 7.0.
+
+It does not import its layer-7.0 peers `engine.v2.serving` or
+`engine.v2.research`, or anything above it (`engine.v2.diagnosis` at 7.5,
+`engine.v2.dashboard` at 8.0), lazily or otherwise. Legacy reads go
+through the one declared adapter module, `engine/v2/ops/legacy_adapter.py`
+(`checks/legacy_adapters.json`) — its own further legacy `engine.*` lazy
+imports (`engine.calendar`, `engine.data*`, `engine.dashboard`,
+`engine.evaluate`, `engine.features`, …) are exactly the adapter's job and
+are not layer-checked v2 dependencies.
 
 Callers: `engine.v2.dashboard._server`'s lazy, documented import of
 `cli.refresh_action` (root doc §4); the `tools/v2_*.py` operator CLIs
@@ -124,7 +167,14 @@ themselves are never held here, only remaining-call/reserve counts.
   decision-facing commands (`ledger import-history`, `decisions supersede`)
   must be checked against the root doc §6 idempotency-collision
   anti-pattern before a new key shape ships — a native key must not reuse
-  a legacy row's key space.
+  a legacy row's key space. The same key reused for a different request
+  (a different digest/payload under an unchanged idempotency key) is
+  refused with `IDEMPOTENCY_CONFLICT`, not silently accepted or merged —
+  `submission.py` (`"same key, different digest — IDEMPOTENCY_CONFLICT,
+  nothing changes"`), `outbox.py`, `decision_commit.py`, `publication.py`,
+  `experiments.py` and `ledger_history_import.py` all raise it on that
+  same-key/different-content case; a same-key/same-content resubmission is
+  the idempotent no-op this section otherwise describes.
 
 ## Invariants
 
@@ -212,7 +262,10 @@ row in one transaction; it never claims a lease or launches a worker.
 Claiming and launching happen later, in a separately running supervisor
 process (`ops serve`'s `Service.tick`, via its `claim_next` call), which
 is the only path that acquires a job's lease before calling `_launch`.
-The worker process for the four coordinator-effect job kinds never
-touches the catalog directly; all real state change for those kinds
-happens in `effects_graph.py`, called from the coordinator, not the
-worker.
+The worker process for a `supervisor._COORDINATOR_EFFECT_KINDS` job kind
+(14 kinds — see "Outputs" above) never touches the catalog directly; all
+real state change for those kinds happens in `_coordinator_effect`,
+called from the coordinator, not the worker — `_coordinator_effect`
+dispatches to `effects_graph.py` for some kinds and to
+`decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own
+`supervisor.py` methods for the rest (see "Outputs").
