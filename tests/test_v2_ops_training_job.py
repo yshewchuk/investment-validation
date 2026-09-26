@@ -399,7 +399,7 @@ def test_promote_kind_is_registered_with_delivery_profile():
     kind = stages.registry().get("models_promote")
     assert kind.resource_classes == frozenset({"delivery"})
     assert kind.checkpoint_contract == "promote_pointer_state.v1.0"
-    assert kind.store_domains == ()
+    assert kind.store_domains == (("deployment_pointer", "write"),)
     assert kind.retry.max_attempts == 1
 
 

@@ -142,14 +142,21 @@ def training_job_kind() -> JobKind:
 
 
 def promote_job_kind() -> JobKind:
-    """The operator-submitted pointer swap. No ``store_domains``:
-    ``deployment.promote`` only touches the release-store path named by the
-    job's own ``release_root`` parameter, never the shared legacy tree."""
+    """The operator-submitted pointer swap. ``deployment.promote`` only
+    touches the release-store path named by the job's own
+    ``release_root`` parameter, never the shared legacy tree -- but its
+    ``_swap_pointer`` read-modify-write (current pointer + next sequence,
+    then an atomic pointer write, then an append-only history write) has
+    no locking of its own, so a shared write lease on the
+    ``deployment_pointer`` domain serializes every ``models_promote``
+    claim against every other one, globally, regardless of which
+    ``release_root`` each names (2026-09-26 CodeRabbit finding)."""
     return JobKind(name="models_promote", worker="models_promote", parameters=PromoteParameters,
                    resource_classes=frozenset({"delivery"}), effects=("staged",),
                    retry=RetryPolicy("bounded", 1, (30,)),
                    checkpoint_contract="promote_pointer_state.v1.0",
-                   namespaces=frozenset({"shadow", "smoke"}))
+                   namespaces=frozenset({"shadow", "smoke"}),
+                   store_domains=(("deployment_pointer", "write"),))
 
 
 def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategies=(),

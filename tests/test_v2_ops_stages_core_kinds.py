@@ -106,7 +106,7 @@ _CASES = {
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
                       "legacy_rebuild_candidate", "legacy_materialize",
-                      "models_promote", "decisions_supersede")
+                      "decisions_supersede")
 
 
 def _extra_params(name):
@@ -289,7 +289,7 @@ def test_claim_next_store_leases_match_each_kinds_declared_store_domains(tmp_pat
     small fake capacity."""
     conn, clock, supervisor = catalog(tmp_path)
     attempt_ids = {}
-    for name in (*_EMPTY_DOMAIN_KINDS, "snapshot_import"):
+    for name in (*_EMPTY_DOMAIN_KINDS, "models_promote", "snapshot_import"):
         case = _CASES[name]
         params = {"expected_ids": ["one"], **_extra_params(name)}
         submit(conn, stages.registry(), POLICY,
@@ -304,7 +304,12 @@ def test_claim_next_store_leases_match_each_kinds_declared_store_domains(tmp_pat
         held = sorted(tuple(row) for row in conn.execute(
             "SELECT domain, mode FROM store_leases WHERE attempt_id=? AND released_at IS NULL",
             (claim.attempt_id,)).fetchall())
-        expected = [("legacy_store", "read")] if name == "snapshot_import" else []
+        if name == "snapshot_import":
+            expected = [("legacy_store", "read")]
+        elif name == "models_promote":
+            expected = [("deployment_pointer", "write")]
+        else:
+            expected = []
         assert held == expected, name
         if name != "snapshot_import":
             # release this kind's reservation before claiming the next one;
@@ -323,3 +328,27 @@ def test_claim_next_store_leases_match_each_kinds_declared_store_domains(tmp_pat
             store_barrier.acquire_in(conn, attempt_ids["artifact_check"],
                                      (("legacy_store", "write"),))
     assert excinfo.value.code == "RESOURCE_UNAVAILABLE"
+
+
+def test_models_promote_claims_serialize_on_the_deployment_pointer_domain(tmp_path):
+    """CodeRabbit round 2 (PR #7): deployment.promote's pointer swap
+    (_swap_pointer) reads then writes the release root's DEPLOYED
+    pointer and appends its history with no locking of its own -- two
+    concurrent models_promote claims, even against DIFFERENT release
+    roots, must not run at once. The job graph's store-lease barrier
+    is what serializes them, exactly like legacy_store already does
+    for the shared legacy tree."""
+    conn, clock, supervisor = catalog(tmp_path)
+    case = _CASES["models_promote"]
+    for key, root_value in (("p1", "rootA"), ("p2", "rootB")):
+        params = {"expected_ids": ["one"], "release_root": root_value, "release_id": "r1"}
+        submit(conn, stages.registry(), POLICY,
+               request(key=key, kind="models_promote", resource_class=case["resource_class"],
+                       checkpoint_contract_ref=case["checkpoint_contract"], parameters=params),
+               clock=clock)
+    first = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=stages.registry())
+    assert first is not None
+    second = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                        supervisor=supervisor, clock=clock, registry=stages.registry())
+    assert second is None
