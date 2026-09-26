@@ -77,7 +77,7 @@ reviews:
         prior output, or against a hand-mutated copy of itself rather than
         against an independent legacy value — legacy output belongs only on
         the expected side of a comparison.
-    - path: "engine/dashboard/**"
+    - path: "engine/v2/dashboard/**"
       instructions: |
         Layer 8, only_imports=(7.0,) (docs/ARCHITECTURE.md §2): this package
         may import engine.v2.serving and nothing else in engine.v2 — no
@@ -85,6 +85,34 @@ reviews:
         or ops. Flag any gate, financial ratio, return estimate, or
         portfolio accounting computed here instead of read from
         engine.v2.serving.
+
+        This package (with legacy engine/dashboard/**) writes the bundles
+        published to dashboard/published/**, a path this config's
+        path_filters excludes from review — so this producer code is the
+        last review checkpoint before anything reaches that artifact. Flag
+        any publish step that is not atomic per the §6/§7 serving
+        publication model, any hardcoded or developer-local filesystem path
+        (paths must resolve through engine.paths / the v2 foundation root
+        helpers, never a module's own Path(__file__)-derived root or an
+        absolute local path), and anything that could put a credential,
+        token, or other secret into the published bundle — the
+        checks/repo_hygiene.py secret scan does not run on
+        dashboard/published/** either.
+    - path: "engine/dashboard/**"
+      instructions: |
+        Legacy tree: must never import engine.v2 (docs/ARCHITECTURE.md §3,
+        rule 3 — "Legacy never imports v2"). Flag any `from engine.v2
+        import ...` or `import engine.v2` here.
+
+        This package (with engine/v2/dashboard/**) writes the bundles
+        published to dashboard/published/**, a path this config's
+        path_filters excludes from review — so this producer code is the
+        last review checkpoint before anything reaches that artifact. Flag
+        any publish step that is not atomic, any hardcoded or
+        developer-local filesystem path, and anything that could put a
+        credential, token, or other secret into the published bundle — the
+        checks/repo_hygiene.py secret scan does not run on
+        dashboard/published/** either.
     - path: "tools/phase6_inventory.py"
       instructions: |
         This tool's inventory proves a declared symbol RESOLVES (imports
