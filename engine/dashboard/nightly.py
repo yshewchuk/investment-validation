@@ -681,7 +681,10 @@ def refresh_calendar_data(
 
     from engine.data.rebuild import rebuild
 
-    rebuild_result = rebuild(tables=("events", "daily", "chains"))
+    # Incremental: unchanged raw inputs reuse their cached parse (byte-identical
+    # outputs; see engine/data/rebuild_cache.py). INVESTING_PLAN_REBUILD_FULL=1
+    # forces a full parse.
+    rebuild_result = rebuild(tables=("events", "daily", "chains"), incremental=True)
     out["rebuild"] = {"snapshot": rebuild_result.snapshot, "elapsed_s": round(rebuild_result.elapsed_s, 1)}
     return out
 

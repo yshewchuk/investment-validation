@@ -28,6 +28,7 @@ from engine.v2.ops.checkpoints import (
 )
 from engine.v2.ops.decision_commit import (
     commit_decisions_in_transaction,
+    commit_supersede,
     import_settlement_candidates_in_transaction,
     validated_decision_candidate,
 )
@@ -100,7 +101,8 @@ from engine.v2.ops.worker_progress import STEPS_FILENAME, read_new_records
 _COORDINATOR_EFFECT_KINDS = frozenset({
     "legacy_decisions", "legacy_settlement", "legacy_render", "legacy_selfcheck",
     "decision_evidence", "ledger_export", "engineering_gate", "publication", "backup",
-    "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize", "experiment"})
+    "snapshot_import", "legacy_rebuild_candidate", "legacy_materialize", "experiment",
+    "decisions_supersede"})
 
 #: Snapshot-backed kinds that write into their legacy tree (attempt-19 fix,
 #: extended 2026-09-15 for ``legacy_model_evidence``): ``legacy_render``
@@ -854,6 +856,8 @@ class Service:
                                 (claim.attempt_id, "decision_commit_receipt", ref.artifact_id))
 
             return _commit, ()
+        if claim.spec.kind == "decisions_supersede":
+            return commit_supersede(self.conn, claim, clock=self.clock)
         if claim.spec.kind == "legacy_settlement":
             return self._settlement_effect(claim, refs)
         if claim.spec.kind == "decision_evidence":
