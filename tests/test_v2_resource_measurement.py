@@ -228,29 +228,19 @@ def test_stream_kills_the_child_when_stdout_forwarding_fails(monkeypatch):
     assert fake_proc.waited is True
 
 
-def test_stream_replaces_invalid_bytes_instead_of_raising(monkeypatch):
-    import subprocess as _subprocess
-
+def test_stream_replaces_invalid_bytes_instead_of_raising():
     from tools import v2_resource_measurement as rm
 
-    class _RawBytesStdout:
-        def __iter__(self):
-            # A line containing a byte that is invalid as UTF-8 on its own
-            # (0x80 is a continuation byte with no lead byte), decoded by a
-            # real text-mode pipe using this module's own errors= policy.
-            yield b"[watchdog] before \x80 after\n".decode("utf-8", errors="replace")
+    # A real child process, so the invalid byte crosses the actual pipe and is
+    # decoded by _stream's own Popen(..., errors="replace") policy -- not by
+    # Python having already decoded it before the test ever calls _stream.
+    script = (
+        "import sys\n"
+        "sys.stdout.buffer.write(b'[watchdog] before \\x80 after\\n')\n"
+        "sys.stdout.buffer.flush()\n"
+    )
 
-    class _FakeProc:
-        def __init__(self):
-            self.stdout = _RawBytesStdout()
-            self.returncode = 0
-
-        def wait(self, timeout=None):
-            pass
-
-    monkeypatch.setattr(_subprocess, "Popen", lambda *a, **k: _FakeProc())
-
-    lines, code = rm._stream(["python3", "-c", "pass"])
+    lines, code = rm._stream(["python3", "-c", script])
 
     assert code == 0
     assert len(lines) == 1

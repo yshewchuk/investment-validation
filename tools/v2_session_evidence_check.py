@@ -237,7 +237,7 @@ def _route_covered(receipt: dict, method: str, path: str) -> bool:
             continue
         if path not in (row.get("path"), row.get("declared_path")):
             continue
-        if _is_2xx(row.get("status")):
+        if _is_2xx(row.get("status")) or row.get("expected_redirect") is True:
             return True
     return False
 

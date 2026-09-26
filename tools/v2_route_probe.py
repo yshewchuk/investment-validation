@@ -269,7 +269,7 @@ def probe(*, base_url: str, session: str, evidence_dir, timeout: float = 10.0) -
         row, payload = _request(base_url, declared, route["method"], token,
                                 timeout=timeout)
         rows.append(row)
-        if declared == "/release/current.json":
+        if declared == "/release/current.json" and _is_2xx(row):
             current_release_id = _document_field(payload, "release_id")
 
     sources = {prefix: source for _, prefix, source in PARAMETERIZED_ROUTES}
