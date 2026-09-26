@@ -155,6 +155,111 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
     return expand(module_cfg(cfg, name).get("tests", []), tracked)
 
 
+# -- PR module selection (shared inputs) --------------------------------------
+
+# Files whose change is treated as touching EVERY enabled module for
+# PR-selection purposes: the dependency locks and the mutation config. This is
+# deliberately narrower than cache_fingerprint (which hashes every tracked file
+# for cache-correctness, including unrelated docs) -- a selection rule that
+# always selected everything would defeat its own purpose.
+SHARED_INPUT_FILES = ("requirements.txt", "requirements-dev.txt", "tools/mutation_pilot.toml")
+
+
+def shared_test_helpers(tracked_tests: list[str]) -> list[str]:
+    """Direct children of ``tests/`` that are not a ``test_*`` file -- e.g.
+    ``tests/conftest.py``, ``tests/helpers.py``, ``tests/fixture.json``. Not
+    restricted to ``.py``: a fixture or data file a module's tests load is
+    exactly as shared as a helper module, and the module-selection rule below
+    must never miss it. Same rule ``tests_digest`` already applies
+    per-module, generalised repo-wide and independent of any one module's
+    own test selection. ``tracked_tests`` is a list of ``tests/...``-relative
+    paths (as ``_tracked(["tests"])`` returns)."""
+    return sorted(p for p in tracked_tests
+                  if p.count("/") == 1 and not p.rsplit("/", 1)[1].startswith("test_"))
+
+
+def is_test_helper_path(path: str) -> bool:
+    """True for a direct ``tests/<name>`` path that is not itself a
+    ``test_*`` file -- the same shape ``shared_test_helpers`` matches against
+    the tracked-file list, but checked against a single bare path string so
+    a DELETED or RENAMED-AWAY helper (already absent from
+    ``_tracked(["tests"])``) still matches. Not restricted to ``.py``: a
+    non-Python direct child (e.g. ``tests/fixture.json``) is exactly as
+    shared as a helper module and must match too. ``git diff --name-only``
+    reports a deleted or renamed-from path by name; this function must not
+    consult the filesystem or git in any way, only the string itself."""
+    if not path.startswith("tests/"):
+        return False
+    rest = path[len("tests/"):]
+    return bool(rest) and "/" not in rest and not rest.startswith("test_")
+
+
+def shared_inputs(tracked_tests: list[str]) -> set[str]:
+    """Every path whose change invalidates EVERY module for PR-selection
+    purposes: the dependency locks, the mutation config, and the shared
+    tests/ helpers (conftest.py and friends)."""
+    return set(SHARED_INPUT_FILES) | set(shared_test_helpers(tracked_tests))
+
+
+def read_changed_files(path: str) -> list[str]:
+    """Newline-delimited changed-file list (``git diff --name-only`` output),
+    blank lines dropped. An empty/blank ``path`` returns ``[]`` -- "no
+    --changed-files given" is a deliberate no-op the caller decides the
+    meaning of. A NON-BLANK path that is not an existing file (missing, or a
+    directory) is refused with a clear error, never silently ``[]``: that
+    shape is an operator/workflow bug (a bad --changed-files argument), and
+    ``changed_modules([])`` treats an empty list as "select nothing", so
+    swallowing the bad path would silently produce an empty CI matrix and
+    skip every mutation job without ever failing."""
+    if not path or not path.strip():
+        return []
+    p = Path(path)
+    if not p.is_file():
+        sys.exit(f"--changed-files {path!r} is not a file (missing, or a "
+                 f"directory); refusing rather than silently selecting no modules")
+    return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
+
+
+def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
+    """True if ``path`` matches module ``name``'s configured ``tests`` or
+    ``mutate`` (minus ``skip``) glob patterns, checked directly against the
+    path string -- independent of whether ``path`` is currently tracked.
+    ``mutate_files``/``test_files`` only return currently-tracked paths (via
+    ``expand``'s ``tracked`` list), so a DELETED source or test file that
+    still matches its module's own pattern would otherwise never select that
+    module, even though ``git diff --name-only`` reports the deletion."""
+    mod = module_cfg(cfg, name)
+    if any(fnmatch.fnmatchcase(path, pat) for pat in mod.get("tests", [])):
+        return True
+    if any(fnmatch.fnmatchcase(path, pat) for pat in mod["mutate"]) and \
+            not any(fnmatch.fnmatchcase(path, pat) for pat in mod.get("skip", [])):
+        return True
+    return False
+
+
+def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
+                    tracked_engine: list[str] | None = None,
+                    tracked_tests: list[str] | None = None) -> list[str]:
+    """The subset of ``names`` (already ``--only``-filtered) whose sources
+    (``mutate_files``), selected tests (``test_files``), or the shared inputs
+    (``shared_inputs``) intersect ``changed``. An empty ``changed`` selects
+    nothing -- a PR with no diff is not "select everything". Any shared-input
+    hit selects every name in ``names``."""
+    changed_set = set(changed)
+    if not changed_set:
+        return []
+    tracked_engine = tracked_engine if tracked_engine is not None else _tracked(["engine"])
+    tracked_tests = tracked_tests if tracked_tests is not None else _tracked(["tests"])
+    if changed_set & shared_inputs(tracked_tests) or any(is_test_helper_path(p) for p in changed_set):
+        return list(names)
+    out = []
+    for name in names:
+        if any(module_owns_changed_path(cfg, name, p) for p in changed_set) or changed_set & (
+                set(mutate_files(cfg, name, tracked_engine)) | set(test_files(cfg, name, tracked_tests))):
+            out.append(name)
+    return out
+
+
 # -- work copy ---------------------------------------------------------------
 
 def _tracked(paths: list[str]) -> list[str]:
@@ -269,6 +374,9 @@ def cmd_matrix(cfg: dict, args) -> int:
         if bad:
             sys.exit(f"not enabled modules: {bad}; enabled: {', '.join(names)}")
         names = [n for n in names if n in wanted]
+    changed_files = getattr(args, "changed_files", "")
+    if changed_files and changed_files.strip():
+        names = changed_modules(cfg, names, read_changed_files(changed_files))
     print(json.dumps(names))
     return 0
 
@@ -534,6 +642,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list")
     p = sub.add_parser("matrix", help="JSON list of enabled modules, for the CI matrix")
     p.add_argument("--only", default="", help="comma-separated subset")
+    p.add_argument("--changed-files", default="", metavar="PATH",
+                   help="path to a newline list of changed files (git diff --name-only); "
+                        "when given, further restricts the matrix to modules whose sources, "
+                        "selected tests, or the shared inputs (locks, mutation config, "
+                        "tests/ conftest/helpers) intersect it. Omitted/blank: unchanged behavior.")
     p = sub.add_parser("count")
     p.add_argument("modules", nargs="*")
     p = sub.add_parser("run")

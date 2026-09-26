@@ -88,6 +88,13 @@ jobs:
       gremlins: ${{ steps.plan.outputs.gremlins }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # pull_request only: full history, so the changed-file diff below
+          # can reach the PR's base commit. push/schedule/dispatch keep the
+          # default shallow checkout (depth 1) -- byte-identical to before,
+          # since the ternary's false branch is the literal old default, not
+          # an omitted option.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || 1 }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -96,6 +103,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           FRESH: ${{ inputs.fresh }}
           ONLY: ${{ inputs.modules }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = "push" ] || [ "$EVENT" = "pull_request" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
@@ -105,13 +113,26 @@ jobs:
           fi
           gremlins=$(sed -n 's/^pytest-gremlins==\([^ ]*\).*/\1/p' requirements-dev.txt)
           test -n "$gremlins"
+          # pull_request only: narrow the matrix to the modules the PR's diff
+          # can actually affect -- its own sources/tests, or a shared input
+          # (dependency locks, the mutation config, tests/conftest.py and
+          # other shared tests/ helpers; see the changed_modules selection
+          # logic). push/schedule/dispatch never set CHANGED_ARGS, so the
+          # matrix command below stays byte-identical to before (an empty
+          # unquoted expansion contributes zero argv words).
+          CHANGED_ARGS=""
+          if [ "$EVENT" = "pull_request" ]; then
+            CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
+            git diff --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
+            CHANGED_ARGS="--changed-files $CHANGED_FILE"
+          fi
           # Assign in its own command, never inside the echo: the exit status of
           # `echo "modules=$(...)"` is echo's, so a failing matrix command would
           # write an empty module list and the step would still pass. Under
           # `set -e` a command substitution in a plain assignment does abort, and
           # `gremlin_pilot.py matrix --only ,` now refuses instead of emitting
           # the empty matrix that would silently skip the whole matrix job.
-          modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY")
+          modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)
           {
             echo "modules=$modules"
             echo "mode=$mode"
