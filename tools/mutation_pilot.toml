@@ -286,8 +286,12 @@ mutate = [
     "engine/v2/data/incremental.py",
     "engine/v2/data/generic_incremental.py",
     "engine/v2/data/incremental_tables.py",
+    "engine/v2/data/computed_moves.py",
+    "engine/v2/data/computed_moves_table.py",
 ]
 tests = [
+    "tests/test_v2_data_computed_moves.py",
+    "tests/test_v2_data_computed_moves_table.py",
     "tests/test_v2_data_generic_incremental.py",
     "tests/test_v2_data_incremental.py",
     "tests/test_v2_data_incremental_persistence.py",
@@ -811,21 +815,27 @@ mutate = [
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/incremental_data.py",
+    "engine/v2/ops/calendar_moves_jobs.py",
+    "engine/v2/ops/computed_moves_store.py",
+    "engine/v2/ops/forward_calendar_store.py",
 ]
 tests = [
     "tests/test_v2_data_incremental_persistence.py",
+    "tests/test_v2_ops_calendar_moves_jobs.py",
     "tests/test_v2_ops_capture_inputs.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_effect_receipt_collision.py",
     "tests/test_v2_ops_explain_from_logs.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
+    "tests/test_v2_ops_forward_calendar_store.py",
     "tests/test_v2_ops_incremental_data.py",
     "tests/test_v2_ops_incremental_refresh_wiring.py",
     "tests/test_v2_ops_incremental_registration.py",
     "tests/test_v2_ops_ledger_history_import.py",
     "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
+    "tests/test_v2_ops_native_computed_moves_forward_calendar_e2e.py",
     # tests/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
     # file caveat as the mutate list above; the glob matches it once.
     "tests/test_v2_ops_nightly*.py",

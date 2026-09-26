@@ -121,6 +121,8 @@ class RefreshCallbackResult:
     This document carries only committed candidate identity and job binding;
     it deliberately has no dependency on data-layer candidate classes. Bulk
     rows and raw provider payloads stay in the staging directory.
+    ``warnings`` records a degradation the job took knowingly (for example a
+    calendar fallback), so it is evidence in the result, not only a log line.
     """
 
     status: Literal[
@@ -132,7 +134,23 @@ class RefreshCallbackResult:
     parent_snapshot_id: str
     refresh_plan_hash: str
     candidate_snapshot_id: str | None = None
+    warnings: tuple[str, ...] = ()
     schema_version: str = REFRESH_RESULT_SCHEMA
+
+
+def refresh_result_document(result: RefreshCallbackResult) -> dict:
+    """The staged result document; an empty ``warnings`` is omitted.
+
+    ``warnings`` is degradation evidence, not a field every run has. Omitting
+    it when empty keeps every result document without a degradation
+    byte-identical to what the schema produced before the field existed (and
+    any hash over those bytes unchanged); a reader of a document without the
+    key gets the field's own empty default.
+    """
+    document = to_document(result)
+    if not result.warnings:
+        document.pop("warnings", None)
+    return document
 
 
 class RefreshCallback(Protocol):
@@ -476,6 +494,28 @@ def _load_data_refresh_callback() -> RefreshCallback:
     from engine.v2.ops.providers import orats_daily_market_fetcher
     return functools.partial(run_daily_market_refresh,
                              fetcher=orats_daily_market_fetcher())
+
+
+def _load_computed_moves_refresh_callback() -> RefreshCallback:
+    """S4C: resolve the computed_moves callback and its yfinance history edge.
+
+    Same lazy shape as ``_load_data_refresh_callback``: constructing the
+    fetcher reads nothing and touches no network, and the data-owning store is
+    imported only when the worker actually dispatches this kind.
+    """
+    from engine.v2.ops.computed_moves_store import run_computed_moves_refresh
+    from engine.v2.ops.providers import yfinance_history_fetcher
+    return functools.partial(run_computed_moves_refresh,
+                             fetcher=yfinance_history_fetcher())
+
+
+def _load_forward_calendar_refresh_callback() -> RefreshCallback:
+    """S4C: resolve the forward_calendar callback and its two network edges."""
+    from engine.v2.ops.forward_calendar_store import run_forward_calendar_refresh
+    from engine.v2.ops.providers import nasdaq_calendar_fetcher, yfinance_earnings_fetcher
+    return functools.partial(run_forward_calendar_refresh,
+                             nasdaq_fetcher=nasdaq_calendar_fetcher(),
+                             earnings_fetcher=yfinance_earnings_fetcher())
 
 
 def validate_refresh_result_document(value) -> RefreshCallbackResult:

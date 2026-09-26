@@ -141,6 +141,12 @@ def dispatch(worker, parameters, root, *, envelope=None):
     if worker == "incremental_refresh":
         from engine.v2.ops.incremental_data import run_refresh_worker
         return run_refresh_worker(parameters, root)
+    if worker == "computed_moves_refresh":
+        from engine.v2.ops.calendar_moves_jobs import run_computed_moves_worker
+        return run_computed_moves_worker(parameters, root)
+    if worker == "forward_calendar_refresh":
+        from engine.v2.ops.calendar_moves_jobs import run_forward_calendar_worker
+        return run_forward_calendar_worker(parameters, root)
     if worker == "legacy_materialize":
         from engine.v2.ops.materialization_worker import run_materialize
         return run_materialize(parameters, root, envelope)

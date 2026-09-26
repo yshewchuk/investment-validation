@@ -57,13 +57,13 @@ id = "nightly-refresh"
 area = "nightly"
 capability = "Nightly data refresh: calendar, chains, prices, history backfill, computed moves"
 old = ["nightly:legacy refresh", "nightly:legacy backfill", "nightly:legacy moves", "cli:engine/data/pulls/forward_calendar.py", "cli:engine/data/pulls/computed_moves.py"]
-new = ["nightly:v2 refresh", "nightly:v2 materialize", "cli:ops price-refresh", "cli:ops price-history", "cli:ops price-history capture", "cli:ops snapshot", "cli:ops snapshot plan-import", "cli:ops snapshot submit", "cli:ops snapshot promote", "cli:ops snapshot rollback", "cli:ops capture-inputs"]
-producer = "incremental_refresh job (opt-in --refresh-mode native) and snapshot import/promote; default refresh_mode stays legacy"
+new = ["nightly:v2 refresh", "nightly:v2 materialize", "cli:ops price-refresh", "cli:ops price-history", "cli:ops price-history capture", "cli:ops snapshot", "cli:ops snapshot plan-import", "cli:ops snapshot submit", "cli:ops snapshot promote", "cli:ops snapshot rollback", "cli:ops capture-inputs", "nightly:v2 computed_moves_refresh", "nightly:v2 forward_calendar_refresh"]
+producer = "incremental_refresh job (opt-in --refresh-mode native), the native computed_moves_refresh/forward_calendar_refresh job kinds, and snapshot import/promote; default refresh_mode stays legacy"
 identity = "snapshot manifest id / promoted snapshot head; RefreshPlan document hash"
-tests = ["tests/test_v2_ops_incremental_refresh_wiring.py", "tests/test_v2_ops_snapshot_stages.py", "tests/test_v2_ops_price_history.py", "tests/test_data_price_refresh.py", "tests/test_computed_moves.py"]
+tests = ["tests/test_v2_ops_incremental_refresh_wiring.py", "tests/test_v2_ops_snapshot_stages.py", "tests/test_v2_ops_price_history.py", "tests/test_data_price_refresh.py", "tests/test_computed_moves.py", "tests/test_v2_ops_calendar_moves_jobs.py", "tests/test_v2_ops_native_computed_moves_forward_calendar_e2e.py"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
-notes = "Native refresh exists but is opt-in; ops price-refresh wraps legacy price_refresh (adapter edges); computed moves and the forward calendar pull have no v2 job."
+notes = "Native refresh exists but is opt-in; ops price-refresh wraps legacy price_refresh (adapter edges). computed moves and the forward calendar now have their own native job kinds (computed_moves_refresh/forward_calendar_refresh), built by the native-mode nightly plan."
 
 [[row]]
 id = "nightly-features"

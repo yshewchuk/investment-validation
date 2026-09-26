@@ -191,6 +191,7 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
         ("data", 9, "price_captures_contract_scope"),
         ("data", 10, "incremental_eod_controls"),
         ("data", 11, "generic_incremental_revisions"),
+        ("data", 12, "computed_moves_captures"),
     ]
     ops_versions = {r[0] for r in conn.execute(
         "SELECT version FROM schema_versions WHERE owner = 'ops'")}

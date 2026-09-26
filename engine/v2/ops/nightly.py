@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Callable
 
 from engine.v2.foundation import content_hash
+from engine.v2.ops.calendar_moves_jobs import (
+    COMPUTED_MOVES_REFRESH_ACTION,
+    DEFAULT_HORIZON_DAYS,
+    FORWARD_CALENDAR_REFRESH_ACTION,
+    NATIVE_COMPUTED_MOVES_ACCOUNT,
+    NATIVE_NASDAQ_ACCOUNT,
+    cached_unit_outcomes,
+    cached_unit_payloads,
+)
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import source_closure
@@ -23,6 +32,10 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 #: (``ops provider-account``); planning never creates one.
 NATIVE_DAILY_MARKET_ACCOUNT = "orats-daily-market"
 
+#: S4C: ``calendar_moves_jobs``' unmetered provider accounts
+#: (``NATIVE_COMPUTED_MOVES_ACCOUNT``/``NATIVE_NASDAQ_ACCOUNT``) are imported
+#: above and re-exported by name, exactly like ``NATIVE_DAILY_MARKET_ACCOUNT``.
+#:
 #: One daily_market fetch unit costs two ORATS calls (``hist/summaries`` and
 #: ``hist/cores``), so the reserved provider budget must count both.
 ORATS_CALLS_PER_DAILY_MARKET_UNIT = 2
@@ -35,6 +48,10 @@ GRAPH = {
     "projection": ("export", "model_evidence"), "selfcheck": ("projection",),
     "engineering": (), "publication": ("selfcheck", "engineering"),
     "delivery": ("publication",), "backup": ("decision_commit",),
+    # S4C: both read daily_market from the parent snapshot, so both run after
+    # the refresh stage.
+    "computed_moves_refresh": ("refresh",),
+    "forward_calendar_refresh": ("refresh",),
     # spec_ns_c: the per-night native-vs-legacy parity report, parented on
     # "score" because that is the last stage whose rows both sides can read.
     # OPTIONAL on purpose: a parity mismatch (or a report-write failure) is
@@ -44,6 +61,7 @@ GRAPH = {
     "native_parity": ("score",),
 }
 OPTIONAL = frozenset({"settlement", "model_evidence", "engineering", "backup",
+                      "computed_moves_refresh", "forward_calendar_refresh",
                       "native_parity"})
 
 
@@ -144,10 +162,22 @@ PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate
 #: stage existed: "refresh" is never even in ``_DAG_STAGES``.
 NATIVE_REFRESH_ACTION = "incremental_refresh"
 
+#: S4C: the native-mode stage -> job-kind map. "refresh" is the daily_market
+#: kind; the two calendar/moves stages are their own job kinds, never
+#: ``legacy_*`` actions. Only a plan that pins ``refresh_mode="native"``
+#: reaches this map; legacy mode leaves ``_action_for`` behaviour, and
+#: therefore the whole DAG, byte-identical to before these stages existed.
+_NATIVE_ACTION_STAGES = {
+    "refresh": NATIVE_REFRESH_ACTION,
+    COMPUTED_MOVES_REFRESH_ACTION: COMPUTED_MOVES_REFRESH_ACTION,
+    FORWARD_CALENDAR_REFRESH_ACTION: FORWARD_CALENDAR_REFRESH_ACTION,
+}
+_NATIVE_REFRESH_ACTIONS = frozenset(_NATIVE_ACTION_STAGES.values())
+
 
 def _action_for(stage, refresh_mode="legacy"):
-    if refresh_mode == "native" and stage == "refresh":
-        return NATIVE_REFRESH_ACTION
+    if refresh_mode == "native" and stage in _NATIVE_ACTION_STAGES:
+        return _NATIVE_ACTION_STAGES[stage]
     return stage if stage in PURE_STAGES else _legacy_action(stage)
 
 
@@ -290,7 +320,7 @@ def _legacy_resource(kind):
     # here only so ``_thread_count`` can fingerprint its ``environment_ref``
     # the same way every other stage's does -- the job itself is built by
     # ``incremental_data.refresh_job_spec``, not ``_job_spec`` below.
-    if kind == NATIVE_REFRESH_ACTION:
+    if kind in _NATIVE_REFRESH_ACTIONS:
         return "io_fetch"
     if kind in ("legacy_score", "legacy_decision_replay"):
         return "legacy_score"
@@ -585,12 +615,170 @@ def _build_native_refresh_plan(plan, context_tickers, *, catalog_path, objects_r
         calls_per_unit=ORATS_CALLS_PER_DAILY_MARKET_UNIT)
 
 
+def _build_native_computed_moves_plan(plan, context_tickers, *, catalog_path, objects_root,
+                                      conn, store, clock):
+    """S4C: the production computed_moves ``RefreshPlan``, built from the shadow head.
+
+    One ``RefreshUnit`` per scoreable target ticker -- the same denominator the
+    store recomputes at run time from the pinned parent. Returns
+    ``(RefreshPlan, expected_ids)``, or ``None`` when the head is absent or
+    carries no scoreable target, so a caller never submits a job its own
+    validator would refuse.
+    """
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+    from engine.v2.data.repository import Repository
+    from engine.v2.ops import computed_moves_store, incremental_data
+
+    if conn is None:
+        # No catalog to read the head from: the optional stage is omitted, the
+        # same graceful-degradation rule OPTIONAL carries.
+        return None
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+        ("shadow",)).fetchone()
+    if head is None:
+        return None
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(head["snapshot_id"])
+    if ("earnings_events" not in snapshot.table_versions
+            or "daily_market" not in snapshot.table_versions):
+        return None
+    as_of = plan["session"]
+    targets, _report = computed_moves_store.target_tickers_from_snapshot(
+        repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
+    if not targets:
+        return None
+    units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
+    refresh_plan = incremental_data.plan_refresh(
+        snapshot, units,
+        cached_outcomes=cached_unit_outcomes(
+            conn, units, source=COMPUTED_MOVES_TABLE_NAME,
+            endpoint=COMPUTED_MOVES_TABLE_NAME),
+        provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
+        expected_head_generation=head["generation"])
+    return refresh_plan, tuple(targets)
+
+
+def _build_native_forward_calendar_plan(plan, context_tickers, *, catalog_path, objects_root,
+                                        conn, store, clock):
+    """S4C: the production forward-calendar Nasdaq ``RefreshPlan``.
+
+    One ``RefreshUnit`` per session date in ``[session, session + horizon]``,
+    resolved from the pinned snapshot's own ``daily_market`` sessions. Every
+    provider request the job can make is counted in the plan the scheduler
+    reserves (spec R6): when a Nasdaq discovery call is due, the yfinance
+    session-confirmation units are planned alongside it on the job's single
+    budget account, so the reserved calls cover the whole run. A fresh Nasdaq
+    fetch always reserves yfinance for every ticker (conservative); an
+    all-cached Nasdaq plan re-derives the same pending set the store would
+    compute from the cached receipts (no network call) and reserves yfinance
+    only for tickers whose cached Nasdaq claim does not resolve a session, so a
+    genuinely cache-complete rerun still reserves and makes zero calls. Returns
+    ``(RefreshPlan, expected_ids)`` -- expected ids are the
+    wanted tickers, the store's own coverage denominator -- or ``None`` when
+    there is no head, no session, or no ticker to plan for.
+    """
+    from engine.v2.data.computed_moves import native_trading_calendar
+    from engine.v2.data.repository import Repository
+    from engine.v2.ops import forward_calendar_store, incremental_data
+
+    if conn is None:
+        # No catalog to read the head from: the optional stage is omitted.
+        return None
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+        ("shadow",)).fetchone()
+    if head is None:
+        return None
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(head["snapshot_id"])
+    if "daily_market" not in snapshot.table_versions:
+        return None
+    try:
+        calendar = native_trading_calendar(
+            forward_calendar_store.daily_by_ticker(repository, snapshot))
+    except ValueError:
+        return None
+    as_of = plan["session"]
+    dates = forward_calendar_store.horizon_dates(
+        as_of, DEFAULT_HORIZON_DAYS, calendar=calendar)
+    tickers = tuple(sorted(set(context_tickers)))
+    if not dates or not tickers:
+        return None
+    nasdaq_units = forward_calendar_store.date_units(dates, as_of=as_of)
+    nasdaq_cached = cached_unit_outcomes(
+        conn, nasdaq_units, source="nasdaq", endpoint="calendar/earnings")
+    nasdaq_plan = incremental_data.plan_refresh(
+        snapshot, nasdaq_units, cached_outcomes=nasdaq_cached,
+        provider_account=NATIVE_NASDAQ_ACCOUNT,
+        expected_head_generation=head["generation"])
+    if nasdaq_plan.fetch_units:
+        yfinance_units = forward_calendar_store.ticker_units(tickers, as_of=as_of)
+    else:
+        cached_payloads = cached_unit_payloads(conn, store, nasdaq_plan)
+        claims: dict[tuple[str, str], dict] = {}
+        wanted = set(tickers)
+        for unit in nasdaq_units:
+            raw = cached_payloads.get(unit.request_id)
+            if raw is None:
+                continue
+            forward_calendar_store.nasdaq_claims_from_rows(
+                claims, unit.expected_keys[0],
+                forward_calendar_store.nasdaq_rows_from_payload(raw), wanted)
+        pending = forward_calendar_store.pending_tickers(claims)
+        yfinance_units = forward_calendar_store.ticker_units(pending, as_of=as_of)
+    cached = {**nasdaq_cached, **cached_unit_outcomes(
+        conn, yfinance_units, source="yfinance", endpoint="earnings")}
+    refresh_plan = incremental_data.plan_refresh(
+        snapshot, (*nasdaq_units, *yfinance_units), cached_outcomes=cached,
+        provider_account=NATIVE_NASDAQ_ACCOUNT,
+        expected_head_generation=head["generation"])
+    return refresh_plan, tickers
+
+
+def _native_calendar_moves_request(plan, key, kind, implementation_ref, environment_ref,
+                                   catalog_path, objects_root, conn, store, clock,
+                                   context_tickers, *, dependency_job_ids=()):
+    """S4C: build one calendar/moves job, or ``None`` when it has no work."""
+    from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+
+    catalog_path = catalog_path if catalog_path is not None else plan.get("catalog_path")
+    objects_root = objects_root if objects_root is not None else plan.get("objects_root")
+    if kind == COMPUTED_MOVES_REFRESH_ACTION:
+        built = _build_native_computed_moves_plan(
+            plan, context_tickers, catalog_path=catalog_path, objects_root=objects_root,
+            conn=conn, store=store, clock=clock)
+        if built is None:
+            return None
+        refresh_plan_obj, expected_ids = built
+        parameters = CalendarMovesParameters(
+            expected_ids=expected_ids, as_of=plan["session"], table_name="computed_moves")
+    else:
+        built = _build_native_forward_calendar_plan(
+            plan, context_tickers, catalog_path=catalog_path, objects_root=objects_root,
+            conn=conn, store=store, clock=clock)
+        if built is None:
+            return None
+        refresh_plan_obj, expected_ids = built
+        parameters = CalendarMovesParameters(
+            expected_ids=expected_ids, as_of=plan["session"],
+            horizon_days=DEFAULT_HORIZON_DAYS, tickers=expected_ids,
+            table_name="earnings_events")
+    return _refresh_submit_request(
+        key, refresh_plan_obj, kind, implementation_ref, environment_ref,
+        catalog_path=catalog_path, objects_root=objects_root,
+        conn=conn, store=store, clock=clock, parameters=parameters,
+        dependency_job_ids=dependency_job_ids)
+
+
 def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref,
-                            *, catalog_path, objects_root, conn=None, store=None, clock=None):
-    """R3B-3: the native refresh job, built by the stage's own contract
-    (``incremental_data.refresh_job_spec``) -- never re-derived through
-    ``_legacy_params``/``_job_spec``, whose contract (``LegacyParameters``)
-    does not fit it.
+                            *, catalog_path, objects_root, conn=None, store=None, clock=None,
+                            parameters=None, dependency_job_ids=()):
+    """R3B-3/S4C: the native refresh job, built by the stage's own contract --
+    ``incremental_data.refresh_job_spec`` for the daily_market kind, or
+    ``calendar_moves_jobs.calendar_moves_job_spec`` for the two S4C kinds --
+    never re-derived through ``_legacy_params``/``_job_spec``, whose contract
+    (``LegacyParameters``) does not fit them.
 
     S4A: the pinned refresh plan is published and bound as
     ``refresh_plan.json`` so ``executor._materialize_inputs`` copies it into
@@ -617,12 +805,22 @@ def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, env
                 register_artifact(conn, ref, None, clock)
         bindings["refresh_plan.json"] = ref.artifact_id
         input_refs = (ref.artifact_id,)
-    job = refresh_job_spec(
-        refresh_plan_obj, implementation_ref=implementation_ref,
-        environment_ref=(environment_ref or content_hash(
-            environment_identity(_thread_count(kind)))),
-        output_namespace="shadow", catalog_path=catalog_path, objects_root=objects_root,
-        input_bindings=bindings or None, input_refs=input_refs)
+    environment_ref = environment_ref or content_hash(
+        environment_identity(_thread_count(kind)))
+    if kind == NATIVE_REFRESH_ACTION:
+        job = refresh_job_spec(
+            refresh_plan_obj, implementation_ref=implementation_ref,
+            environment_ref=environment_ref, output_namespace="shadow",
+            catalog_path=catalog_path, objects_root=objects_root,
+            input_bindings=bindings or None, input_refs=input_refs)
+    else:
+        from engine.v2.ops.calendar_moves_jobs import calendar_moves_job_spec
+        job = calendar_moves_job_spec(
+            kind, refresh_plan_obj, parameters, implementation_ref=implementation_ref,
+            environment_ref=environment_ref, output_namespace="shadow",
+            catalog_path=catalog_path, objects_root=objects_root,
+            input_bindings=bindings or None, input_refs=input_refs,
+            dependency_job_ids=dependency_job_ids)
     return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
 
 
@@ -637,8 +835,17 @@ def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
     stages = tuple(stage for stage in stages if stage not in NO_JOB_STAGES)
     if snapshot is not None:
         stages = ("materialize",) + stages
-    if refresh_mode == "native" and "refresh" not in stages:
-        stages = ("refresh",) + stages
+    if refresh_mode == "native":
+        native = tuple(stage for stage in ("refresh", COMPUTED_MOVES_REFRESH_ACTION,
+                                           FORWARD_CALENDAR_REFRESH_ACTION)
+                       if stage not in stages)
+        stages = native + stages
+    else:
+        # Legacy mode must never build a kind for the two S4C stages; a
+        # prereq-inclusive plan document names them, but only native mode has
+        # the job kinds to build.
+        stages = tuple(stage for stage in stages
+                       if stage not in _NATIVE_ACTION_STAGES or stage == "refresh")
     return stages
 
 
@@ -662,6 +869,44 @@ def _native_refresh_request(plan, key, refresh_plan_obj, kind, implementation_re
         catalog_path=catalog_path if catalog_path is not None else plan.get("catalog_path"),
         objects_root=objects_root if objects_root is not None else plan.get("objects_root"),
         conn=conn, store=store, clock=clock)
+
+
+def _native_request_for(kind, plan, key, refresh_plan_obj, implementation_ref,
+                        environment_ref, catalog_path, objects_root, conn, store, clock,
+                        context_tickers, *, dependency_job_ids=()):
+    """S4C: dispatch one native refresh stage to its kind's own builder."""
+    if kind == NATIVE_REFRESH_ACTION:
+        return _native_refresh_request(
+            plan, key, refresh_plan_obj, kind, implementation_ref, environment_ref,
+            catalog_path, objects_root, conn, store, clock)
+    return _native_calendar_moves_request(
+        plan, key, kind, implementation_ref, environment_ref,
+        catalog_path, objects_root, conn, store, clock, context_tickers,
+        dependency_job_ids=dependency_job_ids)
+
+
+def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, year_end,
+                       expected_population, alt_strikes, input_refs, prior_selfcheck_ref,
+                       effect_scope, snapshot, context_tickers, include_prerequisites,
+                       implementation_ref, environment_ref):
+    """Build one legacy stage's admitted ``SubmitRequest`` (S4C extraction)."""
+    from engine.v2.contracts import SubmitRequest
+
+    parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
+                                   effect_scope, snapshot,
+                                   prior_selfcheck_ref=prior_selfcheck_ref,
+                                   context_tickers=context_tickers)
+    refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
+    if stage == "projection" and prior_selfcheck_ref:
+        refs = tuple(refs) + (prior_selfcheck_ref,)
+    if stage != "materialize":
+        parameters["expected_population"] = tuple(expected_population)
+        parameters["alt_strikes"] = int(alt_strikes)
+    parents = _stage_parents(stage, include_prerequisites, snapshot)
+    return SubmitRequest(
+        namespace="shadow", idempotency_key=key, principal="operator",
+        job=_job_spec(kind, parameters, refs, tuple(keys[parent] for parent in parents),
+                      implementation_ref, environment_ref))
 
 
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
@@ -702,7 +947,6 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     watchlist narrower than the context is refused: a full run must score
     its whole context, never a slice of it.
     """
-    from engine.v2.contracts import SubmitRequest
     from engine.v2.ops.fingerprints import worker_source_manifest
     from engine.v2.ops.submission import job_id_for
 
@@ -712,37 +956,38 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
         refresh_mode, refresh_plan, plan=plan, context_tickers=context_tickers,
         catalog_path=catalog_path, objects_root=objects_root, conn=conn, store=store, clock=clock)
     implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
-    requests = []
-    keys = {}
+    requests, keys = [], {}
     plan_identity = _plan_identity(plan, input_refs)
     scope_hash = _scope_hash(tickers, year_start, year_end, expected_population, snapshot,
                              context_tickers=context_tickers, plan_identity=plan_identity)
     effect_scope = effect_scope_for(tickers, full_universe)
     stages = _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode)
+    submitted_native: set[str] = set()
     for stage in stages:
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
         keys[stage] = job_id_for("shadow", key)
         kind = _action_for(stage, refresh_mode=refresh_mode)
-        if kind == NATIVE_REFRESH_ACTION:
-            requests.append(_native_refresh_request(
-                plan, key, refresh_plan_obj, kind, implementation_ref, environment_ref,
-                catalog_path, objects_root, conn, store, clock))
+        if kind in _NATIVE_REFRESH_ACTIONS:
+            dependency_job_ids = (
+                (keys[COMPUTED_MOVES_REFRESH_ACTION],)
+                if kind == FORWARD_CALENDAR_REFRESH_ACTION
+                and COMPUTED_MOVES_REFRESH_ACTION in submitted_native
+                else ())
+            request = _native_request_for(
+                kind, plan, key, refresh_plan_obj, implementation_ref, environment_ref,
+                catalog_path, objects_root, conn, store, clock, context_tickers,
+                dependency_job_ids=dependency_job_ids)
+            if request is not None:
+                requests.append(request)
+                submitted_native.add(kind)
             continue
-        parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
-                                       effect_scope, snapshot,
-                                       prior_selfcheck_ref=prior_selfcheck_ref,
-                                       context_tickers=context_tickers)
-        refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
-        if stage == "projection" and prior_selfcheck_ref:
-            refs = tuple(refs) + (prior_selfcheck_ref,)
-        if stage != "materialize":
-            parameters["expected_population"] = tuple(expected_population)
-            parameters["alt_strikes"] = int(alt_strikes)
-        parents = _stage_parents(stage, include_prerequisites, snapshot)
-        requests.append(SubmitRequest(
-            namespace="shadow", idempotency_key=key, principal="operator",
-            job=_job_spec(kind, parameters, refs, tuple(keys[parent] for parent in parents),
-                          implementation_ref, environment_ref)))
+        requests.append(_stage_request_for(
+            stage, kind, plan, key, keys, tickers=tickers, year_start=year_start,
+            year_end=year_end, expected_population=expected_population, alt_strikes=alt_strikes,
+            input_refs=input_refs, prior_selfcheck_ref=prior_selfcheck_ref,
+            effect_scope=effect_scope, snapshot=snapshot, context_tickers=context_tickers,
+            include_prerequisites=include_prerequisites, implementation_ref=implementation_ref,
+            environment_ref=environment_ref))
     return tuple(requests)
 
 
