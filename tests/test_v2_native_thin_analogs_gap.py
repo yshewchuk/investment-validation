@@ -27,6 +27,7 @@ def _fake_result(thin: bool) -> _FakeAnalogResult:
     return _FakeAnalogResult(
         exp_pnl_analog=0.1, win_analog=0.5, ci_low=None, ci_high=None,
         n_analogs=2, thin=thin,
+        selected_row_ids=("a",), contributing_row_ids=("a",),
     )
 
 
