@@ -30,6 +30,8 @@
 !/RECOVERY.md
 !/EARNINGS_VOL_PROGRAM_PLAN.md
 !/guides/*.md
+!/docs/*.md
+!/docs/design/*.md
 !/engine/**/*.md
 !/checks/*.md
 !/tests/*.md
