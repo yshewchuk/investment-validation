@@ -114,13 +114,16 @@ jobs:
           mutmut=$(sed -n 's/^mutmut==\([^ ]*\).*/\1/p' requirements-dev.txt)
           test -n "$mutmut"
           # pull_request only: narrow the matrix to the modules the PR's diff
-          # can actually affect, mirroring the gremlins workflow's plan job.
-          # push/schedule/dispatch never set CHANGED_ARGS, so the matrix
-          # command below stays byte-identical to before.
+          # can actually affect, mirroring the gremlins workflow's plan job
+          # (see its comment for the full selection rule: module ownership,
+          # else the docs-only inert allowlist, else every enabled module).
+          # -z pairs with a NUL-splitting reader so a non-ASCII changed path
+          # is not quoted. push/schedule/dispatch never set CHANGED_ARGS, so
+          # the matrix command below stays byte-identical to before.
           CHANGED_ARGS=""
           if [ "$EVENT" = "pull_request" ]; then
             CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
-            git diff --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
+            git diff -z --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
             CHANGED_ARGS="--changed-files $CHANGED_FILE"
           fi
           # Assign in its own command, never inside the echo: the exit status of

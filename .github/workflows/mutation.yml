@@ -120,16 +120,20 @@ jobs:
           gremlins=$(sed -n 's/^pytest-gremlins==\([^ ]*\).*/\1/p' requirements-dev.txt)
           test -n "$gremlins"
           # pull_request only: narrow the matrix to the modules the PR's diff
-          # can actually affect -- its own sources/tests, or a shared input
-          # (dependency locks, the mutation config, tests/conftest.py and
-          # other shared tests/ helpers; see the changed_modules selection
-          # logic). push/schedule/dispatch never set CHANGED_ARGS, so the
-          # matrix command below stays byte-identical to before (an empty
-          # unquoted expansion contributes zero argv words).
+          # can actually affect -- each changed path selects the module that
+          # owns it (the shared changed_modules selection rule), or nothing
+          # if it is on the small docs-only inert allowlist
+          # (tools/mutation_pilot.toml's [pr_selection] inert), or EVERY
+          # enabled module if it is neither (an unrecognized path is never
+          # assumed safe to skip). -z pairs with a NUL-splitting reader so a
+          # non-ASCII changed path is not quoted. push/schedule/dispatch
+          # never set CHANGED_ARGS, so the matrix command below stays
+          # byte-identical to before (an empty unquoted expansion
+          # contributes zero argv words).
           CHANGED_ARGS=""
           if [ "$EVENT" = "pull_request" ]; then
             CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
-            git diff --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
+            git diff -z --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
             CHANGED_ARGS="--changed-files $CHANGED_FILE"
           fi
           # Assign in its own command, never inside the echo: the exit status of

@@ -155,69 +155,75 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
     return expand(module_cfg(cfg, name).get("tests", []), tracked)
 
 
-# -- PR module selection (shared inputs) --------------------------------------
+# -- PR module selection: module ownership, else the inert allowlist, else --
+# -- every enabled module (never zero for an unrecognized path) --------------
+#
+# `changed_modules` decides, per pull_request run, which enabled modules a
+# changed-file list can affect. The rule is "select ALL unless proven safe to
+# skip", never the reverse: a changed path that doesn't match a currently-
+# listed shape is not evidence it cannot affect a module, so it must never
+# quietly select zero modules. Per changed path, in order:
+#   1. some ENABLED module's own `mutate`/`tests` patterns match it
+#      (`module_owns_changed_path`, checked against the bare path string, so
+#      a deleted/renamed-away owned file still matches) -> that module is
+#      selected.
+#   2. else it is on the small, docs-only inert allowlist
+#      (`tools/mutation_pilot.toml`'s `[pr_selection] inert`) -> it selects
+#      nothing.
+#   3. else (unrecognized: no ENABLED module owns it, and it is not inert)
+#      -> every requested module is selected, immediately, for the whole
+#      changed-file list.
+# An EXCLUDED module's ownership (e.g. `contracts` owning
+# `engine/v2/__init__.py`) does NOT count as "some module owns it" in step 1
+# -- an excluded module never runs, so a path only an excluded module claims
+# is exactly as unexplained as one no module claims, and must still fall
+# through to "select everything".
+#
+# This governs both backends (gremlin_pilot.select_modules delegates to this
+# function unchanged) and, by the same "unrecognized -> everything" rule,
+# selects every enabled module when a PR changes the selector itself:
+# tools/mutation_pilot.py, tools/gremlin_pilot.py, tools/mutation_results.py,
+# tools/mutation_pilot.toml, or either mutation workflow file are none of
+# them module-owned or on the inert allowlist.
 
-# Files whose change is treated as touching EVERY enabled module for
-# PR-selection purposes: the dependency locks and the mutation config. This is
-# deliberately narrower than cache_fingerprint (which hashes every tracked file
-# for cache-correctness, including unrelated docs) -- a selection rule that
-# always selected everything would defeat its own purpose.
-SHARED_INPUT_FILES = ("requirements.txt", "requirements-dev.txt", "tools/mutation_pilot.toml")
-
-
-def shared_test_helpers(tracked_tests: list[str]) -> list[str]:
-    """Direct children of ``tests/`` that are not a ``test_*`` file -- e.g.
-    ``tests/conftest.py``, ``tests/helpers.py``, ``tests/fixture.json``. Not
-    restricted to ``.py``: a fixture or data file a module's tests load is
-    exactly as shared as a helper module, and the module-selection rule below
-    must never miss it. Same rule ``tests_digest`` already applies
-    per-module, generalised repo-wide and independent of any one module's
-    own test selection. ``tracked_tests`` is a list of ``tests/...``-relative
-    paths (as ``_tracked(["tests"])`` returns)."""
-    return sorted(p for p in tracked_tests
-                  if p.count("/") == 1 and not p.rsplit("/", 1)[1].startswith("test_"))
-
-
-def is_test_helper_path(path: str) -> bool:
-    """True for a direct ``tests/<name>`` path that is not itself a
-    ``test_*`` file -- the same shape ``shared_test_helpers`` matches against
-    the tracked-file list, but checked against a single bare path string so
-    a DELETED or RENAMED-AWAY helper (already absent from
-    ``_tracked(["tests"])``) still matches. Not restricted to ``.py``: a
-    non-Python direct child (e.g. ``tests/fixture.json``) is exactly as
-    shared as a helper module and must match too. ``git diff --name-only``
-    reports a deleted or renamed-from path by name; this function must not
-    consult the filesystem or git in any way, only the string itself."""
-    if not path.startswith("tests/"):
-        return False
-    rest = path[len("tests/"):]
-    return bool(rest) and "/" not in rest and not rest.startswith("test_")
-
-
-def shared_inputs(tracked_tests: list[str]) -> set[str]:
-    """Every path whose change invalidates EVERY module for PR-selection
-    purposes: the dependency locks, the mutation config, and the shared
-    tests/ helpers (conftest.py and friends)."""
-    return set(SHARED_INPUT_FILES) | set(shared_test_helpers(tracked_tests))
+def is_inert_changed_path(cfg: dict, path: str) -> bool:
+    """True if `path` matches the PR-selection inert allowlist
+    (`tools/mutation_pilot.toml`'s `[pr_selection] inert`, fnmatch patterns
+    where `*` also matches `/`, same convention as `mutate`/`tests`/`skip`).
+    Kept small and docs-only on purpose: anything the mutation-tested code
+    (engine/v2) might read at runtime, or a test might load as a fixture,
+    must NOT be on this list, or a real defect could hide behind a skipped
+    run. Checked against the bare path string, so a deleted/renamed-away
+    inert file still matches."""
+    patterns = cfg.get("pr_selection", {}).get("inert", [])
+    return any(fnmatch.fnmatchcase(path, pat) for pat in patterns)
 
 
 def read_changed_files(path: str) -> list[str]:
-    """Newline-delimited changed-file list (``git diff --name-only`` output),
-    blank lines dropped. An empty/blank ``path`` returns ``[]`` -- "no
+    """NUL-delimited changed-file list (``git diff -z --name-only`` output),
+    empty tokens dropped. An empty/blank ``path`` returns ``[]`` -- "no
     --changed-files given" is a deliberate no-op the caller decides the
     meaning of. A NON-BLANK path that is not an existing file (missing, or a
     directory) is refused with a clear error, never silently ``[]``: that
     shape is an operator/workflow bug (a bad --changed-files argument), and
     ``changed_modules([])`` treats an empty list as "select nothing", so
     swallowing the bad path would silently produce an empty CI matrix and
-    skip every mutation job without ever failing."""
+    skip every mutation job without ever failing.
+
+    NUL-delimited, not newline-delimited: ``-z`` disables git's C-style
+    quoting of paths with unusual bytes, so a non-ASCII or otherwise unusual
+    path comes through as its literal bytes instead of a quoted escape
+    sequence a newline-based reader would have to un-escape. Tokens are not
+    otherwise stripped: only an empty token (e.g. from a trailing NUL) is
+    dropped."""
     if not path or not path.strip():
         return []
     p = Path(path)
     if not p.is_file():
         sys.exit(f"--changed-files {path!r} is not a file (missing, or a "
                  f"directory); refusing rather than silently selecting no modules")
-    return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
+    raw = p.read_bytes().decode("utf-8", "surrogateescape")
+    return [tok for tok in raw.split("\0") if tok]
 
 
 def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
@@ -237,27 +243,27 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
     return False
 
 
-def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
-                    tracked_engine: list[str] | None = None,
-                    tracked_tests: list[str] | None = None) -> list[str]:
-    """The subset of ``names`` (already ``--only``-filtered) whose sources
-    (``mutate_files``), selected tests (``test_files``), or the shared inputs
-    (``shared_inputs``) intersect ``changed``. An empty ``changed`` selects
-    nothing -- a PR with no diff is not "select everything". Any shared-input
-    hit selects every name in ``names``."""
+def changed_modules(cfg: dict, names: list[str], changed: list[str]) -> list[str]:
+    """The subset of ``names`` (already ``--only``-filtered) a changed-file
+    list selects, under the "select ALL unless proven safe to skip" rule
+    documented above. An empty ``changed`` selects nothing -- a PR with no
+    diff is not "select everything"; that is the one intentional
+    zero-selection default. Any other unrecognized path selects every name
+    in ``names``, never zero."""
     changed_set = set(changed)
     if not changed_set:
         return []
-    tracked_engine = tracked_engine if tracked_engine is not None else _tracked(["engine"])
-    tracked_tests = tracked_tests if tracked_tests is not None else _tracked(["tests"])
-    if changed_set & shared_inputs(tracked_tests) or any(is_test_helper_path(p) for p in changed_set):
+    enabled = enabled_modules(cfg)
+    owned: set[str] = set()
+    for path in changed_set:
+        owners = [n for n in enabled if module_owns_changed_path(cfg, n, path)]
+        if owners:
+            owned.update(owners)
+            continue
+        if is_inert_changed_path(cfg, path):
+            continue
         return list(names)
-    out = []
-    for name in names:
-        if any(module_owns_changed_path(cfg, name, p) for p in changed_set) or changed_set & (
-                set(mutate_files(cfg, name, tracked_engine)) | set(test_files(cfg, name, tracked_tests))):
-            out.append(name)
-    return out
+    return [n for n in names if n in owned]
 
 
 # -- work copy ---------------------------------------------------------------

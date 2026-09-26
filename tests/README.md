@@ -299,6 +299,7 @@ its 330-minute step timeout.
 | trigger | mode | state |
 |---|---|---|
 | push to main | incremental | restores the module's newest cached mutmut state |
+| pull_request | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects the ENABLED module owning each changed path, else nothing for a path on the small docs-only `[pr_selection] inert` allowlist (`tools/mutation_pilot.toml`), else EVERY enabled module for anything else -- an unrecognized path is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix |
 | weekly (gremlins Sun 05:23 UTC, mutmut Sun 22:23 UTC — staggered) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
 

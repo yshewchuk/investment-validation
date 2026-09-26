@@ -737,7 +737,7 @@ def test_gremlins_plan_narrows_the_matrix_on_pull_request_via_changed_files():
     # since an empty unquoted expansion contributes zero argv words).
     assert 'CHANGED_ARGS=""' in plan
     assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
-    assert 'git diff --no-renames --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'git diff -z --no-renames --name-only "$BASE_SHA"...HEAD' in plan
     assert 'CHANGED_ARGS="--changed-files' in plan
     assert 'modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
 
@@ -866,7 +866,7 @@ def test_mutmut_plan_narrows_the_matrix_on_pull_request_via_changed_files():
     plan = plan_step["run"]
     assert 'CHANGED_ARGS=""' in plan
     assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
-    assert 'git diff --no-renames --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'git diff -z --no-renames --name-only "$BASE_SHA"...HEAD' in plan
     assert 'CHANGED_ARGS="--changed-files' in plan
     assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
 
@@ -1311,46 +1311,27 @@ def test_report_cli_two_backends_same_run_id_read_their_own_downloads(monkeypatc
         "mutation-mutmut-report"
 
 
-# -- PR module selection: shared inputs vs module-owned sources/tests --------
+# -- PR module selection: module ownership, else the inert allowlist, else --
+# -- every enabled module (never zero for an unrecognized path) --------------
 #
-# A module is selected by `matrix --changed-files` when the changed-file list
-# intersects its own mutate_files/test_files, OR a "shared input" that is
-# deliberately treated as touching every module: the dependency locks
-# (requirements.txt, requirements-dev.txt), the mutation config
-# (tools/mutation_pilot.toml), and the shared tests/ helpers -- tests/conftest.py
-# and any other direct tests/*.py file that is not itself a test_*.py file,
-# exactly the rule tests_digest already applies per-module, generalised
-# repo-wide. This is deliberately narrower than cache_fingerprint (which hashes
-# EVERY tracked file for cache-correctness, including unrelated docs): a
-# PR-selection rule that always selected everything would defeat its own
-# purpose, and a docs-only or workflow-only PR is meant to select nothing.
+# The rule `changed_modules` implements (see its docstring in
+# tools/mutation_pilot.py for the full ordering): a changed path selects the
+# ENABLED module that owns it (`module_owns_changed_path`); failing that, a
+# path on the small docs-only `[pr_selection] inert` allowlist selects
+# nothing; any other path selects EVERY requested module, immediately, for
+# the whole changed-file list. An EXCLUDED module's ownership does not count
+# in the first step -- it never runs, so a path only it claims is exactly as
+# unrecognized as one no module claims.
 
 def _sel_cfg():
-    return {"defaults": {}, "modules": {
-        "alpha": {"why": "x", "mutate": ["engine/a.py"], "tests": ["tests/test_a.py"]},
-        "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
-    }}
-
-
-_SEL_TRACKED_ENGINE = ["engine/a.py", "engine/b.py"]
-_SEL_TRACKED_TESTS = ["tests/test_a.py", "tests/test_b.py", "tests/conftest.py", "tests/helpers.py"]
-
-
-def test_shared_test_helpers_are_non_test_prefixed_direct_children():
-    assert pilot.shared_test_helpers(_SEL_TRACKED_TESTS) == ["tests/conftest.py", "tests/helpers.py"]
-    # a nested file is never "direct", regardless of its name
-    nested = _SEL_TRACKED_TESTS + ["tests/sub/helper.py"]
-    assert pilot.shared_test_helpers(nested) == ["tests/conftest.py", "tests/helpers.py"]
-    # a non-.py direct child (a fixture/data file) is just as shared
-    with_fixture = _SEL_TRACKED_TESTS + ["tests/fixture.json"]
-    assert pilot.shared_test_helpers(with_fixture) == \
-        ["tests/conftest.py", "tests/fixture.json", "tests/helpers.py"]
-
-
-def test_shared_inputs_covers_locks_config_and_test_helpers():
-    assert pilot.shared_inputs(_SEL_TRACKED_TESTS) == {
-        "requirements.txt", "requirements-dev.txt", "tools/mutation_pilot.toml",
-        "tests/conftest.py", "tests/helpers.py"}
+    return {
+        "pr_selection": {"inert": ["*.md", "docs/*", "guides/*"]},
+        "defaults": {},
+        "modules": {
+            "alpha": {"why": "x", "mutate": ["engine/a.py"], "tests": ["tests/test_a.py"]},
+            "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
+        },
+    }
 
 
 def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
@@ -1360,55 +1341,48 @@ def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
     with pytest.raises(SystemExit):  # a directory is not a valid --changed-files path either
         pilot.read_changed_files(str(tmp_path))
     f = tmp_path / "changed.txt"
-    f.write_text("engine/a.py\n\n  \ntests/test_b.py\n")
+    # NUL-delimited, as `git diff -z --name-only` writes it; a doubled NUL
+    # (as a trailing separator would produce) must not yield a blank entry.
+    f.write_bytes(b"engine/a.py\0\0tests/test_b.py\0")
     assert pilot.read_changed_files(str(f)) == ["engine/a.py", "tests/test_b.py"]
 
 
 def test_changed_modules_selects_only_the_owning_module():
     cfg2 = _sel_cfg()
-    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"], **kw) == ["alpha"]
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_b.py"], **kw) == ["beta"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_b.py"]) == ["beta"]
 
 
 def test_changed_modules_a_deleted_own_test_file_still_selects_its_module():
     # alpha's test file, tests/test_a.py, was deleted by this PR: git diff
-    # --name-only reports it in `changed`, but it is gone from the tree, so
-    # it is absent from tracked_tests (as _tracked(["tests"]) would return
-    # post-deletion). alpha must still be selected from the changed path
-    # alone, even though no OTHER changed path touches alpha.
+    # --name-only reports it in `changed`, but module_owns_changed_path
+    # matches the bare path against alpha's OWN configured patterns, never
+    # against a tracked-file list, so the deletion changes nothing.
     cfg2 = _sel_cfg()
-    tracked_tests_without_test_a = ["tests/test_b.py", "tests/conftest.py", "tests/helpers.py"]
-    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=tracked_tests_without_test_a)
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_a.py"], **kw) == ["alpha"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_a.py"]) == ["alpha"]
 
 
 def test_changed_modules_a_deleted_own_source_file_still_selects_its_module():
-    # alpha's mutate (source) file, engine/a.py, was deleted by this PR:
-    # git diff --name-only reports it in `changed`, but it is gone from the
-    # tree, so it is absent from tracked_engine (as _tracked(["engine"])
-    # would return post-deletion). alpha must still be selected from the
-    # changed path alone -- the source-side mirror of the test above, which
-    # only covered a deleted OWNED TEST file, not a deleted OWNED SOURCE file.
+    # The source-side mirror of the test above: engine/a.py, alpha's mutate
+    # file, deleted by this PR.
     cfg2 = _sel_cfg()
-    tracked_engine_without_a = ["engine/b.py"]
-    kw = dict(tracked_engine=tracked_engine_without_a, tracked_tests=_SEL_TRACKED_TESTS)
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"], **kw) == ["alpha"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha"]
 
 
 def test_changed_modules_a_deleted_own_source_file_selects_via_glob_ownership():
     # gamma owns its sources through a glob pattern (engine/pkg/*.py), not an
     # explicit path list, unlike alpha/beta above. A deleted file under that
-    # glob must still select gamma from the changed path alone --
-    # module_owns_changed_path's fnmatch check treats a glob and a literal
-    # path the same way, so ownership style must not change the outcome.
-    cfg2 = {"defaults": {}, "modules": {
-        "gamma": {"why": "x", "mutate": ["engine/pkg/*.py"], "tests": ["tests/test_g.py"]},
-        "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
-    }}
-    tracked_engine_glob = ["engine/pkg/keep.py", "engine/b.py"]  # engine/pkg/gone.py deleted
-    kw = dict(tracked_engine=tracked_engine_glob, tracked_tests=_SEL_TRACKED_TESTS)
-    assert pilot.changed_modules(cfg2, ["gamma", "beta"], ["engine/pkg/gone.py"], **kw) == ["gamma"]
+    # glob must still select gamma -- module_owns_changed_path's fnmatch
+    # check treats a glob and a literal path the same way.
+    cfg2 = {
+        "pr_selection": {"inert": ["*.md", "docs/*", "guides/*"]},
+        "defaults": {},
+        "modules": {
+            "gamma": {"why": "x", "mutate": ["engine/pkg/*.py"], "tests": ["tests/test_g.py"]},
+            "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
+        },
+    }
+    assert pilot.changed_modules(cfg2, ["gamma", "beta"], ["engine/pkg/gone.py"]) == ["gamma"]
 
 
 def test_module_owns_changed_path_matches_tests_and_mutate_minus_skip():
@@ -1419,72 +1393,110 @@ def test_module_owns_changed_path_matches_tests_and_mutate_minus_skip():
     assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_b.py") is False
 
 
-def test_changed_modules_a_shared_input_selects_every_incoming_name():
-    cfg2 = _sel_cfg()
-    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
-    for changed in (["requirements.txt"], ["requirements-dev.txt"],
-                    ["tools/mutation_pilot.toml"], ["tests/conftest.py"], ["tests/helpers.py"]):
-        assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed, **kw) == ["alpha", "beta"]
-
-
-def test_changed_modules_a_deleted_shared_helper_still_selects_every_name():
-    # tests/conftest.py was deleted by this PR: git diff --name-only reports
-    # it in `changed`, but it is gone from the working tree, so it is absent
-    # from tracked_tests (as _tracked(["tests"]) would return post-deletion).
-    # The shared-input hit must still fire from the changed path alone.
-    cfg2 = _sel_cfg()
-    tracked_tests_without_conftest = ["tests/test_a.py", "tests/test_b.py", "tests/helpers.py"]
-    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=tracked_tests_without_conftest)
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/conftest.py"], **kw) == ["alpha", "beta"]
-
-
-def test_changed_modules_a_non_python_shared_fixture_selects_every_name():
-    # tests/fixture.json is a non-.py direct child of tests/: both
-    # shared_test_helpers (via shared_inputs) and is_test_helper_path must
-    # catch it, whether it is still tracked (added) or already gone
-    # (deleted) from tracked_tests.
-    cfg2 = _sel_cfg()
-    tracked_tests_with_fixture = _SEL_TRACKED_TESTS + ["tests/fixture.json"]
-    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=tracked_tests_with_fixture)
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/fixture.json"], **kw) == \
-        ["alpha", "beta"]
-    # deleted: absent from tracked_tests, but is_test_helper_path still matches the bare path
-    kw_deleted = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/fixture.json"], **kw_deleted) == \
-        ["alpha", "beta"]
-
-
-def test_is_test_helper_path_matches_direct_non_test_files_only():
-    assert pilot.is_test_helper_path("tests/conftest.py") is True
-    assert pilot.is_test_helper_path("tests/helpers.py") is True
-    assert pilot.is_test_helper_path("tests/fixture.json") is True  # non-.py, still shared
-    assert pilot.is_test_helper_path("tests/test_a.py") is False
-    assert pilot.is_test_helper_path("tests/sub/conftest.py") is False
-    assert pilot.is_test_helper_path("engine/a.py") is False
-    assert pilot.is_test_helper_path("tests/") is False  # no filename at all
-
-
 def test_changed_modules_respects_the_incoming_names_subset():
-    # beta's own file changed, but beta was already excluded (e.g. by --only)
+    # beta's own file changed, but beta was already excluded (e.g. by
+    # --only). beta still OWNS engine/b.py (it is an enabled module in the
+    # full cfg), so the path is "explained" and must not fall through to
+    # "select every name in names" -- it just contributes nothing to this
+    # narrower `names` list.
     cfg2 = _sel_cfg()
-    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
-    assert pilot.changed_modules(cfg2, ["alpha"], ["engine/b.py"], **kw) == []
+    assert pilot.changed_modules(cfg2, ["alpha"], ["engine/b.py"]) == []
 
 
-def test_changed_modules_unrelated_or_empty_change_selects_nothing():
+def test_changed_modules_empty_change_selects_nothing():
     cfg2 = _sel_cfg()
-    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["docs/readme.md"], **kw) == []
-    assert pilot.changed_modules(cfg2, ["alpha", "beta"], [], **kw) == []
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], []) == []
+
+
+def test_changed_modules_an_inert_path_selects_nothing():
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["docs/readme.md"]) == []
+
+
+def test_changed_modules_all_docs_change_selects_nothing():
+    cfg2 = _sel_cfg()
+    changed = ["README.md", "docs/design/notes.md", "guides/how_to.md"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed) == []
+
+
+def test_changed_modules_mixed_docs_and_owned_change_selects_just_that_module():
+    cfg2 = _sel_cfg()
+    changed = ["docs/design/notes.md", "engine/a.py"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed) == ["alpha"]
+
+
+def test_is_inert_changed_path_matches_only_the_configured_patterns():
+    cfg2 = _sel_cfg()
+    assert pilot.is_inert_changed_path(cfg2, "README.md") is True
+    assert pilot.is_inert_changed_path(cfg2, "docs/anything/nested.txt") is True
+    assert pilot.is_inert_changed_path(cfg2, "guides/exp133_structure_search.md") is True
+    assert pilot.is_inert_changed_path(cfg2, "engine/a.py") is False
+    assert pilot.is_inert_changed_path(cfg2, "tools/mutation_pilot.py") is False
+
+
+# A cfg shaped like the real tools/mutation_pilot.toml's ownership boundaries:
+# alpha/beta are ordinary enabled modules under engine/v2/, contracts is
+# EXCLUDED (mirrors the real `contracts` module, which owns
+# engine/v2/__init__.py but never runs). `names` below is what
+# `enabled_modules` returns for this cfg -- contracts is never in it.
+def _defect_list_cfg():
+    return {
+        "pr_selection": {"inert": ["*.md", "docs/*", "guides/*"]},
+        "defaults": {},
+        "modules": {
+            "alpha": {"why": "x", "mutate": ["engine/v2/alpha/*.py"],
+                      "tests": ["tests/test_v2_alpha.py"]},
+            "beta": {"why": "x", "mutate": ["engine/v2/beta/*.py"],
+                     "tests": ["tests/test_v2_beta.py"]},
+            "contracts": {"why": "x", "excluded": "no mutants",
+                          "mutate": ["engine/v2/__init__.py", "engine/v2/contracts/*.py"]},
+        },
+    }
+
+
+_DEFECT_LIST_PATHS = [
+    "tests/fixtures/v2_ui_mock_api.py",
+    "engine/v2/__init__.py",  # owned only by the EXCLUDED contracts module
+    "engine/analogs.py",  # a legacy top-level engine/*.py file no module owns
+    "experiments/EXP-169_menu_search/run.py",
+    "tools/mutation_pilot.py",
+    "tools/gremlin_pilot.py",
+    "tools/mutation_results.py",
+    "tools/mutation_pilot.toml",
+    ".github/workflows/mutation.yml",
+    ".github/workflows/mutation-mutmut.yml",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "tests/conftest.py",
+]
+
+
+@pytest.mark.parametrize("changed_path", _DEFECT_LIST_PATHS)
+def test_changed_modules_selects_every_enabled_module_for_an_unrecognized_path(changed_path):
+    # Each of these is a real path that the pre-2026-09-26 rule selected ZERO
+    # modules for (it owns none of them and none was on any shared-input
+    # list), silently skipping the whole mutation matrix on a PR that
+    # touched it. None is inert either (none is *.md/docs/*/guides/*), so
+    # the rule must select every enabled module -- `names` here IS every
+    # enabled module, i.e. `pilot.enabled_modules(cfg)` (contracts excluded).
+    cfg2 = _defect_list_cfg()
+    names = pilot.enabled_modules(cfg2)
+    assert names == ["alpha", "beta"]
+    assert pilot.changed_modules(cfg2, names, [changed_path]) == names
+
+
+def test_changed_modules_respects_only_even_when_selecting_everything():
+    # The "select everything" branch selects every name in the INCOMING
+    # `names` (already --only-filtered), not every module in the cfg.
+    cfg2 = _defect_list_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha"], ["tools/mutation_pilot.py"]) == ["alpha"]
 
 
 def test_cmd_matrix_changed_files_narrows_the_matrix(tmp_path, monkeypatch, capsys):
     cfg2 = _sel_cfg()
     monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
-    monkeypatch.setattr(pilot, "_tracked",
-                        lambda paths: _SEL_TRACKED_ENGINE if paths == ["engine"] else _SEL_TRACKED_TESTS)
     changed = tmp_path / "changed.txt"
-    changed.write_text("engine/a.py\n")
+    changed.write_bytes(b"engine/a.py\0")
     args = types.SimpleNamespace(only="", changed_files=str(changed))
     assert pilot.cmd_matrix(cfg2, args) == 0
     assert json.loads(capsys.readouterr().out) == ["alpha"]
@@ -1506,6 +1518,14 @@ def test_cmd_matrix_accepts_missing_changed_files_attr_for_backward_compatibilit
     args = types.SimpleNamespace(only="")
     assert pilot.cmd_matrix(cfg2, args) == 0
     assert json.loads(capsys.readouterr().out) == ["alpha", "beta"]
+
+
+def test_real_toml_inert_allowlist_is_the_small_docs_only_list():
+    # Locks in the intended small allowlist: widening it (even by one
+    # pattern) is a real design decision, not something that should drift
+    # silently through an unrelated toml edit.
+    cfg2 = pilot.load_config()
+    assert cfg2["pr_selection"]["inert"] == ["*.md", "docs/*", "guides/*"]
 
 
 # -- mutate job summary: mutant-level cache reuse vs re-tested this run ------
