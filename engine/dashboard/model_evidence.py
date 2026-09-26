@@ -30,6 +30,7 @@ from __future__ import annotations
 import gc
 import json
 import multiprocessing
+import re
 import time
 from typing import Any
 
@@ -37,6 +38,31 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+
+#: Mirrors ``engine.dashboard.publish.SECRET_PATTERNS``' literal ``/root/``
+#: check: any exception text embedded in a reason string must never carry an
+#: absolute local filesystem path, so a champion evidence block that fails
+#: to rebuild (e.g. a FileNotFoundError inside a worker's private code
+#: snapshot under /root/phase2-shadow-ops/code/<hash>/...) cannot leak one
+#: into the published dashboard bundle. Defense in depth: the real fix is
+#: giving the worker snapshot the files it needs (see
+#: engine/v2/ops/fingerprints.py CODE_ASSET_FILES), but a reason string is
+#: built from arbitrary exception text and must be scrubbed regardless of
+#: why the rebuild failed.
+_ABS_PATH_RE = re.compile(r"/root/\S*", re.IGNORECASE)
+
+
+def _sanitize_reason(text: str) -> str:
+    """Strip any absolute local filesystem path from ``text`` before it can
+    reach a cached or rendered evidence reason string. A path under
+    ``paths.ROOT`` is relativized (still informative); anything else under
+    ``/root/`` (e.g. a worker's private code-snapshot root) is redacted
+    generically, since it is host-local and never meaningful to a reader of
+    the published dashboard."""
+    root = str(paths.ROOT)
+    text = text.replace(root, "<repo>")
+    return _ABS_PATH_RE.sub("<local path>", text)
+
 
 __all__ = ["build_model_evidence", "evidence_path", "load_model_evidence", "DECILES"]
 
@@ -457,10 +483,13 @@ def _champion_block_impl(entry, registry) -> dict[str, Any]:
             features=entry.features,
         )
     except Exception as exc:  # one model's dataset must not lose the others
+        reason = _sanitize_reason(
+            f"rebuilding the training set raised {type(exc).__name__}: {exc}"
+        )[:300]
         return {
             "id": entry.id, "role": entry.role, "strategy": entry.strategy,
             "target": entry.target, "available": False,
-            "reason": f"rebuilding the training set raised {type(exc).__name__}: {exc}"[:300],
+            "reason": reason,
         }
 
     block: dict[str, Any] = {
@@ -523,7 +552,7 @@ def _champion_block(entry, registry) -> dict[str, Any]:
     return {
         "id": entry.id, "role": entry.role, "strategy": entry.strategy,
         "target": entry.target, "available": False,
-        "reason": f"rebuilding the training set raised {result}",
+        "reason": _sanitize_reason(f"rebuilding the training set raised {result}"),
     }
 
 
