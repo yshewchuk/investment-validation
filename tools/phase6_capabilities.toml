@@ -481,13 +481,15 @@ id = "models-training"
 area = "models"
 capability = "Retrain current model roles and register candidates"
 old = ["cli:engine/models/training/train_all.py", "cli:tools/build_chooser_pool.py"]
-new = ["cli:tools/phase5_training_job.py", "py:engine/v2/models/deployment.py::promote"]
+new = ["cli:tools/phase5_training_job.py", "py:engine/v2/models/deployment.py::promote",
+       "py:engine/v2/ops/training.py::training_plan", "py:engine/v2/ops/training.py::promote_plan",
+       "py:engine/v2/ops/training.py::training_job_kind", "py:engine/v2/ops/training.py::promote_job_kind"]
 producer = "P5-3 supervised training job over legacy dataset builders; P5-5 staged deployment"
 identity = "training receipt + staged ModelRelease id"
 tests = ["tests/test_training.py", "tests/test_v2_models_deployment.py", "tests/test_v2_models_phase5_datasets.py"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
-notes = "Phase 5 owns the lifecycle; P6-2 wires it as an ops job."
+notes = "Phase 5 owns the lifecycle; P6-2 wires it as an ops job. training and models_promote are now reached through ops plan/ops submit (ops plan training, ops plan promote), operator-triggered only -- never part of the nightly DAG."
 
 # ---------------------------------------------------------------- history
 

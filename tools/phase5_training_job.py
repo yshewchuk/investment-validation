@@ -233,12 +233,18 @@ def state_file_name(member: str) -> str:
 def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) -> dict:
     """Build one frozen state into ``out``.
 
-    ``plan_only`` builds it and writes only the summary (counts, hash).
     A rerun keeps an identical existing file and refuses a different one.
+    ``--plan-only`` is refused: building the artifact is the whole cost, so
+    previewing it would build everything and discard it (use the two
+    ``--state`` job kinds with their own cheap preview instead).
     """
     from engine.v2.models.frozen_state import serialize_frozen_state
     from tools import phase5_datasets as data
 
+    if plan_only:
+        raise SystemExit(f"{member}: --plan-only unsupported for --state jobs "
+                         "(would build the full artifact only to discard it); run without "
+                         f"--plan-only, or use --state {BOARD_ANALOG_STATE}/{TRAILING_CUTOFF_STATE}")
     artifact, summary = build_state(member, **kwargs)
     summary = {"state": member, "plan_only": bool(plan_only), **summary}
     if member == "paired_residual_pool" and kwargs.get("paired_inputs") is None:
@@ -253,9 +259,7 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         path = out / state_file_name(member)
         payload = serialize_frozen_state(artifact)
         summary.update(content_hash=artifact.content_hash, file=path.name, bytes=len(payload))
-        if plan_only:
-            summary["status"] = "planned"
-        elif path.exists():
+        if path.exists():
             if path.read_bytes() != payload:
                 raise SystemExit(f"RESUME_MISMATCH: {path.name} exists with different content")
             summary["status"] = "resumed"

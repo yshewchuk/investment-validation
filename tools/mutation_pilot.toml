@@ -811,6 +811,7 @@ mutate = [
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/incremental_data.py",
+    "engine/v2/ops/training.py",
 ]
 tests = [
     "tests/test_v2_data_incremental_persistence.py",
@@ -834,6 +835,7 @@ tests = [
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
+    "tests/test_v2_ops_training_job.py",
     "tests/test_v2_ops_worker_typed_failures.py",
     # A glob, not a literal: the spec_ns_b shadow-seam test adds itself to the
     # pool from the commit that lands it, and the two native-refresh e2e files
