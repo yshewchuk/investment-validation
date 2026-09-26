@@ -94,7 +94,7 @@ jobs:
           # default shallow checkout (depth 1) -- byte-identical to before,
           # since the ternary's false branch is the literal old default, not
           # an omitted option.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || 1 }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}

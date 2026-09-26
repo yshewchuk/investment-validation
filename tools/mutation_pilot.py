@@ -176,6 +176,20 @@ def shared_test_helpers(tracked_tests: list[str]) -> list[str]:
                   and not p.rsplit("/", 1)[1].startswith("test_"))
 
 
+def is_test_helper_path(path: str) -> bool:
+    """True for a direct ``tests/<name>.py`` path that is not itself a
+    ``test_*.py`` file -- the same shape ``shared_test_helpers`` matches
+    against the tracked-file list, but checked against a single bare path
+    string so a DELETED helper (already absent from
+    ``_tracked(["tests"])``) still matches. ``git diff --name-only`` reports
+    a deleted path by name; this function must not consult the filesystem or
+    git in any way, only the string itself."""
+    if not path.startswith("tests/"):
+        return False
+    rest = path[len("tests/"):]
+    return "/" not in rest and rest.endswith(".py") and not rest.startswith("test_")
+
+
 def shared_inputs(tracked_tests: list[str]) -> set[str]:
     """Every path whose change invalidates EVERY module for PR-selection
     purposes: the dependency locks, the mutation config, and the shared
@@ -208,7 +222,7 @@ def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
         return []
     tracked_engine = tracked_engine if tracked_engine is not None else _tracked(["engine"])
     tracked_tests = tracked_tests if tracked_tests is not None else _tracked(["tests"])
-    if changed_set & shared_inputs(tracked_tests):
+    if changed_set & shared_inputs(tracked_tests) or any(is_test_helper_path(p) for p in changed_set):
         return list(names)
     out = []
     for name in names:

@@ -717,7 +717,7 @@ def test_gremlins_plan_checks_out_full_history_only_for_pull_request():
     checkout = JOBS["plan"]["steps"][0]
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"]["fetch-depth"] == \
-        "${{ github.event_name == 'pull_request' && 0 || 1 }}"
+        "${{ github.event_name == 'pull_request' && '0' || 1 }}"
 
 
 def test_gremlins_plan_narrows_the_matrix_on_pull_request_via_changed_files():
@@ -844,7 +844,7 @@ def test_mutmut_plan_checks_out_full_history_only_for_pull_request():
     checkout = MUT_JOBS["plan"]["steps"][0]
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"]["fetch-depth"] == \
-        "${{ github.event_name == 'pull_request' && 0 || 1 }}"
+        "${{ github.event_name == 'pull_request' && '0' || 1 }}"
 
 
 def test_mutmut_plan_narrows_the_matrix_on_pull_request_via_changed_files():
@@ -1357,6 +1357,25 @@ def test_changed_modules_a_shared_input_selects_every_incoming_name():
     for changed in (["requirements.txt"], ["requirements-dev.txt"],
                     ["tools/mutation_pilot.toml"], ["tests/conftest.py"], ["tests/helpers.py"]):
         assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed, **kw) == ["alpha", "beta"]
+
+
+def test_changed_modules_a_deleted_shared_helper_still_selects_every_name():
+    # tests/conftest.py was deleted by this PR: git diff --name-only reports
+    # it in `changed`, but it is gone from the working tree, so it is absent
+    # from tracked_tests (as _tracked(["tests"]) would return post-deletion).
+    # The shared-input hit must still fire from the changed path alone.
+    cfg2 = _sel_cfg()
+    tracked_tests_without_conftest = ["tests/test_a.py", "tests/test_b.py", "tests/helpers.py"]
+    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=tracked_tests_without_conftest)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/conftest.py"], **kw) == ["alpha", "beta"]
+
+
+def test_is_test_helper_path_matches_direct_non_test_files_only():
+    assert pilot.is_test_helper_path("tests/conftest.py") is True
+    assert pilot.is_test_helper_path("tests/helpers.py") is True
+    assert pilot.is_test_helper_path("tests/test_a.py") is False
+    assert pilot.is_test_helper_path("tests/sub/conftest.py") is False
+    assert pilot.is_test_helper_path("engine/a.py") is False
 
 
 def test_changed_modules_respects_the_incoming_names_subset():
