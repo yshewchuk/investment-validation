@@ -111,14 +111,28 @@ project's standard DeepSeek-authored-code workflow.
 
 | Package | Layer | New/changed | Imports (new edges) |
 |---|---|---|---|
-| `engine.v2.features` (new file `panel_math.py`) | 2.0 | new | `numpy` (third-party) only. No edge to `engine.v2.data`/`engine.v2.contracts`/`engine.v2.foundation`, and no edge to legacy `engine.*`. |
+| `engine.v2.features` (new file `panel_math.py`) | 2.0 | new | `numpy` and `pandas` (both third-party). No edge to `engine.v2.data`/`engine.v2.contracts`/`engine.v2.foundation`, and no edge to legacy `engine.*`. |
 
 `engine/v2/features/` is the package's own declared home for this port (its
 `layer_map` entry lists `data/features/panel.py` and `data/features/tier4.py`
-among the modules it replaces). This file adds no import edge in either
-direction: it takes plain arrays/sequences/mappings as arguments and returns
-plain mappings, so it needs nothing below it in the layer order and legacy
-needs nothing from it either, before or after this change.
+among the modules it replaces). This file adds no import edge to another
+`engine.v2` package or to legacy in either direction — `layer_map.py` places
+no restriction on third-party dependencies, and `pandas` is already a normal
+dependency elsewhere in `engine.v2` (e.g. `engine/v2/models/training/`,
+`engine/v2/research/`), so taking it here does not introduce a new pattern.
+
+`pandas` is required, not optional, because `add_implied_history`'s ported
+body (`engine/data/features/panel.py:852-889`) is itself pandas code —
+`sort_values`, `groupby`, `.shift(1)`, `.expanding().mean()` — and the byte-
+identical-copy decision above means that body is copied as-is, DataFrame in,
+DataFrame out. `history_features`, `_causal_ema`, `_anchor_index`, and the
+new `daily_state_lookup` take plain arrays/sequences/mappings and return
+plain mappings, exactly as before; `add_implied_history` is the one exception
+in this file, and its signature stays `DataFrame -> DataFrame` to match
+legacy's, not the plain-mapping shape the other four functions use. An
+earlier draft of this table said "numpy only" and separately described every
+function's I/O as "plain arrays/sequences/mappings," which is wrong for
+`add_implied_history` — this revision corrects both places to agree.
 
 `docs/ARCHITECTURE.md` does not exist in this repository yet, so this design
 cannot be checked against it; the layer/ownership claims above are against
@@ -139,13 +153,18 @@ Both intermediate layers are separate, later parts of the same build (the
 orchestrator needs this part plus a market-state module; the job needs the
 orchestrator plus the sources it reads from). Until those land and are wired
 into the nightly `GRAPH`, this file has zero callers and cannot affect any
-board row — it ships as inert, tested math.
+board row — it ships as inert math, with unit tests of its own (this part's
+test plan below) but no consumer.
 
-In the meantime, the correctness check that does exercise it is the parity
-proof tool that is also a later part of this build: it calls this module's
-functions directly on real inputs and compares the result to what legacy's
-existing functions produce on the same inputs, so the port is proven correct
-independently of whether the orchestrator/job parts have landed.
+The correctness check **planned** to exercise it beyond those unit tests is
+the parity proof tool, Part E of this same build, not yet built and not part
+of this PR. Once it exists, it is intended to call this module's functions
+directly on real inputs and compare the result to what legacy's existing
+functions produce on the same inputs, so the port's correctness can be
+checked independently of whether the orchestrator/job parts have landed.
+Nothing about that tool's design, existence, or results is established by
+this design doc — it is future work this part is a precondition for, not a
+check this part has already passed.
 
 ## Changed interfaces and their callers
 
@@ -207,7 +226,8 @@ these are "does not apply" by construction rather than a policy choice:
 | Acceptance criterion | Test | How this test could fail |
 |---|---|---|
 | `history_features`/`_causal_ema` match legacy exactly | `tests/test_v2_features_panel_math.py` calls both the new and legacy functions on the same fixed `(prior_moves, prior_abs)` fixtures (empty, shorter than every EMA span, exactly at a span boundary, longer than all spans) and asserts equal output, including which keys are present | A silent reassociation (e.g. summing in a different order) would produce a value close to but not equal to legacy's, which exact equality catches and a tolerance-based test would not |
-| `_anchor_index` matches legacy exactly | Same test file, fixed `(series_dates, event_dates, as_of_dates)` fixtures covering: `as_of` absent, `as_of` before the event's own anchor, `as_of` after it, and a tie | An off-by-one in the `searchsorted` side/offset would only show up on a boundary-date fixture, not a fixture where all dates are far apart |
+| `_anchor_index` matches legacy exactly, including the out-of-range case | Same test file, fixed `(series_dates, event_dates, as_of_dates)` fixtures covering: `as_of` absent, `as_of` before the event's own anchor, `as_of` after it, a tie, and an event **before the first series date** (asserting the return is `-1`, matching `np.searchsorted(..., side="left") - 1` on an index-0 hit) | An off-by-one in the `searchsorted` side/offset would only show up on a boundary-date fixture, not a fixture where all dates are far apart; a fix that clamps the result to `0` instead of leaving it at `-1` would only show up on this specific before-the-first-date fixture |
+| Every current legacy caller of `_anchor_index` guards the `-1`/out-of-range case before indexing with it | Not a new test on the port — a documentation check on the existing legacy call sites, cited here because a future v2 caller of the ported `_anchor_index` must copy the same guard. `engine/data/features/panel.py` has three call sites (`add_regime_features` ~line 408, `add_runup_features` ~line 566, `add_orats_features` ~line 696), and all three check the index before use: `if j < 0 or j >= len(closes): continue`, `if idx < 0: continue`, and `if j < 0: no_prior += 1` / `else: ...targets[...][i] = columns[...][j]` respectively — none indexes an array with a raw, unchecked `-1` | A future v2 caller (the market-state part, A2) that indexes on `_anchor_index`'s result without first checking `< 0` would silently read the last row of the array (Python's negative-index wraparound) instead of refusing — this is the failure mode the guard exists to prevent, and A2's design must carry the same guard forward |
 | `add_implied_history`'s running mean matches legacy exactly | Same test file, a fixed multi-ticker frame with gaps, asserting the per-ticker expanding mean is shifted by exactly one row and never leaks the current event's own value | A missing `.shift(1)` equivalent would let the current row's own value leak into its own mean — must be tested with a fixture where that would change the result |
 | `daily_state_lookup` matches legacy's `daily_state_frame` for a single decision date | Same test file, a fixed daily-market fixture (including rows with no IV surface, i.e. no `src_iv`) compared against calling legacy's `daily_state_frame` with a one-row request at the same date | Filtering the wrong subset of rows (e.g. not excluding non-surface rows) would only surface on a fixture that mixes surface and non-surface rows for the same ticker |
 | Missing values are absent keys, not `NaN` | Same test file, a decision date before any coverage and a lag field with insufficient history, asserting the corresponding keys are not present in the returned mapping at all (not present-and-`NaN`) | A refactor that keeps computing the value and just leaves it as `NaN` instead of dropping the key would pass a "value is not a real number" check but fail an "is this key even in the dict" check — the test must check for absence, not just non-finiteness |
