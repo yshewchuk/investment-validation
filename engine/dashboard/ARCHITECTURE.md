@@ -35,9 +35,11 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
 - `model_evidence.py` — `load_model_evidence`, `evidence_path`,
   `_sanitize_reason`: the model-evidence page and its own free-text
   sanitizer (see Invariants).
-- `publish.py` — `publish_bundle`, `Publisher`/`publish` (atomic
-  release-symlink flip), `secret_scan`, `access_probe`: the publication
-  path and its own pre-publish secret scan of the rendered bundle.
+- `publish.py` — `publish_bundle`, `LocalPublisher` (atomic
+  release-symlink flip, the default target), `CommandPublisher` (a shell
+  command target; see Failure semantics for what "atomic" does and does
+  not cover there), `secret_scan`, `access_probe`: the publication path
+  and its own pre-publish secret scan of the rendered bundle.
 
 ## Inputs
 
@@ -71,7 +73,7 @@ rather than reimplementing them.
 
 The Tier-1/2 data providers behind the fetch wrapper; the legacy ledger
 and panel filesystem state; the publish target's filesystem (or a remote
-publish command, per `publish.py`'s `Publisher`/command-based variant);
+publish command, per `publish.py`'s `CommandPublisher` variant);
 `fcntl` for the nightly's own run lock.
 
 ## Failure semantics
@@ -84,11 +86,18 @@ publish command, per `publish.py`'s `Publisher`/command-based variant);
 - **Selfcheck mismatch** — stops the publish; `scrub_mismatches` persists a
   sanitised row/field/reason mismatch list to a diagnostics file instead of
   only a bare traceback.
-- **Publish** — atomic per-target; a down target never blocks — the local
-  bundle still renders, and the retry is next night's. `secret_scan` runs
-  over the rendered bundle before publish, independently of
-  `checks/repo_hygiene.py` (which does not scan `dashboard/published/**`
-  at all).
+- **Publish** — `LocalPublisher` (the default target, a directory) is
+  atomic: it stages the full bundle under `releases/{stamp}/`, then flips
+  `current` with one `os.replace`, so a process killed mid-copy leaves the
+  previous release serving. `CommandPublisher` (a shell-command target,
+  e.g. `wrangler pages deploy {bundle}`) carries no atomicity of its own —
+  it runs the configured command and checks its exit code; remote
+  atomicity holds only when that command's own deployment contract is
+  atomic, which this code neither verifies nor provides. Either way a
+  down target never blocks — the local bundle still renders, and the
+  retry is next night's. `secret_scan` runs over the rendered bundle
+  before publish, independently of `checks/repo_hygiene.py` (which does
+  not scan `dashboard/published/**` at all).
 - **Backup** — a failure raises a flag but never blocks the publish; the
   snapshot and the backup are independent.
 - **Idempotency** — re-running re-reads, re-renders, re-publishes; the

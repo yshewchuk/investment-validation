@@ -29,8 +29,18 @@ accounting itself.
 
 ## Inputs
 
-Release root, model-release root, calibration health path and serving
-index path — all read via `engine.v2.serving`'s bounded/paginated reads,
+Launcher contract (`preview.py::_parse_args`/`run`): `--release-root` and
+`--health-path` are required by argparse — omitting either exits with
+code 2 before any server is built. The `V2_DASHBOARD_TOKEN` env var is
+required by `run()` — a missing token raises `SystemExit` before
+`build_server`/`create_server` runs at all. `--model-release-root`,
+`--calibration-health-path`, `--ops-root` and `--serving-index-path` are
+all optional; each unlocks exactly one route (`/models/release.json`,
+`/calibration-health.json`, `POST /actions/refresh`, `GET /analogs.json`
+respectively) and none is ever inferred from `--release-root` or
+`--health-path` — omitting one keeps that route's own explicit
+"not configured" refusal (see Failure semantics). Whatever roots are
+configured are read via `engine.v2.serving`'s bounded/paginated reads,
 never a direct file read of scoring/evaluation/ledger data.
 
 ## Outputs
@@ -70,10 +80,20 @@ no direct filesystem, database or third-party API access of its own.
 
 ## Failure semantics
 
-- **Missing input** — a missing release/calibration/serving-index path is
-  handled by `engine.v2.serving`'s own typed responses (e.g. the read-only
-  503 "refresh not configured" `create_server` returns when no refresh
-  callback is wired); this package adds no new missing-input handling.
+- **Missing input** — two distinct layers:
+  - **Launcher-time, in this package**: a missing `--release-root` or
+    `--health-path` is rejected by argparse (`SystemExit(2)`) before any
+    server object exists; a missing `V2_DASHBOARD_TOKEN` raises
+    `SystemExit` in `run()`, again before `build_server`/`create_server`
+    is ever called. Neither reaches the serving layer.
+  - **Serving-time, in `engine.v2.serving` (not this package)**: an
+    omitted *optional* root (`--model-release-root`,
+    `--calibration-health-path`, `--ops-root`, `--serving-index-path`)
+    is passed straight through to `create_server`, whose own typed
+    responses answer the request at call time — e.g. the read-only 503
+    "refresh not configured" when no refresh callback is wired. This
+    package adds no missing-input handling of its own beyond the two
+    launcher checks above.
 - **Cache / retry / transaction / partial write** — none: this package
   holds no durable state of its own; every read goes through
   `engine.v2.serving`'s own semantics.
