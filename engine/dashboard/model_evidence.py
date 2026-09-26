@@ -90,6 +90,16 @@ SAMPLE_SEED = 7
 #: will load.
 SCATTER_POINTS = 300
 
+#: Bumped whenever a fix changes what build_model_evidence produces or how a
+#: cache hit is judged, in a way that must force every previously cached
+#: entry to rebuild even though the champion artifacts it was keyed on have
+#: not changed. Bumped 2026-09-26: a champion's cached "reason" string could
+#: carry an absolute local filesystem path (see _sanitize_reason above) from
+#: before that fix existed -- the fingerprint alone (artifact_sha256 per
+#: champion) cannot see that difference, since the underlying artifact never
+#: changed, only what this module does with a rebuild failure.
+EVIDENCE_SCHEMA_VERSION = 2
+
 
 def _release_free_pages() -> None:
     """Hand memory Python has finished with back to the OS.
@@ -581,7 +591,11 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
             champions.append(entry)
 
     fingerprint = {e.id: (e.artifact_sha256 or "") for e in champions}
-    if not force and cached.get("fingerprint") == fingerprint:
+    if (
+        not force
+        and cached.get("fingerprint") == fingerprint
+        and cached.get("schema_version") == EVIDENCE_SCHEMA_VERSION
+    ):
         return cached
 
     models: dict[str, Any] = {}
@@ -591,6 +605,7 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
     out = {
         "generated_at": pd.Timestamp.now("UTC").isoformat(),
         "fingerprint": fingerprint,
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
         "deciles": DECILES,
         "elapsed_s": round(time.time() - started, 1),
         "models": models,
