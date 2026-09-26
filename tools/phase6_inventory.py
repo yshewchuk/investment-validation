@@ -171,6 +171,57 @@ def _handler_routes(root: Path, rel: str, app: str, found: dict) -> None:
                     _add(found, f"route:{app} {verb} {node.args[0].value}*", "route", rel)
 
 
+def _route_pairs(node: ast.AST, views: list[str]) -> list[tuple[str, str]]:
+    """The ``(method, path)`` pairs one route-table entry declares."""
+    if isinstance(node, ast.Starred):
+        return _starred_views(node.value, views)
+    if not isinstance(node, ast.Tuple) or len(node.elts) < 2:
+        return []
+    values = _const_strings(ast.Tuple(elts=list(node.elts[:2])))
+    return [(values[0], values[1])] if len(values) == 2 else []
+
+
+def _starred_views(node: ast.AST, views: list[str]) -> list[tuple[str, str]]:
+    """``*(("GET", f"/{view}") for view in _VIEWS if view != "derivation")``.
+
+    Expands to one static route per view, honouring the generator's own
+    ``!=`` exclusions (a view declared separately stays only once).
+    """
+    if not isinstance(node, ast.GeneratorExp) or not views:
+        return []
+    elt = node.elt
+    if not (isinstance(elt, ast.Tuple) and len(elt.elts) == 2):
+        return []
+    method, path = elt.elts
+    if not (isinstance(method, ast.Constant) and method.value == "GET"):
+        return []
+    if not (isinstance(path, ast.JoinedStr) and path.values
+            and isinstance(path.values[0], ast.Constant) and path.values[0].value == "/"):
+        return []
+    excluded = {test.comparators[0].value for gen in node.generators for test in gen.ifs
+                if isinstance(test, ast.Compare) and isinstance(test.ops[0], ast.NotEq)
+                and isinstance(test.comparators[0], ast.Constant)}
+    return [("GET", f"/{view}") for view in views if view not in excluded]
+
+
+def _declared_routes(root: Path, rel: str, app: str, found: dict) -> None:
+    """The module-level ``STATIC_ROUTES``/``PARAMETERIZED_ROUTES`` tuples.
+
+    The same declarative table the route probe imports; a parameterized prefix
+    is recorded as ``<prefix>*``, matching the ``startswith`` id form.
+    """
+    tree = _tree(root, rel)
+    views = _const_strings(_module_assign(tree, "_VIEWS"))
+    for name, parameterized in (("STATIC_ROUTES", False), ("PARAMETERIZED_ROUTES", True)):
+        node = _module_assign(tree, name)
+        if not isinstance(node, ast.Tuple):
+            continue
+        for entry in node.elts:
+            for method, path in _route_pairs(entry, views):
+                suffix = "*" if parameterized else ""
+                _add(found, f"route:{app} {method} {path}{suffix}", "route", rel)
+
+
 def _spa_views(root: Path, found: dict) -> None:
     text = _text(root, LEGACY_SPA)
     match = re.search(r"const AREA_VIEWS\s*=\s*\{([^}]*)\}", text)
@@ -338,6 +389,7 @@ def discover_entrypoints(root: Path = ROOT) -> dict[str, dict]:
     _fastapi_routes(root, LEGACY_APP, "legacy-app", found)
     _fastapi_routes(root, V2_API, "v2-api", found)
     _handler_routes(root, V2_OPS_SERVER, "v2-ops", found)
+    _declared_routes(root, V2_OPS_SERVER, "v2-ops", found)
     _spa_views(root, found)
     _spa_controls(root, found)
     _react_routes(root, found)
