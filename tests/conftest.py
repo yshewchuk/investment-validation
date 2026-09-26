@@ -368,6 +368,24 @@ def _restore_investing_plan_root():
         os.environ["INVESTING_PLAN_ROOT"] = original_root_env
 
 
+@pytest.fixture(autouse=True)
+def _isolate_experiments_ledger(tmp_path, monkeypatch):
+    """Point ``experiments.lib.LEDGER_PATH`` at this test's tmp tree.
+
+    The module resolves its default path at call time, so a test (or a writer
+    it drives) that appends without an explicit path must land under
+    ``tmp_path`` — never in the checkout's ``experiments/LEDGER.csv``. The
+    import is attempted here rather than at module scope: if it fails in some
+    environment there is no module to isolate, and that failure is not this
+    test's to report.
+    """
+    try:
+        from experiments import lib
+    except Exception:
+        return
+    monkeypatch.setattr(lib, "LEDGER_PATH", tmp_path / "experiments" / "LEDGER.csv")
+
+
 @pytest.fixture
 def tmp_root(tmp_path, monkeypatch):
     """Point ``engine.paths`` at a throwaway tree for the duration of a test."""
