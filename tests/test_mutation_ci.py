@@ -1351,6 +1351,26 @@ def test_changed_modules_selects_only_the_owning_module():
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_b.py"], **kw) == ["beta"]
 
 
+def test_changed_modules_a_deleted_own_test_file_still_selects_its_module():
+    # alpha's test file, tests/test_a.py, was deleted by this PR: git diff
+    # --name-only reports it in `changed`, but it is gone from the tree, so
+    # it is absent from tracked_tests (as _tracked(["tests"]) would return
+    # post-deletion). alpha must still be selected from the changed path
+    # alone, even though no OTHER changed path touches alpha.
+    cfg2 = _sel_cfg()
+    tracked_tests_without_test_a = ["tests/test_b.py", "tests/conftest.py", "tests/helpers.py"]
+    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=tracked_tests_without_test_a)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_a.py"], **kw) == ["alpha"]
+
+
+def test_module_owns_changed_path_matches_tests_and_mutate_minus_skip():
+    cfg2 = _sel_cfg()
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_a.py") is True
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "engine/a.py") is True
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "engine/b.py") is False
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_b.py") is False
+
+
 def test_changed_modules_a_shared_input_selects_every_incoming_name():
     cfg2 = _sel_cfg()
     kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)

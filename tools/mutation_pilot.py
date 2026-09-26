@@ -209,6 +209,23 @@ def read_changed_files(path: str) -> list[str]:
     return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
 
 
+def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
+    """True if ``path`` matches module ``name``'s configured ``tests`` or
+    ``mutate`` (minus ``skip``) glob patterns, checked directly against the
+    path string -- independent of whether ``path`` is currently tracked.
+    ``mutate_files``/``test_files`` only return currently-tracked paths (via
+    ``expand``'s ``tracked`` list), so a DELETED source or test file that
+    still matches its module's own pattern would otherwise never select that
+    module, even though ``git diff --name-only`` reports the deletion."""
+    mod = module_cfg(cfg, name)
+    if any(fnmatch.fnmatchcase(path, pat) for pat in mod.get("tests", [])):
+        return True
+    if any(fnmatch.fnmatchcase(path, pat) for pat in mod["mutate"]) and \
+            not any(fnmatch.fnmatchcase(path, pat) for pat in mod.get("skip", [])):
+        return True
+    return False
+
+
 def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
                     tracked_engine: list[str] | None = None,
                     tracked_tests: list[str] | None = None) -> list[str]:
@@ -226,8 +243,8 @@ def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
         return list(names)
     out = []
     for name in names:
-        owned = set(mutate_files(cfg, name, tracked_engine)) | set(test_files(cfg, name, tracked_tests))
-        if changed_set & owned:
+        if any(module_owns_changed_path(cfg, name, p) for p in changed_set) or changed_set & (
+                set(mutate_files(cfg, name, tracked_engine)) | set(test_files(cfg, name, tracked_tests))):
             out.append(name)
     return out
 
