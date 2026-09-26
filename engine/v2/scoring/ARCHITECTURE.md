@@ -60,7 +60,7 @@ enumerator's strategy set, rather than duplicating or hard-coding it — the
 enumerator reads the input builder's own declaration of what it supports,
 so the two cannot drift apart.
 
-Existing consumers of this module — `engine.v2.scoring.__init__` (re-exports
+Existing non-test consumers of this module — `engine.v2.scoring.__init__` (re-exports
 `SourceBundle`/`build_native_score_inputs`), `chooser_inputs.py` (imports
 `SourceBundle` and other frozen-recipe helpers), `tools/capture_tier0_corpus.py`,
 `tools/phase4_release_assembler.py`, and the `checks/phase4_*`/
