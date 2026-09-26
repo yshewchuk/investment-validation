@@ -48,7 +48,7 @@ from engine.structures import (  # noqa: E402
     price_structure,
 )
 from engine.v2.contracts import ScoreRecord, ScoreRequest  # noqa: E402
-from engine.v2.diagnosis import AGREE, SCORE_RECORD_V1, compare_records  # noqa: E402
+from engine.v2.diagnosis import AGREE, compare_records  # noqa: E402
 from engine.v2.domain.generation import Geometry, Pricing, generate, price  # noqa: E402
 from engine.v2.domain.valuation import (  # noqa: E402
     multi_expiry_refusal,
@@ -88,6 +88,15 @@ from engine.v2.models.residual_artifact import (  # noqa: E402
     ResidualArtifactError,
     residual_artifact_from_document,
 )
+from engine.v2.parity.dimensions import (  # noqa: E402
+    ANALOG_FIELDS,
+    FINANCIAL_FIELDS,
+    FORECAST_FIELDS,
+    GATE_FIELDS,
+    NEVER_RAN_DIMENSIONS,
+    SIMULATION_FIELDS,
+    compare_dimension,
+)
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash, score_id, with_score_id  # noqa: E402
@@ -106,6 +115,31 @@ from engine.v2.serving.score_projection import legacy_score_projection  # noqa: 
 from tools.phase4_request_translation import legacy_binding_mismatches  # noqa: E402
 
 __all__ = ["build_evidence", "main"]
+
+#: The numeric field groups and the per-dimension comparator now live in
+#: ``engine.v2.parity.dimensions`` (spec_ns_c part c) so the nightly parity
+#: report can run the same comparison without production importing this
+#: checker.  The underscore aliases below keep every existing call site and
+#: test working unchanged.
+_FORECAST_FIELDS = FORECAST_FIELDS
+_SIMULATION_FIELDS = SIMULATION_FIELDS
+_FINANCIAL_FIELDS = FINANCIAL_FIELDS
+_GATE_FIELDS = GATE_FIELDS
+_ANALOG_FIELDS = ANALOG_FIELDS
+_NEVER_RAN_DIMENSIONS = NEVER_RAN_DIMENSIONS
+
+
+def _compare_dimension(expected: dict, actual: dict, dimension: str) -> dict:
+    """``engine.v2.parity.dimensions.compare_dimension`` with this module's
+    ``compare_records`` binding.
+
+    Not a bare alias: the Phase 4 negative controls plant a blind comparator
+    by ``monkeypatch.setattr(phase4_real, "compare_records", ...)``, so the
+    checker must keep resolving the comparator through its own module global.
+    Passing it explicitly preserves that, while the comparison body itself
+    lives in exactly one place.
+    """
+    return compare_dimension(expected, actual, dimension, compare_records=compare_records)
 
 
 def _request(**changes):
@@ -1132,32 +1166,6 @@ def _diagnostic_checkpoint_control(corpus) -> bool:
     return True
 
 
-_FORECAST_FIELDS = (
-    "driver_prediction", "driver_p10", "driver_p90",
-    "forecast_abs_move", "forecast_p10", "forecast_p90", "forecast_sd",
-    "runup_move_prediction", "runup_move_p10", "runup_move_p90",
-    "runup_move_scale", "chooser_score",
-)
-_SIMULATION_FIELDS = (
-    "exp_pnl_sim", "exp_pnl_model", "exp_pnl_analog",
-    "win_sim", "win_model", "win_model_raw", "win_analog",
-)
-_FINANCIAL_FIELDS = (
-    "entry_cost_pct", "model_vs_market", "fair_premium_pct",
-    "premium_vs_fair", "cost_over_width",
-)
-#: gate_pass alone used to stand in for the whole gate: two runs could agree
-#: on the boolean while disagreeing on the score and threshold that produced
-#: it. Compare all three explicitly.
-_GATE_FIELDS = ("gate_score", "gate_threshold", "gate_pass")
-#: ci_low/ci_high/n_analogs previously appeared in no comparison tuple at
-#: all. Both sides carry these as a genuine concept (the legacy record's own
-#: analog columns; the native side's resolved_request, populated by
-#: _execute_analogs in stages.py) — present as a key with a possibly-None
-#: value, never structurally absent, so an ordinary field comparison applies
-#: with no incomparability marker needed.
-_ANALOG_FIELDS = ("ci_low", "ci_high", "n_analogs")
-
 #: The correspondence set the "keys" check compares. DERIVED, not hand-listed:
 #: exactly the union of the four field-name tuples above -- the fields the
 #: forecasts/simulation/verdicts/analogs numeric dimensions already compare
@@ -1226,18 +1234,6 @@ _NEVER_RAN_PLACEHOLDER_DEFAULTS = {
     name: None for name in _SIMULATION_FIELDS + _GATE_FIELDS + _ANALOG_FIELDS
 }
 _NEVER_RAN_PLACEHOLDER_DEFAULTS["n_analogs"] = 0
-
-#: Dimensions the "never ran" rule (USER DECISION, 2026-09-23) applies to.
-#: Forecasts are explicitly excluded -- the forecast band is being built
-#: separately and this rule must not touch ``_FORECAST_FIELDS`` handling.
-#: ``financial_diagnostics`` is also out of scope: both sides COMPUTE it
-#: from other fields rather than carrying it, so it has no notion of
-#: "stage never ran" independent of the fields this rule already covers.
-_NEVER_RAN_DIMENSIONS = {
-    "simulation": _SIMULATION_FIELDS,
-    "verdicts": _GATE_FIELDS,
-    "analogs": _ANALOG_FIELDS,
-}
 
 
 def _never_ran_dimensions(record: Mapping[str, Any], native) -> frozenset[str]:
@@ -1403,25 +1399,6 @@ def _numeric_views(record: dict, native) -> tuple[dict, dict]:
         "analogs": {name: resolved.get(name) for name in _ANALOG_FIELDS},
     }
     return expected, actual
-
-
-def _compare_dimension(expected: dict, actual: dict, dimension: str) -> dict:
-    comparison = compare_records(
-        expected, actual,
-        comparison_kind=f"phase4_{dimension}_parity",
-        left_ref="frozen_legacy_record",
-        right_ref="native_score_record",
-        tolerance_policy=SCORE_RECORD_V1,
-    )
-    return {
-        "agree": comparison.verdict == AGREE,
-        "finding_fields": sorted(finding.field_path for finding in comparison.findings),
-        "receipt": content_hash({
-            "dimension": dimension,
-            "verdict": comparison.verdict,
-            "findings": [finding.field_path for finding in comparison.findings],
-        }),
-    }
 
 
 def _compare_numeric_outputs(record: dict, native, *, actual_override=None) -> dict:

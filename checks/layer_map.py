@@ -427,6 +427,28 @@ PACKAGES: tuple[Package, ...] = (
         ),
     ),
     Package(
+        dotted="engine.v2.parity",
+        layer=6.5,
+        label="—",
+        owner="Native-vs-legacy parity — the record comparator core (moved from "
+              "diagnosis, which re-exports it) and the per-dimension policy the "
+              "Phase 4 checker and the nightly parity report share (not a §4 "
+              "owner-table row; added spec_ns_c part c)",
+        replaces=("the numeric field groups and per-dimension comparator that "
+                  "lived inside checks/phase4_real.py",),
+        only_imports=(0.5,),
+        responsibilities=(
+            "The numeric field groups and the per-dimension comparison the "
+            "Phase 4 corpus checker and the nightly parity report both run.",
+            "The record comparator, tolerance policies, stage plan and "
+            "receipts, re-exported unchanged by engine.v2.diagnosis.",
+        ),
+        non_responsibilities=(
+            ("Decide whether a difference is acceptable", "a person, from the receipt"),
+            ("Repair the data it found wrong", "the package that produced it"),
+        ),
+    ),
+    Package(
         dotted="engine.v2.research",
         layer=7.0,
         label="—",

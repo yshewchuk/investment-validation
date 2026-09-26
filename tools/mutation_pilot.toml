@@ -198,6 +198,10 @@ tests = [
 why = "Record comparator, tolerances and receipts decide whether two runs agree; a weakened comparison hides a parity break."
 mutate = [
     "engine/v2/diagnosis/*.py",
+    "engine/v2/parity/receipt.py",
+    "engine/v2/parity/record_comparator.py",
+    "engine/v2/parity/stage_plan.py",
+    "engine/v2/parity/tolerance.py",
 ]
 tests = [
     "tests/test_baseline_export.py",
@@ -205,6 +209,20 @@ tests = [
     "tests/test_v2_ops_foundation.py",
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
+]
+
+[modules.parity]
+why = "The shared native-vs-legacy per-dimension comparator and field groups: a weakened comparison hides a parity break in both the nightly report and the Phase 4 checker."
+mutate = [
+    "engine/v2/parity/__init__.py",
+    "engine/v2/parity/dimensions.py",
+]
+tests = [
+    "tests/test_v2_ops_native*.py",
+    "tests/test_phase4_planted_defect_control.py",
+    "tests/test_phase4_numeric_negative_control_states.py",
+    "tests/test_phase4_acceptance_independence.py",
+    "tests/test_v2_scoring_native_entry_rule.py",
 ]
 
 [modules.data_store]
@@ -486,6 +504,17 @@ tests = [
     "tests/test_v2_serving_legacy_bundle.py",
     "tests/test_v2_serving_projections.py",
     "tests/test_v2_serving_publication_binding.py",
+    # A glob, not a new literal line: tests/test_mutation_ci.py expands the
+    # pattern list against `git ls-files`, so a literal for a file not yet
+    # committed would fail as "matches no tracked file". This keeps every
+    # tests/test_v2_serving_*.py (native_render included) in the module's pool
+    # from the commit that lands it onward.
+    "tests/test_v2_serving_*.py",
+    # The spec_ns_b serving half (native_shadow_render.py) is exercised by the
+    # ops-named seam test and by nothing in the serving pool yet; the glob is
+    # valid today (the native-refresh e2e files) and picks the new test up
+    # from the commit that lands it.
+    "tests/test_v2_ops_native*.py",
 ]
 
 [modules.ops_cli]
@@ -772,10 +801,12 @@ tests = [
 [modules.ops_nightly]
 why = "Nightly DAG, stage map, plans, fingerprints and incremental data wiring."
 mutate = [
-    # engine/v2/ops/nightly_trigger.py (phase 6 slice 12) is matched by this
-    # nightly glob exactly once; git ls-files cannot see a brand-new file
-    # before it is staged, so a literal path pattern would abort the matrix.
-    "engine/v2/ops/nightly*.py",
+    # ``n*.py`` keeps nightly.py and nightly_trigger.py (phase 6 slice 12)
+    # owned and lands native_shadow_render.py (the spec_ns_b ops half of the
+    # shadow-serving seam) in the same module from the commit that adds it: a
+    # literal for an untracked file matches nothing and fails
+    # test_mutation_ci's tracked-pattern expansion.
+    "engine/v2/ops/n*.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
@@ -804,6 +835,10 @@ tests = [
     "tests/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
     "tests/test_v2_ops_worker_typed_failures.py",
+    # A glob, not a literal: the spec_ns_b shadow-seam test adds itself to the
+    # pool from the commit that lands it, and the two native-refresh e2e files
+    # it matches today keep the ops half covered before then.
+    "tests/test_v2_ops_native*.py",
 ]
 
 [modules.ops_snapshots]
