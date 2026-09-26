@@ -255,6 +255,57 @@ class TestCarryOverGuards:
             )
 
 
+class TestPrefixGapBackfill:
+    """Regression test for the 2026-09 catch-up nightlies (logs 09-11, 09-14
+    through 09-17, and 09-25 all show the SAME error shape:
+    ``Tier4Error: Tier 3 has N events before <fold> that the existing Tier-4
+    table does not cover``) and for the identical gap still open on disk today
+    in ``data/features/tier4_forecasts.parquet`` (3 rows, one ticker, three
+    2021 dates).
+
+    The fixture is deliberately identical to
+    ``TestCarryOverGuards.test_events_added_inside_the_carried_prefix_refuse_the_carry_over``
+    above — same ``thinned`` construction, same ``since`` — because it is the
+    same event, given a different requirement. That test locks in today's
+    behaviour (refuse and raise). This one states what an incremental build
+    must do about a gap instead of refusing outright: recompute the one fold
+    the gap sits in and return a table that is total over Tier 3 again,
+    the same as a full rebuild would.
+
+    THIS TEST IS EXPECTED TO FAIL until the gap-fill fix lands — it exists to
+    let a reviewer see the exact acceptance bar the fix has to clear before
+    any fix code is written.
+    """
+
+    def test_a_gap_in_the_carried_prefix_is_backfilled_not_refused(self, panel, built):
+        gap_date = built["event_date"].min()
+        thinned = built[built["event_date"] != gap_date]
+
+        # Today's incremental build raises Tier4Error here (see the sibling
+        # test in TestCarryOverGuards) and the caller — the legacy nightly's
+        # step 2b — treats that as "Tier 3/Tier 4 not rebuilt" and moves on,
+        # leaving the gap unfilled for every night after. The fix must make
+        # this call succeed instead of raising.
+        backfilled = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01",
+            existing=thinned, tier3_snapshot="snap", log=lambda _m: None,
+        )
+
+        # Total over Tier 3 again, exactly like a full rebuild.
+        assert len(backfilled) == len(panel)
+        gap_rows = backfilled[backfilled["event_date"] == gap_date]
+        assert len(gap_rows) == (panel["date"] == gap_date).sum()
+
+        # The backfilled row(s) must match a full rebuild bit-for-bit — a
+        # gap-fill that disagrees with a full rebuild is the same silent
+        # corruption TestSinceEquivalence exists to catch for the ordinary
+        # incremental path.
+        pd.testing.assert_frame_equal(
+            gap_rows.sort_values("ticker").reset_index(drop=True),
+            built[built["event_date"] == gap_date].sort_values("ticker").reset_index(drop=True),
+        )
+
+
 class TestTotalityAndNulls:
     def test_every_tier3_event_gets_a_row(self, panel, built):
         assert len(built) == len(panel)
