@@ -91,10 +91,19 @@ def board_requests(
     as_of_ts = pd.Timestamp(as_of).normalize()
     horizon = as_of_ts + pd.Timedelta(days=horizon_days)
 
-    events = events_table[
-        (events_table["event_date"] >= as_of_ts)
-        & (events_table["event_date"] <= horizon)
-        & events_table["session"].notna()
+    try:
+        event_dates = pd.to_datetime(events_table["event_date"])
+    except (ValueError, TypeError) as exc:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            f"events_table event_date column could not be parsed as timestamps: {exc}",
+        )) from exc
+
+    events = events_table.assign(event_date=event_dates)
+    events = events[
+        (events["event_date"] >= as_of_ts)
+        & (events["event_date"] <= horizon)
+        & events["session"].notna()
     ]
     if tickers is not None:
         events = events[events["ticker"].isin(set(tickers))]

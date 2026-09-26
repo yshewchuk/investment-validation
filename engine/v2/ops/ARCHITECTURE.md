@@ -91,10 +91,11 @@ type. No file, network, or database access.
 
 ## Failure semantics (4c R1–R6)
 
-- **Missing input:** `events_table` missing `ticker`, `event_date`, or
-  `session` is a whole-call typed refusal (`OpsError`, code
-  `INVALID_REQUEST`), raised before any row is read — never a partial or
-  silently smaller result.
+- **Missing or malformed input:** `events_table` missing `ticker`,
+  `event_date`, or `session`, or holding an `event_date` column that cannot
+  be parsed as timestamps (e.g. an unparseable string), is a whole-call
+  typed refusal (`OpsError`, code `INVALID_REQUEST`), raised before any row
+  is read — never a partial or silently smaller result.
 - **Cache:** none. The function holds no cache; it reads only the table its
   caller passes in.
 - **Retry:** pure and deterministic for a given table snapshot; re-execution

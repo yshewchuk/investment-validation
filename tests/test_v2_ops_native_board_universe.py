@@ -7,6 +7,8 @@ anywhere in this file.
 """
 from __future__ import annotations
 
+from collections import Counter
+
 import pandas as pd
 import pytest
 
@@ -55,10 +57,11 @@ class _FakeScorer:
         )
 
 
-def _legacy_atm_pairs(monkeypatch, events_df, as_of, horizon_days, tickers, strategies):
-    """The `(ticker, strategy)` pairs legacy `score_calendar` would enumerate
-    for `strategies`, on the ATM pass, against `events_df` — fully mocked,
-    read-only comparison, never a second implementation of the filter."""
+def _legacy_atm_event_keys(monkeypatch, events_df, as_of, horizon_days, tickers, strategies):
+    """Occurrence counts of `(ticker, strategy, event_date, session)` the
+    legacy `score_calendar` would enumerate for `strategies`, on the ATM
+    pass, against `events_df` — fully mocked, read-only comparison, never a
+    second implementation of the filter."""
     import engine.score as score_mod
 
     monkeypatch.setattr(
@@ -77,29 +80,35 @@ def _legacy_atm_pairs(monkeypatch, events_df, as_of, horizon_days, tickers, stra
     atm = frame[frame["strategy"].isin(strategies)]
     if "strike_offset" in atm.columns:
         atm = atm[atm["strike_offset"].isna()]
-    return set(zip(atm["ticker"], atm["strategy"]))
+    return Counter(
+        (ticker, strategy, str(pd.Timestamp(event_date).date()), session)
+        for ticker, strategy, event_date, session
+        in atm[["ticker", "strategy", "event_date", "session"]]
+        .itertuples(index=False, name=None)
+    )
 
 
 class TestBoardUniverseParityWithLegacy:
     def test_native_covered_pairs_match_score_calendar_atm_pass(self, monkeypatch):
         events_df = _events([
             {"event_id": "e1", "ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+            {"event_id": "e1b", "ticker": "AAA", "event_date": pd.Timestamp("2026-02-10"), "session": "AMC"},
             {"event_id": "e2", "ticker": "BBB", "event_date": pd.Timestamp("2026-02-03"), "session": "AMC"},
         ])
         as_of = pd.Timestamp("2026-01-25")
         horizon_days = 21
         covered = sorted(SUPPORTED_STRATEGIES)
 
-        native_pairs = {
-            (r.ticker, r.strategy)
+        native_keys = Counter(
+            (r.ticker, r.strategy, str(r.event_date.date()), r.session)
             for r in board_requests(as_of, horizon_days, None, events_df)
             if r.strategy != "DYN-SV"
-        }
-        legacy_pairs = _legacy_atm_pairs(
+        )
+        legacy_keys = _legacy_atm_event_keys(
             monkeypatch, events_df, as_of, horizon_days, None, covered,
         )
-        assert native_pairs == legacy_pairs
-        assert native_pairs  # the fixture must actually exercise something
+        assert native_keys == legacy_keys
+        assert native_keys  # the fixture must actually exercise something
 
 
 class TestDynSvIsOncePerEvent:
@@ -121,6 +130,27 @@ class TestMalformedEventsTableRefuses:
         events_df = _events([
             {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
         ]).drop(columns=[drop_column])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+
+class TestEventDateColumnConversion:
+    def test_parseable_string_event_date_column_is_accepted(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "2026-02-01", "session": "BMO"},
+        ])
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 21, None, events_df,
+        )
+        non_dyn_sv = [r for r in requests if r.strategy != "DYN-SV"]
+        assert non_dyn_sv
+        assert all(r.event_date == pd.Timestamp("2026-02-01") for r in non_dyn_sv)
+
+    def test_unparseable_event_date_column_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "not-a-date", "session": "BMO"},
+        ])
         with pytest.raises(OpsError) as excinfo:
             board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
         assert excinfo.value.code == "INVALID_REQUEST"
