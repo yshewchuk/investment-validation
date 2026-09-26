@@ -33,7 +33,7 @@ from engine.v2.scoring.stages import (
     receipt,
 )
 
-__all__ = ["SourceBundle", "build_native_score_inputs", "fold_pool"]
+__all__ = ["SourceBundle", "build_native_score_inputs", "fold_pool", "SUPPORTED_STRATEGIES"]
 
 _ANSWER_FIELDS = frozenset({
     "legs", "selected_legs", "selected_contracts", "resolved_legs",
@@ -184,6 +184,10 @@ _STRATEGY_FORECAST_OUTPUTS = {
     },
 }
 _SUPPORTED_STRATEGIES = frozenset(_STRATEGY_FORECAST_OUTPUTS)
+#: Public alias: the strategies this module can build native scoring
+#: inputs for. `engine.v2.ops.native_board_universe` reads this instead of
+#: duplicating the covered-strategy set.
+SUPPORTED_STRATEGIES = _SUPPORTED_STRATEGIES
 
 
 @dataclass(frozen=True, kw_only=True)

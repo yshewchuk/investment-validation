@@ -39,7 +39,7 @@ failure rather than a stale sentence.
 
 `engine/v2/serving` renders the strategy derivation view (Phase 6 slice 9).
 
-<!-- consumers: engine.v2.scoring, engine.v2.serving -->
+<!-- consumers: engine.v2.scoring, engine.v2.serving, engine.v2.ops -->
 
 ## Usage
 
