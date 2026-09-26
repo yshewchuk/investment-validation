@@ -1345,6 +1345,22 @@ def run_nightly(
                 "tier4_since": moves_since,
                 "elapsed_s": getattr(tier_result, "elapsed_s", None),
             }
+            # A bounded gap-fill (engine/data/features/tier4.py) can now close
+            # a hole in the carried prefix without raising at all — but a gap
+            # OLDER than its backfill window is a named, logged skip, not a
+            # silent pass. Surface that here too, or the only place it would
+            # be visible is a JSON report field nobody is watching.
+            gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
+            partial = {name: info for name, info in gap_fill.items()
+                       if info.get("out_of_window_gap")}
+            if partial:
+                n = sum(len(info["out_of_window_gap"]) for info in partial.values())
+                report.flags.append({
+                    "kind": "tier4_gap_partial",
+                    "detail": (f"Tier 4 gap-fill left {n} event(s) beyond its backfill "
+                               f"window unfilled (null forecast) in {sorted(partial)}; "
+                               "a full Tier-4 rebuild closes it.")[:300],
+                })
         except Exception as exc:
             report.steps["tiers"] = {"degraded": True,
                                      "error": f"{type(exc).__name__}: {exc}"[:300]}

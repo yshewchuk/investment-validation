@@ -75,6 +75,7 @@ __all__ = [
     "CADENCE",
     "FIRST_FOLD",
     "MIN_TRAIN_ROWS",
+    "BACKFILL_WINDOW_MONTHS",
     "COLUMNS",
     "KEY_COLUMNS",
     "PRODUCES",
@@ -120,6 +121,16 @@ FIRST_FOLD = pd.Timestamp("2013-01-01")
 #: A fold with a thinner training pool than this is skipped and its rows carry
 #: a NULL forecast. Same threshold as ``walk_forward``'s ``min_train_rows``.
 MIN_TRAIN_ROWS = 500
+
+#: How far back an incremental build may automatically widen ``--since`` to
+#: close a gap in the carried Tier-4 prefix (see ``_carried_prefix``). A gap
+#: whose earliest event is older than this, measured back from the requested
+#: ``since``, is not backfilled automatically — recomputing arbitrarily far
+#: back would put unbounded runtime into the nightly's critical path, which
+#: is the exact failure mode this guard exists to keep out of the incremental
+#: path. A gap that old gets a named, logged skip instead (a null-forecast
+#: row plus a report entry); closing it needs a deliberate full rebuild.
+BACKFILL_WINDOW_MONTHS = 3
 
 #: The grain. One row per ``(ticker, event_date)`` — the same as Tier 3, and
 #: total over it: every Tier-3 event gets a row, NULL where no forecast was
@@ -729,21 +740,45 @@ def _cast_group(out: pd.DataFrame, produces: str) -> pd.DataFrame:
     return out
 
 
-def _carried_prefix(existing: pd.DataFrame, keys: pd.DataFrame, cut: pd.Timestamp, model):
-    """The rows before ``cut`` that a ``--since`` build may reuse, or an error.
+def _carried_prefix(
+    existing: pd.DataFrame,
+    keys: pd.DataFrame,
+    cut: pd.Timestamp,
+    model,
+    *,
+    log: Callable[[str], None] = _log,
+):
+    """The rows before ``cut`` (possibly widened) that a ``--since`` build may
+    reuse, plus any gap this call could not close.
 
-    Three ways a carry-over is unsafe, all of them silent if unchecked:
+    Returns ``(carried, effective_cut, unfilled)``. ``effective_cut`` is
+    ``cut`` unless a gap was found and widened backward to close it (bounded
+    by ``BACKFILL_WINDOW_MONTHS``); the caller must use it in place of ``cut``
+    for everything downstream (which folds to recompute, what counts as
+    "carried"). ``unfilled`` is the Tier-3 keys, older than ``effective_cut``,
+    still missing from ``existing`` after widening — non-empty only for a gap
+    whose earliest date falls outside the bounded window. The caller must
+    give those keys a null-forecast row: they are in neither ``carried`` nor
+    the recomputed scope (both are bounded by ``effective_cut``).
 
-    * the existing table was built on different fold boundaries, so its rows and
-      the new ones would answer to different definitions of causality;
+    Three ways a carry-over is unsafe, all of them silent if unchecked. The
+    first two always raise, unchanged:
+
+    * the existing table was built on different fold boundaries, so its rows
+      and the new ones would answer to different definitions of causality;
     * it was produced by a different model than the one about to run, which
       would leave the table labelled with two model ids and comparable to
-      neither;
-    * Tier 3 gained events inside the retained prefix, so carrying it over would
-      leave permanent holes in a table whose totality consumers rely on.
+      neither.
+
+    The third — Tier 3 gained events inside the retained prefix — used to
+    always raise too. It still does for a gap that predates ``FIRST_FOLD``:
+    an unscored row has no fold to recompute, so widening ``since`` could
+    never fix it, and a hole there means the existing table is corrupt in a
+    way this function cannot repair. For a SCORED gap (>= ``FIRST_FOLD``) it
+    now widens ``cut`` backward to close it instead, bounded by
+    ``BACKFILL_WINDOW_MONTHS`` — see the module docstring's gap-fill design.
     """
     _, _, _, _, _, model_id_col, fold_col = column_group(model.produces)
-    prefix_keys = keys[keys["event_date"] < cut]
     have = existing[existing["event_date"] < cut]
 
     illegal = int((~_is_fold_start(have[fold_col])).sum())
@@ -762,20 +797,61 @@ def _carried_prefix(existing: pd.DataFrame, keys: pd.DataFrame, cut: pd.Timestam
             "(see guides/tier4_feature_models.md §6). Rebuild in full."
         )
 
+    prefix_keys = keys[keys["event_date"] < cut]
     merged = prefix_keys.merge(
         have, on=["ticker", "event_date"], how="left", indicator=True
     )
-    missing = int((merged["_merge"] == "left_only").sum())
-    if missing:
+    missing = merged[merged["_merge"] == "left_only"][["ticker", "event_date"]]
+
+    if missing.empty:
+        stale = len(have) - len(prefix_keys)
+        if stale > 0:
+            _log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
+        return merged.drop(columns=["_merge"]), cut, missing.copy()
+
+    unscored = missing[missing["event_date"] < FIRST_FOLD]
+    if len(unscored):
         raise Tier4Error(
-            f"Tier 3 has {missing:,} events before {cut.date()} that the existing "
+            f"Tier 3 has {len(missing):,} events before {cut.date()} that the existing "
             "Tier-4 table does not cover — carrying the prefix over would leave "
             "permanent holes. Rebuild in full, or move --since earlier."
         )
-    stale = len(have) - len(prefix_keys)
+
+    # Every missing key is scored (>= FIRST_FOLD, so it has a fold to
+    # recompute) — widen `cut` backward to close the gap, bounded.
+    earliest_gap = pd.Timestamp(missing["event_date"].min())
+    widened = pd.Timestamp(fold_start_of([earliest_gap]).iloc[0])
+    floor = pd.Timestamp(
+        fold_start_of([cut - pd.DateOffset(months=BACKFILL_WINDOW_MONTHS)]).iloc[0]
+    )
+    effective_cut = max(widened, floor)
+
+    prefix_keys2 = keys[keys["event_date"] < effective_cut]
+    have2 = existing[existing["event_date"] < effective_cut]
+    merged2 = prefix_keys2.merge(
+        have2, on=["ticker", "event_date"], how="left", indicator=True
+    )
+    unfilled = merged2[merged2["_merge"] == "left_only"][["ticker", "event_date"]].copy()
+    carried = merged2[merged2["_merge"] == "both"].drop(columns=["_merge"])
+
+    detail = (
+        f"{model.produces}: Tier 3 has {len(missing):,} event(s) before {cut.date()} "
+        f"the existing table does not cover — widening --since back to "
+        f"{effective_cut.date()} to backfill"
+    )
+    if len(unfilled):
+        detail += (
+            f"; {len(unfilled):,} event(s) still uncovered beyond the "
+            f"{BACKFILL_WINDOW_MONTHS}-month backfill window — proceeding with a "
+            f"null forecast for them: "
+            f"{list(map(tuple, unfilled[['ticker', 'event_date']].head(10).to_numpy()))}"
+        )
+    log(detail)
+
+    stale = len(have2) - len(carried)
     if stale > 0:
         _log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
-    return merged.drop(columns=["_merge"])
+    return carried, effective_cut, unfilled
 
 
 def _seed_residuals(carried: pd.DataFrame, realized: pd.Series, produces: str):
@@ -820,6 +896,7 @@ def build_producer(
     since=None,
     existing: pd.DataFrame | None = None,
     log: Callable[[str], None] = _log,
+    report: dict | None = None,
 ) -> pd.DataFrame:
     """One producer's column group, for every Tier-3 event.
 
@@ -844,18 +921,31 @@ def build_producer(
 
     cut = None
     carried = _empty_group(model.produces)
+    unfilled_gap = pd.DataFrame({"ticker": [], "event_date": []})
     if since is not None:
-        cut = pd.Timestamp(fold_start_of([pd.Timestamp(since)]).iloc[0])
+        requested_cut = pd.Timestamp(fold_start_of([pd.Timestamp(since)]).iloc[0])
         prior = (
             _empty_group(model.produces)
             if existing is None
             else _normalize_group(existing, model.produces)
         )
-        carried = _carried_prefix(prior, keys, cut, model)
+        carried, cut, unfilled_gap = _carried_prefix(prior, keys, requested_cut, model, log=log)
         log(
             f"{model.produces}: --since {pd.Timestamp(since).date()} → fold "
             f"{cut.date()}; carrying {len(carried):,} row(s)"
+            + (f"; {len(unfilled_gap):,} unfilled beyond the backfill window"
+               if len(unfilled_gap) else "")
         )
+        if report is not None:
+            entry = report.setdefault(model.produces, {})
+            if cut < requested_cut:
+                entry["gap_widened_since"] = str(cut.date())
+                entry["gap_widened_from"] = str(requested_cut.date())
+            if len(unfilled_gap):
+                entry["out_of_window_gap"] = [
+                    {"ticker": t, "event_date": pd.Timestamp(d).date().isoformat()}
+                    for t, d in unfilled_gap[["ticker", "event_date"]].to_numpy()
+                ]
 
     folds = sorted({f for f in scorable["fold_start"].unique() if pd.Timestamp(f) >= FIRST_FOLD})
     if cut is not None:
@@ -878,13 +968,13 @@ def build_producer(
     realized = trainable.set_index(["ticker", "date"])[model.target]
     pool_pred, pool_res = _seed_residuals(carried, realized, point)
 
-    skipped = 0
+    skipped_folds: list[dict] = []
     for fold in folds:
         stamp = pd.Timestamp(fold)
         test = scorable.index[scorable["fold_start"] == fold]
         n_train = int((trainable["date"] < stamp).sum())
         if n_train < MIN_TRAIN_ROWS:
-            skipped += 1
+            skipped_folds.append({"fold": stamp.date().isoformat(), "n_train": n_train})
             continue
         estimator = fit_fold(trainable, model, stamp)
         made = np.asarray(
@@ -915,11 +1005,13 @@ def build_producer(
             f"{len(test):,} forecast(s), residual pool {pool_res.size:,} "
             f"[{time.time() - started:.0f}s]"
         )
-    if skipped:
+    if skipped_folds:
         log(
-            f"{model.produces}: {skipped} fold(s) skipped for a training pool "
+            f"{model.produces}: {len(skipped_folds)} fold(s) skipped for a training pool "
             f"under {MIN_TRAIN_ROWS:,}"
         )
+        if report is not None:
+            report.setdefault(model.produces, {})["skipped_folds"] = skipped_folds
 
     built = pd.DataFrame(
         {
@@ -940,7 +1032,17 @@ def build_producer(
 
     scope = keys if cut is None else keys[keys["event_date"] >= cut]
     fresh = scope.merge(built, on=["ticker", "event_date"], how="left")
-    out = _normalize_group(pd.concat([carried, fresh], ignore_index=True), model.produces)
+    gap_skip = _empty_group(model.produces)
+    if len(unfilled_gap):
+        # A row for a key outside the bounded backfill window: total over
+        # Tier 3 like any other row, forecast columns NULL like any other
+        # never-computed fold (see Decision 4's MIN_TRAIN_ROWS rows for the
+        # same shape) — `_normalize_group` reindexes the missing forecast
+        # columns onto this key-only frame as NaN/NaT/None by construction.
+        gap_skip = _normalize_group(unfilled_gap[["ticker", "event_date"]].copy(), model.produces)
+    out = _normalize_group(
+        pd.concat([carried, fresh, gap_skip], ignore_index=True), model.produces
+    )
     if len(out) != len(keys):
         raise Tier4Error(
             f"{model.produces}: built {len(out):,} rows for {len(keys):,} Tier-3 "
@@ -963,6 +1065,7 @@ def build_forecasts(
     existing: pd.DataFrame | None = None,
     tier3_snapshot: str | None = None,
     log: Callable[[str], None] = _log,
+    report: dict | None = None,
 ) -> pd.DataFrame:
     """The whole Tier-4 table: every producer's group, joined on the keys.
 
@@ -993,7 +1096,8 @@ def build_forecasts(
         if name in wanted:
             model = (models or {}).get(name) or feature_model(name)
             group = build_producer(
-                panel, model, keys=keys, since=since, existing=existing, log=log
+                panel, model, keys=keys, since=since, existing=existing, log=log,
+                report=report,
             )
         elif existing is not None:
             group = _normalize_group(
@@ -1107,9 +1211,10 @@ def build_table(since=None, out: Path | None = None) -> dict:
     panel = load_panel()
     target = paths.TIER4 if out is None else Path(out)
     existing = load_forecasts(target) if since is not None else None
-    frame = build_forecasts(panel, since=since, existing=existing)
+    gap_report: dict = {}
+    frame = build_forecasts(panel, since=since, existing=existing, report=gap_report)
     written = write_forecasts(frame, target)
-    return {
+    result = {
         "rows": int(len(frame)),
         "producers": {
             name: {
@@ -1126,6 +1231,9 @@ def build_table(since=None, out: Path | None = None) -> dict:
         "path": str(written),
         "tier4": forecasts_digest(target),
     }
+    if gap_report:
+        result["gap_fill"] = gap_report
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
