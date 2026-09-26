@@ -278,7 +278,10 @@ class TestPrefixGapBackfill:
     """
 
     def test_a_gap_in_the_carried_prefix_is_backfilled_not_refused(self, panel, built):
-        gap_date = built["event_date"].min()
+        # Must be a SCORED event (fold_start >= FIRST_FOLD), not the panel's
+        # earliest date overall — an unscored prefix row carries a null
+        # forecast and would let this pass without exercising recomputation.
+        gap_date = built.loc[built["pred_abs_move"].notna(), "event_date"].min()
         thinned = built[built["event_date"] != gap_date]
 
         # Today's incremental build raises Tier4Error here (see the sibling
