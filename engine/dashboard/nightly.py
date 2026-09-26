@@ -721,6 +721,40 @@ def _recently_printed(as_of, tickers: Sequence[str]) -> list[str]:
 MAX_PANEL_LAG_SESSIONS = 2
 
 
+def _tier4_gap_partial_flag(gap_fill: dict) -> dict | None:
+    """The ``tier4_gap_partial`` flag for a Tier-4 build report's ``gap_fill``
+    section, or ``None`` if nothing is out-of-window.
+
+    ``gap_fill`` maps producer name -> report entry; an entry's
+    ``out_of_window_gap`` (when present) is a list of ``{"ticker",
+    "event_date"}`` dicts for keys that producer's build left ABSENT this run
+    (see ``engine.data.features.tier4`` §6a — never a null-forecast row).
+
+    The SAME gap normally shows up in every producer's list (they all read
+    the same on-disk table), so counting event(s) by summing each producer's
+    list length overcounts by a factor of however many producers are wired —
+    a 3-event gap across 4 producers would report as 12. Count DISTINCT
+    ``(ticker, event_date)`` keys instead.
+    """
+    partial = {name: info for name, info in gap_fill.items()
+               if info.get("out_of_window_gap")}
+    if not partial:
+        return None
+    distinct = {
+        (entry["ticker"], entry["event_date"])
+        for info in partial.values()
+        for entry in info["out_of_window_gap"]
+    }
+    n = len(distinct)
+    return {
+        "kind": "tier4_gap_partial",
+        "detail": (f"Tier 4 gap-fill left {n} event(s) beyond its backfill "
+                   f"window unfilled (absent from the table, not a null "
+                   f"forecast row) in {sorted(partial)}; a full Tier-4 "
+                   "rebuild with no --since closes out-of-window gaps.")[:300],
+    }
+
+
 def _panel_staleness_flags(as_of) -> list[dict]:
     """Flag a Tier-3/Tier-4 panel that has stopped tracking the calendar.
 
@@ -1351,17 +1385,9 @@ def run_nightly(
             # silent pass. Surface that here too, or the only place it would
             # be visible is a JSON report field nobody is watching.
             gap_fill = tier_result.reports.get("tier4", {}).get("gap_fill", {})
-            partial = {name: info for name, info in gap_fill.items()
-                       if info.get("out_of_window_gap")}
-            if partial:
-                n = sum(len(info["out_of_window_gap"]) for info in partial.values())
-                report.flags.append({
-                    "kind": "tier4_gap_partial",
-                    "detail": (f"Tier 4 gap-fill left {n} event(s) beyond its backfill "
-                               f"window unfilled (null forecast) in {sorted(partial)}; "
-                               "a full Tier-4 rebuild with no --since closes "
-                               "out-of-window gaps.")[:300],
-                })
+            flag = _tier4_gap_partial_flag(gap_fill)
+            if flag is not None:
+                report.flags.append(flag)
         except Exception as exc:
             report.steps["tiers"] = {"degraded": True,
                                      "error": f"{type(exc).__name__}: {exc}"[:300]}

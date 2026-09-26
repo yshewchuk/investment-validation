@@ -329,10 +329,13 @@ class TestPrefixGapBackfill:
         )
 
     def test_a_gap_outside_the_backfill_window_is_a_named_skip_not_a_crash(self, panel, built):
-        """Decision 3: a gap older than BACKFILL_WINDOW_MONTHS from `since`
-        must not raise (that would be today's behaviour again) and must not
-        silently vanish either — it stays a row (Tier 4 total over Tier 3),
-        with a NULL forecast, and is named in the build's report.
+        """Decision 3 (revised): a gap older than BACKFILL_WINDOW_MONTHS from
+        `since` must not raise (that would be today's behaviour again) and
+        must not get a null-forecast placeholder row either — a stored row,
+        even an empty one, would look covered to the NEXT run's own gap check
+        and hide the hole permanently. It stays ABSENT from the table (Tier 4
+        total over Tier 3 MINUS exactly this key) and is named in the
+        build's report.
         """
         scored = built[built["pred_abs_move"].notna()]
         old_date = scored["event_date"].min()
@@ -351,10 +354,9 @@ class TestPrefixGapBackfill:
             tier3_snapshot="snap", log=lambda _m: None, report=report,
         )
 
-        assert len(out) == len(panel)
+        assert len(out) == len(panel) - 1, "the out-of-window key must be ABSENT, not a null row"
         row = out[(out["ticker"] == old_ticker) & (out["event_date"] == old_date)]
-        assert len(row) == 1
-        assert row["pred_abs_move"].isna().all()
+        assert len(row) == 0, "a placeholder row hides the gap from the next run's own anti-join"
 
         gap = report["pred_abs_move"]["out_of_window_gap"]
         assert {"ticker": old_ticker, "event_date": old_date.date().isoformat()} in gap
@@ -408,6 +410,60 @@ class TestPrefixGapBackfill:
         after = rebuilt[rebuilt["event_date"] >= requested_cut]
         assert len(after) > 0
         assert after["tier3_snapshot"].eq("different").all()
+
+    def test_an_out_of_window_gap_is_re_detected_and_stays_absent_across_two_runs(
+        self, panel, built
+    ):
+        """The whole point of leaving the key ABSENT instead of writing a
+        null-forecast placeholder: the SECOND night must see the SAME gap,
+        raise the SAME named skip, and produce a table IDENTICAL to the
+        first night's — not silently swallow it once a row exists.
+        """
+        scored = built[built["pred_abs_move"].notna()]
+        old_date = scored["event_date"].min()
+        old_ticker = scored.loc[scored["event_date"] == old_date, "ticker"].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == old_ticker) & (built["event_date"] == old_date))
+        ]
+        since = (
+            old_date + pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS + 6)
+        ).strftime("%Y-%m-%d")
+        expected_gap_entry = {
+            "ticker": old_ticker, "event_date": old_date.date().isoformat()
+        }
+
+        report1: dict = {}
+        night1 = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
+            tier3_snapshot="snap", log=lambda _m: None, report=report1,
+        )
+        assert expected_gap_entry in report1["pred_abs_move"]["out_of_window_gap"]
+        row1 = night1[(night1["ticker"] == old_ticker) & (night1["event_date"] == old_date)]
+        assert len(row1) == 0, "night 1: the gap key must be absent, not a null row"
+
+        # Night 2 runs the SAME --since against night 1's OWN output. If night
+        # 1 had written a placeholder row, this anti-join would now see the
+        # key as covered and the flag would never fire again — the exact
+        # defect this fix closes.
+        report2: dict = {}
+        night2 = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since, existing=night1,
+            tier3_snapshot="snap", log=lambda _m: None, report=report2,
+        )
+        assert expected_gap_entry in report2["pred_abs_move"]["out_of_window_gap"], (
+            "night 2 must re-detect the same gap — a stored row from night 1 "
+            "would have hidden it"
+        )
+        row2 = night2[(night2["ticker"] == old_ticker) & (night2["event_date"] == old_date)]
+        assert len(row2) == 0, "night 2: the gap key must still be absent"
+
+        # Idempotency: two runs over the same unresolved gap give identical
+        # tables (determinism, not a dedupe key — see the PR's Idempotency
+        # section).
+        pd.testing.assert_frame_equal(
+            night1.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            night2.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
 
 
 class TestTotalityAndNulls:
@@ -1438,3 +1494,37 @@ def test_serving_model_artifact_ref_is_missing_when_never_served(tmp_path, monke
 
     with pytest.raises(FileNotFoundError):
         served.artifact_ref()
+
+
+class TestGapFreeNightMatchesMain:
+    """The PR's test plan promised this exactly: 'A gap-free night produces
+    byte-identical output to today's code path.' A self-comparison against
+    this SAME code cannot fail if the fix breaks the no-gap path — both sides
+    would move together. These hashes were computed by running
+    ``git show main:engine/data/features/tier4.py`` (commit 033ca3e, the base
+    this PR branched from, before ANY gap-fill code existed) against this
+    exact fixture, so a regression in the ordinary no-gap path — the one this
+    PR's Decision on 'Unchanged-output guarantee' says must not change at
+    all — has a real, external value to fail against.
+    """
+
+    _MAIN_FULL_REBUILD_HASH = "20e852b6e73300b54c4e38919b55a57b55ddbfcfb8e3d16ca70de33ad1fa66ae"
+    _MAIN_INCREMENTAL_NO_GAP_HASH = "39fa4b79b8b4d9904dc7249012c61e3c0e61960219a1dd2fddafe182e7e381d9"
+
+    @staticmethod
+    def _frame_hash(frame: pd.DataFrame) -> str:
+        import hashlib
+        b = pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes()
+        return hashlib.sha256(b).hexdigest()
+
+    def test_a_full_rebuild_matches_mains_pinned_hash(self, panel, built):
+        assert len(built) == 1880
+        assert self._frame_hash(built) == self._MAIN_FULL_REBUILD_HASH
+
+    def test_a_gap_free_incremental_build_matches_mains_pinned_hash(self, panel, built):
+        incr = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=built,
+            tier3_snapshot="snap", log=lambda _m: None,
+        )
+        assert len(incr) == 1880
+        assert self._frame_hash(incr) == self._MAIN_INCREMENTAL_NO_GAP_HASH

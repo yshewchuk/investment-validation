@@ -128,8 +128,12 @@ MIN_TRAIN_ROWS = 500
 #: ``since``, is not backfilled automatically — recomputing arbitrarily far
 #: back would put unbounded runtime into the nightly's critical path, which
 #: is the exact failure mode this guard exists to keep out of the incremental
-#: path. A gap that old gets a named, logged skip instead (a null-forecast
-#: row plus a report entry); closing it needs a deliberate full rebuild.
+#: path. A gap that old gets a named, logged skip instead: the key is left
+#: ABSENT from the written table (never a null-forecast row), so the NEXT
+#: run's own anti-join re-detects it and repeats this same bounded widening,
+#: rather than a stored placeholder hiding the gap permanently — see
+#: guides/tier4_feature_models.md §6a. Closing it immediately still needs a
+#: deliberate full rebuild.
 BACKFILL_WINDOW_MONTHS = 3
 
 #: The grain. One row per ``(ticker, event_date)`` — the same as Tier 3, and
@@ -758,8 +762,10 @@ def _carried_prefix(
     "carried"). ``unfilled`` is the Tier-3 keys, older than ``effective_cut``,
     still missing from ``existing`` after widening — non-empty only for a gap
     whose earliest date falls outside the bounded window. The caller must
-    give those keys a null-forecast row: they are in neither ``carried`` nor
-    the recomputed scope (both are bounded by ``effective_cut``).
+    leave those keys ABSENT from the written table, never a null-forecast
+    row: they are in neither ``carried`` nor the recomputed scope (both are
+    bounded by ``effective_cut``), and a placeholder row would hide the gap
+    from the next run's own version of this same anti-join.
 
     Three ways a carry-over is unsafe, all of them silent if unchecked. The
     first two always raise, unchanged:
@@ -776,7 +782,7 @@ def _carried_prefix(
     never fix it, and a hole there means the existing table is corrupt in a
     way this function cannot repair. For a SCORED gap (>= ``FIRST_FOLD``) it
     now widens ``cut`` backward to close it instead, bounded by
-    ``BACKFILL_WINDOW_MONTHS`` — see the module docstring's gap-fill design.
+    ``BACKFILL_WINDOW_MONTHS`` — see guides/tier4_feature_models.md §6a.
     """
     _, _, _, _, _, model_id_col, fold_col = column_group(model.produces)
     have = existing[existing["event_date"] < cut]
@@ -898,6 +904,7 @@ def build_producer(
     log: Callable[[str], None] = _log,
     report: dict | None = None,
     cuts: dict | None = None,
+    gaps: dict | None = None,
 ) -> pd.DataFrame:
     """One producer's column group, for every Tier-3 event.
 
@@ -931,6 +938,8 @@ def build_producer(
             else _normalize_group(existing, model.produces)
         )
         carried, cut, unfilled_gap = _carried_prefix(prior, keys, requested_cut, model, log=log)
+        if gaps is not None:
+            gaps[model.produces] = unfilled_gap
         log(
             f"{model.produces}: --since {pd.Timestamp(since).date()} → fold "
             f"{cut.date()}; carrying {len(carried):,} row(s)"
@@ -1035,21 +1044,24 @@ def build_producer(
 
     scope = keys if cut is None else keys[keys["event_date"] >= cut]
     fresh = scope.merge(built, on=["ticker", "event_date"], how="left")
-    gap_skip = _empty_group(model.produces)
-    if len(unfilled_gap):
-        # A row for a key outside the bounded backfill window: total over
-        # Tier 3 like any other row, forecast columns NULL like any other
-        # never-computed fold (see Decision 4's MIN_TRAIN_ROWS rows for the
-        # same shape) — `_normalize_group` reindexes the missing forecast
-        # columns onto this key-only frame as NaN/NaT/None by construction.
-        gap_skip = _normalize_group(unfilled_gap[["ticker", "event_date"]].copy(), model.produces)
+    # A key outside the bounded backfill window (`unfilled_gap`) gets NO row
+    # here at all — never a null-forecast placeholder. `carried` and `fresh`
+    # are both already bounded by `cut`/`effective_cut`, so this producer's
+    # own frame is total over Tier 3 minus exactly `unfilled_gap` (see
+    # guides/tier4_feature_models.md §6a): a placeholder row here would make
+    # the gap look covered to the NEXT run's own anti-join in
+    # `_carried_prefix`, turning a bounded, self-healing skip into a
+    # permanent, silent one.
     out = _normalize_group(
-        pd.concat([carried, fresh, gap_skip], ignore_index=True), model.produces
+        pd.concat([carried, fresh], ignore_index=True), model.produces
     )
-    if len(out) != len(keys):
+    expected = len(keys) - len(unfilled_gap)
+    if len(out) != expected:
         raise Tier4Error(
-            f"{model.produces}: built {len(out):,} rows for {len(keys):,} Tier-3 "
-            "events — Tier 4 must be total over Tier 3"
+            f"{model.produces}: built {len(out):,} rows for {expected:,} covered "
+            f"Tier-3 events ({len(keys):,} total, {len(unfilled_gap):,} left "
+            "absent as an out-of-window gap) — Tier 4 must be total over Tier 3 "
+            "minus any named gap"
         )
     have = int(out[point].notna().sum())
     log(
@@ -1094,14 +1106,15 @@ def build_forecasts(
     if unknown:
         raise Tier4Error(f"unknown producer(s) {unknown}; known: {list(FEATURE_MODELS)}")
 
-    table = keys.copy()
     producer_cuts: dict[str, pd.Timestamp] = {}
+    producer_gaps: dict[str, pd.DataFrame] = {}
+    groups: dict[str, pd.DataFrame] = {}
     for name in PRODUCES:
         if name in wanted:
             model = (models or {}).get(name) or feature_model(name)
             group = build_producer(
                 panel, model, keys=keys, since=since, existing=existing, log=log,
-                report=report, cuts=producer_cuts,
+                report=report, cuts=producer_cuts, gaps=producer_gaps,
             )
         elif existing is not None:
             group = _normalize_group(
@@ -1109,7 +1122,30 @@ def build_forecasts(
             )
         else:
             group = _normalize_group(keys.copy(), name)
-        table = table.merge(group, on=list(KEY_COLUMNS), how="left")
+        groups[name] = group
+
+    # A key ANY run producer left as an out-of-window gap (build_producer,
+    # §6a) must be absent from the WHOLE written table, not only that one
+    # producer's column group — a row that survives because a different
+    # producer's group still covers the same key would still look "present"
+    # to the next run's anti-join and hide the gap for the producer(s) that
+    # missed it. Every producer reads the same on-disk `existing` table, so
+    # in practice a key's row either exists there for all of them or none;
+    # this union is the defensive form of that invariant.
+    gap_frames = [g[["ticker", "event_date"]] for g in producer_gaps.values() if len(g)]
+    excluded = (
+        pd.concat(gap_frames, ignore_index=True).drop_duplicates()
+        if gap_frames else pd.DataFrame({"ticker": [], "event_date": []})
+    )
+    if len(excluded):
+        table = keys.merge(
+            excluded, on=["ticker", "event_date"], how="left", indicator=True
+        )
+        table = table[table["_merge"] == "left_only"].drop(columns=["_merge"])
+    else:
+        table = keys.copy()
+    for name in PRODUCES:
+        table = table.merge(groups[name], on=list(KEY_COLUMNS), how="left")
 
     # The snapshot is per ROW, and that predates producers. A --since build
     # recomputed everything from `cut` forward against TODAY's panel and left
@@ -1136,10 +1172,13 @@ def build_forecasts(
         table = table.drop(columns=["tier3_snapshot_kept"])
 
     out = normalize(table)
-    if len(out) != len(keys):
+    expected = len(keys) - len(excluded)
+    if len(out) != expected:
         raise Tier4Error(
-            f"built {len(out):,} rows for {len(keys):,} Tier-3 events — Tier 4 "
-            "must be total over Tier 3"
+            f"built {len(out):,} rows for {expected:,} covered Tier-3 events "
+            f"({len(keys):,} total, {len(excluded):,} left absent as an "
+            "out-of-window gap) — Tier 4 must be total over Tier 3 minus any "
+            "named gap"
         )
     return out
 

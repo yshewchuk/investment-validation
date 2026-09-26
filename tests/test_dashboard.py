@@ -2225,3 +2225,50 @@ class TestPanelStalenessGuard:
         monkeypatch.setattr("engine.features.load_panel", boom)
         flags = n._panel_staleness_flags("2026-09-10")
         assert [f["kind"] for f in flags] == ["panel_coverage_unknown"]
+
+
+class TestTier4GapPartialFlag:
+    """The count in `tier4_gap_partial` must be DISTINCT (ticker, event_date)
+    keys, not the sum of each producer's `out_of_window_gap` list — the same
+    keys are named in every producer's list (they all read one on-disk
+    table), so summing overcounts by a factor of however many producers are
+    wired: 3 real events across 4 producers must report as 3, not 12.
+    """
+
+    def test_the_same_three_events_across_four_producers_count_as_three(self):
+        from engine.dashboard.nightly import _tier4_gap_partial_flag
+
+        gap = [
+            {"ticker": "HR", "event_date": "2021-02-10"},
+            {"ticker": "HR", "event_date": "2021-08-04"},
+            {"ticker": "HR", "event_date": "2021-11-03"},
+        ]
+        gap_fill = {
+            "pred_abs_move": {"out_of_window_gap": list(gap)},
+            "pred_im_t1_d14": {"out_of_window_gap": list(gap)},
+            "pred_runup_abs_move_d14": {"out_of_window_gap": list(gap)},
+            "pred_iv_crush_30": {"out_of_window_gap": list(gap)},
+        }
+        flag = _tier4_gap_partial_flag(gap_fill)
+        assert flag is not None
+        assert flag["kind"] == "tier4_gap_partial"
+        assert "3 event(s)" in flag["detail"], flag["detail"]
+        assert "12 event(s)" not in flag["detail"]
+
+    def test_no_out_of_window_gap_returns_none(self):
+        from engine.dashboard.nightly import _tier4_gap_partial_flag
+
+        assert _tier4_gap_partial_flag({}) is None
+        assert _tier4_gap_partial_flag({"pred_abs_move": {"skipped_folds": []}}) is None
+
+    def test_the_detail_no_longer_calls_the_gap_a_null_forecast(self):
+        """The old wording said the unfilled event(s) carried a null
+        forecast; the fix is that they are ABSENT, not a null row — the
+        message must not claim the opposite of what the code now does."""
+        from engine.dashboard.nightly import _tier4_gap_partial_flag
+
+        gap_fill = {"pred_abs_move": {"out_of_window_gap": [
+            {"ticker": "HR", "event_date": "2021-02-10"},
+        ]}}
+        flag = _tier4_gap_partial_flag(gap_fill)
+        assert "null forecast" not in flag["detail"].lower() or "not a null" in flag["detail"].lower()

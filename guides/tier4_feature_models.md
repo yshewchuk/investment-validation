@@ -253,7 +253,9 @@ not just the rows whose inputs changed. This is the expensive property and it
 is not avoidable: it is what "fit on strictly-before" means.
 
 The build therefore takes `--since` and is **idempotent and resumable**: rows
-before `since` are untouched, rows from `since` forward are recomputed.
+before `since` are untouched, rows from `since` forward are recomputed — unless
+the carried prefix has a gap, in which case `since` widens backward instead,
+bounded, to close it (§6a).
 
 There is **no** flag to rebuild one producer and carry the others. Adding a
 producer, or re-promoting any model that feeds one, means rebuilding the whole
@@ -262,6 +264,63 @@ table — every group, one panel, one pass. That is affordable precisely because
 
 `_carried_prefix` still checks `<name>_model_id` per group, because a `--since`
 build has to know which model wrote the prefix it is about to keep.
+
+## 6a. Gap-fill: a bounded backfill, not a permanent hole
+
+An incremental (`--since`) build assumes the carried prefix — everything
+before the cut — is a total record of Tier 3. That assumption can go wrong:
+a night is missed, a pull fails, or a Tier-2 correction lands late, and Tier 3
+gains an event *before* the cut that the stored Tier-4 table never covered.
+`_carried_prefix` detects this the same way it detects a cadence or model-id
+mismatch — an anti-join of the Tier-3 keys against the existing table — but
+its response is different, because a gap in the prefix has a good repair: the
+event has a fold to recompute, so the run can widen `since` backward to cover
+it instead of refusing outright.
+
+Two cases, split at `FIRST_FOLD`:
+
+* **Unscored gap** (older than `FIRST_FOLD`): no fold exists to recompute, so
+  widening can never fix it. This still refuses — `Tier4Error`, "permanent
+  holes" — exactly as it always has.
+* **Scored gap** (`FIRST_FOLD` or later): the run widens `since` backward to
+  the gap's own fold boundary and recomputes from there. The result is
+  bit-for-bit identical to what a full rebuild would have produced for those
+  rows (`TestPrefixGapBackfill`), because it is the same fold-recompute path a
+  normal `--since` build already uses — just starting earlier.
+
+**The widening is bounded** (`BACKFILL_WINDOW_MONTHS`, measured back from the
+requested `since`). Recomputing an arbitrarily old gap would put unbounded,
+unpredictable runtime into the nightly's critical path — the exact failure
+mode the incremental path exists to avoid. A gap whose earliest date falls
+outside that window is **not** backfilled this run.
+
+**An out-of-window gap is a named skip, not a null row.** The affected key is
+left **absent** from the written table — it is in neither the carried prefix
+nor the recomputed scope — rather than given a placeholder NULL-forecast row.
+This is deliberate and is the one narrow exception to §3's "total over Tier 3"
+rule: writing a NULL row there would make the gap *look* covered to the very
+anti-join that is supposed to find it, so every night after the first would
+see a present (if empty) row and stop trying — a silent, permanent hole,
+indistinguishable from a healthy build without reading values column by
+column. Leaving the key absent means the **next** run's anti-join re-detects
+it and repeats the same bounded widening, night after night, until either the
+gap ages into the window or a human runs a full rebuild (`tier4_full.sh`) with
+no `--since` — which closes any gap immediately, regardless of age, because a
+full rebuild has no prefix to carry and nothing to be missing from.
+
+The run itself still proceeds on an out-of-window gap — it does not raise —
+and names the skipped keys in the build's report (`out_of_window_gap` per
+producer). The legacy nightly (`engine/dashboard/nightly.py`) turns a non-empty
+report into a `tier4_gap_partial` flag, counted by **distinct `(ticker,
+event_date)` key, not by summing each producer's list** — the same three
+events show up in every producer's list, and double-counting them would
+overstate the flag.
+
+A gap date that gets recomputed but still lacks a trainable pool
+(`< MIN_TRAIN_ROWS`) is a different case and keeps the existing behaviour: it
+is a row, present, with a NULL forecast — the same shape as any other fold
+that skips for a thin pool (§4). Only a key the run could not even attempt —
+because it fell outside the backfill window — is left absent.
 
 ## 7. The registry gains a tier
 
@@ -324,14 +383,24 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   printed yet has no `abs_move` and must still get a forecast — that is the
   entire point of materialising one. Conflating the two would have left every
   upcoming event, the only ones still tradeable, holding a NULL.
-* **The table is TOTAL over Tier 3.** Every Tier-3 event gets a row, NULL where
-  no forecast was possible. If Tier 4 held only the rows it could predict, a
-  *missing* row would be ambiguous between "no forecast available" and "this
-  table is stale", and only one of those is acceptable to a consumer.
+* **The table is TOTAL over Tier 3, with one bounded, named exception.** Every
+  Tier-3 event gets a row, NULL where no forecast was possible — that is still
+  the rule for a fold that ran and came up thin (§4/§6a's `MIN_TRAIN_ROWS`
+  case). The one deliberate exception is a gap-fill key outside the bounded
+  backfill window (§6a): it is left **absent**, not given a NULL row, because a
+  present-but-NULL row would look covered to the next run's own gap check and
+  the hole would never be revisited. If Tier 4 held only the rows it could
+  predict *as a general rule*, a missing row would be ambiguous between "no
+  forecast available" and "this table is stale" — the gap-fill case avoids
+  that ambiguity by being the only case, always reported (`out_of_window_gap`,
+  `tier4_gap_partial`), so an absent key means specifically "an unclosed gap",
+  never a silent unbuilt table.
 * **The carry-over is guarded three ways** (`_carried_prefix`): a cadence
-  change, a different `model_id`, and Tier-3 events appearing inside the
-  retained prefix each refuse `--since` rather than stitch together two halves
-  that answer to different definitions of causality.
+  change and a different `model_id` still refuse `--since` outright. The
+  third — Tier-3 events appearing inside the retained prefix — refuses only
+  when the gap is UNSCORED (older than `FIRST_FOLD`, with no fold to
+  recompute); a SCORED gap now widens `since` backward to close it instead,
+  bounded, rather than refusing (§6a).
 * **`--since` rounds DOWN to its fold boundary**, because a fold is the unit of
   recomputation: half a month cannot be rebuilt without fitting the model its
   other half already used. The rounding recomputes a superset, which is
