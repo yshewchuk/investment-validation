@@ -83,3 +83,15 @@ def test_sanitize_reason_relativizes_a_repo_root_path():
 def test_sanitize_reason_is_a_noop_on_clean_text():
     clean = "rebuilding the training set raised ValueError: bad target column"
     assert _sanitize_reason(clean) == clean
+
+
+def test_sanitize_reason_redacts_a_tmp_path():
+    leaky = "rebuilding the training set raised FileNotFoundError: /tmp/claude-0/scratch/x.py not found"
+    cleaned = _sanitize_reason(leaky)
+    assert "/tmp/" not in cleaned
+    assert "FileNotFoundError" in cleaned
+
+
+def test_sanitize_reason_does_not_mangle_a_url():
+    clean = "rebuilding the training set raised ConnectionError: GET http://example.com/api/v1 failed"
+    assert _sanitize_reason(clean) == clean

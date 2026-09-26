@@ -49,14 +49,21 @@ from engine import paths
 #: engine/v2/ops/fingerprints.py CODE_ASSET_FILES), but a reason string is
 #: built from arbitrary exception text and must be scrubbed regardless of
 #: why the rebuild failed.
-_ABS_PATH_RE = re.compile(r"/root/\S*", re.IGNORECASE)
+#: Known absolute-path roots on this box worth redacting beyond /root/ (e.g.
+#: a scratchpad or worktree path under /tmp), while never matching a URL's
+#: path component -- (?<!/) excludes a second slash immediately following
+#: another slash, so "http://x/y" never matches at either "/".
+_ABS_PATH_RE = re.compile(
+    r"(?<!/)/(?:root|tmp|home|var|etc|usr|opt|mnt|srv|workspace)(?:/\S*)?",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_reason(text: str) -> str:
     """Strip any absolute local filesystem path from ``text`` before it can
     reach a cached or rendered evidence reason string. A path under
-    ``paths.ROOT`` is relativized (still informative); anything else under
-    ``/root/`` (e.g. a worker's private code-snapshot root) is redacted
+    ``paths.ROOT`` is relativized (still informative); anything else under a
+    known local path root (``/root/``, ``/tmp/``, etc.) is redacted
     generically, since it is host-local and never meaningful to a reader of
     the published dashboard."""
     root = str(paths.ROOT)
