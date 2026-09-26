@@ -391,6 +391,10 @@ def read_table(
         base = empty_frame(name)
         return base[list(columns)] if columns else base
     out = pd.concat(frames, ignore_index=True)
+    # Drop the per-year partitions before coerce() copies the result: holding
+    # them too put three copies of daily_market live at once, past the
+    # nightly's 8 GB cap.
+    frames.clear()
     return coerce(out, name, only=list(columns) if columns else None)
 
 
