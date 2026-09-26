@@ -72,4 +72,6 @@ def _calendar_moves_document(claim) -> dict:
         "tickers": list(params.tickers),
         "all_scoreable": params.all_scoreable,
         "since": params.since,
+        "attempt_id": claim.attempt_id,
+        "fence": claim.fence,
     }

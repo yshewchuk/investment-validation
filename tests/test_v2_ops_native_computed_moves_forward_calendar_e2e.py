@@ -579,7 +579,9 @@ def test_missing_staged_identity_fails_with_the_kinds_own_message(
     request = _build_requests(conn, store, clock, tmp_path)[kind]
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
-    no_op = lambda claim, staging: None
+    def no_op(claim, staging):
+        return None
+
     monkeypatch.setattr(executor, "stage_refresh_input", no_op)
     monkeypatch.setattr(refresh_staging, "stage_refresh_input", no_op)
     _install_history_stub(monkeypatch, explode=False)

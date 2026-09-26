@@ -55,6 +55,7 @@ from engine.v2.ops.incremental_data import (
     RefreshUnit,
     plan_refresh,
 )
+from engine.v2.ops.lifecycle import verify_fence
 
 __all__ = [
     "computed_moves_units",
@@ -313,7 +314,8 @@ def _insert_captures(conn: sqlite3.Connection, attempts: list[dict]) -> None:
 
 
 def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempts, clock,
-                       expected_head, generation, request_hash):
+                       expected_head, generation, request_hash,
+                       staged_attempt_id=None, staged_fence=None):
     prior_manifest = parent.table_manifests.get(COMPUTED_MOVES_TABLE_NAME)
     prior_records = tuple(record for record in parent.records
                           if record.table_contract_ref.contract_id
@@ -353,7 +355,11 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
         objects=all_objects, records=all_records, manifests=tuple(table_manifests.values()),
         snapshot=snapshot, expected_head_snapshot_id=expected_head,
         expected_head_generation=generation, receipt_id=receipt_id, attempt_id=attempt_id,
-        fence=1, fence_check=lambda connection: None, clock=clock, store=store,
+        fence=1,
+        fence_check=(lambda connection: verify_fence(
+            connection, staged_attempt_id, staged_fence, clock.now()))
+        if staged_attempt_id is not None else (lambda connection: None),
+        clock=clock, store=store,
         record_references=lambda connection, rid: _insert_captures(connection, attempts),
         audit_partitions=False)
 
@@ -472,7 +478,8 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
             records_by_ticker=fragment_records, attempts=attempts, clock=clock,
             expected_head=document.get("expected_head_snapshot_id",
                                        parameters.parent_snapshot_id),
-            generation=int(document["expected_head_generation"]), request_hash=request_hash)
+            generation=int(document["expected_head_generation"]), request_hash=request_hash,
+            staged_attempt_id=document.get("attempt_id"), staged_fence=document.get("fence"))
         if receipt.resulting_head_snapshot_id == parent.snapshot.snapshot_id:
             # The commit layer's own result decides: the candidate resolved
             # back to the parent snapshot, so the head did not move and
