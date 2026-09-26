@@ -255,6 +255,111 @@ class TestCarryOverGuards:
             )
 
 
+class TestPrefixGapBackfill:
+    """Regression test for the 2026-09 catch-up nightlies (logs 09-11, 09-14
+    through 09-17, and 09-25 all show the SAME error shape:
+    ``Tier4Error: Tier 3 has N events before <fold> that the existing Tier-4
+    table does not cover``) and for the identical gap still open on disk today
+    in ``data/features/tier4_forecasts.parquet`` (3 rows, one ticker, three
+    2021 dates).
+
+    The sibling test
+    ``TestCarryOverGuards.test_events_added_inside_the_carried_prefix_refuse_the_carry_over``
+    locks in the OTHER half of this behaviour: a gap in an UNSCORED prefix row
+    (older than ``FIRST_FOLD``) still refuses and raises, because there is no
+    fold to recompute for it. This class covers the SCORED case, which the fix
+    now backfills instead of refusing.
+    """
+
+    def test_a_gap_in_the_carried_prefix_is_backfilled_not_refused(self, panel, built):
+        # Must be a SCORED event (fold_start >= FIRST_FOLD) that falls INSIDE
+        # the bounded backfill window measured back from `since` — the
+        # earliest scored event in the whole fixture would be ~24 months
+        # back from `since` below, which BACKFILL_WINDOW_MONTHS (3) correctly
+        # treats as the separate out-of-window case the sibling test below
+        # covers. Pick the scored event closest to (but before) `since`
+        # instead, which this fixture's monthly cadence keeps well inside the
+        # window.
+        since = "2015-01-01"
+        scored = built[built["pred_abs_move"].notna()]
+        gap_date = scored.loc[scored["event_date"] < pd.Timestamp(since), "event_date"].max()
+        # Remove exactly ONE (ticker, event_date) key, not every ticker on
+        # that date. Tier 4 must be total at (ticker, event_date) grain —
+        # removing a whole date (40 tickers at once, in this fixture) would
+        # let a date-level backfill pass without proving an isolated key gets
+        # restored.
+        gap_ticker = scored.loc[scored["event_date"] == gap_date, "ticker"].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == gap_ticker) & (built["event_date"] == gap_date))
+        ]
+
+        # Today's incremental build raises Tier4Error here (see the sibling
+        # test in TestCarryOverGuards) and the caller — the legacy nightly's
+        # step 2b — treats that as "Tier 3/Tier 4 not rebuilt" and moves on,
+        # leaving the gap unfilled for every night after. The fix makes this
+        # call succeed instead of raising.
+        backfilled = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since,
+            existing=thinned, tier3_snapshot="snap", log=lambda _m: None,
+        )
+
+        # Total over Tier 3 again, exactly like a full rebuild.
+        assert len(backfilled) == len(panel)
+        restored = backfilled[
+            (backfilled["ticker"] == gap_ticker) & (backfilled["event_date"] == gap_date)
+        ]
+        assert len(restored) == 1
+        pd.testing.assert_frame_equal(
+            restored.reset_index(drop=True),
+            built[
+                (built["ticker"] == gap_ticker) & (built["event_date"] == gap_date)
+            ].reset_index(drop=True),
+        )
+
+        # The gap-fill must match a full rebuild bit-for-bit EVERYWHERE, not
+        # only at the restored key — the incremental producer seeds its
+        # residual pool from the carried prefix, so a gap-fill that
+        # recomputes the missing fold differently could still change LATER
+        # forecasts even though the one restored row looks right. Same risk
+        # TestSinceEquivalence exists to catch for the ordinary incremental
+        # path.
+        pd.testing.assert_frame_equal(
+            backfilled.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
+
+    def test_a_gap_outside_the_backfill_window_is_a_named_skip_not_a_crash(self, panel, built):
+        """Decision 3: a gap older than BACKFILL_WINDOW_MONTHS from `since`
+        must not raise (that would be today's behaviour again) and must not
+        silently vanish either — it stays a row (Tier 4 total over Tier 3),
+        with a NULL forecast, and is named in the build's report.
+        """
+        scored = built[built["pred_abs_move"].notna()]
+        old_date = scored["event_date"].min()
+        old_ticker = scored.loc[scored["event_date"] == old_date, "ticker"].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == old_ticker) & (built["event_date"] == old_date))
+        ]
+
+        # Far enough past `old_date` that the bounded window cannot reach it.
+        since = (
+            old_date + pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS + 6)
+        ).strftime("%Y-%m-%d")
+        report: dict = {}
+        out = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
+            tier3_snapshot="snap", log=lambda _m: None, report=report,
+        )
+
+        assert len(out) == len(panel)
+        row = out[(out["ticker"] == old_ticker) & (out["event_date"] == old_date)]
+        assert len(row) == 1
+        assert row["pred_abs_move"].isna().all()
+
+        gap = report["pred_abs_move"]["out_of_window_gap"]
+        assert {"ticker": old_ticker, "event_date": old_date.date().isoformat()} in gap
+
+
 class TestTotalityAndNulls:
     def test_every_tier3_event_gets_a_row(self, panel, built):
         assert len(built) == len(panel)

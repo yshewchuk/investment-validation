@@ -2125,6 +2125,8 @@ class TestTheNightlyRebuildsTheTiers:
         assert block.index("computed_moves") < block.index("rebuild_tables(("), \
             "realized moves must be refreshed before the tiers that read them"
         assert "moves_degraded" in block, "a failed moves refresh has to raise a flag"
+        assert "tier4_gap_partial" in block, \
+            "an out-of-window gap-fill skip has to raise a flag too, not just a degrade"
 
 
 class TestAssetCacheBusting:
