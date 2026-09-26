@@ -18,6 +18,7 @@ import json
 import sqlite3
 
 from checks.rearchitecture_phase6_restore_drill import _build_published_fixture
+from engine.v2.ops.errors import fail
 from engine.v2.ops.publication import current
 from tools import v2_controlled_failure_drill
 
@@ -219,3 +220,44 @@ def test_against_real_candidate_rehearses_on_copies_and_leaves_the_candidate_alo
     finally:
         probe.close()
     assert release_ids == {"R0"}
+
+
+def test_after_good_release_retry_ops_error_is_a_fail_not_a_refusal(tmp_path, monkeypatch):
+    from engine.v2.ops import publication
+
+    real_publish_local = publication.publish_local
+    calls = {"n": 0}
+
+    def flaky_publish_local(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_publish_local(*args, **kwargs)
+        raise fail("STALE_EXPECTATION", "test-forced retry failure")
+
+    monkeypatch.setattr(publication, "publish_local", flaky_publish_local)
+
+    receipt = v2_controlled_failure_drill.run_drill(
+        scenario="after-good-release", scratch_root=tmp_path / "scratch")
+
+    assert receipt["verdict"] == "FAIL"
+    assert receipt["retry"]["delivered"] is False
+
+
+def test_before_any_release_retry_ops_error_is_a_fail_not_a_refusal(tmp_path, monkeypatch):
+    import tools.v2_controlled_failure_drill as mod
+
+    real_run_backup = mod.run_backup
+    calls = {"n": 0}
+
+    def flaky_run_backup(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_run_backup(*args, **kwargs)
+        raise fail("STALE_EXPECTATION", "test-forced retry failure")
+
+    monkeypatch.setattr(mod, "run_backup", flaky_run_backup)
+
+    receipt = v2_controlled_failure_drill.run_drill(
+        scenario="before-any-release", scratch_root=tmp_path / "scratch")
+
+    assert receipt["verdict"] == "FAIL"

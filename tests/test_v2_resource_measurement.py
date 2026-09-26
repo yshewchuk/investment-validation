@@ -132,6 +132,16 @@ def test_breach_text_without_exit_137_is_never_a_kill(tmp_path, stub):
     assert record["kill_reason"] is None
 
 
+def test_workload_printed_breach_text_is_not_a_watchdog_kill(tmp_path, stub):
+    stub([_watchdog(0.5), "some workload line mentions SWAP BREACH but is not "
+                          "from the watchdog"], 137)
+
+    record = _measure(tmp_path)
+
+    assert record["killed"] is True
+    assert record["kill_reason"] is None
+
+
 # ----------------------------------------------------------------- pass-through
 
 
@@ -146,6 +156,23 @@ def test_optional_flags_reach_the_child_only_when_given(tmp_path, stub):
     argv_path = stub([_watchdog(0.5)], 0)
     _measure(tmp_path)
     assert _child_argv(argv_path) == ["--max-rss-gb", "2.0", "--", *WORKLOAD]
+
+
+def test_heavy_flag_reaches_the_child_only_when_given(tmp_path, stub):
+    argv_path = stub([_watchdog(0.5)], 0)
+    _measure(tmp_path, heavy=True)
+    assert "--heavy" in _child_argv(argv_path)
+
+    argv_path = stub([_watchdog(0.5)], 0)
+    _measure(tmp_path)
+    assert "--heavy" not in _child_argv(argv_path)
+
+
+def test_record_carries_the_heavy_flag(tmp_path, stub):
+    stub([_watchdog(0.5)], 0)
+    assert _measure(tmp_path, heavy=True)["heavy"] is True
+    stub([_watchdog(0.5)], 0)
+    assert _measure(tmp_path)["heavy"] is False
 
 
 def test_stream_kills_the_child_when_stdout_forwarding_fails(monkeypatch):

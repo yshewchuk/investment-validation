@@ -182,8 +182,11 @@ def _run_after_good_release(deployment: _Deployment) -> dict:
             "SELECT published_at FROM releases WHERE release_id='R1'").fetchone()
         crash_published_at = None if crash_row is None else crash_row["published_at"]
 
-        retry = publication.publish_local(conn, claim, store, target, "R1",
-                                          scope="shadow", clock=clock)
+        try:
+            retry = publication.publish_local(conn, claim, store, target, "R1",
+                                              scope="shadow", clock=clock)
+        except OpsError as exc:
+            retry = {"release_id": "R1", "delivered": False, "error": exc.code}
         retry_row = conn.execute(
             "SELECT published_at FROM releases WHERE release_id='R1'").fetchone()
         retry_published_at = None if retry_row is None else retry_row["published_at"]
@@ -255,8 +258,11 @@ def _run_before_any_release(deployment: _Deployment) -> dict:
             (row["effect_id"],)).fetchone()["state"]
         current_after_crash = publication.current(target)
 
-        retry_manifest = run_backup(conn, key=key, owner="controlled-failure-drill",
-                                    target=deployment.backup_root, clock=clock, store=store)
+        try:
+            retry_manifest = run_backup(conn, key=key, owner="controlled-failure-drill",
+                                        target=deployment.backup_root, clock=clock, store=store)
+        except OpsError:
+            retry_manifest = None
         state_after_retry = conn.execute(
             "SELECT state FROM outbox WHERE effect_id=?",
             (row["effect_id"],)).fetchone()["state"]

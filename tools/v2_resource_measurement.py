@@ -37,7 +37,7 @@ non-zero exit or a watchdog kill into 0.
 Usage::
 
     python3 tools/v2_resource_measurement.py --workload-label nightly-shadow \\
-        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state cold \\
+        --max-rss-gb 8 --max-swap-gb 6 --cores 8 --cache-state cold --heavy \\
         --capabilities-covered nightly-score,nightly-publish \\
         -- python3 -m engine.v2.ops nightly ...
 """
@@ -163,7 +163,7 @@ def _stamp(moment: datetime) -> str:
 
 
 def _bounded_argv(bounded_run: Path, max_rss_gb, max_swap_gb, cores, cpu_set,
-                  command: list[str]) -> list[str]:
+                  command: list[str], *, heavy: bool = False) -> list[str]:
     """The child argv: optional flags appear only when the operator gave them."""
     return [
         "python3", str(bounded_run),
@@ -171,6 +171,7 @@ def _bounded_argv(bounded_run: Path, max_rss_gb, max_swap_gb, cores, cpu_set,
         *(["--max-swap-gb", str(max_swap_gb)] if max_swap_gb is not None else []),
         *(["--cores", str(cores)] if cores is not None else []),
         *(["--cpu-set", cpu_set] if cpu_set else []),
+        *(["--heavy"] if heavy else []),
         "--", *command,
     ]
 
@@ -190,7 +191,8 @@ def _stream(command: list[str]) -> tuple[list[str], int]:
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            lines.append(line)
+            if line.lstrip().startswith("[watchdog]"):
+                lines.append(line)
             sys.stdout.write(line)
             sys.stdout.flush()
     except BaseException:
@@ -213,7 +215,7 @@ def _write_evidence(record: dict, evidence_dir: Path) -> Path:
 
 
 def measure(workload_label, max_rss_gb, cache_state, command, *,
-            max_swap_gb=None, cores=None, cpu_set=None,
+            max_swap_gb=None, cores=None, cpu_set=None, heavy: bool = False,
             capabilities_covered=(), evidence_dir=DEFAULT_EVIDENCE_DIR,
             bounded_run=None) -> dict:
     """Run ``command`` under ``bounded_run.py``, write and return the record."""
@@ -221,7 +223,8 @@ def measure(workload_label, max_rss_gb, cache_state, command, *,
     available_before = _available_ram_gb()
     contention = collect_contention()
     argv = _bounded_argv(Path(bounded_run) if bounded_run is not None else BOUNDED_RUN,
-                         max_rss_gb, max_swap_gb, cores, cpu_set, list(command))
+                         max_rss_gb, max_swap_gb, cores, cpu_set, list(command),
+                         heavy=heavy)
     lines, exit_code = _stream(argv)
     ended = datetime.now(timezone.utc)
     output = "".join(lines)
@@ -238,6 +241,7 @@ def measure(workload_label, max_rss_gb, cache_state, command, *,
         "available_ram_gb_after": _available_ram_gb(),
         "contention": contention,
         "cpu_set": cpu_set,
+        "heavy": heavy,
         "cores": cores,
         "max_rss_gb_cap": max_rss_gb,
         "max_swap_gb_cap": max_swap_gb,
@@ -263,6 +267,8 @@ def _parse_args(argv):
     parser.add_argument("--max-swap-gb", type=float, default=None)
     parser.add_argument("--cores", type=int, default=None)
     parser.add_argument("--cpu-set", default=None)
+    parser.add_argument("--heavy", action="store_true",
+                        help="pass bounded_run.py's --heavy (the one nightly-class job)")
     parser.add_argument("--cache-state", required=True, choices=CACHE_STATES)
     parser.add_argument("--capabilities-covered", default="",
                         help="comma-separated tools/phase6_capabilities.toml row ids")
@@ -288,6 +294,7 @@ def main(argv=None) -> int:
         workload_label=args.workload_label, max_rss_gb=args.max_rss_gb,
         cache_state=args.cache_state, command=command,
         max_swap_gb=args.max_swap_gb, cores=args.cores, cpu_set=args.cpu_set,
+        heavy=args.heavy,
         capabilities_covered=[item.strip() for item in args.capabilities_covered.split(",")
                               if item.strip()],
         evidence_dir=args.evidence_dir)
