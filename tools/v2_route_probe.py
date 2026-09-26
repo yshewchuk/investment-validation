@@ -31,6 +31,9 @@ returned -- and since POST routes are never requested, that row is recorded as
 
 Receipt rows carry ``declared_path`` on parameterized routes so a reader can
 map a concrete request back to the route table entry it covers.
+``GET /analogs.json`` is likewise always skipped -- it needs a real event id
+in its query string that the probe has no session context to supply -- and
+is never requested or fabricated as a 2xx.
 
 Usage::
 
@@ -76,6 +79,15 @@ TOKEN_ENV = "V2_PROBE_TOKEN"
 #: when its ``Location`` is same-origin; the receipt row then carries
 #: ``expected_redirect: true``. Every other 3xx, and any cross-origin one, fails.
 EXPECTED_REDIRECTS = {("GET", "/release/current")}
+
+#: Static (non-parameterized) GET routes the probe always skips instead of
+#: requesting, mapped to the reason recorded on the receipt row. These need
+#: session context (e.g. a real event id) the probe has no way to produce,
+#: the same reason a parameterized route without a resolvable suffix is
+#: skipped rather than requested -- never fabricated as a 2xx.
+SKIPPED_STATIC_ROUTES = {
+    ("GET", "/analogs.json"): "no event id in this session",
+}
 
 #: ``example_suffix_source`` values the probe knows how to resolve.
 _LITERAL_PREFIX = "literal:"
@@ -249,6 +261,11 @@ def probe(*, base_url: str, session: str, evidence_dir, timeout: float = 10.0) -
         if route["parameterized"]:
             continue
         declared = route["path"]
+        skip_reason = SKIPPED_STATIC_ROUTES.get((route["method"], declared))
+        if skip_reason is not None:
+            rows.append({"method": route["method"], "path": declared,
+                         "skipped": skip_reason})
+            continue
         row, payload = _request(base_url, declared, route["method"], token,
                                 timeout=timeout)
         rows.append(row)

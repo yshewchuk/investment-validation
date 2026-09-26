@@ -129,6 +129,8 @@ def test_probe_reaches_every_declared_get_route_and_writes_the_receipt(tmp_path)
             assert "status" not in row, route
         elif route["path"] == "/actions/whatif/":
             assert row["skipped"] == "no job id in this session"
+        elif route["path"] == "/analogs.json":
+            assert row["skipped"] == "no event id in this session"
         else:
             assert "skipped" not in row, route
             assert row["bytes"] >= 0
@@ -298,8 +300,12 @@ def test_whatif_result_route_is_skipped_without_a_job_id(tmp_path):
         _stop(server, thread)
 
     skipped = [row for row in receipt["routes"] if "skipped" in row]
-    assert skipped == [{"method": "GET", "path": "/actions/whatif/",
-                        "skipped": "no job id in this session"}]
+    assert {tuple(sorted(row.items())) for row in skipped} == {
+        tuple(sorted({"method": "GET", "path": "/actions/whatif/",
+                      "skipped": "no job id in this session"}.items())),
+        tuple(sorted({"method": "GET", "path": "/analogs.json",
+                      "skipped": "no event id in this session"}.items())),
+    }
     # True: /release/current's documented same-origin 302 is an expected
     # redirect; the skip itself is never a fabricated 2xx.
     assert receipt["all_2xx"] is True
