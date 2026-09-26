@@ -77,7 +77,7 @@ Paths used below (pick your own; keep them outside the repo and `data/`):
          python3 tools/bounded_run.py --max-rss-gb 2.5 -- python3 -u \
              tools/phase5_training_job.py --state $S --out $STATES --plan-only
        done
-       python3 tools/bounded_run.py --max-rss-gb 5.5 -- python3 -u \
+       python3 tools/bounded_run.py --max-rss-gb 5.5 --heavy -- python3 -u \
            tools/phase5_training_job.py --state paired_residual_pool --out $STATES --plan-only
 
    The driver pools are the champions' own embedded pools, wrapped unchanged
