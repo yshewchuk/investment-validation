@@ -322,15 +322,37 @@ def _join_dotted(base: str, tail: str | None) -> str:
     return f"{base}.{tail}" if base else tail
 
 
+def _ancestor_package_inits(dotted: str, tracked_set: set[str]) -> set[str]:
+    """Every tracked `__init__.py` of `dotted`'s STRICT ancestor packages
+    (excluding `dotted` itself). Python always runs a package's `__init__.py`
+    before any of its submodules, for both `import a.b.c` and
+    `from a.b import c` -- `build_import_graph` must add those edges too, or
+    a change to `a/__init__.py` looks unrelated to code that only ever
+    imports `a.b.c` directly."""
+    parts = dotted.split(".")
+    out: set[str] = set()
+    for i in range(1, len(parts)):
+        init = "/".join(parts[:i]) + "/__init__.py"
+        if init in tracked_set:
+            out.add(init)
+    return out
+
+
 def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     """Static import graph over every tracked engine/**/*.py and
     tests/**/*.py file: maps each file to the set of tracked files it
-    imports (resolved via `_resolve_dotted`). Every tracked file is a key,
-    even one with no resolvable imports (an empty set), so `module_
-    dependency_closure` can always look it up. Raises `SyntaxError` (via
-    `ast.parse`) on the first file that fails to parse -- a real syntax
-    error in the current tree, never swallowed into a silently partial
-    graph; `changed_modules` treats that as "select every module"."""
+    imports (resolved via `_resolve_dotted`), PLUS the tracked `__init__.py`
+    of every strict ancestor package of each resolved import (`_ancestor_
+    package_inits`) -- Python always runs a package's `__init__.py` before
+    any of its submodules, so `import engine.pkg.inner` depends on
+    `engine/pkg/__init__.py` even when neither the import statement nor
+    `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`. Every
+    tracked file is a key, even one with no resolvable imports (an empty
+    set), so `module_dependency_closure` can always look it up. Raises
+    `SyntaxError` (via `ast.parse`) on the first file that fails to parse --
+    a real syntax error in the current tree, never swallowed into a
+    silently partial graph; `changed_modules` treats that as "select every
+    module"."""
     tracked = tracked if tracked is not None else [
         p for p in _tracked(_GRAPH_ROOTS) if p.endswith(".py")]
     tracked_set = set(tracked)
@@ -348,6 +370,7 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                     target = _resolve_dotted(alias.name, tracked_set)
                     if target:
                         edges.add(target)
+                    edges |= _ancestor_package_inits(alias.name, tracked_set)
             elif isinstance(node, ast.ImportFrom):
                 if node.level:
                     base = _relative_base(rel, node.level)
@@ -358,6 +381,7 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                     target = _resolve_dotted(dotted, tracked_set)
                     if target:
                         edges.add(target)
+                    edges |= _ancestor_package_inits(dotted, tracked_set)
                     for alias in node.names:
                         sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set)
                         if sub:

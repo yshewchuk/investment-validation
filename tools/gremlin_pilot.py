@@ -360,11 +360,14 @@ def select_modules(cfg: dict, only: str = "", changed_files: str = "") -> list[s
     (GitHub renders a dispatched empty input as the empty string).
 
     ``changed_files``, when non-blank, is a path to a NUL-delimited changed-file
-    list (as ``mutation_pilot.read_changed_files`` reads); it further restricts
-    the result via ``mutation_pilot.changed_modules`` of the already-``--only``-
-    filtered names: an owned path keeps only its module, an inert-allowlisted
+    list (``git diff -z --no-renames --name-only``, as
+    ``mutation_pilot.read_changed_files`` reads); it further restricts the
+    result via ``mutation_pilot.changed_modules`` of the already-``--only``-
+    filtered names: a path keeps every name that owns it OR transitively
+    depends on it (a static ast import-graph closure), an inert-allowlisted
     path keeps none, and any other path keeps every name (never zero on an
-    unrecognized change). Blank/omitted: unchanged behavior."""
+    unrecognized change, and never zero if the import graph itself cannot be
+    built). Blank/omitted: unchanged behavior."""
     names = pilot.enabled_modules(cfg)
     if only.strip():
         wanted = [n.strip() for n in only.split(",") if n.strip()]
@@ -446,12 +449,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("matrix", help="JSON list of enabled modules, for the CI matrix")
     p.add_argument("--only", default="", help="comma-separated subset")
     p.add_argument("--changed-files", default="", metavar="PATH",
-                   help="path to a NUL-delimited changed-file list (git diff -z --name-only); "
-                        "when given, a path an enabled module owns selects only that module, "
-                        "a path on the inert allowlist selects nothing, and any other path "
-                        "selects every enabled module (never zero on an unrecognized change); "
-                        "a path that is not an existing file is a hard failure, not a silent "
-                        "empty selection. Omitted/blank: unchanged behavior.")
+                   help="path to a NUL-delimited changed-file list (git diff -z --no-renames "
+                        "--name-only); when given, a path selects every enabled module that "
+                        "owns it OR transitively depends on it (a static ast import-graph "
+                        "closure), a path on the inert allowlist selects nothing, and any "
+                        "other path selects every enabled module (never zero on an "
+                        "unrecognized change, and never zero if the import graph itself "
+                        "cannot be built); a path that is not an existing file is a hard "
+                        "failure, not a silent empty selection. Omitted/blank: unchanged "
+                        "behavior.")
     p = sub.add_parser("fingerprint",
                        help="outer cache-namespace digest of one module over every tracked input "
                             "(hex, via git ls-files; no tests run)")

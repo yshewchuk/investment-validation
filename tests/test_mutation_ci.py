@@ -1569,6 +1569,43 @@ def test_build_import_graph_resolves_a_package_import_through_its_init(tmp_path,
     assert graph["engine/pkg/inner.py"] == set()
 
 
+def test_build_import_graph_a_submodule_import_still_depends_on_the_parent_inits(tmp_path, monkeypatch):
+    # `import engine.pkg.inner` runs engine/pkg/__init__.py before inner.py,
+    # even though this statement never names engine.pkg itself and
+    # engine/pkg/__init__.py is empty (no `from .inner import ...`). The
+    # graph must still record that dependency, or a change to
+    # engine/pkg/__init__.py looks unrelated to code that only ever imports
+    # the deeper submodule.
+    (tmp_path / "engine" / "pkg").mkdir(parents=True)
+    (tmp_path / "engine" / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "engine" / "pkg" / "inner.py").write_text("thing = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_importer.py").write_text("import engine.pkg.inner\n")
+    tracked = ["engine/pkg/__init__.py", "engine/pkg/inner.py", "tests/test_importer.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "engine/pkg/__init__.py" in graph["tests/test_importer.py"]
+    assert "engine/pkg/inner.py" in graph["tests/test_importer.py"]
+
+    # End-to-end: a module ("owner") owns engine/pkg/__init__.py; a
+    # different module ("importer") owns only the test that imports the
+    # submodule. A change to engine/pkg/__init__.py must still select
+    # "importer", even though "importer" never owns that path and its own
+    # source/test never names engine.pkg directly.
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "owner": {"why": "x", "mutate": ["engine/pkg/__init__.py"], "tests": []},
+            "importer": {"why": "x", "mutate": ["engine/pkg/inner.py"],
+                         "tests": ["tests/test_importer.py"]},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["owner", "importer"],
+                                      ["engine/pkg/__init__.py"], graph=graph)
+    assert selected == ["owner", "importer"]
+
+
 def test_build_import_graph_resolves_relative_imports(tmp_path, monkeypatch):
     (tmp_path / "engine" / "a" / "b").mkdir(parents=True)
     (tmp_path / "engine" / "a" / "__init__.py").write_text("")
