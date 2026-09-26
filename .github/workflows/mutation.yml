@@ -144,12 +144,33 @@ jobs:
             requirements-dev.txt
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - id: key
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # Assign the fingerprint, never interpolate it inside the echo: the
           # exit status of `echo "...=$(...)"` is echo's, so a failing digest
           # would write a truncated prefix and the step would still pass.
-          fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE")
+          #
+          # pull_request only: the fingerprint hashes every tracked file in
+          # the CURRENT checkout (see cache_fingerprint), and a PR always
+          # differs from main's tree by at least one tracked file -- that's
+          # what makes it a PR. Hashing the PR's own checkout therefore can
+          # never reproduce the prefix main's push last saved a cache under,
+          # so the restore below would miss on every single PR run. Cache
+          # SAVES are already skipped for pull_request (see "Save gremlins
+          # cache" below), so a PR run only ever needs cache LOOKUP -- computed
+          # from a detached checkout of the PR's base commit, matching the
+          # tree main's own push last ran (and saved) against. fetch-depth: 0
+          # above makes the base commit's objects available locally.
+          if [ "$EVENT" = "pull_request" ]; then
+            git worktree add --detach --quiet /tmp/gremlin-base-fp "$BASE_SHA"
+            fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE" --cwd /tmp/gremlin-base-fp)
+            git worktree remove --force /tmp/gremlin-base-fp
+          else
+            fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE")
+          fi
           echo "prefix=mutation-gremlins${{ needs.plan.outputs.gremlins }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('tools/mutation_pilot.toml') }}-${{ matrix.module }}-${fp}-" >> "$GITHUB_OUTPUT"
       # Only the gremlins cache is restored, and only for incremental runs: a
       # full run starts fresh (--fresh clears .gremlins_cache and the workflow
