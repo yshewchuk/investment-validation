@@ -35,6 +35,10 @@ __all__ = [
     "iter_normalized",
     "list_tickers",
     "fetch_daily_index",
+    "normalize_frames",
+    "history_body_path",
+    "read_history_body",
+    "SOURCE_COLUMNS",
 ]
 
 #: ``raw ORATS key -> (tier-2 column, multiplier)``. The multiplier turns
@@ -52,6 +56,13 @@ SUMMARY_FIELDS: dict[str, tuple[str, float]] = {
     "fwd90_30": ("fwd90_30", 100.0),
     "fexErn90_30": ("fexern90_30", 100.0),
     "ieeEarnEffect": ("iee", 1.0),
+}
+
+
+#: The raw columns :func:`normalize_frames` reads, per kind.
+SOURCE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "summaries": ("tradeDate", *SUMMARY_FIELDS),
+    "cores": ("tradeDate", "mktCap"),
 }
 
 
@@ -111,21 +122,32 @@ def _ticker_history_rows(ticker: str, kind: str) -> list[dict]:
     without touching any other. This is what keeps a rebuild's memory flat as
     per-ticker history accumulates.
     """
-    import gzip
-    import json as _json
+    path = history_body_path(ticker, kind)
+    if not path.exists():
+        return []
+    rows = read_history_body(path)
+    return [] if rows is None else rows
 
+
+def history_body_path(ticker: str, kind: str) -> Path:
+    """Where the cached ``?ticker=X`` response for one ticker would live."""
     from engine.data.fetch import Fetcher, cache_key
 
     endpoint = {"summaries": "hist/summaries", "cores": "hist/cores"}[kind]
     key = cache_key("orats", endpoint, {"ticker": str(ticker)})
-    path = Fetcher().body_path("orats", key)
-    if not path.exists():
-        return []
+    return Fetcher().body_path("orats", key)
+
+
+def read_history_body(path: Path) -> list | None:
+    """The rows of one per-ticker history body, or ``None`` when unreadable."""
+    import gzip
+    import json as _json
+
     try:
         with gzip.open(path, "rb") as fh:
             payload = _json.loads(fh.read())
     except (OSError, EOFError, ValueError):
-        return []
+        return None
     rows = payload.get("data") if isinstance(payload, dict) else payload
     return list(rows or [])
 
@@ -163,7 +185,22 @@ def normalize_ticker(
     if not rows:
         return pd.DataFrame(), {"ticker": ticker, "reason": "no summaries rows"}
 
-    src = pd.DataFrame(rows)
+    def cores_frame() -> pd.DataFrame | None:
+        crows = _rows_for(ticker, "cores", cores_dir)
+        return pd.DataFrame(crows) if crows else None
+
+    return normalize_frames(ticker, pd.DataFrame(rows), cores_frame)
+
+
+def normalize_frames(ticker: str, src: pd.DataFrame, cores_frame) -> tuple[pd.DataFrame, dict]:
+    """:func:`normalize_ticker` from the raw summaries frame onward.
+
+    ``src`` is the summaries rows as a frame (non-empty); ``cores_frame`` is a
+    zero-argument callable returning the cores rows as a frame, or ``None``
+    when there are none. Only the columns named in :data:`SUMMARY_FIELDS`,
+    ``tradeDate`` and ``mktCap`` are read, which is what lets the incremental
+    rebuild hand over a frame assembled from per-file parses.
+    """
     if "tradeDate" not in src.columns:
         return pd.DataFrame(), {"ticker": ticker, "reason": "no tradeDate column"}
 
@@ -193,9 +230,8 @@ def normalize_ticker(
     mcap_rows = 0
     cores_only_rows = 0
     core = None
-    crows = _rows_for(ticker, "cores", cores_dir)
-    if crows:
-        candidate = pd.DataFrame(crows)
+    candidate = cores_frame()
+    if candidate is not None:
         if {"tradeDate", "mktCap"} <= set(candidate.columns):
             candidate = candidate.assign(
                 date=pd.to_datetime(candidate["tradeDate"], errors="coerce")
