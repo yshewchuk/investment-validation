@@ -818,9 +818,11 @@ def _carried_prefix(
     unscored = missing[missing["event_date"] < FIRST_FOLD]
     if len(unscored):
         raise Tier4Error(
-            f"Tier 3 has {len(missing):,} events before {cut.date()} that the existing "
-            "Tier-4 table does not cover — carrying the prefix over would leave "
-            "permanent holes. Rebuild in full, or move --since earlier."
+            f"Tier 3 has {len(unscored):,} unscored event(s) before "
+            f"{FIRST_FOLD.date()} (of {len(missing):,} missing before {cut.date()}) "
+            "that the existing Tier-4 table does not cover — carrying the "
+            "prefix over would leave permanent holes. Rebuild in full, or "
+            "move --since earlier."
         )
 
     # Every missing key is scored (>= FIRST_FOLD, so it has a fold to
