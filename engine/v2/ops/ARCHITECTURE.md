@@ -125,12 +125,20 @@ Enforces or is bound by, from the root doc §5: missing-input typed
 refusal; no parity-only mode (`native_parity` runs the real code and is
 never given a legacy-shaped branch); one shared parity comparator
 (`native_parity_report.py` calls `engine/v2/parity`, never a second
-comparator); snapshot/root isolation (paths resolve through
-`engine.paths`/the v2 foundation, never a module's own
-`Path(__file__)`-derived root); nothing published carries a local path,
-raw exception text, or an unsanitised free-text field — `worker.py`'s
-convention (a caught traceback goes to a private per-attempt file, never
-the result pipe) is the model other stages in this package follow.
+comparator); snapshot/root isolation (data and artifact paths resolve
+through `engine.paths`/the v2 foundation, never a module's own
+`Path(__file__)`-derived root) — the one documented exemption is worker-*source*
+fingerprinting: `build_legacy_job_requests` computes `implementation_ref`
+from `worker_source_manifest(Path(__file__).resolve().parents[3])`, a code
+closure keyed to where `nightly.py` itself sits on disk, independent of
+the plan's `source_root`/`catalog_path`/`objects_root`. That fingerprint
+answers "what worker code is running," not "which data root," so it is
+never redirected by a request's or plan's root; nothing else in this
+package may adopt the same pattern for a data or artifact path; nothing
+published carries a local path, raw exception text, or an unsanitised
+free-text field — `worker.py`'s convention (a caught traceback goes to a
+private per-attempt file, never the result pipe) is the model other
+stages in this package follow.
 
 ## Diagrams
 
@@ -160,14 +168,26 @@ flowchart TD
 ```
 
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
-blocks the graph. `native_parity` is additionally in `NO_JOB_STAGES` — it
-is in `GRAPH` (and in `graph_order()`'s output, and in every plan's
-`"order"` field) but the real job list (`_stage_sequence`, called from
-`build_legacy_job_requests`) filters it out before submission, so it never
-becomes a submitted job in production. The only function that runs the
-*whole* graph inline, including `native_parity`, is `run_shadow_nightly`,
-and it has no production caller — only `tests/test_v2_ops_legacy_workflows.py`
-and `tests/test_v2_ops_native_shadow_render.py` call it.
+blocks the graph. This diagram is the *shadow* graph: `build_nightly_plan`
+stamps `graph_order()`'s output into every plan's `"order"` field, and
+`run_shadow_nightly` is the only function that walks it whole, inline,
+including `native_parity` — it has no production caller, only
+`tests/test_v2_ops_legacy_workflows.py` and
+`tests/test_v2_ops_native_shadow_render.py` call it.
+
+Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
+only production caller, `cli.py`, always passes `include_prerequisites=False`,
+so `_stage_sequence` returns a second, separately hand-maintained tuple,
+`_DAG_STAGES` — whose stage names diverge from this diagram's
+(`decision_replay`/`decision_evidence`/`decision_commit` where this graph
+has `decision_validation`/`decision_commit`; `ledger_export` for `export`;
+`engineering_gate` for `engineering`) — and which never contains
+`native_parity` at all: in production `native_parity` is simply absent
+from the submitted stage list, not removed by a filter. `NO_JOB_STAGES`
+(currently `{"native_parity"}`) only does work on the other branch,
+`include_prerequisites=True` (test-only), where `_stage_sequence` instead
+returns `plan["order"]` (this diagram's order) and strips `NO_JOB_STAGES`
+from it before returning.
 
 ### CLI → catalog → coordinator effect
 

@@ -3,8 +3,10 @@
 Legacy tree (root `/ARCHITECTURE.md` §1): runs the production board today,
 frozen until Phase 7/8 cutover. See the companion native doc,
 `engine/v2/dashboard/ARCHITECTURE.md`, for the package that eventually
-replaces its formatting half — both write to `dashboard/published/**` and
-are the last review checkpoint before anything reaches that path (excluded
+replaces its formatting half. This legacy package alone owns publication
+to `dashboard/published/**` — `engine/v2/dashboard` never writes there, it
+only composes and starts the serving preview — so this producer code is
+the last review checkpoint before anything reaches that path (excluded
 from CodeRabbit review by `.coderabbit.yaml`'s `path_filters`, and from the
 secret scan by `checks/repo_hygiene.py`).
 

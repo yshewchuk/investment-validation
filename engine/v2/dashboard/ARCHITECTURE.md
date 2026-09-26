@@ -4,10 +4,11 @@ Layer 8.0 in the root `/ARCHITECTURE.md` layer table, alongside `ui/`.
 Replaces the formatting half of legacy `dashboard/render.py` and
 `dashboard/static/`. See the companion legacy doc,
 `engine/dashboard/ARCHITECTURE.md`, for the board this package does not
-replace yet — both write to `dashboard/published/**` and are the last
-review checkpoint before anything reaches that path (it is excluded from
-CodeRabbit review by `.coderabbit.yaml`'s `path_filters`, and from the
-secret scan by `checks/repo_hygiene.py`).
+replace yet. This package never writes `dashboard/published/**` — it only
+composes and starts the serving preview; the legacy package owns
+publication to that path (`publish_bundle`), which is excluded from
+CodeRabbit review by `.coderabbit.yaml`'s `path_filters` and from the
+secret scan by `checks/repo_hygiene.py`.
 
 ## Purpose
 

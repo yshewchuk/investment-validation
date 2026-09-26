@@ -109,30 +109,29 @@ reviews:
         estimate, or portfolio accounting computed here instead of read
         from engine.v2.serving.
 
-        This package (with legacy engine/dashboard/**) writes the bundles
-        published to dashboard/published/**, a path this config's
-        path_filters excludes from review — so this producer code is the
-        last review checkpoint before anything reaches that artifact. Flag
-        any publish step that is not atomic per the §6/§7 serving
-        publication model, any hardcoded or developer-local filesystem path
-        (paths must resolve through engine.paths / the v2 foundation root
-        helpers, never a module's own Path(__file__)-derived root or an
-        absolute local path), and anything that could put a credential,
-        token, or other secret into the published bundle — the
-        checks/repo_hygiene.py secret scan does not run on
-        dashboard/published/** either. Free-text fields that can reach the
-        bundle (a `degraded_reason`, a flag's `detail` string, an
-        exception's `str()`) are the same leak path as a raw traceback or a
-        local path and must be sanitised before they are written, not
-        trusted because they look like a short message.
+        This package does NOT write dashboard/published/** — it only
+        composes and starts the serving preview (`preview.py`,
+        `_server.py`). Legacy `engine/dashboard/**` alone owns publication
+        to that path (`publish_bundle`); apply the publish-atomicity and
+        bundle-secret-leak checks below to that scope, not this one. Still
+        flag in this package: any hardcoded or developer-local filesystem
+        path (paths must resolve through engine.paths / the v2 foundation
+        root helpers, never a module's own Path(__file__)-derived root or
+        an absolute local path), and anything that could put the preview
+        token (`V2_DASHBOARD_TOKEN`) or another credential into a log
+        line, response body, or error message. The preview server is
+        loopback-only by default (`is_loopback`) and must stay refused,
+        not guessed, when a caller widens the bind host.
     - path: "engine/dashboard/**"
       instructions: |
         Legacy tree: must never import engine.v2 (/ARCHITECTURE.md §3,
         rule 3 — "Legacy never imports v2"). Flag any `from engine.v2
         import ...` or `import engine.v2` here.
 
-        This package (with engine/v2/dashboard/**) writes the bundles
-        published to dashboard/published/**, a path this config's
+        This package alone writes the bundles published to
+        dashboard/published/** (`engine/v2/dashboard/**` only composes and
+        starts the serving preview; it never writes there) — a path this
+        config's
         path_filters excludes from review — so this producer code is the
         last review checkpoint before anything reaches that artifact. Flag
         any publish step that is not atomic, any hardcoded or

@@ -24,6 +24,41 @@ dashboards (`engine/v2/dashboard`, `engine/dashboard`); the rest of
 the level this root doc covers, until a follow-up PR gives them their own
 component doc.
 
+## Component docs
+
+Every component's own `ARCHITECTURE.md`, linked so an agent or reviewer
+never has to grep the tree to find one. A component listed `(pending)` has
+no doc of its own yet — it is documented only at this root doc's level
+(§2's layer table), until a follow-up PR gives it a file of its own
+(`docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`). `tests/test_architecture_docs.py`
+checks that every `**/ARCHITECTURE.md` in the tree, except this one, is
+linked below, and that every link here resolves.
+
+| Component | Doc |
+|---|---|
+| `engine/v2/contracts/` | (pending) |
+| `engine/v2/foundation/` | (pending) |
+| `engine/v2/data/` | (pending) |
+| `engine/v2/features/` | (pending) |
+| `engine/v2/models/` | (pending) |
+| `engine/v2/registry/` | (pending) |
+| `engine/v2/domain/generation/` | (pending) |
+| `engine/v2/domain/scenarios/` | (pending) |
+| `engine/v2/domain/valuation/` | (pending) |
+| `engine/v2/domain/simulation/` | (pending) |
+| `engine/v2/scoring/` | (pending) |
+| `engine/v2/evaluation/` | (pending) |
+| `engine/v2/ledger/` | (pending) |
+| `engine/v2/models/training/` | (pending) |
+| `engine/v2/research/` | (pending) |
+| `engine/v2/parity/` | (pending) |
+| `engine/v2/serving/` | (pending) |
+| `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
+| `engine/v2/diagnosis/` | (pending) |
+| `engine/v2/dashboard/`, `ui/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
+| `engine/dashboard/` (legacy) | [`engine/dashboard/ARCHITECTURE.md`](engine/dashboard/ARCHITECTURE.md) |
+| legacy `engine/**` (undivided) | (pending — see §1) |
+
 ## 1. Two trees
 
 - **`engine/*` (legacy).** Runs the production board today: the legacy
@@ -158,19 +193,30 @@ or a new consumer must update that package's README in the same change.
   `cli.refresh_action` to queue a shadow nightly plan onto the operations
   server's `POST /actions/refresh` — it queues jobs and returns job ids; it
   never starts the supervisor loop or executes inline.
-- **v2 nightly job graph — `engine/v2/ops/nightly.py`.** `GRAPH` declares
-  each stage's parents; `graph_order()` derives a deterministic topological
-  order from it, so nobody hand-maintains a separate ordered list. See
-  `engine/v2/ops/ARCHITECTURE.md` for the full stage graph and its
-  `OPTIONAL`/`NO_JOB_STAGES` markings. **The one trap worth stating here**:
-  `NO_JOB_STAGES` (currently `{"native_parity"}`) names a stage that is in
-  `GRAPH` for planning and receipt purposes but that *never becomes a
-  submitted job* in production — the filter is applied where the real job
-  list is built (`_stage_sequence`, called from `build_legacy_job_requests`),
-  not where the plan document is built (`build_nightly_plan`), so the
-  plan's own `"order"` field still lists `native_parity` unfiltered. A
-  stage listed in `NO_JOB_STAGES` runs nowhere in production even though it
-  appears in every plan and every graph-shaped diagram.
+- **v2 nightly job graph — `engine/v2/ops/nightly.py`.** Two separate stage
+  lists exist here, for two separate jobs. `GRAPH` declares each *shadow*
+  stage's parents; `graph_order()` derives a deterministic topological
+  order from it, and `build_nightly_plan` stamps that order into every
+  plan's `"order"` field. The only function that walks the *whole* graph
+  inline, including `native_parity`, is `run_shadow_nightly` — it has no
+  production caller, only `tests/test_v2_ops_legacy_workflows.py` and
+  `tests/test_v2_ops_native_shadow_render.py` call it. Production job
+  **submission** (`build_legacy_job_requests`) does not walk `GRAPH` at
+  all: its only production caller, `cli.py`, always passes
+  `include_prerequisites=False`, so `_stage_sequence` returns a second,
+  separately hand-maintained tuple, `_DAG_STAGES`, whose stage names
+  diverge from `GRAPH`'s (`decision_replay`/`decision_evidence`/
+  `decision_commit` where `GRAPH` has `decision_validation`/
+  `decision_commit`; `ledger_export` for `export`; `engineering_gate` for
+  `engineering`). `native_parity` is not in `_DAG_STAGES` at all, so in
+  production it is simply absent from the submitted list, not filtered out
+  of it. **The one trap worth stating here**: `NO_JOB_STAGES` (currently
+  `{"native_parity"}`) only does work on the *other* branch —
+  `include_prerequisites=True`, exercised by tests only — where
+  `_stage_sequence` instead returns `plan["order"]` (the full `GRAPH`
+  order, `native_parity` included) and strips `NO_JOB_STAGES` from it
+  before returning. See `engine/v2/ops/ARCHITECTURE.md` for the full
+  stage graph and its `OPTIONAL` markings and this same distinction.
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
