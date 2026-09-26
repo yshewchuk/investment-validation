@@ -1,5 +1,8 @@
 # `engine/v2/dashboard`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and invariants.
+
 ## Ownership
 
 Implements the **UI — navigation, formatting, tables, charts, loading/error states** row of the §4 owner table of
