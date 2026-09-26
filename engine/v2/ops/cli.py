@@ -398,13 +398,14 @@ def _check_submitted_nightly_manifest(plan, conn, store):
     _check_nightly_manifest(store.read_verified(artifact(conn, store, plan["input_manifest_ref"])))
 
 
-def _read_input_manifest_ref(args, root, conn, clock):
+def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
     if not args.input_manifest:
         return None
     if not args.input_manifest.is_file() or args.input_manifest.is_symlink():
         raise fail("INPUT_CHANGED", "input manifest is missing")
     raw_bytes = args.input_manifest.read_bytes()
-    _check_nightly_manifest(raw_bytes)
+    if nightly:
+        _check_nightly_manifest(raw_bytes)
     manifest = ArtifactStore(root).publish_bytes(
         raw_bytes, schema_ref="legacy_input_manifest.v1.0")
     from engine.v2.ops.checkpoints import register_artifact
@@ -496,7 +497,7 @@ def _plan_command(args, root, conn, clock):
                              state=args.state or "", alpha=args.alpha,
                              cutoffs=tuple(args.cutoff), strategies=tuple(args.strategy),
                              pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk,
-                             manifest_ref=_read_input_manifest_ref(args, root, conn, clock))
+                             manifest_ref=_read_input_manifest_ref(args, root, conn, clock, nightly=False))
     elif args.kind == "promote":
         from engine.v2.ops.training import promote_plan
         plan = promote_plan(release_root=args.release_root, release_id=args.release_id)

@@ -333,7 +333,8 @@ def run_promote_worker(parameters, root) -> dict:
     try:
         state = deployment.promote(Path(parameters["release_root"]), parameters["release_id"])
     except deployment.DeploymentError as exc:
-        raise fail("VALIDATION_FAILED", f"promote refused: {exc}") from exc
+        raise fail("VALIDATION_FAILED", "promote refused",
+                   details={"exception_class": type(exc).__name__}) from exc
     (Path(root) / "pointer_state.json").write_text(json.dumps(to_document(state), sort_keys=True))
     return {"outputs": [{"name": "pointer_state", "path": "pointer_state.json",
                          "schema": "promote_pointer_state.v1.0"}],

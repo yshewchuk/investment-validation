@@ -409,6 +409,9 @@ def test_promote_worker_refuses_when_unstaged(tmp_path):
             {"expected_ids": ["models_promote"], "release_root": str(tmp_path),
              "release_id": "ghost"}, tmp_path / "staging")
     assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.message == "promote refused"
+    assert "ghost" not in excinfo.value.problem.message
+    assert excinfo.value.problem.details == {"exception_class": "ReleaseNotStaged"}
 
 
 def test_promote_worker_promotes_a_staged_release(tmp_path):

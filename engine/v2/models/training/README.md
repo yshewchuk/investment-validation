@@ -77,8 +77,10 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-No v2 package imports this one (and none below layer 6 may). The real-data
-entry point is `tools/phase5_training_job.py`, which is not a v2 package.
+`engine.v2.ops` imports `TrainingRefused` from this package (to map a
+refused training receipt to a typed `OpsError`); no other v2 package
+imports this one, and none below layer 6 may. The real-data entry point is
+`tools/phase5_training_job.py`, which is not a v2 package.
 
 <!-- consumers: engine.v2.ops -->
 
