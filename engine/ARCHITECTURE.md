@@ -141,7 +141,7 @@ flowchart TB
     subgraph v2["engine.v2 (native)"]
         nbu["ops.native_board_universe\n(new reader)"]
     end
-    nbu --> sp
+    nbu -.->|"never imports"| sp
     nbu -.->|"never imports"| score
     nbu -.->|"never imports"| structures
 ```

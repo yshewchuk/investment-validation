@@ -31,9 +31,9 @@ behavior.
   keys `_STRATEGY_FORECAST_OUTPUTS` declares (`STR-THRU`, `STR-RUNUP`, and
   the seven strategies `_SIZE_STRATEGIES` names, which are exactly the
   `DYNAMIC_MENU` members). It is a second name bound to the same object as
-  the pre-existing private `_SUPPORTED_STRATEGIES`; neither the private
-  name's two internal call sites nor `_STRATEGY_FORECAST_OUTPUTS` itself
-  changed.
+  the pre-existing private `_SUPPORTED_STRATEGIES`; its one internal call
+  site (`build_native_score_inputs`'s membership check) and
+  `_STRATEGY_FORECAST_OUTPUTS` itself are both unchanged.
 - `score_one`/`score_event` (`application.py`), `fold_pool` — unchanged by
   this document.
 
@@ -60,10 +60,17 @@ enumerator's strategy set, rather than duplicating or hard-coding it — the
 enumerator reads the input builder's own declaration of what it supports,
 so the two cannot drift apart.
 
-Existing consumers of this module (`application.py`,
-`engine.v2.serving.native_shadow_render`, and this package's own tests) are
-unaffected: the private `_SUPPORTED_STRATEGIES` name they may already use
-internally is untouched.
+Existing consumers of this module — `engine.v2.scoring.__init__` (re-exports
+`SourceBundle`/`build_native_score_inputs`), `chooser_inputs.py` (imports
+`SourceBundle` and other frozen-recipe helpers), `tools/capture_tier0_corpus.py`,
+`tools/phase4_release_assembler.py`, and the `checks/phase4_*`/
+`checks/phase5_consumers.py` call sites that build native score inputs — are
+unaffected: none of them reference the private `_SUPPORTED_STRATEGIES` name
+directly; only `source_inputs.py` itself does, at the one call site above.
+`application.py` and `engine.v2.serving.native_shadow_render` do not import
+`source_inputs` at all (the latter only consumes the already-built
+`NativeScoreInputs` type from `stages.py`), so this change does not reach
+them either.
 
 ## External systems and libraries
 

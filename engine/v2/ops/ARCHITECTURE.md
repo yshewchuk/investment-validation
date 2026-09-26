@@ -110,10 +110,10 @@ type. No file, network, or database access.
 ## Invariants touched
 
 - **Native vs. legacy values:** every `BoardRequest` field comes from the
-  shared events table, which neither side owns; the module reads two
-  legacy-owned names (`DISABLED_STRATEGIES`, indirectly `DYNAMIC_MENU`'s
-  cousin registries) only for read-only consistency assertions, never to
-  produce a value.
+  shared events table, which neither side owns; the module's one consistency
+  assertion (`DYNAMIC_MENU` is a subset of `SUPPORTED_STRATEGIES`) reads only
+  v2-native names — it does not import `engine.strategy_policy`'s
+  `DISABLED_STRATEGIES` or any other legacy-owned name.
 - **Typed status:** a malformed table refuses with a named code rather than
   degrading to a silent empty or partial result.
 - **Isolation:** this module never loads the legacy option-chain index and
