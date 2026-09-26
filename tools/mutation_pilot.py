@@ -649,10 +649,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("matrix", help="JSON list of enabled modules, for the CI matrix")
     p.add_argument("--only", default="", help="comma-separated subset")
     p.add_argument("--changed-files", default="", metavar="PATH",
-                   help="path to a newline list of changed files (git diff --name-only); "
-                        "when given, further restricts the matrix to modules whose sources, "
-                        "selected tests, or the shared inputs (locks, mutation config, "
-                        "tests/ conftest/helpers) intersect it. Omitted/blank: unchanged behavior.")
+                   help="path to a NUL-delimited changed-file list (git diff -z --name-only); "
+                        "when given, a path an enabled module owns selects only that module, "
+                        "a path on the inert allowlist selects nothing, and any other path "
+                        "selects every enabled module (never zero on an unrecognized change); "
+                        "a path that is not an existing file is a hard failure, not a silent "
+                        "empty selection. Omitted/blank: unchanged behavior.")
     p = sub.add_parser("count")
     p.add_argument("modules", nargs="*")
     p = sub.add_parser("run")
