@@ -271,27 +271,51 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 
 # -- reverse import closure: what could a changed file affect? ---------------
 #
-# `build_import_graph` parses (never executes) every tracked engine/**/*.py
-# and tests/**/*.py file with `ast` and resolves each `import`/`from ...
-# import` statement to a repo file: `import x.y` and `from x.y import z`
-# resolve the dotted name `x.y` to `x/y.py`, or, if that is a package, to
-# `x/y/__init__.py`; a relative import (`from . import z` / `from ..pkg
-# import z`) resolves against the importing file's own package first. Only
-# names rooted at `engine` or `tests` resolve to a graph node -- anything
-# else (the standard library, a third-party package, `tools`, `checks`,
-# `experiments`, ...) is simply not part of this graph, the same as it was
-# never `mutate`/`tests`-owned by any module.
-_GRAPH_ROOTS = ["engine", "tests"]
+# `build_import_graph` parses (never executes) EVERY git-tracked `.py` file
+# in the repo with `ast` and resolves each `import`/`from ... import`
+# statement, and each `importlib.import_module("x.y")`/`__import__("x.y")`
+# call whose argument is a string literal, to a repo file: `import x.y` and
+# `from x.y import z` resolve the dotted name `x.y` to `x/y.py`, or, if that
+# is a package, to `x/y/__init__.py`; a relative import (`from . import z` /
+# `from ..pkg import z`) resolves against the importing file's own package
+# first. A dotted name only resolves to a graph node when its own top-level
+# component is a tracked top-level package (`_tracked_roots`, computed fresh
+# from the tracked file list every run -- `engine`, `tests`, `checks`,
+# `tools`, `experiments`, `dashboard` today, and any future top-level
+# directory automatically, with no hand-kept allowlist to fall out of date).
+# A stdlib or third-party import's top-level name is never a tracked
+# directory, so it is simply never a candidate.
+def _tracked_roots(tracked_set: set[str]) -> set[str]:
+    """Every top-level package/module name present in `tracked_set` -- the
+    first path segment of each tracked `.py` file (or, for a tracked file
+    directly at the repo root with no `/`, its name minus `.py`). A dotted
+    import only resolves to a graph node when its own top-level component is
+    one of these, so a stdlib or third-party import (whose top-level name is
+    never a tracked directory) is never mistaken for a repo file. Computed
+    fresh from the tracked file list every time `build_import_graph` runs --
+    there is NO hand-kept allowlist, so a new top-level package (a future
+    `dashboard/`, `scripts/`, ...) is picked up automatically and can never
+    be silently missed the way `_GRAPH_ROOTS` (removed by this change) could
+    be."""
+    roots: set[str] = set()
+    for p in tracked_set:
+        parts = p.split("/", 1)
+        top = parts[0]
+        if len(parts) == 1:
+            top = top[:-3] if top.endswith(".py") else top
+        roots.add(top)
+    return roots
 
 
-def _resolve_dotted(dotted: str, tracked_set: set[str]) -> str | None:
-    """`dotted` (e.g. "engine.v2.foundation" or "engine.v2.foundation.artifacts")
+def _resolve_dotted(dotted: str, tracked_set: set[str], roots: set[str]) -> str | None:
+    """`dotted` (e.g. "engine.v2.foundation" or "checks.phase4_frozen_bridge")
     resolved to a tracked repo file, or None. A package name resolves to its
-    `__init__.py`; anything not rooted at `engine`/`tests` is out of scope."""
+    `__init__.py`; a dotted name whose top-level component is not in `roots`
+    (not a tracked top-level package) is out of scope."""
     if not dotted:
         return None
     parts = dotted.split(".")
-    if parts[0] not in ("engine", "tests"):
+    if parts[0] not in roots:
         return None
     as_module = "/".join(parts) + ".py"
     if as_module in tracked_set:
@@ -338,13 +362,39 @@ def _ancestor_package_inits(dotted: str, tracked_set: set[str]) -> set[str]:
     return out
 
 
+def _string_import_target(node: ast.Call) -> str | None:
+    """The dotted module name of an `importlib.import_module("x.y")` or
+    `__import__("x.y")` call (however `import_module` itself was imported:
+    `importlib.import_module(...)`, a bare `import_module(...)` after
+    `from importlib import import_module`, or `__import__(...)`), when the
+    first positional argument is a string literal. None for every other
+    call, including one whose argument is a variable, an f-string, or any
+    other computed expression -- those are dynamic and this static graph
+    cannot see them (the existing "failed to parse -> select all" fail-safe
+    protects the overall selection; this function does not try to)."""
+    func = node.func
+    is_import_call = (
+        (isinstance(func, ast.Attribute) and func.attr == "import_module")
+        or (isinstance(func, ast.Name) and func.id in ("import_module", "__import__"))
+    )
+    if not is_import_call or not node.args:
+        return None
+    arg = node.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
+
 def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
-    """Static import graph over every tracked engine/**/*.py and
-    tests/**/*.py file: maps each file to the set of tracked files it
-    imports (resolved via `_resolve_dotted`), PLUS the tracked `__init__.py`
-    of every strict ancestor package of each resolved import (`_ancestor_
-    package_inits`) -- Python always runs a package's `__init__.py` before
-    any of its submodules, so `import engine.pkg.inner` depends on
+    """Static import graph over EVERY git-tracked `.py` file in the repo (no
+    hand-kept root allowlist -- see `_tracked_roots`): maps each file to the
+    set of tracked files it imports, via `import`/`from ... import`
+    (resolved by `_resolve_dotted`) AND via a string literal passed to
+    `importlib.import_module(...)` or `__import__(...)` (resolved by
+    `_string_import_target` then `_resolve_dotted`), PLUS the tracked
+    `__init__.py` of every strict ancestor package of each resolved import
+    (`_ancestor_package_inits`) -- Python always runs a package's `__init__.py`
+    before any of its submodules, so `import engine.pkg.inner` depends on
     `engine/pkg/__init__.py` even when neither the import statement nor
     `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`. Every
     tracked file is a key, even one with no resolvable imports (an empty
@@ -354,8 +404,9 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     silently partial graph; `changed_modules` treats that as "select every
     module"."""
     tracked = tracked if tracked is not None else [
-        p for p in _tracked(_GRAPH_ROOTS) if p.endswith(".py")]
+        p for p in _tracked(["."]) if p.endswith(".py")]
     tracked_set = set(tracked)
+    roots = _tracked_roots(tracked_set)
     graph: dict[str, set[str]] = {rel: set() for rel in tracked}
     for rel in tracked:
         source = (REPO / rel).read_text(encoding="utf-8")
@@ -367,7 +418,7 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    target = _resolve_dotted(alias.name, tracked_set)
+                    target = _resolve_dotted(alias.name, tracked_set, roots)
                     if target:
                         edges.add(target)
                     edges |= _ancestor_package_inits(alias.name, tracked_set)
@@ -378,36 +429,66 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                 else:
                     dotted = node.module or ""
                 if dotted:
-                    target = _resolve_dotted(dotted, tracked_set)
+                    target = _resolve_dotted(dotted, tracked_set, roots)
                     if target:
                         edges.add(target)
                     edges |= _ancestor_package_inits(dotted, tracked_set)
                     for alias in node.names:
-                        sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set)
+                        sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set, roots)
                         if sub:
                             edges.add(sub)
+            elif isinstance(node, ast.Call):
+                dotted_str = _string_import_target(node)
+                if dotted_str:
+                    target = _resolve_dotted(dotted_str, tracked_set, roots)
+                    if target:
+                        edges.add(target)
+                    edges |= _ancestor_package_inits(dotted_str, tracked_set)
     return graph
+
+
+def _conftest_ancestors(rel: str, tracked_set: set[str]) -> set[str]:
+    """Every tracked `conftest.py` in `rel`'s own directory or any ancestor
+    directory up to the repo root -- pytest applies every one of these to a
+    test file, so a change reachable only through a conftest.py's OWN
+    imports (not the test file's) can still affect that test's behavior.
+    `rel` is expected to be a test file path; a `conftest.py` at the repo
+    root itself is included when tracked."""
+    parts = rel.split("/")[:-1]
+    out: set[str] = set()
+    for i in range(len(parts), -1, -1):
+        candidate = "/".join(parts[:i] + ["conftest.py"]) if parts[:i] else "conftest.py"
+        if candidate in tracked_set:
+            out.add(candidate)
+    return out
 
 
 def _closure_roots(mod: dict, tracked_set: set[str]) -> set[str]:
     """Module `mod`'s own `tests`/`mutate` (minus `skip`) glob patterns,
-    expanded against `tracked_set`. Unlike `expand`, a pattern matching
-    nothing here is NOT an error: this powers dependency-closure roots,
-    which must tolerate a `tracked_set` that does not happen to contain one
-    of the module's configured files (e.g. a unit-test fixture, or a graph
-    built from a narrower tree) without raising -- ownership
-    (`module_owns_changed_path`) is unaffected either way, since it never
-    consults a tracked list."""
+    expanded against `tracked_set`, PLUS every tracked `conftest.py` that
+    applies to one of its `tests` files (`_conftest_ancestors`) -- a
+    conftest.py's own imports become part of the closure even though the
+    conftest file itself never matches a `mutate`/`tests` pattern. Unlike
+    `expand`, a pattern matching nothing here is NOT an error: this powers
+    dependency-closure roots, which must tolerate a `tracked_set` that does
+    not happen to contain one of the module's configured files (e.g. a
+    unit-test fixture, or a graph built from a narrower tree) without
+    raising -- ownership (`module_owns_changed_path`) is unaffected either
+    way, since it never consults a tracked list."""
     test_pats, mutate_pats = mod.get("tests", []), mod["mutate"]
     skip_pats = mod.get("skip", [])
     out: set[str] = set()
+    test_hits: set[str] = set()
     for p in tracked_set:
         if any(fnmatch.fnmatchcase(p, pat) for pat in test_pats):
             out.add(p)
+            test_hits.add(p)
             continue
         if any(fnmatch.fnmatchcase(p, pat) for pat in mutate_pats) and \
                 not any(fnmatch.fnmatchcase(p, pat) for pat in skip_pats):
             out.add(p)
+    for t in test_hits:
+        out |= _conftest_ancestors(t, tracked_set)
     return out
 
 

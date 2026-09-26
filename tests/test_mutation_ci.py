@@ -1701,6 +1701,115 @@ def test_artifacts_change_selects_every_module_whose_tests_transitively_import_f
     assert len(selected) > 1  # NOT just ['foundation'] -- the defect this round fixes
 
 
+def test_frozen_inputs_change_selects_chooser_via_the_checks_bridge():
+    # The Opus-blocking counterexample THIS round fixes: the pre-fix rule
+    # selected ONLY ['scoring_application'] for
+    # engine/v2/scoring/frozen_inputs.py, because chooser's own test
+    # (tests/test_phase4_capture_strict.py) reaches frozen_inputs only
+    # through checks/phase4_frozen_bridge.py -- a file the old
+    # engine/tests-only graph never parsed at all. checks/tools/experiments
+    # are now graph nodes too, so the bridge closes the chain.
+    names = pilot.enabled_modules(CFG)
+    selected = pilot.changed_modules(CFG, names, ["engine/v2/scoring/frozen_inputs.py"])
+    assert "chooser" in selected
+    assert "scoring_application" in selected  # already selected before this fix
+    assert len(selected) > 1
+
+
+def test_build_import_graph_covers_checks_tools_and_experiments_too():
+    # Not just engine/tests: any tracked top-level package is a graph node,
+    # with no hand-kept root list.
+    graph = pilot.build_import_graph()
+    assert any(rel.startswith("checks/") for rel in graph)
+    assert any(rel.startswith("tools/") for rel in graph)
+    assert any(rel.startswith("experiments/") for rel in graph)
+
+
+def test_build_import_graph_a_synthetic_test_reaches_engine_through_checks(tmp_path, monkeypatch):
+    # A test file imports a `checks.*` bridge module, which imports the real
+    # `engine.*` module -- the synthetic version of the frozen_inputs defect
+    # above, isolated from the real repo's file layout.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "x.py").write_text("from engine import y\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_bridge.py").write_text("from checks import x\n")
+    tracked = ["engine/y.py", "checks/x.py", "tests/test_bridge.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "checks/x.py" in graph["tests/test_bridge.py"]
+    assert "engine/y.py" in graph["checks/x.py"]
+
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "target": {"why": "x", "mutate": ["engine/y.py"],
+                       "tests": ["tests/test_bridge.py"]},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["target"], ["engine/y.py"], graph=graph)
+    assert selected == ["target"]
+
+
+def test_build_import_graph_resolves_an_importlib_import_module_string_literal(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dynamic.py").write_text(
+        "import importlib\n"
+        "importlib.import_module('engine.y')\n"
+        "__import__('engine.y')\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "engine/y.py" in graph["tests/test_dynamic.py"]
+
+
+def test_build_import_graph_ignores_a_non_literal_import_module_argument(tmp_path, monkeypatch):
+    # A computed/variable argument is dynamic and this static graph cannot
+    # see it -- it must not be mistaken for an edge to nowhere or crash.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dynamic.py").write_text(
+        "import importlib\n"
+        "name = 'engine.' + 'y'\n"
+        "importlib.import_module(name)\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/test_dynamic.py"] == set()
+
+
+def test_conftest_own_imports_are_a_closure_root_for_tests_under_its_directory(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text("from engine import y\n")
+    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")  # never imports engine.y itself
+    tracked = ["engine/y.py", "tests/conftest.py", "tests/test_a.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "alpha": {"why": "x", "mutate": ["engine/other.py"], "tests": ["tests/test_a.py"]},
+        },
+    }
+    # alpha's own test (test_a.py) never imports engine/y.py, and alpha
+    # never mutates it -- but tests/conftest.py, which applies to every test
+    # under tests/, does. alpha must still be selected. Add alpha's mutate
+    # target as its own graph key (no imports of its own) so it is a valid
+    # tracked_set member for `changed_modules`.
+    graph["engine/other.py"] = set()
+    selected = pilot.changed_modules(cfg2, ["alpha"], ["engine/y.py"], graph=graph)
+    assert selected == ["alpha"]
+
+
 def test_domain_valuation_init_change_selects_its_dependents():
     names = pilot.enabled_modules(CFG)
     selected = set(pilot.changed_modules(CFG, names, ["engine/v2/domain/valuation/__init__.py"]))
@@ -1724,8 +1833,8 @@ def test_import_graph_build_is_fast():
     start = time.monotonic()
     graph = pilot.build_import_graph()
     elapsed = time.monotonic() - start
-    assert elapsed < 5.0, f"import graph build took {elapsed:.2f}s (budget: 5s)"
-    assert len(graph) > 100
+    assert elapsed < 15.0, f"import graph build took {elapsed:.2f}s (budget: 15s)"
+    assert len(graph) > 800  # whole repo now, not just engine/+tests/
 
 
 # -- mutate job summary: mutant-level cache reuse vs re-tested this run ------
