@@ -1,0 +1,226 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  path_filters:
+    - "!dashboard/published/**"
+    - "!data/**"
+    - "!fixtures/**"
+    - "!guides/rearchitecture_phase6_consumer_parity.md"
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        The PR body's `<details><summary>Spec</summary>` block contains the
+        spec and acceptance criteria; read it before reviewing.
+
+        Start every review with a "## Design review" section, in this order:
+        1. Spec coverage — does the diff satisfy every acceptance criterion
+           in the spec? Name any criterion not met.
+        2. Reachability from production entrypoints — trace
+           entrypoint -> ... -> new code per /ARCHITECTURE.md §4 (the
+           legacy nightly steps, the v2 nightly `GRAPH` stages minus
+           `NO_JOB_STAGES`, ops CLI subcommands, serving routes). If nothing
+           in production reaches the new code, say so.
+        3. Layer and dependency violations against /ARCHITECTURE.md §2-3
+           (import direction, declared legacy adapters, package README
+           public-interface lists).
+        4. Callers outside this diff affected by any changed interface —
+           search the repo for every call site, not just the ones touched
+           here.
+        5. Siblings with the same pattern that were NOT fixed — when this
+           diff fixes a defect, check for the same shape elsewhere and name
+           any sibling left unfixed.
+
+        Only after the Design review section, give line-level findings.
+
+        There is no per-task design doc: a PR that changes a component's
+        public interface, its dependencies, its inputs/outputs, or its
+        failure semantics must update that component's `ARCHITECTURE.md`
+        (root `/ARCHITECTURE.md` §7) in the same PR. Flag as a defect any
+        such change with no corresponding `**/ARCHITECTURE.md` update —
+        this is a stronger requirement than "nice to have," on par with an
+        unmet acceptance criterion.
+
+        If the PR includes an `**/ARCHITECTURE.md` file, check its claims
+        against the code (see the `**/ARCHITECTURE.md` path instruction
+        below) and flag any undocumented deviation between the two.
+    - path: "**/ARCHITECTURE.md"
+      instructions: |
+        Review as an architecture change, not as prose:
+        - Check every factual claim (import rules, entrypoints, stage
+          graphs, CLI subcommand lists, invariants) against the real code
+          it describes — a layer table, an import restriction, a job-graph
+          edge, or a CLI subcommand that does not match the source it
+          cites is a defect, not a style nit.
+        - If the doc contains a mermaid diagram, check every node and edge
+          against the code (a graph literal, an argparse tree, a call
+          graph) — a diagram that has drifted from the code it claims to
+          describe is worse than no diagram.
+        - For the root `/ARCHITECTURE.md`: check that anything claimed as
+          cross-cutting (a layer, an invariant, a production entrypoint) is
+          not actually scoped to one component that should own the detail
+          in its own `ARCHITECTURE.md` instead.
+        - For a component `ARCHITECTURE.md`
+          (`docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`'s section order):
+          check the stated dependencies and callers against the real
+          import graph and real call sites, not just against the doc's own
+          claim; flag any missing failure semantic in the 4c R1-R6 template
+          (missing input, cache, retry, transaction, partial write,
+          idempotency); check every invariant the doc claims to enforce
+          against the root doc's actual §5 bullet.
+    - path: "engine/v2/**"
+      instructions: |
+        Apply /ARCHITECTURE.md §5: a native row must never carry a
+        legacy-derived value or legacy reference under a native label; a
+        missing/unusable input must produce a typed withheld/refused status,
+        never a silent 0/None/default; no parity-only or legacy-emulation
+        code path; failure semantics (missing input, cache, retry,
+        transaction, partial write, idempotency) must be stated for any new
+        stage or effect; paths must resolve through engine.paths / the v2
+        foundation root helpers, never a module's own
+        Path(__file__)-derived root. Check that the changed package's
+        README Public-interface and Consumers sections were updated if any
+        name or caller changed.
+    - path: "engine/v2/parity/**"
+      instructions: |
+        This package is the ONE comparator the Phase 4 checker and the
+        nightly native_parity report both call (/ARCHITECTURE.md §5).
+        Flag any new or duplicated comparison logic elsewhere in the diff
+        that reimplements a similar diff instead of reusing
+        compare_dimension and the declared field groups. Flag any test or
+        code that compares native output against itself, against its own
+        prior output, or against a hand-mutated copy of itself rather than
+        against an independent legacy value — legacy output belongs only on
+        the expected side of a comparison.
+    - path: "engine/v2/dashboard/**"
+      instructions: |
+        Layer 8, only_imports=(7.0,) (/ARCHITECTURE.md §2): this package
+        may import anything on layer 7.0 — engine.v2.serving,
+        engine.v2.ops, and engine.v2.research — and nothing else in
+        engine.v2: no direct import of scoring, evaluation, ledger, domain,
+        models, or data (layers 0-6), and no import of engine.v2.diagnosis
+        (7.5, the sink; imported by nothing). The one documented ops import
+        is engine.v2.dashboard._server's lazy
+        `from engine.v2.ops.cli import refresh_action`, used only to queue a
+        shadow nightly plan onto the operations server's
+        `POST /actions/refresh` (/ARCHITECTURE.md §4) — flag any other
+        ops import as undocumented. Flag any gate, financial ratio, return
+        estimate, or portfolio accounting computed here instead of read
+        from engine.v2.serving.
+
+        This package does NOT write dashboard/published/** — it only
+        composes and starts the serving preview (`preview.py`,
+        `_server.py`). Legacy `engine/dashboard/**` alone owns publication
+        to that path (`publish_bundle`); apply the publish-atomicity and
+        bundle-secret-leak checks below to that scope, not this one. Still
+        flag in this package: any hardcoded or developer-local filesystem
+        path (paths must resolve through engine.paths / the v2 foundation
+        root helpers, never a module's own Path(__file__)-derived root or
+        an absolute local path), and anything that could put the preview
+        token (`V2_DASHBOARD_TOKEN`) or another credential into a log
+        line, response body, or error message. The preview server is
+        loopback-only by default (`is_loopback`) and must stay refused,
+        not guessed, when a caller widens the bind host.
+    - path: "engine/dashboard/**"
+      instructions: |
+        Legacy tree: must never import engine.v2 (/ARCHITECTURE.md §3,
+        rule 3 — "Legacy never imports v2"). Flag any `from engine.v2
+        import ...` or `import engine.v2` here.
+
+        This package alone writes the bundles published to
+        dashboard/published/** (`engine/v2/dashboard/**` only composes and
+        starts the serving preview; it never writes there) — a path this
+        config's
+        path_filters excludes from review — so this producer code is the
+        last review checkpoint before anything reaches that artifact. Flag
+        any publish step that is not atomic, any hardcoded or
+        developer-local filesystem path, and anything that could put a
+        credential, token, or other secret into the published bundle — the
+        checks/repo_hygiene.py secret scan does not run on
+        dashboard/published/** either. Free-text fields that can reach the
+        bundle (a degraded/skip reason, a flag detail string, an exception's
+        message) are the same leak path and must be sanitised before they
+        are written.
+    - path: "tools/phase6_inventory.py"
+      instructions: |
+        This tool's inventory proves a declared symbol RESOLVES (imports
+        and exists); it does not prove the symbol is REACHABLE from a
+        production entrypoint (/ARCHITECTURE.md §4, §6). Flag any change
+        that treats a resolved row as proof of reachability, and flag
+        `ROOT = Path(__file__).resolve().parents[1]` (or any similar
+        self-derived root) as the anti-pattern documented in
+        /ARCHITECTURE.md §5 — paths should resolve through engine.paths
+        or the v2 foundation instead.
+    - path: "experiments/**"
+      instructions: |
+        Any experiment runner must expose a `--no-ledger` flag and any
+        subset/smoke invocation must use it (/ARCHITECTURE.md §5).
+        LEDGER.csv is a multiple-testing record, not a run log, and runners
+        dedupe on spec hash, so a smoke-test row can permanently occupy the
+        slot a real run needed. Flag a new runner with no `--no-ledger`
+        flag, and flag a smoke/test invocation that omits it.
+
+        Flag a new idempotency key without checking whether it can collide
+        with a legacy row already occupying the same key space (e.g. a
+        ledger "ran" row keyed `(experiment_id, stage)` that a legacy run
+        already wrote) — /ARCHITECTURE.md §6.
+    - path: ".github/workflows/**"
+      instructions: |
+        A workflow change must not skip pre-commit hooks, bypass the secret
+        scan (checks/repo_hygiene.py) or GitHub push protection, run with
+        elevated (admin) merge permissions, or add a step that could push to
+        `main` directly. CI credentials must never be echoed into logs.
+
+        A workflow triggered on `pull_request` must set a `concurrency`
+        group (keyed on the ref/PR) with `cancel-in-progress: true`
+        (/ARCHITECTURE.md §6). Without it, every push to an open PR
+        queues another full run behind the last one instead of cancelling
+        it, burning CI minutes on runs whose result a newer push already
+        superseded. Flag a new or changed `pull_request` trigger with no
+        `concurrency` block.
+    - path: "tests/**"
+      instructions: |
+        Flag a test that would pass regardless of the code under test —
+        comparing native output against itself, against its own prior
+        output, or against a hand-mutated copy rather than an independent
+        expected value (/ARCHITECTURE.md §6). Every new checkpointed or
+        native output needs both a focused regression test and a
+        planted-defect test that proves the comparator actually fails on a
+        corrupted value, not just that "a row is red". A negative control
+        that has never been observed to fail is not known to work.
+
+        Check any claim that a failure is "pre-existing" or "flaky" against
+        main's own current run, not against "green" (/ARCHITECTURE.md
+        §6) — a test failure, or an UNOWNED `tools/phase6_inventory.py` row,
+        that is new versus main is a defect this PR introduced even though
+        the baseline it branched from was already red.
+  pre_merge_checks:
+    custom_checks:
+      - name: "Spec criteria met"
+        mode: warning
+        instructions: |
+          Pass if every acceptance criterion listed in the PR body's
+          `<details><summary>Spec</summary>` block is either satisfied by
+          the diff or explicitly deferred in an "Out of scope" note. Fail if
+          any acceptance criterion has no corresponding change or test and
+          no deferral is stated.
+      - name: "New code reachable from production"
+        mode: warning
+        instructions: |
+          Pass if every new function, route, CLI subcommand or job stage
+          added by this PR is called, directly or transitively, from a
+          production entrypoint named in /ARCHITECTURE.md §4 (the legacy
+          nightly, the v2 nightly GRAPH minus NO_JOB_STAGES, an ops CLI
+          subcommand, or a serving route) — or the PR body states explicitly
+          why it is not yet reachable (e.g. gated behind a flag, exercised
+          only by a manual CLI). Fail if new code has no caller anywhere and
+          the PR body gives no such statement.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "**/ARCHITECTURE.md"

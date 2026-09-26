@@ -1,5 +1,8 @@
 # `engine/v2/ops`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and invariants.
+
 ## Ownership
 
 Implements the **Supervisor/catalog — transactions, leases, dependencies, capacity, retry history** row of the §4 owner table of
