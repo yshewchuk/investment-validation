@@ -8,12 +8,16 @@ replace yet. This package never writes `dashboard/published/**` — it only
 composes and starts the serving preview; the legacy package owns
 publication to that path (`publish_bundle`), which `.coderabbit.yaml`'s
 `path_filters` excludes from CodeRabbit review (it is a runtime artifact,
-not committed source). It is not excluded from a secret scan:
-`checks/repo_hygiene.py`'s `check_bundle` is the dedicated fail-closed
-scanner for the published bundle's own content, called from the
+not committed source). It is not excluded from a secret scan, but two
+distinct scans are involved, over two distinct artifacts, and neither is
+`check_files` (the ordinary committed-source scan): legacy `publish_bundle`
+calls `engine/dashboard/publish.py`'s `secret_scan` on the built bundle
+before writing it to `dashboard/published/**`; separately, the v2
 publication security gate (`engine/v2/ops/effects_graph.py`'s
-`_security_gate`) — stricter than the ordinary committed-source scan
-(`check_files`), not an exemption from one.
+`_security_gate`) calls `checks/repo_hygiene.py`'s `check_bundle` (via
+`engine/v2/ops/legacy_adapter.py`'s `run_security_scan`) on its own bound
+`bundle.tar` artifact before that generation's commit — not on
+`dashboard/published/**`, which the v2 gate never writes.
 
 ## Purpose
 

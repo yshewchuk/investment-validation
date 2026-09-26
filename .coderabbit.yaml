@@ -19,8 +19,8 @@ reviews:
            in the spec? Name any criterion not met.
         2. Reachability from production entrypoints — trace
            entrypoint -> ... -> new code per /ARCHITECTURE.md §4 (the
-           legacy nightly steps, the v2 nightly `_DAG_STAGES` submission
-           (minus `NO_JOB_STAGES`), ops CLI subcommands, serving routes). If nothing
+           legacy nightly steps, the v2 nightly production `_DAG_STAGES`
+           submission, ops CLI subcommands, serving routes). If nothing
            in production reaches the new code, say so.
         3. Layer and dependency violations against /ARCHITECTURE.md §2-3
            (import direction, declared legacy adapters, package README
@@ -211,7 +211,7 @@ reviews:
           Pass if every new function, route, CLI subcommand or job stage
           added by this PR is called, directly or transitively, from a
           production entrypoint named in /ARCHITECTURE.md §4 (the legacy
-          nightly, the v2 nightly `_DAG_STAGES` submission minus NO_JOB_STAGES, an ops CLI
+          nightly, the v2 nightly production `_DAG_STAGES` submission, an ops CLI
           subcommand, or a serving route) — or the PR body states explicitly
           why it is not yet reachable (e.g. gated behind a flag, exercised
           only by a manual CLI). Fail if new code has no caller anywhere and

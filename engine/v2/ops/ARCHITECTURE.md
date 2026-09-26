@@ -106,10 +106,15 @@ themselves are never held here, only remaining-call/reserve counts.
   and ownership recovery after a crash; a stale lease is reclaimed only
   after ownership is proven gone, never assumed.
 - **Transaction** — catalog writes go through `catalog.py`'s `transaction`
-  context manager; a coordinator effect's catalog/outbox/filesystem writes
-  are sequenced so a crash mid-effect is recoverable by replay, not by a
-  file append racing a DB commit (root doc §6, the CSV/transaction
-  anti-pattern).
+  context manager; coordinator effects must make their filesystem writes
+  replay-safe and idempotent rather than atomic with the DB commit (root
+  doc §6, the CSV/transaction anti-pattern). One exception is visible in
+  practice: `experiment_effect`'s `_commit` appends the "ran" row to
+  `experiments/LEDGER.csv` from inside `commit_attempt`'s transaction, so a
+  later failure in that same transaction (and its DB rollback) can leave
+  the CSV row in place while the DB records no committed attempt. Recovery
+  is by replay, not atomicity: a retry reuses the same run identity, and
+  `_ran_row_exists` skips appending a second "ran" row for it.
 - **Partial write** — artifact publication is atomic (`ArtifactStore`); a
   killed process leaves either the old artifact or nothing, never a
   half-written one.
