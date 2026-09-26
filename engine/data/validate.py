@@ -98,6 +98,10 @@ class ValidationReport:
     rows_in: int = 0
     rows_out: int = 0
     quarantined_files: list[str] = field(default_factory=list)
+    #: ``(source_file, reason, details)`` of every quarantine call made while
+    #: producing this report. Not part of :meth:`summary`; the incremental
+    #: rebuild replays these for a source whose parse it reuses.
+    quarantine_calls: list[tuple] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -274,13 +278,11 @@ def validate_chains(
     report.rows_out = len(clean)
 
     if reasons and source_file and should_quarantine(report):
-        quarantine(
-            source_file,
-            "chain row validation: " + ", ".join(reasons),
-            {"rows_in": len(df), "rows_kept": len(clean)},
-            root=quarantine_root,
-        )
+        reason = "chain row validation: " + ", ".join(reasons)
+        details = {"rows_in": len(df), "rows_kept": len(clean)}
+        quarantine(source_file, reason, details, root=quarantine_root)
         report.quarantined_files.append(str(source_file))
+        report.quarantine_calls.append((source_file, reason, details))
     return clean, report
 
 

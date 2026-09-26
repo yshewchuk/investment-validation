@@ -459,6 +459,35 @@ def test_expected_return_stays_null_when_only_analog_is_present(tmp_path):
     assert summary.expected_return_sim is None
 
 
+def test_n_analogs_stores_null_when_absent_and_a_real_zero_as_zero(tmp_path):
+    """Migration 3's n_analogs is nullable: a display row carrying no
+    ``n_analogs`` key means the analog layer never ran (stored NULL), while a
+    real run that matched zero rows stores 0 -- the two are never conflated."""
+    conn, store, snap = _events_snapshot(tmp_path, [
+        _event_row("e1", "AAA", datetime(2024, 1, 5)),
+        _event_row("e2", "BBB", datetime(2024, 1, 5)),
+    ])
+    repo = Repository(conn, store)
+    serving_conn, serving_store = _serving(tmp_path)
+    zero = _row(ticker="AAA", n_analogs=0)
+    absent = _row(ticker="BBB", n_analogs=None)
+    zero_display = _compact(zero)
+    absent_display = _compact(absent)
+    absent_display.pop("n_analogs")
+    release = _build(_preview_input(), _score_doc(rows=[zero, absent]),
+                     _bundle(zero_display, absent_display),
+                     repository=repo, snap=snap,
+                     serving_conn=serving_conn, serving_store=serving_store)
+    assert isinstance(release, PreviewRelease)
+    rows = serving_conn.execute(
+        "SELECT e.ticker, s.n_analogs FROM serving_score_summary s "
+        "JOIN serving_event_summary e ON e.release_id = s.release_id "
+        "AND e.event_id = s.event_id WHERE s.release_id = ?",
+        (release.release_id,)).fetchall()
+    assert {row["ticker"]: row["n_analogs"] for row in rows} == {
+        "AAA": 0, "BBB": None}
+
+
 # --------------------------------------------------------------------------
 # schema migration: a v1-only serving.sqlite gains v2's `flags` column
 # --------------------------------------------------------------------------
@@ -467,7 +496,8 @@ def test_expected_return_stays_null_when_only_analog_is_present(tmp_path):
 def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
     """A serving.sqlite written by the v1-only code must open through the
     ordinary `connect`/`ensure_schema` path and gain migration 2's working
-    `flags` column rather than refusing or silently lacking it."""
+    `flags` column and migration 3's analog row-id columns rather than
+    refusing or silently lacking them."""
     path = tmp_path / "serving.sqlite"
     old = sqlite3.connect(path, isolation_level=None)
     try:
@@ -487,7 +517,7 @@ def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
     try:
         applied = {int(row[0]) for row in migrated.execute(
             "SELECT version FROM schema_versions WHERE owner = ?", (projections._OWNER,))}
-        assert applied == {1, 2}
+        assert applied == {1, 2, 3}
         migrated.execute(
             "INSERT INTO serving_release (release_id, document_json, findings_json, status, written_at) "
             "VALUES ('r1', '{}', '{}', 'candidate', '2024-01-01T00:00:00Z')")
@@ -498,8 +528,14 @@ def test_ensure_schema_migrates_an_old_schema_db_to_v2_flags(tmp_path):
             "VALUES ('r1', 's1', 'e1', 'STR-THRU', ?, 'a1')",
             (json.dumps(["OUT_OF_DOMAIN"]),))
         row = migrated.execute(
-            "SELECT flags FROM serving_score_summary WHERE score_id = 's1'").fetchone()
+            "SELECT flags, selected_row_ids, contributing_row_ids, n_analogs "
+            "FROM serving_score_summary WHERE score_id = 's1'").fetchone()
         assert json.loads(row["flags"]) == ["OUT_OF_DOMAIN"]
+        assert json.loads(row["selected_row_ids"]) == []
+        assert json.loads(row["contributing_row_ids"]) == []
+        # Migration 3's n_analogs is nullable: a row that never declared a
+        # count stays NULL, never an invented 0.
+        assert row["n_analogs"] is None
     finally:
         migrated.close()
 

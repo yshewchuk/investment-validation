@@ -1,7 +1,8 @@
 """Allowlisted stage contracts and strict result validation."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
 from engine.v2.ops.calendar_moves_jobs import (
@@ -73,6 +74,21 @@ class RebuildCandidateParameters:
     protected_before_hash: str = ""
     tables: tuple[str, ...] = ()
     sample: int | None = None
+
+
+@dataclass(frozen=True)
+class SupersedeParameters:
+    """P6-3 ``decisions_supersede``: one operator's reasoned supersession of
+    an already-decided row. Its three small JSON-safe values ride directly in
+    the job parameters (no artifact staging): the CLI validates the new
+    payload against the same rules ``decisions.insert`` applies before
+    submission, and ``decision_commit.commit_supersede`` re-validates it
+    under the fence before appending."""
+
+    expected_ids: tuple[str, ...]
+    old_decision_id: str = ""
+    reason: str = ""
+    new_payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -207,6 +223,20 @@ def input_mode_problems(job, params):
     return ("snapshot input mode is missing bindings: " + ",".join(missing),) if missing else ()
 
 
+def _decisions_supersede_kind():
+    """P6-3: a one-off operator supersession whose trivial worker only proves
+    the attempt ran (``worker.py``'s ``_dispatch_effect_receipt``); the real
+    append happens in ``decision_commit.commit_supersede``, the coordinator
+    effect, never in this process or the worker."""
+    return JobKind(
+        name="decisions_supersede", worker="decisions_supersede",
+        parameters=SupersedeParameters,
+        resource_classes=frozenset({"io_fetch"}), effects=("staged",),
+        retry=RetryPolicy("bounded", 2, (5, 30)),
+        checkpoint_contract="decisions_supersede_receipt.v1.0",
+        namespaces=frozenset({"shadow", "smoke"}))
+
+
 def _core_kinds():
     """The one-off ``JobKind`` entries with no generated sibling — every
     "loop over a small family" kind (the outbox effects, the legacy action
@@ -284,6 +314,7 @@ def _core_kinds():
             retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="legacy_materialization_manifest.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
+        _decisions_supersede_kind(),
     ]
 
 

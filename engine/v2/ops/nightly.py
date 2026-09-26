@@ -535,7 +535,10 @@ def _native_cached_outcome(conn, unit):
     The lookup must reproduce ``_fetch_unit``'s request document field for
     field -- ``cache_raw_receipt`` hashes ``_jsonable`` of it, and every value
     here is already JSON-native, so ``content_hash(request)`` is that same
-    hash. Found: the cached receipt id/hash classify as a complete cache hit.
+    hash. Found AND the stored pull was ``complete``: the cached receipt
+    id/hash classify as a complete cache hit. A stored ``legitimate_empty``
+    pull is never reused -- it may have been captured before ORATS finished
+    publishing the date, so it is always re-verified against the live source.
     """
     from engine.v2.data.incremental import FETCH_SOURCE
     from engine.v2.foundation import content_hash
@@ -544,10 +547,12 @@ def _native_cached_outcome(conn, unit):
     request = {"request_id": unit.request_id, "table_name": unit.table_name,
                "partition_key": unit.partition_key, "keys": list(unit.expected_keys)}
     row = conn.execute(
-        "SELECT raw_receipt_id, raw_hash FROM data_raw_receipts "
-        "WHERE source = ? AND endpoint = ? AND request_hash = ?",
+        "SELECT raw_receipt_id, raw_hash, response_kind FROM data_raw_receipts "
+        "WHERE source = ? AND endpoint = ? AND request_hash = ? "
+        "AND response_kind = 'complete' "
+        "ORDER BY received_at DESC",
         (FETCH_SOURCE, unit.table_name, content_hash(request))).fetchone()
-    if row is None:
+    if row is None or row["response_kind"] != "complete":
         return {}
     return {unit.request_id: incremental_data.classify_response(
         200, unit.expected_keys, returned_keys=unit.expected_keys,

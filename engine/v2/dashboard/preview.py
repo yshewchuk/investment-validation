@@ -25,11 +25,17 @@ submits the shadow nightly (a ``202`` with job ids) rather than the read-only
 ``503``. Omitting it keeps that explicit 503 refusal; this wires nothing for
 production authority and never runs the refresh inline.
 
+``--serving-index-path`` points the authenticated ``GET /analogs.json`` route
+at the serving index sqlite file it reads persisted analog row ids from —
+again distinct from ``--release-root``, never guessed from it. Omitting it
+keeps that route's explicit 503 ``analogs not configured`` refusal.
+
 Run as::
 
     V2_DASHBOARD_TOKEN=... python3 -m engine.v2.dashboard.preview \\
         --host 127.0.0.1 --port 8765 --release-root R --health-path H \\
-        --model-release-root M --ops-root O --calibration-health-path C
+        --model-release-root M --ops-root O --calibration-health-path C \\
+        --serving-index-path S
 """
 from __future__ import annotations
 
@@ -96,6 +102,11 @@ def _parse_args(argv):
                              "engine.v2.ops.cli.refresh_action; distinct from --release-root, "
                              "never inferred from it. Omit to keep the route's read-only "
                              "503 'refresh not configured' refusal.")
+    parser.add_argument("--serving-index-path", default=None,
+                        help="the serving index sqlite file GET /analogs.json reads analog "
+                             "row ids from; distinct from --release-root, never inferred from "
+                             "it. Omit to keep the route's explicit 503 'analogs not "
+                             "configured' refusal.")
     parser.add_argument("--frozen-at", default="unknown")
     parser.add_argument("--allow-non-loopback", action="store_true")
     return parser.parse_args(argv)
@@ -118,7 +129,8 @@ def run(argv=None):
                           health_path=args.health_path, release_root=args.release_root,
                           frozen_at=args.frozen_at, model_release_root=args.model_release_root,
                           ops_root=args.ops_root,
-                          calibration_health_path=args.calibration_health_path)
+                          calibration_health_path=args.calibration_health_path,
+                          serving_index_path=args.serving_index_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     probe_host = args.host if args.host not in ("0.0.0.0", "::") else "127.0.0.1"

@@ -482,7 +482,9 @@ mutate = [
 ]
 tests = [
     "tests/test_v2_dashboard_preview.py",
+    "tests/test_v2_dashboard_preview_analogs.py",
     "tests/test_v2_ops_serving.py",
+    "tests/test_v2_serving_analogs.py",
     "tests/test_v2_serving_api.py",
     "tests/test_v2_serving_bridge.py",
     "tests/test_v2_serving_legacy_bundle.py",
@@ -774,7 +776,10 @@ tests = [
 [modules.ops_nightly]
 why = "Nightly DAG, stage map, plans, fingerprints and incremental data wiring."
 mutate = [
-    "engine/v2/ops/nightly.py",
+    # engine/v2/ops/nightly_trigger.py (phase 6 slice 12) is matched by this
+    # nightly glob exactly once; git ls-files cannot see a brand-new file
+    # before it is staged, so a literal path pattern would abort the matrix.
+    "engine/v2/ops/nightly*.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
@@ -800,6 +805,9 @@ tests = [
     "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_native_computed_moves_forward_calendar_e2e.py",
+    # tests/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
+    # file caveat as the mutate list above; the glob matches it once.
+    "tests/test_v2_ops_nightly*.py",
     "tests/test_v2_ops_render_parity.py",
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_runtime.py",

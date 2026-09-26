@@ -18,11 +18,13 @@ import pytest
 
 from engine.v2.data.catalog import commit_snapshot
 from engine.v2.data.manifests import dataset_manifest, snapshot_ref
-from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp
+from engine.v2.foundation import ArtifactStore, content_hash, format_timestamp, from_document
 from engine.v2.ops import cli, executor, refresh_staging
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
+from engine.v2.ops.checkpoints import artifact as load_artifact
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.incremental_data import RefreshPlan
 from engine.v2.ops.nightly import NATIVE_DAILY_MARKET_ACCOUNT, build_legacy_job_requests
 from engine.v2.ops.plans import nightly_plan
 from engine.v2.ops.profiles import DEFAULT_POLICY
@@ -323,3 +325,93 @@ def test_provider_account_cli_admits_native_refresh_and_absent_row_is_refused(tm
                               "attempt-absent", 1, {"provider_calls": 3},
                               format_timestamp(clock.now()))
     assert refused.value.code == "CREDENTIAL_INVALID"
+
+
+CACHED_SESSION = "2026-09-19"
+CACHED_TICKER = "AAPL"
+
+
+def _cached_request_id():
+    return "eod-" + CACHED_SESSION + "-market"
+
+
+def _seed_market_pull(conn, store, clock, response_kind, payload=b"{}"):
+    """One raw receipt keyed by the exact request document ``_fetch_unit``
+    builds, so ``_native_cached_outcome``'s ``content_hash`` lookup finds it.
+    The payload distinguishes the receipt identity (the receipt id hashes the
+    raw hash), so two pulls of one request store two rows."""
+    from engine.v2.data.incremental import FETCH_SOURCE, RawPayload, cache_raw_receipt
+    return cache_raw_receipt(
+        conn, store,
+        RawPayload(payload=payload, response_kind=response_kind, response_meta={}),
+        source=FETCH_SOURCE, endpoint="daily_market",
+        request={"request_id": _cached_request_id(), "table_name": "daily_market",
+                 "partition_key": CACHED_SESSION, "keys": [CACHED_TICKER]},
+        received_at=format_timestamp(clock.now()))
+
+
+def _pinned_native_plan(conn, store, clock, root):
+    """The production native plan path, decoded from the artifact it publishes."""
+    tickers = (CACHED_TICKER,)
+    plan = nightly_plan(
+        ROOT, CACHED_SESSION, manifest_ref="artifact:parent",
+        expected_population=(CACHED_TICKER + "|x|" + CACHED_SESSION,),
+        tickers=tickers, context_tickers=tickers, refresh_mode="native",
+        catalog_path=str(root / "ops.sqlite"), objects_root=str(root), clock=clock)
+    requests = build_legacy_job_requests(
+        plan, tickers=tickers, context_tickers=tickers,
+        year_start=plan["year_start"], year_end=plan["year_end"],
+        refresh_mode="native", catalog_path=str(root / "ops.sqlite"),
+        objects_root=str(root), conn=conn, store=store, clock=clock)
+    assert requests[0].job.kind == "incremental_refresh"
+    binding = requests[0].job.parameters["input_bindings"]["refresh_plan.json"]
+    document = json.loads(store.read_verified(load_artifact(conn, store, binding)))
+    return from_document(RefreshPlan, document)
+
+
+def test_cached_outcome_reverifies_a_legitimate_empty_pull(tmp_path):
+    """A stored ``legitimate_empty`` pull may predate ORATS finishing the
+    date's file, so it must never satisfy the cache: the unit is re-fetched."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    _seed_market_pull(conn, store, clock, "legitimate_empty")
+
+    refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
+    assert [unit.request_id for unit in refresh_plan.fetch_units] == [_cached_request_id()]
+    assert refresh_plan.cached == ()
+    assert refresh_plan.provider_calls == 6
+
+
+def test_cached_outcome_selects_the_later_complete_receipt(tmp_path):
+    """A date first pulled ``legitimate_empty`` and LATER pulled complete
+    must reuse the cache: the lookup selects the newer complete receipt
+    instead of the oldest (empty) row, so the unit is not re-fetched."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    _seed_market_pull(conn, store, clock, "legitimate_empty")
+    clock.advance(3600)
+    _seed_market_pull(conn, store, clock, "complete", payload=b'{"AAPL": 1}')
+
+    refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
+    assert refresh_plan.fetch_units == ()
+    assert [outcome.kind for outcome in refresh_plan.cached] == ["complete"]
+    assert refresh_plan.cached[0].cache_hit is True
+    assert refresh_plan.provider_calls == 0
+
+
+def test_cached_outcome_still_reuses_a_complete_pull(tmp_path):
+    """Negative control: a genuinely complete cached pull remains a pure
+    cache hit -- the fix does not disable legitimate cache reuse."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    _seed_market_pull(conn, store, clock, "complete")
+
+    refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
+    assert refresh_plan.fetch_units == ()
+    assert [outcome.kind for outcome in refresh_plan.cached] == ["complete"]
+    assert refresh_plan.cached[0].cache_hit is True
+    assert refresh_plan.cached[0].receipt_ref
+    assert refresh_plan.provider_calls == 0
