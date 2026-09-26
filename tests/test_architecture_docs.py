@@ -17,7 +17,7 @@ ROOT_ARCHITECTURE = ROOT / "ARCHITECTURE.md"
 # Matches a markdown link's target: [text](target)
 _LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 
-_EXCLUDED_PARTS = {".git", "node_modules"}
+_EXCLUDED_PARTS = {".git", "node_modules", ".claude"}
 
 
 def _excluded(path: Path) -> bool:
