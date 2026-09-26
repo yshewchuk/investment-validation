@@ -729,7 +729,7 @@ def test_gremlins_plan_narrows_the_matrix_on_pull_request_via_changed_files():
     # since an empty unquoted expansion contributes zero argv words).
     assert 'CHANGED_ARGS=""' in plan
     assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
-    assert 'git diff --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'git diff --no-renames --name-only "$BASE_SHA"...HEAD' in plan
     assert 'CHANGED_ARGS="--changed-files' in plan
     assert 'modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
 
@@ -853,7 +853,7 @@ def test_mutmut_plan_narrows_the_matrix_on_pull_request_via_changed_files():
     plan = plan_step["run"]
     assert 'CHANGED_ARGS=""' in plan
     assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
-    assert 'git diff --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'git diff --no-renames --name-only "$BASE_SHA"...HEAD' in plan
     assert 'CHANGED_ARGS="--changed-files' in plan
     assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
 
@@ -1328,6 +1328,10 @@ def test_shared_test_helpers_are_non_test_prefixed_direct_children():
     # a nested file is never "direct", regardless of its name
     nested = _SEL_TRACKED_TESTS + ["tests/sub/helper.py"]
     assert pilot.shared_test_helpers(nested) == ["tests/conftest.py", "tests/helpers.py"]
+    # a non-.py direct child (a fixture/data file) is just as shared
+    with_fixture = _SEL_TRACKED_TESTS + ["tests/fixture.json"]
+    assert pilot.shared_test_helpers(with_fixture) == \
+        ["tests/conftest.py", "tests/fixture.json", "tests/helpers.py"]
 
 
 def test_shared_inputs_covers_locks_config_and_test_helpers():
@@ -1336,9 +1340,12 @@ def test_shared_inputs_covers_locks_config_and_test_helpers():
         "tests/conftest.py", "tests/helpers.py"}
 
 
-def test_read_changed_files_strips_blanks_and_handles_missing(tmp_path):
+def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
     assert pilot.read_changed_files("") == []
-    assert pilot.read_changed_files(str(tmp_path / "nope.txt")) == []
+    with pytest.raises(SystemExit):  # missing: an operator/workflow bug, not "no changes"
+        pilot.read_changed_files(str(tmp_path / "nope.txt"))
+    with pytest.raises(SystemExit):  # a directory is not a valid --changed-files path either
+        pilot.read_changed_files(str(tmp_path))
     f = tmp_path / "changed.txt"
     f.write_text("engine/a.py\n\n  \ntests/test_b.py\n")
     assert pilot.read_changed_files(str(f)) == ["engine/a.py", "tests/test_b.py"]
@@ -1390,12 +1397,30 @@ def test_changed_modules_a_deleted_shared_helper_still_selects_every_name():
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/conftest.py"], **kw) == ["alpha", "beta"]
 
 
+def test_changed_modules_a_non_python_shared_fixture_selects_every_name():
+    # tests/fixture.json is a non-.py direct child of tests/: both
+    # shared_test_helpers (via shared_inputs) and is_test_helper_path must
+    # catch it, whether it is still tracked (added) or already gone
+    # (deleted) from tracked_tests.
+    cfg2 = _sel_cfg()
+    tracked_tests_with_fixture = _SEL_TRACKED_TESTS + ["tests/fixture.json"]
+    kw = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=tracked_tests_with_fixture)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/fixture.json"], **kw) == \
+        ["alpha", "beta"]
+    # deleted: absent from tracked_tests, but is_test_helper_path still matches the bare path
+    kw_deleted = dict(tracked_engine=_SEL_TRACKED_ENGINE, tracked_tests=_SEL_TRACKED_TESTS)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/fixture.json"], **kw_deleted) == \
+        ["alpha", "beta"]
+
+
 def test_is_test_helper_path_matches_direct_non_test_files_only():
     assert pilot.is_test_helper_path("tests/conftest.py") is True
     assert pilot.is_test_helper_path("tests/helpers.py") is True
+    assert pilot.is_test_helper_path("tests/fixture.json") is True  # non-.py, still shared
     assert pilot.is_test_helper_path("tests/test_a.py") is False
     assert pilot.is_test_helper_path("tests/sub/conftest.py") is False
     assert pilot.is_test_helper_path("engine/a.py") is False
+    assert pilot.is_test_helper_path("tests/") is False  # no filename at all
 
 
 def test_changed_modules_respects_the_incoming_names_subset():
@@ -1452,3 +1477,27 @@ def test_markdown_reports_cache_reuse_counts():
     assert s["retested_this_run"] == 1
     md = mr.markdown(s, rows, None)
     assert "**cache reuse**: 2 of 3 mutant(s) reused from cache, 1 re-tested this run." in md
+
+
+def test_markdown_excludes_skipped_mutants_from_cache_reuse_denominator():
+    # a skipped mutant (never run, this run or any prior one) has no cached
+    # verdict to "reuse" -- it must not inflate the reused count.
+    rows = [_row("m", "a.py", "f", "killed", retested=True, name="n1"),
+            _row("m", "a.py", "f", "survived", retested=False, name="n2"),
+            _row("m", "a.py", "g", "skipped", retested=False, name="n3")]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert (s["total"], s["checked"], s["retested_this_run"]) == (3, 2, 1)
+    md = mr.markdown(s, rows, None)
+    assert "**cache reuse**: 1 of 2 mutant(s) reused from cache, 1 re-tested this run." in md
+
+
+def test_summarize_retested_this_run_is_none_when_no_snapshot_row_has_it():
+    # no before-snapshot at all (e.g. the very first run): every row's own
+    # retested_this_run is None (build_rows sets this when before is None).
+    # summarize() must report None too, not coerce it to a false "0".
+    rows = [_row("m", "a.py", "f", "killed", retested=None),
+            _row("m", "a.py", "f", "survived", retested=None)]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert s["retested_this_run"] is None
+    md = mr.markdown(s, rows, None)
+    assert "cache reuse" not in md  # unknown provenance: say nothing, not a false count

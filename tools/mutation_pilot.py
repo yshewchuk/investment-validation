@@ -166,28 +166,32 @@ SHARED_INPUT_FILES = ("requirements.txt", "requirements-dev.txt", "tools/mutatio
 
 
 def shared_test_helpers(tracked_tests: list[str]) -> list[str]:
-    """Direct children of ``tests/`` that are not a ``test_*.py`` file -- e.g.
-    ``tests/conftest.py``, ``tests/helpers.py``. Same rule ``tests_digest``
-    already applies per-module, generalised repo-wide and independent of any
-    one module's own test selection. ``tracked_tests`` is a list of
-    ``tests/...``-relative paths (as ``_tracked(["tests"])`` returns)."""
+    """Direct children of ``tests/`` that are not a ``test_*`` file -- e.g.
+    ``tests/conftest.py``, ``tests/helpers.py``, ``tests/fixture.json``. Not
+    restricted to ``.py``: a fixture or data file a module's tests load is
+    exactly as shared as a helper module, and the module-selection rule below
+    must never miss it. Same rule ``tests_digest`` already applies
+    per-module, generalised repo-wide and independent of any one module's
+    own test selection. ``tracked_tests`` is a list of ``tests/...``-relative
+    paths (as ``_tracked(["tests"])`` returns)."""
     return sorted(p for p in tracked_tests
-                  if p.count("/") == 1 and p.endswith(".py")
-                  and not p.rsplit("/", 1)[1].startswith("test_"))
+                  if p.count("/") == 1 and not p.rsplit("/", 1)[1].startswith("test_"))
 
 
 def is_test_helper_path(path: str) -> bool:
-    """True for a direct ``tests/<name>.py`` path that is not itself a
-    ``test_*.py`` file -- the same shape ``shared_test_helpers`` matches
-    against the tracked-file list, but checked against a single bare path
-    string so a DELETED helper (already absent from
-    ``_tracked(["tests"])``) still matches. ``git diff --name-only`` reports
-    a deleted path by name; this function must not consult the filesystem or
-    git in any way, only the string itself."""
+    """True for a direct ``tests/<name>`` path that is not itself a
+    ``test_*`` file -- the same shape ``shared_test_helpers`` matches against
+    the tracked-file list, but checked against a single bare path string so
+    a DELETED or RENAMED-AWAY helper (already absent from
+    ``_tracked(["tests"])``) still matches. Not restricted to ``.py``: a
+    non-Python direct child (e.g. ``tests/fixture.json``) is exactly as
+    shared as a helper module and must match too. ``git diff --name-only``
+    reports a deleted or renamed-from path by name; this function must not
+    consult the filesystem or git in any way, only the string itself."""
     if not path.startswith("tests/"):
         return False
     rest = path[len("tests/"):]
-    return "/" not in rest and rest.endswith(".py") and not rest.startswith("test_")
+    return bool(rest) and "/" not in rest and not rest.startswith("test_")
 
 
 def shared_inputs(tracked_tests: list[str]) -> set[str]:
@@ -199,13 +203,20 @@ def shared_inputs(tracked_tests: list[str]) -> set[str]:
 
 def read_changed_files(path: str) -> list[str]:
     """Newline-delimited changed-file list (``git diff --name-only`` output),
-    blank lines dropped. An empty/blank ``path`` or a path that does not exist
-    returns ``[]`` -- the caller decides what an empty change list means."""
+    blank lines dropped. An empty/blank ``path`` returns ``[]`` -- "no
+    --changed-files given" is a deliberate no-op the caller decides the
+    meaning of. A NON-BLANK path that is not an existing file (missing, or a
+    directory) is refused with a clear error, never silently ``[]``: that
+    shape is an operator/workflow bug (a bad --changed-files argument), and
+    ``changed_modules([])`` treats an empty list as "select nothing", so
+    swallowing the bad path would silently produce an empty CI matrix and
+    skip every mutation job without ever failing."""
     if not path or not path.strip():
         return []
     p = Path(path)
     if not p.is_file():
-        return []
+        sys.exit(f"--changed-files {path!r} is not a file (missing, or a "
+                 f"directory); refusing rather than silently selecting no modules")
     return [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
 
 

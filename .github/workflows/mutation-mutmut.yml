@@ -117,7 +117,7 @@ jobs:
           CHANGED_ARGS=""
           if [ "$EVENT" = "pull_request" ]; then
             CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
-            git diff --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
+            git diff --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
             CHANGED_ARGS="--changed-files $CHANGED_FILE"
           fi
           # Assign in its own command, never inside the echo: the exit status of

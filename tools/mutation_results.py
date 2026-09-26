@@ -345,9 +345,15 @@ def _counts(rows: list[dict]) -> Counter:
 
 def summarize(rows: list[dict], module: str, info: dict, files: list[str], **extra) -> dict:
     by_file = {rel: [r for r in rows if r["file"] == rel] for rel in files}
+    # None means "unknown provenance" (no before-snapshot for this row, e.g.
+    # the very first run). A group with even one such row must report None
+    # too, not silently coerce it to 0 -- 0 claims "definitely 0 re-tested",
+    # a different (and false) fact than "we don't know".
+    retested = (None if any(r["retested_this_run"] is None for r in rows)
+                else sum(1 for r in rows if r["retested_this_run"]))
     return {"schema_version": SCHEMA_VERSION, **info, "module": module, **extra,
             **score_block(_counts(rows)),
-            "retested_this_run": sum(1 for r in rows if r["retested_this_run"]),
+            "retested_this_run": retested,
             "files": {rel: score_block(_counts(rs)) for rel, rs in by_file.items()}}
 
 
@@ -416,9 +422,12 @@ def markdown(summary: dict, rows: list[dict], changed: set[tuple[str, str]] | No
         out.append(f"| {label} | {b['total']} | {b['killed']} | {b['survived']} | {b['no_tests']} "
                    f"| {b['timeout']} | {b['suspicious']} | {b['skipped']} | {_pct(b['score'])} |")
     out.append("")
-    if summary.get("retested_this_run") is not None and summary.get("total") is not None:
-        reused = summary["total"] - summary["retested_this_run"]
-        out.append(f"**cache reuse**: {reused} of {summary['total']} mutant(s) reused "
+    if summary.get("retested_this_run") is not None and summary.get("checked") is not None:
+        # checked (total minus skipped), not total: a skipped mutant was
+        # never run, this run or any prior one, so it has no cached verdict
+        # to "reuse" -- counting it as reused would overstate cache reuse.
+        reused = summary["checked"] - summary["retested_this_run"]
+        out.append(f"**cache reuse**: {reused} of {summary['checked']} mutant(s) reused "
                     f"from cache, {summary['retested_this_run']} re-tested this run.")
         out.append("")
     if summary.get("run_exit_code") not in (None, 0):
