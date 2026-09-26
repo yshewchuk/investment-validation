@@ -22,6 +22,18 @@ class TestSpecHash:
         spec = {"id": "EXP-101", "primary_spec": {"back_dte": 20}}
         assert lib.spec_hash(spec) == engine_hash(spec)
 
+    def test_the_v2_ops_copy_matches_the_legacy_definition(self):
+        """engine/v2/ops cannot import the legacy engine.evaluate module, so
+        it carries a pure copy of the same algorithm; the planned row and the
+        ran row only join if the two agree exactly."""
+        from engine.evaluate import spec_hash as engine_hash
+        from engine.v2.ops.experiments import legacy_spec_hash
+
+        spec = {"id": "EXP-101", "primary_spec": {"back_dte": 20},
+                "preregistered_at": "2026-01-01T00:00:00+00:00",
+                "grid_cell": True, "walk_forward": {"unit": "year"}}
+        assert legacy_spec_hash(spec) == engine_hash(spec) == lib.spec_hash(spec)
+
     def test_slugify(self):
         assert lib.slugify("CAL-P exact-spec backtest!") == "cal_p_exact_spec_backtest"
         assert lib.slugify("???") == "experiment"

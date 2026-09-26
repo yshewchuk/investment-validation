@@ -281,10 +281,10 @@ old = ["cli-family:experiments/*/run.py", "writer:engine/evaluate.py::evaluate",
 new = ["cli:ops plan", "py:engine/v2/ops/experiments.py::run_experiment"]
 producer = "supervised experiment job: legacy runner via the declared command adapter (EXP-182 only)"
 identity = "spec_hash + input manifest + runner manifest"
-tests = ["tests/test_experiments.py", "tests/test_v2_ops_runner_onboarding.py", "tests/test_evaluate.py"]
+tests = ["tests/test_experiments.py", "tests/test_v2_ops_runner_onboarding.py", "tests/test_evaluate.py", "tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
-notes = "Only EXP-182 is onboarded; other runners run by filesystem path outside the supervisor."
+notes = "EXP-182 is the only onboarded legacy runner; a primary-mode activation now requires a PLANNED ledger row (engine/v2/ops/experiments.py::require_preregistration) and appends its ledger row through the experiment coordinator effect, not a worker-subprocess write. Other runners still run by filesystem path outside the supervisor. Reached at runtime, not just by symbol resolution: tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report calls run_experiment with mode=primary through invoke_evaluate. p6/slice11 will rename these rows' identity from filesystem `new` entrypoints to `job:experiment` (both rows share the one job kind -- there is no separate research_report job kind; a report is always evidence attached to an experiment job's receipt)."
 
 [[row]]
 id = "research-reports"
@@ -294,9 +294,10 @@ old = ["writer:engine/report.py::Report.write", "writer:engine/report.py::fig_eq
 new = ["py:engine/v2/ops/experiments.py::run_experiment"]
 producer = "legacy engine.report inside the runner; the v2 job records the report as evidence"
 identity = "report bytes hash in the experiment receipt"
-tests = ["tests/test_report.py", "tests/test_experiments.py"]
+tests = ["tests/test_report.py", "tests/test_experiments.py", "tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report", "tests/test_v2_ops_experiment_reports.py::test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
+notes = "Reached at runtime by tests/test_v2_ops_experiment_reports.py::test_primary_run_produces_a_real_engine_report: a primary-mode run whose REPORT.md is produced by engine.evaluate -> engine.report through the declared invoke_evaluate adapter, not the synthetic fixture. The registered EXP-182 wrapper delegates to experiments/EXP-181_d_1_gated_execution_parity/run.py, which calls evaluate(..., write_report=True), so the producer statement holds for the legacy path too. Also reached through the production wiring by tests/test_v2_ops_experiment_reports.py::test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger: ops plan -> worker.dispatch -> run_legacy_script -> REPORT.md verified into the experiment receipt -> the coordinator's ran row in the checkout ledger, with the planned and ran rows joining on the legacy spec_hash. p6/slice11 will rename this row's identity from filesystem `new` entrypoints to `job:experiment` (both research rows share the one job kind -- there is no separate research_report job kind; a report is always evidence attached to an experiment job's receipt)."
 
 [[row]]
 id = "research-replay"

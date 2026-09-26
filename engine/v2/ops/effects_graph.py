@@ -806,8 +806,8 @@ def _named_ref(refs, name):
     raise fail("VALIDATION_FAILED", "required effect artifact is missing")
 
 
-def experiment_effect(conn, store, claim, refs, *, clock):
-    """P6 slice 10: durably record one smoke experiment attempt after its
+def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_root=None):
+    """P6 slice 10/11: durably record one experiment attempt after its
     worker receipt validates. Mirrors backup_effect's shape (a coordinator
     effect with no watermark/outbox of its own — an experiment run has no
     generation/session scope to key on).
@@ -815,10 +815,28 @@ def experiment_effect(conn, store, claim, refs, *, clock):
     ``spec.json`` is re-read from the attempt's OWN durably recorded binding
     (``attempt_input_bindings``, written once at launch by
     ``executor._materialize_inputs``): the exact bytes the worker ran, never
-    a re-resolution of the job's live parameters and never a second
-    ``resolve_and_record`` call (those rows are immutable and already exist).
+    a re-resolution of the job's live parameters.
+
+    Returns the fenced commit closure (the ``legacy_decisions`` coordinator
+    pattern): registration and the durable ledger append run inside
+    ``commit_attempt``'s transaction, i.e. only after ``verify_fence`` has
+    accepted the attempt — a lost fence never reaches the append at all. The
+    append is additionally idempotent by the run's own identity, so a retry
+    after a crash between register and append appends exactly one row; it is
+    never gated on ``register_hypothesis``'s ``created`` flag.
+
+    ``code_source``/``store_root`` name the checkout whose ``experiments/``
+    tree owns the ledger (``Service.store_root`` defaults to
+    ``code_source``), resolved by the same
+    :func:`experiments.experiments_ledger_path` the plan-time check uses.
+    The operations store root is never used for either the ledger or the
+    registered runner's ``spec.yaml``.
     """
-    from engine.v2.ops.experiments import experiment_spec_from_document, register_hypothesis
+    from engine.v2.ops.experiments import (
+        experiment_spec_from_document,
+        register_hypothesis_in_transaction,
+        require_preregistration,
+    )
 
     receipt = json.loads(store.read_verified(_named_ref(refs, "experiment_receipt")))
     binding = recorded_bindings(conn, claim.attempt_id).get("spec.json")
@@ -826,6 +844,103 @@ def experiment_effect(conn, store, claim, refs, *, clock):
         raise fail("VALIDATION_FAILED", "experiment specification is not bound")
     document = json.loads(store.read_verified(artifact(conn, store, binding.artifact_id)))
     spec = experiment_spec_from_document(document)
-    register_hypothesis(conn, spec, receipt["input_hash"], mode="smoke",
-                        run_id=claim.attempt_id)
-    return None, ()
+    mode = "smoke" if claim.spec.parameters.get("no_ledger", True) else "primary"
+    checkout_root = Path(store_root) if store_root is not None else Path(code_source)
+
+    def _commit(txn):
+        if mode == "primary":
+            recorded_root = claim.spec.parameters.get("preregistration_root")
+            if recorded_root is None:
+                raise fail("INVALID_REQUEST",
+                           "primary experiment has no preregistration root")
+            if Path(recorded_root).resolve() != checkout_root.resolve():
+                raise fail("INVALID_REQUEST",
+                           "primary experiment checkout differs from its "
+                           "preregistration root")
+            require_preregistration(checkout_root, spec)
+        run_id, _created = register_hypothesis_in_transaction(
+            txn, spec, receipt["input_hash"], mode=mode, run_id=claim.attempt_id)
+        if mode == "primary":
+            _append_ledger_row(txn, checkout_root, spec, receipt, run_id=run_id)
+
+    return _commit, ()
+
+
+def _ran_row_exists(ledger, experiment_id):
+    """True iff ``ledger`` already carries this experiment's "ran" row.
+
+    The fixed ledger format has no ``run_id`` column, and the durable run
+    identity lives in ``experiment_runs.run_id`` (the attempt identity used
+    by ``register_hypothesis``); the row key here is therefore
+    ``(experiment_id, stage="ran")`` -- one primary run per experiment, so
+    it is the same identity the retry sees.
+    """
+    if not ledger.is_file():
+        return False
+    import csv
+    with open(ledger, newline="") as fh:
+        return any(row.get("id") == experiment_id and row.get("stage") == "ran"
+                   for row in csv.DictReader(fh))
+
+
+def _ledger_metrics(receipt):
+    """``(oos_mean_mid, sharpe_trade)`` from the runner's own result."""
+    runner_result = (receipt.get("evidence") or {}).get("runner_result") or {}
+    if not isinstance(runner_result, dict):
+        runner_result = {}
+    headline = runner_result.get("headline")
+    headline = headline if isinstance(headline, dict) else runner_result
+    return (headline.get("mean", headline.get("oos_mean_mid", "")),
+            headline.get("sharpe_trade", ""))
+
+
+def _mark_metrics_source(conn, run_id, source):
+    """Record why a ran row's headline columns are empty on the durable run."""
+    row = conn.execute("SELECT evidence_json FROM experiment_runs WHERE run_id=?",
+                       (run_id,)).fetchone()
+    if row is None:
+        return
+    evidence = json.loads(row[0])
+    evidence["metrics_source"] = source
+    conn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                 (json.dumps(evidence, sort_keys=True), run_id))
+
+
+def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
+    """Append the "ran" row for one primary experiment to the checkout's
+    ``experiments/LEDGER.csv`` (``experiments_ledger_path``), never to the
+    operations store root.
+
+    ``experiments.lib`` is a plain data-format helper package outside
+    ``engine.*`` (``checks/import_layers.py`` records no edge and
+    ``checks/legacy_adapters.json`` stays at 75/75); its ``ledger_append``
+    carries the append-only prefix check this writer would otherwise have to
+    duplicate. ``spec_hash`` is the LEGACY identity of the registered
+    runner's ``spec.yaml`` computed by the same
+    :func:`experiments.legacy_spec_hash` the PLANNED row used, so planned
+    and ran rows join. The runner's own results JSON supplies the headline
+    metrics; when it did not write them the columns stay empty and the fact
+    is recorded on the durable run's evidence as
+    ``metrics_source: unavailable`` (the legacy ledger format stays at its
+    fixed 7 columns).
+    """
+    from datetime import datetime, timezone
+
+    from engine.v2.ops.experiments import experiments_ledger_path, registered_spec_hash
+    from experiments.lib import LEDGER_COLUMNS, ledger_append
+
+    ledger = experiments_ledger_path(checkout_root)
+    mean, sharpe = _ledger_metrics(receipt)
+    available = mean not in ("", None) or sharpe not in ("", None)
+    if _ran_row_exists(ledger, spec.experiment_id):
+        if not available:
+            _mark_metrics_source(conn, run_id, "unavailable")
+        return
+    row = {"id": spec.experiment_id,
+           "spec_hash": registered_spec_hash(checkout_root, spec) or "",
+           "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+           "stage": "ran", "oos_mean_mid": mean, "sharpe_trade": sharpe,
+           "promoted": "False"}
+    ledger_append([{name: row.get(name, "") for name in LEDGER_COLUMNS}], path=ledger)
+    if not available:
+        _mark_metrics_source(conn, run_id, "unavailable")

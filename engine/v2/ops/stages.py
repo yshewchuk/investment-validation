@@ -40,6 +40,7 @@ class ExperimentParameters:
     input_bindings: dict[str, str] | None = None
     runner: str = ""
     no_ledger: bool = True
+    preregistration_root: str | None = None
 
 
 @dataclass(frozen=True)

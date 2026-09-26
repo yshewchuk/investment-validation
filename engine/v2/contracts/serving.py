@@ -34,6 +34,8 @@ from typing import Any, Literal
 from engine.v2.contracts.data import EventRef, ObjectRef
 
 __all__ = [
+    "DEFAULT_SHADOW_SERVING_SCORER",
+    "SHADOW_SERVING_SCORERS",
     "EVENT_PAGE_ITEM_V1",
     "EVENT_PAGE_V1",
     "EVENT_SCORE_SUMMARY_V1",
@@ -305,3 +307,15 @@ class ProjectionFindings:
     findings: tuple[Finding, ...] = ()
     ok: bool
     schema_version: str = PROJECTION_FINDINGS_V1
+
+
+#: The only values a plan's ``shadow_serving_scorer`` may carry (spec_ns_b G5).
+#: The ONE source of truth for both halves of the shadow-serving seam:
+#: ``engine.v2.ops.native_shadow_render`` and
+#: ``engine.v2.serving.native_shadow_render`` are layer-7 peers and cannot
+#: import each other, so both read the allowed values and the default here.
+SHADOW_SERVING_SCORERS = ("native", "legacy")
+
+#: The shadow board's default scorer when a plan carries no explicit value.
+DEFAULT_SHADOW_SERVING_SCORER = "native"
+
