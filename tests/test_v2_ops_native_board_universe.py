@@ -155,6 +155,23 @@ class TestEventDateColumnConversion:
             board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
         assert excinfo.value.code == "INVALID_REQUEST"
 
+    def test_null_event_date_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+            {"ticker": "BBB", "event_date": None, "session": "AMC"},
+        ])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_timezone_aware_event_date_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "2026-02-01T00:00:00+00:00", "session": "BMO"},
+        ])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
 
 class TestDeterministicOrder:
     def test_output_order_is_sorted_events_then_strategies_then_dyn_sv_last(self):

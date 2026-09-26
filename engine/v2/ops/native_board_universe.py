@@ -78,8 +78,11 @@ def board_requests(
     `DYN-SV` request last.
 
     Raises `OpsError` (code `INVALID_REQUEST`) if `events_table` is missing
-    any of `ticker`/`event_date`/`session` — a whole-call refusal raised
-    before any row is read, never a partial or silently empty result.
+    any of `ticker`/`event_date`/`session`, if `event_date` cannot be parsed
+    as timestamps or contains a null/unparseable value, or if `event_date`
+    is timezone-aware (this module only supports timezone-naive event
+    dates, matching `as_of`) — a whole-call refusal raised before any row
+    is read, never a partial or silently empty/smaller result.
     """
     missing = [c for c in _REQUIRED_COLUMNS if c not in events_table.columns]
     if missing:
@@ -98,6 +101,19 @@ def board_requests(
             "INVALID_REQUEST",
             f"events_table event_date column could not be parsed as timestamps: {exc}",
         )) from exc
+
+    if event_dates.isna().any():
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            "events_table event_date column contains null or unparseable "
+            "timestamps",
+        ))
+    if getattr(event_dates.dt, "tz", None) is not None:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            "events_table event_date column is timezone-aware; "
+            "board_requests only supports timezone-naive event dates",
+        ))
 
     events = events_table.assign(event_date=event_dates)
     events = events[
