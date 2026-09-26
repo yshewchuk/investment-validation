@@ -87,10 +87,15 @@ _CASES = {
         resource_class="materialize",
         checkpoint_contract="legacy_materialization_manifest.v1.0",
         max_attempts=2, backoff=(5, 30), extra_field=("scratch_estimate_bytes", 5)),
+    "decisions_supersede": dict(
+        resource_class="io_fetch",
+        checkpoint_contract="decisions_supersede_receipt.v1.0",
+        max_attempts=2, backoff=(5, 30), extra_field=("reason", "x")),
 }
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
-                      "legacy_rebuild_candidate", "legacy_materialize")
+                      "legacy_rebuild_candidate", "legacy_materialize",
+                      "decisions_supersede")
 
 
 def _extra_params(name):

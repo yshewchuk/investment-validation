@@ -175,13 +175,12 @@ id = "decisions-supersede"
 area = "decisions"
 capability = "Reasoned superseding entry for an immutable bad decision"
 old = ["writer:engine/ledger.py::supersede"]
-new = ["py:engine/v2/ledger/decisions.py::insert"]
-producer = "decisions.insert with supersedes + supersede_reason"
+new = ["cli:ops decisions", "cli:ops decisions supersede", "job:decisions_supersede", "py:engine/v2/ops/decision_commit.py::commit_supersede"]
+producer = "ops decisions supersede CLI -> decisions_supersede job -> decision_commit.commit_supersede"
 identity = "decision_id chain"
 tests = ["tests/test_v2_ops_authority.py", "tests/test_ledger.py"]
 disposition = "native"
 owner = "P6-3"
-notes = "Both sides are Python callables with no operator command; parity of access."
 
 [[row]]
 id = "decisions-settlement"
@@ -561,7 +560,7 @@ id = "operations-quotas"
 area = "operations"
 capability = "Provider quota state and reserve"
 old = ["py:engine/dashboard/render.py::quota_state"]
-new = ["py:engine/v2/ops/scheduler.py::_reserve_provider", "route:v2-ops GET /release/*"]
+new = ["py:engine/v2/ops/scheduler.py::_reserve_provider", "route:v2-ops GET /release/*", "cli:ops provider-account"]
 producer = "legacy quota_state adapter inside legacy_render; v2 provider_budget enforces but does not publish"
 identity = "meta.json in the release bundle"
 tests = ["tests/test_v2_ops_provider_admission.py", "tests/test_ledger.py"]
