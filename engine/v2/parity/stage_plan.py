@@ -92,6 +92,8 @@ class StagePlan:
                 if name not in seen:
                     raise ValueError(
                         f"stage {stage.stage_id!r} depends_on unknown/self/forward stage {name!r}")
+            if stage.stage_id in seen or stage.stage_id == UNASSIGNED:
+                raise ValueError(f"duplicate or reserved stage id {stage.stage_id!r}")
             seen.add(stage.stage_id)
 
     def stage_ids(self) -> tuple[str, ...]:
