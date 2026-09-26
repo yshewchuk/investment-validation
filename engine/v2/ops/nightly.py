@@ -717,19 +717,15 @@ def _build_native_forward_calendar_plan(plan, context_tickers, *, catalog_path, 
     else:
         cached_payloads = cached_unit_payloads(conn, store, nasdaq_plan)
         claims: dict[tuple[str, str], dict] = {}
+        wanted = set(tickers)
         for unit in nasdaq_units:
-            day = unit.expected_keys[0]
             raw = cached_payloads.get(unit.request_id)
             if raw is None:
                 continue
-            for row in forward_calendar_store._nasdaq_rows_from_payload(raw):
-                ticker = str(row.get("symbol") or "").strip()
-                if not ticker or ticker not in set(tickers):
-                    continue
-                claims.setdefault((ticker, day), {})["nasdaq"] = \
-                    forward_calendar_store.SESSION_BY_TIME.get(row.get("time"))
-        pending = sorted({ticker for (ticker, _day), sources in claims.items()
-                          if not sources.get("nasdaq")})
+            forward_calendar_store.nasdaq_claims_from_rows(
+                claims, unit.expected_keys[0],
+                forward_calendar_store.nasdaq_rows_from_payload(raw), wanted)
+        pending = forward_calendar_store.pending_tickers(claims)
         yfinance_units = forward_calendar_store.ticker_units(pending, as_of=as_of)
     cached = {**nasdaq_cached, **cached_unit_outcomes(
         conn, yfinance_units, source="yfinance", endpoint="earnings")}

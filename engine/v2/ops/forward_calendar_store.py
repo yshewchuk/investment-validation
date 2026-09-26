@@ -257,7 +257,7 @@ def _parse_earnings(raw: bytes):
         return None
 
 
-def _nasdaq_rows_from_payload(raw: bytes) -> list[dict]:
+def nasdaq_rows_from_payload(raw: bytes) -> list[dict]:
     """The provider's own ``data.rows`` parser, over a cached receipt's bytes."""
     from engine.v2.ops.providers.nasdaq_calendar import _rows_field
 
@@ -266,6 +266,32 @@ def _nasdaq_rows_from_payload(raw: bytes) -> list[dict]:
     except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
         return []
     return _rows_field(document) or []
+
+
+def nasdaq_claims_from_rows(claims: dict, day: str, rows, wanted) -> None:
+    """Fold one Nasdaq date's rows into ``claims`` in place.
+
+    ``claims`` maps ``(ticker, day) -> {"nasdaq": session_or_None}``. Shared by
+    ``_fetch_nasdaq`` (fresh-or-cached fetch path) and the nightly planner's
+    zero-fetch path, so the two can never drift on the symbol strip, the
+    wanted-ticker filter, or the ``SESSION_BY_TIME`` lookup (spec R6: the
+    reserved ``provider_calls`` must cover every yfinance fetch the store
+    makes, so both call sites must agree on which tickers are "pending").
+    """
+    for row in rows:
+        ticker = str(row.get("symbol") or "").strip()
+        if not ticker or (wanted and ticker not in wanted):
+            continue
+        claims.setdefault((ticker, day), {})["nasdaq"] = SESSION_BY_TIME.get(row.get("time"))
+
+
+def pending_tickers(claims: dict) -> list[str]:
+    """Tickers whose Nasdaq claim never resolved a session.
+
+    These still need a yfinance confirmation pass.
+    """
+    return sorted({ticker for (ticker, _day), sources in claims.items()
+                  if not sources.get("nasdaq")})
 
 
 def _nasdaq_unit(conn, store, fetcher, unit, cached, *, received_at: str):
@@ -281,7 +307,7 @@ def _nasdaq_unit(conn, store, fetcher, unit, cached, *, received_at: str):
         raw, kind, _meta, rows = _edge_result(fetcher, _unit_request(unit))
     else:
         raw, kind = cached[unit.request_id], "complete"
-        rows = _nasdaq_rows_from_payload(raw)
+        rows = nasdaq_rows_from_payload(raw)
     if kind in ("complete", "legitimate_empty"):
         if not raw or not _parseable_json(raw):
             kind = "refused"  # unparseable bytes are never cached as complete
@@ -309,11 +335,7 @@ def _fetch_nasdaq(conn, store, fetcher, plan, wanted: set[str], *, received_at: 
         kinds.append(kind)
         if kind != "complete":
             continue
-        for row in rows:
-            ticker = str(row.get("symbol") or "").strip()
-            if not ticker or (wanted and ticker not in wanted):
-                continue
-            claims.setdefault((ticker, day), {})["nasdaq"] = SESSION_BY_TIME.get(row.get("time"))
+        nasdaq_claims_from_rows(claims, day, rows, wanted)
     return claims, kinds
 
 
@@ -573,8 +595,7 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
             cached_nasdaq=_cached_nasdaq(conn, nasdaq_units))
         claims, nasdaq_kinds = _fetch_nasdaq(conn, store, nasdaq_fetcher, nasdaq_plan, wanted,
                                              received_at=received_at)
-        pending = sorted({ticker for (ticker, _day), sources in claims.items()
-                          if not sources.get("nasdaq")})
+        pending = pending_tickers(claims)
         yfinance_units = ticker_units(pending, as_of=as_of)
         _, yfinance_plan = plan_forward_calendar(
             parent.snapshot, (), pending, as_of=as_of,
