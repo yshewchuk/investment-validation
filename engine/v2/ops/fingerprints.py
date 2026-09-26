@@ -84,6 +84,23 @@ MODEL_PICKLE_MODULES = (
 #: :func:`_assert_code_asset_path_safe`, not just convention.
 CODE_ASSET_FILES: tuple[str, ...] = (
     "engine/v2/data/legacy_annotations.json",
+    # engine/models/training/chooser.py dynamically loads this file via
+    # importlib.util.spec_from_file_location (not a static import, so the
+    # AST closure above never sees it). It in turn loads
+    # experiments/EXP-161_.../run.py, which loads
+    # experiments/EXP-134_.../margin.py; and it separately loads
+    # experiments/EXP-163_.../margin163.py, which ALSO loads the same
+    # experiments/EXP-134_.../margin.py. All four are declared here so a
+    # worker's private code snapshot carries the DYN-SV chooser's real
+    # training pipeline, not just engine/. Real failure this fixes: a
+    # worker's model-evidence rebuild raised FileNotFoundError for the
+    # first of these four, leaking the snapshot's absolute /root/ path into
+    # a cached evidence reason string that then failed the dashboard's
+    # publish-time secret scan (2026-09-25).
+    "experiments/EXP-169_menu7prime_confirmation/run.py",
+    "experiments/EXP-161_dynamic_short_vol_neural_structure_picker/run.py",
+    "experiments/EXP-163_two_headed_level_and_deviation_dyn_sv/margin163.py",
+    "experiments/EXP-134_priced_right_funded_and_held_structure_s/margin.py",
 )
 
 CODE_ASSET_DIRS: tuple[str, ...] = (

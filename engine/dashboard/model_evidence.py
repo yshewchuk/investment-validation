@@ -30,6 +30,7 @@ from __future__ import annotations
 import gc
 import json
 import multiprocessing
+import re
 import time
 from typing import Any
 
@@ -37,6 +38,51 @@ import numpy as np
 import pandas as pd
 
 from engine import paths
+
+#: Mirrors ``engine.dashboard.publish.SECRET_PATTERNS``' literal ``/root/``
+#: check: any exception text embedded in a reason string must never carry an
+#: absolute local filesystem path, so a champion evidence block that fails
+#: to rebuild (e.g. a FileNotFoundError inside a worker's private code
+#: snapshot under /root/phase2-shadow-ops/code/<hash>/...) cannot leak one
+#: into the published dashboard bundle. Defense in depth: the real fix is
+#: giving the worker snapshot the files it needs (see
+#: engine/v2/ops/fingerprints.py CODE_ASSET_FILES), but a reason string is
+#: built from arbitrary exception text and must be scrubbed regardless of
+#: why the rebuild failed.
+#: Known absolute-path roots on this box worth redacting beyond /root/ (e.g.
+#: a scratchpad or worktree path under /tmp). Matched per-token (see
+#: _sanitize_reason) so a URL is never touched -- the lookbehind trick alone
+#: is not enough: it only protects the "://" position itself, and a URL's
+#: LATER path segments (http://example.com/tmp/file) still look exactly like
+#: a bare local path from where this pattern would match.
+_ABS_PATH_RE = re.compile(
+    r"/(?:root|tmp|home|var|etc|usr|opt|mnt|srv|workspace)(?:/\S*)?",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_reason(text: str) -> str:
+    """Strip any absolute local filesystem path from ``text`` before it can
+    reach a cached or rendered evidence reason string. A path under
+    ``paths.ROOT`` is relativized (still informative); anything else under a
+    known local path root (``/root/``, ``/tmp/``, etc.) is redacted
+    generically, since it is host-local and never meaningful to a reader of
+    the published dashboard -- except inside a URL, which is left untouched
+    entirely (a whitespace-delimited token containing ``://`` is never a
+    local filesystem path, and mangling one loses real information, e.g. an
+    upstream API endpoint that happens to share a path segment name like
+    ``/tmp/`` or ``/var/`` with a local root)."""
+    root = str(paths.ROOT)
+    text = text.replace(root, "<repo>")
+
+    def _redact_token(match: "re.Match") -> str:
+        token = match.group(0)
+        if "://" in token:
+            return token
+        return _ABS_PATH_RE.sub("<local path>", token)
+
+    return re.sub(r"\S+", _redact_token, text)
+
 
 __all__ = ["build_model_evidence", "evidence_path", "load_model_evidence", "DECILES"]
 
@@ -63,6 +109,16 @@ SAMPLE_SEED = 7
 #: shape, small enough that fifty inputs across four models stay a file a phone
 #: will load.
 SCATTER_POINTS = 300
+
+#: Bumped whenever a fix changes what build_model_evidence produces or how a
+#: cache hit is judged, in a way that must force every previously cached
+#: entry to rebuild even though the champion artifacts it was keyed on have
+#: not changed. Bumped 2026-09-26: a champion's cached "reason" string could
+#: carry an absolute local filesystem path (see _sanitize_reason above) from
+#: before that fix existed -- the fingerprint alone (artifact_sha256 per
+#: champion) cannot see that difference, since the underlying artifact never
+#: changed, only what this module does with a rebuild failure.
+EVIDENCE_SCHEMA_VERSION = 2
 
 
 def _release_free_pages() -> None:
@@ -457,10 +513,13 @@ def _champion_block_impl(entry, registry) -> dict[str, Any]:
             features=entry.features,
         )
     except Exception as exc:  # one model's dataset must not lose the others
+        reason = _sanitize_reason(
+            f"rebuilding the training set raised {type(exc).__name__}: {exc}"
+        )[:300]
         return {
             "id": entry.id, "role": entry.role, "strategy": entry.strategy,
             "target": entry.target, "available": False,
-            "reason": f"rebuilding the training set raised {type(exc).__name__}: {exc}"[:300],
+            "reason": reason,
         }
 
     block: dict[str, Any] = {
@@ -523,7 +582,7 @@ def _champion_block(entry, registry) -> dict[str, Any]:
     return {
         "id": entry.id, "role": entry.role, "strategy": entry.strategy,
         "target": entry.target, "available": False,
-        "reason": f"rebuilding the training set raised {result}",
+        "reason": _sanitize_reason(f"rebuilding the training set raised {result}"),
     }
 
 
@@ -552,7 +611,11 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
             champions.append(entry)
 
     fingerprint = {e.id: (e.artifact_sha256 or "") for e in champions}
-    if not force and cached.get("fingerprint") == fingerprint:
+    if (
+        not force
+        and cached.get("fingerprint") == fingerprint
+        and cached.get("schema_version") == EVIDENCE_SCHEMA_VERSION
+    ):
         return cached
 
     models: dict[str, Any] = {}
@@ -562,6 +625,7 @@ def build_model_evidence(*, registry=None, force: bool = False) -> dict:
     out = {
         "generated_at": pd.Timestamp.now("UTC").isoformat(),
         "fingerprint": fingerprint,
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
         "deciles": DECILES,
         "elapsed_s": round(time.time() - started, 1),
         "models": models,

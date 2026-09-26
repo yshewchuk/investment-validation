@@ -80,6 +80,11 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "SOURCE_EMPTY": ("source", False),
     "SOURCE_NOT_FINAL": ("source", True),
     "INPUT_CHANGED": ("dependency", False),
+    # P6 experiment pre-registration (review fix item 4): the registered
+    # runner's legacy spec.yaml no longer hashes to the PLANNED ledger row's
+    # spec_hash. A dependency refusal -- the registration it was bound to is
+    # gone -- and never retryable: only a new experiment fixes it.
+    "SPEC_CHANGED": ("dependency", False),
     "CHECKPOINT_INCOMPATIBLE": ("dependency", False),
     "DEPENDENCY_FAILED": ("dependency", False),
     "LEASE_LOST": ("dependency", True),

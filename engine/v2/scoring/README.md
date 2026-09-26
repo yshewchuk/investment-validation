@@ -45,7 +45,7 @@ that arrives with a prebuilt geometry or pricing object.
 compatibility callers, so replay and future native workers share one
 implementation.
 
-<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs -->
+<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation -->
 
 ## Consumers
 
@@ -61,9 +61,11 @@ compatibility path that fitting math runs, and it is layer 6 importing
 layer 5 (strictly lower), never the reverse. `engine.v2.ops.cli` imports
 `score_one`, `NativeScoreInputs` and `StageReceipt` for the read-only
 `ops rescore` command, which re-scores one already-captured event inside a
-`no_fit_guard()` block.
+`no_fit_guard()` block. `engine.v2.serving.native_render` (layer 7) imports
+`analog_display_fields`, `DISPLAY_ANALOG_FIELDS` and `StageObservation` to
+carry the analog stage's display-only row ids onto a native serving row.
 
-<!-- consumers: engine.v2.models.training, engine.v2.ops -->
+<!-- consumers: engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 
 ## Usage
 

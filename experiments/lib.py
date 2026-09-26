@@ -83,10 +83,12 @@ def verify_append(before: bytes, after: bytes) -> bool:
 def ledger_ensure(path: Path | None = None) -> Path:
     """Create a header-only ledger if none exists.
 
-    Called at import so the program ledger always exists: reports must be
-    able to distinguish "no experiments tried yet" (N/A) from "the ledger is
-    missing" (FAIL), and promotion rule (e) needs the file to be there from
-    the first experiment onward.
+    Called at the start of every writer, so the program ledger exists from
+    the first write onward: reports must be able to distinguish "no
+    experiments tried yet" (N/A) from "the ledger is missing" (FAIL), and
+    promotion rule (e) needs the file to be there from the first experiment
+    onward. Deliberately NOT called at import time — importing this module
+    must never create a file in the checkout.
     """
     path = Path(path or LEDGER_PATH)
     if not path.exists():
@@ -95,10 +97,6 @@ def ledger_ensure(path: Path | None = None) -> Path:
         csv.DictWriter(buf, fieldnames=LEDGER_COLUMNS).writeheader()
         path.write_bytes(buf.getvalue().encode())
     return path
-
-
-# The program ledger exists from the moment the experiments package is used.
-ledger_ensure()
 
 
 def ledger_read(path: Path | None = None) -> pd.DataFrame:
@@ -112,6 +110,18 @@ def ledger_read(path: Path | None = None) -> pd.DataFrame:
     return frame
 
 
+def _ledger_fieldnames(path: Path) -> list[str]:
+    """The fieldnames one append must use: the file's own header if it has
+    one, else the fixed new-ledger header. An existing ledger keeps its own
+    header byte-for-byte and is never rewritten or corrupted."""
+    if path.exists():
+        with open(path, newline="") as fh:
+            header = next(csv.reader(fh), None)
+        if header:
+            return header
+    return list(LEDGER_COLUMNS)
+
+
 def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None) -> int:
     """Append rows, enforcing the append-only invariant.
 
@@ -122,18 +132,19 @@ def ledger_append(rows: Sequence[Mapping[str, Any]], path: Path | None = None) -
     simply no replace/delete function to call.
     """
     path = Path(path or LEDGER_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_ensure(path)
     before = path.read_bytes() if path.exists() else b""
+    fieldnames = _ledger_fieldnames(path)
 
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=LEDGER_COLUMNS, extrasaction="ignore")
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     if not before:
         writer.writeheader()
     for row in rows:
         missing = [c for c in LEDGER_COLUMNS if c not in row]
         if missing:
             raise LedgerError(f"ledger row missing columns {missing}: {row}")
-        writer.writerow({c: row[c] for c in LEDGER_COLUMNS})
+        writer.writerow({c: row.get(c, "") for c in fieldnames})
 
     with open(path, "ab") as fh:
         fh.write(buf.getvalue().encode())
@@ -240,6 +251,7 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
     """Append the RAN row for one evaluated spec (primary or grid cell)."""
     from datetime import datetime, timezone
 
+    ledger_path = ledger_ensure(ledger_path)
     headline = results.get("headline", {}) if isinstance(results, Mapping) else {}
     ledger_append(
         [{

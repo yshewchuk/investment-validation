@@ -14,6 +14,11 @@ Replaces (§4.4): `dashboard/selfcheck.py`, `the parity comparators`.
 - Tolerance policies, declared per field and never global.
 - ComparisonReceipts and their tiers.
 
+The comparator core (`receipt`, `record_comparator`, `stage_plan`, `tolerance`)
+lives in `engine/v2/parity` (layer 6.5, below the layer-7 reporting packages and
+above everything they compare) so the nightly parity report can run it; this
+package re-exports the same objects under the same names, and stays a sink.
+
 ## Non-responsibilities
 
 - **Decide whether a difference is acceptable** — `a person, from the receipt` does it instead.

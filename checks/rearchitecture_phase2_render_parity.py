@@ -266,10 +266,17 @@ def run_bounded(argv, *, max_rss_gb, cwd, env, poll_s=2, timeout=1800):
 
     A memory-cap breach is ``tools/bounded_run.py``'s own clean, explained
     exit 137 -- never a hang: the watchdog polls every ``poll_s`` seconds and
-    kills the tree itself, so this call always returns within ``timeout``.
+    kills the tree itself. This call returns within ``timeout`` because the
+    resource wait is bounded below it: ``--max-wait-s`` is ``timeout`` less
+    ten minutes, floored at 0 (never negative, and always strictly less than
+    ``timeout`` since 600 > 0), so a job that never gets its slot exits 75
+    before ``subprocess.run``'s own deadline can SIGKILL it -- even for a
+    short ``timeout`` such as 60 s, where a 60 s floor would have made the
+    wait equal to (not below) the outer timeout.
     """
     command = [sys.executable, str(ROOT / "tools" / "bounded_run.py"),
-              "--max-rss-gb", str(max_rss_gb), "--poll-s", str(poll_s), "--", *argv]
+              "--max-rss-gb", str(max_rss_gb), "--poll-s", str(poll_s),
+              "--max-wait-s", str(max(0, timeout - 600)), "--", *argv]
     return subprocess.run(command, cwd=str(cwd), env=env, capture_output=True, text=True,
                           timeout=timeout)
 

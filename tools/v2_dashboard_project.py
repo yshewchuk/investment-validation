@@ -37,6 +37,7 @@ predate the real adapter; it leaves ``--preview-input``'s own
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import sys
@@ -55,7 +56,12 @@ from engine.v2.foundation import (  # noqa: E402
     from_document,
     to_document,
 )
+from engine.v2.contracts import ScoreRequest  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
+from engine.v2.ops.errors import fail  # noqa: E402
+from engine.v2.ops.native_shadow_render import native_shadow_serving_mode  # noqa: E402
+from engine.v2.scoring.stages import NativeScoreInputs  # noqa: E402
+from engine.v2.serving.native_shadow_render import shadow_serving_row_source  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.legacy_bundle import load_legacy_bundle, load_score_document  # noqa: E402
 from engine.v2.serving.projections import build_candidate, connect  # noqa: E402
@@ -90,6 +96,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="output directory: serving.sqlite plus this release's own objects/")
     parser.add_argument("--requested-as-of", required=True)
     parser.add_argument("--resolved-as-of", required=True)
+    parser.add_argument("--nightly-plan", type=Path,
+                        help="the shadow nightly plan document; its shadow_serving_scorer "
+                        "(default native) picks the shadow board's row source")
+    parser.add_argument("--native-inputs", type=Path,
+                        help="{key: {request, inputs}} documents scored natively when the "
+                        "plan serves native rows")
     return parser.parse_args(argv)
 
 
@@ -101,6 +113,69 @@ def _load_flat_bundle(bundle_dir: Path) -> dict[str, list[dict]]:
             raise ValueError(f"{path}: expected a JSON array of rendered rows")
         bundle[path.stem] = rows
     return bundle
+
+
+def _contract_key(key):
+    """A JSON object key back to the tuple contract ``to_document`` stringified."""
+    if not isinstance(key, str):
+        return key
+    try:
+        parsed = ast.literal_eval(key)
+    except (SyntaxError, ValueError):
+        return key
+    return parsed if isinstance(parsed, tuple) else key
+
+
+def _with_contract_quote_keys(document: dict) -> dict:
+    """Rehydrate ``context["quotes"]``'s ``(right, strike, expiry)`` keys.
+
+    ``price`` looks those contracts up by tuple; ``to_document`` writes every
+    mapping key as a string and JSON cannot carry a tuple, so a document
+    round-tripped from a real ``NativeScoreInputs`` loses the pricing lookup
+    unless the keys are restored here.  Every other field already survives the
+    round trip.
+    """
+    context = document.get("context")
+    quotes = context.get("quotes") if isinstance(context, dict) else None
+    if not isinstance(quotes, dict):
+        return document
+    restored = {_contract_key(key): value for key, value in quotes.items()}
+    return {**document, "context": {**context, "quotes": restored}}
+
+
+def _load_native_inputs(path: Path) -> dict[str, tuple[ScoreRequest, NativeScoreInputs]]:
+    """Decode the same documents ``ops rescore`` accepts, through its loader.
+
+    ``NativeScoreInputs`` carries ``Mapping[...]`` blocks (and a typed model
+    layer) ``from_document`` cannot reconstruct, so this composes the ops
+    layer's own canonical decoder rather than a second one here.
+    """
+    from engine.v2.ops.cli import _load_native_score_inputs
+
+    doc = json.loads(path.read_text())
+    return {key: (from_document(ScoreRequest, pair["request"]),
+                  _load_native_score_inputs(_with_contract_quote_keys(pair["inputs"])))
+            for key, pair in sorted(doc.items())}
+
+
+def _shadow_rows(args: argparse.Namespace, score_doc: dict,
+                 bundle_rows_by_ticker: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """The shadow board's rows through the one G5 seam.
+
+    Without ``--nightly-plan`` there is no plan record, so the rows given are
+    served unchanged.  With one, ``shadow_serving_row_source`` switches on
+    the plan's ``shadow_serving_scorer``; ``"native"`` needs
+    ``--native-inputs`` and is refused without them, never served legacy
+    rows under a native label.
+    """
+    if args.nightly_plan is None:
+        return bundle_rows_by_ticker
+    plan = json.loads(args.nightly_plan.read_text())
+    native = native_shadow_serving_mode(plan) == "native"
+    if native and args.native_inputs is None:
+        raise fail("INVALID_REQUEST", "a native shadow plan needs --native-inputs")
+    pairs = _load_native_inputs(args.native_inputs) if native else {}
+    return shadow_serving_row_source(plan, score_doc, bundle_rows_by_ticker, pairs)
 
 
 def _sha256(data: bytes) -> str:
@@ -197,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     _verify_source_provenance(preview_input, args.source_provenance,
                               score_path=args.score_json, bundle_manifest_ref=bundle_manifest_ref)
 
+    bundle_rows_by_ticker = _shadow_rows(args, score_doc, bundle_rows_by_ticker)
     clock = SystemClock()
     catalog_conn = open_catalog(args.catalog, clock=clock)
     phase2_store = ArtifactStore(args.store_root)

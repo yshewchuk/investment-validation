@@ -66,7 +66,7 @@ failure rather than a stale sentence.
 - engine/v2/models/training — `content_hash` for recipe fingerprints and receipt hashes.
 - engine/v2/research — research tools and replay reading pinned snapshots (Phase 6 slices 6-7).
 
-<!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.models.training, engine.v2.research -->
+<!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.models.training, engine.v2.research, engine.v2.parity -->
 
 ## Usage
 
