@@ -212,6 +212,35 @@ def test_stream_kills_the_child_when_stdout_forwarding_fails(monkeypatch):
     assert fake_proc.waited is True
 
 
+def test_stream_replaces_invalid_bytes_instead_of_raising(monkeypatch):
+    import subprocess as _subprocess
+
+    from tools import v2_resource_measurement as rm
+
+    class _RawBytesStdout:
+        def __iter__(self):
+            # A line containing a byte that is invalid as UTF-8 on its own
+            # (0x80 is a continuation byte with no lead byte), decoded by a
+            # real text-mode pipe using this module's own errors= policy.
+            yield b"[watchdog] before \x80 after\n".decode("utf-8", errors="replace")
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _RawBytesStdout()
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(_subprocess, "Popen", lambda *a, **k: _FakeProc())
+
+    lines, code = rm._stream(["python3", "-c", "pass"])
+
+    assert code == 0
+    assert len(lines) == 1
+    assert "before" in lines[0] and "after" in lines[0]
+
+
 # -------------------------------------------------------------------- record
 
 
@@ -319,3 +348,46 @@ def test_cli_refuses_an_empty_command(tmp_path, stub, capsys):
 def test_cli_refuses_a_label_that_cannot_name_a_file(tmp_path, stub):
     assert rm.main(["--workload-label", "../escape", "--max-rss-gb", "2",
                     "--cache-state", "cold", "--", *WORKLOAD]) == 2
+
+
+def test_cli_normalizes_a_negative_signal_exit_code(tmp_path, monkeypatch):
+    monkeypatch.setattr(rm, "_stream", lambda command: ([_watchdog(0.5)], -9))
+
+    code = rm.main(["--workload-label", LABEL, "--max-rss-gb", "2",
+                    "--cache-state", "cold", "--evidence-dir", str(tmp_path / "evidence"),
+                    "--", *WORKLOAD])
+
+    assert code == 137
+
+
+def test_record_keeps_the_raw_negative_exit_code_and_is_not_killed(tmp_path, monkeypatch):
+    monkeypatch.setattr(rm, "_stream", lambda command: ([_watchdog(0.5)], -9))
+
+    record = _measure(tmp_path)
+
+    assert record["exit_code"] == -9
+    assert record["killed"] is False
+
+
+def test_cli_refuses_a_non_finite_max_rss_gb(capsys):
+    with pytest.raises(SystemExit):
+        rm.main(["--workload-label", LABEL, "--max-rss-gb", "nan",
+                "--cache-state", "cold", "--", *WORKLOAD])
+    assert "finite" in capsys.readouterr().err
+
+
+def test_cli_refuses_a_non_finite_max_swap_gb(capsys):
+    with pytest.raises(SystemExit):
+        rm.main(["--workload-label", LABEL, "--max-rss-gb", "2",
+                "--max-swap-gb", "inf",
+                "--cache-state", "cold", "--", *WORKLOAD])
+    assert "finite" in capsys.readouterr().err
+
+
+def test_cli_still_accepts_a_negative_max_swap_gb_to_disable_the_check(tmp_path, stub, capsys):
+    stub([], 0)
+    code = rm.main(["--workload-label", LABEL, "--max-rss-gb", "2",
+                    "--max-swap-gb", "-1",
+                    "--cache-state", "cold", "--evidence-dir", str(tmp_path / "evidence"),
+                    "--", *WORKLOAD])
+    assert code == 0

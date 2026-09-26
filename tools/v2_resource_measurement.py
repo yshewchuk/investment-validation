@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -186,7 +187,7 @@ def _stream(command: list[str]) -> tuple[list[str], int]:
     reservation it holds) could keep running indefinitely.
     """
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
+                            text=True, errors="replace", bufsize=1)
     lines: list[str] = []
     try:
         assert proc.stdout is not None
@@ -259,12 +260,26 @@ def measure(workload_label, max_rss_gb, cache_state, command, *,
     return record
 
 
+def _finite_float(text: str) -> float:
+    """A ``float`` cap value that is neither NaN nor +/-infinity.
+
+    Negative values are allowed through unparsed (``--max-swap-gb -1``
+    intentionally disables the swap check) -- only non-finite values are
+    rejected, since those would reach ``_write_evidence`` and produce
+    non-standard JSON (``NaN``/``Infinity`` tokens).
+    """
+    value = float(text)
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"{text!r} must be a finite number")
+    return value
+
+
 def _parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--workload-label", required=True,
                         help="names the evidence file, so letters/digits/._- only")
-    parser.add_argument("--max-rss-gb", required=True, type=float)
-    parser.add_argument("--max-swap-gb", type=float, default=None)
+    parser.add_argument("--max-rss-gb", required=True, type=_finite_float)
+    parser.add_argument("--max-swap-gb", type=_finite_float, default=None)
     parser.add_argument("--cores", type=int, default=None)
     parser.add_argument("--cpu-set", default=None)
     parser.add_argument("--heavy", action="store_true",
@@ -299,7 +314,8 @@ def main(argv=None) -> int:
                               if item.strip()],
         evidence_dir=args.evidence_dir)
     print(json.dumps(record, indent=2, sort_keys=True))
-    return int(record["exit_code"])
+    exit_code = int(record["exit_code"])
+    return 128 - exit_code if exit_code < 0 else exit_code
 
 
 if __name__ == "__main__":
