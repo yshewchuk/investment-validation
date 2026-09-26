@@ -102,20 +102,73 @@ different set of events than the legacy board would make every later
 native-vs-legacy comparison meaningless — it would be comparing two
 different boards, not the same board scored two ways.
 
+**5. `DISABLED_STRATEGIES` moves to a new, dependency-free module — never
+read via `engine.score`.**
+
+- *Read `engine.score.DISABLED_STRATEGIES` directly* — rejected once checked
+  against the real import graph: `engine/score.py`'s own top-level import
+  block (`from engine.replay import (ChainIndex, ..., load_chain_index, ...)`)
+  pulls in `engine.replay`, which itself imports `engine.fills` (`FillModel`)
+  — the legacy pricing module. Importing `engine.score` at all, even solely
+  to read one dict constant, drags the legacy chain-index class and the
+  legacy fill model into this enumerator's import graph. That is exactly
+  what the isolation invariant below forbids, regardless of whether anything
+  in that chain ever gets *called*.
+- *Import it lazily, inside `board_requests()`, instead of at module top* —
+  rejected: the import still happens, only later; the invariant is about not
+  depending on legacy pricing at all, not about when the dependency loads.
+- *Duplicate the two disabled-strategy names in the new module* — rejected
+  for the same reason decision 2 rejects hard-coding the covered set: a
+  second copy of a decision `engine.score` already owns, free to drift.
+- Chosen: extract `DISABLED_STRATEGIES` — a plain literal dict with no
+  dependency on anything else in `engine.score` — into a new module,
+  `engine/strategy_policy.py`, with no imports beyond the standard library.
+  `engine.score` re-exports it unchanged (`from engine.strategy_policy import
+  DISABLED_STRATEGIES`, kept in its `__all__`), so every existing caller —
+  `engine.score` itself, `engine.dashboard.render`, `engine.structure_registry`
+  (docstring reference), `checks/phase1_checks.py`, `checks/phase3_checks.py`,
+  and the `tools/prepare_phase4_tier4_caches.py` /
+  `tools/baseline_export.py` / `tools/capture_tier0_corpus.py` scripts — keeps
+  working with no code change (see "Changed interfaces"). The new enumerator
+  reads `engine.strategy_policy.DISABLED_STRATEGIES` directly and never
+  imports `engine.score`.
+
+**6. Canonical output order: sorted, never `frozenset` iteration order.**
+
+- *Iterate the covered-strategy `frozenset` (decision 2) directly, in
+  whatever order Python's set iteration gives it* — rejected once checked:
+  `frozenset`/`dict` iteration order for `str` keys depends on their hash,
+  which is randomized per process (`PYTHONHASHSEED`) unless pinned. Two
+  calls inside one process still agree with each other (same object, same
+  hashes), which is exactly why a determinism test that only calls twice and
+  compares can pass while the order is still not guaranteed stable across a
+  process restart.
+- Chosen: `board_requests()` defines its own order and never leaks the
+  frozenset's iteration order into the result. Outer order: events sorted by
+  `(event_date, ticker)`, matching `score_calendar`'s own
+  `events.sort_values(["event_date", "ticker"])` (decision 4). Inner order,
+  per event: the native-covered strategies in sorted (alphabetical) order,
+  then the `DYN-SV` meta-row last — mirroring legacy's shape of appending its
+  chooser row once per event after the per-strategy rows (decision 2).
+
 ## Layers and modules touched
 
-New module: `engine/v2/ops/native_board_universe.py` — pure and
-side-effect-free. It takes an already-loaded events table as a parameter; it
-performs no I/O, no network call, no store write, and constructs no legacy
-`Scorer` or chain index.
+New modules:
+- `engine/v2/ops/native_board_universe.py` — pure and side-effect-free. It
+  takes an already-loaded events table as a parameter; it performs no I/O,
+  no network call, no store write, and constructs no legacy `Scorer` or
+  chain index.
+- `engine/strategy_policy.py` — holds `DISABLED_STRATEGIES` (decision 5);
+  zero imports beyond the standard library.
 
-It reads (does not modify) four existing declarations, each from its actual
-owner:
+`native_board_universe` reads (does not modify) four existing declarations,
+each from its actual owner:
 - `engine.structures.STRUCTURES` — the registered strategy keys (legacy
   owns this registry; native reads the key set only for the
   "not the full registry" comparison in decision 2).
-- `engine.score.DISABLED_STRATEGIES` — the two strategies the board never
-  scores by policy, for the same comparison.
+- `engine.strategy_policy.DISABLED_STRATEGIES` — the two strategies the
+  board never scores by policy, for the same comparison (decision 5 moves
+  this out of `engine.score` so reading it cannot pull in legacy pricing).
 - `engine.v2.registry.strategies.DYNAMIC_MENU` — the seven dynamic-menu
   strategy names.
 - `engine.v2.scoring.source_inputs`'s new public export (decision 2) — the
@@ -150,13 +203,30 @@ noting it so the "production call path" claim above isn't overstated.
 
 ## Changed interfaces
 
-One additive, backward-compatible change: `engine.v2.scoring.source_inputs`
-gains one new public name — a frozen-set alias of the strategy keys its
-existing (private) forecast-output mapping already declares. Its private
-name is used internally in exactly two places in that module today (a
-missing-forecast-output check, and a strategy-support guard); neither
-changes behavior. No other module references the private name, so adding a
-public alias cannot collide with an existing caller.
+Two changes to existing modules, both additive/behavior-preserving:
+
+- `engine.v2.scoring.source_inputs` gains one new public name — a frozen-set
+  alias of the strategy keys its existing (private) forecast-output mapping
+  already declares. Its private name is used internally in exactly two
+  places in that module today (a missing-forecast-output check, and a
+  strategy-support guard); neither changes behavior. No other module
+  references the private name, so adding a public alias cannot collide with
+  an existing caller.
+- `DISABLED_STRATEGIES` moves from `engine.score` to the new
+  `engine.strategy_policy` (decision 5). `engine.score` keeps re-exporting
+  the same name from the same place a caller imports it
+  (`from engine.score import DISABLED_STRATEGIES`), so every current caller
+  is unaffected: `engine.score` itself (three internal uses), `engine/
+  dashboard/render.py` (two local imports), `engine/structure_registry.py`
+  (docstring reference only), `checks/phase1_checks.py`,
+  `checks/phase3_checks.py`, `tools/prepare_phase4_tier4_caches.py`,
+  `tools/baseline_export.py`, `tools/capture_tier0_corpus.py`, and the tests
+  that import or monkeypatch it (`tests/test_score.py`,
+  `tests/test_capture_tier0_chain_index.py`,
+  `tests/test_phase4_capture_strict.py`) — found by
+  `grep -rn DISABLED_STRATEGIES` across the tree. The new enumerator is the
+  one caller that reads `engine.strategy_policy.DISABLED_STRATEGIES`
+  directly instead of through `engine.score`.
 
 Everything else is new: the `BoardRequest` dataclass and the
 `board_requests(as_of, horizon_days, tickers, events_table)` function have
@@ -197,7 +267,10 @@ caller.
   degrading to a silent empty or partial result.
 - **Isolation:** this function never loads the legacy option-chain index and
   never constructs a legacy `Scorer` — it needs no priced quotes at all,
-  only the board's event dates and sessions.
+  only the board's event dates and sessions. It also never *imports*
+  `engine.score` (decision 5), so its import graph never reaches
+  `engine.replay`/`engine.fills` either — the isolation holds at import
+  time, not only at call time.
 
 `docs/ARCHITECTURE.md` does not exist on `main` yet; once it lands, this
 section should cite its specific invariant bullets by number instead of
@@ -210,7 +283,7 @@ restating them here.
 | Enumerated `(ticker, strategy)` pairs match legacy's ATM-pass requests one-for-one for the native-covered strategies | New fixture-table test comparing `board_requests()`'s output against `score_calendar`'s own default enumeration on the same small fixture, read-only | A filter drifts out of sync with `score_calendar` (e.g. an off-by-one at the horizon boundary), or the native-covered strategy set silently gains or loses a member |
 | Exactly one `DYN-SV` request per event, never per strategy | Fixture with one event asserts the count of `DYN-SV` requests is 1 regardless of how many dynamic-menu members exist | `DYN-SV` gets added inside the same per-strategy loop as the seven menu members instead of once per event |
 | A malformed events table raises a named refusal, never a silent empty result | Fixture missing one of `ticker`/`event_date`/`session` asserts both the specific refusal code AND that no empty tuple is returned instead | A future refactor adds a broad `except` that swallows the schema error and returns an empty result |
-| Determinism | Calling `board_requests()` twice on the same fixture returns equal tuples in the same order | Any dependency on unordered iteration (e.g. a set) leaking into the returned order |
+| Determinism | A fixture with ≥2 native-covered strategies across ≥2 events asserts the exact output tuple in the sorted order decision 6 defines (events by `(event_date, ticker)`, strategies alphabetical, `DYN-SV` last) — not merely that two calls agree with each other | A dependency on unordered `frozenset`/`dict` iteration leaking into the returned order: two calls in one process would still agree (same hashes), so a test that only compares call-to-call, rather than asserting the exact sorted order, would pass even though the order is not stable across a process restart with a different `PYTHONHASHSEED` |
 
 ## Out of scope
 
