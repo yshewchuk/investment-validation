@@ -1,0 +1,151 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  path_filters:
+    - "!dashboard/published/**"
+    - "!data/**"
+    - "!fixtures/**"
+    - "!guides/rearchitecture_phase6_consumer_parity.md"
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        The PR body's `<details><summary>Spec</summary>` block contains the
+        spec and acceptance criteria; read it before reviewing.
+
+        Start every review with a "## Design review" section, in this order:
+        1. Spec coverage — does the diff satisfy every acceptance criterion
+           in the spec? Name any criterion not met.
+        2. Reachability from production entrypoints — trace
+           entrypoint -> ... -> new code per docs/ARCHITECTURE.md §4 (the
+           legacy nightly steps, the v2 nightly `GRAPH` stages minus
+           `NO_JOB_STAGES`, ops CLI subcommands, serving routes). If nothing
+           in production reaches the new code, say so.
+        3. Layer and dependency violations against docs/ARCHITECTURE.md §2-3
+           (import direction, declared legacy adapters, package README
+           public-interface lists).
+        4. Callers outside this diff affected by any changed interface —
+           search the repo for every call site, not just the ones touched
+           here.
+        5. Siblings with the same pattern that were NOT fixed — when this
+           diff fixes a defect, check for the same shape elsewhere and name
+           any sibling left unfixed.
+
+        Only after the Design review section, give line-level findings.
+
+        If the PR includes a `docs/design/*.md` file, check the code against
+        it and flag any undocumented deviation from that design doc.
+    - path: "docs/design/**"
+      instructions: |
+        Review as an architecture decision, not as code:
+        - Challenge the "Decisions" section's options considered — is the
+          chosen option actually justified against the alternatives, or just
+          asserted?
+        - Check the stated "Production call path" and "Changed interfaces"
+          callers against the real repo, not just against the doc's own
+          claim.
+        - Flag any missing failure semantic in the 4c R1-R6 template
+          (missing input, cache, retry, transaction, partial write,
+          idempotency).
+        - Check every invariant the doc claims to touch against the actual
+          docs/ARCHITECTURE.md §5 bullet it cites.
+        - Check that every acceptance criterion in the linked spec has a row
+          in the "Test plan" table, and that "how it could fail" names a
+          real failure mode, not a restatement of the test.
+    - path: "engine/v2/**"
+      instructions: |
+        Apply docs/ARCHITECTURE.md §5: a native row must never carry a
+        legacy-derived value or legacy reference under a native label; a
+        missing/unusable input must produce a typed withheld/refused status,
+        never a silent 0/None/default; no parity-only or legacy-emulation
+        code path; failure semantics (missing input, cache, retry,
+        transaction, partial write, idempotency) must be stated for any new
+        stage or effect; paths must resolve through engine.paths / the v2
+        foundation root helpers, never a module's own
+        Path(__file__)-derived root. Check that the changed package's
+        README Public-interface and Consumers sections were updated if any
+        name or caller changed.
+    - path: "engine/v2/parity/**"
+      instructions: |
+        This package is the ONE comparator the Phase 4 checker and the
+        nightly native_parity report both call (docs/ARCHITECTURE.md §5).
+        Flag any new or duplicated comparison logic elsewhere in the diff
+        that reimplements a similar diff instead of reusing
+        compare_dimension and the declared field groups. Flag any test or
+        code that compares native output against itself, against its own
+        prior output, or against a hand-mutated copy of itself rather than
+        against an independent legacy value — legacy output belongs only on
+        the expected side of a comparison.
+    - path: "engine/dashboard/**"
+      instructions: |
+        Layer 8, only_imports=(7.0,) (docs/ARCHITECTURE.md §2): this package
+        may import engine.v2.serving and nothing else in engine.v2 — no
+        direct import of scoring, evaluation, ledger, domain, models, data,
+        or ops. Flag any gate, financial ratio, return estimate, or
+        portfolio accounting computed here instead of read from
+        engine.v2.serving.
+    - path: "tools/phase6_inventory.py"
+      instructions: |
+        This tool's inventory proves a declared symbol RESOLVES (imports
+        and exists); it does not prove the symbol is REACHABLE from a
+        production entrypoint (docs/ARCHITECTURE.md §4, §6). Flag any change
+        that treats a resolved row as proof of reachability, and flag
+        `ROOT = Path(__file__).resolve().parents[1]` (or any similar
+        self-derived root) as the anti-pattern documented in
+        docs/ARCHITECTURE.md §5 — paths should resolve through engine.paths
+        or the v2 foundation instead.
+    - path: "experiments/**"
+      instructions: |
+        Any experiment runner must expose a `--no-ledger` flag and any
+        subset/smoke invocation must use it (docs/ARCHITECTURE.md §5).
+        LEDGER.csv is a multiple-testing record, not a run log, and runners
+        dedupe on spec hash, so a smoke-test row can permanently occupy the
+        slot a real run needed. Flag a new runner with no `--no-ledger`
+        flag, and flag a smoke/test invocation that omits it.
+    - path: ".github/workflows/**"
+      instructions: |
+        A workflow change must not skip pre-commit hooks, bypass the secret
+        scan (checks/repo_hygiene.py) or GitHub push protection, run with
+        elevated (admin) merge permissions, or add a step that could push to
+        `main` directly. CI credentials must never be echoed into logs.
+    - path: "tests/**"
+      instructions: |
+        Flag a test that would pass regardless of the code under test —
+        comparing native output against itself, against its own prior
+        output, or against a hand-mutated copy rather than an independent
+        expected value (docs/ARCHITECTURE.md §6). Every new checkpointed or
+        native output needs both a focused regression test and a
+        planted-defect test that proves the comparator actually fails on a
+        corrupted value, not just that "a row is red". A negative control
+        that has never been observed to fail is not known to work.
+  pre_merge_checks:
+    custom_checks:
+      - name: "Spec criteria met"
+        mode: warning
+        instructions: |
+          Pass if every acceptance criterion listed in the PR body's
+          `<details><summary>Spec</summary>` block is either satisfied by
+          the diff or explicitly deferred in an "Out of scope" note. Fail if
+          any acceptance criterion has no corresponding change or test and
+          no deferral is stated.
+      - name: "New code reachable from production"
+        mode: warning
+        instructions: |
+          Pass if every new function, route, CLI subcommand or job stage
+          added by this PR is called, directly or transitively, from a
+          production entrypoint named in docs/ARCHITECTURE.md §4 (the legacy
+          nightly, the v2 nightly GRAPH minus NO_JOB_STAGES, an ops CLI
+          subcommand, or a serving route) — or the PR body states explicitly
+          why it is not yet reachable (e.g. gated behind a flag, exercised
+          only by a manual CLI). Fail if new code has no caller anywhere and
+          the PR body gives no such statement.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "docs/ARCHITECTURE.md"
+      - "docs/design/*.md"
