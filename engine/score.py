@@ -64,6 +64,7 @@ from engine.features import (
     session_for,
 )
 from engine.fills import BAD_QUOTE_COST_PCT, MID, FillModel
+from engine.strategy_policy import DISABLED_STRATEGIES
 from engine.forecast_sizing import (
     FORECAST_SIZED,
     forecast_params,
@@ -112,27 +113,6 @@ __all__ = [
     "DISABLED_STRATEGIES",
     "FLAGS",
 ]
-
-#: Structures the scorer refuses to put a number on, and why.
-DISABLED_STRATEGIES = {
-    "CAL-P": (
-        "The exact spec (put legs, entry shortly before the print with a ~1 DTE "
-        "front, held THROUGH the print, both legs closed together after) has "
-        "never been backtested. EXP-046b tested straddle legs at T-14 unwound "
-        "pre-print — a different structure. Phase 2 backlog 1-2 must run first."
-    ),
-    "CND-P": (
-        "EXP-121 registered and ran the risk-mechanics validation (defined-risk "
-        "falsification, assignment exposure, the oracle ceiling) but nothing has "
-        "reviewed its result or decided to promote the structure. There is no "
-        "gate for it — the STR-THRU-shaped one the mechanics call for is not yet "
-        "registered — and no fill/execution evidence beyond the replay. Added to "
-        "STRUCTURES for engine.replay/build_trades so EXP-121 could price it; "
-        "that registry is shared with the live board's default strategy list, "
-        "which is what put it here before a single trade should ever be "
-        "recommended off it."
-    ),
-}
 
 FLAGS = (
     "UNVALIDATED_STRUCTURE",

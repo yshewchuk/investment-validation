@@ -30,7 +30,10 @@
 !/RECOVERY.md
 !/EARNINGS_VOL_PROGRAM_PLAN.md
 !/guides/*.md
+!/docs/*.md
+!/docs/design/*.md
 !/engine/**/*.md
+!**/ARCHITECTURE.md
 !/checks/*.md
 !/tests/*.md
 !/tools/*.md
