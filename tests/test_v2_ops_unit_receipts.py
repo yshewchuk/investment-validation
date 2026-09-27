@@ -5,7 +5,10 @@ Part 0) alongside the module it tests.
 """
 from __future__ import annotations
 
-from engine.v2.ops.unit_receipts import provider_failure_code
+from engine.v2.foundation import ArtifactStore
+from engine.v2.ops.incremental_data import RefreshUnit
+from engine.v2.ops.unit_receipts import provider_failure_code, record_unit_receipt
+from tests.ops_support import catalog
 
 
 def test_provider_failure_code_orders_mixed_kinds():
@@ -17,3 +20,51 @@ def test_provider_failure_code_orders_mixed_kinds():
     assert provider_failure_code(("transient", "refused")) == "SOURCE_INVALID"
     assert provider_failure_code(("refused", "not_final")) == "SOURCE_INVALID"
     assert provider_failure_code(("transient", "credential_invalid")) == "CREDENTIAL_INVALID"
+
+
+def test_record_unit_receipt_stores_expected_fields(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    unit = RefreshUnit(
+        request_id="req-1",
+        table_name="daily_market",
+        partition_key="AAPL",
+        expected_keys=("2026-09-01", "2026-09-02"),
+    )
+
+    record = record_unit_receipt(
+        conn,
+        store,
+        unit,
+        b"unit-payload-bytes",
+        source="fixture",
+        endpoint="daily_market",
+        received_at=clock.now().isoformat(),
+    )
+
+    assert record.source == "fixture"
+    assert record.endpoint == "daily_market"
+    assert record.response_kind == "complete"
+    assert record.request == {
+        "request_id": "req-1",
+        "table_name": "daily_market",
+        "partition_key": "AAPL",
+        "keys": ["2026-09-01", "2026-09-02"],
+    }
+
+    row = conn.execute(
+        "SELECT source, endpoint, response_kind FROM data_raw_receipts "
+        "WHERE raw_receipt_id = ?",
+        (record.raw_receipt_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["source"] == "fixture"
+    assert row["endpoint"] == "daily_market"
+    assert row["response_kind"] == "complete"
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
+
+# NOTE: a unit test for cached_unit_payloads is deferred to
+# https://github.com/yshewchuk/investment-validation/issues/<TBD> -- it calls
+# engine.v2.data.incremental.load_raw_receipt, which does not exist on this
+# branch (only on the fuller p6/slice4c branch); adding it is out of scope
+# for this tests-only PR.
