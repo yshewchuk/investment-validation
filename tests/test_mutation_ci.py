@@ -959,7 +959,7 @@ def test_plan_job_checks_the_triggering_pr_is_still_open():
     assert select_pr["if"] == "github.event_name == 'workflow_run'"
     assert select_pr["env"]["PULL_REQUESTS_JSON"] == \
         "${{ toJSON(github.event.workflow_run.pull_requests) }}"
-    assert select_pr["env"]["HEAD_REPO"] == "${{ github.repository }}"
+    assert select_pr["env"]["REPO_ID"] == "${{ github.repository_id }}"
     assert select_pr["env"]["HEAD_SHA"] == "${{ github.event.workflow_run.head_sha }}"
     pr_open = JOBS["plan"]["steps"][1]
     assert pr_open["id"] == "pr_open"
@@ -1373,7 +1373,12 @@ def test_no_join_over_pull_requests_remains_anywhere_and_group_is_pr_safe():
             assert not re.search(r"join\([^)]*pull_requests", value), value
         assert "pull_requests" not in group
         filt = _select_pr_filter(jobs)
-        assert "base.repo.full_name" in filt
+        # base.repo.id, never base.repo.full_name: the pull-request-minimal
+        # object GitHub actually sends has no full_name field at all (see
+        # test_select_pr_jq_filter_matches_only_the_real_same_repo_pr and
+        # tests/fixtures/workflow_run_pull_requests.py).
+        assert "base.repo.id" in filt
+        assert "base.repo.full_name" not in filt
         assert "head.sha" in filt
         assert "select(" in filt
         assert jobs["plan"]["outputs"]["pr_number"] == "${{ steps.select_pr.outputs.number }}"
@@ -1381,22 +1386,25 @@ def test_no_join_over_pull_requests_remains_anywhere_and_group_is_pr_safe():
         assert jobs["mutate"]["steps"][0]["env"]["PR_NUMBER"] == "${{ needs.plan.outputs.pr_number }}"
 
 
-_OUR_PR = {
-    "number": 45,
-    "base": {"repo": {"full_name": "yshewchuk/investment-validation"}, "sha": "aaa111"},
-    "head": {"sha": "deadbeef"},
-}
-_FORK_COLLISION_PR = {
-    "number": 7,
-    "base": {"repo": {"full_name": "attacker/investment-validation"}, "sha": "bbb222"},
-    "head": {"sha": "cafef00d"},
-}
+# Real GitHub `workflow_run.pull_requests` entries (the pull-request-minimal
+# schema: base/head.repo carry ONLY id/name/url, never full_name) -- see
+# tests/fixtures/workflow_run_pull_requests.py for exactly where each one
+# came from (fetched read-only via `gh api`) and why. `_SAME_REPO_PR` is this
+# repo's own real PR #45; `_FORK_PR` is a real PR from a different public
+# repository, kept only for its genuine minimal-schema shape (its numbers
+# are unrelated to investment-validation, which is exactly what must fail to
+# match).
+from tests.fixtures.workflow_run_pull_requests import FORK_PR as _FORK_PR  # noqa: E402
+from tests.fixtures.workflow_run_pull_requests import SAME_REPO_PR as _SAME_REPO_PR  # noqa: E402
+
+_SAME_REPO_ID = _SAME_REPO_PR["base"]["repo"]["id"]
+_SAME_REPO_HEAD_SHA = _SAME_REPO_PR["head"]["sha"]
 
 
 def _run_select_pr_filter(filt, payload):
     out = subprocess.run(
-        ["jq", "-c", "--arg", "repo", "yshewchuk/investment-validation",
-         "--arg", "sha", "deadbeef", filt],
+        ["jq", "-c", "--argjson", "repo_id", str(_SAME_REPO_ID),
+         "--arg", "sha", _SAME_REPO_HEAD_SHA, filt],
         input=json.dumps(payload), capture_output=True, text=True, check=True,
     ).stdout
     return json.loads(out)
@@ -1404,16 +1412,21 @@ def _run_select_pr_filter(filt, payload):
 
 @pytest.mark.parametrize("jobs", [JOBS, MUT_JOBS], ids=["gremlins", "mutmut"])
 def test_select_pr_jq_filter_matches_only_the_real_same_repo_pr(jobs):
-    """Opus BLOCK(1) / #45: runs the SHIPPED jq filter (extracted from the
-    select_pr step's own script, never a hand copy that could drift) against
-    three sample workflow_run.pull_requests payloads: one same-repo PR
-    (selected), our PR plus a fork PR sharing our branch name (only ours
-    selected), and only the fork PR (no match, skip). Must fail on 0377071,
-    which has no select_pr step -- and so no FILTER -- at all."""
+    """Opus BLOCK(1) / #45 AND its own re-gate on d2d9bae: runs the SHIPPED
+    jq filter (extracted from the select_pr step's own script, never a hand
+    copy) against real `workflow_run.pull_requests` entries (see
+    tests/fixtures/workflow_run_pull_requests.py) -- this repo's own real
+    PR #45 alone (selected), that PR plus a real PR from a different
+    repository (only ours selected), and only the other repository's PR (no
+    match, skip). A filter on `.base.repo.full_name` (d2d9bae) matches NONE
+    of these, including the first -- that field does not exist on the real
+    payload, so mutation CI never ran for any PR. Must fail on both 0377071
+    (no select_pr step at all) and d2d9bae (select_pr exists but its filter
+    can never match)."""
     filt = _select_pr_filter(jobs)
-    assert _run_select_pr_filter(filt, [_OUR_PR]) == [_OUR_PR]
-    assert _run_select_pr_filter(filt, [_OUR_PR, _FORK_COLLISION_PR]) == [_OUR_PR]
-    assert _run_select_pr_filter(filt, [_FORK_COLLISION_PR]) == []
+    assert _run_select_pr_filter(filt, [_SAME_REPO_PR]) == [_SAME_REPO_PR]
+    assert _run_select_pr_filter(filt, [_SAME_REPO_PR, _FORK_PR]) == [_SAME_REPO_PR]
+    assert _run_select_pr_filter(filt, [_FORK_PR]) == []
 
 
 def test_mutmut_report_job_gates_the_merge_on_the_planned_module_set():

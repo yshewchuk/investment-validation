@@ -17,7 +17,7 @@
 # full rationale (why mutation used to starve Tests for account-wide runners,
 # why workflow_run.pull_requests can list a fork PR alongside a same-repo one
 # and how the "Select the triggering PR" step resolves the real PR from it
-# (base.repo.full_name + head.sha, never a join() over the raw array), what
+# (base.repo.id + head.sha, never a join() over the raw array), what
 # running in the base repository's context does and does not isolate this job
 # from, and why this gate applies to every qualifying Tests completion once
 # this file's change reaches main, including for PRs opened before that).
@@ -149,26 +149,33 @@ jobs:
       # See mutation.yml's plan job "Select the triggering PR" step for the
       # identical rationale and jq filter: resolves the one
       # workflow_run.pull_requests entry that both targets this repository
-      # (base.repo.full_name) and shares this run's head commit (head.sha).
+      # (base.repo.id) and shares this run's head commit (head.sha).
       # Zero or multiple matches leave number/base_sha empty, which the
       # `pr_open` step below (and the `plan` step's PR_OPEN check) treats
       # exactly like a closed PR -- an empty, explicitly-valid plan, never a
       # job failure. $PULL_REQUESTS_JSON is passed through env, never
-      # interpolated into the script.
+      # interpolated into the script. `.base.repo.id`, never
+      # `.base.repo.full_name`: the pull-request-minimal object GitHub
+      # actually puts in this array carries only `id`/`name`/`url` on
+      # `base.repo` -- no `full_name` field exists, so a filter on it can
+      # never match anything (see mutation.yml's own comment and
+      # tests/fixtures/workflow_run_pull_requests.json, captured from a real
+      # payload). Compared as a NUMBER via `--argjson`, never `--arg`, since
+      # `.base.repo.id` in the payload is a JSON number.
       - name: Select the triggering PR
         id: select_pr
         if: github.event_name == 'workflow_run'
         env:
           PULL_REQUESTS_JSON: ${{ toJSON(github.event.workflow_run.pull_requests) }}
-          HEAD_REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          FILTER='[.[] | select(.base.repo.full_name == $repo and .head.sha == $sha)]'
-          selected=$(jq -c --arg repo "$HEAD_REPO" --arg sha "$HEAD_SHA" "$FILTER" <<< "$PULL_REQUESTS_JSON")
+          FILTER='[.[] | select(.base.repo.id == $repo_id and .head.sha == $sha)]'
+          selected=$(jq -c --argjson repo_id "$REPO_ID" --arg sha "$HEAD_SHA" "$FILTER" <<< "$PULL_REQUESTS_JSON")
           count=$(jq 'length' <<< "$selected")
           if [ "$count" != "1" ]; then
-            echo "::notice::${count} workflow_run.pull_requests entries matched base.repo=$HEAD_REPO head.sha=$HEAD_SHA (need exactly 1) -- skipping mutation for this run."
+            echo "::notice::${count} workflow_run.pull_requests entries matched base.repo.id=$REPO_ID head.sha=$HEAD_SHA (need exactly 1) -- skipping mutation for this run."
             echo "number=" >> "$GITHUB_OUTPUT"
             echo "base_sha=" >> "$GITHUB_OUTPUT"
           else
