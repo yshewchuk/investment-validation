@@ -52,6 +52,14 @@ _TIER4_STAMP_SUFFIXES = ("_fold_start", "_model_id")
 _TIER4_STAMP_NAMES = frozenset({"tier3_snapshot"})
 _TIER4_CRUSH_STAMP_PREFIX = "pred_iv_crush_30"
 
+# A band column's own fold_start is its BASE metric's fold_start: the real
+# schema has no "<metric>_p10_fold_start" etc. -- only one fold_start per
+# metric (data/features/tier4_forecasts.parquet: pred_abs_move_fold_start,
+# pred_im_t1_d14_fold_start, pred_runup_abs_move_d14_fold_start,
+# pred_iv_crush_30_fold_start; the crush family is refused as a feature name
+# entirely by _leaked_feature_reason, so it never reaches this lookup).
+_TIER4_BAND_SUFFIXES = ("_p10", "_p90", "_sd", "_resid_n")
+
 _MISSING = object()
 
 
@@ -177,26 +185,75 @@ def _staged_observed_at(quote_rows: Sequence[Mapping[str, Any]]) -> list[tuple[i
     return found
 
 
-def _checked_against_as_of(
+def _checked_panel_row_event(
     calendar_row: Mapping[str, Any],
     panel_row: Mapping[str, Any],
+) -> None:
+    """The panel row must describe the SAME event being scored.
+
+    In the real legacy panel, a row's own ``_PANEL_DATE_COLUMN`` ("date")
+    is the EVENT date, never an observation/decision date --
+    ``engine/features.py::live_features`` builds its synthetic row with
+    ``"date": event_date`` (line ~753), and every persisted
+    ``panel.parquet`` row is likewise keyed by its own event date. A prior
+    version of this module compared ``panel_row.date`` against ``as_of``
+    as if it were an observation timestamp; that refused every real
+    upcoming-event row outright, since a real panel row's ``date`` always
+    equals its own (future, relative to ``as_of``) event date -- the only
+    rows that check ever passed were rows for a DIFFERENT, already-past
+    event. The one invariant this module can actually verify from the data
+    it is given is that the staged ``panel_row`` names the SAME event
+    ``calendar_row`` does.
+    """
+    event_ts = validated_as_of(calendar_row["event_date"], label="calendar_row.event_date")
+    panel_date_ts = validated_as_of(
+        panel_row[_PANEL_DATE_COLUMN], label=f"panel_row.{_PANEL_DATE_COLUMN}")
+    if panel_date_ts != event_ts:
+        raise NightlySourceBundleRefusal(
+            "PANEL_ROW_WRONG_EVENT",
+            f"panel_row.{_PANEL_DATE_COLUMN} ({panel_date_ts}) does not match "
+            f"calendar_row.event_date ({event_ts})",
+        )
+
+
+def _checked_against_as_of(
+    calendar_row: Mapping[str, Any],
     observed: Sequence[tuple[int, Any]],
     as_of_ts: pd.Timestamp,
 ) -> None:
     """Refuse any staged observation dated strictly after ``as_of``.
 
-    Tier-4 has no row-level date to check here: ``panel.parquet`` and
-    ``tier4_forecasts.parquet`` neither one carries ``observed_at``.
-    ``panel_row`` carries its own real date column instead
-    (``_PANEL_DATE_COLUMN``, "date" -- legacy's own panel key column,
-    engine/features.py's ``_KEY_COLUMNS``). Tier-4 carries no single
-    row-level date at all; each metric column stamps its own
-    "<metric>_fold_start" instead, checked per used feature in
-    ``_project_features``, not here.
+    Only ``calendar_row.calendar_observed_through`` and each quote row's
+    own ``observed_at`` are checked here. The legacy panel's own
+    ``_PANEL_DATE_COLUMN`` ("date") is the EVENT date, not an observation
+    date (see ``_checked_panel_row_event``); Tier-4 carries no row-level
+    date at all -- each metric column stamps its own "<metric>_fold_start"
+    instead, checked per used feature in ``_project_features``, not here.
+    Neither belongs in an "as of this moment" comparison against ``as_of``.
+
+    KNOWN GAP, escalated rather than invented: a panel row's market-derived
+    FEATURE values are computed as of a decision anchor that can differ
+    from the row's own ``date`` -- ``engine/features.py::live_features``
+    computes a local ``_as_of`` column (line ~778) for exactly this reason
+    (its synthetic row's market-state blocks read as of ``_as_of``, which
+    precedes ``event_date``/``date`` for a genuine upcoming-event score),
+    but that anchor is never written into the row values
+    ``live_features`` returns (it is not one of ``PANEL_FEATURE_COLUMNS``),
+    and the persisted-panel equivalent
+    (``regime_asof``/``runup_asof``/``orats_asof``, ``ANCHOR_COLUMNS``) is
+    explicitly dropped before ``panel.parquet`` is written
+    (``engine/data/features/panel.py:912-918`` -- for a HISTORICAL row
+    those all equal ``date`` by construction, which is why dropping them
+    is byte-identical, but that equivalence does not hold for a live
+    per-event row). No column survives to a ``panel_row`` this function
+    can read that records that anchor. This function cannot verify "as of
+    when were these features computed" without a caller-supplied anchor
+    this signature does not accept today; adding one is a separate,
+    deliberate interface change for a future PR, not something to invent
+    silently here.
     """
     staged = [
         ("calendar_row.calendar_observed_through", calendar_row["calendar_observed_through"]),
-        (f"panel_row.{_PANEL_DATE_COLUMN}", panel_row[_PANEL_DATE_COLUMN]),
         *((f"quote_rows[{index}].observed_at", value) for index, value in observed),
     ]
     for label, value in staged:
@@ -312,6 +369,40 @@ def _require_staged_inputs_present(
         raise NightlySourceBundleRefusal("MISSING_STAGED_INPUT", "quote_rows is missing")
 
 
+def _tier4_fold_start_key(name: str) -> str:
+    """The real fold_start column that stamps ``name`` in
+    ``tier4_forecasts.parquet``.
+
+    A band column (``<metric>_p10``/``_p90``/``_sd``/``_resid_n``) is
+    stamped by its BASE metric's own fold_start -- there is no
+    ``<metric>_p10_fold_start`` column in the real schema, only one
+    fold_start per metric.
+    """
+    for suffix in _TIER4_BAND_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)] + "_fold_start"
+    return f"{name}_fold_start"
+
+
+def _is_null_forecast_value(value: Any) -> bool:
+    """Whether ``value`` is legacy's "no forecast" null.
+
+    Used ONLY to decide whether the fold_start gate below applies -- never
+    to build ``feature_missing_mask``, which stays a pure presence fact.
+    Measured against the real ``tier4_forecasts.parquet``: 108,320 of
+    199,973 ``pred_abs_move`` rows are NULL, always paired with a NULL
+    ``pred_abs_move_fold_start`` (zero counterexamples) -- a null forecast
+    was never fit, so requiring its fold_start would refuse every real
+    null row outright, exactly the rows the Tier-4 fallback-to-panel path
+    exists to let through as "missing" rather than "unusable input."
+    """
+    return (
+        value is None
+        or value is pd.NA
+        or (isinstance(value, (float, np.floating)) and math.isnan(value))
+    )
+
+
 def _project_features(
     tier4_row: Mapping[str, Any],
     panel_row: Mapping[str, Any],
@@ -329,13 +420,17 @@ def _project_features(
     name resolves from, and whether that provenance is allowed to be used at
     all -- not what the resolved value itself means.
 
-    A name resolved from ``tier4_row`` is allowed only when that metric's
-    own ``"{name}_fold_start"`` is staged and ``<= as_of`` (the real Tier-4
-    stamp contract: ``tier4_forecasts.parquet`` has no row-level
-    ``observed_at``; every metric stamps its own ``fold_start`` instead). A
-    used Tier-4 value with no ``fold_start`` staged at all is refused
-    outright, not silently treated as missing -- the caller must be able to
-    prove *when* that value was fit before native scoring may see it.
+    A NON-NULL value resolved from ``tier4_row`` is allowed only when that
+    metric's own fold_start (``_tier4_fold_start_key``) is staged and
+    ``<= as_of`` (the real Tier-4 stamp contract: ``tier4_forecasts.parquet``
+    has no row-level ``observed_at``; every metric stamps its own
+    ``fold_start`` instead). A used, non-null Tier-4 value with no
+    fold_start staged at all is refused outright, not silently treated as
+    missing -- the caller must be able to prove *when* that value was fit
+    before native scoring may see it. A NULL Tier-4 value (legacy's own
+    "no forecast") skips this gate entirely, fold_start present or not,
+    NaT/None or dated whenever -- a null forecast carries no information to
+    leak, and its fold_start is itself always null in the real data.
 
     ``feature_missing_mask`` is a pure PRESENCE fact (the name was found in
     neither row), never a value-quality judgement -- and exists only
@@ -348,19 +443,22 @@ def _project_features(
     feature_missing_mask: dict[str, bool] = {}
     for name in sorted(feature_names):
         if name in tier4_row:
-            fold_start = tier4_row.get(f"{name}_fold_start", _MISSING)
-            if fold_start is _MISSING:
-                raise NightlySourceBundleRefusal(
-                    "MISSING_STAGED_INPUT",
-                    f"tier4_row is missing {name}_fold_start, needed to use {name}",
-                )
-            fold_ts = validated_as_of(fold_start, label=f"tier4_row.{name}_fold_start")
-            if fold_ts > as_of_ts:
-                raise NightlySourceBundleRefusal(
-                    "POST_AS_OF_ROW",
-                    f"tier4_row.{name}_fold_start ({fold_ts}) is after as_of ({as_of_ts})",
-                )
-            feature_vector[name] = tier4_row[name]
+            value = tier4_row[name]
+            if not _is_null_forecast_value(value):
+                fold_key = _tier4_fold_start_key(name)
+                fold_start = tier4_row.get(fold_key, _MISSING)
+                if fold_start is _MISSING:
+                    raise NightlySourceBundleRefusal(
+                        "MISSING_STAGED_INPUT",
+                        f"tier4_row is missing {fold_key}, needed to use {name}",
+                    )
+                fold_ts = validated_as_of(fold_start, label=f"tier4_row.{fold_key}")
+                if fold_ts > as_of_ts:
+                    raise NightlySourceBundleRefusal(
+                        "POST_AS_OF_ROW",
+                        f"tier4_row.{fold_key} ({fold_ts}) is after as_of ({as_of_ts})",
+                    )
+            feature_vector[name] = value
             feature_missing_mask[name] = False
         elif name in panel_row:
             feature_vector[name] = panel_row[name]
@@ -403,9 +501,10 @@ def assemble_nightly_source_bundle(
     _require_staged_inputs_present(calendar_row, panel_row, tier4_row, quote_rows)
     _validated_spot(calendar_row["spot"])
     _reject_leaked_feature_names(feature_names, driver_name)
+    _checked_panel_row_event(calendar_row, panel_row)
     observed = _staged_observed_at(quote_rows)
     as_of_ts = validated_as_of(as_of, label="as_of")
-    _checked_against_as_of(calendar_row, panel_row, observed, as_of_ts)
+    _checked_against_as_of(calendar_row, observed, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
     feature_vector, feature_missing_mask = _project_features(

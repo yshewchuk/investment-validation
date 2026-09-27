@@ -26,7 +26,7 @@ def _valid_kwargs(**overrides):
             "expiry": "2026-01-16", "spot": 100.0,
             "calendar_observed_through": "2026-01-09",
         },
-        panel_row={"date": "2026-01-09", "signal": 1.5},
+        panel_row={"date": "2026-01-15", "signal": 1.5},
         tier4_row={"pred_abs_move": 0.05, "pred_abs_move_fold_start": "2026-01-01"},
         quote_rows=[
             {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
@@ -226,7 +226,7 @@ def test_planted_leak_realized_outcome_move_is_rejected():
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         assemble_nightly_source_bundle(**_valid_kwargs(
             feature_names=("signal", "move"),
-            panel_row={"date": "2026-01-09", "signal": 1.5, "move": 0.02},
+            panel_row={"date": "2026-01-15", "signal": 1.5, "move": 0.02},
         ))
     assert exc.value.code == "LEAKED_FEATURE_NAME"
     assert "move" in str(exc.value)
@@ -236,7 +236,7 @@ def test_planted_leak_realized_outcome_abs_move_is_rejected():
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         assemble_nightly_source_bundle(**_valid_kwargs(
             feature_names=("signal", "abs_move"),
-            panel_row={"date": "2026-01-09", "signal": 1.5, "abs_move": 0.02},
+            panel_row={"date": "2026-01-15", "signal": 1.5, "abs_move": 0.02},
         ))
     assert exc.value.code == "LEAKED_FEATURE_NAME"
     assert "abs_move" in str(exc.value)
@@ -247,7 +247,7 @@ def test_planted_leak_driver_name_is_rejected():
         assemble_nightly_source_bundle(**_valid_kwargs(
             driver_name="custom_driver",
             feature_names=("signal", "custom_driver"),
-            panel_row={"date": "2026-01-09", "signal": 1.5, "custom_driver": 0.02},
+            panel_row={"date": "2026-01-15", "signal": 1.5, "custom_driver": 0.02},
         ))
     assert exc.value.code == "LEAKED_FEATURE_NAME"
     assert "custom_driver" in str(exc.value)
@@ -324,12 +324,25 @@ def test_no_answer_field_in_clean_bundle():
 
 
 # --- R2 leakage (item 2): the real stamp/as-of contract ---
+#
+# Second Opus gate (re-review of 042f794): the panel's own "date" column is
+# the EVENT date (engine/features.py::live_features sets "date": event_date),
+# never an observation timestamp -- the baseline fixture's panel_row.date
+# ("2026-01-15") equals calendar_row.event_date, exactly the real shape:
+# a genuine upcoming event, dated strictly after as_of ("2026-01-10"), must
+# be allowed. test_happy_path_builds_expected_bundle already proves this
+# (it uses the unmodified baseline); test_future_event_dates_are_not_post_as_of
+# documents it explicitly.
 
-def test_planted_post_as_of_panel_row_is_rejected():
+def test_planted_wrong_event_panel_row_is_rejected():
+    # The one invariant this module CAN check without a persisted decision
+    # anchor (see _checked_against_as_of's docstring for the escalated gap):
+    # panel_row must describe the SAME event calendar_row names.
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         assemble_nightly_source_bundle(**_valid_kwargs(
             panel_row={"date": "2026-01-11", "signal": 1.5}))
-    assert exc.value.code == "POST_AS_OF_ROW"
+    assert exc.value.code == "PANEL_ROW_WRONG_EVENT"
+    assert "2026-01-11" in str(exc.value) and "2026-01-15" in str(exc.value)
 
 
 def test_missing_fold_start_for_used_tier4_feature_refuses():
@@ -360,6 +373,71 @@ def test_tier4_fold_start_before_as_of_is_allowed():
     assert bundle.feature_vector["pred_abs_move"] == 0.05
 
 
+def test_tier4_band_column_uses_base_metric_fold_start():
+    # Second Opus gate finding #2: a band column (pred_abs_move_p10) has no
+    # "pred_abs_move_p10_fold_start" column in the real schema -- it is
+    # stamped by its BASE metric's own fold_start. A wrong (band-suffixed)
+    # key would raise MISSING_STAGED_INPUT even with the real column staged.
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        feature_names=("signal", "pred_abs_move_p10"),
+        tier4_row={
+            "pred_abs_move_p10": 0.03,
+            "pred_abs_move_fold_start": "2026-01-01",  # base metric's stamp
+        },
+    ))
+    assert bundle.feature_vector["pred_abs_move_p10"] == 0.03
+
+
+def test_tier4_band_column_fold_start_after_as_of_is_rejected():
+    with pytest.raises(NightlySourceBundleRefusal) as exc:
+        assemble_nightly_source_bundle(**_valid_kwargs(
+            as_of="2026-01-10",
+            feature_names=("signal", "pred_abs_move_p10"),
+            tier4_row={
+                "pred_abs_move_p10": 0.03,
+                "pred_abs_move_fold_start": "2026-02-01",
+            },
+        ))
+    assert exc.value.code == "POST_AS_OF_ROW"
+    assert "pred_abs_move_fold_start" in str(exc.value)
+
+
+# --- Second Opus gate finding #2: a NULL Tier-4 forecast is a missing
+# value, not a leakage refusal. Measured against the real
+# tier4_forecasts.parquet: 108,320 of 199,973 pred_abs_move rows are NULL,
+# always paired with a NULL pred_abs_move_fold_start. ---
+
+def test_null_tier4_forecast_with_missing_fold_start_is_allowed():
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        tier4_row={"pred_abs_move": None}))  # no pred_abs_move_fold_start at all
+    assert bundle.feature_vector["pred_abs_move"] is None
+    assert bundle.feature_missing_mask["pred_abs_move"] is False
+
+
+def test_null_tier4_forecast_with_nat_fold_start_is_allowed():
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        tier4_row={"pred_abs_move": float("nan"), "pred_abs_move_fold_start": pd.NaT}))
+    assert math.isnan(bundle.feature_vector["pred_abs_move"])
+    assert bundle.feature_missing_mask["pred_abs_move"] is False
+
+
+def test_real_shaped_mix_of_null_and_non_null_tier4_forecasts_assembles():
+    # A real-shaped tier4_row: some forecasts null (with a null fold_start,
+    # the measured real pairing), some genuinely fit (with a real,
+    # in-range fold_start) -- the bundle must assemble both.
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        feature_names=("signal", "pred_abs_move", "pred_im_t1_d14"),
+        tier4_row={
+            "pred_abs_move": 0.05, "pred_abs_move_fold_start": "2026-01-01",
+            "pred_im_t1_d14": None, "pred_im_t1_d14_fold_start": None,
+        },
+    ))
+    assert bundle.feature_vector["pred_abs_move"] == 0.05
+    assert bundle.feature_vector["pred_im_t1_d14"] is None
+    assert bundle.feature_missing_mask == {
+        "signal": False, "pred_abs_move": False, "pred_im_t1_d14": False}
+
+
 def test_planted_post_as_of_quote_row_is_rejected():
     quote_rows = [dict(row) for row in _valid_kwargs()["quote_rows"]]
     quote_rows[1]["observed_at"] = "2026-01-11"
@@ -388,9 +466,35 @@ def test_future_event_dates_are_not_post_as_of():
 
 
 def test_same_inputs_produce_equal_bundle():
+    # `==` is a valid probe here ONLY because the baseline carries no NaN
+    # pass-through value; see test_same_inputs_with_nan_are_field_identical
+    # for the general case (ARCHITECTURE.md's determinism claim was fixed
+    # to stop overstating `==` as always valid, second Opus gate finding #3).
     first = assemble_nightly_source_bundle(**_valid_kwargs())
     second = assemble_nightly_source_bundle(**_valid_kwargs())
     assert first == second
+
+
+def test_same_inputs_with_nan_are_field_identical_but_not_equal():
+    # Second Opus gate finding #3: with a pass-through NaN (a null Tier-4
+    # forecast), two calls with identical arguments are NOT `==` -- NaN !=
+    # NaN under IEEE 754 -- even though every field was built the same way.
+    # Determinism means reproducibility of the underlying data, not that
+    # bare `==` is a valid equality probe once a NaN is present.
+    # Two DISTINCT NaN objects (not the same reused float): CPython's
+    # container equality has an identity fast-path (`x is x` short-circuits
+    # to True even for a NaN), so reusing one nan object across both calls
+    # would silently pass `==` for the wrong reason and hide the real bug.
+    first = assemble_nightly_source_bundle(**_valid_kwargs(
+        tier4_row={"pred_abs_move": float("nan")}))
+    second = assemble_nightly_source_bundle(**_valid_kwargs(
+        tier4_row={"pred_abs_move": float("nan")}))
+    assert first != second  # bare `==` misreads this as different
+    assert math.isnan(first.feature_vector["pred_abs_move"])
+    assert math.isnan(second.feature_vector["pred_abs_move"])
+    assert first.context == second.context
+    assert first.raw_quotes == second.raw_quotes
+    assert first.feature_missing_mask == second.feature_missing_mask
 
 
 def test_validated_as_of_rejects_none():

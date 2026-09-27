@@ -96,12 +96,17 @@ the checked graph actually uses.
   - `panel_row`, `tier4_row` — one already-staged row apiece from the
     legacy panel/Tier-4 tables for this ticker, plus whatever feature
     columns the caller names in `feature_names`. Neither real table has an
-    `observed_at` column: `panel_row` carries its own row-level `date`
-    column instead (`data/features/panel.parquet`'s real schema, legacy's
-    `_KEY_COLUMNS`); `tier4_row` carries no row-level date at all — each
-    metric column instead stamps its own `"<metric>_fold_start"`
-    (`data/features/tier4_forecasts.parquet`'s real schema), checked only
-    for a name actually used from that row (see Failure semantics).
+    `observed_at` column: `panel_row["date"]` (`data/features/panel.parquet`'s
+    real schema, legacy's `_KEY_COLUMNS`) is the EVENT date, not an
+    observation date — `engine/features.py::live_features` builds its
+    synthetic row with `"date": event_date` — so `panel_row["date"]` must
+    equal `calendar_row["event_date"]` (see Failure semantics); `tier4_row`
+    carries no row-level date at all — each metric column instead stamps
+    its own `"<metric>_fold_start"` (a BAND column such as `"..._p10"` is
+    stamped by its BASE metric's own `fold_start`, not a per-band one — the
+    real schema has only one `fold_start` per metric), checked only for a
+    name actually used AND non-null (a NULL forecast, legacy's own "no
+    forecast," skips this gate — see Failure semantics).
   - `quote_rows` — the Tier-1 option-quote rows in the domain scored for
     this event (each: `right`, `strike`, `expiry`, `bid`, `ask`,
     `observed_at`), plus an optional `quote_status` for the two
@@ -276,28 +281,73 @@ function's — see Invariants (read-only, no I/O).
     is a second, independent layer on top of the feature-name denylist
     above, catching a calculated scoring answer (e.g. `gate_pass`) that is
     not itself a raw panel/Tier-4 source-table column.
+  - **Panel row must describe the same event (`PANEL_ROW_WRONG_EVENT`).**
+    A second Opus review round found that the FIRST version of this fix
+    still refused every real row: `panel_row["date"]` is the EVENT date,
+    not an observation date — `engine/features.py::live_features` builds
+    its synthetic row with `"date": event_date`, and every persisted
+    `panel.parquet` row is likewise keyed by its own event date — so
+    comparing it against `as_of` (as if it were an observation timestamp)
+    refused every genuine upcoming-event row outright; only a row for a
+    DIFFERENT, already-past event ever passed. The one invariant this
+    module can verify from the data it is given: `panel_row["date"]`,
+    normalized by `validated_as_of`, must equal `calendar_row["event_date"]`,
+    likewise normalized → `PANEL_ROW_WRONG_EVENT`, naming both values, if
+    they differ. This check does not depend on `as_of` at all.
   - **Leakage, post-`as_of` rows — the real stamp contract.** Neither
     `panel.parquet` nor `tier4_forecasts.parquet` carries `observed_at`;
-    the prior version of this check compared against a column that does
+    an earlier version of this check compared against a column that does
     not exist on either table. The real contract: `as_of` itself,
-    `calendar_row["calendar_observed_through"]`, `panel_row`'s own `"date"`
-    column, and each `quote_rows` entry's own `observed_at` (quotes DO
-    carry it) are each validated by `validated_as_of` (rejects `None`,
-    `NaT`, a bare number/bool, an unparseable value, or a timezone-aware
-    value — mirroring `engine/v2/ops/native_board_universe.py::
-    _validated_as_of`, issue #16's pattern) and then compared: any strictly
-    after `as_of` → `POST_AS_OF_ROW`, naming the input and its date.
-    `calendar_row`'s `event_date`/`entry_date`/`exit_date`/`expiry` are
-    exempt from this comparison — they describe the (future) event being
-    scored, not a fact observed after `as_of`. `tier4_row` has no row-level
-    date to check here at all: instead, a feature name actually resolved
-    from `tier4_row` is allowed only when that metric's own
-    `"{name}_fold_start"` is staged (else `MISSING_STAGED_INPUT`, naming
-    the feature) and `<= as_of` (else `POST_AS_OF_ROW`, naming the
-    `fold_start` field and its date) — checked per used feature inside
-    `_project_features`, not against the whole row up front. A feature
-    resolved from `panel_row` instead needs no per-feature stamp check,
-    since `panel_row["date"]` already gates the whole row.
+    `calendar_row["calendar_observed_through"]`, and each `quote_rows`
+    entry's own `observed_at` (quotes DO carry it) are each validated by
+    `validated_as_of` (rejects `None`, `NaT`, a bare number/bool, an
+    unparseable value, or a timezone-aware value — mirroring
+    `engine/v2/ops/native_board_universe.py::_validated_as_of`, issue #16's
+    pattern) and then compared: any strictly after `as_of` →
+    `POST_AS_OF_ROW`, naming the input and its date. `calendar_row`'s
+    `event_date`/`entry_date`/`exit_date`/`expiry` are exempt from this
+    comparison — they describe the (future) event being scored, not a fact
+    observed after `as_of`. `panel_row["date"]` is NOT compared against
+    `as_of` here at all (see `PANEL_ROW_WRONG_EVENT` above — it is the
+    event date, an as_of comparison on it is simply the wrong check).
+    `tier4_row` has no row-level date to check here at all: instead, a
+    feature name actually resolved from `tier4_row` AND non-null is
+    allowed only when that metric's own fold_start (its BASE metric's
+    `"<metric>_fold_start"` — a band column such as `"..._p10"` shares its
+    base metric's stamp, since the real schema has no per-band fold_start)
+    is staged (else `MISSING_STAGED_INPUT`, naming the feature) and
+    `<= as_of` (else `POST_AS_OF_ROW`, naming the `fold_start` field and
+    its date) — checked per used feature inside `_project_features`, not
+    against the whole row up front. A resolved value that is legacy's own
+    "no forecast" NULL (`None`, `pandas.NA`, or a float NaN of any flavor)
+    skips this entire gate, whatever its own fold_start holds (present,
+    absent, `NaT`, or dated whenever) — measured against the real
+    `tier4_forecasts.parquet`: 108,320 of 199,973 `pred_abs_move` rows are
+    NULL, always paired with a NULL `pred_abs_move_fold_start` with zero
+    counterexamples, so requiring a fold_start on a null value would
+    refuse every real null row outright. A feature resolved from
+    `panel_row` needs no per-feature stamp check at all — only the
+    whole-row `PANEL_ROW_WRONG_EVENT` check above applies to it.
+  - **Known gap, escalated rather than invented (not fixed by either Opus
+    round).** Neither check above verifies WHEN a panel row's
+    market-derived FEATURE values were actually computed relative to
+    `as_of` — only that the row names the right event
+    (`PANEL_ROW_WRONG_EVENT`). `engine/features.py::live_features` does
+    compute a real decision anchor for its synthetic row (`_as_of`, which
+    can precede `event_date`/`date` for a genuine upcoming-event score),
+    but that anchor is never written into the row values `live_features`
+    returns, and the persisted-panel equivalent
+    (`regime_asof`/`runup_asof`/`orats_asof`, `ANCHOR_COLUMNS`) is
+    explicitly dropped before `panel.parquet` is written
+    (`engine/data/features/panel.py:912-918` — safe to drop only because,
+    for a HISTORICAL row, those all equal `date` by construction, an
+    equivalence that does not hold for a live per-event row). No column
+    survives to a `panel_row` this function can read that records that
+    anchor, so this module cannot check it without inventing a stamp the
+    real data does not carry. Resolving this requires a deliberate,
+    separate interface change (e.g. a caller-supplied decision-anchor
+    parameter this signature does not accept today) and is left for a
+    future PR, not silently patched over here.
   - **Other input validation.** `calendar_row["spot"]` not coercible to
     `float`, non-finite, or `<= 0.0` → `INVALID_SPOT`, naming the value
     found. `feature_names` a bare `str`/`bytes`, not a `Sequence`,
@@ -323,8 +373,21 @@ function's — see Invariants (read-only, no I/O).
     `_quote_map`'s behavior) rather than sorting it, which is still fully
     deterministic for the same `quote_rows` sequence, and dict equality does
     not depend on key order regardless. Two calls with identical arguments
-    produce `SourceBundle` values equal under `==` (the dataclass's
-    structural equality).
+    produce `SourceBundle` values that are field-for-field identical —
+    but NOT necessarily equal under a bare `==` once a pass-through NaN is
+    present (a null Tier-4 forecast, R3 above): `float('nan') != float('nan')`
+    under IEEE 754 even when every field was built the same way (a second
+    Opus review round found this exact claim false by probe:
+    `assemble_nightly_source_bundle(...) == assemble_nightly_source_bundle(...)`
+    reads `False` once `tier4_row` carries a null forecast). Determinism
+    here means reproducibility of the underlying data, not that `==` is a
+    valid equality probe in general — a caller comparing two bundles that
+    may carry a pass-through NaN needs a NaN-aware comparison (e.g.
+    comparing each field with `math.isnan`-aware equality, or a canonical/
+    content-hash comparison), not bare `==`.
+    `tests/test_v2_scoring_nightly_source_bundle.py::
+    test_same_inputs_with_nan_are_field_identical_but_not_equal` proves
+    this directly.
   - **Read-only (R2–R5 do not apply).** The function performs no I/O: every
     staged input arrives as an already-loaded mapping/sequence, and nothing
     it does can mutate a store, a file, or its own arguments.
@@ -417,13 +480,16 @@ flowchart LR
     NAMES --> NAMECHK["feature_names shape\n(non-string sequence,\nnon-empty str, no dupes)"]
     NAMECHK --> LEAKNAMES["feature-name denylist\n(move/abs_move, driver_name,\n*_fold_start, *_model_id,\ntier3_snapshot, pred_iv_crush_30*)"]
 
-    CAL --> VALIDATE["validated_as_of\n(reject tz-aware / bare number /\nunparseable; reject calendar_observed_through,\npanel_row.date, quote observed_at\nafter as_of)"]
-    PANEL --> VALIDATE
+    CAL --> EVENTCHK["panel_row.date ==\ncalendar_row.event_date\n(PANEL_ROW_WRONG_EVENT if not;\nno as_of comparison -- date IS\nthe event date, not an observation)"]
+    PANEL --> EVENTCHK
+
+    CAL --> VALIDATE["validated_as_of\n(reject tz-aware / bare number /\nunparseable; reject calendar_observed_through,\nquote observed_at after as_of)"]
     QUOTES --> VALIDATE
     ASOF --> VALIDATE
 
     VALIDATE --> CONTEXT["context\n(calendar facts)"]
-    LEAKNAMES --> FEATURES["feature_vector (raw pass-through) +\nfeature_missing_mask (presence only)\n(project feature_names from tier4_row/panel_row;\ntier4 use gated by that metric's own\nfold_start <= as_of)"]
+    LEAKNAMES --> FEATURES["feature_vector (raw pass-through) +\nfeature_missing_mask (presence only)\n(project feature_names from tier4_row/panel_row;\na non-null tier4 value is gated by its base\nmetric's fold_start <= as_of; a null value\nskips the gate)"]
+    EVENTCHK --> FEATURES
     TIER4 --> FEATURES
     PANEL --> FEATURES
     QUOTES --> QMAP["quote_domain_map\n(extracted from\ncapture_tier0_corpus._quote_map)"]
