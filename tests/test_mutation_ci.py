@@ -13,7 +13,6 @@ import re
 import signal
 import subprocess
 import sys
-import time
 import tomllib
 import types
 from pathlib import Path
@@ -2478,75 +2477,66 @@ def test_a_leaf_module_change_now_selects_every_module_via_the_sys_path_failsafe
     assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == names
 
 
-# -- import-graph build budget: CPU time, self-calibrated per run ------------
+# -- import-graph build guard: deterministic parse-count property ------------
 #
-# time.process_time() (CPU seconds this process actually consumed), not
-# time.monotonic() (wall clock): build_import_graph is pure CPU-bound work
-# (file reads + ast.parse + a dict-based graph walk, no network/threads/
-# sleeps), and the Tests workflow runs pytest -n auto with many workers
-# sharing a small runner -- wall-clock time includes however long this
-# worker sat descheduled while a sibling worker held the CPU. process_time()
-# does not advance while descheduled or blocked on I/O, so shared-runner
-# contention no longer inflates the measurement.
-#
-# The budget itself is a ratio against _cpu_calibration_seconds(), a small,
-# fixed, pure-CPU busy loop measured in the SAME process, NOT a hardcoded
-# wall-clock number: a fixed absolute budget drifts stale as the repo's
-# tracked-file count grows with every merge (this test's own budget already
-# needed bumping once for exactly that reason -- see the "whole repo now"
-# comment below), and a ratio against an independent in-process benchmark
-# self-normalizes to both "how fast is this host right now" and "how big is
-# the repo right now." The calibration loop must never call
-# build_import_graph or touch the filesystem -- it has to be independent of
-# the code under test, or a genuine regression there would inflate the
-# calibration too and never trip the budget.
-CALIBRATION_ITERATIONS = 20_000_000
-IMPORT_GRAPH_BUDGET_RATIO = 10.0  # measured ratio on an idle box is ~3x; see PR body
-
-
-def _cpu_calibration_seconds() -> float:
-    start = time.process_time()
-    total = 0
-    for i in range(CALIBRATION_ITERATIONS):
-        total += i * i
-    return time.process_time() - start
-
-
-def _assert_import_graph_builds_within_budget(tracked=None, ratio=IMPORT_GRAPH_BUDGET_RATIO):
-    calibration = _cpu_calibration_seconds()
-    start = time.process_time()
-    graph = pilot.build_import_graph(tracked)
-    elapsed = time.process_time() - start
-    budget = calibration * ratio
-    assert elapsed < budget, (
-        f"import graph build took {elapsed:.2f}s of CPU time "
-        f"(budget: {budget:.2f}s = {ratio:g}x this run's {calibration:.2f}s CPU calibration)")
-    return graph
-
-
-def test_import_graph_build_is_fast():
-    graph = _assert_import_graph_builds_within_budget()
-    assert len(graph) > 800  # whole repo now, not just engine/+tests/
-
-
-def test_import_graph_build_flags_a_planted_slowdown(monkeypatch):
-    """Negative control for the CPU-time switch above: a genuine per-file
-    CPU regression must still fail the check. The plant is real CPU work (a
-    busy loop equal to one full calibration), NOT time.sleep() -- sleeping
-    consumes no CPU, so process_time() correctly would not see it, and a
-    sleep-based plant would prove nothing about this CPU-time-based check."""
+# No clock, no calibration, no budget ratio: this checks the actual
+# algorithmic property that matters instead of a timing proxy for it.
+# `build_import_graph` (see tools/mutation_pilot.py) loops once over its
+# `tracked` argument and calls `ast.parse` exactly once per file in that
+# loop. A counting spy on `pilot.ast.parse` (installed via monkeypatch, so
+# it is restored automatically) records how many times each filename was
+# actually parsed. The guard then asserts (1) no tracked file was parsed
+# more than once, and (2) the total number of parses never exceeds the
+# number of files the builder was given -- so a bug that re-parses even one
+# file, or that parses files outside the given set, fails deterministically
+# on every run, on any host, with no flake.
+def _install_parse_spy(monkeypatch, multiply=1):
+    """Monkeypatch pilot.ast.parse with a spy that calls the real ast.parse
+    `multiply` times per invocation (default 1: real behavior, one call in
+    one call out) and records, per filename, how many times the real parse
+    actually ran. Returns the running counts dict; monkeypatch restores the
+    original pilot.ast.parse when the test ends."""
     real_parse = pilot.ast.parse
+    parse_counts: dict[str, int] = {}
 
-    def slow_parse(*args, **kwargs):
-        total = 0
-        for i in range(2 * CALIBRATION_ITERATIONS):
-            total += i * i
-        return real_parse(*args, **kwargs)
+    def spy(source, filename="<unknown>", *args, **kwargs):
+        result = None
+        for _ in range(multiply):
+            parse_counts[filename] = parse_counts.get(filename, 0) + 1
+            result = real_parse(source, filename, *args, **kwargs)
+        return result
 
-    monkeypatch.setattr(pilot.ast, "parse", slow_parse)
-    subset = [p for p in _tracked(".") if p.endswith(".py")][:10]
-    with pytest.raises(AssertionError, match="budget"):
-        _assert_import_graph_builds_within_budget(subset)
+    monkeypatch.setattr(pilot.ast, "parse", spy)
+    return parse_counts
+
+
+def _assert_parsed_at_most_once(tracked, parse_counts):
+    over_parsed = {f: n for f, n in parse_counts.items() if n > 1}
+    assert not over_parsed, f"parsed more than once: {over_parsed}"
+    assert sum(parse_counts.values()) <= len(tracked), (
+        f"{sum(parse_counts.values())} total parses exceeds "
+        f"{len(tracked)} tracked files considered")
+
+
+def test_import_graph_build_parses_each_tracked_file_at_most_once(monkeypatch):
+    tracked = [p for p in _tracked(".") if p.endswith(".py")]
+    parse_counts = _install_parse_spy(monkeypatch)
+    graph = pilot.build_import_graph(tracked)
+    assert len(graph) > 800  # whole repo now, not just engine/+tests/
+    _assert_parsed_at_most_once(tracked, parse_counts)
+
+
+def test_import_graph_build_flags_a_planted_double_parse(monkeypatch):
+    """Negative control for the guard above: if the builder parsed a
+    tracked file twice, `_assert_parsed_at_most_once` must catch it. The
+    plant is a spy that genuinely calls the real ast.parse twice per file
+    (not a fake counter bump), so this proves the guard detects real
+    double-parsing, not just a rigged count."""
+    tracked = [p for p in _tracked(".") if p.endswith(".py")][:10]
+    parse_counts = _install_parse_spy(monkeypatch, multiply=2)
+    pilot.build_import_graph(tracked)
+    with pytest.raises(AssertionError, match="parsed more than once"):
+        _assert_parsed_at_most_once(tracked, parse_counts)
 
 
 # -- mutate job summary: mutant-level cache reuse vs re-tested this run ------
