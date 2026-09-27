@@ -303,6 +303,25 @@ its 330-minute step timeout.
 | weekly (gremlins Sun 05:23 UTC, mutmut Sun 22:23 UTC — staggered) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
 
+- **Static analysis is conservative, not sound.** The import-graph
+  classifier used above (`build_import_graph`/`_is_dynamic_file`) only
+  resolves the three shapes named in the table row; anything else fails
+  the whole file DYNAMIC rather than guessing narrower. That is
+  conservative for the constructs it recognizes, NOT a sound analysis in
+  general -- see [issue #42](https://github.com/yshewchuk/investment-validation/issues/42)
+  for constructs it does not recognize at all (string-target
+  `monkeypatch.setattr`/`mock.patch`, `pytest.importorskip`,
+  `getattr`-based imports, `__import__` via `globals()`/`builtins`,
+  `asyncio.create_subprocess_exec`, `__path__`/`sys.meta_path` edits,
+  `pytest_plugins` outside a conftest.py or under an `if`, and
+  `from pkg import *` re-exports). None of those holes matter today:
+  `tests/conftest.py` itself always classifies DYNAMIC (its own
+  `sys.path.insert`), every test file's closure includes
+  `tests/conftest.py`, and so every non-inert PR change already selects
+  every enabled module regardless of the holes. `tests/test_mutation_ci.py`
+  has a synthetic-tree test that fails loudly, naming issue #42, the
+  moment `tests/conftest.py` stops classifying DYNAMIC.
+
 - **Scope.** All of `engine/v2`, split into 23 modules plus the six pilot
   modules. The only legacy files are the pilot's `engine/pnl_sim.py` and
   `engine/models/no_fit.py`. `contracts` (with `engine/v2/__init__.py` and

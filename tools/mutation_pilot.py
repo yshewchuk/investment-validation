@@ -290,18 +290,32 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 # single literal call `importlib.import_module("<absolute.name>")`
 # (`_allowed_import_module_call`); or a plain, unannotated
 # `pytest_plugins = [...]` assignment of string literals, at a conftest.py's
-# top level only (`_pytest_plugins_targets`). A file is DYNAMIC -- and,
-# sound by construction, depends on EVERY OTHER TRACKED FILE, no narrower
-# edge attempted -- the moment its AST references, in ANY form (an import,
-# an alias, an attribute access, or a bare name), `sys.path`, `site`,
-# `runpy`, `subprocess`, `multiprocessing`, `pkgutil`, a dynamic-exec `os`
-# function, `importlib` used any way other than the one literal shape, or
-# one of a short list of standalone dangerous names -- see `_is_dynamic_file`
-# for the exact list. `subprocess` and every loader construct
-# (`spec_from_file_location`, `SourceFileLoader`, `runpy.run_path`) are
-# dropped ENTIRELY as of this round: no static resolution of a subprocess
-# target or a loader's file-path argument is attempted any more, literal or
-# not -- any reference fails the whole file safe outright.
+# top level only (`_pytest_plugins_targets`). A file is DYNAMIC -- and
+# depends on EVERY OTHER TRACKED FILE, no narrower edge attempted -- the
+# moment its AST references, in ANY form (an import, an alias, an attribute
+# access, or a bare name), `sys.path`, `site`, `runpy`, `subprocess`,
+# `multiprocessing`, `pkgutil`, a dynamic-exec `os` function, `importlib`
+# used any way other than the one literal shape, or one of a short list of
+# standalone dangerous names -- see `_is_dynamic_file` for the exact list.
+# `subprocess` and every loader construct (`spec_from_file_location`,
+# `SourceFileLoader`, `runpy.run_path`) are dropped ENTIRELY as of this
+# round: no static resolution of a subprocess target or a loader's
+# file-path argument is attempted any more, literal or not -- any reference
+# fails the whole file safe outright.
+#
+# This is conservative for the known set of constructs above, NOT sound in
+# general: see https://github.com/yshewchuk/investment-validation/issues/42
+# for constructs it does not recognize at all (string-target
+# monkeypatch.setattr/mock.patch, pytest.importorskip, getattr-based
+# imports of importlib/sys, __import__ via globals()/builtins, asyncio
+# subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
+# outside a conftest.py or under an `if`, and `from pkg import *`
+# re-exports). None of that matters today: `tests/conftest.py` itself
+# always classifies DYNAMIC (its own `sys.path.insert`), every test file's
+# closure includes `tests/conftest.py`, and so every non-inert PR change
+# already selects all enabled modules regardless of those holes. A
+# synthetic-tree test in `tests/test_mutation_ci.py` fails loudly, naming
+# issue #42, the moment `tests/conftest.py` stops classifying DYNAMIC.
 def _tracked_roots(tracked_set: set[str]) -> set[str]:
     """Every top-level package/module name present in `tracked_set` -- the
     first path segment of each tracked `.py` file (or, for a tracked file
@@ -591,8 +605,19 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     A file that is DYNAMIC by `_is_dynamic_file`'s allowlist (or has a
     non-literal/annotated conftest.py `pytest_plugins`) skips this precise
     resolution entirely and instead depends on EVERY OTHER TRACKED FILE
-    (`edges |= tracked_set - {rel}`) -- sound by construction, never a
-    narrower guess. Every tracked file is a key, even one with no
+    (`edges |= tracked_set - {rel}`), never a narrower guess. This
+    classification is conservative for the constructs `_is_dynamic_file`
+    recognizes, NOT sound in general -- see
+    https://github.com/yshewchuk/investment-validation/issues/42 for
+    constructs it misses entirely (string-target monkeypatch/mock.patch,
+    pytest.importorskip, getattr-based imports, __import__ via
+    globals()/builtins, asyncio subprocess-exec calls, __path__/meta_path
+    edits, pytest_plugins outside a conftest.py, `from pkg import *`).
+    Today `tests/conftest.py` itself is always DYNAMIC (its own
+    `sys.path.insert`), so every test file's closure already includes it
+    and every non-inert change already selects every enabled module -- the
+    holes in issue #42 are masked by that fail-safe until something narrows
+    selection past it. Every tracked file is a key, even one with no
     resolvable imports (an empty set), so `module_dependency_closure` can
     always look it up. Raises `SyntaxError` (via `ast.parse`) on the first
     file that fails to parse -- a real syntax error in the current tree,

@@ -1987,6 +1987,30 @@ def test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert():
     assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}
 
 
+def test_conftest_dynamic_classification_guards_static_analysis_holes():
+    # See https://github.com/yshewchuk/investment-validation/issues/42:
+    # `_is_dynamic_file`'s allowlist has several known holes (string-target
+    # monkeypatch.setattr/mock.patch, pytest.importorskip, getattr-based
+    # imports of importlib/sys, __import__ via globals()/builtins, asyncio
+    # subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
+    # outside a conftest.py or under an `if`, and `from pkg import *`
+    # re-exports). None of them matter today, because tests/conftest.py
+    # itself always classifies DYNAMIC (its own sys.path.insert), so every
+    # test file's dependency closure already includes tests/conftest.py and
+    # mutation selection can never narrow past those holes. This is a
+    # dedicated guard, separate from
+    # test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert
+    # above, so a failure here points straight at issue #42 instead of only
+    # restating the fail-safe fact.
+    graph = pilot.build_import_graph()
+    tracked_set = set(graph)
+    assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}, (
+        "tests/conftest.py is no longer fail-safe; mutation selection "
+        "would narrow and expose the static-analysis holes in issue #42. "
+        "Close them first."
+    )
+
+
 def test_build_import_graph_a_spec_from_file_location_call_always_fails_safe(tmp_path, monkeypatch):
     # Loader constructs get no static path evaluation any more, literal or
     # not -- ANY reference to `spec_from_file_location` fails the whole file

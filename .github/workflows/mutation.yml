@@ -139,6 +139,18 @@ jobs:
           # push/schedule/dispatch never set CHANGED_ARGS, so the matrix
           # command below stays byte-identical to before (an empty unquoted
           # expansion contributes zero argv words).
+          # This static analysis is conservative for the constructs named
+          # above, NOT sound in general -- see issue #42 for constructs it
+          # misses entirely (string-target monkeypatch/mock.patch,
+          # importorskip, getattr-based imports, __import__ via
+          # globals/builtins, asyncio subprocess-exec, __path__/meta_path
+          # edits, pytest_plugins outside a conftest.py, from-pkg-import-star
+          # re-exports). Today tests/conftest.py itself always classifies
+          # DYNAMIC (its own sys.path.insert), so every test file's closure
+          # already includes it and every non-inert PR change already
+          # selects every enabled module regardless of those holes;
+          # tests/test_mutation_ci.py has a synthetic-tree test that fails
+          # loudly, naming issue #42, if that ever stops being true.
           CHANGED_ARGS=""
           if [ "$EVENT" = "pull_request" ]; then
             CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
