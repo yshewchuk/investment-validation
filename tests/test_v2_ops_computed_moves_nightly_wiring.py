@@ -32,7 +32,7 @@ from engine.v2.ops.calendar_moves_jobs import (
 )
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.incremental_data import AcquisitionOutcome
-from engine.v2.ops.profiles import profile_named
+from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.nightly import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     NATIVE_REFRESH_ACTION,
@@ -630,3 +630,34 @@ def test_tick_survives_an_identity_lookup_exception_and_legacy_dispatch_still_ru
     finally:
         service.close()
         conn.close()
+
+
+def test_reconcile_submits_through_the_real_production_service_construction(tmp_path, monkeypatch):
+    """Opus re-gate, confirmed real (issue #63): Service is constructed
+    with DEFAULT_POLICY in production -- engine/v2/ops/cli.py:574's
+    ``serve`` command and engine/v2/ops/nightly_trigger.py:559 both do
+    exactly this, never a NamespacePolicy stand-in. DEFAULT_POLICY is a
+    bare ResourcePolicy (.profiles, for claim_next) with no .allows() --
+    the method submission.submit's own admission check
+    (validate_request) calls. Before the fix, threading self.policy
+    straight into submit_computed_moves_refresh_if_ready made every real
+    submission attempt raise AttributeError (caught by this method's own
+    try/except, so no job was ever actually queued). This test builds
+    Service exactly as those two production entrypoints do -- not a fake
+    NamespacePolicy -- and proves a real submission goes through."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAPL"], {}))
+
+    service = Service(conn, tmp_path, registry(), DEFAULT_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    service._reconcile_computed_moves_refresh()
+
+    job_id = job_id_for("shadow", _computed_moves_refresh_key("2026-09-18"))
+    row = conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    assert row is not None, "submission never reached the catalog -- see issue #63"
+    assert row["state"] == "queued"
+    assert service._computed_moves_memo is None  # cleared: a job now exists

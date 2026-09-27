@@ -413,9 +413,22 @@ class Service:
         crash the tick or block dispatch of any other job. See
         ``nightly.submit_computed_moves_refresh_if_ready`` and
         ARCHITECTURE.md "Outputs"/"Failure semantics" for the full account.
+
+        Submits under its OWN ``NamespacePolicy``, never ``self.policy``
+        (Opus re-gate, confirmed real: ``cli.py``'s ``serve``/
+        ``nightly_trigger.py`` construct ``Service`` with ``DEFAULT_POLICY``,
+        a ``ResourcePolicy`` -- ``.profiles`` for ``claim_next``, but no
+        ``.allows()``, which ``submission.submit`` needs). Every OTHER
+        production submission site (``cli.py``'s ``_submit_command``/
+        ``_submit_nightly``/HTTP submit/adhoc-rescore/snapshot-submit/
+        decisions-supersede) already builds its own ad-hoc
+        ``NamespacePolicy`` inline, never from ``Service``'s resource
+        policy; this matches that, scoped to just ``"shadow"`` -- the only
+        namespace this stage ever targets.
         """
         from engine.v2.ops.nightly import submit_computed_moves_refresh_if_ready
         from engine.v2.ops.snapshot_stages import _catalog_path
+        from engine.v2.ops.submission import NamespacePolicy
 
         now = self.clock.monotonic()
         identity = self._computed_moves_identity_or_none(now)
@@ -428,9 +441,10 @@ class Service:
                 or now < memo["not_before"]):
             self._computed_moves_memo = memo
             return
+        policy = NamespacePolicy({"operator": frozenset({"shadow"})})
         try:
             receipt = submit_computed_moves_refresh_if_ready(
-                self.conn, self.registry, self.policy, self.store,
+                self.conn, self.registry, policy, self.store,
                 catalog_path=_catalog_path(self.conn), objects_root=str(self.root),
                 clock=self.clock)
         except Exception as exc:
