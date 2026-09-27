@@ -186,8 +186,9 @@ def test_model_binding_hash_mismatch_raises_model_not_ready_never_falls_back(tmp
     release = _stage_and_promote(tmp_path)
     member_path = _dep_root(tmp_path) / release.bindings[0].members[0].path
     member_path.write_bytes(_linear_payload(intercept=99.0, coefficient=98.0))
-    with pytest.raises(ModelNotReady):
+    with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
+    assert error.value.member_id.startswith("model:")
 
 
 def test_missing_state_catalog_raises_model_not_ready(tmp_path):

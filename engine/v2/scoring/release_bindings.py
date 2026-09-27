@@ -224,7 +224,10 @@ def _verify_object_bytes(dep_root: Path, member_id: str, name: str, path: str,
         raise ModelNotReady(member_id, f"{name}: object path escapes the deployment root")
     if not target.is_file():
         raise ModelNotReady(member_id, f"{name}: missing object at {path}")
-    payload = target.read_bytes()
+    try:
+        payload = target.read_bytes()
+    except OSError as exc:
+        raise ModelNotReady(member_id, f"{name}: cannot read object at {path}: {exc}") from exc
     actual = "sha256:" + hashlib.sha256(payload).hexdigest()
     if actual != expected_hash:
         raise ModelNotReady(member_id, f"{name}: object hash disagrees with the pointer")
@@ -295,12 +298,21 @@ def _resolve_state_group(
 ) -> dict[str, tuple]:
     grouped: dict[str, list] = {}
     for row in catalog.get("members", ()):
+        if not isinstance(row, Mapping):
+            raise ModelNotReady("phase5_release.json", "a members row is not a JSON object")
         member_id = row.get("member_id", "")
         if not matches(member_id):
             continue
-        if row.get("status") != "STAGED" or not row.get("objects"):
+        objects = row.get("objects")
+        if row.get("status") != "STAGED" or not objects:
             raise ModelNotReady(member_id, f"status={row.get('status')!r}, no staged objects")
-        for obj in row["objects"]:
+        if not isinstance(objects, list):
+            raise ModelNotReady(member_id, "objects must be a JSON array")
+        for obj in objects:
+            if (not isinstance(obj, Mapping)
+                    or not isinstance(obj.get("path"), str)
+                    or not isinstance(obj.get("content_hash"), str)):
+                raise ModelNotReady(member_id, f"malformed object reference: {obj!r}")
             artifact = loader(dep_root, member_id, obj)
             grouped.setdefault(artifact.strategy, []).append(artifact)
     return {strategy: tuple(items) for strategy, items in grouped.items()}
@@ -324,7 +336,10 @@ def _load_recalibration(dep_root: Path, member_id: str, obj: Mapping):
 
 def _load_analog(dep_root: Path, member_id: str, obj: Mapping):
     try:
-        return FrozenStateLoader(dep_root).load(
+        state = FrozenStateLoader(dep_root).load(
             FrozenStateRef(path=obj["path"], content_hash=obj["content_hash"]))
     except FrozenStateError as exc:
         raise ModelNotReady(member_id, str(exc)) from exc
+    if not isinstance(state, BoardAnalogPoolArtifact):
+        raise ModelNotReady(member_id, f"expected a board analog pool, got {type(state).__name__}")
+    return state
