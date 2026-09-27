@@ -12,9 +12,11 @@ module) imports live in ``engine.v2.ops.unit_receipts`` (P6 slice-4c split,
 Part 0); this module re-exports them under their original names for anything
 that still imports them from here.
 
-This job kind has no ``nightly.py`` ``GRAPH``/``OPTIONAL`` entry yet -- see
-``ARCHITECTURE.md`` "Outputs" -- so today it is reachable only through the
-general job-submission pipeline, not an ordinary nightly.
+``nightly.py``'s ``GRAPH`` carries a ``"computed_moves_refresh": ("refresh",)``
+node and ``OPTIONAL`` includes it (Part 4), but no nightly submission path
+ever builds a job for it: it is submitted only by ``supervisor.Service``'s
+own tick-loop sidecar, after a native ``"refresh"`` job has already
+succeeded -- see ``ARCHITECTURE.md`` "Outputs"/"Failure semantics".
 """
 from __future__ import annotations
 

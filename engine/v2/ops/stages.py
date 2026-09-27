@@ -239,8 +239,10 @@ def _decisions_supersede_kind():
 def _calendar_moves_kinds() -> list:
     """S4C Part 3: the natively-owned computed_moves refresh job kind. It
     reads only the immutable object store and a read-only catalog connection,
-    so it carries no legacy-store lease. It has no nightly.py GRAPH/OPTIONAL
-    entry yet (Part 4) -- see ARCHITECTURE.md "Outputs". forward_calendar_refresh
+    so it carries no legacy-store lease. nightly.py's GRAPH/OPTIONAL do carry
+    this stage (Part 4), but it is submitted only by supervisor.Service's own
+    tick loop, never by build_legacy_job_requests -- see ARCHITECTURE.md
+    "Outputs". forward_calendar_refresh
     is not registered here: see ARCHITECTURE.md and issue #52 (no attempt-fence
     check in forward_calendar_store's commit path -- the fence is a
     prerequisite for registering that kind as a job)."""

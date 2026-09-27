@@ -40,9 +40,13 @@ GRAPH = {
     "projection": ("export", "model_evidence"), "selfcheck": ("projection",),
     "engineering": (), "publication": ("selfcheck", "engineering"),
     "delivery": ("publication",), "backup": ("decision_commit",),
-    # S4C Part 4: both "refresh" and "computed_moves_refresh" read
-    # daily_market off the same pinned parent snapshot, so this stage runs
-    # after "refresh". forward_calendar_refresh gets no GRAPH node -- see
+    # S4C Part 4 (revised after Opus BLOCK(3) on dc7f9360): this node is
+    # topological documentation for run_shadow_nightly's whole-graph walk
+    # only. No submission path builds a job from it -- see
+    # ARCHITECTURE.md "Outputs"/"Failure semantics" for
+    # supervisor.Service._reconcile_computed_moves_refresh, the ONLY
+    # place a computed_moves_refresh job is ever submitted.
+    # forward_calendar_refresh gets no GRAPH node at all -- see
     # calendar_moves_jobs.py's own module docstring (issue #52).
     "computed_moves_refresh": ("refresh",),
     # spec_ns_c: the per-night native-vs-legacy parity report, parented on
@@ -154,14 +158,15 @@ PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate
 #: stage existed: "refresh" is never even in ``_DAG_STAGES``.
 NATIVE_REFRESH_ACTION = "incremental_refresh"
 
-#: S4C Part 4: the native-mode stage -> job-kind map. "refresh" is the
-#: daily_market kind; "computed_moves_refresh" is its own job kind, never a
-#: legacy_* action. Only a plan that pins refresh_mode="native" reaches this
-#: map; legacy mode leaves _action_for behaviour, and therefore the whole
-#: DAG, byte-identical to before these stages existed.
+#: S4C Part 4 (revised after Opus BLOCK(3)): the native-mode stage ->
+#: job-kind map. "computed_moves_refresh" is deliberately NOT here any
+#: more -- build_legacy_job_requests never builds a job for it in any
+#: mode; supervisor.Service's own tick loop is the only submitter (see
+#: ARCHITECTURE.md "Outputs"). Only a plan that pins refresh_mode="native"
+#: reaches this map; legacy mode leaves _action_for behaviour, and
+#: therefore the whole DAG, byte-identical to before "refresh" existed.
 _NATIVE_ACTION_STAGES = {
     "refresh": NATIVE_REFRESH_ACTION,
-    COMPUTED_MOVES_REFRESH_ACTION: COMPUTED_MOVES_REFRESH_ACTION,
 }
 _NATIVE_REFRESH_ACTIONS = frozenset(_NATIVE_ACTION_STAGES.values())
 
@@ -606,10 +611,14 @@ def _build_native_refresh_plan(plan, context_tickers, *, catalog_path, objects_r
         calls_per_unit=ORATS_CALLS_PER_DAILY_MARKET_UNIT)
 
 
-def _build_native_computed_moves_plan(plan, context_tickers, *, catalog_path, objects_root,
+def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
                                       conn, store, clock):
-    """S4C Part 4: the production computed_moves ``RefreshPlan``, built from
-    the shadow head.
+    """S4C Part 4 (revised after Opus BLOCK(3)): the production computed_moves
+    ``RefreshPlan``, built against the CURRENT shadow head -- the only
+    caller, ``submit_computed_moves_refresh_if_ready``, calls this after
+    confirming a native "refresh" job already succeeded, so "current" here
+    always means "the head refresh just committed", never a head pinned at
+    some earlier, possibly stale, plan-build time.
 
     One ``RefreshUnit`` per scoreable target ticker -- the same denominator
     ``computed_moves_store.run_computed_moves_refresh`` recomputes at run
@@ -621,7 +630,9 @@ def _build_native_computed_moves_plan(plan, context_tickers, *, catalog_path, ob
     stage is OPTIONAL, so each of those is a graceful "nothing to submit this
     run", never a raised refusal (contrast ``_build_native_refresh_plan``
     above, which raises for the same missing-catalog/missing-head cases
-    because "refresh" is required).
+    because "refresh" is required). ``catalog_path``/``objects_root``/
+    ``clock`` are accepted for signature symmetry with the other native
+    builders in this module; none is read by this body.
     """
     from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
     from engine.v2.data.repository import Repository
@@ -639,7 +650,6 @@ def _build_native_computed_moves_plan(plan, context_tickers, *, catalog_path, ob
     if ("earnings_events" not in snapshot.table_versions
             or "daily_market" not in snapshot.table_versions):
         return None
-    as_of = plan["session"]
     targets, _report = computed_moves_store.target_tickers_from_snapshot(
         repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
     if not targets:
@@ -719,18 +729,14 @@ def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
     stages = tuple(stage for stage in stages if stage not in NO_JOB_STAGES)
     if snapshot is not None:
         stages = ("materialize",) + stages
-    if refresh_mode == "native":
-        native = tuple(stage for stage in ("refresh", COMPUTED_MOVES_REFRESH_ACTION)
-                       if stage not in stages)
-        stages = native + stages
-    else:
-        # Legacy mode must never build a kind for computed_moves_refresh: a
-        # prereq-inclusive plan document names it (it is a real GRAPH node),
-        # but only native mode has the job kind to build it. "refresh" is
-        # kept -- this is the pre-existing legacy include_prerequisites
-        # behaviour, unchanged.
-        stages = tuple(stage for stage in stages
-                       if stage not in _NATIVE_ACTION_STAGES or stage == "refresh")
+    if refresh_mode == "native" and "refresh" not in stages:
+        stages = ("refresh",) + stages
+    # computed_moves_refresh is never in this function's output, in either
+    # mode (S4C Part 4, revised after Opus BLOCK(3)): it is a real GRAPH
+    # node (a prereq-inclusive plan["order"] walk names it), but no
+    # submission path builds a kind for it any more -- supervisor.Service's
+    # own tick loop is the only submitter (see ARCHITECTURE.md "Outputs").
+    stages = tuple(stage for stage in stages if stage != COMPUTED_MOVES_REFRESH_ACTION)
     return stages
 
 
@@ -756,41 +762,95 @@ def _native_refresh_request(plan, key, refresh_plan_obj, kind, implementation_re
         conn=conn, store=store, clock=clock)
 
 
-def _native_computed_moves_request(plan, key, kind, implementation_ref, environment_ref,
-                                   catalog_path, objects_root, conn, store, clock,
-                                   context_tickers):
-    """S4C Part 4: build the ``computed_moves_refresh`` job, or ``None`` when
-    the pinned parent snapshot has no scoreable target -- the same
-    graceful-degradation ``OPTIONAL`` already gives every native stage.
-    """
-    from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+def _computed_moves_refresh_key(as_of):
+    """S4C Part 4 (revised): session-only, never scope-qualified -- see
+    ``submit_computed_moves_refresh_if_ready``'s own docstring for why."""
+    return "nightly:" + as_of + ":computed_moves_refresh"
 
-    catalog_path = catalog_path if catalog_path is not None else plan.get("catalog_path")
-    objects_root = objects_root if objects_root is not None else plan.get("objects_root")
+
+def _session_from_refresh_key(idempotency_key):
+    """Recover the session ``build_legacy_job_requests`` encoded into a
+    native "refresh" job's OWN idempotency key
+    (``"nightly:<session>:<scope_hash>:refresh"``) -- the only place a
+    native refresh's session is recorded; ``RefreshParameters`` has no
+    ``as_of`` field. Returns ``None`` for anything that does not match this
+    module's own key format exactly."""
+    parts = idempotency_key.split(":")
+    if len(parts) == 4 and parts[0] == "nightly" and parts[3] == "refresh":
+        return parts[1]
+    return None
+
+
+def _build_computed_moves_refresh_request(as_of, key, *, catalog_path, objects_root,
+                                          conn, store, clock):
+    """S4C Part 4 (revised): the ``computed_moves_refresh`` ``SubmitRequest``
+    for one session, or ``None`` when there is nothing to submit -- see
+    ``submit_computed_moves_refresh_if_ready``, the only caller."""
+    from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+
     built = _build_native_computed_moves_plan(
-        plan, context_tickers, catalog_path=catalog_path, objects_root=objects_root,
+        as_of, catalog_path=catalog_path, objects_root=objects_root,
         conn=conn, store=store, clock=clock)
     if built is None:
         return None
     refresh_plan_obj, expected_ids = built
-    parameters = CalendarMovesParameters(expected_ids=expected_ids, as_of=plan["session"])
+    parameters = CalendarMovesParameters(expected_ids=expected_ids, as_of=as_of)
+    implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
+    environment_ref = content_hash(
+        environment_identity(_thread_count(COMPUTED_MOVES_REFRESH_ACTION)))
     return _refresh_submit_request(
-        key, refresh_plan_obj, kind, implementation_ref, environment_ref,
+        key, refresh_plan_obj, COMPUTED_MOVES_REFRESH_ACTION, implementation_ref, environment_ref,
         catalog_path=catalog_path, objects_root=objects_root,
         conn=conn, store=store, clock=clock, parameters=parameters)
 
 
-def _native_request_for(kind, plan, key, refresh_plan_obj, implementation_ref,
-                        environment_ref, catalog_path, objects_root, conn, store, clock,
-                        context_tickers):
-    """S4C Part 4: dispatch one native refresh stage to its kind's own builder."""
-    if kind == NATIVE_REFRESH_ACTION:
-        return _native_refresh_request(
-            plan, key, refresh_plan_obj, kind, implementation_ref, environment_ref,
-            catalog_path, objects_root, conn, store, clock)
-    return _native_computed_moves_request(
-        plan, key, kind, implementation_ref, environment_ref,
-        catalog_path, objects_root, conn, store, clock, context_tickers)
+def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, catalog_path,
+                                           objects_root, clock):
+    """S4C Part 4 (revised after Opus BLOCK(3) on ``dc7f9360``): the ONLY
+    place ``computed_moves_refresh`` is ever submitted. Called every
+    ``supervisor.Service.tick()`` (``Service._reconcile_computed_moves_refresh``),
+    never by ``build_legacy_job_requests``, which never builds a job for
+    this stage in any mode any more.
+
+    See ARCHITECTURE.md "Outputs"/"Failure semantics" for the full R1-R6
+    account of why this moved out of the shared native-stage graph
+    submission (both native jobs pinning the same head at plan-build time
+    could race or fail each other against ``_check_head_expectation``, and
+    ``submit_graph``'s all-or-nothing insert let an optional-stage problem
+    refuse the REQUIRED "refresh" job with it) and into its own, later,
+    single-node submission that always resolves the CURRENT head -- the one
+    "refresh" just committed, never one pinned earlier.
+
+    Returns the new ``JobReceipt`` on submission, or ``None`` when there is
+    nothing to do yet (no catalog, no succeeded "refresh" this function can
+    key a session off, no scoreable target, or today's session already has
+    a job under this key, in any state -- see ``_computed_moves_refresh_key``).
+    Any exception past that point is the caller's ``Service`` to catch.
+    """
+    from engine.v2.ops.submission import job_id_for, submit
+
+    if conn is None:
+        return None
+    latest = conn.execute(
+        "SELECT idempotency_key FROM jobs WHERE kind = ? AND state = 'succeeded' "
+        "ORDER BY updated_at DESC LIMIT 1", (NATIVE_REFRESH_ACTION,)).fetchone()
+    if latest is None:
+        return None
+    as_of = _session_from_refresh_key(latest["idempotency_key"])
+    if as_of is None:
+        return None
+    key = _computed_moves_refresh_key(as_of)
+    job_id = job_id_for("shadow", key)
+    exists = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    if exists is not None:
+        return None
+    request = _build_computed_moves_refresh_request(
+        as_of, key, catalog_path=catalog_path, objects_root=objects_root,
+        conn=conn, store=store, clock=clock)
+    if request is None:
+        return None
+    return submit(conn, registry, policy, request, clock=clock)
 
 
 def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, year_end,
@@ -878,9 +938,9 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
         keys[stage] = job_id_for("shadow", key)
         kind = _action_for(stage, refresh_mode=refresh_mode)
         if kind in _NATIVE_REFRESH_ACTIONS:
-            request = _native_request_for(
-                kind, plan, key, refresh_plan_obj, implementation_ref, environment_ref,
-                catalog_path, objects_root, conn, store, clock, context_tickers)
+            request = _native_refresh_request(
+                plan, key, refresh_plan_obj, kind, implementation_ref, environment_ref,
+                catalog_path, objects_root, conn, store, clock)
             if request is not None:
                 requests.append(request)
             continue

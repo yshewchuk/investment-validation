@@ -192,6 +192,9 @@ class Service:
         #: problem actually printed, so a persisting problem prints once
         #: rather than on every ~1s tick (2026-09-14 second review fix).
         self._last_publication_status_problem = None
+        #: same dedup, for _reconcile_computed_moves_refresh (S4C Part 4,
+        #: revised after Opus BLOCK(3)).
+        self._last_computed_moves_problem = None
 
     def start(self):
         if not self.lock.acquire():
@@ -229,6 +232,7 @@ class Service:
         if claim:
             self._launch(claim)
         self._reconcile_publication_status()
+        self._reconcile_computed_moves_refresh()
         return bool(self.running or claim)
 
     def _reconcile_publication_status(self):
@@ -265,6 +269,40 @@ class Service:
                 return
             self._last_publication_status_problem = problem_key
             print(json.dumps({"event": "publication_status_reconcile_failed",
+                              "problem": {field: to_document(problem)[field]
+                                          for field in ("code", "category", "retryable", "message")}}))
+
+    def _reconcile_computed_moves_refresh(self):
+        """S4C Part 4 (revised after Opus BLOCK(3) on ``dc7f9360``): the ONLY
+        place ``computed_moves_refresh`` is submitted -- never bundled into
+        ``build_legacy_job_requests``'s single ``submit_graph`` call, so it
+        can never race or fail the required "refresh" stage
+        (``_check_head_expectation`` rejects whichever native job commits
+        its pinned head second). Called every tick, after every state
+        transition this tick could have produced, exactly the way
+        ``_reconcile_publication_status`` is; a failure here is caught and
+        reported the same redacted way, never left to crash the tick or
+        block dispatch of any other job. See ``nightly.
+        submit_computed_moves_refresh_if_ready`` and ARCHITECTURE.md
+        "Outputs"/"Failure semantics" for the full account.
+        """
+        from engine.v2.ops.nightly import submit_computed_moves_refresh_if_ready
+        from engine.v2.ops.snapshot_stages import _catalog_path
+
+        try:
+            submit_computed_moves_refresh_if_ready(
+                self.conn, self.registry, self.policy, self.store,
+                catalog_path=_catalog_path(self.conn), objects_root=str(self.root),
+                clock=self.clock)
+            self._last_computed_moves_problem = None
+        except Exception as exc:
+            problem = exc.problem if isinstance(exc, OpsError) else make_problem(
+                "VALIDATION_FAILED", "computed_moves_refresh reconciliation failed")
+            problem_key = (problem.code, problem.message)
+            if problem_key == self._last_computed_moves_problem:
+                return
+            self._last_computed_moves_problem = problem_key
+            print(json.dumps({"event": "computed_moves_refresh_reconcile_failed",
                               "problem": {field: to_document(problem)[field]
                                           for field in ("code", "category", "retryable", "message")}}))
 

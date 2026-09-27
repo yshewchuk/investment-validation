@@ -227,37 +227,73 @@ own test module.
   then `DYN-SV` last inner. No side effect, no write.
 
 **`computed_moves_refresh` is registered as an ordinary job kind (Part 3) and
-now has a nightly caller (Part 4); `forward_calendar_refresh` still has no
+now has a nightly `GRAPH`/`OPTIONAL` node and a SUPERVISED submitter (Part 4,
+revised after Opus BLOCK(3)); `forward_calendar_refresh` still has no
 `JobKind` at all.** `stages.py::_core_kinds` includes
 `calendar_moves_jobs.computed_moves_job_kind()`, and `worker.py::dispatch`
 routes worker `"computed_moves_refresh"` to
-`calendar_moves_jobs.run_computed_moves_worker`. `nightly.py`'s `GRAPH` now
-carries a `"computed_moves_refresh": ("refresh",)` node (both read
-`daily_market` off the same pinned parent, so this stage runs after it),
-`OPTIONAL` includes it (its failure degrades the receipt, never blocks the
-graph — see "Diagrams" below for the updated stage graph), and
-`_NATIVE_ACTION_STAGES` maps the stage to itself (the worker kind IS the
-stage name, exactly like `NATIVE_REFRESH_ACTION` for `"refresh"`) — reached
-only when a plan pins `refresh_mode="native"`; the default `"legacy"` plan's
-submitted DAG (`_DAG_STAGES`) is unchanged, and `_stage_sequence` refuses to
-build a kind for this stage in legacy mode even when
-`include_prerequisites=True` walks the full `plan["order"]`, which DOES
-include this node (it is a real `GRAPH` member) — the same "named but never
-given a kind" treatment `NO_JOB_STAGES` already gives `native_parity`,
-enforced by a separate filter since, unlike `native_parity`, this node IS a
-submittable job kind in native mode. `build_legacy_job_requests`'s own
-`_build_native_computed_moves_plan` derives `expected_ids` from
-`computed_moves_store.target_tickers_from_snapshot`/`computed_moves_units`
-against the pinned shadow head — the SAME two functions the worker itself
-calls at run time (see the coverage-denominator note below) — so a caller's
-coverage denominator never disagrees with what the worker independently
-recomputes. No open catalog connection, no shadow head, a head missing the
-`earnings_events`/`daily_market` tables target selection needs, or a
-resolved target list that comes back empty, each make that builder return
-`None`; `build_legacy_job_requests` then simply omits the stage from the
-requests it returns for that run, rather than submitting a job with no work
-or manufacturing a synthetic empty result — see "Failure semantics" below
-for why this differs from the REQUIRED `"refresh"` stage's own builder.
+`calendar_moves_jobs.run_computed_moves_worker`. `nightly.py`'s `GRAPH` still
+carries a `"computed_moves_refresh": ("refresh",)` node, and `OPTIONAL`
+still includes it, but ONLY for `run_shadow_nightly`'s own whole-graph walk
+(see "Diagrams" below) — no *submission* path builds a job for it from that
+node, and `_NATIVE_ACTION_STAGES` maps only `"refresh"` now.
+
+**Why it moved out of `build_legacy_job_requests` (Opus BLOCK(3) on
+`dc7f9360`).** The first cut of Part 4 built both native jobs — `"refresh"`
+(daily_market) and `"computed_moves_refresh"` — inside the SAME
+`build_legacy_job_requests` call, both pinning the identical shadow head at
+plan-build time, and submitted them together through one
+`submission.submit_graph` call. Two defects followed directly from that:
+(1) `data_catalog.commit_snapshot`'s `_check_head_expectation` is strict —
+whichever of the two jobs commits its pinned `(snapshot_id, generation)`
+SECOND is rejected as stale, and `"refresh"` commits first on almost every
+real session (it is the one that actually adds daily_market rows), so
+`computed_moves_refresh` would fail on a stale head essentially always, or,
+with no ordering at all, could occasionally commit FIRST and fail the
+REQUIRED `"refresh"` instead — either way the optional stage could break the
+required one, which `OPTIONAL` must never do. (2) `submit_graph` validates
+every node then inserts all or none (`submission.py`'s own module
+docstring): a zero-provider-call rebuild, a same-session resubmission whose
+digest had drifted from cached-receipt changes, or a plain exception in the
+computed-moves plan builder each aborted the WHOLE graph — including the
+REQUIRED `"refresh"` and every downstream legacy stage — not just the
+optional one.
+
+**The revised design: a separate, later submission, never sharing
+`build_legacy_job_requests`'s graph.** `computed_moves_refresh` is submitted
+ONLY by `supervisor.Service`'s own tick loop —
+`Service._reconcile_computed_moves_refresh`, called every `tick()` right
+after `_reconcile_publication_status`, which calls
+`nightly.submit_computed_moves_refresh_if_ready`. That function: (a) looks
+for the most recently `succeeded` native `"refresh"` job and recovers its
+session (`as_of`) by parsing that job's OWN idempotency key —
+`"nightly:<as_of>:<scope_hash>:refresh"`, `build_legacy_job_requests`'s own
+format; `RefreshParameters` carries no `as_of` field, so this is the only
+place a native refresh's session is recorded — and does nothing if none has
+succeeded yet; (b) resolves the shadow head FRESH, right now, never a head
+pinned by any earlier plan, so by construction it can only ever read the
+head `"refresh"` already committed; (c) keys the job purely by session —
+`"nightly:<as_of>:computed_moves_refresh"`, no `scope_hash` — because its
+target set is always every scoreable ticker on the pinned head
+(`all_scoreable=True`), independent of which watchlist's `"refresh"`
+triggered the tick that noticed it; (d) if a job already exists under that
+key, in ANY state, returns without rebuilding or resubmitting anything — so
+a same-session rerun, or cached-receipts changing between ticks, can never
+reach `submission.submit` at all, let alone hit `IDEMPOTENCY_CONFLICT`; (e)
+is submitted alone, through `submission.submit` (one node, not
+`submit_graph`), so it can never make a REQUIRED job's admission all-or-
+nothing with it. `Service._reconcile_computed_moves_refresh` wraps the whole
+call in the identical try/except `_reconcile_publication_status` already
+uses (a reporting sidecar, never the pipeline; see "Failure semantics"
+below) — a broken build (a resolve error, a target-selection error) degrades
+only this optional stage, never `tick()` itself and never a required job's
+dispatch. `_build_native_computed_moves_plan` still derives `expected_ids`
+from `computed_moves_store.target_tickers_from_snapshot`/`computed_moves_units`
+against the pinned (now current, post-refresh) shadow head — the SAME two
+functions the worker itself calls at run time (see the coverage-denominator
+note below) — so a caller's coverage denominator never disagrees with what
+the worker independently recomputes; it now takes `as_of` directly rather
+than a nightly `plan`/`context_tickers` (neither was ever read by its body).
 `forward_calendar_refresh` was registered, and briefly wired into a draft of
 this same nightly stage, in an earlier draft of this PR too, but that
 registration (and its `run_forward_calendar_worker` job-layer adapter) was
@@ -569,26 +605,53 @@ network, or database access.
   being refused before the catalog connection even opens
   (`tests/test_v2_ops_forward_calendar_store.py::test_expected_head_snapshot_id_empty_is_refused_before_any_io`/
   `::test_expected_head_snapshot_id_too_long_is_refused_before_any_io`).
-- **`nightly.py`'s own missing-input handling for `computed_moves_refresh`
-  (Part 4)** — `_build_native_computed_moves_plan` never raises for a
-  missing catalog connection, an absent shadow head, a head missing the
-  `earnings_events`/`daily_market` tables target selection reads, or a
-  resolved target list that comes back empty: each case returns `None`, and
-  `build_legacy_job_requests` omits the stage from the requests it returns
-  for that run rather than submitting a job with no work or manufacturing a
-  synthetic empty result. This deliberately differs from the REQUIRED
+- **`nightly.submit_computed_moves_refresh_if_ready`'s own failure semantics
+  for `computed_moves_refresh` (Part 4, revised after Opus BLOCK(3))** —
+  R1 missing input: no open catalog connection, no native `"refresh"` job
+  that has yet `succeeded` (so no session to key off), an absent shadow
+  head, a head missing the `earnings_events`/`daily_market` tables target
+  selection reads, or a resolved target list that comes back empty — each
+  case returns without submitting anything; there is no partial or
+  synthetic empty job. This deliberately differs from the REQUIRED
   `"refresh"` stage's own builder (`_build_native_refresh_plan`), which
   raises `INVALID_REQUEST`/`INPUT_CHANGED` for the same missing-catalog/
   missing-head cases — `"refresh"` is not `OPTIONAL`, so a nightly run
   cannot silently skip its daily_market pull, while `computed_moves_refresh`
-  is, so silently not submitting it (rather than refusing the whole
-  `build_legacy_job_requests` call) is the correct degradation, matching
-  what `OPTIONAL`/`_run_stage` already does for a stage with no shadow
-  handler. A `computed_moves_refresh` job that IS submitted still validates
-  every field of its own staged input document before any I/O exactly like
-  every other job kind (the bullet above); the "no work" case is resolved
-  entirely at plan-build time, before any job or catalog write exists for
-  it, so there is nothing left for that per-job validation to see.
+  is `OPTIONAL` in a stronger sense here than `_run_stage`'s degraded-receipt
+  meaning (that only applies to `run_shadow_nightly`'s report walk, which
+  this function is never part of): in the SUPERVISED path, `OPTIONAL` means
+  the supervisor may simply never submit a job for it this session, and
+  that alone is not a failure of anything — there is no receipt to degrade,
+  because there was never an attempt. R2 cache: once a job exists under
+  today's session key, in any state, it is never rebuilt or resubmitted —
+  the existence check runs before `plan_refresh`/`calendar_moves_job_spec`
+  are ever reached, so a fully-cached rerun cannot even observe the
+  zero-`provider_calls` case (see the round-3-fix bullet's own `plan_refresh`
+  null-out below, which still applies to whichever job DOES get built this
+  way, e.g. the first attempt of a session where every target ticker was
+  already cached by some earlier run). R3 retry: this function retries
+  nothing itself; a submitted job's own `RetryPolicy` covers its worker
+  attempts, and a session whose key already exists — succeeded OR failed —
+  is never retried by this function again. R4 transaction: the one node
+  this builds goes through `submission.submit` (`submit_graph`'s
+  single-request wrapper), the same one-transaction insert every other job
+  uses; there is no multi-node graph here to make all-or-nothing, which is
+  the whole point (see the "why it moved" note above). R5 partial write:
+  none — the `RefreshPlan`/`JobSpec` are pure documents built from an
+  already-committed head; nothing is written before `submit`. R6
+  idempotency: the key is session-only, never `scope_hash`-qualified (see
+  the "why it moved" note above for why that is correct, not merely
+  simpler). `Service._reconcile_computed_moves_refresh` catches every
+  exception this function can raise past the existence check — a resolve
+  error, a target-selection error, a submission conflict — the identical
+  way `_reconcile_publication_status` catches its own (a reporting sidecar,
+  never the pipeline), so a broken build here degrades only this optional
+  stage, never `tick()`, never a required job's dispatch. A
+  `computed_moves_refresh` job that IS submitted still validates every
+  field of its own staged input document before any I/O exactly like every
+  other job kind (the bullet above); the "no work"/"not yet" cases above
+  are all resolved before any job or catalog write exists for it, so there
+  is nothing left for that per-job validation to see.
 - **`calendar_moves_jobs.py`'s own job-layer validation (Part 3, hardened
   Round 3 — Opus finding 1)** — `CalendarMovesParameters` is a strict
   dataclass (`engine.v2.foundation.from_document`): an unknown field, a
@@ -825,14 +888,19 @@ from the submitted stage list, not removed by a filter. `NO_JOB_STAGES`
 (currently `{"native_parity"}`) only does work on the other branch,
 `include_prerequisites=True` (test-only), where `_stage_sequence` instead
 returns `plan["order"]` (this diagram's order) and strips `NO_JOB_STAGES`
-from it before returning. `computed_moves_refresh` is not in
-`_DAG_STAGES` either — it reaches production submission through a THIRD
-path, `refresh_mode="native"`: `_stage_sequence` prepends both `"refresh"`
-and `"computed_moves_refresh"` ahead of `_DAG_STAGES` when native mode is
-pinned (mirroring the pre-existing `"refresh"`-only prepend), and, in legacy
-mode, filters `"computed_moves_refresh"` back out of a prerequisite-inclusive
-`plan["order"]` walk too — the stage is a real `GRAPH` node either way, but
-only native mode has a kind to build for it.
+from it before returning. `computed_moves_refresh` is not in `_DAG_STAGES`
+either, and — unlike in the first cut of Part 4 — `_stage_sequence` never
+prepends it in native mode any more: `refresh_mode="native"` prepends only
+`("refresh",)` now, exactly as before this stage existed, and
+`_NATIVE_ACTION_STAGES` maps only `"refresh"`. In legacy mode,
+`_stage_sequence` still filters `"computed_moves_refresh"` out of a
+prerequisite-inclusive `plan["order"]` walk explicitly, by name, since it is
+no longer a member of `_NATIVE_ACTION_STAGES` to fall out of that check for
+free. The stage reaches production submission through a FOURTH path
+entirely, outside `_stage_sequence`/`build_legacy_job_requests` altogether:
+`supervisor.Service`'s own tick loop. See "Outputs"/"Failure semantics"
+above for `submit_computed_moves_refresh_if_ready` and why it was pulled out
+of the graph-submission path (Opus BLOCK(3)).
 
 ### CLI → catalog → coordinator effect
 
