@@ -8,6 +8,17 @@ starts. This module owns that one write, per refresh kind, from
 ``claim.spec.parameters`` -- never the environment and never a legacy path.
 Acquired data (raw payloads, revisions, coverage) stays the worker callback's
 own output, appended to the same document in place.
+
+S4C Part 3: ``computed_moves_refresh`` gets its own staged document too --
+``computed_moves_store._input_document``/``_validate_input_document`` already
+read and cross-validate one, including the ``attempt_id``/``fence`` pair its
+own commit's fence check needs (``engine.v2.ops.lifecycle.verify_fence``, the
+real production signature -- no ``check_lease_time`` parameter to disable the
+wall-clock lease-expiry check with). ``forward_calendar_refresh`` gets no
+entry here: every value ``run_forward_calendar_refresh`` needs already lives
+on the job's own ``CalendarMovesParameters``, so a second, staged copy could
+only drift from it, never add anything (``engine/v2/ops/ARCHITECTURE.md``
+"Inputs").
 """
 from __future__ import annotations
 
@@ -16,11 +27,10 @@ from pathlib import Path
 from engine.v2.foundation import canonical_json, from_document
 from engine.v2.ops.incremental_data import RefreshParameters
 
-#: One entry per refresh kind that needs a staged identity document. Slice 4's
-#: ``computed_moves_refresh``/``forward_calendar_refresh`` extend this registry
-#: with their own document names; no new staging mechanism is needed.
+#: One entry per refresh kind that needs a staged identity document.
 REFRESH_INPUT_DOCUMENT_NAMES = {
     "incremental_refresh": "incremental_refresh_input.json",
+    "computed_moves_refresh": "computed_moves_refresh_input.json",
 }
 
 
@@ -32,11 +42,18 @@ def stage_refresh_input(claim, staging: Path) -> None:
     provider-response cache never collides across attempts or leaks a mutable
     legacy root into a reproducible attempt.
     """
-    name = REFRESH_INPUT_DOCUMENT_NAMES.get(claim.spec.kind)
+    kind = claim.spec.kind
+    name = REFRESH_INPUT_DOCUMENT_NAMES.get(kind)
     if name is None:
         return
+    document = (_daily_document(claim, staging) if kind == "incremental_refresh"
+                else _computed_moves_document(claim))
+    (staging / name).write_text(canonical_json(document))
+
+
+def _daily_document(claim, staging: Path) -> dict:
     params = from_document(RefreshParameters, claim.spec.parameters)
-    document = {
+    return {
         "catalog_path": params.catalog_path,
         "objects_root": params.objects_root,
         "scope": params.scope,
@@ -45,4 +62,27 @@ def stage_refresh_input(claim, staging: Path) -> None:
         "table_name": params.table_name,
         "fetch_root": str(staging / "fetch"),
     }
-    (staging / name).write_text(canonical_json(document))
+
+
+def _computed_moves_document(claim) -> dict:
+    """The ``computed_moves_refresh`` identity document, in exactly the shape
+    ``computed_moves_store._ALLOWED_DOCUMENT_KEYS`` accepts -- an extra key
+    (e.g. ``horizon_days``/``tickers``, which that store never reads) would
+    make that store's own ``_validate_document_identity`` refuse the document
+    outright as carrying an unknown key.
+    """
+    from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+
+    params = from_document(CalendarMovesParameters, claim.spec.parameters)
+    return {
+        "catalog_path": params.catalog_path,
+        "objects_root": params.objects_root,
+        "scope": params.scope,
+        "expected_head_generation": params.expected_head_generation,
+        "expected_head_snapshot_id": params.expected_head_snapshot_id,
+        "as_of": params.as_of,
+        "all_scoreable": params.all_scoreable,
+        "since": params.since,
+        "attempt_id": claim.attempt_id,
+        "fence": claim.fence,
+    }

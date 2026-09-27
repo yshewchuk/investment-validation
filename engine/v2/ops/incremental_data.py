@@ -138,6 +138,21 @@ class RefreshCallbackResult:
     schema_version: str = REFRESH_RESULT_SCHEMA
 
 
+def refresh_result_document(result: RefreshCallbackResult) -> dict:
+    """The staged result document; an empty ``warnings`` is omitted.
+
+    ``warnings`` is degradation evidence, not a field every run has. Omitting
+    it when empty keeps every result document without a degradation
+    byte-identical to what the schema produced before the field existed (and
+    any hash over those bytes unchanged); a reader of a document without the
+    key gets the field's own empty default.
+    """
+    document = to_document(result)
+    if not result.warnings:
+        document.pop("warnings", None)
+    return document
+
+
 class RefreshCallback(Protocol):
     """Structural boundary implemented by the data layer."""
 
@@ -479,6 +494,53 @@ def _load_data_refresh_callback() -> RefreshCallback:
     from engine.v2.ops.providers import orats_daily_market_fetcher
     return functools.partial(run_daily_market_refresh,
                              fetcher=orats_daily_market_fetcher())
+
+
+def _load_computed_moves_refresh_callback(as_of: str | None) -> RefreshCallback:
+    """S4C Part 3: resolve the computed_moves callback and its yfinance edge.
+
+    ``as_of`` cannot be pre-bound the way the fetcher is: it varies per job
+    dispatch (a session date), never a constant of the deployment the way
+    the injected fetcher is. Same lazy shape as ``_load_data_refresh_callback``:
+    constructing the fetcher reads nothing and touches no network, and the
+    data-owning store is imported only when the worker actually dispatches
+    this kind.
+    """
+    from engine.v2.ops.computed_moves_store import run_computed_moves_refresh
+    from engine.v2.ops.providers import yfinance_history_fetcher
+    return functools.partial(run_computed_moves_refresh, as_of=as_of,
+                             fetcher=yfinance_history_fetcher())
+
+
+def _load_forward_calendar_refresh_callback() -> RefreshCallback:
+    """S4C Part 3: resolve the forward_calendar callback and its two network edges.
+
+    ``forward_calendar_store.run_forward_calendar_refresh`` takes no
+    ``(parameters, root)`` pair at all -- it is a standalone runner with an
+    explicit, fully keyword-only signature -- so a bare ``functools.partial``
+    cannot make it ``RefreshCallback``-shaped the way
+    ``_load_data_refresh_callback`` does for ``run_daily_market_refresh``.
+    This closure reads every keyword argument off the decoded
+    ``CalendarMovesParameters`` instead, and ignores ``root``: the runner
+    stages no input document of its own (``engine/v2/ops/ARCHITECTURE.md``
+    "Inputs").
+    """
+    from engine.v2.ops.forward_calendar_store import run_forward_calendar_refresh
+    from engine.v2.ops.providers import nasdaq_calendar_fetcher, yfinance_earnings_fetcher
+    nasdaq_fetcher = nasdaq_calendar_fetcher()
+    earnings_fetcher = yfinance_earnings_fetcher()
+
+    def _callback(parameters, root):
+        return run_forward_calendar_refresh(
+            catalog_path=parameters.catalog_path, objects_root=parameters.objects_root,
+            parent_snapshot_id=parameters.parent_snapshot_id,
+            refresh_plan_hash=parameters.refresh_plan_hash, as_of=parameters.as_of,
+            tickers=parameters.tickers, horizon_days=parameters.horizon_days,
+            scope=parameters.scope,
+            expected_head_generation=parameters.expected_head_generation,
+            expected_head_snapshot_id=parameters.expected_head_snapshot_id,
+            nasdaq_fetcher=nasdaq_fetcher, earnings_fetcher=earnings_fetcher)
+    return _callback
 
 
 def validate_refresh_result_document(value) -> RefreshCallbackResult:

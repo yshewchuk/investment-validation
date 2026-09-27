@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
+from engine.v2.ops.calendar_moves_jobs import (
+    computed_moves_job_kind,
+    forward_calendar_job_kind,
+)
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
@@ -235,6 +239,14 @@ def _decisions_supersede_kind():
         namespaces=frozenset({"shadow", "smoke"}))
 
 
+def _calendar_moves_kinds() -> list:
+    """S4C Part 3: the two natively-owned calendar/moves refresh kinds. They
+    read only the immutable object store and a read-only catalog connection,
+    so neither carries a legacy-store lease. Neither has a nightly.py
+    GRAPH/OPTIONAL entry yet (Part 4) -- see ARCHITECTURE.md "Outputs"."""
+    return [computed_moves_job_kind(), forward_calendar_job_kind()]
+
+
 def _core_kinds():
     """The one-off ``JobKind`` entries with no generated sibling — every
     "loop over a small family" kind (the outbox effects, the legacy action
@@ -242,6 +254,7 @@ def _core_kinds():
     a plain, static enumeration."""
     return [
         refresh_job_kind(),
+        *_calendar_moves_kinds(),
         JobKind(
             name="artifact_check", worker="artifact_check", parameters=CheckParameters,
             resource_classes=frozenset({"delivery"}), effects=("staged",),

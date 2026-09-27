@@ -271,3 +271,11 @@ def test_parent_snapshot_id_empty_is_refused_before_any_io(tmp_path):
 
 def test_refresh_plan_hash_malformed_is_refused_before_any_io(tmp_path):
     _refused(tmp_path, refresh_plan_hash="not-a-sha256-hash")
+
+
+def test_expected_head_snapshot_id_empty_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, expected_head_snapshot_id="")
+
+
+def test_expected_head_snapshot_id_too_long_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, expected_head_snapshot_id="s" * 129)
