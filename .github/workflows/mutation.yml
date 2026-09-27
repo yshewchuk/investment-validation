@@ -74,32 +74,43 @@
 # from writing under main's cache key, but does not by itself stop PR code
 # from calling the cache API directly with that ambient token. The real
 # security boundary is the
-# plan job's own `if:` (below): a non-empty `workflow_run.pull_requests`
-# AND a matching `workflow_run.head_repository.full_name` together are what
-# prove this workflow_run actually completed in (and was triggered by a PR
-# of) this same repository -- only a contributor who already has push access
-# to this repository can reach this job at all, so this does not open a
-# privilege a same-repo contributor didn't already have. A fork PR never
-# reaches here (see below). One
+# plan job's own `if:` (below): `workflow_run.conclusion == 'success'`,
+# `workflow_run.event == 'pull_request'` and a matching
+# `workflow_run.head_repository.full_name` together are what prove this
+# workflow_run actually completed in this same repository -- only a
+# contributor who already has push access to this repository can reach this
+# job at all, so this does not open a privilege a same-repo contributor
+# didn't already have. A fork PR's own Tests run executes with
+# head_repository set to the FORK, so it never reaches here. One
 # consequence of using main's copy of the file: after this change merges,
 # the gate applies to every qualifying Tests completion from then on,
 # including for PRs that were opened before the merge -- not only new ones.
-# `github.event.workflow_run.pull_requests` -- the array holding the PR's
-# number/branch/base sha -- is populated only when the PR's head repository is
-# this same repository; for a fork PR it is empty (a documented GitHub
-# limitation, not a bug here), so the plan job's `if:` also requires that
-# array to be non-empty and a fork PR's mutation run is skipped outright
-# (mutation is report-only and already excluded from required checks, so this
-# only means a fork PR gets no mutation coverage -- its Tests run is
-# unaffected). The array is read with the `.*` projection + `join(...)` (e.g.
-# `join(github.event.workflow_run.pull_requests.*.number, ',')`), never
-# `pull_requests[0]` directly: indexing an empty array throws and would fail
-# the expression outright, exactly for the fork-PR case this must degrade out
-# of cleanly instead. The `$EVENT`/`$BASE_SHA` bash variables the plan and
-# mutate steps below already used for their PR-selection and cache-key logic
-# (added for #13/#28/#30) are fed from these same workflow_run-aware
-# expressions, so every `"$EVENT" = "pull_request"` check in this file keeps
-# meaning exactly what it always meant -- "this is a PR run" -- unchanged.
+#
+# `github.event.workflow_run.pull_requests` -- the array GitHub says holds
+# "the pull requests" for this run -- is populated by matching this run's
+# head BRANCH NAME against every repository's open PRs, not only this one's.
+# It is NOT restricted to same-repo entries: a PR someone opens from their
+# own fork, using a branch name that happens to match one of ours, lands in
+# this SAME array alongside our real PR. Treating it as "exactly one
+# same-repo PR" -- the assumption every earlier revision of this file made --
+# let such a collision turn `join(...pull_requests.*.number, ',')` into
+# "45,7", which 404s `gh api pulls/45,7` and breaks a base-sha `git diff`
+# the same way: a denial of service any outside contributor could trigger
+# against our own PR's mutation run (it fails closed, but it still fails).
+# The plan job's own "Select the triggering PR" step (below) is what actually
+# resolves the ONE array entry that both targets this repository
+# (base.repo.full_name) and shares this run's own head commit (head.sha);
+# zero or multiple matches skip mutation cleanly (an empty matrix, not a job
+# failure) via the same path used when the PR has simply closed. Nothing in
+# this file joins or indexes `pull_requests` directly any more -- every
+# consumer (the PR-open check, cache keys, the changed-file diff, the
+# concurrency group) reads the plan job's already-validated `pr_number`/
+# `base_sha` outputs instead. The `$EVENT`/`$BASE_SHA` bash variables the plan
+# and mutate steps below use for their cache-key/diff logic (added for
+# #13/#28/#30, re-plumbed through `select_pr` for #45) are fed from these
+# same workflow_run-aware expressions, so every `"$EVENT" = "pull_request"`
+# check in this file keeps meaning exactly what it always meant -- "this is
+# a PR run" -- unchanged.
 #
 # Concurrency group `mutation-gremlins-...`: disjoint from the mutmut
 # workflow's `mutation-mutmut-...` group, so a run of one active backend never
@@ -132,23 +143,27 @@ concurrency:
   # Three disjoint groups, one per trigger family, so none of push/
   # schedule/dispatch/workflow_run can ever cancel a run it doesn't own:
   #
-  # - workflow_run (a PR's Tests run completing): grouped by PR number when
-  #   one is known (join() over pull_requests, never the unsafe
-  #   pull_requests[0] index -- see "PR context" above), so a new push to the
-  #   PR -- which reruns Tests and so re-fires this trigger -- supersedes the
-  #   last mutation run for THAT PR instead of queuing behind it. If no PR
-  #   number is available (shouldn't reach here given the plan job's own
-  #   `if:`, but the group is evaluated for every workflow_run event before
-  #   any job or its `if:` runs, so this must degrade safely on its own
-  #   terms) the group falls back to head_repository.full_name + head_branch
-  #   + workflow_run.event: head_repository.full_name is required precisely
-  #   because head_branch alone is only a branch STRING with no owner/fork
-  #   identity -- a branch in an unrelated fork can share a name with a
-  #   same-repo PR's branch, and the concurrency group is resolved before the
-  #   fork gate (the plan job's `if:`) ever runs, so an unqualified
-  #   head_branch group could let that fork's workflow_run cancel the real
-  #   PR's in-progress mutation run. workflow_run.event is still folded in
-  #   too, for the reason below.
+  # - workflow_run (a PR's Tests run completing): grouped by
+  #   head_repository.full_name + head_branch + workflow_run.event. NOT by PR
+  #   number: `github.event.workflow_run.pull_requests` lists every open PR
+  #   whose head branch matches this run's, in ANY repository -- a fork PR
+  #   opened with a branch that happens to share a same-repo PR's branch NAME
+  #   lands in that same array (see "PR context" above and the plan job's own
+  #   "Select the triggering PR" step, which resolves the real PR from it).
+  #   Step outputs aren't available yet when the concurrency group is
+  #   resolved (before any job or its `if:` runs), so the group can only use
+  #   the raw event fields, never the resolved PR number -- keying on a
+  #   number here would require trusting the same unfiltered array the
+  #   selection step exists to distrust. head_repository.full_name +
+  #   head_branch already uniquely identifies the branch that triggered THIS
+  #   run (a branch is the head of at most one open PR at a time in its own
+  #   repo) and head_repository.full_name is required precisely because
+  #   head_branch alone is only a branch STRING with no owner/fork identity:
+  #   without it, a same-named branch in an unrelated fork could land in the
+  #   same group and cancel the real PR's in-progress mutation run.
+  #   workflow_run.event is folded in too, so this group is never confused
+  #   with the schedule/dispatch fallback group below (whose own workflow_run
+  #   case never reaches here, since only workflow_run events use this arm).
   # - push to main: its OWN group (never shared with schedule/dispatch, whose
   #   github.ref is identical to push's on main -- the three used to collide
   #   in one `refs/heads/main` group, so a merge's cancel-in-progress could
@@ -159,11 +174,11 @@ concurrency:
   #   change, and still non-cancelling (see cancel-in-progress below) -- a
   #   weekly full run and a manual dispatch on the same ref simply queue.
   #
-  # The three `&&`/`||` clauses below short-circuit left to right (like a
+  # The two `&&`/`||` clauses below short-circuit left to right (like a
   # chained ternary): push matches first, then workflow_run, and anything
   # else (schedule, workflow_dispatch) falls through to the plain
   # `mutation-gremlins-<ref>` group every trigger used before this change.
-  group: mutation-gremlins-${{ github.event_name == 'push' && format('push-{0}', github.ref) || github.event_name == 'workflow_run' && (join(github.event.workflow_run.pull_requests.*.number, ',') != '' && format('pr-{0}', join(github.event.workflow_run.pull_requests.*.number, ',')) || format('{0}-{1}-{2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch, github.event.workflow_run.event)) || github.ref }}
+  group: mutation-gremlins-${{ github.event_name == 'push' && format('push-{0}', github.ref) || github.event_name == 'workflow_run' && format('{0}-{1}-{2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
   # true for push and workflow_run (each now in its own group, so cancelling
   # only ever hits a predecessor of the SAME kind); false for schedule/
   # workflow_dispatch, unchanged from before this PR.
@@ -186,16 +201,17 @@ jobs:
     # push/schedule/dispatch: unaffected, always proceed (github.event_name is
     # never 'workflow_run' for them). workflow_run: proceed only when the
     # Tests run it followed succeeded AND was itself a pull_request run AND
-    # that run's PR is in this same repository (pull_requests non-empty, read
-    # via the `.*`/join projection -- never `pull_requests[0]`, which throws
-    # on the empty array a fork PR produces). Any other workflow_run (Tests on
+    # that Tests run itself executed in this same repository (never a fork's
+    # -- see head_repository.full_name below). This does NOT yet prove which
+    # PR triggered it: that is resolved by the "Select the triggering PR"
+    # step below, from the workflow_run.pull_requests array, which is NOT
+    # trustworthy on its own (see that step). Any other workflow_run (Tests on
     # push/schedule/dispatch, or a failed/cancelled Tests run) is a no-op: the
     # job -- and everything that needs it -- is skipped, not failed.
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
-      join(github.event.workflow_run.pull_requests.*.number, ',') != '' &&
       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     # contents:read for checkout/diff (as before); pull-requests:read is new,
@@ -210,24 +226,77 @@ jobs:
       modules: ${{ steps.plan.outputs.modules }}
       mode: ${{ steps.plan.outputs.mode }}
       gremlins: ${{ steps.plan.outputs.gremlins }}
+      # The one PR this run was actually triggered by (never a join()'d
+      # list): resolved once here so `mutate`'s own re-check, and every
+      # cache/diff step in both jobs, read the SAME already-validated value
+      # instead of re-deriving it (and re-trusting the raw array) themselves.
+      pr_number: ${{ steps.select_pr.outputs.number }}
+      base_sha: ${{ steps.select_pr.outputs.base_sha }}
     steps:
+      # `github.event.workflow_run.pull_requests` is populated by matching
+      # this run's head branch NAME against every repository's open PRs, not
+      # only this repository's -- a documented GitHub quirk, not a bug here.
+      # A PR someone opens from their own fork, using a branch name that
+      # happens to match one of ours, lands in this SAME array alongside our
+      # real PR: `join(...pull_requests.*.number, ',')` would then produce
+      # "45,7", `gh api pulls/45,7` 404s, and a base-sha join like "a,b"
+      # breaks `git diff` -- every one of those is a denial of service any
+      # outside contributor could trigger against our own PR's mutation run
+      # (it fails closed, but it still fails). The only combination that
+      # proves an array entry actually IS the PR that triggered this run is:
+      # it targets OUR repo (base.repo.full_name) AND its head commit IS this
+      # run's head commit (head.sha) -- an entry can share our head SHA only
+      # if it names the exact commit this run is testing, which a same-named
+      # but different fork branch never does. $PULL_REQUESTS_JSON is passed
+      # through env (toJSON), never interpolated into this script, so nothing
+      # in a PR's title, branch name or any other field can inject shell or
+      # jq syntax here. Zero matches (PR closed/merged into the array's blind
+      # spot, or this really is a fork-only collision) or more than one match
+      # (still ambiguous) both skip mutation cleanly via the SAME "PR is
+      # closed" path the `pr_open`/`plan` steps below already handle -- never
+      # a job failure.
+      - name: Select the triggering PR
+        id: select_pr
+        if: github.event_name == 'workflow_run'
+        env:
+          PULL_REQUESTS_JSON: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          HEAD_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          FILTER='[.[] | select(.base.repo.full_name == $repo and .head.sha == $sha)]'
+          selected=$(jq -c --arg repo "$HEAD_REPO" --arg sha "$HEAD_SHA" "$FILTER" <<< "$PULL_REQUESTS_JSON")
+          count=$(jq 'length' <<< "$selected")
+          if [ "$count" != "1" ]; then
+            echo "::notice::${count} workflow_run.pull_requests entries matched base.repo=$HEAD_REPO head.sha=$HEAD_SHA (need exactly 1) -- skipping mutation for this run."
+            echo "number=" >> "$GITHUB_OUTPUT"
+            echo "base_sha=" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=$(jq -r '.[0].number' <<< "$selected")" >> "$GITHUB_OUTPUT"
+            echo "base_sha=$(jq -r '.[0].base.sha' <<< "$selected")" >> "$GITHUB_OUTPUT"
+          fi
       # Closes the race the job `if:` above can't see: that `if:` only proves
       # the PR was open when its Tests run STARTED (workflow_run fires on
       # Tests' completion, which can be many minutes after the PR closed or
-      # merged). Runs only for workflow_run (push/schedule/dispatch have no
-      # triggering PR at all); PR_NUMBER reuses the same safe join()
-      # projection as the gate above rather than indexing pull_requests[0].
-      # Uses the default GITHUB_TOKEN with the pull-requests:read permission
-      # granted above -- read-only, no elevated token needed.
+      # merged) -- and, now, that `select_pr` resolved exactly one PR at all
+      # (an empty PR_NUMBER here 404s cleanly into the same "not open" path).
+      # Runs only for workflow_run (push/schedule/dispatch have no triggering
+      # PR at all). Uses the default GITHUB_TOKEN with the
+      # pull-requests:read permission granted above -- read-only, no
+      # elevated token needed.
       - name: Check the triggering PR is still open
         id: pr_open
         if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ join(github.event.workflow_run.pull_requests.*.number, ',') }}
+          PR_NUMBER: ${{ steps.select_pr.outputs.number }}
         run: |
           set -euo pipefail
+          if [ -z "$PR_NUMBER" ]; then
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           state=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.state')
           open=false
           [ "$state" = "open" ] && open=true
@@ -273,11 +342,10 @@ jobs:
           # the check below only treats as "false" via an exact string match,
           # so those events fall straight through to the unchanged logic.
           PR_OPEN: ${{ steps.pr_open.outputs.open }}
-          # workflow_run: the PR's base sha lives on the linked pull request,
-          # read via the `.*`/join projection (a single-element array joins to
-          # exactly that one sha; never `pull_requests[0]`, unsafe on the
-          # empty array a fork PR would produce).
-          BASE_SHA: ${{ github.event_name == 'workflow_run' && join(github.event.workflow_run.pull_requests.*.base.sha, ',') || github.event.pull_request.base.sha }}
+          # workflow_run: the base sha `select_pr` already resolved for the
+          # one PR that actually triggered this run (never the raw
+          # pull_requests array -- see that step).
+          BASE_SHA: ${{ github.event_name == 'workflow_run' && steps.select_pr.outputs.base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # The PR closed/merged between its Tests run starting and this
@@ -379,13 +447,17 @@ jobs:
       # after the matrix was already scheduled. Re-checking here, as the
       # first step of every matrix job, lets a queued job exit in seconds
       # instead of running a full mutation pass for a PR that is already gone.
+      # Reuses `needs.plan.outputs.pr_number` -- the one PR plan's own
+      # "Select the triggering PR" step already resolved (and validated
+      # against base.repo/head.sha) -- rather than re-deriving it from the
+      # raw, untrustworthy pull_requests array a second time.
       - name: Check the triggering PR is still open
         id: pr_open
         if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ join(github.event.workflow_run.pull_requests.*.number, ',') }}
+          PR_NUMBER: ${{ needs.plan.outputs.pr_number }}
         run: |
           set -euo pipefail
           state=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.state')
@@ -420,13 +492,10 @@ jobs:
         if: steps.pr_open.outputs.open != 'false'
         env:
           EVENT: ${{ github.event_name == 'workflow_run' && 'pull_request' || github.event_name }}
-          # workflow_run: the PR's base sha lives on the linked pull request,
-          # read via the `.*`/join projection (a single-element array joins to
-          # exactly that one sha; never `pull_requests[0]`, which throws on
-          # the empty array a fork PR would produce -- unreachable here since
-          # the plan job's `if:` already required a non-empty array, but kept
-          # safe on its own terms rather than relying on that).
-          BASE_SHA: ${{ github.event_name == 'workflow_run' && join(github.event.workflow_run.pull_requests.*.base.sha, ',') || github.event.pull_request.base.sha }}
+          # workflow_run: the base sha `select_pr` already resolved in the
+          # plan job for the one PR that actually triggered this run (never
+          # the raw pull_requests array a second time).
+          BASE_SHA: ${{ github.event_name == 'workflow_run' && needs.plan.outputs.base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # Assign the fingerprint and config-hash, never interpolate either
@@ -522,8 +591,9 @@ jobs:
         if: always() && steps.key.outcome == 'success'
         env:
           # PRs use the PR base SHA as the change window base (github.event.before
-          # only exists on push).
-          BEFORE: ${{ github.event_name == 'push' && github.event.before || (github.event_name == 'workflow_run' && join(github.event.workflow_run.pull_requests.*.base.sha, ',') || '') }}
+          # only exists on push). workflow_run: plan's own `select_pr` output,
+          # never the raw pull_requests array.
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || (github.event_name == 'workflow_run' && needs.plan.outputs.base_sha || '') }}
         run: |
           set -euo pipefail
           rc=$(cat "$RUNNER_TEMP/gremlin-rc" 2>/dev/null || echo -1)  # -1: killed by the step timeout
