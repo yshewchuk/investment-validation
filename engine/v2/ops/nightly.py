@@ -805,6 +805,34 @@ def _build_computed_moves_refresh_request(as_of, key, *, catalog_path, objects_r
         conn=conn, store=store, clock=clock, parameters=parameters)
 
 
+def _computed_moves_identity(conn):
+    """Cheap (no pandas scan) identity for the supervisor's own memo/backoff
+    (``supervisor.Service._reconcile_computed_moves_refresh``): the session
+    to key ``computed_moves_refresh`` under, and the shadow head right now.
+
+    The session is the MAX (chronologically latest) session among every
+    succeeded native "refresh" job's own idempotency key -- never the
+    latest-UPDATED row (Opus re-gate finding, non-blocking): an older
+    session's "refresh" job can be touched again later than a newer
+    session's (a backfill, a re-verify), and ``updated_at DESC`` would then
+    pick the wrong, older session. Returns ``None`` when there is no
+    succeeded "refresh" yet, or no shadow head."""
+    rows = conn.execute(
+        "SELECT idempotency_key FROM jobs WHERE kind = ? AND state = 'succeeded'",
+        (NATIVE_REFRESH_ACTION,)).fetchall()
+    sessions = sorted(session for session in
+                      (_session_from_refresh_key(row["idempotency_key"]) for row in rows)
+                      if session is not None)
+    if not sessions:
+        return None
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+        ("shadow",)).fetchone()
+    if head is None:
+        return None
+    return sessions[-1], head["snapshot_id"], head["generation"]
+
+
 def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, catalog_path,
                                            objects_root, clock):
     """S4C Part 4 (revised after Opus BLOCK(3) on ``dc7f9360``): the ONLY
@@ -826,20 +854,22 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
     nothing to do yet (no catalog, no succeeded "refresh" this function can
     key a session off, no scoreable target, or today's session already has
     a job under this key, in any state -- see ``_computed_moves_refresh_key``).
-    Any exception past that point is the caller's ``Service`` to catch.
+    Any exception past that point is the caller's ``Service`` to catch --
+    ``Service._reconcile_computed_moves_refresh`` also memoizes attempts per
+    ``_computed_moves_identity()`` and backs off after a rebuild that does
+    not end in a submitted job, so this function's own (expensive: a full
+    pandas scan via ``computed_moves_store.target_tickers_from_snapshot``)
+    work is never repeated every tick, all day, for a session with nothing
+    to submit -- see that method's own docstring for the schedule.
     """
     from engine.v2.ops.submission import job_id_for, submit
 
     if conn is None:
         return None
-    latest = conn.execute(
-        "SELECT idempotency_key FROM jobs WHERE kind = ? AND state = 'succeeded' "
-        "ORDER BY updated_at DESC LIMIT 1", (NATIVE_REFRESH_ACTION,)).fetchone()
-    if latest is None:
+    identity = _computed_moves_identity(conn)
+    if identity is None:
         return None
-    as_of = _session_from_refresh_key(latest["idempotency_key"])
-    if as_of is None:
-        return None
+    as_of, _snapshot_id, _generation = identity
     key = _computed_moves_refresh_key(as_of)
     job_id = job_id_for("shadow", key)
     exists = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()

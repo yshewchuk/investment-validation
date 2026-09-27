@@ -264,15 +264,21 @@ optional one.
 ONLY by `supervisor.Service`'s own tick loop —
 `Service._reconcile_computed_moves_refresh`, called every `tick()` right
 after `_reconcile_publication_status`, which calls
-`nightly.submit_computed_moves_refresh_if_ready`. That function: (a) looks
-for the most recently `succeeded` native `"refresh"` job and recovers its
-session (`as_of`) by parsing that job's OWN idempotency key —
-`"nightly:<as_of>:<scope_hash>:refresh"`, `build_legacy_job_requests`'s own
-format; `RefreshParameters` carries no `as_of` field, so this is the only
-place a native refresh's session is recorded — and does nothing if none has
-succeeded yet; (b) resolves the shadow head FRESH, right now, never a head
-pinned by any earlier plan, so by construction it can only ever read the
-head `"refresh"` already committed; (c) keys the job purely by session —
+`nightly.submit_computed_moves_refresh_if_ready`. That function: (a) calls
+`nightly._computed_moves_identity`, which looks at every `succeeded` native
+`"refresh"` job, recovers each one's session (`as_of`) by parsing that job's
+OWN idempotency key — `"nightly:<as_of>:<scope_hash>:refresh"`,
+`build_legacy_job_requests`'s own format; `RefreshParameters` carries no
+`as_of` field, so this is the only place a native refresh's session is
+recorded — and picks the MAX (chronologically latest) session, never the
+latest-UPDATED row (Opus re-gate finding, non-blocking, fixed alongside the
+memo/backoff below): an older session's `"refresh"` row can be touched again
+later than a newer session's (a backfill, a re-verify), and
+`ORDER BY updated_at DESC` would then wrongly pick the older session; does
+nothing if no `"refresh"` has succeeded yet; (b) resolves the shadow head
+FRESH, right now, never a head pinned by any earlier plan, so by
+construction it can only ever read the head `"refresh"` already committed;
+(c) keys the job purely by session —
 `"nightly:<as_of>:computed_moves_refresh"`, no `scope_hash` — because its
 target set is always every scoreable ticker on the pinned head
 (`all_scoreable=True`), independent of which watchlist's `"refresh"`
@@ -287,7 +293,42 @@ call in the identical try/except `_reconcile_publication_status` already
 uses (a reporting sidecar, never the pipeline; see "Failure semantics"
 below) — a broken build (a resolve error, a target-selection error) degrades
 only this optional stage, never `tick()` itself and never a required job's
-dispatch. `_build_native_computed_moves_plan` still derives `expected_ids`
+dispatch.
+
+**Memoized per (session, head), with backoff (Opus re-gate blocking
+finding).** `_computed_moves_identity` itself is cheap — two indexed
+`SELECT`s, no pandas — but `submit_computed_moves_refresh_if_ready`'s own
+deeper work, when there IS something to (re)build, is not: it calls
+`_build_native_computed_moves_plan`, which calls
+`computed_moves_store.target_tickers_from_snapshot`, a full pandas scan.
+Without a memo, `tick()`'s ~1s cadence would repeat that scan every tick,
+all day, whenever the build keeps coming back with nothing to submit — an
+empty target list (`_build_native_computed_moves_plan` returns `None`), a
+build-time exception, or a `submit` rejection (which also re-hashes the
+source tree for `implementation_ref`/`environment_ref`). `Service` keys a
+single in-memory memo (`self._computed_moves_memo`) by
+`_computed_moves_identity`'s own return value (session, snapshot_id,
+generation) and tracks an attempt count and a monotonic `not_before` against
+it. A tick whose current identity does not match the memo's (a new session,
+or the same session on a new head) resets the memo to zero attempts with no
+backoff — a new identity always gets an immediate first try. Each outcome
+that is NOT a submitted job — the reconcile call raising, or
+`submit_computed_moves_refresh_if_ready` returning `None` because the build
+came back empty/there was nothing to do — increments the attempt count and
+sets `not_before` from a fixed backoff schedule indexed by attempt number:
+`_COMPUTED_MOVES_BACKOFF_SECONDS = (30.0, 120.0, 600.0, 1800.0, 3600.0)`
+(30s, 2m, 10m, 30m, 1h). After `_COMPUTED_MOVES_MAX_ATTEMPTS = 5` attempts
+against the same identity, the tick stops trying that identity at all until
+it changes (a later attempt count clamps to the schedule's last entry, 1h,
+so it never gets more aggressive than that even past 5 tries — the max just
+stops the loop from being live-patched by a fresh count on every tick past
+that point). A successful submission (a `JobReceipt` returned) clears the
+memo entirely, so the NEXT distinct identity — which can only be a new
+session or a new head, since a job now exists under the current key —
+starts from zero rather than inheriting a stale attempt count. Both numbers
+(5 attempts, the five-step schedule) are this PR's own judgment call, not a
+measured or externally specified bound; nothing before this fix throttled
+the rebuild at all. `_build_native_computed_moves_plan` still derives `expected_ids`
 from `computed_moves_store.target_tickers_from_snapshot`/`computed_moves_units`
 against the pinned (now current, post-refresh) shadow head — the SAME two
 functions the worker itself calls at run time (see the coverage-denominator

@@ -35,6 +35,7 @@ from engine.v2.ops.nightly import (
     NATIVE_REFRESH_ACTION,
     _NATIVE_ACTION_STAGES,
     _build_native_computed_moves_plan,
+    _computed_moves_identity,
     _computed_moves_refresh_key,
     _session_from_refresh_key,
     _stage_sequence,
@@ -384,3 +385,76 @@ def test_resolves_the_head_refresh_just_committed_not_a_stale_one(tmp_path, monk
     params = json.loads(row["spec_json"])["parameters"]
     assert params["parent_snapshot_id"] == advanced_head["snapshot_id"]
     assert params["expected_head_generation"] == advanced_head["generation"]
+
+
+def test_identity_picks_max_session_not_latest_updated_row(tmp_path):
+    """Opus re-gate finding (non-blocking, my call): ``_computed_moves_identity``
+    must pick the session by MAX(session), never by the latest-UPDATED "refresh"
+    row. Mark the NEWER session succeeded first, then touch an OLDER session's
+    "refresh" row again later (a backfill/re-verify) -- ``updated_at DESC``
+    would then wrongly select the older session."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head,
+                            scope_hash="newer")
+    clock.advance(120)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-10", head=head,
+                            scope_hash="older")
+
+    identity = _computed_moves_identity(conn)
+
+    assert identity is not None
+    assert identity[0] == "2026-09-18"
+
+
+def test_no_rescan_on_repeated_ticks_for_the_same_key(tmp_path, monkeypatch):
+    """Opus re-gate blocking finding: the expensive pandas scan
+    (``target_tickers_from_snapshot``) must be memoized per (session, head)
+    at the ``Service`` layer -- repeated ticks against the same identity must
+    not re-scan while a build attempt is backing off."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    calls = []
+
+    def _counting_scan(*a, **k):
+        calls.append(1)
+        return ([], {})
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot", _counting_scan)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    for _ in range(5):
+        service._reconcile_computed_moves_refresh()
+
+    assert len(calls) == 1
+
+
+def test_reset_on_new_head_resets_attempts(tmp_path, monkeypatch):
+    """Opus re-gate blocking finding: a new identity (here, a new shadow head)
+    must reset the memo's attempt count/backoff, allowing an immediate rescan
+    even while the prior identity was still backing off."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    calls = []
+
+    def _counting_scan(*a, **k):
+        calls.append(1)
+        return ([], {})
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot", _counting_scan)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    service._reconcile_computed_moves_refresh()
+    assert len(calls) == 1
+    service._reconcile_computed_moves_refresh()  # same identity, still backing off
+    assert len(calls) == 1
+
+    _advance_shadow_head(conn, clock, store, head)  # new head -> new identity
+
+    service._reconcile_computed_moves_refresh()
+    assert len(calls) == 2
