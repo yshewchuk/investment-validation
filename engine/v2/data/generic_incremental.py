@@ -136,7 +136,25 @@ def commit_generic_table_candidate(
     attempt_id: str | None = None,
     fence: int = 1,
     fault: Callable[[str], None] | None = None,
+    fence_check: Callable[[Any], None] | None = None,
 ):
+    """``fence_check``, when supplied, REPLACES the default ``_head_fence``
+    check below (it is never composed with it) -- safe because
+    ``catalog.commit_snapshot`` always runs its own
+    ``_check_head_expectation`` immediately after ``fence_check(conn)``
+    inside the same transaction, regardless of which ``fence_check`` runs.
+    A caller that wants an attempt-lease check
+    (``engine.v2.ops.lifecycle.verify_fence``) alongside the head check
+    passes ``fence_check=lambda c: verify_fence(c, attempt_id, fence, now)``
+    -- see ``forward_calendar_store.py``'s and ``computed_moves_store.py``'s
+    own ``_fence_check_for`` for the pattern (this module, in
+    ``engine/v2/data/``, cannot import ``engine.v2.ops.lifecycle`` itself --
+    see the layering note in ``engine/v2/data/catalog.py``). Omitting it
+    (the default) keeps this function's previous, unchanged behavior for
+    its other two callers (``engine/v2/data/incremental.py``'s
+    ``_run_generic_refresh`` and ``engine/v2/research/_trades_publish.py``'s
+    ``publish``), neither of which passes this parameter.
+    """
     clock = clock or SystemClock()
     request_hash = request_hash or content_hash({"changeset": candidate.changeset_hash})
     receipt_id = receipt_id or "receipt_" + request_hash.removeprefix(CONTENT_HASH_PREFIX)[:32]
@@ -150,8 +168,8 @@ def commit_generic_table_candidate(
         expected_head_snapshot_id=expected_head_snapshot_id,
         expected_head_generation=expected_head_generation, receipt_id=receipt_id,
         attempt_id=attempt_id, fence=fence,
-        fence_check=lambda c: _head_fence(c, scope, expected_head_snapshot_id,
-                                          expected_head_generation),
+        fence_check=fence_check or (lambda c: _head_fence(c, scope, expected_head_snapshot_id,
+                                          expected_head_generation)),
         clock=clock, fault=fault, store=store,
         record_references=lambda c, rid: _record_references(c, rid, candidate, clock),
         audit_partitions=True)

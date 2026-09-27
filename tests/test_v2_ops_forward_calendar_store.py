@@ -12,9 +12,11 @@ import pytest
 from engine.calendar import SESSION_PRIORITY
 from engine.v2.contracts import SnapshotRef
 from engine.v2.ops import forward_calendar_store
+from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.forward_calendar_store import (
     SESSION_BY_TIME,
+    _fence_check_for,
     date_units,
     horizon_dates,
     plan_forward_calendar,
@@ -22,6 +24,8 @@ from engine.v2.ops.forward_calendar_store import (
     ticker_units,
 )
 from engine.v2.ops.incremental_data import classify_response
+from engine.v2.ops.lifecycle import request_cancel
+from tests.ops_support import catalog, enqueue_claim
 
 AS_OF = "2026-09-18"
 
@@ -38,6 +42,54 @@ def _cached(unit):
     return classify_response(200, unit.expected_keys, returned_keys=unit.expected_keys,
                              request_id=unit.request_id, receipt_ref="cache:" + unit.request_id,
                              cache_hit=True)
+
+
+def test_fence_check_for_matches_the_real_verify_fence_and_keeps_the_lease_check(tmp_path):
+    """``_fence_check_for`` must build a callable ``verify_fence`` accepts
+    with its REAL signature (``conn, attempt_id, fence, now`` -- no
+    ``check_lease_time`` keyword). It must also still enforce the production
+    wall-clock lease-expiry check -- never a skipped check, no matter who
+    calls this store (issue #52, mirroring
+    ``computed_moves_store``'s own identical test)."""
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    check = _fence_check_for(claim.attempt_id, claim.fence, clock)
+
+    with transaction(conn):
+        job, attempt = check(conn)
+        assert job["fence"] == claim.fence
+        assert attempt["fence"] == claim.fence
+
+    clock.advance(10 ** 6)  # long past any lease_expires_at
+    with transaction(conn):
+        with pytest.raises(OpsError) as err:
+            check(conn)
+        assert err.value.code == "LEASE_LOST"
+
+
+def test_fence_check_for_refuses_a_cancelled_attempt(tmp_path):
+    """A job whose cancellation invalidates the fence (``request_cancel``
+    sets the job to ``cancelling``) must refuse the commit's fence check
+    with ``CANCELLED``, even though the snapshot head has not moved (issue
+    #52's exact scenario: the head is unchanged, but the issuing attempt's
+    lease is no longer live)."""
+    conn, clock, supervisor = catalog(tmp_path)
+    claim = enqueue_claim(conn, clock, supervisor)
+    request_cancel(conn, claim.job_id, claim.attempt_id, clock=clock)
+    check = _fence_check_for(claim.attempt_id, claim.fence, clock)
+
+    with transaction(conn):
+        with pytest.raises(OpsError) as err:
+            check(conn)
+        assert err.value.code == "CANCELLED"
+
+
+def test_fence_check_for_with_no_staged_attempt_is_a_noop():
+    """No staged attempt (e.g. a manual/ad-hoc invocation with nothing to
+    fence against): the returned callable does nothing and returns
+    ``None``, matching ``computed_moves_store``'s own identical contract."""
+    check = _fence_check_for(None, None, clock=None)
+    assert check(object()) is None
 
 
 def test_claims_carry_session_priority_same_as_legacy():
@@ -279,3 +331,16 @@ def test_expected_head_snapshot_id_empty_is_refused_before_any_io(tmp_path):
 
 def test_expected_head_snapshot_id_too_long_is_refused_before_any_io(tmp_path):
     _refused(tmp_path, expected_head_snapshot_id="s" * 129)
+
+
+def test_attempt_id_empty_string_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, attempt_id="")
+
+
+def test_attempt_id_non_str_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, attempt_id=123)
+
+
+@pytest.mark.parametrize("bad_fence", [True, 0, -1, 1.5, "1"])
+def test_fence_is_refused_before_any_io(tmp_path, bad_fence):
+    _refused(tmp_path, fence=bad_fence)
