@@ -128,6 +128,130 @@ contracts" above. Its pure helpers (`horizon_dates`, `date_units`,
 are unit-testable without a catalog or a network. Today this runner has no
 production caller, only its own test module.
 
+**Cutover PR-4 (this doc describes the design as this PR's Phase 2 will
+leave it, not a pre-existing fact — Phase 1 of this PR is documentation
+only, gated on cutover PR-3 (`native_score_batch.py`, `#66`) merging before
+any of the code below is written).** Three additions close the gap the
+root doc §4 and this doc's own "Diagrams" section both name today:
+`run_shadow_nightly` "has no production caller, only tests ... call it,"
+so `native_parity` always compares `{}` in practice. None of the three
+changes `run_shadow_nightly`'s own stage-walk or `native_parity_handler`'s
+signature contract (both already correctly consume real
+`legacy_rows`/`native_rows` dicts today — proven by
+`tests/test_v2_ops_native_shadow_render.py`); the gap is purely that
+nothing before this PR builds real dicts to hand them.
+
+- **`nightly.legacy_parity_rows(score_document: Mapping[str, Any]) ->
+  dict[str, dict]`** (new, this package). Keys the legacy `score.json`
+  document's own `"rows"` array by
+  `engine.v2.ops.legacy_adapter.population_key`'s `"ticker|strategy|
+  event_date"` format — REUSED, not re-derived: it is the identical
+  three-field format `engine.v2.serving.native_render.native_row_key`
+  already derives for a native `ScoreRecord` (that module's own docstring:
+  `"the native twin of bridge._population_key"`), so a legacy row and its
+  native counterpart land under the same string key once both sides are
+  handed to `native_parity_report.compare_native_vs_legacy`. Pure: no
+  filesystem, no clock, and — the point of putting this here rather than
+  in the composing script below — no import of `engine.v2.serving` (a
+  layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table;
+  `checks/import_layers.py` would refuse that edge). `legacy_adapter.py`
+  gains one new one-line public function, `population_key`, a thin wrapper
+  over its existing private `_population_key` so this cross-module reuse
+  never reaches into another module's underscore-prefixed name; the
+  private original and its one existing caller (`_action_score`'s
+  population check) are unchanged. A `score_document` with no `"rows"` key
+  returns `{}` (not a refusal — `native_parity_handler`'s existing
+  `_refuse_empty_inputs` already turns an empty `legacy_rows` into
+  `VALIDATION_FAILED` downstream, so this function does not need its own
+  empty-input check); a row missing `ticker`/`strategy`/`event_date` keys
+  under `""` for that field, exactly as `population_key` already does —
+  no new behavior invented here, and see "Failure semantics" below for why
+  that is a real, tested risk rather than a defensive-only note.
+- **`native_parity_report.py` gains a caller-supplied "explained" bucket**,
+  the mechanism for classifying a known structural difference (legacy's
+  stale-px rule; legacy finality drift — memory `d14-corpus-parity`'s
+  measured 212/124 counts) as accepted rather than a defect, without
+  hiding the finding or touching `engine/v2/parity`'s comparator. New
+  `ROW_EXPLANATION_CODES = frozenset({"LEGACY_STALE_PX",
+  "LEGACY_FINALITY_DRIFT"})` and a new keyword-only parameter on both
+  `compare_native_vs_legacy` and `native_parity_handler`:
+  `row_explanations: Mapping[tuple[str, str], str] = {}`, keyed by
+  `(row_key, dimension)` — never by `row_key` alone, so explaining one
+  dimension of a row (say, `financial_diagnostics`, because legacy priced
+  it off a stale quote) can never silently swallow a genuine, unrelated
+  mismatch the SAME row has on another dimension (say, `verdicts`). A
+  `(row_key, dimension)` pair whose `dimension` was not itself compared,
+  whose `row_key` is not in `compared`, or whose pair did not actually
+  produce a mismatch (agreement needs no explaining, and accepting one
+  would hide a caller classifier that is itself wrong) is refused
+  `INVALID_REQUEST` — never a silent no-op annotation. A reason code
+  outside `ROW_EXPLANATION_CODES` is refused the same way: this is a
+  closed, named vocabulary, not a free-text field a caller can widen
+  without a doc change. The returned document gains `"explained": [...]`,
+  each entry the same shape as a `mismatches` entry
+  (`row_key`/`dimension`/`finding_fields`/`receipt`) plus `"reason"`; an
+  explained `(row_key, dimension)` is removed from `mismatches` and moved
+  to `explained`, never counted in both. `native_parity_handler`'s summary
+  gains `"explained": len(report["explained"])` alongside its existing
+  `"mismatches"` count. **The classifier itself — deciding which rows are
+  actually stale-px vs. finality-drift — is explicitly out of scope for
+  this PR, and not invented here**: no reusable stale-px/finality-drift
+  detector exists in production code today (`engine/v2/data/price_history.py`
+  has finality/staleness primitives but no per-row classifier over a scored
+  record; the D14 corpus's 212/124 counts were a one-off manual
+  classification during a Phase 2 gate investigation, never a callable
+  function). Until a follow-up PR builds one, `row_explanations` defaults
+  to `{}` and every real mismatch reports as a mismatch — this PR adds the
+  plumbing so a future classifier has somewhere correct to plug in, not a
+  guess at what that classifier should decide today. Tracked as a
+  follow-up issue, filed alongside this PR's Phase 2 push.
+- **`tools/native_parity_run.py`** (new, tools-composing layer — the one
+  place allowed to import both `engine.v2.ops` and `engine.v2.serving` in
+  one process, per `engine/v2/ops/native_shadow_render.py`'s own docstring
+  and the working precedent `tools/v2_dashboard_project.py` already sets
+  for composing `engine.v2.ops.bootstrap` with `engine.v2.serving`). This
+  is the real (manual, operator-invoked; not yet wired into any job graph
+  or the supervisor's tick loop — see "out of scope" below) production
+  caller that finally builds a non-empty `parity_rows` and calls
+  `run_shadow_nightly` with it: reads a session's already-written legacy
+  `score.json` (`nightly.legacy_parity_rows`, above); resolves the current
+  release (`engine.v2.scoring.release_bindings.resolve_release_binding`,
+  PR-1, already on `main`); reads one already-staged `events.json` of
+  `native_score_batch.NightlyEventInputs` (PR-3/`#66`'s own shape — this
+  PR does not build the per-night enumeration/staging of those events; it
+  accepts them as an explicit input file, exactly as
+  `run_native_score_batch_worker` itself does, and leaves "who stages
+  `events.json` for every `BoardRequest`" to cutover PR-6 per
+  `scratchpad/cutover_wiring_plan.md`); calls
+  `native_score_batch.assemble_score_batch_inputs` (PR-3) to get
+  `requests_by_key`; calls
+  `engine.v2.serving.native_shadow_render.build_native_bundle_rows`
+  (already on `main`) to get `native_rows`; and calls
+  `nightly.run_shadow_nightly(..., plan=..., parity_rows=(legacy_rows,
+  native_rows))`. It writes nothing to `source_root` and nothing to the
+  legacy board — see "Failure semantics" below for why a failure anywhere
+  in this script cannot touch the legacy nightly.
+
+**Out of scope for this PR** (each a real gap, named rather than silently
+left implicit): the per-night enumeration of every `BoardRequest` and the
+staging of its `events.json` inputs (cutover PR-6); flipping
+`native_parity` or anything else onto a schedule, a job kind, or the
+supervisor's tick loop (no PR before Phase 7 changes legacy authority);
+the stale-px/finality-drift classifier itself (above); and any new
+per-field tolerance value in `engine.v2.parity.tolerance.SCORE_RECORD_V1`
+— this PR reuses that policy exactly as `native_parity_report.py` already
+does today (`dimensions.compare_dimension`'s hardcoded
+`tolerance_policy=SCORE_RECORD_V1`; unchanged by this PR) and adds none.
+**`SCORE_RECORD_V1` declares zero per-field rules
+(`rules=()`), so every one of the five dimensions' 30 fields —
+`FORECAST_FIELDS` (12), `SIMULATION_FIELDS` (7), `FINANCIAL_FIELDS` (5),
+`GATE_FIELDS` (3), `ANALOG_FIELDS` (3) — compares under exact equality
+today, not a widened tolerance; there is no Phase-4-declared per-field
+tolerance beyond that for this PR to reuse.** Adding one is later,
+field-by-field work with its own stated derivation (`tolerance.py`'s own
+docstring: "chosen to make the first run pass" is a named failure mode),
+never invented here to make a real-data run look cleaner than it is.
+
 ## Inputs
 
 - Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan`
@@ -226,6 +350,15 @@ production caller, only its own test module.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
+- Cutover PR-4 (design; see "Primary contracts" above): once
+  `tools/native_parity_run.py` supplies real rows, `native_parity_report.json`
+  (already written by `native_parity_handler` today, just always over
+  empty inputs in production) carries a real `"compared"`/`"only_legacy"`/
+  `"only_native"`/`"mismatches"` split, plus the new `"explained"` list
+  (each entry `mismatches`-shaped plus `"reason"`) for a caller-classified
+  known structural difference. Still private-shadow-only, same as every
+  other artifact in this bullet list; nothing here writes to the legacy
+  board.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the EXISTING `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never
@@ -896,6 +1029,82 @@ network, or database access.
   Idempotency of anything built from this enumeration downstream (a job's
   own commit key, once `native_score` exists) is that later stage's
   concern.
+
+### Cutover PR-4: real `parity_rows` (the 4c R1–R6 template)
+
+**A `native_parity` failure never fails or alters the legacy nightly, at
+any layer this PR touches.** This restates and extends an existing
+invariant (`native_parity` is `OPTIONAL` in `GRAPH`; `_run_stage` degrades
+rather than raises for an `OPTIONAL` stage), not a new one: `nightly.py`'s
+own stage-walk is unchanged by this PR. What is new is the composing
+script sitting entirely outside that walk — `tools/native_parity_run.py`
+reads the legacy `score.json` (never writes to `source_root`), and
+everything it writes lands under `private_root`, exactly like
+`run_shadow_nightly`'s existing shadow-only contract. A crash anywhere in
+this script — a bad release, a malformed `events.json`, a `score_one`
+exception `build_native_bundle_rows` deliberately lets propagate — stops
+before `run_shadow_nightly` is even called, or stops `run_shadow_nightly`
+partway through a `NightlyReceipt` that is itself private and never
+consumed by the legacy board. There is no code path from this script back
+into `engine.dashboard.nightly`.
+
+- **R1, missing input.** `legacy_parity_rows` never refuses: a
+  `score_document` missing `"rows"` returns `{}`; a row missing
+  `ticker`/`strategy`/`event_date` keys under `""` (`population_key`'s
+  existing behavior, not new). This is a REAL join-format risk stated
+  explicitly, not a defensive-only note: `population_key` and
+  `native_row_key` must format `event_date` identically (e.g. both an ISO
+  date string, never one side a `pandas.Timestamp.__str__()` and the other
+  a plain date string) or a legitimately-shared event silently lands in
+  `only_legacy`/`only_native` instead of `compared` — the acceptance test
+  for this PR asserts the two functions produce the SAME key string for
+  one real event's row pair, not merely that each behaves consistently on
+  its own side. `compare_native_vs_legacy`'s own existing
+  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty side or no shared
+  key at all) is unchanged and still the backstop when the join produces
+  nothing. `row_explanations` validation (above) is itself a missing/
+  invalid-input refusal, raised before any row is reclassified: an unknown
+  reason code, an unmatched `(row_key, dimension)`, or a pair that never
+  mismatched is `INVALID_REQUEST`, exactly the same typed shape
+  `native_parity_report.py` already raises elsewhere in this module.
+  `tools/native_parity_run.py` raises (never refuses per-row) on a missing
+  `score.json`/`events.json`/unresolvable release — the whole run has
+  nothing to compare without them; a per-row `assemble_score_batch_inputs`
+  refusal (PR-3) is logged and excluded from `requests_by_key`, never
+  raised, matching that function's own per-row-refusal contract.
+- **R2, cache.** None of this PR's own. `legacy_parity_rows` and
+  `compare_native_vs_legacy`'s `row_explanations` handling are both pure,
+  no I/O. `tools/native_parity_run.py` resolves the release binding once
+  per run (PR-1's own cached member resolution inside that one call, not
+  re-cached here) and reads `score.json`/`events.json` once each; a rerun
+  re-reads both from disk rather than reusing a prior in-process result.
+- **R3, retry.** This script has no retry of its own and is not a job
+  kind (`native_parity` stays in `NO_JOB_STAGES`, unchanged): a failed
+  manual run is simply re-invoked by the operator, exactly like
+  `forward_calendar_store.run_forward_calendar_refresh`'s own "no
+  production caller, only its own test module" runners before they gained
+  a `JobKind`.
+- **R4, transaction.** Not applicable: no catalog writes. `write_parity_report`
+  (unchanged by this PR) writes one JSON file after
+  `compare_native_vs_legacy` fully returns; there is no multi-step commit
+  to make atomic.
+- **R5, partial write.** `write_parity_report` still writes once, after
+  comparison finishes — unchanged. `tools/native_parity_run.py` writes no
+  file of its own; `run_shadow_nightly`'s own `receipt_path` write (if
+  given) is unchanged pre-existing behavior, guarded by the same
+  `path.parent.mkdir`/single `write_text` it already uses.
+- **R6, idempotency.** Same `score.json` + same `events.json` + same
+  resolved release + same `row_explanations` → the same
+  `native_parity_report.json`, byte-for-byte: `legacy_parity_rows` is a
+  pure function of `score_document`, `assemble_score_batch_inputs`/
+  `build_native_bundle_rows` are pure functions of their inputs (PR-3's
+  own R6; `build_native_bundle_rows`'s `score_one` calls are
+  content-addressed), and `compare_native_vs_legacy` is a pure function of
+  `(legacy_rows, native_rows, dimensions, row_explanations)`. Promoting a
+  new release between two runs changes the resolved bindings and therefore
+  the native side's values — a different release genuinely producing a
+  different report is the correct, by-design outcome, matching PR-3's own
+  R6 note for the identical reason.
 
 ## Invariants
 
