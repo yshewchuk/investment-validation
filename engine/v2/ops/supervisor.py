@@ -192,6 +192,15 @@ class Service:
         #: problem actually printed, so a persisting problem prints once
         #: rather than on every ~1s tick (2026-09-14 second review fix).
         self._last_publication_status_problem = None
+        #: same dedup, for _reconcile_computed_moves_refresh (S4C Part 4,
+        #: revised after Opus BLOCK(3)).
+        self._last_computed_moves_problem = None
+        #: {"identity": _computed_moves_identity() tuple, "attempts": int,
+        #: "not_before": monotonic float} or None -- the backoff memo for
+        #: the SAME method (Opus re-gate finding: an unthrottled rebuild
+        #: attempt repeated every tick, all day, whenever it did not end in
+        #: a submitted job).
+        self._computed_moves_memo = None
 
     def start(self):
         if not self.lock.acquire():
@@ -229,6 +238,7 @@ class Service:
         if claim:
             self._launch(claim)
         self._reconcile_publication_status()
+        self._reconcile_computed_moves_refresh()
         return bool(self.running or claim)
 
     def _reconcile_publication_status(self):
@@ -267,6 +277,185 @@ class Service:
             print(json.dumps({"event": "publication_status_reconcile_failed",
                               "problem": {field: to_document(problem)[field]
                                           for field in ("code", "category", "retryable", "message")}}))
+
+    #: Max rebuild attempts per (session, head) identity before giving up
+    #: on it entirely (never retried again until a new head or session
+    #: changes the identity). Each attempt that reaches
+    #: ``submit_computed_moves_refresh_if_ready`` and does not end in a
+    #: submitted job re-runs a full pandas scan
+    #: (``computed_moves_store.target_tickers_from_snapshot``) and, if
+    #: admission rejects the built request, re-hashes the source tree
+    #: (``fingerprints.worker_source_manifest``) -- unthrottled, that
+    #: repeats every ~1s tick, all day (Opus re-gate finding).
+    _COMPUTED_MOVES_MAX_ATTEMPTS = 5
+    #: Backoff (seconds) after attempt N fails -- 30s, 2m, 10m, 30m, 1h,
+    #: then no more attempts for this identity. Picked to bound the worst
+    #: case (an all-day session with nothing to submit) to a handful of
+    #: scans rather than tens of thousands of tick-driven ones, while still
+    #: noticing a target becoming scoreable within the hour.
+    _COMPUTED_MOVES_BACKOFF_SECONDS = (30.0, 120.0, 600.0, 1800.0, 3600.0)
+
+    def _computed_moves_backoff(self, memo, now):
+        """Record one spent attempt against ``memo`` and schedule the next
+        one via ``_COMPUTED_MOVES_BACKOFF_SECONDS``, indexed by attempt
+        number and clamped to the schedule's last entry past
+        ``_COMPUTED_MOVES_MAX_ATTEMPTS`` (split out of
+        ``_reconcile_computed_moves_refresh`` to stay under the function-line
+        budget; same two call sites -- a raised exception and a ``None``
+        receipt back -- share this exactly)."""
+        memo["attempts"] += 1
+        memo["not_before"] = now + self._COMPUTED_MOVES_BACKOFF_SECONDS[
+            min(memo["attempts"] - 1, len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]
+        self._computed_moves_memo = memo
+
+    def _report_computed_moves_problem(self, exc):
+        """Redacted, deduped report for a ``_reconcile_computed_moves_refresh``
+        exception -- the identical dedup-by-(code, message) pattern
+        ``_reconcile_publication_status`` already uses for its own
+        reporting (split out for the same function-line-budget reason as
+        ``_computed_moves_backoff``)."""
+        problem = exc.problem if isinstance(exc, OpsError) else make_problem(
+            "VALIDATION_FAILED", "computed_moves_refresh reconciliation failed")
+        problem_key = (problem.code, problem.message)
+        if problem_key == self._last_computed_moves_problem:
+            return
+        self._last_computed_moves_problem = problem_key
+        print(json.dumps({"event": "computed_moves_refresh_reconcile_failed",
+                          "problem": {field: to_document(problem)[field]
+                                      for field in ("code", "category", "retryable", "message")}}))
+
+    def _computed_moves_identity_or_none(self, now):
+        """The two CHEAP checks (plain indexed ``SELECT``s, no pandas scan)
+        ``_reconcile_computed_moves_refresh`` needs every tick --
+        ``nightly._computed_moves_identity`` (the session to key off and
+        the current head), and whether a job already exists under that
+        session's key -- split out to stay under the function-line budget.
+
+        Both run inside a ``try`` -- CodeRabbit finding on the Opus
+        re-gate: before this fix they ran BEFORE any ``try`` in the caller,
+        so a raise from either (a locked database, a malformed idempotency
+        key making ``_session_from_refresh_key``'s ``split`` choke) would
+        escape and crash ``tick()`` itself, contradicting ARCHITECTURE.md's
+        "never interrupt the tick or required dispatch" claim -- unlike
+        every other failure path here, matching
+        ``_reconcile_publication_status``'s own shape, whose entire body is
+        inside its ``try``. Such a raise is recorded against a dedicated
+        ``identity: None`` memo entry (there is no real identity to key it
+        by yet) via the same ``_computed_moves_backoff`` schedule, but
+        WITHOUT the ``_COMPUTED_MOVES_MAX_ATTEMPTS`` cap the caller applies
+        once a real identity is known: a transient failure here (the lock
+        clearing) has no "new identity" signal of its own to reset on, so
+        giving up permanently after 5 tries would silently and
+        irrecoverably stop this stage for the rest of the process's life;
+        instead it keeps retrying forever, just at the schedule's slowest
+        (1h) cadence past the 5th attempt.
+
+        Returns the real identity tuple when the caller should proceed, or
+        ``None`` when it should return immediately -- covering a caught
+        exception (reported and backed off here), "no identity yet"
+        (nothing succeeded), and "already submitted" (a job exists under
+        that key); the last two clear ``self._computed_moves_memo``
+        themselves, since there is nothing to back off from once a job
+        exists."""
+        from engine.v2.ops.nightly import _computed_moves_identity, _computed_moves_refresh_key
+        from engine.v2.ops.submission import job_id_for
+
+        memo = self._computed_moves_memo
+        if memo is not None and memo["identity"] is None and now < memo["not_before"]:
+            return None
+        try:
+            identity = _computed_moves_identity(self.conn)
+            exists = identity is not None and self.conn.execute(
+                "SELECT 1 FROM jobs WHERE job_id = ?",
+                (job_id_for("shadow", _computed_moves_refresh_key(identity[0])),)).fetchone() is not None
+        except Exception as exc:
+            error_memo = memo if (memo is not None and memo["identity"] is None) else {
+                "identity": None, "attempts": 0, "not_before": 0.0}
+            self._computed_moves_backoff(error_memo, now)
+            self._report_computed_moves_problem(exc)
+            return None
+        self._last_computed_moves_problem = None
+        if identity is None or exists:
+            self._computed_moves_memo = None
+            return None
+        return identity
+
+    def _reconcile_computed_moves_refresh(self):
+        """S4C Part 4 (revised after Opus BLOCK(3) on ``dc7f9360``, then
+        again after the Opus re-gate on ``e6be41a``, then again after the
+        Opus re-gate on ``f531b07``): the ONLY place ``computed_moves_refresh``
+        is submitted -- never bundled into ``build_legacy_job_requests``'s
+        single ``submit_graph`` call, so it can never race or fail the
+        required "refresh" stage (``_check_head_expectation`` rejects
+        whichever native job commits its pinned head second).
+
+        ``_computed_moves_identity_or_none`` runs the two CHEAP checks (see
+        its own docstring for their failure semantics) and returns either a
+        real identity to proceed with, or ``None`` to return immediately.
+
+        Only past that does this method reach the EXPENSIVE path --
+        ``nightly.submit_computed_moves_refresh_if_ready``, which (when
+        there is no job yet) runs the full
+        ``computed_moves_store.target_tickers_from_snapshot`` scan and
+        builds+submits a request -- and even then only if
+        ``self._computed_moves_memo`` (keyed by THIS identity; a new head
+        or a new session's identity always resets ``attempts`` to 0 and
+        clears the backoff) has not already spent its
+        ``_COMPUTED_MOVES_MAX_ATTEMPTS`` attempts and is not still inside
+        its ``not_before`` backoff window. A submitted job clears the memo
+        (nothing left to retry); anything else -- ``None`` back (no
+        scoreable target) or a raised exception (a resolve/target-selection
+        error, admission rejecting the request) -- counts as one spent
+        attempt and schedules the next one via
+        ``_COMPUTED_MOVES_BACKOFF_SECONDS``. Every exception this method can
+        see is caught and reported the same redacted way
+        ``_reconcile_publication_status`` reports its own, never left to
+        crash the tick or block dispatch of any other job. See
+        ``nightly.submit_computed_moves_refresh_if_ready`` and
+        ARCHITECTURE.md "Outputs"/"Failure semantics" for the full account.
+
+        Submits under its OWN ``NamespacePolicy``, never ``self.policy``
+        (Opus re-gate, confirmed real: ``cli.py``'s ``serve``/
+        ``nightly_trigger.py`` construct ``Service`` with ``DEFAULT_POLICY``,
+        a ``ResourcePolicy`` -- ``.profiles`` for ``claim_next``, but no
+        ``.allows()``, which ``submission.submit`` needs). Every OTHER
+        production submission site (``cli.py``'s ``_submit_command``/
+        ``_submit_nightly``/HTTP submit/adhoc-rescore/snapshot-submit/
+        decisions-supersede) already builds its own ad-hoc
+        ``NamespacePolicy`` inline, never from ``Service``'s resource
+        policy; this matches that, scoped to just ``"shadow"`` -- the only
+        namespace this stage ever targets.
+        """
+        from engine.v2.ops.nightly import submit_computed_moves_refresh_if_ready
+        from engine.v2.ops.snapshot_stages import _catalog_path
+        from engine.v2.ops.submission import NamespacePolicy
+
+        now = self.clock.monotonic()
+        identity = self._computed_moves_identity_or_none(now)
+        if identity is None:
+            return
+        memo = self._computed_moves_memo
+        if memo is None or memo["identity"] != identity:
+            memo = {"identity": identity, "attempts": 0, "not_before": 0.0}
+        if (memo["attempts"] >= self._COMPUTED_MOVES_MAX_ATTEMPTS
+                or now < memo["not_before"]):
+            self._computed_moves_memo = memo
+            return
+        policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+        try:
+            receipt = submit_computed_moves_refresh_if_ready(
+                self.conn, self.registry, policy, self.store,
+                catalog_path=_catalog_path(self.conn), objects_root=str(self.root),
+                code_source=self.code_source, clock=self.clock)
+        except Exception as exc:
+            self._computed_moves_backoff(memo, now)
+            self._report_computed_moves_problem(exc)
+            return
+        self._last_computed_moves_problem = None
+        if receipt is not None:
+            self._computed_moves_memo = None
+        else:
+            self._computed_moves_backoff(memo, now)
 
     def _clock_check(self):
         wall, mono = self.clock.now(), self.clock.monotonic()

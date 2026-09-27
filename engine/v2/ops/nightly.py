@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Callable
 
 from engine.v2.foundation import content_hash
+from engine.v2.ops.calendar_moves_jobs import (
+    COMPUTED_MOVES_REFRESH_ACTION,
+    NATIVE_COMPUTED_MOVES_ACCOUNT,
+    cached_unit_outcomes,
+)
 from engine.v2.ops.checkpoints import artifact
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import source_closure
@@ -35,6 +40,15 @@ GRAPH = {
     "projection": ("export", "model_evidence"), "selfcheck": ("projection",),
     "engineering": (), "publication": ("selfcheck", "engineering"),
     "delivery": ("publication",), "backup": ("decision_commit",),
+    # S4C Part 4 (revised after Opus BLOCK(3) on dc7f9360): this node is
+    # topological documentation for run_shadow_nightly's whole-graph walk
+    # only. No submission path builds a job from it -- see
+    # ARCHITECTURE.md "Outputs"/"Failure semantics" for
+    # supervisor.Service._reconcile_computed_moves_refresh, the ONLY
+    # place a computed_moves_refresh job is ever submitted.
+    # forward_calendar_refresh gets no GRAPH node at all -- see
+    # calendar_moves_jobs.py's own module docstring (issue #52).
+    "computed_moves_refresh": ("refresh",),
     # spec_ns_c: the per-night native-vs-legacy parity report, parented on
     # "score" because that is the last stage whose rows both sides can read.
     # OPTIONAL on purpose: a parity mismatch (or a report-write failure) is
@@ -44,7 +58,7 @@ GRAPH = {
     "native_parity": ("score",),
 }
 OPTIONAL = frozenset({"settlement", "model_evidence", "engineering", "backup",
-                      "native_parity"})
+                      "computed_moves_refresh", "native_parity"})
 
 
 @dataclass(frozen=True)
@@ -144,10 +158,22 @@ PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate
 #: stage existed: "refresh" is never even in ``_DAG_STAGES``.
 NATIVE_REFRESH_ACTION = "incremental_refresh"
 
+#: S4C Part 4 (revised after Opus BLOCK(3)): the native-mode stage ->
+#: job-kind map. "computed_moves_refresh" is deliberately NOT here any
+#: more -- build_legacy_job_requests never builds a job for it in any
+#: mode; supervisor.Service's own tick loop is the only submitter (see
+#: ARCHITECTURE.md "Outputs"). Only a plan that pins refresh_mode="native"
+#: reaches this map; legacy mode leaves _action_for behaviour, and
+#: therefore the whole DAG, byte-identical to before "refresh" existed.
+_NATIVE_ACTION_STAGES = {
+    "refresh": NATIVE_REFRESH_ACTION,
+}
+_NATIVE_REFRESH_ACTIONS = frozenset(_NATIVE_ACTION_STAGES.values())
+
 
 def _action_for(stage, refresh_mode="legacy"):
-    if refresh_mode == "native" and stage == "refresh":
-        return NATIVE_REFRESH_ACTION
+    if refresh_mode == "native" and stage in _NATIVE_ACTION_STAGES:
+        return _NATIVE_ACTION_STAGES[stage]
     return stage if stage in PURE_STAGES else _legacy_action(stage)
 
 
@@ -290,7 +316,7 @@ def _legacy_resource(kind):
     # here only so ``_thread_count`` can fingerprint its ``environment_ref``
     # the same way every other stage's does -- the job itself is built by
     # ``incremental_data.refresh_job_spec``, not ``_job_spec`` below.
-    if kind == NATIVE_REFRESH_ACTION:
+    if kind in _NATIVE_REFRESH_ACTIONS:
         return "io_fetch"
     if kind in ("legacy_score", "legacy_decision_replay"):
         return "legacy_score"
@@ -585,12 +611,69 @@ def _build_native_refresh_plan(plan, context_tickers, *, catalog_path, objects_r
         calls_per_unit=ORATS_CALLS_PER_DAILY_MARKET_UNIT)
 
 
+def _build_native_computed_moves_plan(as_of, *, catalog_path, objects_root,
+                                      conn, store, clock):
+    """S4C Part 4 (revised after Opus BLOCK(3)): the production computed_moves
+    ``RefreshPlan``, built against the CURRENT shadow head -- the only
+    caller, ``submit_computed_moves_refresh_if_ready``, calls this after
+    confirming a native "refresh" job already succeeded, so "current" here
+    always means "the head refresh just committed", never a head pinned at
+    some earlier, possibly stale, plan-build time.
+
+    One ``RefreshUnit`` per scoreable target ticker -- the same denominator
+    ``computed_moves_store.run_computed_moves_refresh`` recomputes at run
+    time from the same pinned parent, so a submitted job's coverage
+    denominator never disagrees with what the worker independently derives.
+    Returns ``(RefreshPlan, expected_ids)``, or ``None`` when there is no open
+    catalog, no shadow head, a head missing ``earnings_events``/
+    ``daily_market``, or a resolved target list that comes back empty -- this
+    stage is OPTIONAL, so each of those is a graceful "nothing to submit this
+    run", never a raised refusal (contrast ``_build_native_refresh_plan``
+    above, which raises for the same missing-catalog/missing-head cases
+    because "refresh" is required). ``catalog_path``/``objects_root``/
+    ``clock`` are accepted for signature symmetry with the other native
+    builders in this module; none is read by this body.
+    """
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+    from engine.v2.data.repository import Repository
+    from engine.v2.ops import computed_moves_store, incremental_data
+
+    if conn is None:
+        return None
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+        ("shadow",)).fetchone()
+    if head is None:
+        return None
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(head["snapshot_id"])
+    if ("earnings_events" not in snapshot.table_versions
+            or "daily_market" not in snapshot.table_versions):
+        return None
+    targets, _report = computed_moves_store.target_tickers_from_snapshot(
+        repository, head["snapshot_id"], all_scoreable=True, as_of=as_of)
+    if not targets:
+        return None
+    units = computed_moves_store.computed_moves_units(targets, as_of=as_of)
+    refresh_plan = incremental_data.plan_refresh(
+        snapshot, units,
+        cached_outcomes=cached_unit_outcomes(
+            conn, units, source=COMPUTED_MOVES_TABLE_NAME,
+            endpoint=COMPUTED_MOVES_TABLE_NAME),
+        provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
+        expected_head_generation=head["generation"])
+    return refresh_plan, tuple(targets)
+
+
 def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, environment_ref,
-                            *, catalog_path, objects_root, conn=None, store=None, clock=None):
-    """R3B-3: the native refresh job, built by the stage's own contract
-    (``incremental_data.refresh_job_spec``) -- never re-derived through
+                            *, catalog_path, objects_root, conn=None, store=None, clock=None,
+                            parameters=None):
+    """R3B-3/S4C: the native refresh job, built by the stage's own contract --
+    ``incremental_data.refresh_job_spec`` for the daily_market kind, or
+    ``calendar_moves_jobs.calendar_moves_job_spec`` for
+    ``computed_moves_refresh`` -- never re-derived through
     ``_legacy_params``/``_job_spec``, whose contract (``LegacyParameters``)
-    does not fit it.
+    does not fit either of them.
 
     S4A: the pinned refresh plan is published and bound as
     ``refresh_plan.json`` so ``executor._materialize_inputs`` copies it into
@@ -617,12 +700,21 @@ def _refresh_submit_request(key, refresh_plan_obj, kind, implementation_ref, env
                 register_artifact(conn, ref, None, clock)
         bindings["refresh_plan.json"] = ref.artifact_id
         input_refs = (ref.artifact_id,)
-    job = refresh_job_spec(
-        refresh_plan_obj, implementation_ref=implementation_ref,
-        environment_ref=(environment_ref or content_hash(
-            environment_identity(_thread_count(kind)))),
-        output_namespace="shadow", catalog_path=catalog_path, objects_root=objects_root,
-        input_bindings=bindings or None, input_refs=input_refs)
+    environment_ref = environment_ref or content_hash(
+        environment_identity(_thread_count(kind)))
+    if kind == NATIVE_REFRESH_ACTION:
+        job = refresh_job_spec(
+            refresh_plan_obj, implementation_ref=implementation_ref,
+            environment_ref=environment_ref, output_namespace="shadow",
+            catalog_path=catalog_path, objects_root=objects_root,
+            input_bindings=bindings or None, input_refs=input_refs)
+    else:
+        from engine.v2.ops.calendar_moves_jobs import calendar_moves_job_spec
+        job = calendar_moves_job_spec(
+            kind, refresh_plan_obj, parameters, implementation_ref=implementation_ref,
+            environment_ref=environment_ref, output_namespace="shadow",
+            catalog_path=catalog_path, objects_root=objects_root,
+            input_bindings=bindings or None, input_refs=input_refs)
     return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
 
 
@@ -639,6 +731,12 @@ def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
         stages = ("materialize",) + stages
     if refresh_mode == "native" and "refresh" not in stages:
         stages = ("refresh",) + stages
+    # computed_moves_refresh is never in this function's output, in either
+    # mode (S4C Part 4, revised after Opus BLOCK(3)): it is a real GRAPH
+    # node (a prereq-inclusive plan["order"] walk names it), but no
+    # submission path builds a kind for it any more -- supervisor.Service's
+    # own tick loop is the only submitter (see ARCHITECTURE.md "Outputs").
+    stages = tuple(stage for stage in stages if stage != COMPUTED_MOVES_REFRESH_ACTION)
     return stages
 
 
@@ -662,6 +760,182 @@ def _native_refresh_request(plan, key, refresh_plan_obj, kind, implementation_re
         catalog_path=catalog_path if catalog_path is not None else plan.get("catalog_path"),
         objects_root=objects_root if objects_root is not None else plan.get("objects_root"),
         conn=conn, store=store, clock=clock)
+
+
+def _computed_moves_refresh_key(as_of):
+    """S4C Part 4 (revised): session-only, never scope-qualified -- see
+    ``submit_computed_moves_refresh_if_ready``'s own docstring for why."""
+    return "nightly:" + as_of + ":computed_moves_refresh"
+
+
+def _session_from_refresh_key(idempotency_key):
+    """Recover the session ``build_legacy_job_requests`` encoded into a
+    native "refresh" job's OWN idempotency key
+    (``"nightly:<session>:<scope_hash>:refresh"``) -- the only place a
+    native refresh's session is recorded; ``RefreshParameters`` has no
+    ``as_of`` field. Returns ``None`` for anything that does not match this
+    module's own key format exactly."""
+    parts = idempotency_key.split(":")
+    if len(parts) == 4 and parts[0] == "nightly" and parts[3] == "refresh":
+        return parts[1]
+    return None
+
+
+def _build_computed_moves_refresh_request(as_of, key, *, catalog_path, objects_root,
+                                          code_source, conn, store, clock):
+    """S4C Part 4 (revised): the ``computed_moves_refresh`` ``SubmitRequest``
+    for one session, or ``None`` when there is nothing to submit -- see
+    ``submit_computed_moves_refresh_if_ready``, the only caller.
+
+    ``code_source`` (CodeRabbit finding on the Opus re-gate): unlike
+    ``build_legacy_job_requests``'s own ``implementation_ref``, this is
+    NOT the "documented exemption" ARCHITECTURE.md's Invariants section
+    describes -- that exemption covers a CLI/plan-driven function with no
+    ``Service`` in its call chain, where a self-derived
+    ``Path(__file__).resolve().parents[3]`` and the SEPARATELY
+    self-derived root ``cli.py``'s own ``dispatch()`` constructs ``Service``
+    with happen to agree only because both files sit in the same checkout
+    at the same relative depth. This function's ONLY caller
+    (``submit_computed_moves_refresh_if_ready``, called from
+    ``Service._reconcile_computed_moves_refresh``) runs inside a live
+    ``Service``, which already has an authoritative worker-source root of
+    its own -- ``self.code_source``, the exact root ``Service._launch``
+    recomputes ``worker_source_manifest`` from to validate
+    ``implementation_ref`` at dispatch. Deriving a SEPARATE root here (this
+    module's own file position) risks disagreeing with that root under a
+    pinned/worktree execution model where the supervisor's checkout is not
+    wherever Python happened to import ``nightly.py`` from -- silently
+    refusing every real submission as ``INPUT_CHANGED`` at launch. Passing
+    the caller's own root through, instead, makes them agree by
+    construction, the same way ``Service._launch`` itself does."""
+    from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
+    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+
+    built = _build_native_computed_moves_plan(
+        as_of, catalog_path=catalog_path, objects_root=objects_root,
+        conn=conn, store=store, clock=clock)
+    if built is None:
+        return None
+    refresh_plan_obj, expected_ids = built
+    parameters = CalendarMovesParameters(expected_ids=expected_ids, as_of=as_of)
+    implementation_ref = content_hash(worker_source_manifest(code_source))
+    environment_ref = content_hash(
+        environment_identity(_thread_count(COMPUTED_MOVES_REFRESH_ACTION)))
+    return _refresh_submit_request(
+        key, refresh_plan_obj, COMPUTED_MOVES_REFRESH_ACTION, implementation_ref, environment_ref,
+        catalog_path=catalog_path, objects_root=objects_root,
+        conn=conn, store=store, clock=clock, parameters=parameters)
+
+
+def _computed_moves_identity(conn):
+    """Cheap (no pandas scan) identity for the supervisor's own memo/backoff
+    (``supervisor.Service._reconcile_computed_moves_refresh``): the session
+    to key ``computed_moves_refresh`` under, and the shadow head right now.
+
+    The session is the MAX (chronologically latest) session among every
+    succeeded native "refresh" job's own idempotency key -- never the
+    latest-UPDATED row (Opus re-gate finding, non-blocking): an older
+    session's "refresh" job can be touched again later than a newer
+    session's (a backfill, a re-verify), and ``updated_at DESC`` would then
+    pick the wrong, older session. Returns ``None`` when there is no
+    succeeded "refresh" yet, or no shadow head."""
+    rows = conn.execute(
+        "SELECT idempotency_key FROM jobs WHERE kind = ? AND state = 'succeeded'",
+        (NATIVE_REFRESH_ACTION,)).fetchall()
+    sessions = sorted(session for session in
+                      (_session_from_refresh_key(row["idempotency_key"]) for row in rows)
+                      if session is not None)
+    if not sessions:
+        return None
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+        ("shadow",)).fetchone()
+    if head is None:
+        return None
+    return sessions[-1], head["snapshot_id"], head["generation"]
+
+
+def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, catalog_path,
+                                           objects_root, code_source, clock):
+    """S4C Part 4 (revised after Opus BLOCK(3) on ``dc7f9360``): the ONLY
+    place ``computed_moves_refresh`` is ever submitted. Called every
+    ``supervisor.Service.tick()`` (``Service._reconcile_computed_moves_refresh``),
+    never by ``build_legacy_job_requests``, which never builds a job for
+    this stage in any mode any more.
+
+    See ARCHITECTURE.md "Outputs"/"Failure semantics" for the full R1-R6
+    account of why this moved out of the shared native-stage graph
+    submission (both native jobs pinning the same head at plan-build time
+    could race or fail each other against ``_check_head_expectation``, and
+    ``submit_graph``'s all-or-nothing insert let an optional-stage problem
+    refuse the REQUIRED "refresh" job with it) and into its own, later,
+    single-node submission that always resolves the CURRENT head -- the one
+    "refresh" just committed, never one pinned earlier.
+
+    Returns the new ``JobReceipt`` on submission, or ``None`` when there is
+    nothing to do yet (no catalog, no succeeded "refresh" this function can
+    key a session off, no scoreable target, or today's session already has
+    a job under this key, in any state -- see ``_computed_moves_refresh_key``).
+    Any exception past that point is the caller's ``Service`` to catch --
+    ``Service._reconcile_computed_moves_refresh`` also memoizes attempts per
+    ``_computed_moves_identity()`` and backs off after a rebuild that does
+    not end in a submitted job, so this function's own (expensive: a full
+    pandas scan via ``computed_moves_store.target_tickers_from_snapshot``)
+    work is never repeated every tick, all day, for a session with nothing
+    to submit -- see that method's own docstring for the schedule.
+
+    ``code_source`` (CodeRabbit finding on the Opus re-gate): the caller's
+    own worker-source root -- ``Service.code_source`` when called from
+    ``Service._reconcile_computed_moves_refresh`` -- used for
+    ``implementation_ref`` instead of a root this module would derive from
+    its own file position; see ``_build_computed_moves_refresh_request``'s
+    docstring for why that self-derivation is unsafe here specifically.
+    """
+    from engine.v2.ops.submission import job_id_for, submit
+
+    if conn is None:
+        return None
+    identity = _computed_moves_identity(conn)
+    if identity is None:
+        return None
+    as_of, _snapshot_id, _generation = identity
+    key = _computed_moves_refresh_key(as_of)
+    job_id = job_id_for("shadow", key)
+    exists = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    if exists is not None:
+        return None
+    request = _build_computed_moves_refresh_request(
+        as_of, key, catalog_path=catalog_path, objects_root=objects_root,
+        code_source=code_source, conn=conn, store=store, clock=clock)
+    if request is None:
+        return None
+    return submit(conn, registry, policy, request, clock=clock)
+
+
+def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, year_end,
+                       expected_population, alt_strikes, input_refs, prior_selfcheck_ref,
+                       effect_scope, snapshot, context_tickers, include_prerequisites,
+                       implementation_ref, environment_ref):
+    """Build one legacy stage's admitted ``SubmitRequest`` (S4C Part 4
+    extraction, to stay under the function-line budget after
+    ``build_legacy_job_requests`` gained the native-stage dispatch branch)."""
+    from engine.v2.contracts import SubmitRequest
+
+    parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
+                                   effect_scope, snapshot,
+                                   prior_selfcheck_ref=prior_selfcheck_ref,
+                                   context_tickers=context_tickers)
+    refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
+    if stage == "projection" and prior_selfcheck_ref:
+        refs = tuple(refs) + (prior_selfcheck_ref,)
+    if stage != "materialize":
+        parameters["expected_population"] = tuple(expected_population)
+        parameters["alt_strikes"] = int(alt_strikes)
+    parents = _stage_parents(stage, include_prerequisites, snapshot)
+    return SubmitRequest(
+        namespace="shadow", idempotency_key=key, principal="operator",
+        job=_job_spec(kind, parameters, refs, tuple(keys[parent] for parent in parents),
+                      implementation_ref, environment_ref))
 
 
 def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
@@ -702,7 +976,6 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
     watchlist narrower than the context is refused: a full run must score
     its whole context, never a slice of it.
     """
-    from engine.v2.contracts import SubmitRequest
     from engine.v2.ops.fingerprints import worker_source_manifest
     from engine.v2.ops.submission import job_id_for
 
@@ -723,26 +996,20 @@ def build_legacy_job_requests(plan, *, tickers, year_start, year_end,
         key = "nightly:" + plan["session"] + ":" + scope_hash + ":" + stage
         keys[stage] = job_id_for("shadow", key)
         kind = _action_for(stage, refresh_mode=refresh_mode)
-        if kind == NATIVE_REFRESH_ACTION:
-            requests.append(_native_refresh_request(
+        if kind in _NATIVE_REFRESH_ACTIONS:
+            request = _native_refresh_request(
                 plan, key, refresh_plan_obj, kind, implementation_ref, environment_ref,
-                catalog_path, objects_root, conn, store, clock))
+                catalog_path, objects_root, conn, store, clock)
+            if request is not None:
+                requests.append(request)
             continue
-        parameters = _stage_parameters(stage, plan, tickers, year_start, year_end, keys,
-                                       effect_scope, snapshot,
-                                       prior_selfcheck_ref=prior_selfcheck_ref,
-                                       context_tickers=context_tickers)
-        refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
-        if stage == "projection" and prior_selfcheck_ref:
-            refs = tuple(refs) + (prior_selfcheck_ref,)
-        if stage != "materialize":
-            parameters["expected_population"] = tuple(expected_population)
-            parameters["alt_strikes"] = int(alt_strikes)
-        parents = _stage_parents(stage, include_prerequisites, snapshot)
-        requests.append(SubmitRequest(
-            namespace="shadow", idempotency_key=key, principal="operator",
-            job=_job_spec(kind, parameters, refs, tuple(keys[parent] for parent in parents),
-                          implementation_ref, environment_ref)))
+        requests.append(_stage_request_for(
+            stage, kind, plan, key, keys, tickers=tickers, year_start=year_start,
+            year_end=year_end, expected_population=expected_population, alt_strikes=alt_strikes,
+            input_refs=input_refs, prior_selfcheck_ref=prior_selfcheck_ref,
+            effect_scope=effect_scope, snapshot=snapshot, context_tickers=context_tickers,
+            include_prerequisites=include_prerequisites, implementation_ref=implementation_ref,
+            environment_ref=environment_ref))
     return tuple(requests)
 
 
