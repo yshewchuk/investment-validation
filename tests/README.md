@@ -243,7 +243,7 @@ or merges into the other -- every shared resource is namespaced per backend:
 | workflow | backend | concurrency group | cache namespace | module artifacts | aggregate artifact |
 |---|---|---|---|---|---|
 | `mutation.yml` | pytest-gremlins 1.9.0 (`tools/gremlin_pilot.py`) | `mutation-gremlins-<ref>` | `mutation-gremlins<ver>-...` (per-module tracked-input fingerprint) over `.gremlins_cache` | `mutation-module-<module>` | `mutation-report` |
-| `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-<ref>` | `mutation-mutmut<ver>-py<ver>-<toml hash>-<module>-...` over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
+| `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-<ref>` | `mutation-mutmut<ver>-py<ver>-<config-hash>-<module>-...` (per-module config-hash) over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
 
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,
@@ -322,13 +322,20 @@ its 330-minute step timeout.
 - **Cache.** One `actions/cache` entry per module holds only mutmut's state:
   `mutants/**/*.meta`, `mutmut-stats.json` and the driver's
   `mutation-ci-state.json`. The key is
-  `mutation-mutmut<ver>-py<ver>-<hash of mutation_pilot.toml>-<module>-<sha>-<run id>-<attempt>`.
+  `mutation-mutmut<ver>-py<ver>-<config-hash>-<module>-<sha>-<run id>-<attempt>`,
+  where `<config-hash>` is `tools/mutation_pilot.py config-hash <module>` --
+  a hash of `[defaults]` plus that module's own `[modules.<name>]` section,
+  not the whole toml file. Editing one module's section (or `[defaults]`,
+  shared by every module) changes the config-hash for the modules whose
+  effective config actually changed, and restarts only those; a comment-only
+  edit, or an edit confined to a different module's section, leaves this
+  module's cache namespace untouched. Bumping mutmut or changing Python still
+  restarts every module (both are in the key too).
   The `mutation-mutmut` namespace never touches the gremlins workflow's
   `mutation-gremlins` keys or cache paths. Restore uses the same key without
   the sha, so each run gets the newest
   state. The work copy and mutated files are rebuilt from the checkout. mutmut
-  then keeps every verdict whose function hash is unchanged. Editing the toml,
-  bumping mutmut or changing Python restarts every module.
+  then keeps every verdict whose function hash is unchanged.
 - **What incremental re-tests.** mutmut re-tests a mutant only when its own
   function's source changed. The driver adds one rule: when a module's
   selected tests or the shared `tests/*.py` helpers change, it resets that

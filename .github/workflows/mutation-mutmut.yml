@@ -40,9 +40,10 @@
 #   `mutation-mutmut-report` can only ever describe the whole planned run.
 #
 # mutmut needs no cache fingerprint of its own beyond the key below: its state
-# is keyed by the backend version, Python, the toml hash and the module, and
-# every function's verdict is validated against that function's source hash
-# inside the restored state, so changed code is re-tested even on a cache hit.
+# is keyed by the backend version, Python, the per-module config-hash (see the
+# "key" step below) and the module, and every function's verdict is validated
+# against that function's source hash inside the restored state, so changed
+# code is re-tested even on a cache hit.
 name: mutation-mutmut
 
 on:
@@ -127,6 +128,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         module: ${{ fromJSON(needs.plan.outputs.modules) }}
     env:
@@ -148,9 +150,19 @@ jobs:
             requirements-dev.txt
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - id: key
-        run: >-
-          echo "prefix=mutation-mutmut${{ needs.plan.outputs.mutmut }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('tools/mutation_pilot.toml') }}-${{ matrix.module }}-"
-          >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # Assigned before the echo, never interpolated inside it: the exit
+          # status of `echo "...=$(...)"` is echo's, so a failing config-hash
+          # would write a truncated prefix and the step would still pass.
+          #
+          # Per-module, not the whole-file hashFiles this replaced: hashing the
+          # whole toml busted every module's cache on any one module's edit
+          # (measured: PR #17 cold-started all 34 jobs). config-hash covers only
+          # [defaults] plus this module's own section, so an edit to one
+          # module's section restarts only that module.
+          ch=$(python3 tools/mutation_pilot.py config-hash "$MODULE")
+          echo "prefix=mutation-mutmut${{ needs.plan.outputs.mutmut }}-py${{ steps.py.outputs.python-version }}-${ch}-${{ matrix.module }}-" >> "$GITHUB_OUTPUT"
       # Only mutmut's state is cached -- a namespace fully separate from the
       # gremlins workflow's .gremlins_cache keys (mutation-gremlins...):
       # per-file verdicts and function hashes (*.meta), test stats and the

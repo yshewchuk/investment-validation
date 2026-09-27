@@ -3,8 +3,10 @@
 # Driven by tools/mutation_pilot.py. Every enabled [modules.<name>] is one job
 # of the mutmut workflow's matrix (.github/workflows/mutation-mutmut.yml; the
 # gremlins matrix in mutation.yml schedules the same modules); a module with an
-# `excluded` reason is listed but never run. The CI cache key hashes this file,
-# so any edit here restarts every module's incremental state.
+# `excluded` reason is listed but never run. Each module's CI cache key hashes
+# `tools/mutation_pilot.py config-hash <module>` -- [defaults] plus that
+# module's own [modules.<name>] section -- so an edit to one module's section
+# restarts only that module's incremental state, not every module's.
 #
 # `mutate` and `tests` entries are tracked paths or globs (fnmatch: `*` also
 # matches `/`); `skip` removes paths from `mutate`. A pattern that matches
@@ -30,9 +32,20 @@
 # gremlin workers in the repo checkout, not mutmut in a work copy). Keeping one
 # map means the exhaustive module-ownership test (tests/test_mutation_ci.py:
 # every engine/v2 file in exactly one module) governs both backends. The gremlins
-# CI cache key also hashes this file, so an edit here restarts every module --
-# the same as for mutmut. mutmut's own settings and its historical triage and
-# baselines below are unchanged: the gremlins note is additive.
+# CI cache key folds in the SAME per-module config-hash (defaults plus that
+# module's own section) mutmut uses, but that is only PART of the gremlins
+# key -- the rest is cache_fingerprint (tools/gremlin_pilot.py), which hashes
+# EVERY tracked file, this toml included. On a pull_request run that
+# fingerprint is computed against the PR's BASE commit, so a PR's own edits
+# -- to this toml or anything else -- never move it, and only the touched
+# module's config-hash changes: PR runs get the same per-module scoping as
+# mutmut. On a push to main (and on schedule/dispatch) the fingerprint is
+# computed against the CURRENT checkout, so ANY tracked-file change -- an
+# edit to one module's section here, or even a comment-only edit to this
+# file -- shifts every module's fingerprint together and cold-starts the
+# whole gremlins matrix; mutmut's push-time key has no such all-files term.
+# mutmut's own settings and its historical triage and baselines below are
+# unchanged: the gremlins note is additive.
 
 [defaults]
 # Per-mutant timeout. mutmut sets an RLIMIT_CPU of
@@ -812,6 +825,7 @@ mutate = [
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/incremental_data.py",
     "engine/v2/ops/training.py",
+    "engine/v2/ops/unit_receipts.py",
 ]
 tests = [
     "tests/test_v2_data_incremental_persistence.py",
@@ -825,6 +839,7 @@ tests = [
     "tests/test_v2_ops_incremental_refresh_wiring.py",
     "tests/test_v2_ops_incremental_registration.py",
     "tests/test_v2_ops_ledger_history_import.py",
+    "tests/test_v2_ops_unit_receipts.py",
     "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     # tests/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
