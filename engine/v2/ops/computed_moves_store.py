@@ -82,15 +82,28 @@ _CONTRACT_REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id
 
 
 def _as_of_day(as_of) -> str:
-    """The job's as_of date as ``YYYY-MM-DD``; a missing as_of is refused.
+    """The job's as_of date as ``YYYY-MM-DD``.
 
     Spec R4/R5: the as_of is part of every unit id and the only date selection
-    may use, so it is required, never defaulted to the wall clock.
+    may use, so it is required, never defaulted to the wall clock, and every
+    bad shape is refused (``INVALID_REQUEST``) rather than silently coerced:
+    ``None``, a bool, a raw number (pandas reads an int/float as a UNIX
+    timestamp, not a calendar date -- a defect class distinct from what it
+    looks like), NaT, a tz-aware value (silently normalizing one would drop
+    the timezone rather than refuse it), or a string pandas cannot parse.
     """
-    day = pd.Timestamp(as_of).normalize()
+    if as_of is None or isinstance(as_of, bool) or isinstance(as_of, (int, float)):
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh as_of must be a date-like value, not a number")
+    try:
+        day = pd.Timestamp(as_of)
+    except (ValueError, TypeError):
+        raise fail("INVALID_REQUEST", "computed moves refresh as_of could not be parsed as a date")
     if pd.isna(day):
         raise fail("INVALID_REQUEST", "computed moves refresh needs an as_of date")
-    return str(day.date())
+    if day.tzinfo is not None:
+        raise fail("INVALID_REQUEST", "computed moves refresh as_of must be tz-naive")
+    return str(day.normalize().date())
 
 
 # --------------------------------------------------------------------------
@@ -296,11 +309,14 @@ def _write_ticker_fragment(store: ArtifactStore, ticker: str, rows: list[dict], 
 def _insert_captures(conn: sqlite3.Connection, attempts: list[dict]) -> None:
     """Record this run's captures once; a capture already logged is not re-logged.
 
-    ``capture_id`` (``_capture_id_for``) is content-derived from the unit's own
-    ``request_id`` (ticker + as_of day), never the run's wall-clock time, so a
-    retry of the same unit resolves to the SAME id: an id already in the
-    append-only log is the same capture (a rerun that rebuilt it from the
-    durable receipt), never a new one.
+    ``capture_id`` (``_capture_id_for``) folds in the unit's own ``request_id``
+    (ticker + as_of day), the table contract's ``definition_hash``, and -- when
+    a series was actually obtained -- the fetched source bytes' hash. Never
+    the run's wall-clock time. Two attempts for the SAME unit with the SAME
+    underlying content resolve to the SAME id (a retry never double-logs);
+    different underlying content (a same-day upstream data change) or a
+    different contract version gets a genuinely different id, never silently
+    reused.
     """
     for attempt in attempts:
         existing = conn.execute(
@@ -430,23 +446,24 @@ def _failed(parameters) -> RefreshCallbackResult:
         refresh_plan_hash=parameters.refresh_plan_hash)
 
 
-def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCallbackResult:
-    """The ``RefreshCallback`` this job's worker calls (spec s4b Change 3).
+def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> RefreshCallbackResult:
+    """This job's own callback (spec s4b Change 3), called directly -- NOT
+    bound to ``RefreshCallback`` via a bare ``functools.partial``:
+    ``RefreshParameters`` has no ``as_of`` field on ``main``, and ``as_of``
+    varies per dispatch, so it is an explicit, validated, required keyword
+    here instead; a later nightly-wiring change builds the per-dispatch
+    closure that satisfies the protocol.
 
-    Reads the executor-staged ``computed_moves_refresh_input.json`` (catalog
-    path, objects root, scope, expected head generation), selects targets from
-    the pinned parent snapshot with ONE scan of each source table, reserves
-    budget through ``incremental_data.plan_refresh`` per ticker, and commits
-    one new snapshot carrying every other table forward alongside a fresh
-    ``computed_moves`` dataset version. A unit already backed by a durable raw
-    receipt is a cache hit: it is never re-fetched. A same-session retry
-    rebuilds EVERY unit's fragment -- the fresh fetches plus the cached
-    complete receipts re-read by receipt -- so it commits exactly what a clean
-    single run would. Whether the result is a no-op is decided only by the
-    commit: a candidate whose fragments equal the parent's resolves back to
-    the parent snapshot, and committed-key presence is never mistaken for this
-    run's content. Never touches ``INVESTING_PLAN_ROOT`` or any legacy path.
+    Reads the staged ``computed_moves_refresh_input.json``, selects targets
+    from the pinned parent snapshot with ONE scan of each source table,
+    reserves budget per ticker, and commits one new snapshot carrying every
+    other table forward alongside a fresh ``computed_moves`` version. A unit
+    already backed by a durable raw receipt is never re-fetched. Known gap,
+    not fixed here: a rebuilt-from-cache rerun still commits ``complete``,
+    not a no-op -- ``computed_at`` is wall-clock time and differs between
+    attempts even when everything else is identical.
     """
+    _as_of_day(as_of)  # validated before any I/O; raises INVALID_REQUEST on a bad value
     root = Path(root)
     document = _input_document(root)
     if document is None:
@@ -461,7 +478,6 @@ def run_computed_moves_refresh(parameters, root, *, fetcher=None) -> RefreshCall
         repository = Repository(conn, store)
         parent = repository.resolve_full(parameters.parent_snapshot_id)
         events, daily = _scan_once(repository, parent.snapshot)
-        as_of = document.get("as_of") or parameters.as_of
         targets, _selection = target_tickers_from_snapshot(
             repository, parameters.parent_snapshot_id,
             all_scoreable=bool(document.get("all_scoreable", True)),
@@ -535,19 +551,34 @@ def _unit_history(conn, store, unit, fetcher, cached, *, created_at):
     return series, kind, fresh
 
 
-def _capture_id_for(unit) -> str:
-    """The stable capture identity for one refresh unit.
+def _capture_id_for(unit, *, source_hash: str | None = None,
+                    definition_hash: str = COMPUTED_MOVES_CONTRACT.definition_hash) -> str:
+    """The stable capture identity for one refresh unit's ACTUAL content.
 
     Same (ticker, as_of) always yields the same id, regardless of when this
     run's wall clock reads: derived from the unit's own ``request_id``
     (``computed_moves:<ticker>:<day>``, spec R4/R5's per-session request id),
-    never from the run's ``created_at``. A rerun of the same unit -- a
-    crash-retry, or a same-session no-op replay -- must resolve to the
-    identity ``_insert_captures`` already logged, or its dedup-by-``capture_id``
-    check never dedups anything.
+    never from the run's ``created_at``. request_id ALONE is not enough,
+    though: two attempts for the same unit can carry genuinely different
+    content -- a same-day yfinance correction/backfill changes the fetched
+    bytes, or a code change moves the table's ``definition_hash`` -- and a
+    request_id-only id would collide those into one row, silently keeping
+    only the first attempt's outcome. ``source_hash`` (the fetched series'
+    hash, when a series was actually obtained) and ``definition_hash`` (the
+    contract's own schema identity) are folded in too, so a same-request-id
+    attempt with different real content gets a genuinely different id.
+    ``source_hash=None`` (no series obtained -- a failed/too-few outcome) omits
+    it: there is no immutable source content to distinguish by, so two failed
+    attempts for the same unit under the same code are correctly the same
+    capture. A rerun of the same unit with the SAME content -- a crash-retry,
+    or a same-session no-op replay -- must still resolve to the identity
+    ``_insert_captures`` already logged, or its dedup-by-``capture_id`` check
+    never dedups anything.
     """
-    return "capture_" + content_hash(
-        {"request_id": unit.request_id}).removeprefix("sha256:")[:32]
+    payload = {"request_id": unit.request_id, "contract_definition_hash": definition_hash}
+    if source_hash is not None:
+        payload["source_hash"] = source_hash
+    return "capture_" + content_hash(payload).removeprefix("sha256:")[:32]
 
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
@@ -566,11 +597,11 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
     fragment_records, attempts, kinds = {}, [], []
     for unit in plan.units:
         ticker = unit.expected_keys[0]
-        capture_id = _capture_id_for(unit)
         series, kind, fresh = _unit_history(conn, store, unit, fetcher, cached,
                                             created_at=created_at)
         kinds.append(kind)
         if series is None:
+            capture_id = _capture_id_for(unit)
             attempts.append({"capture_id": capture_id, "ticker": ticker,
                              "created_at": created_at,
                              "outcome": ("no_history" if kind == "legitimate_empty"
@@ -578,16 +609,17 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
             continue
         events = events_by_ticker.get(ticker)
         if events is None:
+            capture_id = _capture_id_for(unit)
             attempts.append({"capture_id": capture_id, "ticker": ticker,
                              "created_at": created_at, "outcome": "too_few"})
             continue
         sd, sc = series
+        source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
+        capture_id = _capture_id_for(unit, source_hash=source_hash)
         events = events[events["event_date"] >= pd.Timestamp(sd[0])]
         rows = build_rows(
             ticker, events, sd, sc, daily_by_ticker.get(ticker, _EMPTY_DAILY),
-            computed_at=created_at,
-            source_hash=hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest(),
-            capture_id=capture_id)
+            computed_at=created_at, source_hash=source_hash, capture_id=capture_id)
         if not rows:
             attempts.append({"capture_id": capture_id, "ticker": ticker,
                              "created_at": created_at, "outcome": "too_few"})

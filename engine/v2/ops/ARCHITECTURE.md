@@ -103,17 +103,27 @@ the coordinator-effect functions in `effects_graph.py`.
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
 
-**`computed_moves_store.py` is not yet wired to production.** It ships as a
-standalone `RefreshCallback` implementation only: no CLI subcommand, no
-`nightly.py` `GRAPH`/`OPTIONAL` entry, no `supervisor` job kind calls it yet.
-A later change adds the nightly stage and job-kind dispatch this doc's
-"Diagrams" section would then need to reflect. `tests/test_v2_ops_computed_moves_store.py`
-covers two of its extracted helpers directly (`_capture_id_for`'s stable,
-non-wall-clock capture identity; `_fence_check_for`'s real-`verify_fence`
-signature and its still-active production lease-expiry check) — the full
-`RefreshCallback` path (`run_computed_moves_refresh` end to end) has no
-direct test in this change; that coverage is a known, tracked gap, closed
-alongside the wiring.
+**`computed_moves_store.py` is not yet wired to production.** No CLI
+subcommand, no `nightly.py` `GRAPH`/`OPTIONAL` entry, no `supervisor` job
+kind calls `run_computed_moves_refresh` yet. It is also not itself a bare
+`engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
+`parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
+varies per job dispatch (a session date) so it cannot be pre-bound the way
+the fetcher is — it is an explicit, validated, required keyword instead. A
+later change adds the nightly stage, the per-dispatch closure that DOES
+satisfy the protocol, and the job-kind dispatch this doc's "Diagrams" section
+would then need to reflect. `tests/test_v2_ops_computed_moves_store.py`
+covers `_capture_id_for`'s stable, non-wall-clock, non-colliding capture
+identity, `_fence_check_for`'s real-`verify_fence` signature and its
+still-active production lease-expiry check, `as_of`'s pre-I/O validation, and
+`run_computed_moves_refresh` end to end (one complete unit, a cached rerun
+that re-fetches nothing, and a provider failure mapped to its typed code).
+Known, tracked gap (not fixed here, filed as
+[#41](https://github.com/yshewchuk/investment-validation/issues/41)): a
+same-session cached rerun still commits a fresh `complete` generation rather
+than resolving to a no-op, because `computed_at` (a column on every
+committed row) is the run's own wall-clock time and differs between attempts
+even when the fetched bytes and every other input are identical.
 
 ## Dependencies
 
