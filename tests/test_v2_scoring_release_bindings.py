@@ -251,6 +251,7 @@ def test_happy_path_resolves_every_field(tmp_path):
 
     assert binding.release_id == release.release_id
     declared = release.bindings[0]
+    assert set(binding.model_identity) == {"gate:STR-THRU"}
     identity = binding.model_identity["gate:STR-THRU"]
     assert identity.binding_id == declared.binding_id
     assert identity.model_id == declared.model_id
