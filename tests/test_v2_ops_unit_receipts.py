@@ -5,9 +5,13 @@ Part 0) alongside the module it tests.
 """
 from __future__ import annotations
 
+import types
+
 from engine.v2.foundation import ArtifactStore
 from engine.v2.ops.incremental_data import RefreshUnit
-from engine.v2.ops.unit_receipts import provider_failure_code, record_unit_receipt
+from engine.v2.ops.unit_receipts import (
+    cached_unit_outcomes, cached_unit_payloads, provider_failure_code, record_unit_receipt,
+)
 from tests.ops_support import catalog
 
 
@@ -63,8 +67,32 @@ def test_record_unit_receipt_stores_expected_fields(tmp_path):
     assert row["response_kind"] == "complete"
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 
-# NOTE: a unit test for cached_unit_payloads is deferred to
-# https://github.com/yshewchuk/investment-validation/issues/<TBD> -- it calls
-# engine.v2.data.incremental.load_raw_receipt, which does not exist on this
-# branch (only on the fuller p6/slice4c branch); adding it is out of scope
-# for this tests-only PR.
+
+def test_cached_unit_payloads_restores_stored_bytes(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    unit = RefreshUnit(
+        request_id="req-1",
+        table_name="daily_market",
+        partition_key="AAPL",
+        expected_keys=("2026-09-01", "2026-09-02"),
+    )
+    original_bytes = b"unit-payload-bytes-for-cache-hit"
+
+    record_unit_receipt(
+        conn,
+        store,
+        unit,
+        original_bytes,
+        source="fixture",
+        endpoint="daily_market",
+        received_at=clock.now().isoformat(),
+    )
+
+    outcomes = cached_unit_outcomes(conn, [unit], source="fixture", endpoint="daily_market")
+    assert unit.request_id in outcomes
+
+    plan = types.SimpleNamespace(cached=tuple(outcomes.values()))
+    payloads = cached_unit_payloads(conn, store, plan)
+
+    assert payloads[unit.request_id] == original_bytes
