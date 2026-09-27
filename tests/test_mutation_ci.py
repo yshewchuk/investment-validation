@@ -997,6 +997,23 @@ def test_the_two_workflows_own_disjoint_artifact_names():
     assert WORKFLOW["name"] != MUTMUT["name"]
 
 
+def test_both_mutation_matrices_cap_parallelism_so_tests_never_starve():
+    """A public-repo free-plan account gets 20 concurrent Actions runners
+    total. Each backend's matrix has 30+ per-module jobs with no
+    max-parallel, so one cold run of either workflow can occupy every
+    runner and every PR's `test` job queues behind it. Both matrices cap at
+    3: with two PRs open at once (each capable of running both workflows),
+    that is at most 2 x 2 x 3 = 12 mutation runners account-wide, leaving
+    >= 8 free for Tests/plan/report."""
+    assert JOBS["mutate"]["strategy"]["max-parallel"] == 3
+    assert MUT_JOBS["mutate"]["strategy"]["max-parallel"] == 3
+    assert JOBS["mutate"]["strategy"]["fail-fast"] is False
+    assert MUT_JOBS["mutate"]["strategy"]["fail-fast"] is False
+    total = JOBS["mutate"]["strategy"]["max-parallel"] + \
+        MUT_JOBS["mutate"]["strategy"]["max-parallel"]
+    assert total <= 6
+
+
 # -- merge expected-modules contract: the aggregate can never lie about scope ----------
 
 def _module_artifact(tmp_path: Path, name: str, statuses, info=None, tag=None, run_exit_code=None):
