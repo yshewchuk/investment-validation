@@ -64,7 +64,7 @@ identity = "<private>/native_parity_report.json"
 tests = ["tests/test_v2_ops_native_shadow_render.py"]
 disposition = "native"
 owner = "P6-6"
-notes = "Not in _DAG_STAGES; NO_JOB_STAGES strips it from _stage_sequence on both the default and include_prerequisites=True planning branches, so neither planning path ever submits it as a job. Only run_shadow_nightly (test-only, walks the whole GRAPH inline) executes it. See engine/v2/ops/ARCHITECTURE.md's native_parity discussion."
+notes = "Not in _DAG_STAGES, so the default plan omits it before NO_JOB_STAGES ever runs; only include_prerequisites=True starts from plan[\"order\"] (which does include it) and NO_JOB_STAGES filters it out there. Neither planning path ever submits it as a job; only run_shadow_nightly (test-only, walks the whole GRAPH inline) executes it. See engine/v2/ops/ARCHITECTURE.md's native_parity discussion."
 
 [[row]]
 id = "nightly-refresh"
