@@ -91,12 +91,13 @@ def test_as_of_not_iso_is_a_problem():
     assert any("as_of" in problem for problem in problems)
 
 
-def test_as_of_none_is_not_a_problem_here():
-    # Required-ness of as_of is each store's own responsibility
-    # (run_forward_calendar_refresh/_as_of_day), enforced again before any
-    # I/O -- see the module docstring on calendar_moves_parameter_problems.
+def test_as_of_none_is_a_problem():
+    """Opus re-gate BLOCK(1) on 609cb2c5: as_of=None used to pass here and
+    fail only inside the worker (computed_moves_store._as_of_day always
+    refuses None) -- the same admitted-only-to-fail-later pattern already
+    fixed for the plan binding. as_of is now required at submission."""
     problems = calendar_moves_parameter_problems(_job(), _params(as_of=None))
-    assert problems == ()
+    assert any("as_of" in problem for problem in problems)
 
 
 def test_partial_plan_binding_is_a_problem():

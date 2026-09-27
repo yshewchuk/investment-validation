@@ -80,7 +80,7 @@ class CalendarMovesParameters:
     (they had no remaining reader); ``table_name`` was never read -- see
     ``ARCHITECTURE.md``. ``expected_ids`` is the worker coverage denominator
     the supervisor checks the result against: one id per computed_moves
-    target ticker, or per wanted forward-calendar ticker.
+    target ticker.
     """
 
     expected_ids: tuple[str, ...]
@@ -126,7 +126,11 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
     (``parent_snapshot_id``/``refresh_plan_hash``/``provider_calls``) is now
     ALWAYS validated, never only when a binding field happens to be
     supplied -- an unbound job used to be admitted only to fail inside the
-    worker. ``catalog_path``/``objects_root``/``scope`` and
+    worker.
+    ``as_of`` must be a non-None, real ISO date -- ``computed_moves_store``'s
+    own ``_as_of_day`` always refuses ``None`` too, so an admitted job with
+    ``as_of=None`` used to be admitted only to fail inside the worker, the same
+    pattern already fixed for the plan binding. ``catalog_path``/``objects_root``/``scope`` and
     ``expected_head_generation``/``expected_head_snapshot_id`` are validated
     here too, exactly like ``incremental_data.refresh_parameter_problems``
     validates them for ``incremental_refresh`` -- this really is now "the
@@ -149,7 +153,7 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
                + incremental_data._head_binding_problems(params)
                + incremental_data._refresh_budget_problems(
                    job, params, result_path=COMPUTED_MOVES_RESULT_PATH))
-    if params.as_of is not None and not _is_iso_date(params.as_of):
+    if not _is_iso_date(params.as_of):
         problems.append("as_of must be an ISO date")
     return tuple(problems)
 
