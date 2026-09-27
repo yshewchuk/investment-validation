@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import signal
 import subprocess
@@ -1460,6 +1461,62 @@ def test_the_two_workflows_own_disjoint_artifact_names():
                         MUT_JOBS)
     assert gre_pattern["with"]["pattern"] != mut_pattern["with"]["pattern"]
     assert WORKFLOW["name"] != MUTMUT["name"]
+
+
+def _report_status_step(jobs):
+    return _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation status"),
+                jobs)
+
+
+@pytest.mark.parametrize("jobs,context", [(JOBS, "mutation/pr"), (MUT_JOBS, "mutation-mutmut/pr")],
+                         ids=["gremlins", "mutmut"])
+def test_report_status_job_only_runs_when_plan_resolved_a_pr(jobs, context):
+    """report_status must need [plan, report] with always() (a
+    `needs.plan.result == 'success'` guard would skip this job whenever
+    `plan` itself fails after `select_pr` already set pr_number -- see
+    tests/README.md, "Mutation CI" -- silently recreating the invisible-PR
+    problem this job exists to fix) and only proceed once `plan` actually
+    resolved a PR number; a fork PR or a non-PR/failed/cancelled Tests run
+    never reaches this far because `plan` itself is skipped or leaves
+    pr_number empty."""
+    job = jobs["report_status"]
+    assert job["needs"] == ["plan", "report"]
+    assert job["if"] == "always() && needs.plan.outputs.pr_number != ''"
+    assert job["permissions"] == {"statuses": "write"}
+    step = _report_status_step(jobs)
+    assert step["env"]["SHA"] == "${{ github.event.workflow_run.head_sha }}"
+    assert step["env"]["MODULES"] == "${{ needs.plan.outputs.modules }}"
+    assert step["env"]["REPORT_RESULT"] == "${{ needs.report.result }}"
+    assert f'-f context="{context}"' in step["run"]
+    assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
+
+
+def _run_status_decision(run_script, modules, report_result):
+    # Runs everything the SHIPPED script computes before its `gh api` call
+    # (the real state/desc decision, never a hand copy) against fixture
+    # inputs, with no network call.
+    decision = run_script[:run_script.index("gh api")]
+    script = "set -euo pipefail\n" + decision + '\necho "${state}|${desc}"\n'
+    env = dict(os.environ, MODULES=modules, REPORT_RESULT=report_result)
+    out = subprocess.run(["bash", "-c", script], input="", capture_output=True,
+                         text=True, check=True, env=env).stdout.strip()
+    state, desc = out.split("|", 1)
+    return state, desc
+
+
+@pytest.mark.parametrize("jobs", [JOBS, MUT_JOBS], ids=["gremlins", "mutmut"])
+def test_report_status_decision_covers_skip_success_and_failure(jobs):
+    """Runs the shipped decision logic directly (extracted from the real
+    step, never a hand copy) against the three cases it must distinguish:
+    a plan that found no eligible module (closed PR or docs-only, by
+    design), a report that actually published, and anything else."""
+    run_script = _report_status_step(jobs)["run"]
+    state, desc = _run_status_decision(run_script, "[]", "skipped")
+    assert state == "success" and "by design" in desc
+    state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success")
+    assert state == "success" and "2" in desc
+    state, desc = _run_status_decision(run_script, '["pnl_sim"]', "failure")
+    assert state == "failure" and "failure" in desc
 
 
 def test_both_mutation_matrices_cap_parallelism_so_tests_never_starve():

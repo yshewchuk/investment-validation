@@ -704,3 +704,45 @@ jobs:
         run: |
           rc=$(cat "$RUNNER_TEMP/gremlin-merge-rc" 2>/dev/null || echo -1)
           if [ "$rc" != 0 ]; then echo "::error::report merge exited $rc"; exit 1; fi
+
+  report_status:
+    # Posts the run's outcome onto the PR's own head commit as a plain
+    # commit status. This run's own event is `workflow_run`, so `plan`/
+    # `mutate`/`report` only ever show up under the DEFAULT branch's own
+    # Actions history -- never on the PR's Checks tab -- and without this
+    # job a fully successful (or a failed) run is invisible from the PR
+    # itself. See tests/README.md, "Mutation CI", for the full design,
+    # including why this condition deliberately omits a
+    # `needs.plan.result == 'success'` guard: `plan`'s own steps can fail
+    # AFTER `select_pr` has already set `pr_number` (a checkout or pip
+    # install failure, say), and that guard would then skip this job too,
+    # silently recreating the exact invisible-PR problem it exists to fix.
+    needs: [plan, report]
+    if: always() && needs.plan.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Post mutation status to the PR head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MODULES: ${{ needs.plan.outputs.modules }}
+          REPORT_RESULT: ${{ needs.report.result }}
+        run: |
+          set -euo pipefail
+          if [ "$MODULES" = "[]" ]; then
+            state=success
+            desc="gremlins: skipped (closed PR or no eligible module) by design"
+          elif [ "$REPORT_RESULT" = "success" ]; then
+            state=success
+            desc="gremlins: report published for $(jq -r 'length' <<< "$MODULES") module(s)"
+          else
+            state=failure
+            desc="gremlins: report job ${REPORT_RESULT} -- see run for detail"
+          fi
+          gh api "repos/$REPO/statuses/$SHA" \
+            -f state="$state" -f context="mutation/pr" \
+            -f description="$desc" -f target_url="$RUN_URL"
