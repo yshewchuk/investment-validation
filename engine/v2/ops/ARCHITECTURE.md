@@ -1031,7 +1031,9 @@ network, or database access.
     "event_date"]` (CodeRabbit round 3, PR #66) is this same refusal, not a
     raised exception: the date-parsing failure is caught inside the
     mismatch check itself, so a malformed date in one row cannot abort
-    every other row's assembly.
+    every other row's assembly. Its `detail` is a fixed string in both
+    cases (CodeRabbit round 4, CWE-209) — never the raw staged ticker/date
+    values — see the fixed-detail note below.
   - `UNSUPPORTED_STRATEGY` — `key.strategy != "STR-THRU"` (this bounded
     assembler's one supported strategy, matching `nightly_source_bundle.py`'s
     own documented scope).
@@ -1067,8 +1069,25 @@ network, or database access.
   - A `ValueError` from `build_native_score_inputs` itself (an
     unresolvable `forecast_recipes`/`gate_recipe` shape, an answer-field
     leak `_reject_answers` catches, an unsupported strategy) is likewise
-    caught and wrapped, code `NATIVE_INPUT_BUILD_FAILED`, detail the
-    original message.
+    caught and wrapped, code `NATIVE_INPUT_BUILD_FAILED`, but — unlike the
+    `NightlySourceBundleRefusal` re-wrap immediately above — with a FIXED
+    `detail` string, never `str(exc)` (CodeRabbit round 4, CWE-209:
+    `build_native_score_inputs`'s own message can name staged recipe/field
+    shapes, and `refusals.json` is a published output of a successful
+    attempt, not a log only this worker's own operator reads).
+  **Fixed-detail contract.** `CALENDAR_ROW_KEY_MISMATCH` and
+  `NATIVE_INPUT_BUILD_FAILED` never carry an input-derived or
+  exception-derived `detail` — both are fixed strings, precisely because
+  their underlying failure (an unparseable/mismatched staged value, or an
+  arbitrary `ValueError` message from a nested builder) could otherwise
+  echo staged content into a file this module cannot guarantee stays
+  private. Every OTHER refusal code's `detail` names only a small,
+  closed-vocabulary identifier this module already controls (a role key
+  like `"driver:STR-THRU"`, a `decision_clock_id`, the strategy string, or
+  a re-wrapped `NightlySourceBundleRefusal`'s own `detail` — see
+  `engine/v2/scoring/ARCHITECTURE.md` for that module's own refusal
+  detail conventions) — CodeRabbit's review did not flag those, and this
+  PR does not change them.
   This module never suppresses a batch-level (non-`ValueError`) exception
   from a row: only `ValueError`/`NightlySourceBundleRefusal` (both
   `ValueError` subclasses) are caught per row; anything else (e.g. a

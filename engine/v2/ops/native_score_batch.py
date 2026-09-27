@@ -161,11 +161,14 @@ def _calendar_row_key_mismatch(key: BoardRequest, calendar_row: Mapping[str, Any
         # escapes _assemble_one_event and aborts every other row's assembly.
         calendar_event_date = _iso(raw_event_date)
     except (TypeError, ValueError):
-        return f"calendar_row event_date={raw_event_date!r} is not a valid date"
+        # CodeRabbit round 4 (PR #66, CWE-209): a fixed message, never the
+        # raw staged value -- refusals.json is a published output of a
+        # successful attempt, and this row's actual value belongs in the
+        # worker's own logs, not a document a future consumer might read.
+        return "calendar row event_date is invalid"
     if calendar_ticker == key.ticker and calendar_event_date == _iso(key.event_date):
         return None
-    return (f"calendar_row ticker={calendar_ticker!r} event_date="
-            f"{calendar_event_date!r} does not match key {key!r}")
+    return "calendar row does not match the request key"
 
 
 def _assemble_one_event(
@@ -229,8 +232,12 @@ def _assemble_one_event(
     )
     try:
         native_inputs = build_native_score_inputs(bundle)
-    except ValueError as exc:
-        return NativeScoreBatchRowRefusal(key, "NATIVE_INPUT_BUILD_FAILED", str(exc))
+    except ValueError:
+        # CodeRabbit round 4 (PR #66, CWE-209): a fixed message, not str(exc)
+        # -- build_native_score_inputs' own ValueError text can name staged
+        # recipe/field shapes, and refusals.json is a published output.
+        return NativeScoreBatchRowRefusal(
+            key, "NATIVE_INPUT_BUILD_FAILED", "native input build failed")
     request = ScoreRequest(
         event_id=str(event_id), calendar_revision=str(calendar_revision),
         strategy_version=strategy, deployment_id=binding.model_release.deployment_id,
