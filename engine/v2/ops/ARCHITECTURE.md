@@ -43,15 +43,26 @@ the coordinator-effect functions in `effects_graph.py`.
 A small number of natively-fetched data stores live directly in this
 package rather than delegating computation to another v2 layer — like
 `price-history capture` above, `forward_calendar_store.py` (spec s4c) is
-one of these. Its `RefreshCallback`-compatible entrypoint,
-`run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher,
-earnings_fetcher)`, is what a forward-calendar job's worker calls; its
-pure helpers (`horizon_dates`, `date_units`, `ticker_units`,
-`plan_forward_calendar`, `resolve_session_claims`, `nasdaq_rows_from_payload`,
-`nasdaq_claims_from_rows`, `pending_tickers`) are unit-testable without a
-catalog or a network. This store is not yet wired into `nightly.py`'s
-`GRAPH`/job dispatch (spec s4c Parts 3-4 add the job kind and the nightly
-stage) — today it has no production caller, only its own test module.
+one of these. It does NOT claim `RefreshCallback` compatibility: `main`'s
+`RefreshParameters` (`incremental_data.py`) has no `as_of`/`tickers` field,
+only Part 3's job-kind-specific parameters dataclass will, so a function
+shaped `(parameters, root)` cannot actually run on `main` today.
+`run_forward_calendar_refresh` is instead a standalone runner with an
+explicit, fully keyword-only signature (`catalog_path`, `objects_root`,
+`parent_snapshot_id`, `refresh_plan_hash`, `as_of`, `tickers`,
+`horizon_days`, `scope`, `expected_head_generation`,
+`expected_head_snapshot_id`, `nasdaq_fetcher`, `earnings_fetcher`) that
+validates every one of `as_of`/`tickers`/`horizon_days`/`scope`/
+`expected_head_generation` before touching the catalog or a provider (see
+"Failure semantics" below); Part 3 wires it into a `RefreshCallback`-shaped
+adapter that reads the job's staged parameters/input document and calls
+this runner with explicit keyword arguments — that adaptation, and this
+runner's own dispatch into `nightly.py`'s `GRAPH`/job kinds, does not exist
+yet (spec s4c Parts 3-4). Its pure helpers (`horizon_dates`, `date_units`,
+`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
+`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
+are unit-testable without a catalog or a network. Today this runner has no
+production caller, only its own test module.
 
 ## Inputs
 
@@ -67,12 +78,16 @@ stage) — today it has no production caller, only its own test module.
   `daily_market` sessions (one scan, grouped by ticker, fed to
   `engine.v2.data.computed_moves.native_trading_calendar` for the horizon
   calendar — a snapshot without a `daily_market` session falls back to plain
-  weekdays); the job's input document
-  (`forward_calendar_refresh_input.json`: catalog path, objects root,
-  `as_of`, `horizon_days`, `tickers`, `scope`); and the two injected network
-  edges, `providers.nasdaq_calendar.nasdaq_calendar_fetcher` (one call per
-  discovery date) and `providers.yfinance_edge.yfinance_earnings_fetcher`
-  (one call per ticker still missing a session after the Nasdaq pass).
+  weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
+  (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
+  `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
+  `expected_head_snapshot_id`) — there is no staged input-document file for
+  this runner (see "Primary contracts" above: it is not `RefreshCallback`-
+  shaped, so it reads nothing from a job's private working directory); and
+  the two injected network edges, `providers.nasdaq_calendar.
+  nasdaq_calendar_fetcher` (one call per discovery date) and
+  `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
+  still missing a session after the Nasdaq pass).
 
 ## Outputs
 
@@ -110,12 +125,14 @@ stage) — today it has no production caller, only its own test module.
   into the EXISTING `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never
   `engine.data.rebuild.rebuild` — and returns a `RefreshCallbackResult`
-  (`status` one of `complete`/`noop`/`failed`, `completed_ids`,
-  `coverage_advanced`, and `warnings` carrying any weekday-calendar-fallback
-  degradation as evidence rather than only a log line). A run whose merged
-  claims equal the parent snapshot's own rows resolves back to the parent
-  (the commit layer's own equality check decides this, never key presence
-  in the parent), so it reports `noop` rather than a spurious `complete`.
+  (`status` one of `complete`/`noop` — invalid input or an unconfigured
+  fetcher pair raises `OpsError` instead of returning a `"failed"` result;
+  `completed_ids`, `coverage_advanced`, and `warnings` carrying any
+  weekday-calendar-fallback degradation as evidence rather than only a log
+  line). A run whose merged claims equal the parent snapshot's own rows
+  resolves back to the parent (the commit layer's own equality check
+  decides this, never key presence in the parent), so it reports `noop`
+  rather than a spurious `complete`.
 
 ## Dependencies
 
@@ -196,16 +213,37 @@ direct HTTP client of its own.
 
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
-  code (root doc §5), never defaulted. `forward_calendar_store.py` is one
-  exception to the raise-a-typed-`Problem` shape: a missing/unparseable
-  `forward_calendar_refresh_input.json`, or one missing `catalog_path`/
-  `objects_root`, returns a `RefreshCallbackResult(status="failed", …)`
-  instead of raising — the job's own result document, not an `OpsError`, is
-  where that refusal is recorded. An unconfigured fetcher pair (the worker
-  never injected `nasdaq_fetcher`/`earnings_fetcher`) IS the raise-a-typed-
-  `Problem` shape: `RESOURCE_UNAVAILABLE`. A parent snapshot with no
-  `daily_market` session is not a missing-input refusal at all — it is the
-  documented weekday-calendar fallback, recorded as a result `warning`.
+  code (root doc §5), never defaulted. `forward_calendar_store.py`'s
+  `run_forward_calendar_refresh` validates every one of its five
+  request-shaped arguments — `as_of`, `tickers`, `horizon_days`, `scope`,
+  `expected_head_generation` — before opening the catalog connection,
+  constructing the artifact store, or making a provider call: each raises
+  `INVALID_REQUEST` (root doc §5's typed-`Problem` shape) the moment it is
+  missing or malformed, never a bare `AttributeError`/`KeyError` reached
+  deeper in the function. `as_of` refuses `None`, a bare number or `bool`
+  (which would misread as epoch time), an unparseable value, `NaT`, and a
+  timezone-aware value — mirroring `native_board_universe._validated_as_of`
+  (PR #16, not yet on `main`, so mirrored rather than imported).
+  `tickers` refuses a bare `str` (a common caller mistake that `set()`/
+  iteration would otherwise silently accept character-by-character), any
+  other non-iterable, and any element that is not a non-empty `str`.
+  `horizon_days` refuses a non-`int` (a `bool` is explicitly excluded even
+  though it is an `int` subclass in Python) and anything outside
+  `[1, MAX_HORIZON_DAYS]` (366 — one year plus a leap day; no existing
+  forward-calendar or board-universe horizon constant already bounds this,
+  so this is a new, deliberately generous ceiling, not a tuned limit).
+  `scope`/`expected_head_generation` are simply required (a non-empty `str`/
+  an `int` respectively) — the old code read these via `document["scope"]`/
+  `document["expected_head_generation"]`, so a missing key surfaced as a
+  `KeyError` partway through the run instead of a refusal before any I/O.
+  An unconfigured fetcher pair (`nasdaq_fetcher`/`earnings_fetcher` not
+  passed) is the same typed-`Problem` shape: `RESOURCE_UNAVAILABLE`. A
+  parent snapshot with no `daily_market` session is not a missing-input
+  refusal at all — it is the documented weekday-calendar fallback, recorded
+  as a result `warning` (see "Diagrams" below for its narrowed
+  `except ValueError`, which now wraps only the one call
+  (`native_trading_calendar`) whose `ValueError` that fallback is
+  documented to catch, not the calendar-scan/arithmetic around it).
 - **Cache** — one part of this package's own state *is* a cache, read
   through the operations catalog's own `data_raw_receipts` table (the same
   connection this package's stages already use for `data_snapshot_heads`
@@ -369,7 +407,10 @@ dispatches to `effects_graph.py` for some kinds and to
 
 ```mermaid
 flowchart TD
-    A["parent snapshot's daily_market<br/>-> native_trading_calendar<br/>(weekday fallback + warning if absent)"] --> B["horizon_dates -> date_units"]
+    V{"validate as_of, tickers,<br/>horizon_days, scope,<br/>expected_head_generation"}
+    V -->|any invalid| VF["INVALID_REQUEST<br/>-- no catalog connection,<br/>no provider call"]
+    V -->|all valid| A["parent snapshot's daily_market<br/>-> native_trading_calendar<br/>(weekday fallback + warning if absent)"]
+    A --> B["horizon_dates -> date_units"]
     B --> C{"unit cached complete?"}
     C -->|yes| D["cached_unit_payloads:<br/>re-read receipt bytes"]
     C -->|no| E["nasdaq_calendar_fetcher<br/>(one call per date)"]
