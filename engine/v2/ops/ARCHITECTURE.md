@@ -40,6 +40,19 @@ Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`,
 `_stage_sequence` (see §"Diagrams" below); `supervisor.Service`/`serve`;
 the coordinator-effect functions in `effects_graph.py`.
 
+A small number of natively-fetched data stores live directly in this
+package rather than delegating computation to another v2 layer — like
+`price-history capture` above, `forward_calendar_store.py` (spec s4c) is
+one of these. Its `RefreshCallback`-compatible entrypoint,
+`run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher,
+earnings_fetcher)`, is what a forward-calendar job's worker calls; its
+pure helpers (`horizon_dates`, `date_units`, `ticker_units`,
+`plan_forward_calendar`, `resolve_session_claims`, `nasdaq_rows_from_payload`,
+`nasdaq_claims_from_rows`, `pending_tickers`) are unit-testable without a
+catalog or a network. This store is not yet wired into `nightly.py`'s
+`GRAPH`/job dispatch (spec s4c Parts 3-4 add the job kind and the nightly
+stage) — today it has no production caller, only its own test module.
+
 ## Inputs
 
 - Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan`
@@ -50,6 +63,16 @@ the coordinator-effect functions in `effects_graph.py`.
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture` and `price-refresh`.
+- `forward_calendar_store.py`'s own inputs: the pinned parent snapshot's
+  `daily_market` sessions (one scan, grouped by ticker, fed to
+  `engine.v2.data.computed_moves.native_trading_calendar` for the horizon
+  calendar — a snapshot without a `daily_market` session falls back to plain
+  weekdays); the job's input document
+  (`forward_calendar_refresh_input.json`: catalog path, objects root,
+  `as_of`, `horizon_days`, `tickers`, `scope`); and the two injected network
+  edges, `providers.nasdaq_calendar.nasdaq_calendar_fetcher` (one call per
+  discovery date) and `providers.yfinance_edge.yfinance_earnings_fetcher`
+  (one call per ticker still missing a session after the Nasdaq pass).
 
 ## Outputs
 
@@ -83,6 +106,16 @@ the coordinator-effect functions in `effects_graph.py`.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
+- `forward_calendar_store.run_forward_calendar_refresh` commits revisions
+  into the EXISTING `earnings_events` contract through
+  `engine.v2.data.generic_incremental` — never
+  `engine.data.rebuild.rebuild` — and returns a `RefreshCallbackResult`
+  (`status` one of `complete`/`noop`/`failed`, `completed_ids`,
+  `coverage_advanced`, and `warnings` carrying any weekday-calendar-fallback
+  degradation as evidence rather than only a log line). A run whose merged
+  claims equal the parent snapshot's own rows resolves back to the parent
+  (the commit layer's own equality check decides this, never key presence
+  in the parent), so it reports `noop` rather than a spurious `complete`.
 
 ## Dependencies
 
@@ -94,7 +127,11 @@ including inside function bodies):
 - Top-level: `engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5),
   `engine.v2.data` (1.0), `engine.v2.ledger` (6.0), `engine.v2.parity`
   (6.5) — all strictly below this package's own layer (7.0), per the root
-  doc's §2 rule.
+  doc's §2 rule. `forward_calendar_store.py` adds one new `engine.v2.data`
+  submodule to this package's dependency surface,
+  `engine.v2.data.computed_moves` (`native_trading_calendar`, layer 1.0),
+  alongside its existing top-level use of `generic_incremental`,
+  `incremental_tables` and `repository.Repository`.
 - Lazy, function-local: `engine.v2.contracts` also appears lazily
   (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
   `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
@@ -139,15 +176,36 @@ caller of `cli.refresh_action` noted above.
 
 `sqlite3` (the operations catalog); the local filesystem (artifact store,
 snapshot roots, legacy px/fetch-cache trees read through the adapter); the
-market-data provider account this package's `provider-account` command
-budgets against (`engine/v2/ops/providers/`, e.g. ORATS) — credentials
-themselves are never held here, only remaining-call/reserve counts.
+market-data provider accounts this package's `provider-account` command
+budgets against (`engine/v2/ops/providers/`) — credentials themselves are
+never held here, only remaining-call/reserve counts. Three accounts exist
+today: `orats-daily-market` (keyed, reads `ORATS_API_KEY`); and, as of spec
+s4c, `nasdaq` and `yfinance` — both unmetered and keyless (their
+`PROVIDER_CREDENTIAL_VARIABLES` tuples are empty), but still
+operator-provisioned budget rows so the shared scheduler reserves against
+them like any keyed account. `providers/nasdaq_calendar.py` calls Nasdaq's
+public `api.nasdaq.com/api/calendar/earnings` endpoint (one date per call,
+a plain keyless HTTPS GET with a browser user-agent — the endpoint refuses
+the default client UA with a 403); `providers/yfinance_edge.py` wraps the
+third-party `yfinance` library (imported lazily, only inside the default
+callables, so importing the module touches no network) — one
+`Ticker.history`/`Ticker.get_earnings_dates` call per ticker, never a
+direct HTTP client of its own.
 
 ## Failure semantics
 
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
-  code (root doc §5), never defaulted.
+  code (root doc §5), never defaulted. `forward_calendar_store.py` is one
+  exception to the raise-a-typed-`Problem` shape: a missing/unparseable
+  `forward_calendar_refresh_input.json`, or one missing `catalog_path`/
+  `objects_root`, returns a `RefreshCallbackResult(status="failed", …)`
+  instead of raising — the job's own result document, not an `OpsError`, is
+  where that refusal is recorded. An unconfigured fetcher pair (the worker
+  never injected `nasdaq_fetcher`/`earnings_fetcher`) IS the raise-a-typed-
+  `Problem` shape: `RESOURCE_UNAVAILABLE`. A parent snapshot with no
+  `daily_market` session is not a missing-input refusal at all — it is the
+  documented weekday-calendar fallback, recorded as a result `warning`.
 - **Cache** — one part of this package's own state *is* a cache, read
   through the operations catalog's own `data_raw_receipts` table (the same
   connection this package's stages already use for `data_snapshot_heads`
@@ -158,15 +216,29 @@ themselves are never held here, only remaining-call/reserve counts.
   `legitimate_empty` payload is always re-verified against the live source
   on the next run, and a `not_final`/`transient`/`refused` response is
   never written to the cache at all (`record_unit_receipt` refuses to
-  store one). `unit_receipts.py` breaks a `received_at` tie by `rowid`
-  (the table's own append-only insertion order); `nightly.py`'s older,
-  narrower lookup does not carry that tie-break. On the acquisition side,
-  a provider response that cannot be used maps to one of two non-retried
-  failure codes — `refused` (an unparseable body or other non-auth 4xx) to
-  `SOURCE_INVALID`, `credential_invalid` (the provider's own 401/403) to
-  `CREDENTIAL_INVALID` — while only `transient` is retried; everything
-  else about this package's own job/lease/history state is not a cache,
-  and the catalog remains the durable record of it.
+  store one). `forward_calendar_store.py`'s `_cached_nasdaq`/`_cached_yfinance`
+  are thin wrappers over `cached_unit_outcomes` for the `nasdaq`/`yfinance`
+  source+endpoint pairs; its `_fetch_nasdaq`/`_fetch_yfinance` then re-read
+  the wanted units' bytes through `cached_unit_payloads` before falling back
+  to a fresh fetch, so a same-session retry rebuilds every unit's claims —
+  fresh and cache-hit alike — exactly as a clean single run would.
+  `unit_receipts.py` breaks a `received_at` tie by `rowid` (the table's own
+  append-only insertion order); `nightly.py`'s older, narrower lookup does
+  not carry that tie-break. On the acquisition side, a provider response
+  that cannot be used maps to one of four failure codes via
+  `provider_failure_code` — two registered retryable (`checks`/
+  `contracts/operations.py`'s `("source", True)`): `not_final` (Nasdaq's
+  404, a date not yet published) to `SOURCE_NOT_FINAL` and `transient`
+  (network errors, 429, 5xx) to `TRANSIENT_SOURCE`; and two non-retryable
+  (`("source", False)`): `refused` (an unparseable body or other non-auth
+  4xx) to `SOURCE_INVALID` and `credential_invalid` (the provider's own
+  401/403) to `CREDENTIAL_INVALID`. A mixed batch of unit kinds reports the
+  worst code among them, ranked `TRANSIENT_SOURCE` <
+  `SOURCE_NOT_FINAL` < `SOURCE_INVALID` < `CREDENTIAL_INVALID` — retryable
+  or not, the job still fails on the first non-`complete`/`legitimate_empty`
+  unit rather than committing a partial claim set. Everything else about
+  this package's own job/lease/history state is not a cache, and the
+  catalog remains the durable record of it.
 - **Retry** — `lifecycle.py`'s `attempt_receipts`/`request_cancel` and
   `recovery.py`'s `reconcile_attempt`/`prove_ownership_gone` govern retry
   and ownership recovery after a crash; a stale lease is reclaimed only
@@ -292,3 +364,43 @@ called from the coordinator, not the worker — `_coordinator_effect`
 dispatches to `effects_graph.py` for some kinds and to
 `decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own
 `supervisor.py` methods for the rest (see "Outputs").
+
+### Forward-calendar refresh: two-source, cache-first fetch (`forward_calendar_store.py`)
+
+```mermaid
+flowchart TD
+    A["parent snapshot's daily_market<br/>-> native_trading_calendar<br/>(weekday fallback + warning if absent)"] --> B["horizon_dates -> date_units"]
+    B --> C{"unit cached complete?"}
+    C -->|yes| D["cached_unit_payloads:<br/>re-read receipt bytes"]
+    C -->|no| E["nasdaq_calendar_fetcher<br/>(one call per date)"]
+    D -->|kind=complete| F["nasdaq_claims_from_rows"]
+    E -->|complete: parseable,<br/>has rows| G["record_unit_receipt"] --> F
+    E -->|legitimate_empty:<br/>parseable, no rows| G2["record_unit_receipt<br/>(no claims folded)"]
+    E -->|not_final/transient/refused/<br/>credential_invalid| H["provider_failure_code<br/>-> job fails, nothing committed"]
+    F --> I["pending_tickers:<br/>tickers with no nasdaq session"]
+    I --> J{"unit cached complete?"}
+    J -->|yes| K["cached_unit_payloads:<br/>re-read receipt bytes"]
+    J -->|no| L["yfinance_earnings_fetcher<br/>(one call per pending ticker)"]
+    K -->|kind=complete| M["fold session into claims"]
+    L -->|complete: frame has rows| N["record_unit_receipt"] --> M
+    L -->|legitimate_empty:<br/>empty frame, no bytes<br/>-- never cached| M2["no claim, no receipt"]
+    L -->|transient/refused| H
+    M --> O["_commit_claims -> generic_incremental<br/>into the existing earnings_events contract"]
+    O --> P{"merged rows == parent's?"}
+    P -->|yes| Q["status=noop, head unmoved"]
+    P -->|no| R["status=complete,<br/>candidate_snapshot_id set"]
+```
+
+Nasdaq runs first and is the *discovery* pass (which tickers have a date at
+all); yfinance runs only against `pending_tickers` — the tickers Nasdaq's
+pass left without a resolved session — as a *confirmation* pass. Both
+passes are cache-first and unit-independent: a same-session retry re-reads
+every already-cached unit's bytes by receipt (`cached_unit_payloads`) and
+only fetches the units that are still missing, so the retry's claims are
+identical to a clean single run's. `provider_failure_code` is checked once,
+after both passes, over the combined kind list: the yfinance pass still
+runs and still caches its own successful units' receipts even when a
+Nasdaq unit already failed (each unit records its own receipt as soon as
+it resolves, spec R3 — one unit's failure never discards another unit's
+already-recorded receipt within the same run), but no `generic_incremental`
+commit happens until the combined kind list is clean.
