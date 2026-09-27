@@ -793,8 +793,16 @@ network, or database access.
   untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
   `RuntimeFitForbidden` -> `VALIDATION_FAILED`, any other `SystemExit` ->
   `_tool_failure`'s mapping. `run_promote_worker` maps
-  `deployment.DeploymentError` (including an unstaged `release_id`) to
-  `VALIDATION_FAILED`. A `training` plan with no bound legacy input manifest
+  `deployment.DeploymentError` (including an unstaged `release_id`, or
+  (new) a release staged under a superseded hash version --
+  `deployment.StaleReleaseHash`) to `VALIDATION_FAILED`. `promote_plan`
+  (new, this PR) resolves an omitted `--release-root` from
+  `engine.v2.models.deployment.production_release_root()` (config key
+  `MODEL_RELEASE_ROOT`, `engine/v2/models/ARCHITECTURE.md` §7.4) at PLAN
+  time, before submission: a missing key is `INVALID_REQUEST` there, so it
+  never reaches the worker with an empty `release_root`. `nightly.py`,
+  `worker.py` and `stages.py` do not read this config key — out of this
+  PR's scope. A `training` plan with no bound legacy input manifest
   carries `blocked_prerequisites` and can never be submitted, exactly like a
   manifest-less nightly plan. A recipe job's `pairs_path`
   (`ops plan training --pairs`) is validated twice: a malformed one

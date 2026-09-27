@@ -84,7 +84,14 @@ entrypoints:
 - `release_bindings.py` (new) — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`: the production reader of a live deployment's model
   identity, model artifact refs, and analog/payoff/recalibration artifacts.
-  See its own section below.
+  See its own section below. `resolve_production_release_binding() ->
+  ScoringReleaseBinding` (new, this PR) is the same resolution against the
+  ONE configured production release root
+  (`engine.v2.models.deployment.production_release_root()`, config key
+  `MODEL_RELEASE_ROOT` — see `engine/v2/models/ARCHITECTURE.md` §7.4); a
+  missing key is `ModelNotReady("release_root", ...)`, R1(g) below. Nothing
+  calls either function yet; a later PR wires one into the per-night
+  `SourceBundle` assembler.
   `ScoringReleaseBinding` (frozen dataclass, every mapping field a read-only
   `MappingProxyType` set in `__post_init__` — the `FrozenStageResult`
   convention `frozen_executor.py` already uses) fields: `release_id: str`;
@@ -374,7 +381,24 @@ refusals with a machine-checkable `.code`/`.detail` also exist at
     `manifest.release` or any binding's member hashes. `resolve_release()`'s
     public path never performs this check itself, which is why this module
     cannot use it. A mismatch raises `ModelNotReady("model_release",
-    "release_hash disagrees with manifest")`.
+    "release_hash disagrees with manifest")`. This check accepts a
+    verified manifest under EITHER `release_hash_version`
+    (`deployment.RELEASE_HASH_MEMBER_V1` or `...SEMANTIC_V2`) — replay of a
+    score recorded against an older, legacy-hashed release must keep
+    resolving it. `deployment.promote`/`rollback` enforce a stricter,
+    write-side rule (refusing anything but `...SEMANTIC_V2`,
+    `deployment.StaleReleaseHash`) that this read-only module does not
+    apply and never will: "safe to make live" and "the release a past
+    score actually used" are different questions (`engine/v2/models/
+    ARCHITECTURE.md` §7.2–§7.3).
+  - **(g) no configured production release root.** Only
+    `resolve_production_release_binding()` has this case —
+    `resolve_release_binding()` itself still takes an explicit
+    `release_root` and never reads the environment. A missing or blank
+    `MODEL_RELEASE_ROOT` raises `deployment.MissingReleaseRoot`, caught and
+    re-raised as `ModelNotReady("release_root", "no production release
+    root is configured")` before `deployment.production_release_root()`'s
+    return value ever reaches `resolve_release_binding`.
 - **R1 (continued), a member missing or corrupt.** Once a release is
   resolved, every model binding's member objects and every declared
   payoff/recalibration/analog state object is hash-verified and typed-loaded

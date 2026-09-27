@@ -30,6 +30,12 @@ from engine.v2.models import (
     stage_release,
 )
 from engine.v2.models import deployment as deployment_module
+from engine.v2.models.deployment import (
+    MissingReleaseRoot,
+    StaleReleaseHash,
+    production_release_root,
+    restage_semantic_hash,
+)
 
 
 def _linear_payload(intercept, coefficient):
@@ -392,3 +398,159 @@ def test_rollback_refuses_a_pointer_that_is_its_own_predecessor(tmp_path):
 
     with pytest.raises(NoPriorRelease):
         rollback(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# production_release_root (config key)
+# --------------------------------------------------------------------------
+
+
+def test_production_release_root_reads_the_env_var(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    assert production_release_root() == tmp_path
+
+
+def test_production_release_root_missing_env_var_refuses(monkeypatch):
+    monkeypatch.delenv("MODEL_RELEASE_ROOT", raising=False)
+    with pytest.raises(MissingReleaseRoot):
+        production_release_root()
+
+
+def test_production_release_root_blank_env_var_refuses(monkeypatch):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", "   ")
+    with pytest.raises(MissingReleaseRoot):
+        production_release_root()
+
+
+# --------------------------------------------------------------------------
+# release-hash versioning: promote/rollback require the current version
+# --------------------------------------------------------------------------
+
+
+def _stage_legacy_hashed(tmp_path, release_id):
+    """Stage a real release, then rewrite its manifest on disk to look like
+    a pre-versioning (RELEASE_HASH_MEMBER_V1) manifest -- the exact shape
+    the real /root/p5-6/release-B manifest has (no release_hash_version key
+    at all, and release_hash computed by the legacy member-only function).
+    Returns the STAGED release (rewritten member paths, matching what
+    resolve_release/current_release will later return), not the original
+    pre-staging release object."""
+    release, inventory, payloads = _fixture(release_id)
+    staged = stage_release(tmp_path, release, inventory, payloads).release
+    manifest_path = deployment_module._manifest_path(tmp_path, release_id)
+    document = json.loads(manifest_path.read_text())
+    document["release_hash"] = deployment_module._legacy_release_hash(staged)
+    document.pop("release_hash_version", None)
+    manifest_path.write_text(json.dumps(document))
+    return staged
+
+
+def test_promote_refuses_a_legacy_hashed_release_and_restage_clears_it(tmp_path):
+    _stage_legacy_hashed(tmp_path, "r1")
+    with pytest.raises(StaleReleaseHash) as error:
+        promote(tmp_path, "r1")
+    assert error.value.release_id == "r1"
+    assert error.value.hash_version == deployment_module.RELEASE_HASH_MEMBER_V1
+
+    restaged = restage_semantic_hash(tmp_path, "r1")
+    assert restaged.release_hash_version == deployment_module.RELEASE_HASH_SEMANTIC_V2
+
+    state = promote(tmp_path, "r1")
+    assert state.release_id == "r1"
+    assert current_pointer(tmp_path).release_id == "r1"
+
+
+def test_rollback_refuses_when_the_previous_release_is_legacy_hashed(tmp_path):
+    _stage_legacy_hashed(tmp_path, "r1")
+    restage_semantic_hash(tmp_path, "r1")
+    promote(tmp_path, "r1")
+
+    r2, inv2, pay2 = _fixture("r2")
+    stage_release(tmp_path, r2, inv2, pay2)
+    promote(tmp_path, "r2")
+
+    # r1 is legacy-hashed on disk again: simulate it having never been
+    # restaged by rewriting it back after the promote above.
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    document = json.loads(manifest_path.read_text())
+    document["release_hash"] = deployment_module._legacy_release_hash(
+        deployment_module._read_manifest(tmp_path, "r1").release)
+    document.pop("release_hash_version", None)
+    manifest_path.write_text(json.dumps(document))
+
+    with pytest.raises(StaleReleaseHash) as error:
+        rollback(tmp_path)
+    assert error.value.release_id == "r1"
+
+
+def test_repromoting_the_currently_deployed_release_refuses_once_its_manifest_turns_legacy(tmp_path):
+    """The hash-version gate runs BEFORE the already-deployed no-op check
+    in _swap_pointer, so even a repeat promote of the CURRENTLY live
+    release is refused once its on-disk manifest looks stale -- proving
+    the gate is not bypassed by the no-op short-circuit."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    promote(tmp_path, "r1")
+    assert current_pointer(tmp_path).release_id == "r1"
+
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    document = json.loads(manifest_path.read_text())
+    document["release_hash"] = deployment_module._legacy_release_hash(release)
+    document.pop("release_hash_version", None)
+    manifest_path.write_text(json.dumps(document))
+
+    with pytest.raises(StaleReleaseHash):
+        promote(tmp_path, "r1")
+
+
+# --------------------------------------------------------------------------
+# restage_semantic_hash
+# --------------------------------------------------------------------------
+
+
+def test_restage_semantic_hash_is_a_noop_on_an_already_modern_manifest(tmp_path):
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    before = deployment_module._read_manifest(tmp_path, "r1")
+    after = restage_semantic_hash(tmp_path, "r1")
+    assert after == before
+    assert after.release_hash_version == deployment_module.RELEASE_HASH_SEMANTIC_V2
+
+
+def test_restage_semantic_hash_refuses_an_unstaged_release(tmp_path):
+    with pytest.raises(ReleaseNotStaged):
+        restage_semantic_hash(tmp_path, "ghost")
+
+
+def test_restage_semantic_hash_refuses_a_tampered_legacy_manifest(tmp_path):
+    _stage_legacy_hashed(tmp_path, "r1")
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    document = json.loads(manifest_path.read_text())
+    document["release_hash"] = "sha256:" + "0" * 64
+    manifest_path.write_text(json.dumps(document))
+    with pytest.raises(StagingRefused) as error:
+        restage_semantic_hash(tmp_path, "r1")
+    assert error.value.issues[0].code == "RELEASE_ID_REUSED"
+
+
+def test_restage_semantic_hash_touches_only_the_manifest_file(tmp_path):
+    release = _stage_legacy_hashed(tmp_path, "r1")
+    object_path = tmp_path / "objects" / release.bindings[0].members[0].content_hash.removeprefix("sha256:")
+    before_object_bytes = object_path.read_bytes()
+    before_object_mtime = object_path.stat().st_mtime_ns
+
+    restage_semantic_hash(tmp_path, "r1")
+
+    assert object_path.read_bytes() == before_object_bytes
+    assert object_path.stat().st_mtime_ns == before_object_mtime
+    assert current_pointer(tmp_path) is None
+    assert pointer_history(tmp_path) == ()
+
+
+def test_restage_semantic_hash_then_promote_then_resolve_release_round_trip(tmp_path):
+    original = _stage_legacy_hashed(tmp_path, "r1")
+    restage_semantic_hash(tmp_path, "r1")
+    promote(tmp_path, "r1")
+    resolved = resolve_release(tmp_path, "r1")
+    assert resolved == original
+    assert current_release(tmp_path) == original

@@ -621,6 +621,19 @@ def test_promote_plan_stores_release_root_absolute():
     assert Path(plan["parameters"]["release_root"]).is_absolute()
 
 
+def test_promote_plan_resolves_the_configured_release_root_when_omitted(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    plan = training.promote_plan(release_root="", release_id="r1")
+    assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
+
+
+def test_promote_plan_with_no_release_root_and_no_config_refuses(monkeypatch):
+    monkeypatch.delenv("MODEL_RELEASE_ROOT", raising=False)
+    with pytest.raises(OpsError) as error:
+        training.promote_plan(release_root="", release_id="r1")
+    assert error.value.code == "INVALID_REQUEST"
+
+
 def test_promote_never_submitted_by_nightly():
     """Structural, never a source grep: build the nightly plan with the real
     plan builder, build the actual job DAG it submits (every stage, with its
