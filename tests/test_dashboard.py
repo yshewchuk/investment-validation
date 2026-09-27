@@ -2271,4 +2271,12 @@ class TestTier4GapPartialFlag:
             {"ticker": "HR", "event_date": "2021-02-10"},
         ]}}
         flag = _tier4_gap_partial_flag(gap_fill)
-        assert "null forecast" not in flag["detail"].lower() or "not a null" in flag["detail"].lower()
+
+        # Compare against the COMPLETE expected message built from the same
+        # inputs above (1 producer, 1 event) — a substring/either-or check
+        # can pass on contradictory wording; an exact match cannot.
+        expected = ("Tier 4 gap-fill left 1 event(s) beyond its backfill "
+                    "window unfilled (absent from the table, not a null "
+                    "forecast row) in ['pred_abs_move']; a full Tier-4 "
+                    "rebuild with no --since closes out-of-window gaps.")
+        assert flag["detail"] == expected
