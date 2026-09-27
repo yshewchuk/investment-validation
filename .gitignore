@@ -27,6 +27,7 @@
 
 # ── docs: allow-listed by exact path (research findings stay private) ────
 !/README.md
+!/CONTRIBUTING.md
 !/RECOVERY.md
 !/EARNINGS_VOL_PROGRAM_PLAN.md
 !ARCHITECTURE.md
