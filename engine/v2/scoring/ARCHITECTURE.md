@@ -190,6 +190,25 @@ entrypoints:
     real schema has only one `fold_start` per metric), checked only for a
     name actually used AND non-null (a NULL forecast, legacy's own "no
     forecast," skips this gate — see Failure semantics).
+  - `panel_anchor` (new, issue #53) — the as-of timestamp `panel_row`'s
+    market-state feature values (`spy_*`, `ret*`, `or_*`, `pre_iv*`,
+    `dist_*`) were actually computed against. Required, no default: the
+    caller states it, this module does not infer or recompute it (see
+    Failure semantics — this is the same "trusted caller-declared fact,
+    checked only against `as_of`" shape already used for
+    `calendar_row["calendar_observed_through"]` and each quote row's own
+    `observed_at`, not a third, independent classifier that could disagree
+    with `live_features`'s own accounting). For a row built by
+    `engine/features.py::live_features(as_of=...)` (a forward/upcoming
+    event), this is exactly the `as_of` value that call was made with — the
+    caller already holds it, since `live_features` never returns its own
+    internal anchor (see Failure semantics, the former "Known gap", now
+    closed). For a persisted `panel.parquet` row describing an
+    already-realized historical event, this is `panel_row["date"]` itself
+    (`engine/data/features/panel.py`'s dropped `ANCHOR_COLUMNS` —
+    `regime_asof`/`runup_asof`/`orats_asof` — all equal `date` by
+    construction for a historical row, so the caller loses nothing by
+    passing it through).
   - `quote_rows` — the Tier-1 option-quote rows in the domain scored for
     this event (each: `right`, `strike`, `expiry`, `bid`, `ask`,
     `observed_at`), plus an optional `quote_status` for the two
@@ -572,19 +591,23 @@ also uses in this package):
   `panel.parquet` nor `tier4_forecasts.parquet` carries `observed_at`;
   an earlier version of this check compared against a column that does
   not exist on either table. The real contract: `as_of` itself,
-  `calendar_row["calendar_observed_through"]`, and each `quote_rows`
-  entry's own `observed_at` (quotes DO carry it) are each validated by
-  `validated_as_of` (rejects `None`, `NaT`, a bare number/bool, an
-  unparseable value, or a timezone-aware value — mirroring
-  `engine/v2/ops/native_board_universe.py::_validated_as_of`, issue #16's
-  pattern) and then compared: any strictly after `as_of` →
+  `calendar_row["calendar_observed_through"]`, `panel_anchor`, and each
+  `quote_rows` entry's own `observed_at` (quotes DO carry it) are each
+  validated by `validated_as_of` (rejects `None`, `NaT`, a bare
+  number/bool, an unparseable value, or a timezone-aware value —
+  mirroring `engine/v2/ops/native_board_universe.py::_validated_as_of`,
+  issue #16's pattern) and then compared: any strictly after `as_of` →
   `POST_AS_OF_ROW`, naming the input and its date. `calendar_row`'s
   `event_date`/`entry_date`/`exit_date`/`expiry` are exempt from this
   comparison — they describe the (future) event being scored, not a fact
   observed after `as_of`. `panel_row["date"]` is NOT compared against
   `as_of` here at all (see `PANEL_ROW_WRONG_EVENT` above — it is the
-  event date, an as_of comparison on it is simply the wrong check).
-  `tier4_row` has no row-level date to check here at all: instead, a
+  event date, an as_of comparison on it is simply the wrong check); the
+  row's own market-state feature values are what `panel_anchor` verifies
+  instead (see "Panel-row feature anchor" below), checked unconditionally
+  — regardless of whether `feature_names` ends up resolving anything from
+  `panel_row` at all — the same way `calendar_row["calendar_observed_through"]`
+  is checked unconditionally. `tier4_row` has no row-level date to check here at all: instead, a
   feature name actually resolved from `tier4_row` AND non-null is
   allowed only when that metric's own fold_start (its BASE metric's
   `"<metric>_fold_start"` — a band column such as `"..._p10"` shares its
@@ -602,35 +625,49 @@ also uses in this package):
   refuse every real null row outright. A feature resolved from
   `panel_row` needs no per-feature stamp check at all — only the
   whole-row `PANEL_ROW_WRONG_EVENT` check above applies to it.
-- **Known gap, escalated rather than invented (not fixed by either Opus
-  round).** Neither check above verifies WHEN a panel row's
-  market-derived FEATURE values were actually computed relative to
-  `as_of` — only that the row names the right event
-  (`PANEL_ROW_WRONG_EVENT`). `engine/features.py::live_features` does
-  compute a real decision anchor for its synthetic row (`_as_of`, which
-  can precede `event_date`/`date` for a genuine upcoming-event score),
-  but that anchor is never written into the row values `live_features`
-  returns, and the persisted-panel equivalent
-  (`regime_asof`/`runup_asof`/`orats_asof`, `ANCHOR_COLUMNS`) is
-  explicitly dropped before `panel.parquet` is written
+- **Panel-row feature anchor (resolved, issue #53).** Neither
+  `PANEL_ROW_WRONG_EVENT` nor the fold_start checks above verify WHEN a
+  panel row's market-derived FEATURE values were actually computed
+  relative to `as_of` — only that the row names the right event.
+  `engine/features.py::live_features` does compute a real decision anchor
+  for its synthetic row (`_as_of`, which can precede `event_date`/`date`
+  for a genuine upcoming-event score), but that anchor is never written
+  into the row values `live_features` returns, and the persisted-panel
+  equivalent (`regime_asof`/`runup_asof`/`orats_asof`, `ANCHOR_COLUMNS`)
+  is explicitly dropped before `panel.parquet` is written
   (`engine/data/features/panel.py:912-918` — safe to drop only because,
   for a HISTORICAL row, those all equal `date` by construction, an
   equivalence that does not hold for a live per-event row). No column
   survives to a `panel_row` this function can read that records that
   anchor, so this module cannot check it without inventing a stamp the
-  real data does not carry. Resolving this requires a deliberate,
-  separate interface change (e.g. a caller-supplied decision-anchor
-  parameter this signature does not accept today) and is left for a
-  future PR, not silently patched over here. **Consequence:** a
-  persisted `panel.parquet` row is anchored at its own event date
-  (`engine/data/features/panel.py:912-918`), so if a caller stages one
-  for an event whose date is after `as_of`, its market-state features
-  (`spy_*`, `ret*`, `or_*`, `pre_iv*`, `dist_*`) are values observed
-  after `as_of`, and this function accepts them. Only a
-  `live_features(as_of=...)` row is causal for an upcoming event. This
-  per-row anchor gap is tracked in
-  [issue #53](https://github.com/yshewchuk/investment-validation/issues/53),
-  not fixed here.
+  real data does not carry — the earlier version of this doc escalated
+  that as a known gap rather than inventing one. The fix lands as a
+  deliberate interface change: `assemble_nightly_source_bundle` gains a
+  new required, no-default keyword-only parameter, `panel_anchor` (see
+  Inputs above) — the caller states the anchor `panel_row`'s market-state
+  values were actually computed against, the same "trusted caller-declared
+  fact" shape this module already uses for `calendar_observed_through` and
+  quote `observed_at`, not a value this module infers or recomputes.
+  `panel_anchor`, once staged, is validated by `validated_as_of` and
+  checked against `as_of` exactly like every other observation-time anchor
+  (see the stamp-contract bullet above) → `POST_AS_OF_ROW`, naming
+  `panel_row.anchor` and its date, if it is strictly after `as_of`.
+  **Consequence, before this fix:** a persisted `panel.parquet` row is
+  anchored at its own event date (`engine/data/features/panel.py:912-918`),
+  so if a caller staged one for an event whose date is after `as_of`, its
+  market-state features (`spy_*`, `ret*`, `or_*`, `pre_iv*`, `dist_*`)
+  could be values observed after `as_of`, and this function accepted
+  them silently. **Scope of the fix:** this module trusts the caller's
+  declared `panel_anchor` — it does not re-derive it from `panel_row`'s
+  own columns (there is nothing left to re-derive it from, per the
+  paragraph above) and does not assert `panel_anchor <= panel_row["date"]`
+  (the print itself) — that causal ordering is `live_features`'s own
+  `assert_decision_causal`'s job, not a second, possibly-disagreeing
+  check here. A caller that mis-declares its own anchor (states an
+  earlier value than the one it actually used) defeats this check the
+  same way a caller that lies about `calendar_observed_through` would —
+  this module verifies the declared contract, not the caller's honesty
+  about it, exactly as already true for every other staged input.
 - **Other input validation.** `calendar_row["spot"]` not coercible to
   `float`, non-finite, or `<= 0.0` → `INVALID_SPOT`, naming the value
   found. `feature_names` a bare `str`/`bytes`, not a `Sequence`,
@@ -711,17 +748,20 @@ Package-specific: `release_bindings.py` never imports `engine.score`/
   (`source_inputs.py` has no `as_of` concept of its own; the closest
   existing fact, `calendar_observed_through`, was carried through without
   being validated against anything). `nightly_source_bundle.py` is the
-  first place in this package that enforces it — but only for the inputs
-  that actually carry an observation-time anchor: `calendar_row`'s
+  first place in this package that enforces it — for the inputs that
+  actually carry an observation-time anchor: `calendar_row`'s
   `calendar_observed_through`, every `quote_rows` entry's own
-  `observed_at`, and a used, non-null Tier-4 feature's own base metric
-  `fold_start` (see "Leakage, post-`as_of` rows — the real stamp contract"
-  above). `panel_row` carries no such anchor at all — its only check is
-  `PANEL_ROW_WRONG_EVENT` (`panel_row["date"]` identifies WHICH event the
-  row is for, not WHEN its market-state features were observed) — and a
-  null Tier-4 value skips the gate entirely (see "Known gap, escalated
-  rather than invented" above for why the panel side of this is a real,
-  documented gap, not an oversight this invariant papers over).
+  `observed_at`, the caller-declared `panel_anchor` (issue #53, see "Panel-row
+  feature anchor" above), and a used, non-null Tier-4 feature's own base
+  metric `fold_start` (see "Leakage, post-`as_of` rows — the real stamp
+  contract" above). `panel_row` itself still carries no such anchor as one
+  of its own columns — `PANEL_ROW_WRONG_EVENT` (`panel_row["date"]`
+  identifies WHICH event the row is for, not WHEN its market-state
+  features were observed) is unchanged — which is exactly why the anchor
+  is a separate, caller-declared parameter rather than something read off
+  `panel_row`; a null Tier-4 value still skips the fold_start gate
+  entirely (see "Leakage, post-`as_of` rows — the real stamp contract"
+  above for why).
 - **`model_identity`/`model_artifact_refs`/recipe fields are
   `nightly_source_bundle.py`'s explicit non-goal.** `SourceBundle` requires
   them, but resolving a model identity or artifact reference from a live
@@ -777,6 +817,7 @@ engine.v2.ops / engine.v2.serving (layer 7, callers, not shown as dependents bel
 flowchart LR
     CAL["calendar_row\n(ticker, event/entry/exit dates,\nexpiry, spot,\ncalendar_observed_through)"]
     PANEL["panel_row\n(date + feature columns)"]
+    PANCHOR["panel_anchor\n(issue #53: caller-declared as-of\nfor panel_row's market-state values)"]
     TIER4["tier4_row\n(feature columns, each with its own\nname_fold_start stamp)"]
     QUOTES["quote_rows\n(right, strike, expiry,\nbid, ask, observed_at)"]
     ASOF["as_of"]
@@ -789,8 +830,9 @@ flowchart LR
     CAL --> EVENTCHK["panel_row.date ==\ncalendar_row.event_date\n(PANEL_ROW_WRONG_EVENT if not;\nno as_of comparison -- date IS\nthe event date, not an observation)"]
     PANEL --> EVENTCHK
 
-    CAL --> VALIDATE["validated_as_of\n(reject tz-aware / bare number /\nunparseable; reject calendar_observed_through,\nquote observed_at after as_of)"]
+    CAL --> VALIDATE["validated_as_of\n(reject tz-aware / bare number /\nunparseable; reject calendar_observed_through,\npanel_anchor, quote observed_at after as_of)"]
     QUOTES --> VALIDATE
+    PANCHOR --> VALIDATE
     ASOF --> VALIDATE
 
     VALIDATE --> CONTEXT["context\n(calendar facts)"]
