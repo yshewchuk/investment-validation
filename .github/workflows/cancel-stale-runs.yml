@@ -1,0 +1,121 @@
+# When a PR closes (merged or not), cancel any Tests run still
+# in_progress/queued for it, so a closed PR does not keep occupying
+# account-wide Actions runners (the same starvation concern mutation.yml's
+# own header comment describes for open PRs). This reliably covers `Tests`,
+# which runs directly on `pull_request` and so carries this PR's own
+# head_branch on its run record, matched below by branch AND the run's own
+# linked pull_requests[].number.
+#
+# It does NOT reliably cover mutation.yml/mutation-mutmut.yml. Both now run
+# via `workflow_run` gated on Tests succeeding (see mutation.yml's "PR
+# context: workflow_run" comment), and a workflow_run-triggered run's own
+# head_branch/pull_requests are unusable as a match key here: head_branch on
+# such a run is reported as the DEFAULT branch, not this PR's branch (a
+# documented side effect of workflow_run evaluating against the default
+# branch's copy of the workflow file), and pull_requests on it is not a
+# dependable substitute either. The loop below still tries -- for the rare
+# case the fields do line up -- but that is best-effort, not the contract:
+# the real fast-exit for a closed PR's mutation run lives in the mutation
+# workflows themselves. Each one's `plan` job checks (via `gh api`) whether
+# the triggering PR, by number from the workflow_run payload, is still open,
+# and emits an empty matrix if not; each `mutate` matrix job repeats that
+# same check as its first step, so a job already queued when the PR closes
+# exits in seconds instead of running a full pass. See mutation.yml's and
+# mutation-mutmut.yml's own "Check the triggering PR is still open" steps.
+#
+# Same-repo PRs only. The workflow-level `permissions: {}` below denies
+# everything by default; the `cancel` job's own `actions: write` grant
+# (scoped there, not at workflow level, so a future job added to this file
+# does not inherit it for free) is what lets the cancel calls below succeed
+# at all; for a FORK pull_request, GitHub forces the run's GITHUB_TOKEN to
+# read-only regardless of what this file requests, so the calls below would
+# just fail closed (403) with no effect. The `if:` guard on the job skips
+# that case outright instead of leaving a noisy failed run behind for
+# something that could never have worked, which is also the safe behavior
+# for a fork PR: nothing here ever runs with write access to a fork's own
+# code or a secret.
+name: cancel-stale-runs
+
+on:
+  pull_request:
+    types: [closed]
+
+# Explicit deny-all baseline (zizmor: excessive-permissions) instead of
+# relying on the repo's default GITHUB_TOKEN permissions, which can be
+# broader than this workflow needs and which a future job with no
+# `permissions:` of its own would otherwise inherit. The `cancel` job below
+# grants itself exactly what it needs on top of this.
+permissions: {}
+
+concurrency:
+  group: cancel-stale-runs-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cancel:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # Required to list and cancel repository Actions runs through gh api;
+    # scoped to this one job so it is never inherited by a future job added
+    # to this workflow.
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel in-progress/queued runs for this PR (reliable for Tests only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          for wf in Tests mutation mutation-mutmut; do
+            for status in in_progress queued; do
+              # The runs endpoint's own `branch=` filter narrows the list
+              # server-side. This works for `Tests`, whose run carries this
+              # PR's own head_branch (it triggers directly on
+              # `pull_request`). It does NOT reliably work for `mutation`/
+              # `mutation-mutmut`: a workflow_run-triggered run's own
+              # head_branch is reported as the DEFAULT branch, not this PR's
+              # branch, so the filter below will typically find zero runs for
+              # those two names -- see this file's header comment. Kept in
+              # the loop anyway as a harmless best-effort (a false miss here
+              # costs nothing; the mutation workflows' own "PR still open?"
+              # checks are the real fast-exit for them). PR_BRANCH is passed
+              # as a `-f` query parameter, not interpolated into a filter
+              # string, so it can never change what is requested regardless
+              # of what characters a branch name contains. $wf is one of the
+              # three literal names above, never attacker input, so binding
+              # it via --arg here is a hygiene choice, not a required one.
+              ids=$(gh api --paginate -X GET "repos/$REPO/actions/runs" \
+                  -f status="$status" -f branch="$PR_BRANCH" \
+                | jq -r --arg wf "$wf" '.workflow_runs[] | select(.name == $wf) | .id')
+              for id in $ids; do
+                # Confirm the match instead of trusting the branch filter
+                # alone: `branch=` only identifies a branch string, not this
+                # PR -- a fork's branch can share a name with a same-repo
+                # branch (head_branch carries no owner/fork identity), so an
+                # OR'd head_branch fallback could cancel a same-named
+                # sibling's run. The run's own linked pull_requests[].number
+                # is the only thing that actually proves it belongs to this
+                # PR, checked as jq DATA via --argjson, never
+                # string-interpolated into the filter text (a branch name
+                # may legally contain a `"`, which would otherwise let a
+                # crafted branch name widen the filter). This job only ever
+                # runs for a same-repo PR (see the `if:` guard below), so
+                # pull_requests[] is populated for every run that is
+                # actually this PR's -- `// []` keeps a run with no linked
+                # PR at all (never this PR's) a plain no-match instead of a
+                # jq error, rather than a reason to fall back to branch name.
+                match=$(gh api "repos/$REPO/actions/runs/$id" \
+                  | jq -r --argjson n "$PR_NUMBER" \
+                    'select((.pull_requests // []) | any(.number == $n)) | .id')
+                if [ -n "$match" ]; then
+                  echo "cancelling $wf run $id (status=$status, branch=$PR_BRANCH, pr=$PR_NUMBER)"
+                  if ! gh api -X POST "repos/$REPO/actions/runs/$id/cancel" >/dev/null; then
+                    echo "::warning::failed to cancel $wf run $id"
+                  fi
+                fi
+              done
+            done
+          done

@@ -138,6 +138,21 @@ class RefreshCallbackResult:
     schema_version: str = REFRESH_RESULT_SCHEMA
 
 
+def refresh_result_document(result: RefreshCallbackResult) -> dict:
+    """The staged result document; an empty ``warnings`` is omitted.
+
+    ``warnings`` is degradation evidence, not a field every run has. Omitting
+    it when empty keeps every result document without a degradation
+    byte-identical to what the schema produced before the field existed (and
+    any hash over those bytes unchanged); a reader of a document without the
+    key gets the field's own empty default.
+    """
+    document = to_document(result)
+    if not result.warnings:
+        document.pop("warnings", None)
+    return document
+
+
 class RefreshCallback(Protocol):
     """Structural boundary implemented by the data layer."""
 
@@ -354,32 +369,48 @@ def refresh_job_kind() -> JobKind:
         validate=refresh_parameter_problems)
 
 
-def _refresh_identity_problems(params: RefreshParameters) -> list[str]:
+def _bounded_nonempty_problems(fields) -> list[str]:
+    """``fields`` is a sequence of ``(name, value, max_length)``. Each named
+    value must be a nonempty string no longer than its bound; used for both
+    the daily refresh's own identity fields and the calendar/moves job
+    family's (S4C Part 3), so the two never drift on what "bounded nonempty"
+    means."""
+    return [f"{name} must be a bounded nonempty string" for name, value, limit in fields
+            if not isinstance(value, str) or not value or len(value) > limit]
+
+
+def _expected_ids_problems(params) -> list[str]:
+    """The coverage-denominator shape check, shared by every refresh-family
+    job kind's submit-time validation (S4C Part 3 reuses this directly)."""
     problems = []
     if not params.expected_ids or len(params.expected_ids) > MAX_REFRESH_IDS:
         problems.append("expected_ids must contain 1..4096 request ids")
     if (len(set(params.expected_ids)) != len(params.expected_ids)
             or any(not item or len(item) > 128 for item in params.expected_ids)):
         problems.append("expected_ids must be unique bounded nonempty strings")
+    return problems
+
+
+def _plan_binding_problems(params) -> list[str]:
+    """The pinned-parent/plan-hash/provider-calls binding every refresh-family
+    worker refuses to run without (shared with S4C Part 3's calendar/moves
+    job kind -- see ``calendar_moves_jobs.calendar_moves_parameter_problems``,
+    which now always calls this, not only when a binding field happens to be
+    supplied)."""
+    problems = []
     if not params.parent_snapshot_id or len(params.parent_snapshot_id) > 128:
         problems.append("parent_snapshot_id must be a bounded nonempty string")
     if not _is_hash(params.refresh_plan_hash):
         problems.append("refresh_plan_hash must be a sha256 content hash")
     if not isinstance(params.provider_calls, int) or not 0 <= params.provider_calls <= 1_000_000:
         problems.append("provider_calls must be between zero and 1000000")
-    problems.extend(_refresh_staging_identity_problems(params))
     return problems
 
 
-def _refresh_staging_identity_problems(params: RefreshParameters) -> list[str]:
-    """S4A: the attempt's deployment identity must be reproducible and bounded."""
+def _head_binding_problems(params) -> list[str]:
+    """The pinned-head generation/snapshot-id shape check, shared with S4C
+    Part 3's calendar/moves job kind."""
     problems = []
-    bounded = (("catalog_path", params.catalog_path, 4096),
-               ("objects_root", params.objects_root, 4096),
-               ("scope", params.scope, 128), ("table_name", params.table_name, 128))
-    for name, value, limit in bounded:
-        if not isinstance(value, str) or not value or len(value) > limit:
-            problems.append(f"{name} must be a bounded nonempty string")
     if not isinstance(params.expected_head_generation, int) \
             or params.expected_head_generation < 0:
         problems.append("expected_head_generation must be a non-negative integer")
@@ -389,14 +420,36 @@ def _refresh_staging_identity_problems(params: RefreshParameters) -> list[str]:
     return problems
 
 
-def _refresh_budget_problems(job: JobSpec, params: RefreshParameters) -> list[str]:
+def _refresh_identity_problems(params: RefreshParameters) -> list[str]:
+    problems = _expected_ids_problems(params) + _plan_binding_problems(params)
+    problems.extend(_refresh_staging_identity_problems(params))
+    return problems
+
+
+def _refresh_staging_identity_problems(params: RefreshParameters) -> list[str]:
+    """S4A: the attempt's deployment identity must be reproducible and bounded."""
+    problems = _bounded_nonempty_problems((
+        ("catalog_path", params.catalog_path, 4096),
+        ("objects_root", params.objects_root, 4096),
+        ("scope", params.scope, 128), ("table_name", params.table_name, 128)))
+    problems.extend(_head_binding_problems(params))
+    return problems
+
+
+def _refresh_budget_problems(job: JobSpec, params: RefreshParameters, *,
+                             result_path: str = REFRESH_RESULT_PATH) -> list[str]:
+    """``result_path`` defaults to this module's own refresh output path;
+    S4C Part 3's calendar/moves job kind passes its OWN result path (a
+    different file than this one), since that is the path its own worker
+    would actually write and therefore the one that must never be bound as
+    an input."""
     problems = []
     if params.provider_calls and not job.provider_budget_ref:
         problems.append("provider calls require a shared provider budget")
     if not params.provider_calls and job.provider_budget_ref:
         problems.append("a provider budget requires at least one planned call")
     bindings = params.input_bindings or {}
-    if REFRESH_RESULT_PATH in bindings:
+    if result_path in bindings:
         problems.append("the refresh output path may not be an input binding")
     return problems
 
@@ -479,6 +532,22 @@ def _load_data_refresh_callback() -> RefreshCallback:
     from engine.v2.ops.providers import orats_daily_market_fetcher
     return functools.partial(run_daily_market_refresh,
                              fetcher=orats_daily_market_fetcher())
+
+
+def _load_computed_moves_refresh_callback(as_of: str | None) -> RefreshCallback:
+    """S4C Part 3: resolve the computed_moves callback and its yfinance edge.
+
+    ``as_of`` cannot be pre-bound the way the fetcher is: it varies per job
+    dispatch (a session date), never a constant of the deployment the way
+    the injected fetcher is. Same lazy shape as ``_load_data_refresh_callback``:
+    constructing the fetcher reads nothing and touches no network, and the
+    data-owning store is imported only when the worker actually dispatches
+    this kind.
+    """
+    from engine.v2.ops.computed_moves_store import run_computed_moves_refresh
+    from engine.v2.ops.providers import yfinance_history_fetcher
+    return functools.partial(run_computed_moves_refresh, as_of=as_of,
+                             fetcher=yfinance_history_fetcher())
 
 
 def validate_refresh_result_document(value) -> RefreshCallbackResult:

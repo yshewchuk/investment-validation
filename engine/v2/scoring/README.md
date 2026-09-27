@@ -48,7 +48,29 @@ that arrives with a prebuilt geometry or pricing object.
 compatibility callers, so replay and future native workers share one
 implementation.
 
-<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map -->
+`release_bindings` is the Phase 6 (cutover PR-1) production release reader:
+given a staged release root, `resolve_release_binding` resolves the live
+deployment pointer's model identity/artifact refs and the release's frozen
+payoff/recalibration/board-analog-matcher artifacts into one immutable
+`ScoringReleaseBinding`, raising `NoCurrentRelease`/`ModelNotReady` (never a
+legacy or cached fallback) when the pointer, catalog or a named member is
+not ready. No caller imports it yet; see `ARCHITECTURE.md` for the PR that
+wires it in.
+
+`nightly_source_bundle` is the per-night, per-(ticker, event) `SourceBundle`
+field assembler: `assemble_nightly_source_bundle` turns one already-staged
+forward-calendar row, panel row, Tier-4 row and set of Tier-1 quote rows into
+`context`/`raw_quotes`/`feature_vector`/`feature_missing_mask`, refusing a
+leaked outcome/driver/Tier-4-stamp feature name, a panel row naming a
+different event, or a used feature whose own fold_start postdates `as_of`.
+`quote_domain_map` (extracted from `tools/capture_tier0_corpus.py`'s
+`_quote_map`) and `validated_as_of` are its other real `__all__` exports; no
+production caller resolves a full bundle yet (`tools/capture_tier0_corpus.py`
+calls `quote_domain_map()` only), so only `quote_domain_map` — the one name a
+real cross-package `__all__` check requires be declared — joins the directive
+below today. See `ARCHITECTURE.md` for why the rest join later.
+
+<!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map -->
 
 ## Consumers
 

@@ -508,10 +508,12 @@ mutate = [
     "engine/v2/scoring/financial.py",
     "engine/v2/scoring/frozen_batch.py",
     "engine/v2/scoring/frozen_inputs.py",
+    "engine/v2/scoring/nightly_source_bundle.py",
     "engine/v2/scoring/source_inputs.py",
 ]
 tests = [
     "tests/test_phase4_acceptance_independence.py",
+    "tests/test_phase4_capture_strict.py",
     "tests/test_phase4_frozen_bridge_rows.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_recalibration_artifact.py",
@@ -525,6 +527,7 @@ tests = [
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/test_v2_scoring_native_payoff.py",
+    "tests/test_v2_scoring_nightly_source_bundle.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
@@ -861,6 +864,7 @@ mutate = [
     "engine/v2/ops/training.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
+    "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
     "tests/test_v2_data_incremental_persistence.py",
@@ -877,6 +881,7 @@ tests = [
     "tests/test_v2_ops_incremental_registration.py",
     "tests/test_v2_ops_ledger_history_import.py",
     "tests/test_v2_ops_unit_receipts.py",
+    "tests/test_v2_ops_calendar_moves_jobs.py",
     "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     # tests/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked

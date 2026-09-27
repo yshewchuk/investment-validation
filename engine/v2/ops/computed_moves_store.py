@@ -416,19 +416,6 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
 # --------------------------------------------------------------------------
 
 
-def _committed_targets(parent, targets) -> tuple[str, ...]:
-    """The wanted tickers whose rows the pinned snapshot already committed.
-
-    Only the empty-rebuild edge needs this: when no fragment could be built at
-    all there is no commit to ask, so the parent's own rows are the honest
-    completed ids. Every other run's ids come from the committed fragments.
-    """
-    committed = {record.partition_key for record in parent.records
-                 if record.table_contract_ref.contract_id
-                 == COMPUTED_MOVES_CONTRACT.contract_id}
-    return tuple(ticker for ticker in targets if ticker in committed)
-
-
 def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
     """A truthful rerun result: nothing committed, nothing advanced.
 
@@ -649,9 +636,10 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
             events_by_ticker=_group_by_ticker(events),
             daily_by_ticker=_group_by_ticker(daily), as_of_day=_as_of_day(as_of))
         if not fragment_records:
-            # Nothing could be rebuilt at all: the committed generation is the
-            # parent's own, so its rows are the only honest completed ids.
-            return _noop_result(parameters, _committed_targets(parent, targets))
+            # ``targets`` -- the whole derived universe -- is what "completed"
+            # means here, whether or not this particular run wrote a fragment
+            # for every one of them.
+            return _noop_result(parameters, tuple(sorted(targets)))
 
         request_hash = content_hash({
             "kind": "computed_moves_generation", "scope": document["scope"],
@@ -671,9 +659,9 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
             # nothing was committed. Key presence in the parent is never
             # consulted -- yesterday's partition or a cached receipt is not
             # today's committed content.
-            return _noop_result(parameters, tuple(sorted(fragment_records)))
+            return _noop_result(parameters, tuple(sorted(targets)))
         return RefreshCallbackResult(
-            status="complete", completed_ids=tuple(sorted(fragment_records)),
+            status="complete", completed_ids=tuple(sorted(targets)),
             coverage_advanced=True, parent_snapshot_id=parameters.parent_snapshot_id,
             refresh_plan_hash=parameters.refresh_plan_hash,
             candidate_snapshot_id=receipt.resulting_head_snapshot_id)
