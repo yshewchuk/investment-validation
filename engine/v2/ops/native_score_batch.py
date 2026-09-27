@@ -154,7 +154,14 @@ def _calendar_row_key_mismatch(key: BoardRequest, calendar_row: Mapping[str, Any
     and could produce a duplicate ``request_hash`` (see
     :func:`assemble_score_batch_inputs`) that corrupts a different row."""
     calendar_ticker = calendar_row.get("ticker")
-    calendar_event_date = _iso(calendar_row.get("event_date"))
+    raw_event_date = calendar_row.get("event_date")
+    try:
+        # CodeRabbit round 3 (PR #66): _iso raises on an unparseable value --
+        # that must become this row's own refusal, never an exception that
+        # escapes _assemble_one_event and aborts every other row's assembly.
+        calendar_event_date = _iso(raw_event_date)
+    except (TypeError, ValueError):
+        return f"calendar_row event_date={raw_event_date!r} is not a valid date"
     if calendar_ticker == key.ticker and calendar_event_date == _iso(key.event_date):
         return None
     return (f"calendar_row ticker={calendar_ticker!r} event_date="

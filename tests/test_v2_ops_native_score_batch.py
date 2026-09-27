@@ -255,6 +255,24 @@ def test_calendar_row_key_mismatch_refuses_without_sinking_batch(tmp_path):
     assert refusals[0].key == bad.key
 
 
+def test_calendar_row_unparseable_event_date_refuses_without_raising(tmp_path):
+    """CodeRabbit round 3 (PR #66): _iso raises on an unparseable value --
+    _calendar_row_key_mismatch must convert that into this row's own
+    refusal rather than letting the exception escape and abort every other
+    row's assembly."""
+    binding = _stage_release(tmp_path)
+    good = _event_inputs()
+    bad = _event_inputs(
+        key=BoardRequest(ticker="OTHER", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15"), session="am"),
+        calendar_row=_calendar_row(ticker="OTHER", event_date="not-a-date"))
+    assembled, refusals = _assemble(binding, [good, bad])
+    assert list(assembled) == [good.key]
+    assert len(refusals) == 1
+    assert refusals[0].code == "CALENDAR_ROW_KEY_MISMATCH"
+    assert refusals[0].key == bad.key
+
+
 def test_duplicate_event_key_raises(tmp_path):
     binding = _stage_release(tmp_path)
     with pytest.raises(ValueError):

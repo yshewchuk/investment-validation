@@ -1027,7 +1027,11 @@ network, or database access.
     module or in `assemble_nightly_source_bundle` (which only checks
     `panel_row` against `calendar_row`, never against the caller's
     `BoardRequest`) verifies that a staged `calendar_row` actually belongs
-    to the key it was paired with.
+    to the key it was paired with. An unparseable `calendar_row[
+    "event_date"]` (CodeRabbit round 3, PR #66) is this same refusal, not a
+    raised exception: the date-parsing failure is caught inside the
+    mismatch check itself, so a malformed date in one row cannot abort
+    every other row's assembly.
   - `UNSUPPORTED_STRATEGY` — `key.strategy != "STR-THRU"` (this bounded
     assembler's one supported strategy, matching `nightly_source_bundle.py`'s
     own documented scope).
