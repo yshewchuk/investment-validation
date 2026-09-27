@@ -6,6 +6,10 @@ from a live ``deployment.current_pointer()`` -- the failure-semantics contract
 is ``engine/v2/scoring/ARCHITECTURE.md``'s ``release_bindings.py`` section (the
 "4c R1-R6 template"). Nothing calls this yet; a later PR wires it into the
 per-night ``SourceBundle`` assembler.
+
+Every refusal below is path-free by construction: a fixed message plus the
+exact ``member_id``/field name (and, where useful, a type name), never a raw
+filesystem path, an exception's own text, or ``repr()`` of untrusted content.
 """
 from __future__ import annotations
 
@@ -66,7 +70,7 @@ class ModelNotReady(ReleaseBindingError):
     binding member, or a payoff/recalibration/analog state object -- is
     missing, wrong status, hash-mismatched, or rejected by its own typed
     loader. Never a fallback: this is always the only outcome for a bad
-    member (R1)."""
+    member (R1). ``detail`` is always a fixed, path-free message."""
 
     code = MODEL_NOT_READY
 
@@ -155,14 +159,16 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
 
     try:
         pointer = deployment.current_pointer(dep_root)
-    except ValueError as exc:
-        # R1(b): a corrupt/unparseable DEPLOYED file. json.JSONDecodeError,
-        # engine.v2.foundation.typed.DocumentError and UnicodeDecodeError
-        # (invalid UTF-8) are all ValueError subclasses; none is a
-        # DeploymentError, so this module catches them here explicitly.
-        raise ModelNotReady("DEPLOYED", str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        # R1(b): a corrupt/unparseable/unreadable DEPLOYED file. json.
+        # JSONDecodeError, engine.v2.foundation.typed.DocumentError and
+        # UnicodeDecodeError (invalid UTF-8) are all ValueError subclasses;
+        # a read racing the is_file() check inside current_pointer raises a
+        # bare OSError. None is a DeploymentError, so this module catches
+        # them here explicitly, with a fixed, path-free message.
+        raise ModelNotReady("DEPLOYED", "the deployment pointer could not be read") from exc
     if pointer is None:
-        raise NoCurrentRelease(f"no release has ever been promoted at {dep_root}")
+        raise NoCurrentRelease("no release has ever been promoted at this release root")
 
     manifest = _read_and_verify_manifest(dep_root, pointer.release_id)
     release = manifest.release
@@ -193,12 +199,15 @@ def _read_and_verify_manifest(dep_root: Path, release_id: str) -> "deployment.St
     try:
         manifest = deployment._read_manifest(dep_root, release_id)
     except deployment.DeploymentError as exc:
-        # R1(c): an unsafe release_id (contains "/" or is "."/"..").
-        raise ModelNotReady("model_release", str(exc)) from exc
-    except ValueError as exc:
+        # R1(c): an unsafe release_id (contains "/" or is "."/".."). The
+        # DeploymentError's own message would echo the release_id verbatim,
+        # so it is never passed through -- fixed message only.
+        raise ModelNotReady("model_release", "unsafe or invalid release id") from exc
+    except (OSError, ValueError) as exc:
         # R1(e): manifest.json exists but will not parse (same ValueError
-        # family as R1(b) above).
-        raise ModelNotReady("manifest.json", str(exc)) from exc
+        # family as R1(b) above), or a read races the is_file() check inside
+        # deployment._read_manifest and raises a bare OSError.
+        raise ModelNotReady("manifest.json", "the staged manifest could not be read") from exc
     if manifest is None:
         # R1(d): no staged manifest for this release_id.
         raise ModelNotReady("model_release", "release not staged")
@@ -223,7 +232,7 @@ def _verify_object_bytes(dep_root: Path, member_id: str, name: str, path: str,
     except ValueError:
         raise ModelNotReady(member_id, f"{name}: object path escapes the deployment root")
     if not target.is_file():
-        raise ModelNotReady(member_id, f"{name}: missing object at {path}")
+        raise ModelNotReady(member_id, f"{name}: missing staged object")
     try:
         payload = target.read_bytes()
     except OSError as exc:
@@ -271,7 +280,7 @@ def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        raise ModelNotReady(_STATE_CATALOG_NAME, f"cannot read {_STATE_CATALOG_NAME}: {exc}") from exc
+        raise ModelNotReady(_STATE_CATALOG_NAME, f"cannot read {_STATE_CATALOG_NAME}") from exc
     try:
         body = json.loads(raw)
     except ValueError as exc:
@@ -279,33 +288,34 @@ def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping
     if not isinstance(body, dict):
         raise ModelNotReady(_STATE_CATALOG_NAME, f"{_STATE_CATALOG_NAME} must be a JSON object")
     if body.get("schema_version") != _PHASE5_RELEASE_SCHEMA:
-        raise ModelNotReady(_STATE_CATALOG_NAME,
-                            f"unsupported schema_version {body.get('schema_version')!r}")
+        raise ModelNotReady(_STATE_CATALOG_NAME, "unsupported schema_version")
     claimed = body.get("manifest_hash")
     unhashed = {k: v for k, v in body.items() if k != "manifest_hash"}
     if claimed != content_hash(unhashed):
         raise ModelNotReady(_STATE_CATALOG_NAME, "manifest_hash does not match its own body")
     if body.get("release_id") != expected_release_id:
-        raise ModelNotReady(
-            _STATE_CATALOG_NAME,
-            f"release_id {body.get('release_id')!r} disagrees with the deployed pointer "
-            f"{expected_release_id!r}")
+        raise ModelNotReady(_STATE_CATALOG_NAME, "release_id disagrees with the deployed pointer")
     return body
 
 
 def _resolve_state_group(
     dep_root: Path, catalog: Mapping, matches: Callable[[str], bool], loader,
 ) -> dict[str, tuple]:
+    members = catalog.get("members")
+    if members is None or not isinstance(members, list):
+        raise ModelNotReady("phase5_release.json", "members must be a JSON array")
     grouped: dict[str, list] = {}
-    for row in catalog.get("members", ()):
+    for row in members:
         if not isinstance(row, Mapping):
             raise ModelNotReady("phase5_release.json", "a members row is not a JSON object")
         member_id = row.get("member_id", "")
+        if not isinstance(member_id, str):
+            raise ModelNotReady("phase5_release.json", "a members row has a non-string member_id")
         if not matches(member_id):
             continue
         objects = row.get("objects")
         if row.get("status") != "STAGED" or not objects:
-            raise ModelNotReady(member_id, f"status={row.get('status')!r}, no staged objects")
+            raise ModelNotReady(member_id, "status is not STAGED, or no staged objects")
         if not isinstance(objects, list):
             raise ModelNotReady(member_id, "objects must be a JSON array")
         for obj in objects:
@@ -322,24 +332,28 @@ def _load_payoff(dep_root: Path, member_id: str, obj: Mapping):
     try:
         return PayoffArtifactLoader(dep_root).load(
             PayoffArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
-    except PayoffArtifactError as exc:
-        raise ModelNotReady(member_id, str(exc)) from exc
+    except (PayoffArtifactError, KeyError, TypeError) as exc:
+        # A hash-valid document missing a required field raises a bare
+        # KeyError out of PayoffArtifactLoader.load() (it does not guard its
+        # own document-to-artifact conversion) -- caught here, not left to
+        # escape uncaught.
+        raise ModelNotReady(member_id, "payoff artifact could not be verified or loaded") from exc
 
 
 def _load_recalibration(dep_root: Path, member_id: str, obj: Mapping):
     try:
         return RecalibrationArtifactLoader(dep_root).load(
             RecalibrationArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
-    except RecalibrationArtifactError as exc:
-        raise ModelNotReady(member_id, str(exc)) from exc
+    except (RecalibrationArtifactError, KeyError, TypeError) as exc:
+        raise ModelNotReady(member_id, "recalibration artifact could not be verified or loaded") from exc
 
 
 def _load_analog(dep_root: Path, member_id: str, obj: Mapping):
     try:
         state = FrozenStateLoader(dep_root).load(
             FrozenStateRef(path=obj["path"], content_hash=obj["content_hash"]))
-    except FrozenStateError as exc:
-        raise ModelNotReady(member_id, str(exc)) from exc
+    except (FrozenStateError, KeyError, TypeError) as exc:
+        raise ModelNotReady(member_id, "analog state could not be verified or loaded") from exc
     if not isinstance(state, BoardAnalogPoolArtifact):
         raise ModelNotReady(member_id, f"expected a board analog pool, got {type(state).__name__}")
     return state

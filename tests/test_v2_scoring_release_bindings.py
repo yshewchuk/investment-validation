@@ -1,11 +1,13 @@
 """Failure semantics and happy-path resolution of ``release_bindings``."""
 import hashlib
 import json
+import os
 import unittest.mock
 from pathlib import Path
 
 import pytest
 
+from checks.phase5_release import StateSpec, manifest_body, member_row
 from engine.v2.foundation import content_hash
 from engine.v2.models import (
     ArtifactInventoryMember,
@@ -65,6 +67,15 @@ def _linear_payload(intercept=1.0, coefficient=2.0) -> bytes:
         "outputs": [{"name": "prediction", "intercept": intercept,
                      "coefficients": [coefficient]}],
     }, sort_keys=True).encode()
+
+
+def _assert_no_leak(tmp_path: Path, exc: Exception) -> None:
+    """No refusal's message or ``.detail`` may contain a path separator or
+    the tmp_path string -- only a fixed message, a field/member name, or a
+    type name are allowed."""
+    for blob in (str(exc), getattr(exc, "detail", "")):
+        assert os.sep not in blob, blob
+        assert str(tmp_path) not in blob, blob
 
 
 def _stage_and_promote(root: Path, *, release_id: str = _RELEASE_ID) -> ModelRelease:
@@ -128,15 +139,30 @@ def _analog() -> tuple[BoardAnalogPoolArtifact, bytes]:
     return artifact, serialize_frozen_state(artifact)
 
 
+def _obj(path: str, content_hash_value: str | None, name: str = "object") -> dict:
+    return {"name": name, "path": path, "content_hash": content_hash_value}
+
+
 def _row(member_id: str, objects: list, status: str = "STAGED") -> dict:
-    return {"member_id": member_id, "status": status, "objects": objects}
+    """A well-formed catalog row, built through the real producer's
+    ``member_row`` (every object dict must already have a ``name``, from
+    ``_obj``)."""
+    spec = StateSpec(member_id=member_id, kind="test", strategies=("STR-THRU",),
+                      modules=(), consumer=None, source="test")
+    return member_row(spec, status, objects, "")
 
 
 def _write_catalog(root: Path, *, release_id: str = _RELEASE_ID, schema: str = _SCHEMA,
-                   rows: list | None = None) -> None:
-    body: dict = {"schema_version": schema, "release_id": release_id,
-                  "members": [] if rows is None else rows}
-    body["manifest_hash"] = content_hash(body)
+                   rows: list | None = None, manifest_hash_override: str | None = None) -> None:
+    members = [] if rows is None else rows
+    if schema == _SCHEMA:
+        body = manifest_body(release_id, "d1", members, {})
+    else:
+        body = {"schema_version": schema, "release_id": release_id,
+                "deployment_id": "d1", "members": members, "sources": {}}
+        body["manifest_hash"] = content_hash({k: v for k, v in body.items() if k != "manifest_hash"})
+    if manifest_hash_override is not None:
+        body["manifest_hash"] = manifest_hash_override
     (root / "phase5_release.json").write_text(json.dumps(body, indent=2, sort_keys=True))
 
 
@@ -150,19 +176,17 @@ def _happy_catalog(root: Path) -> str:
     analog, analog_bytes = _analog()
     analog_path = _write_object(dep_root, analog_bytes)
     _write_catalog(root, rows=[
-        _row("payoff_line:STR-THRU", [
-            {"path": payoff_path, "content_hash": payoff.content_hash}]),
-        _row("recalibration_map:STR-THRU", [
-            {"path": recal_path, "content_hash": recal.content_hash}]),
-        _row("board_analog_matcher", [
-            {"path": analog_path, "content_hash": analog.content_hash}]),
+        _row("payoff_line:STR-THRU", [_obj(payoff_path, payoff.content_hash)]),
+        _row("recalibration_map:STR-THRU", [_obj(recal_path, recal.content_hash)]),
+        _row("board_analog_matcher", [_obj(analog_path, analog.content_hash)]),
     ])
     return payoff_path
 
 
 def test_no_current_release_raises_typed_refusal(tmp_path):
-    with pytest.raises(NoCurrentRelease):
+    with pytest.raises(NoCurrentRelease) as error:
         resolve_release_binding(tmp_path)
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_corrupt_deployed_pointer_invalid_utf8_raises_model_not_ready(tmp_path):
@@ -172,6 +196,17 @@ def test_corrupt_deployed_pointer_invalid_utf8_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "DEPLOYED"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_bad_json_deployed_pointer_raises_model_not_ready(tmp_path):
+    deployed = _dep_root(tmp_path) / "DEPLOYED"
+    deployed.parent.mkdir(parents=True)
+    deployed.write_bytes(b"{not valid json")
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "DEPLOYED"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_missing_model_binding_object_raises_model_not_ready(tmp_path):
@@ -180,6 +215,7 @@ def test_missing_model_binding_object_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id.startswith("model:")
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_unreadable_model_binding_object_raises_model_not_ready_without_leaking_path(tmp_path):
@@ -196,8 +232,8 @@ def test_unreadable_model_binding_object_raises_model_not_ready_without_leaking_
         with pytest.raises(ModelNotReady) as error:
             resolve_release_binding(tmp_path)
     assert error.value.member_id.startswith("model:")
-    assert str(member_path) not in error.value.detail
     assert "simulated read failure" not in error.value.detail
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_model_binding_hash_mismatch_raises_model_not_ready_never_falls_back(tmp_path):
@@ -207,6 +243,94 @@ def test_model_binding_hash_mismatch_raises_model_not_ready_never_falls_back(tmp
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id.startswith("model:")
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_ambiguous_model_binding_raises_model_not_ready(tmp_path):
+    payload = _linear_payload()
+    member_hash = _sha(payload)
+    binding1 = ModelBinding(
+        binding_id="b1", model_id="m1", role="gate", strategy_id="STR-THRU",
+        decision_clock_id="entry-close", adapter="json-linear.v1",
+        feature_order=("x",), output_names=("prediction",),
+        members=(ArtifactMember(name="estimator", path="unused1.json", content_hash=member_hash),))
+    binding2 = ModelBinding(
+        binding_id="b2", model_id="m2", role="gate", strategy_id="STR-THRU",
+        decision_clock_id="entry-close", adapter="json-linear.v1",
+        feature_order=("x",), output_names=("prediction",),
+        members=(ArtifactMember(name="estimator", path="unused2.json", content_hash=member_hash),))
+    release = ModelRelease(release_id="r-dup", deployment_id="d1", bindings=(binding1, binding2))
+    inventory = ModelReleaseInventory(
+        release_id="r-dup", deployment_id="d1", known_clock_ids=("entry-close",),
+        artifacts=(ModelArtifactInventory(
+            artifact_id="m1", role="gate", strategy_ids=("STR-THRU",),
+            compatible_clock_ids=("entry-close",), target_contract_ref="return.v1",
+            ordered_features=("x",), members=(ArtifactInventoryMember(
+                member_id="m1:estimator", kind="estimator", artifact_ref="artifact://m1",
+                content_hash=member_hash),),),),
+        bindings=(ReleaseBinding(
+            role="gate", strategy_id="STR-THRU", clock_id="entry-close", artifact_id="m1",
+            ordered_features=("x",), required_member_kinds=("estimator",),),),
+        requirements=(ReleaseRequirement(
+            role="gate", strategy_id="STR-THRU", clock_id="entry-close"),),
+        artifact_manifest_ref="manifest://r", evidence_refs=("evidence://r",))
+    dep_root = _dep_root(tmp_path)
+    deployment.stage_release(dep_root, release, inventory, {member_hash: payload})
+    deployment.promote(dep_root, "r-dup")
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "model:gate:STR-THRU"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_unsafe_release_id_in_pointer_raises_model_not_ready(tmp_path):
+    dep_root = _dep_root(tmp_path)
+    dep_root.mkdir(parents=True)
+    pointer = deployment.PointerState(sequence=0, release_id="a/b", previous_release_id=None,
+                                      action="promote", at="2026-01-01T00:00:00Z")
+    (dep_root / "DEPLOYED").write_bytes(
+        json.dumps(deployment.to_document(pointer), sort_keys=True).encode())
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "model_release"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_pointer_names_unstaged_release_raises_model_not_ready(tmp_path):
+    dep_root = _dep_root(tmp_path)
+    dep_root.mkdir(parents=True)
+    pointer = deployment.PointerState(sequence=0, release_id="never-staged", previous_release_id=None,
+                                      action="promote", at="2026-01-01T00:00:00Z")
+    (dep_root / "DEPLOYED").write_bytes(
+        json.dumps(deployment.to_document(pointer), sort_keys=True).encode())
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "model_release"
+    assert error.value.detail == "release not staged"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_corrupt_staged_manifest_bad_json_raises_model_not_ready(tmp_path):
+    release = _stage_and_promote(tmp_path)
+    manifest_path = _dep_root(tmp_path) / "releases" / release.release_id / "manifest.json"
+    manifest_path.write_bytes(b"{not valid json")
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "manifest.json"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_staged_manifest_release_hash_mismatch_raises_model_not_ready(tmp_path):
+    release = _stage_and_promote(tmp_path)
+    manifest_path = _dep_root(tmp_path) / "releases" / release.release_id / "manifest.json"
+    body = json.loads(manifest_path.read_text())
+    body["release_hash"] = "sha256:" + "0" * 64
+    manifest_path.write_text(json.dumps(body, indent=2, sort_keys=True))
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "model_release"
+    assert error.value.detail == "release_hash disagrees with manifest"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_missing_state_catalog_raises_model_not_ready(tmp_path):
@@ -214,6 +338,7 @@ def test_missing_state_catalog_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "phase5_release.json"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_state_catalog_release_id_mismatch_raises_model_not_ready(tmp_path):
@@ -222,6 +347,7 @@ def test_state_catalog_release_id_mismatch_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "phase5_release.json"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_state_catalog_wrong_schema_version_raises_model_not_ready(tmp_path):
@@ -230,6 +356,39 @@ def test_state_catalog_wrong_schema_version_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "phase5_release.json"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_catalog_manifest_hash_mismatch_raises_model_not_ready(tmp_path):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path, manifest_hash_override="sha256:" + "0" * 64)
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "phase5_release.json"
+    assert error.value.detail == "manifest_hash does not match its own body"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_non_list_members_in_catalog_raises_model_not_ready(tmp_path):
+    _stage_and_promote(tmp_path)
+    body = {"schema_version": _SCHEMA, "release_id": _RELEASE_ID,
+            "deployment_id": "d1", "members": "not-a-list", "sources": {}}
+    body["manifest_hash"] = content_hash(body)
+    (tmp_path / "phase5_release.json").write_text(json.dumps(body, sort_keys=True))
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "phase5_release.json"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_non_string_member_id_in_catalog_row_raises_model_not_ready(tmp_path):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path, rows=[{"member_id": 123, "kind": "test", "strategies": [],
+                                    "status": "STAGED", "objects": [], "detail": ""}])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "phase5_release.json"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_payoff_member_pending_status_raises_model_not_ready(tmp_path):
@@ -238,6 +397,18 @@ def test_payoff_member_pending_status_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "payoff_line:STR-THRU"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_payoff_member_missing_field_raises_model_not_ready(tmp_path):
+    _stage_and_promote(tmp_path)
+    junk = json.dumps({"schema_version": "payoff_line_artifact.v1.0"}).encode()
+    path = _write_object(_dep_root(tmp_path), junk)
+    _write_catalog(tmp_path, rows=[_row("payoff_line:STR-THRU", [_obj(path, _sha(junk))])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "payoff_line:STR-THRU"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_recalibration_member_hash_mismatch_raises_model_not_ready(tmp_path):
@@ -245,31 +416,35 @@ def test_recalibration_member_hash_mismatch_raises_model_not_ready(tmp_path):
     _recal, recal_bytes = _recalibration()
     path = _write_object(_dep_root(tmp_path), recal_bytes)
     _write_catalog(tmp_path, rows=[_row("recalibration_map:STR-THRU", [
-        {"path": path, "content_hash": _sha(b"declared-but-wrong")}])])
+        _obj(path, _sha(b"declared-but-wrong"))])])
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "recalibration_map:STR-THRU"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_malformed_object_reference_in_catalog_raises_model_not_ready_without_leaking_content(tmp_path):
     _stage_and_promote(tmp_path)
-    _write_catalog(tmp_path, rows=[_row("payoff_line:STR-THRU", [
-        {"path": "objects/whatever", "content_hash": None}])])
+    _write_catalog(tmp_path, rows=[{"member_id": "payoff_line:STR-THRU", "kind": "test",
+                                    "strategies": ["STR-THRU"], "status": "STAGED",
+                                    "objects": [{"path": "objects/whatever", "content_hash": None}],
+                                    "detail": ""}])
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "payoff_line:STR-THRU"
     assert "whatever" not in error.value.detail
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_analog_member_unloadable_raises_model_not_ready(tmp_path):
     _stage_and_promote(tmp_path)
     junk = json.dumps({"schema_version": "not_a_frozen_state.v9.9", "rows": []}).encode()
     path = _write_object(_dep_root(tmp_path), junk)
-    _write_catalog(tmp_path, rows=[_row("board_analog_matcher", [
-        {"path": path, "content_hash": _sha(junk)}])])
+    _write_catalog(tmp_path, rows=[_row("board_analog_matcher", [_obj(path, _sha(junk))])])
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "board_analog_matcher"
+    _assert_no_leak(tmp_path, error.value)
 
 
 def test_happy_path_resolves_every_field(tmp_path):
@@ -348,3 +523,4 @@ def test_repeated_calls_do_not_share_a_cache_across_release_changes(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "payoff_line:STR-THRU"
+    _assert_no_leak(tmp_path, error.value)
