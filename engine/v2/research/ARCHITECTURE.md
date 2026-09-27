@@ -103,12 +103,18 @@ snapshot-read helpers), `_pricing.py`, `_trades_revisions.py`.
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`), `engine.v2.
 contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`),
-`engine.v2.foundation` (`ArtifactStore`, `SystemClock`), `engine.v2.ops.
-bootstrap.open_catalog` — all below this package's own layer, consistent
-with the generic "may import anything at a lower layer" rule (`only_imports`
-is unset for this package in `checks/layer_map.py`, i.e. no narrower
-restriction than that generic rule). No import of `engine.v2.scoring`,
-`engine.v2.evaluation`, `engine.v2.ledger` or any sibling/higher package.
+`engine.v2.foundation` (`ArtifactStore`, `SystemClock`) — the package's own
+lower-layer dependencies, consistent with the generic "may import anything
+at a lower layer" rule (`only_imports` is unset for this package in
+`checks/layer_map.py`, i.e. no narrower restriction than that generic
+rule). No import of `engine.v2.scoring`, `engine.v2.evaluation`,
+`engine.v2.ledger` or any sibling/higher package. `engine.v2.ops.
+bootstrap.open_catalog` is a CLI dependency, not a package one: the
+`tools/v2_*.py` leaves call it to open `--catalog` before handing the
+connection to this package (see Inputs); nothing under
+`engine/v2/research/` imports `engine.v2.ops` itself, even though layer
+7.0 (ops) is not below this package's own enforced layer (also 7.0) and
+so could not be imported under the generic rule regardless.
 `_pricing.py` holds pure pricing primitives copied from legacy
 `engine.structures`/`engine.fills`/`engine.calendar` rather than reached
 through a legacy adapter (supervisor decision: no legacy adapter for this
@@ -139,9 +145,15 @@ leaves listed above, which the layering hook does not parse.
 ## External systems and libraries
 
 None directly: no network call (Polygon/ORATS pulls stay in
-`engine/data/pulls/`, legacy and unmoved), no direct filesystem access
-outside `ArtifactStore`/the sqlite catalog connection it is handed, and no
-third-party service. `pandas`/`numpy`/`pyarrow` for frame arithmetic.
+`engine/data/pulls/`, legacy and unmoved). Snapshot access uses
+`ArtifactStore` and the sqlite catalog connection it is handed — never a
+direct filesystem or database call of this package's own. Report writers
+(`fill_quality.write_report`, `signal_screen.write_report`,
+`polygon_fills.run`'s own write step) are the one exception: they write
+Markdown/parquet/CSV/JSON files directly under the caller-provided
+`reports_dir`/`out_dir`, outside `ArtifactStore` — those are this
+package's plain local files, not snapshot-store objects. No third-party
+service. `pandas`/`numpy`/`pyarrow` for frame arithmetic.
 
 ## Failure semantics
 
@@ -162,15 +174,30 @@ and message on stderr rather than a bare traceback.
     resolved id is always written into the output so the exact snapshot a
     report came from is never ambiguous after the fact, and `--snapshot-id`
     lets a later run reproduce it even after the head has since moved.
-  - **An explicit `--snapshot-id` that does not exist, or a manifest that
-    fails its own hash check.** `Repository.resolve`/`resolve_full` raises
-    `MANIFEST_CORRUPT` (`category="integrity"`, not retryable) — a
-    tampered or unknown id is refused, never silently substituted for the
-    scope head.
+  - **An explicit `--snapshot-id` that does not exist.**
+    `Repository.resolve`/`resolve_full` raises `SNAPSHOT_NOT_FOUND`
+    (`category="dependency"`, not retryable) — an unknown id is refused,
+    never silently substituted for the scope head.
+  - **A resolved snapshot's manifest fails its own identity or hash
+    check** (a dataset version, contract, or fragment that does not match
+    its catalog identity, references an unknown object, or a scan result
+    that is out of the manifest's declared primary-key order).
+    `Repository.resolve`/`resolve_full`/`scan` raises `MANIFEST_CORRUPT`
+    (`category="integrity"`, not retryable) — a tampered snapshot is
+    refused rather than read.
   - **A table absent from the resolved snapshot, or with no recorded
     fragment time bounds** (`_scan.py`'s path) **or no declared partition
-    column** (`_snapshot.py`'s path). `CONTRACT_MISMATCH`
-    (`category="validation"`, not retryable).
+    column** (`_snapshot.py`'s path, `_scan.py`'s path with no fragment
+    records at all). `CONTRACT_MISMATCH` (`category="validation"`, not
+    retryable) — except `_snapshot.read_table` (the `replay.py`/
+    `_chains.py`/`_trades_publish.py` path only, not `_scan.py`): a table
+    with fragments but no matching partition-key values raises a bare
+    `ValueError`, not a `DataError`. The CLIs built on this path
+    (`v2_replay.py`, `v2_build_trades.py`, `v2_reconcile_trades.py`) catch
+    only `DataError` at `main()`, so this specific condition escapes as
+    an uncaught traceback rather than the typed refusal every other
+    condition here gets. Pre-existing, not introduced or fixed by this
+    doc; tracked as a follow-up (see hand-back).
   - **A single day-partition scan that still exceeds
     `maximum_result_rows`** (`_scan.py`'s path only — `_snapshot.py` has no
     finer split to fall back to). `RESULT_LIMIT_EXCEEDED`
