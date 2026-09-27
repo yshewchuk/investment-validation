@@ -42,6 +42,13 @@ reviews:
         this is a stronger requirement than "nice to have," on par with an
         unmet acceptance criterion.
 
+        Exception: a legacy component (`engine/**` outside `engine/v2/**`)
+        gets no new `ARCHITECTURE.md` — it is never a defect that a legacy
+        change has no component doc. For that change, check instead that
+        the PR body carries the design (and, if durable, that the operator
+        guides do too, per `CONTRIBUTING.md`); flag it as a defect only if
+        neither the PR body nor the operator guides state the design.
+
         If the PR includes an `**/ARCHITECTURE.md` file, check its claims
         against the code (see the `**/ARCHITECTURE.md` path instruction
         below) and flag any undocumented deviation between the two.

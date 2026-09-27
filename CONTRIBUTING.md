@@ -20,17 +20,24 @@ plus the reason).
 
 ## Scope and deferred work
 
-Keep each pull request inside the scope its description states: the lines
-it adds or changes, plus anything that change makes wrong elsewhere (a
-caller it breaks, a doc it makes false, a test it invalidates). Code the
-PR adds that cannot work against the current `main` as it stands is in
-scope too — bring in what's missing rather than deferring it.
+Keep each pull request inside the scope its description states. In scope:
+the lines it adds or changes; anything that change makes wrong elsewhere
+(a caller it breaks, a doc it makes false, a test it invalidates); code
+the PR adds that cannot work against the current `main` as it stands
+(bring in what's missing rather than deferring it); and any part of a
+pre-existing defect that this PR's change makes worse or newly reachable.
+Fix all of these in the PR — deferring one of them is not allowed.
 
 A review comment that is real but falls outside that scope — a
-pre-existing defect in code the PR doesn't touch, a feature request, or a
-neighbouring refactor — is not fixed in the PR. File it as an issue
-instead, referencing the PR and the review comment it came from, and
-reply on the review thread noting that it is tracked separately.
+pre-existing defect in code the PR doesn't touch and doesn't make worse or
+newly reachable, a feature request, or a neighbouring refactor — never
+blocks merge and is not fixed in the PR. File it as a GitHub issue instead
+with `gh issue create`: the issue body starts with the line `Deferred from
+#<PR> (<reviewer> review of <sha>, <file>:<line>).`, then states the
+problem, what's wanted, and a test that would prove it — public-safe, no
+strategy thresholds, edge figures, or local paths. Then reply on the
+review thread: `Out of scope for this PR (<reason>); tracked in
+#<issue>.`
 
 ## Small pull requests
 
