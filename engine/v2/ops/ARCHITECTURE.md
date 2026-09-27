@@ -50,12 +50,31 @@ the coordinator-effect functions in `effects_graph.py`.
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture` and `price-refresh`.
+- `computed_moves_store.py`'s `run_computed_moves_refresh` (the
+  `RefreshCallback` a future job's worker calls — see "Not yet wired" below):
+  reads `earnings_events`/`daily_market` off the pinned parent snapshot
+  through `Repository`, exactly once each per run (`_scan_once`), and calls
+  an injected yfinance history fetcher (never `legacy_adapter.new_fetcher`)
+  per target ticker. Target tickers are the ORATS-confirmed-session rule
+  `target_tickers_from_snapshot` re-implements from the legacy pull, read
+  through the v2 snapshot instead of the legacy store.
 
 ## Outputs
 
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
+- `computed_moves_store.py` commits one new snapshot generation per run,
+  carrying every other table forward unchanged alongside a fresh
+  `computed_moves` table version (`engine/v2/data/computed_moves_table.py`;
+  one fragment per ticker, via the same immutable-object/manifest/atomic-head
+  commit primitives `price_history_store` uses, never `generic_incremental` —
+  `computed_moves` has no manifest in the parent snapshot the way an
+  existing contracted table does). Alongside the snapshot commit it inserts
+  one append-only row per attempted ticker into `data_computed_moves_captures`
+  (schema v12, `engine/v2/data/schema.py`) — a capture already logged (same
+  content-derived `capture_id`) is never re-logged, so a rerun that rebuilds
+  a generation from durable receipts does not duplicate the log.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (14 kinds, cited by name rather
   than copied here since the list can drift: `legacy_decisions`,
@@ -83,6 +102,14 @@ the coordinator-effect functions in `effects_graph.py`.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
+
+**`computed_moves_store.py` is not yet wired to production.** It ships as a
+standalone `RefreshCallback` implementation only: no CLI subcommand, no
+`nightly.py` `GRAPH`/`OPTIONAL` entry, no `supervisor` job kind calls it yet.
+A later change adds the nightly stage and job-kind dispatch this doc's
+"Diagrams" section would then need to reflect. It ships with no direct test
+of its own in this change either — coverage is a known, tracked gap, closed
+alongside the wiring.
 
 ## Dependencies
 
@@ -154,6 +181,12 @@ themselves are never held here, only remaining-call/reserve counts.
   and other catalog rows): `unit_receipts.py`'s `cached_unit_outcomes`/
   `cached_unit_payloads` and `nightly.py`'s `_native_cached_outcome` each
   look up the newest receipt for a `(source, endpoint, request_hash)` key
+  (`computed_moves_store.py` is one such caller — its per-ticker
+  `RefreshUnit`s key off `computed_moves:<ticker>:<as_of>`, and a unit
+  already backed by a durable `complete` receipt is re-parsed from that
+  receipt rather than re-fetched, so a same-session retry rebuilds every
+  unit's fragment from the fresh fetches plus the cached receipts, never a
+  live-and-cached mix that a clean single run could not also produce)
   and reuse it only when its recorded `response_kind` is `complete` — a
   `legitimate_empty` payload is always re-verified against the live source
   on the next run, and a `not_final`/`transient`/`refused` response is
