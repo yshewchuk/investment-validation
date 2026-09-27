@@ -295,7 +295,9 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     assert result["no_work"] is False
     records_document = json.loads((root / "records.json").read_text())
     assert records_document["authoritative"] is False
-    assert records_document["known_gaps"] == ["PANEL_ANCHOR_UNVERIFIED"]
+    # Issue #53 (fixed by #67): known_gaps is empty now that
+    # assemble_nightly_source_bundle verifies panel_anchor itself.
+    assert records_document["known_gaps"] == []
     assert len(records_document["records"]) == 1
     refusals_document = json.loads((root / "refusals.json").read_text())
     assert len(refusals_document) == 1
