@@ -270,7 +270,10 @@ so a planned `report_status` job (design only as of 2026-09-27; not yet
 implemented) will post the outcome onto the PR's own head commit itself
 (`github.event.workflow_run.head_sha`) as a plain commit status: never a
 check run, and never added to branch protection, so it can never become a
-required check.** `report_status` will need `[plan, report]`, with
+required check.** `report_status` will need `[plan, report]` and
+`statuses: write` for its `GITHUB_TOKEN` in both workflows (the existing
+workflow-level token grants only `contents: read`; every scope a job
+doesn't list itself becomes `none`), with
 `if: always() && needs.plan.outputs.pr_number != ''` (the `always()` is
 required: without it, GitHub Actions would skip `report_status` outright
 whenever `report` itself failed or was skipped, which is exactly when a
