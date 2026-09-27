@@ -59,7 +59,10 @@ this PR:
   `deployment.current_release(root) -> ModelRelease | None` — read a staged
   release by id, or by the live pointer.
 - `deployment.production_release_root() -> Path` **(new, this PR)** — the
-  one configured production release root; see §7.4.
+  one configured production STORE root; see §7.4.
+- `deployment.production_deployment_root() -> Path` **(new, this PR)** —
+  `production_release_root() / "deployment"`, the directory this module's
+  own root-taking functions actually want; see §7.4.
 - `deployment.restage_semantic_hash(root, release_id) -> StagedManifest`
   **(new, this PR)** — rewrite an already-staged manifest's hash to the
   current semantic version, in place, with no retraining; see §7.5.
@@ -147,10 +150,12 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `engine.v2.ops` — `engine/v2/ops/cli.py` (the no-fit guard for `ops
   rescore`) and `engine/v2/ops/training.py` (`deployment.promote` from the
   `models_promote` job worker, and, this PR, `deployment.
-  production_release_root`/`deployment.MissingReleaseRoot` from
-  `promote_plan`). Neither `nightly.py`, `worker.py` nor `stages.py` import
-  this package's deployment surface directly — `stages.py` only registers
-  `training.py`'s `JobKind`s.
+  production_deployment_root`/`deployment.MissingReleaseRoot` from
+  `promote_plan` -- NOT `production_release_root` directly: `promote_plan`
+  hands its resolved value straight to `deployment.promote`, which takes
+  the `deployment/` directory itself as `root`). Neither `nightly.py`,
+  `worker.py` nor `stages.py` import this package's deployment surface
+  directly — `stages.py` only registers `training.py`'s `JobKind`s.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the
   deployment pointer read-only (`current_pointer`, `resolve_release`) to
   serve `/models/release.json`; never promotes.
@@ -384,10 +389,11 @@ stateDiagram-v2
 ```mermaid
 flowchart LR
     ENV["MODEL_RELEASE_ROOT\n(environment variable)"] --> PRR["deployment.production_release_root()"]
-    PRR -->|"set"| ROOT["release store root"]
+    PRR -->|"set"| ROOT["release STORE root"]
     PRR -->|"unset/blank"| MRR["MissingReleaseRoot"]
-    ROOT --> RB["release_bindings.resolve_production_release_binding()"]
-    ROOT --> PP["training.promote_plan()\n(only when --release-root is omitted)"]
+    ROOT --> RB["release_bindings.resolve_production_release_binding()\n(adds deployment/ itself)"]
+    ROOT --> PDR["deployment.production_deployment_root()\n(= root / \"deployment\")"]
+    PDR --> PP["training.promote_plan()\n(only when --release-root is omitted)"]
     MRR --> RBERR["ModelNotReady('release_root', ...)"]
     MRR --> PPERR["OpsError INVALID_REQUEST"]
 ```
