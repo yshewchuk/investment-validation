@@ -453,8 +453,11 @@ refusals with a machine-checkable `.code`/`.detail` also exist at
   `resolve_release_binding` again, which re-resolves the pointer from
   scratch.
 - **R4, transaction.** Not applicable — read-only, single-pass, no
-  multi-step state to roll back. Resolution either completes and returns
-  one immutable `ScoringReleaseBinding`, or raises before returning anything.
+  multi-step state to roll back. Resolution either completes and returns one
+  `ScoringReleaseBinding` -- immutable except for its `frozen_inference` field,
+  whose referenced `FrozenInference` instance holds its own mutable cache
+  outside this dataclass's fields (see R2 and Outputs) -- or raises before
+  returning anything.
 - **R5, partial write.** None possible: this module performs no writes.
   Every function it calls into (`deployment.current_pointer`,
   `deployment._read_manifest`, `deployment._manifest_hash_matches`, the

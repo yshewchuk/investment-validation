@@ -396,6 +396,7 @@ tests = [
 why = "Model releases, deployment, inventory, lineage and loaders: which frozen model serves which request."
 mutate = [
     "engine/v2/models/*.py",
+    "engine/v2/scoring/release_bindings.py",
 ]
 skip = [
     "engine/v2/models/training/*",
@@ -425,6 +426,7 @@ tests = [
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",
     "tests/test_v2_scoring_r4_20_infinite_residuals.py",
+    "tests/test_v2_scoring_release_bindings.py",
 ]
 
 [modules.board_analog]
