@@ -229,8 +229,11 @@ job kind from the nightly graph. `nightly.py` is not touched by this PR.
   the pinned plan/read set, per "Primary contracts" above), one
   `ScoringReleaseBinding` (PR-1, resolved once by the caller — never
   re-resolved per row), a sequence of `NightlyEventInputs` (one
-  `BoardRequest` key plus its `calendar_row`/`panel_row`/`tier4_row`/
-  `quote_rows`/optional `quote_status` — the calendar row here additionally
+  `BoardRequest` key plus its `calendar_row`/`panel_row`/required
+  `panel_anchor` (issue #53, fixed by #67 — threaded straight through to
+  `assemble_nightly_source_bundle`'s own required parameter of the same
+  name, unmodified)/`tier4_row`/`quote_rows`/optional `quote_status` — the
+  calendar row here additionally
   carries the real `earnings_events` table's own `event_id` column, which
   `nightly_source_bundle._CALENDAR_REQUIRED_FIELDS` does not itself
   require), the batch's `feature_names`, and an optional `gate_policy:
@@ -1118,13 +1121,21 @@ network, or database access.
   `events.json` and re-resolves the release from scratch — nothing is
   reused across attempts.
 - **R4, transaction.** Not applicable: read-only, single-pass, no catalog
-  writes of its own. The worker either returns one complete
-  `(records.json, refusals.json)` pair after `score_batch` fully returns, or
-  raises before writing either file — never a partial pair on disk read as
-  if it were complete.
-- **R5, partial write.** None possible: both output files are written once,
-  after the full batch (assembly + `score_batch`) has finished; no
-  incremental per-row write to either file.
+  writes of its own. `records.json` and `refusals.json` are two separate,
+  non-atomic `write_text` calls (CodeRabbit round 1, PR #66) — an
+  interruption between them can leave only one of the two in the worker's
+  private staging directory. This module does not make that pair atomic
+  itself (no temp-file-then-rename dance); what makes an interrupted
+  attempt safe is one level up: the supervisor publishes an attempt's
+  staged outputs only after the worker subprocess exits successfully (its
+  own atomic attempt-publication contract, common to every job kind, not
+  reimplemented here), so a partial pair sitting in an interrupted
+  attempt's discarded staging directory is never published as a
+  committed `records.json`/`refusals.json`.
+- **R5, partial write.** Staging itself is not partial-write-safe in the
+  above sense (see R4): a killed attempt can leave one file written and the
+  other missing in private staging. No consumer ever sees that state,
+  because nothing publishes an incomplete attempt's staging.
 - **R6, idempotency.** Same `events.json`, same `release_root` pointer
   state, same `as_of`/`snapshot_id`/`calendar_revision`, same `gate_policy`
   → the same `records.json`/`refusals.json`, byte-for-byte: assembly is a

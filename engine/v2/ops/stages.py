@@ -46,7 +46,7 @@ class NativeScoreBatchParameters:
     snapshot_id: str
     calendar_revision: str
     feature_names: tuple[str, ...]
-    gate_policy: dict | None = None
+    gate_policy: dict[str, Any] | None = None
     input_bindings: dict[str, str] | None = None
 
 

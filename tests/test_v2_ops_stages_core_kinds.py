@@ -80,9 +80,15 @@ _CASES = {
         checkpoint_contract="native_score_batch_records.v1.0",
         max_attempts=2, backoff=(5, 30),
         extra_field=("calendar_revision", "cal-rev-1"),
+        # CodeRabbit round 1 (PR #66): gate_policy is exercised here as a
+        # non-empty dict so the parametrized submit() path decodes it
+        # through the real strict decoder (proves `dict[str, Any]`, not
+        # `dict`, is accepted -- a bare `dict` annotation raises TypeError
+        # in from_document for any non-empty value).
         required={"release_root": "root", "as_of": "2026-09-01",
                   "snapshot_id": "snap1", "calendar_revision": "cal-rev-1",
-                  "feature_names": ["f1"]}),
+                  "feature_names": ["f1"],
+                  "gate_policy": {"STR-THRU": {"threshold": 0.0}}}),
     "snapshot_import": dict(
         resource_class="legacy_rebuild",
         checkpoint_contract="snapshot_import_inspections.v1.0",
