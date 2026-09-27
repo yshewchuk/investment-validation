@@ -32,17 +32,6 @@ def _snapshot(snapshot_id="snap-parent"):
         knowledge_mode_by_table={})
 
 
-class FakeFetcher:
-    """A ``Fetcher``-shaped counter; no network, no cache."""
-
-    def __init__(self):
-        self.calls = 0
-
-    def fetch(self, source, endpoint, params=None, *, live=False, note=""):
-        self.calls += 1
-        return None
-
-
 def _cached(unit):
     return classify_response(200, unit.expected_keys, returned_keys=unit.expected_keys,
                              request_id=unit.request_id, receipt_ref="cache:" + unit.request_id,
@@ -118,11 +107,33 @@ def test_native_calendar_fallback_is_recorded_as_a_warning(monkeypatch):
     monkeypatch.setattr(forward_calendar_store, "daily_by_ticker",
                         lambda repository, snapshot: {})
     parent = type("Parent", (), {"snapshot": object()})()
-    calendar, warnings = forward_calendar_store._native_calendar(object(), parent)
+    calendar, warnings = forward_calendar_store._native_calendar(
+        object(), parent, as_of=AS_OF, horizon_days=21)
     assert calendar is None
     assert len(warnings) == 1
     assert warnings[0].startswith("weekday calendar fallback:")
     assert "daily_market session" in warnings[0]
+
+
+def test_native_calendar_extends_through_the_requested_horizon(monkeypatch):
+    """A stale panel (an old last observed session) must not truncate a
+    normal horizon: the projection extends through as_of + horizon_days even
+    when that crosses last + 400 days."""
+    old_last = pd.Timestamp("2020-01-02")
+    frame = pd.DataFrame({"date": [old_last]})
+    monkeypatch.setattr(forward_calendar_store, "daily_by_ticker",
+                        lambda repository, snapshot: {"AAPL": frame})
+    parent = type("Parent", (), {"snapshot": object()})()
+    calendar, warnings = forward_calendar_store._native_calendar(
+        object(), parent, as_of=AS_OF, horizon_days=21)
+    assert warnings == ()
+    horizon_end = pd.Timestamp(AS_OF).normalize() + pd.Timedelta(days=21)
+    assert max(calendar.days) >= horizon_end
+
+
+def test_input_document_rejects_a_non_object_json_body(tmp_path):
+    (tmp_path / forward_calendar_store.INPUT_PATH).write_text("[1, 2, 3]")
+    assert forward_calendar_store._input_document(tmp_path) is None
 
 
 def test_no_provider_call_when_all_cached():
@@ -137,8 +148,3 @@ def test_no_provider_call_when_all_cached():
         _snapshot(), dates, (), as_of=AS_OF, cached_nasdaq=cached, cached_yfinance={})
     assert nasdaq.provider_calls == 0
     assert nasdaq.fetch_units == ()
-
-    fake = FakeFetcher()
-    for unit in nasdaq.fetch_units:
-        fake.fetch("nasdaq", "calendar/earnings", {"date": unit.expected_keys[0]})
-    assert fake.calls == 0

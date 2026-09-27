@@ -505,6 +505,8 @@ def _input_document(root: Path) -> dict | None:
         document = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
+    if not isinstance(document, dict):
+        return None
     return document if document.get("catalog_path") and document.get("objects_root") else None
 
 
@@ -523,17 +525,24 @@ def _cached_yfinance(conn, units) -> dict:
     return cached_unit_outcomes(conn, units, source=YFINANCE_SOURCE, endpoint="earnings")
 
 
-def _native_calendar(repository, parent) -> tuple[object | None, tuple[str, ...]]:
+def _native_calendar(repository, parent, *, as_of, horizon_days) \
+        -> tuple[object | None, tuple[str, ...]]:
     """The pinned snapshot's own trading calendar, or ``None`` for the fallback.
 
     ``native_trading_calendar`` raises ``ValueError`` when the snapshot carries
     no ``daily_market`` session; that one specific error selects the weekday
     fallback. The error text is returned as a job-result warning so the
     diagnostics in the evidence name the fallback instead of the horizon
-    silently changing shape.
+    silently changing shape. ``as_of``/``horizon_days`` compute this run's
+    actual requested horizon end, passed through as ``horizon_end`` so a
+    stale panel or a wide horizon can never silently truncate the returned
+    calendar's date range (the projection always extends through the greater
+    of the default 400-day window and the requested horizon).
     """
     try:
-        return native_trading_calendar(daily_by_ticker(repository, parent.snapshot)), ()
+        horizon_end = pd.Timestamp(as_of).normalize() + pd.Timedelta(days=int(horizon_days))
+        return native_trading_calendar(daily_by_ticker(repository, parent.snapshot),
+                                       horizon_end=horizon_end), ()
     except ValueError as exc:
         warning = f"weekday calendar fallback: {exc}"
         _LOGGER.warning("forward_calendar: %s", warning)
@@ -585,7 +594,8 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
         as_of = _as_of_day(document.get("as_of") or parameters.as_of)
         horizon = int(document.get("horizon_days", 21))
         wanted = {str(ticker) for ticker in (document.get("tickers") or parameters.tickers)}
-        calendar, warnings = _native_calendar(repository, parent)
+        calendar, warnings = _native_calendar(repository, parent, as_of=as_of,
+                                              horizon_days=horizon)
         dates = horizon_dates(as_of, horizon, calendar=calendar)
         received_at = clock.now().isoformat()
 
