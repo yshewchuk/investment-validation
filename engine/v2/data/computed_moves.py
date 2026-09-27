@@ -21,18 +21,14 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from engine.v2.foundation import content_hash
-
 __all__ = [
     "MAX_GAP_CALENDAR_DAYS",
     "MIN_SCOREABLE",
     "NativeTradingCalendar",
     "build_rows",
     "build_ticker",
-    "canonical_row",
     "native_trading_calendar",
     "projected_trading_days",
-    "row_content_hash",
     "session_move",
     "us_market_holidays",
 ]
@@ -128,31 +124,6 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
 #: The legacy name of the same builder, kept so a reader of the moved code
 #: finds the function it was moved from (spec s4b Change 2).
 build_ticker = build_rows
-
-
-def canonical_row(row) -> dict:
-    """One row's content for identity/hashing, excluding operational time.
-
-    ``computed_at`` records real wall-clock time -- when this particular
-    execution ran (the table contract's bitemporal "as of" dimension) -- not
-    the row's actual content, and it must never feed a content hash or
-    logical identity: a same-session rerun over the identical
-    ``(source_hash, capture_id)`` inputs has to produce identical row
-    content, not a spurious "complete" merely because wall-clock time
-    advanced between the two runs (issue #41). Mirrors
-    ``engine.v2.scoring.identity.canonical_request``/``score_id``'s
-    established "pop the operational field before hashing" convention --
-    every consumer that hashes a ``build_rows`` row for identity or
-    deduplication must hash ``canonical_row(row)``, never the raw row.
-    """
-    document = dict(row)
-    document.pop("computed_at", None)
-    return document
-
-
-def row_content_hash(row) -> str:
-    """Content hash of one row, ``computed_at`` excluded (see ``canonical_row``)."""
-    return content_hash(canonical_row(row))
 
 
 # --------------------------------------------------------------------------

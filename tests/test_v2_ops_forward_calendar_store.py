@@ -151,92 +151,123 @@ def _poison_fetcher(*_args, **_kwargs):
     raise AssertionError("a provider fetcher must never be called before validation passes")
 
 
-#: A structurally valid call: every field is well-typed and well-shaped, but
-#: catalog_path/objects_root point nowhere, and the fetchers explode if
-#: called. Each refusal test overrides exactly one field with an invalid
-#: value. If validation runs before any I/O (as required), the run raises
-#: OpsError(INVALID_REQUEST) without ever opening a catalog connection or
-#: calling a fetcher -- either of which would raise a DIFFERENT exception
-#: (sqlite3.OperationalError / FileNotFoundError / AssertionError) instead,
-#: which pytest.raises(OpsError) below would not swallow.
-_VALID_KWARGS = dict(
-    catalog_path="/no/such/forward_calendar_catalog.db",
-    objects_root="/no/such/forward_calendar_objects",
-    parent_snapshot_id="snap-parent",
-    refresh_plan_hash="sha256:" + "a" * 64,
-    as_of=AS_OF,
-    tickers=("AAPL",),
-    horizon_days=21,
-    scope="shadow",
-    expected_head_generation=0,
-    nasdaq_fetcher=_poison_fetcher,
-    earnings_fetcher=_poison_fetcher,
-)
+def _valid_kwargs(tmp_path):
+    """A structurally valid call: ``catalog_path``/``objects_root`` are a
+    REAL (but empty/unusable) file and directory, so those two checks pass
+    and whichever single field a test overrides is the one that fails.
+    Every other field is well-typed and well-shaped, and the fetchers
+    explode if called. If validation runs before any I/O (as required), an
+    invalid override raises OpsError(INVALID_REQUEST) without ever opening
+    the catalog connection or calling a fetcher -- either of which would
+    raise a DIFFERENT exception (sqlite3.OperationalError / AssertionError)
+    instead, which pytest.raises(OpsError) below would not swallow.
+    """
+    catalog_path = tmp_path / "forward_calendar_catalog.db"
+    catalog_path.write_bytes(b"")
+    objects_root = tmp_path / "forward_calendar_objects"
+    objects_root.mkdir()
+    return dict(
+        catalog_path=str(catalog_path),
+        objects_root=str(objects_root),
+        parent_snapshot_id="snap-parent",
+        refresh_plan_hash="sha256:" + "a" * 64,
+        as_of=AS_OF,
+        tickers=("AAPL",),
+        horizon_days=21,
+        scope="shadow",
+        expected_head_generation=0,
+        nasdaq_fetcher=_poison_fetcher,
+        earnings_fetcher=_poison_fetcher,
+    )
 
 
-def _refused(**overrides):
+def _refused(tmp_path, **overrides):
     """Run with one field overridden; assert INVALID_REQUEST, no I/O reached."""
-    kwargs = dict(_VALID_KWARGS, **overrides)
+    kwargs = dict(_valid_kwargs(tmp_path), **overrides)
     with pytest.raises(OpsError) as exc_info:
         forward_calendar_store.run_forward_calendar_refresh(**kwargs)
     assert exc_info.value.code == "INVALID_REQUEST"
 
 
-def test_as_of_none_is_refused_before_any_io():
-    _refused(as_of=None)
+def test_as_of_none_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, as_of=None)
 
 
-def test_as_of_unparseable_string_is_refused_before_any_io():
-    _refused(as_of="not-a-date")
+def test_as_of_unparseable_string_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, as_of="not-a-date")
 
 
-def test_as_of_bare_number_is_refused_before_any_io():
-    _refused(as_of=20260918)
+def test_as_of_bare_number_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, as_of=20260918)
 
 
-def test_as_of_bool_is_refused_before_any_io():
-    _refused(as_of=True)
+def test_as_of_bool_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, as_of=True)
 
 
-def test_as_of_nat_is_refused_before_any_io():
-    _refused(as_of=pd.NaT)
+def test_as_of_nat_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, as_of=pd.NaT)
 
 
-def test_as_of_timezone_aware_is_refused_before_any_io():
-    _refused(as_of=pd.Timestamp(AS_OF, tz="UTC"))
+def test_as_of_timezone_aware_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, as_of=pd.Timestamp(AS_OF, tz="UTC"))
 
 
-def test_tickers_bare_str_is_refused_before_any_io():
-    _refused(tickers="AAPL")
+def test_tickers_bare_str_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, tickers="AAPL")
 
 
-def test_tickers_non_iterable_is_refused_before_any_io():
-    _refused(tickers=123)
+def test_tickers_non_iterable_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, tickers=123)
 
 
-def test_tickers_empty_string_element_is_refused_before_any_io():
-    _refused(tickers=("AAPL", ""))
+def test_tickers_empty_string_element_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, tickers=("AAPL", ""))
 
 
-def test_horizon_days_non_int_is_refused_before_any_io():
-    _refused(horizon_days="21")
+def test_horizon_days_non_int_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, horizon_days="21")
 
 
-def test_horizon_days_bool_is_refused_before_any_io():
-    _refused(horizon_days=True)
+def test_horizon_days_bool_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, horizon_days=True)
 
 
-def test_horizon_days_below_range_is_refused_before_any_io():
-    _refused(horizon_days=0)
+def test_horizon_days_below_range_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, horizon_days=0)
 
 
-def test_horizon_days_above_range_is_refused_before_any_io():
-    _refused(horizon_days=forward_calendar_store.MAX_HORIZON_DAYS + 1)
+def test_horizon_days_above_range_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, horizon_days=forward_calendar_store.MAX_HORIZON_DAYS + 1)
 
 
-def test_scope_missing_is_refused_before_any_io():
-    _refused(scope=None)
+def test_scope_missing_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, scope=None)
 
 
-def test_expected_head_generation_missing_is_refused_before_any_io():
-    _refused(expected_head_generation=None)
+def test_scope_outside_the_standard_namespaces_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, scope="production")
+
+
+def test_expected_head_generation_missing_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, expected_head_generation=None)
+
+
+def test_expected_head_generation_negative_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, expected_head_generation=-1)
+
+
+def test_catalog_path_that_does_not_exist_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, catalog_path=str(tmp_path / "does_not_exist.db"))
+
+
+def test_objects_root_that_does_not_exist_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, objects_root=str(tmp_path / "does_not_exist_dir"))
+
+
+def test_parent_snapshot_id_empty_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, parent_snapshot_id="")
+
+
+def test_refresh_plan_hash_malformed_is_refused_before_any_io(tmp_path):
+    _refused(tmp_path, refresh_plan_hash="not-a-sha256-hash")

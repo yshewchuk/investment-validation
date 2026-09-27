@@ -32,6 +32,7 @@ import json
 import logging
 import numbers
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -243,21 +244,84 @@ def _validated_horizon_days(horizon_days) -> int:
     return horizon_days
 
 
+#: The only two commit-destination namespaces v2 ops ever authorizes for a
+#: job like this one -- the same pair every ``JobKind`` in ``stages.py``/
+#: ``cli.py``/``incremental_data.refresh_job_kind`` registers as
+#: ``namespaces=frozenset({"shadow", "smoke"})``. Reused, not redefined: no
+#: single module exports this pair as an importable name, so this is a local
+#: copy of the same two values, not a new list.
+_VALID_SCOPES = frozenset({"shadow", "smoke"})
+
+
 def _validated_scope(scope) -> str:
-    """``scope`` is required: a non-empty ``str``, refused before any I/O."""
-    if not isinstance(scope, str) or not scope.strip():
+    """``scope`` is required and must be one of ``_VALID_SCOPES``, refused
+    before any I/O."""
+    if not isinstance(scope, str) or scope not in _VALID_SCOPES:
         raise fail("INVALID_REQUEST",
-                   f"scope is required and must be a non-empty str, got {scope!r}")
+                   f"scope must be one of {sorted(_VALID_SCOPES)}, got {scope!r}")
     return scope
 
 
 def _validated_expected_head_generation(value) -> int:
-    """``expected_head_generation`` is required: an ``int``, refused before any I/O."""
+    """``expected_head_generation`` is required: a non-negative ``int``,
+    refused before any I/O."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise fail("INVALID_REQUEST",
                    f"expected_head_generation is required and must be an int, "
                    f"got {value!r}")
+    if value < 0:
+        raise fail("INVALID_REQUEST",
+                   f"expected_head_generation must not be negative, got {value!r}")
     return value
+
+
+def _validated_catalog_path(catalog_path) -> str:
+    """``catalog_path`` must already exist as a file -- ``sqlite3.connect``
+    is never allowed to silently create one that does not."""
+    if not isinstance(catalog_path, str) or not catalog_path:
+        raise fail("INVALID_REQUEST",
+                   f"catalog_path must be a non-empty str, got {catalog_path!r}")
+    if not Path(catalog_path).is_file():
+        raise fail("INVALID_REQUEST",
+                   f"catalog_path does not exist as a file: {catalog_path!r}")
+    return catalog_path
+
+
+def _validated_objects_root(objects_root) -> str:
+    """``objects_root`` must already exist as a directory."""
+    if not isinstance(objects_root, str) or not objects_root:
+        raise fail("INVALID_REQUEST",
+                   f"objects_root must be a non-empty str, got {objects_root!r}")
+    if not Path(objects_root).is_dir():
+        raise fail("INVALID_REQUEST",
+                   f"objects_root does not exist as a directory: {objects_root!r}")
+    return objects_root
+
+
+def _validated_parent_snapshot_id(parent_snapshot_id) -> str:
+    """Matches ``incremental_data``'s own ``RefreshParameters`` rule for this
+    same field: a bounded nonempty string (a parent snapshot id is not
+    restricted to one minted shape -- a bootstrap/root reference is
+    legitimate too)."""
+    if (not isinstance(parent_snapshot_id, str) or not parent_snapshot_id
+            or len(parent_snapshot_id) > 128):
+        raise fail("INVALID_REQUEST",
+                   f"parent_snapshot_id must be a bounded nonempty str, "
+                   f"got {parent_snapshot_id!r}")
+    return parent_snapshot_id
+
+
+def _validated_refresh_plan_hash(refresh_plan_hash) -> str:
+    """Matches ``incremental_data._is_hash``'s own sha256-hex check for this
+    same field (mirrored rather than imported: that name is private)."""
+    valid = (isinstance(refresh_plan_hash, str)
+             and refresh_plan_hash.startswith("sha256:") and len(refresh_plan_hash) == 71
+             and all(char in "0123456789abcdef" for char in refresh_plan_hash[7:]))
+    if not valid:
+        raise fail("INVALID_REQUEST",
+                   f"refresh_plan_hash must be a sha256 content hash, "
+                   f"got {refresh_plan_hash!r}")
+    return refresh_plan_hash
 
 
 def date_units(dates, *, as_of) -> tuple[RefreshUnit, ...]:
@@ -634,13 +698,28 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
     NOT ``RefreshCallback``-shaped: ``main``'s ``RefreshParameters`` has no
     ``as_of``/``tickers`` field (only a later job-kind-specific parameters
     dataclass will), so this runner takes every value it needs as an
-    explicit keyword argument instead, and validates ``as_of``/``tickers``/
-    ``horizon_days``/``scope``/``expected_head_generation`` up front -- before
-    the catalog connection opens, before the artifact store is constructed,
-    and before any provider call or receipt write -- raising a typed
-    ``INVALID_REQUEST`` for each. A later PR wires a ``RefreshCallback``-
-    shaped adapter that reads a job's staged parameters/input document and
-    calls this runner with explicit keyword arguments.
+    explicit keyword argument instead, and validates every one of them up
+    front -- before the catalog connection opens, before the artifact store
+    is constructed, and before any provider call or receipt write -- raising
+    a typed ``INVALID_REQUEST`` for each: ``catalog_path`` must already exist
+    as a file (``sqlite3.connect`` is never allowed to silently create one),
+    ``objects_root`` must already exist as a directory,
+    ``parent_snapshot_id``/``refresh_plan_hash`` are checked against the same
+    formats ``incremental_data.RefreshParameters`` already uses for these
+    fields, and ``as_of``/``tickers``/``horizon_days``/``scope``/
+    ``expected_head_generation`` are the request-shaped fields below. A
+    later PR wires a ``RefreshCallback``-shaped adapter that reads a job's
+    staged parameters/input document and calls this runner with explicit
+    keyword arguments.
+
+    ``tickers=()`` means the whole market (my call, since the nightly
+    refreshes everything): an empty ``wanted`` set never filters a Nasdaq
+    date's rows (``nasdaq_claims_from_rows``), so every ticker Nasdaq reports
+    for the requested dates is claimed. The yfinance fan-out is bounded by
+    that Nasdaq result for the horizon, not by ``tickers``: only tickers
+    Nasdaq left without a resolved session (``pending_tickers``) ever reach
+    yfinance, whether ``tickers`` named a handful of symbols or the whole
+    market.
 
     Never calls ``engine.data.rebuild.rebuild``: the claims merge into the
     existing ``earnings_events`` contract through ``generic_incremental``
@@ -658,6 +737,10 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
     the parent's resolves back to the parent snapshot, and key presence in the
     parent is never mistaken for this run's content.
     """
+    catalog_path = _validated_catalog_path(catalog_path)
+    objects_root = _validated_objects_root(objects_root)
+    parent_snapshot_id = _validated_parent_snapshot_id(parent_snapshot_id)
+    refresh_plan_hash = _validated_refresh_plan_hash(refresh_plan_hash)
     as_of = _as_of_day(as_of)
     tickers = _validated_tickers(tickers)
     horizon_days = _validated_horizon_days(horizon_days)
