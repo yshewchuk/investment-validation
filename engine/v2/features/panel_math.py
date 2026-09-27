@@ -5,8 +5,15 @@ Ported from ``engine/data/features/panel.py`` and ``engine/features.py``.
 Legacy keeps its own copy of this math unchanged; this module does not
 import from legacy and legacy does not import from this module — two
 independent copies of the same math, not a shared import, per the project's
-"pure functions MOVE, legacy stays frozen until cutover" rule. A missing
-value is an absent key in the returned mapping, never a fabricated NaN/0.0.
+"pure functions MOVE, legacy stays frozen until cutover" rule.
+
+Missing-value conventions differ by function, matching each one's own
+legacy source: ``history_features`` always returns its fixed key set, with
+``None`` for a value not yet available; ``add_implied_history`` represents
+a missing value as ``NaN`` in its output column, exactly as legacy does;
+``daily_state_lookup`` is a new function (not a byte-identical copy) and
+represents a missing value as an ABSENT KEY in the returned mapping, never
+a fabricated NaN/0.0.
 """
 from __future__ import annotations
 

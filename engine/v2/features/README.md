@@ -1,5 +1,8 @@
 # `engine/v2/features`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and invariants.
+
 ## Ownership
 
 Implements the **Feature engine — registered transforms and their causal dependencies** row of the §4 owner table of
