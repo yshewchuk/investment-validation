@@ -62,13 +62,14 @@ ordinary-job-kind pattern as `training`/`promote_job_kind` above, not a
 coordinator effect), `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
 `calendar_moves_job_spec`, and `run_computed_moves_worker` (dispatched by
 `worker.py` for worker `"computed_moves_refresh"`) — see "Primary contracts"
-below for what this adapts and "Outputs" for what is still missing before
-this job kind has a real caller. `calendar_moves_jobs.py` registers only
-`computed_moves_refresh`: `forward_calendar_refresh` has no `JobKind` yet —
-its store's commit path has no attempt-fence check (issue #52), so
-registering it as a supervised job (leases, retries, cancellation) would make
-that gap newly reachable; the fence is now a prerequisite for registering
-that kind.
+below for what this adapts; "Outputs" below now covers its nightly caller
+(Part 4). `calendar_moves_jobs.py` registers only `computed_moves_refresh`:
+`forward_calendar_refresh` has no `JobKind` yet — its store's commit path has
+no attempt-fence check (issue #52), so registering it as a supervised job
+(leases, retries, cancellation) would make that gap newly reachable; the
+fence is a prerequisite for registering that kind, and Part 4 wires only
+`computed_moves_refresh` into the nightly graph for exactly this reason —
+`forward_calendar_refresh` gets neither a `JobKind` nor a `GRAPH` node.
 
 A small number of natively-fetched data stores live directly in this
 package rather than delegating computation to another v2 layer — like
@@ -225,23 +226,47 @@ own test module.
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
 
-**`computed_moves_refresh` is registered as an ordinary job kind (Part 3),
-but still has no nightly caller; `forward_calendar_refresh` has no `JobKind`
-at all.** `stages.py::_core_kinds` now includes
+**`computed_moves_refresh` is registered as an ordinary job kind (Part 3) and
+now has a nightly caller (Part 4); `forward_calendar_refresh` still has no
+`JobKind` at all.** `stages.py::_core_kinds` includes
 `calendar_moves_jobs.computed_moves_job_kind()`, and `worker.py::dispatch`
 routes worker `"computed_moves_refresh"` to
-`calendar_moves_jobs.run_computed_moves_worker`. Neither `nightly.py`'s
-`GRAPH`/`OPTIONAL` nor any coordinator effect calls this job kind yet — that
-DAG wiring is a later change (spec s4c Part 4), which this doc's "Diagrams"
-section would then need to reflect; today it is reachable only through the
-general job-submission pipeline (`ops submit` with a raw `JobSpec`), same as
-`training`/`models_promote` above. `forward_calendar_refresh` was registered
-in an earlier draft of this PR too, but that registration (and its
-`run_forward_calendar_worker` job-layer adapter) was pulled before merge:
-see "Primary contracts" above and issue #52 (no attempt-fence check in
-`forward_calendar_store`'s commit path — a gap the job registration would
-have made newly reachable as a supervised, leased, retried, cancellable
-attempt). `run_computed_moves_refresh` is also still not itself a bare
+`calendar_moves_jobs.run_computed_moves_worker`. `nightly.py`'s `GRAPH` now
+carries a `"computed_moves_refresh": ("refresh",)` node (both read
+`daily_market` off the same pinned parent, so this stage runs after it),
+`OPTIONAL` includes it (its failure degrades the receipt, never blocks the
+graph — see "Diagrams" below for the updated stage graph), and
+`_NATIVE_ACTION_STAGES` maps the stage to itself (the worker kind IS the
+stage name, exactly like `NATIVE_REFRESH_ACTION` for `"refresh"`) — reached
+only when a plan pins `refresh_mode="native"`; the default `"legacy"` plan's
+submitted DAG (`_DAG_STAGES`) is unchanged, and `_stage_sequence` refuses to
+build a kind for this stage in legacy mode even when
+`include_prerequisites=True` walks the full `plan["order"]`, which DOES
+include this node (it is a real `GRAPH` member) — the same "named but never
+given a kind" treatment `NO_JOB_STAGES` already gives `native_parity`,
+enforced by a separate filter since, unlike `native_parity`, this node IS a
+submittable job kind in native mode. `build_legacy_job_requests`'s own
+`_build_native_computed_moves_plan` derives `expected_ids` from
+`computed_moves_store.target_tickers_from_snapshot`/`computed_moves_units`
+against the pinned shadow head — the SAME two functions the worker itself
+calls at run time (see the coverage-denominator note below) — so a caller's
+coverage denominator never disagrees with what the worker independently
+recomputes. No open catalog connection, no shadow head, a head missing the
+`earnings_events`/`daily_market` tables target selection needs, or a
+resolved target list that comes back empty, each make that builder return
+`None`; `build_legacy_job_requests` then simply omits the stage from the
+requests it returns for that run, rather than submitting a job with no work
+or manufacturing a synthetic empty result — see "Failure semantics" below
+for why this differs from the REQUIRED `"refresh"` stage's own builder.
+`forward_calendar_refresh` was registered, and briefly wired into a draft of
+this same nightly stage, in an earlier draft of this PR too, but that
+registration (and its `run_forward_calendar_worker` job-layer adapter) was
+pulled before merge: see "Primary contracts" above and issue #52 (no
+attempt-fence check in `forward_calendar_store`'s commit path — a gap the
+job registration would have made newly reachable as a supervised, leased,
+retried, cancellable attempt) — Part 4 wires only `computed_moves_refresh`
+for the same reason; `forward_calendar_refresh` gets no `GRAPH` node either.
+`run_computed_moves_refresh` is also still not itself a bare
 `engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
 `parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
 varies per job dispatch (a session date) so it cannot be pre-bound the way
@@ -339,7 +364,12 @@ including inside function bodies):
   submodule to this package's dependency surface,
   `engine.v2.data.computed_moves` (`native_trading_calendar`, layer 1.0),
   alongside its existing top-level use of `generic_incremental`,
-  `incremental_tables` and `repository.Repository`.
+  `incremental_tables` and `repository.Repository`. `nightly.py`'s own
+  `_build_native_computed_moves_plan` (Part 4) adds a lazy import of
+  `engine.v2.data.computed_moves_table` (`COMPUTED_MOVES_TABLE_NAME`,
+  layer 1.0) and reuses this same package's `computed_moves_store`/
+  `incremental_data`/`repository.Repository` — no new cross-package edge,
+  since `engine.v2.data` was already a top-level dependency here.
 - Lazy, function-local: `engine.v2.contracts` also appears lazily
   (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
   `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
@@ -539,6 +569,26 @@ network, or database access.
   being refused before the catalog connection even opens
   (`tests/test_v2_ops_forward_calendar_store.py::test_expected_head_snapshot_id_empty_is_refused_before_any_io`/
   `::test_expected_head_snapshot_id_too_long_is_refused_before_any_io`).
+- **`nightly.py`'s own missing-input handling for `computed_moves_refresh`
+  (Part 4)** — `_build_native_computed_moves_plan` never raises for a
+  missing catalog connection, an absent shadow head, a head missing the
+  `earnings_events`/`daily_market` tables target selection reads, or a
+  resolved target list that comes back empty: each case returns `None`, and
+  `build_legacy_job_requests` omits the stage from the requests it returns
+  for that run rather than submitting a job with no work or manufacturing a
+  synthetic empty result. This deliberately differs from the REQUIRED
+  `"refresh"` stage's own builder (`_build_native_refresh_plan`), which
+  raises `INVALID_REQUEST`/`INPUT_CHANGED` for the same missing-catalog/
+  missing-head cases — `"refresh"` is not `OPTIONAL`, so a nightly run
+  cannot silently skip its daily_market pull, while `computed_moves_refresh`
+  is, so silently not submitting it (rather than refusing the whole
+  `build_legacy_job_requests` call) is the correct degradation, matching
+  what `OPTIONAL`/`_run_stage` already does for a stage with no shadow
+  handler. A `computed_moves_refresh` job that IS submitted still validates
+  every field of its own staged input document before any I/O exactly like
+  every other job kind (the bullet above); the "no work" case is resolved
+  entirely at plan-build time, before any job or catalog write exists for
+  it, so there is nothing left for that per-job validation to see.
 - **`calendar_moves_jobs.py`'s own job-layer validation (Part 3, hardened
   Round 3 — Opus finding 1)** — `CalendarMovesParameters` is a strict
   dataclass (`engine.v2.foundation.from_document`): an unknown field, a
@@ -732,6 +782,7 @@ invariant (above) and adds two of its own, scoped to that module:
 ```mermaid
 flowchart TD
     refresh --> finality
+    refresh -.-> computed_moves_refresh
     finality --> features
     finality --> settlement
     features --> score
@@ -749,7 +800,7 @@ flowchart TD
     publication --> delivery
 
     classDef optional stroke-dasharray: 4 3
-    class settlement,model_evidence,engineering,backup,native_parity optional
+    class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh optional
 ```
 
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
@@ -758,7 +809,9 @@ stamps `graph_order()`'s output into every plan's `"order"` field, and
 `run_shadow_nightly` is the only function that walks it whole, inline,
 including `native_parity` — it has no production caller, only
 `tests/test_v2_ops_legacy_workflows.py` and
-`tests/test_v2_ops_native_shadow_render.py` call it.
+`tests/test_v2_ops_native_shadow_render.py` call it. `computed_moves_refresh`
+(Part 4) is a real submittable job kind, unlike `native_parity` — see below
+for how production submission reaches it.
 
 Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
 only production caller, `cli.py`, always passes `include_prerequisites=False`,
@@ -772,7 +825,14 @@ from the submitted stage list, not removed by a filter. `NO_JOB_STAGES`
 (currently `{"native_parity"}`) only does work on the other branch,
 `include_prerequisites=True` (test-only), where `_stage_sequence` instead
 returns `plan["order"]` (this diagram's order) and strips `NO_JOB_STAGES`
-from it before returning.
+from it before returning. `computed_moves_refresh` is not in
+`_DAG_STAGES` either — it reaches production submission through a THIRD
+path, `refresh_mode="native"`: `_stage_sequence` prepends both `"refresh"`
+and `"computed_moves_refresh"` ahead of `_DAG_STAGES` when native mode is
+pinned (mirroring the pre-existing `"refresh"`-only prepend), and, in legacy
+mode, filters `"computed_moves_refresh"` back out of a prerequisite-inclusive
+`plan["order"]` walk too — the stage is a real `GRAPH` node either way, but
+only native mode has a kind to build for it.
 
 ### CLI → catalog → coordinator effect
 
