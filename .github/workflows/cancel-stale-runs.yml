@@ -1,11 +1,27 @@
-# When a PR closes (merged or not), cancel any run of Tests, mutation or
-# mutation-mutmut still in_progress/queued for it, so a closed PR does not
-# keep occupying account-wide Actions runners (the same starvation concern
-# mutation.yml's own header comment describes for open PRs). Tests and the two
-# mutation workflows are all covered because Tests runs directly on
-# `pull_request`, while mutation.yml/mutation-mutmut.yml now run via
-# `workflow_run` gated on Tests succeeding (see mutation.yml's "PR context:
-# workflow_run" comment) and so can still be mid-run when the PR closes.
+# When a PR closes (merged or not), cancel any Tests run still
+# in_progress/queued for it, so a closed PR does not keep occupying
+# account-wide Actions runners (the same starvation concern mutation.yml's
+# own header comment describes for open PRs). This reliably covers `Tests`,
+# which runs directly on `pull_request` and so carries this PR's own
+# head_branch on its run record, matched below by branch AND the run's own
+# linked pull_requests[].number.
+#
+# It does NOT reliably cover mutation.yml/mutation-mutmut.yml. Both now run
+# via `workflow_run` gated on Tests succeeding (see mutation.yml's "PR
+# context: workflow_run" comment), and a workflow_run-triggered run's own
+# head_branch/pull_requests are unusable as a match key here: head_branch on
+# such a run is reported as the DEFAULT branch, not this PR's branch (a
+# documented side effect of workflow_run evaluating against the default
+# branch's copy of the workflow file), and pull_requests on it is not a
+# dependable substitute either. The loop below still tries -- for the rare
+# case the fields do line up -- but that is best-effort, not the contract:
+# the real fast-exit for a closed PR's mutation run lives in the mutation
+# workflows themselves. Each one's `plan` job checks (via `gh api`) whether
+# the triggering PR, by number from the workflow_run payload, is still open,
+# and emits an empty matrix if not; each `mutate` matrix job repeats that
+# same check as its first step, so a job already queued when the PR closes
+# exits in seconds instead of running a full pass. See mutation.yml's and
+# mutation-mutmut.yml's own "Check the triggering PR is still open" steps.
 #
 # Same-repo PRs only. The workflow-level `permissions: {}` below denies
 # everything by default; the `cancel` job's own `actions: write` grant
@@ -45,7 +61,7 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Cancel in-progress/queued Tests/mutation/mutation-mutmut runs for this PR
+      - name: Cancel in-progress/queued runs for this PR (reliable for Tests only)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -56,10 +72,16 @@ jobs:
           for wf in Tests mutation mutation-mutmut; do
             for status in in_progress queued; do
               # The runs endpoint's own `branch=` filter narrows the list
-              # server-side (mutation/mutation-mutmut runs started by
-              # workflow_run carry the originating Tests run's head_branch,
-              # i.e. this PR's branch), so this never needs to page through
-              # every in-progress/queued run repo-wide. PR_BRANCH is passed
+              # server-side. This works for `Tests`, whose run carries this
+              # PR's own head_branch (it triggers directly on
+              # `pull_request`). It does NOT reliably work for `mutation`/
+              # `mutation-mutmut`: a workflow_run-triggered run's own
+              # head_branch is reported as the DEFAULT branch, not this PR's
+              # branch, so the filter below will typically find zero runs for
+              # those two names -- see this file's header comment. Kept in
+              # the loop anyway as a harmless best-effort (a false miss here
+              # costs nothing; the mutation workflows' own "PR still open?"
+              # checks are the real fast-exit for them). PR_BRANCH is passed
               # as a `-f` query parameter, not interpolated into a filter
               # string, so it can never change what is requested regardless
               # of what characters a branch name contains. $wf is one of the

@@ -62,18 +62,25 @@
 # context, meaning it CAN read this repo's secrets, and the `mutate` job
 # checks out the PR's own `head_sha` and then runs that PR's code (pip
 # installing its `requirements.txt`, running its `tools/*.py`) inside that
-# context -- this is not a sandboxed, secret-free review. `permissions:
-# contents: read` below only narrows the auto-issued GITHUB_TOKEN's own
-# scope; it does not block a `secrets.FOO` reference (none exist in this
-# file today) or the ambient runtime token every job carries for
-# actions/cache. Skipping the "Save gremlins cache"/"Save mutmut state" step
-# on a PR run (see below) keeps our OWN steps from writing under main's
-# cache key, but does not by itself stop PR code from calling the cache API
-# directly with that ambient token. The real security boundary is the
-# same-repository gate on `workflow_run.pull_requests` (below): only a
-# contributor who already has push access to this repository can reach this
-# job at all, so this does not open a privilege a same-repo contributor
-# didn't already have. A fork PR never reaches here (see below). One
+# context -- this is not a sandboxed, secret-free review. The workflow-level
+# `permissions: contents: read`, plus the job-scoped `pull-requests: read`
+# the `plan` and `mutate` jobs each add for their own "is this PR still
+# open?" `gh api` call (see those jobs below), only narrow the auto-issued
+# GITHUB_TOKEN's own scope; neither blocks a `secrets.FOO` reference (none
+# exist in this file today) or the ambient runtime token every job carries
+# for actions/cache. Skipping the "Save gremlins cache"/"Save mutmut state"
+# step on a PR run (see below), and disabling actions/setup-python's own pip
+# cache entirely (restore and save) for that same event, keeps our OWN steps
+# from writing under main's cache key, but does not by itself stop PR code
+# from calling the cache API directly with that ambient token. The real
+# security boundary is the
+# plan job's own `if:` (below): a non-empty `workflow_run.pull_requests`
+# AND a matching `workflow_run.head_repository.full_name` together are what
+# prove this workflow_run actually completed in (and was triggered by a PR
+# of) this same repository -- only a contributor who already has push access
+# to this repository can reach this job at all, so this does not open a
+# privilege a same-repo contributor didn't already have. A fork PR never
+# reaches here (see below). One
 # consequence of using main's copy of the file: after this change merges,
 # the gate applies to every qualifying Tests completion from then on,
 # including for PRs that were opened before the merge -- not only new ones.
@@ -122,28 +129,44 @@ permissions:
   contents: read
 
 concurrency:
-  # workflow_run (a PR's Tests run completing) gets a per-branch group with
-  # cancel-in-progress true, so a new push to the PR -- which reruns Tests and
-  # so re-fires this trigger -- supersedes the last mutation run instead of
-  # queuing behind it. Grouped by head_branch, not PR number: the number lives
-  # inside the pull_requests array (see "PR context" above), which is unsafe
-  # to index here (a top-level `concurrency:` expression error would fail the
-  # whole run to start), while head_branch is a plain top-level field that is
-  # always present, PR or not. The group ALSO folds in
-  # workflow_run.event: Tests fires workflow_run for every trigger it has
-  # (push, schedule, dispatch, AND pull_request), not only the pull_request
-  # one this workflow's plan job actually acts on (see "PR context" above) --
-  # without this, a manually re-run/dispatched Tests run on a PR's branch
-  # would land in the SAME group as that PR's real pull_request-triggered
-  # mutation run and cancel it, even though the dispatch-flavored workflow_run
-  # itself does nothing (the plan job's `if:` skips it), losing that PR's
-  # mutation coverage for no benefit. push also cancels an in-progress older
-  # push run on main, so a fast string of merges cannot queue up behind
-  # itself. schedule and workflow_dispatch keep the exact old group and stay
-  # non-cancelling: neither github.event_name is 'workflow_run' nor 'push',
-  # so the ternary's false branch -- the unchanged literal ref-based group --
-  # is what they get.
-  group: mutation-gremlins-${{ github.event_name == 'workflow_run' && format('{0}-{1}', github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
+  # Three disjoint groups, one per trigger family, so none of push/
+  # schedule/dispatch/workflow_run can ever cancel a run it doesn't own:
+  #
+  # - workflow_run (a PR's Tests run completing): grouped by PR number when
+  #   one is known (join() over pull_requests, never the unsafe
+  #   pull_requests[0] index -- see "PR context" above), so a new push to the
+  #   PR -- which reruns Tests and so re-fires this trigger -- supersedes the
+  #   last mutation run for THAT PR instead of queuing behind it. If no PR
+  #   number is available (shouldn't reach here given the plan job's own
+  #   `if:`, but the group is evaluated for every workflow_run event before
+  #   any job or its `if:` runs, so this must degrade safely on its own
+  #   terms) the group falls back to head_repository.full_name + head_branch
+  #   + workflow_run.event: head_repository.full_name is required precisely
+  #   because head_branch alone is only a branch STRING with no owner/fork
+  #   identity -- a branch in an unrelated fork can share a name with a
+  #   same-repo PR's branch, and the concurrency group is resolved before the
+  #   fork gate (the plan job's `if:`) ever runs, so an unqualified
+  #   head_branch group could let that fork's workflow_run cancel the real
+  #   PR's in-progress mutation run. workflow_run.event is still folded in
+  #   too, for the reason below.
+  # - push to main: its OWN group (never shared with schedule/dispatch, whose
+  #   github.ref is identical to push's on main -- the three used to collide
+  #   in one `refs/heads/main` group, so a merge's cancel-in-progress could
+  #   kill a running Sunday full run or a dispatched run). cancel-in-progress:
+  #   true, so a rapid string of merges cannot queue up behind itself.
+  # - schedule and workflow_dispatch: their own shared, ref-based group,
+  #   byte-identical in shape to the group every trigger used before this
+  #   change, and still non-cancelling (see cancel-in-progress below) -- a
+  #   weekly full run and a manual dispatch on the same ref simply queue.
+  #
+  # The three `&&`/`||` clauses below short-circuit left to right (like a
+  # chained ternary): push matches first, then workflow_run, and anything
+  # else (schedule, workflow_dispatch) falls through to the plain
+  # `mutation-gremlins-<ref>` group every trigger used before this change.
+  group: mutation-gremlins-${{ github.event_name == 'push' && format('push-{0}', github.ref) || github.event_name == 'workflow_run' && (join(github.event.workflow_run.pull_requests.*.number, ',') != '' && format('pr-{0}', join(github.event.workflow_run.pull_requests.*.number, ',')) || format('{0}-{1}-{2}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch, github.event.workflow_run.event)) || github.ref }}
+  # true for push and workflow_run (each now in its own group, so cancelling
+  # only ever hits a predecessor of the SAME kind); false for schedule/
+  # workflow_dispatch, unchanged from before this PR.
   cancel-in-progress: ${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}
 
 env:
@@ -172,14 +195,49 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
-      join(github.event.workflow_run.pull_requests.*.number, ',') != '')
+      join(github.event.workflow_run.pull_requests.*.number, ',') != '' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
+    # contents:read for checkout/diff (as before); pull-requests:read is new,
+    # for the "PR still open?" gh api call below -- once a job declares
+    # `permissions:`, every scope it doesn't list is `none`, so this must be
+    # named explicitly rather than assumed from the workflow-level
+    # `contents: read`.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       modules: ${{ steps.plan.outputs.modules }}
       mode: ${{ steps.plan.outputs.mode }}
       gremlins: ${{ steps.plan.outputs.gremlins }}
     steps:
+      # Closes the race the job `if:` above can't see: that `if:` only proves
+      # the PR was open when its Tests run STARTED (workflow_run fires on
+      # Tests' completion, which can be many minutes after the PR closed or
+      # merged). Runs only for workflow_run (push/schedule/dispatch have no
+      # triggering PR at all); PR_NUMBER reuses the same safe join()
+      # projection as the gate above rather than indexing pull_requests[0].
+      # Uses the default GITHUB_TOKEN with the pull-requests:read permission
+      # granted above -- read-only, no elevated token needed.
+      - name: Check the triggering PR is still open
+        id: pr_open
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ join(github.event.workflow_run.pull_requests.*.number, ',') }}
+        run: |
+          set -euo pipefail
+          state=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.state')
+          open=false
+          [ "$state" = "open" ] && open=true
+          echo "open=$open" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        # Skipped once the PR is confirmed closed/merged -- no point cloning
+        # for a matrix that is about to be forced empty below. Unaffected for
+        # push/schedule/dispatch: the check above only runs (and so only
+        # produces this output) for workflow_run.
+        if: steps.pr_open.outputs.open != 'false'
         with:
           # workflow_run: the PR's own head commit (never the default branch,
           # which is what an unpinned checkout would give this event -- see
@@ -193,9 +251,15 @@ jobs:
           # before.
           fetch-depth: ${{ github.event_name == 'workflow_run' && '0' || 1 }}
       - uses: actions/setup-python@v5
+        if: steps.pr_open.outputs.open != 'false'
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - id: plan
+        # Always runs (never gated on steps.pr_open) so a closed PR still
+        # gets a `plan` job that reports success with an explicit modules=[]
+        # output -- never left unset. An unset (skipped-step) output reads as
+        # '' downstream, and '' != '[]' is true, which would make `mutate`'s
+        # own `if:` think there was a real plan to run.
         env:
           # Remapped so every check below ("$EVENT" = "pull_request") keeps
           # meaning "this is a PR run" unchanged: a workflow_run event that
@@ -205,6 +269,10 @@ jobs:
           EVENT: ${{ github.event_name == 'workflow_run' && 'pull_request' || github.event_name }}
           FRESH: ${{ inputs.fresh }}
           ONLY: ${{ inputs.modules }}
+          # '' for push/schedule/dispatch (the pr_open step didn't run), which
+          # the check below only treats as "false" via an exact string match,
+          # so those events fall straight through to the unchanged logic.
+          PR_OPEN: ${{ steps.pr_open.outputs.open }}
           # workflow_run: the PR's base sha lives on the linked pull request,
           # read via the `.*`/join projection (a single-element array joins to
           # exactly that one sha; never `pull_requests[0]`, unsafe on the
@@ -212,6 +280,16 @@ jobs:
           BASE_SHA: ${{ github.event_name == 'workflow_run' && join(github.event.workflow_run.pull_requests.*.base.sha, ',') || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          # The PR closed/merged between its Tests run starting and this
+          # workflow_run firing (the job `if:` above only proves it was open
+          # at Tests-start): emit an empty, explicitly-valid plan and stop --
+          # `mutate` and `report` both skip on modules == '[]'.
+          if [ "$PR_OPEN" = "false" ]; then
+            echo "modules=[]" >> "$GITHUB_OUTPUT"
+            echo "mode=incremental" >> "$GITHUB_OUTPUT"
+            echo "gremlins=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT" = "push" ] || [ "$EVENT" = "pull_request" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
             mode=incremental
           else
@@ -280,6 +358,12 @@ jobs:
     if: needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    # contents:read (as before) plus pull-requests:read for this job's own
+    # "PR still open?" check -- see the plan job's identical grant for why an
+    # unlisted scope is `none`, not inherited from the workflow-level block.
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -289,20 +373,51 @@ jobs:
       MODULE: ${{ matrix.module }}
       MODE: ${{ needs.plan.outputs.mode }}
     steps:
+      # A matrix job can sit queued for a while behind the account's runner
+      # pool; the plan job's own check (and the job `if:` above, both proven
+      # against the PR's state at plan time) cannot see a close that happens
+      # after the matrix was already scheduled. Re-checking here, as the
+      # first step of every matrix job, lets a queued job exit in seconds
+      # instead of running a full mutation pass for a PR that is already gone.
+      - name: Check the triggering PR is still open
+        id: pr_open
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ join(github.event.workflow_run.pull_requests.*.number, ',') }}
+        run: |
+          set -euo pipefail
+          state=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.state')
+          open=false
+          [ "$state" = "open" ] && open=true
+          echo "open=$open" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
+        if: steps.pr_open.outputs.open != 'false'
         with:
           fetch-depth: 0  # the push's base commit, for the report adapter's change window
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
       - id: py
+        if: steps.pr_open.outputs.open != 'false'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+          # No cache under workflow_run: this job runs the PR's own
+          # requirements.txt/tools inside the base repository's Actions
+          # context (see "PR context" above), and a cache SAVE would write
+          # into main's shared pip cache scope under a PR-controlled key. An
+          # empty string disables actions/setup-python's cache entirely
+          # (restore included), rather than merely skipping a save step, so a
+          # PR job can never read OR write that scope. push/schedule/dispatch
+          # are unaffected -- byte-identical 'pip' caching as before.
+          cache: ${{ github.event_name != 'workflow_run' && 'pip' || '' }}
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
-      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - if: steps.pr_open.outputs.open != 'false'
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - id: key
+        if: steps.pr_open.outputs.open != 'false'
         env:
           EVENT: ${{ github.event_name == 'workflow_run' && 'pull_request' || github.event_name }}
           # workflow_run: the PR's base sha lives on the linked pull request,
@@ -365,7 +480,7 @@ jobs:
        # restores the newest entry. matrix.module keeps the per-module separation,
        # so one module's cache never answers for another's.
       - name: Restore gremlins cache
-        if: needs.plan.outputs.mode == 'incremental'
+        if: needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.GREMLINS_CACHE }}
@@ -373,6 +488,7 @@ jobs:
           restore-keys: ${{ steps.key.outputs.prefix }}
       - name: Run pytest-gremlins
         id: run
+        if: steps.pr_open.outputs.open != 'false'
         # 60 min on a PR's gated workflow_run: incremental PR checks must stay
         # bounded and never queue behind (or emulate) main's full 330-min
         # budget. main's push/schedule/dispatch runs are unaffected -- only
