@@ -278,6 +278,11 @@ third-party service. `hashlib.sha256` for every content hash;
 - **R1, missing input.** Refuses `ReleaseNotStaged(release_id)` if nothing
   is staged under that id. Refuses `StagingRefused` (`MANIFEST_UNREADABLE`)
   if the existing `manifest.json` will not parse or read at all. Refuses
+  `StagingRefused` (`RELEASE_ID_MISMATCH`) if the manifest at this path
+  declares a `release.release_id` other than the one asked for -- e.g. a
+  manifest for a different release copied onto this path on disk still
+  verifies fine under its OWN internally-consistent hash, so this check
+  runs BEFORE the hash check below and does not rely on it. Refuses
   `StagingRefused` (`RELEASE_ID_REUSED`, same code `stage_release` uses for
   the same condition) if the EXISTING manifest does not verify under its
   OWN declared `release_hash_version` first, and this check runs before
