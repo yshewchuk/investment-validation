@@ -47,6 +47,7 @@ from engine.v2.ops.incremental_data import (
     RefreshCallbackResult,
     RefreshUnit,
     plan_refresh,
+    refresh_job_kind,
 )
 from engine.v2.ops.lifecycle import verify_fence
 from engine.v2.ops.unit_receipts import (
@@ -79,6 +80,21 @@ _ARROW_SCHEMA = pa.schema([
 
 _CONTRACT_REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id,
                                  definition_hash=COMPUTED_MOVES_CONTRACT.definition_hash)
+
+#: Every key the staged input document may carry; an unrecognized key is
+#: refused rather than silently ignored (Opus review, PR #39).
+_ALLOWED_DOCUMENT_KEYS = frozenset({
+    "catalog_path", "objects_root", "scope", "expected_head_generation",
+    "expected_head_snapshot_id", "attempt_id", "fence", "all_scoreable",
+    "since", "as_of",
+})
+
+#: The namespaces this store's document may commit into. This store has no
+#: ``JobKind`` of its own yet (see ARCHITECTURE.md "not yet wired"), so there
+#: is no allowlist of its own to diverge from -- it reuses the sibling
+#: ``incremental_refresh`` job kind's, the same ``{"shadow", "smoke"}`` every
+#: other v2 ops entry point is scoped to.
+_ALLOWED_SCOPES = refresh_job_kind().namespaces
 
 
 def _as_of_day(as_of) -> str:
@@ -198,7 +214,7 @@ def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str
         "no_daily_market_rows": len(pool - dm_tickers),
     }
     if since is not None:
-        since = pd.Timestamp(since).normalize()
+        since = pd.Timestamp(_as_of_day(since))  # same validation as_of gets (Opus review)
         if events.empty:
             printed: set[str] = set()
         else:
@@ -434,40 +450,121 @@ def _input_document(root: Path) -> dict | None:
         document = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    if not document.get("catalog_path") or not document.get("objects_root"):
+    if not isinstance(document, dict):
         return None
     return document
 
 
-def _failed(parameters) -> RefreshCallbackResult:
-    return RefreshCallbackResult(
-        status="failed", completed_ids=(), coverage_advanced=False,
-        parent_snapshot_id=parameters.parent_snapshot_id,
-        refresh_plan_hash=parameters.refresh_plan_hash)
+def _validate_document_identity(document: dict) -> None:
+    """Unknown keys, and the three bounded non-empty string fields every
+    input document must carry."""
+    unknown = set(document) - _ALLOWED_DOCUMENT_KEYS
+    if unknown:
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh input document has unknown keys",
+                   details={"unknown_keys": sorted(unknown)})
+    for name in ("catalog_path", "objects_root", "scope"):
+        value = document.get(name)
+        if not isinstance(value, str) or not value:
+            raise fail("INVALID_REQUEST",
+                       f"computed moves refresh input document needs a non-empty string {name}")
+    if document["scope"] not in _ALLOWED_SCOPES:
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh scope is not an allowed namespace",
+                   details={"scope": document["scope"], "allowed": sorted(_ALLOWED_SCOPES)})
+
+
+def _validate_document_head(document: dict) -> None:
+    """The commit-target fields: generation, the optional expected head, and
+    the optional staged attempt id."""
+    generation = document.get("expected_head_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document needs a "
+                                       "non-negative integer expected_head_generation")
+    head = document.get("expected_head_snapshot_id")
+    if head is not None and (not isinstance(head, str) or not head):
+        raise fail("INVALID_REQUEST",
+                   "expected_head_snapshot_id must be a non-empty string when present")
+    attempt_id = document.get("attempt_id")
+    if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id):
+        raise fail("INVALID_REQUEST", "attempt_id must be a non-empty string when present")
+
+
+def _validate_document_selection(document: dict) -> None:
+    """``all_scoreable``/``since``, the two fields that steer target selection."""
+    if "all_scoreable" in document and not isinstance(document["all_scoreable"], bool):
+        # The old call site did ``bool(document.get("all_scoreable", True))``:
+        # ``bool("false")`` is ``True`` in Python, so a string value was
+        # silently inverted rather than refused. A real JSON boolean decodes
+        # as a Python ``bool`` already; anything else is refused.
+        raise fail("INVALID_REQUEST", "all_scoreable must be a real boolean, not a coerced value")
+    if document.get("since") is not None:
+        _as_of_day(document["since"])  # same validation as_of gets; raises on a bad value
+
+
+def _validate_document_matches_job(document: dict, parameters, *, as_of: str) -> None:
+    """The document's own identity must agree with ``parameters`` and the
+    validated ``as_of`` keyword -- never silently diverge."""
+    if "as_of" in document:
+        # The document's own as_of was staged but never read -- dead data a
+        # caller could set to anything without effect (the same defect class
+        # as sibling PR #40's RefreshParameters.as_of/tickers mismatch).
+        # Rather than refuse its presence outright (every staged input
+        # already writes it), this store requires it to agree with the
+        # validated ``as_of`` keyword: a documented choice, not a silent one.
+        if _as_of_day(document["as_of"]) != _as_of_day(as_of):
+            raise fail("INVALID_REQUEST",
+                       "computed moves refresh input document's as_of disagrees with the "
+                       "job's as_of")
+    if document["catalog_path"] != parameters.catalog_path:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's catalog_path "
+                                       "disagrees with the job's RefreshParameters")
+    if document["scope"] != parameters.scope:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's scope disagrees "
+                                       "with the job's RefreshParameters")
+    if document.get("expected_head_generation") != parameters.expected_head_generation:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's "
+                                       "expected_head_generation disagrees with the job's "
+                                       "RefreshParameters")
+
+
+def _validate_input_document(document: dict, parameters, *, as_of: str) -> None:
+    """Every field the staged input document carries, validated before any
+    I/O (sqlite connect, snapshot resolve, fetch, or receipt write) -- the
+    same discipline ``_as_of_day`` already applies to the ``as_of`` keyword
+    (Opus review, PR #39). An unknown key, a wrong type, or a value that
+    disagrees with the job's own ``RefreshParameters`` is refused, never
+    coerced or silently ignored.
+    """
+    _validate_document_identity(document)
+    _validate_document_head(document)
+    _validate_document_selection(document)
+    _validate_document_matches_job(document, parameters, as_of=as_of)
 
 
 def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> RefreshCallbackResult:
     """This job's own callback (spec s4b Change 3), called directly -- NOT
-    bound to ``RefreshCallback`` via a bare ``functools.partial``:
-    ``RefreshParameters`` has no ``as_of`` field on ``main``, and ``as_of``
-    varies per dispatch, so it is an explicit, validated, required keyword
-    here instead; a later nightly-wiring change builds the per-dispatch
-    closure that satisfies the protocol.
+    bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
+    ``RefreshParameters`` has no ``as_of`` field, and ``as_of`` varies per
+    dispatch, so it is an explicit, validated, required keyword instead; a
+    later nightly-wiring change builds the per-dispatch closure that
+    satisfies the protocol.
 
-    Reads the staged ``computed_moves_refresh_input.json``, selects targets
-    from the pinned parent snapshot with ONE scan of each source table,
-    reserves budget per ticker, and commits one new snapshot carrying every
-    other table forward alongside a fresh ``computed_moves`` version. A unit
-    already backed by a durable raw receipt is never re-fetched. Known gap,
-    not fixed here: a rebuilt-from-cache rerun still commits ``complete``,
-    not a no-op -- ``computed_at`` is wall-clock time and differs between
-    attempts even when everything else is identical.
+    Validates the staged input document up front (``_validate_input_document``
+    refuses any unknown or mismatched field before any I/O), selects targets
+    from the pinned parent snapshot with ONE scan per source table, and
+    commits one new snapshot alongside a fresh ``computed_moves`` version. A
+    cached unit is never re-fetched, and a same-``as_of`` rerun now genuinely
+    no-ops: every committed row's ``computed_at`` derives from ``as_of``, not
+    the wall clock, so identical inputs commit identical bytes.
     """
     _as_of_day(as_of)  # validated before any I/O; raises INVALID_REQUEST on a bad value
     root = Path(root)
     document = _input_document(root)
     if document is None:
-        return _failed(parameters)
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh input document is missing or malformed")
+    _validate_input_document(document, parameters, as_of=as_of)
     if fetcher is None:
         raise fail("RESOURCE_UNAVAILABLE", "no computed_moves history fetcher is configured")
     conn = sqlite3.connect(document["catalog_path"])
@@ -480,7 +577,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
         events, daily = _scan_once(repository, parent.snapshot)
         targets, _selection = target_tickers_from_snapshot(
             repository, parameters.parent_snapshot_id,
-            all_scoreable=bool(document.get("all_scoreable", True)),
+            all_scoreable=document.get("all_scoreable", True),
             since=document.get("since"), events=events, daily=daily, as_of=as_of)
         units = computed_moves_units(targets, as_of=as_of)
         plan = plan_refresh(
@@ -493,7 +590,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
         fragment_records, attempts = _capture_targets(
             conn, store, plan, fetcher, clock,
             events_by_ticker=_group_by_ticker(events),
-            daily_by_ticker=_group_by_ticker(daily))
+            daily_by_ticker=_group_by_ticker(daily), as_of_day=_as_of_day(as_of))
         if not fragment_records:
             # Nothing could be rebuilt at all: the committed generation is the
             # parent's own, so its rows are the only honest completed ids.
@@ -582,7 +679,7 @@ def _capture_id_for(unit, *, source_hash: str | None = None,
 
 
 def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
-                     daily_by_ticker):
+                     daily_by_ticker, as_of_day: str):
     """Acquire and stage one fragment per unit, fresh or cached, exactly once.
 
     The caller reaches this only when the plan has at least one fresh fetch, and
@@ -591,6 +688,14 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
     retry commits exactly what a clean single run would. Any unit that ends
     transient/refused/not_final fails the whole job (R3) after every unit has
     been attempted, with the good receipts already cached.
+
+    ``created_at`` (this run's wall clock) tags the audit-only capture log and
+    raw-receipt rows -- when this attempt happened, never content identity.
+    Every COMMITTED row's ``computed_at`` uses ``as_of_day`` instead (Opus
+    review, PR #39; was tracked as #41): the fragment's bytes, and so its
+    content-addressed identity, must be a pure function of ``as_of`` and the
+    fetched source, or a same-``as_of`` rerun with identical inputs commits a
+    new generation instead of resolving to a true no-op.
     """
     created_at = clock.now().isoformat()
     cached = cached_unit_payloads(conn, store, plan)
@@ -619,7 +724,7 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
         events = events[events["event_date"] >= pd.Timestamp(sd[0])]
         rows = build_rows(
             ticker, events, sd, sc, daily_by_ticker.get(ticker, _EMPTY_DAILY),
-            computed_at=created_at, source_hash=source_hash, capture_id=capture_id)
+            computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)
         if not rows:
             attempts.append({"capture_id": capture_id, "ticker": ticker,
                              "created_at": created_at, "outcome": "too_few"})

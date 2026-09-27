@@ -9,6 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json
 from engine.v2.ops import computed_moves_store
 from engine.v2.ops.catalog import transaction
@@ -16,7 +17,7 @@ from engine.v2.ops.computed_moves_store import _capture_id_for, _fence_check_for
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import RefreshParameters, RefreshUnit
 from tests.data_scan_support import commit_tables, contract_for, contract_ref_for, publish_and_inspect
-from tests.ops_support import catalog, enqueue_claim
+from tests.ops_support import FakeClock, catalog, enqueue_claim
 
 
 def _unit(ticker: str, day: str) -> RefreshUnit:
@@ -178,13 +179,15 @@ def _parameters(head, *, expected_ids, catalog_path, objects_root) -> RefreshPar
         expected_head_generation=head["generation"], expected_head_snapshot_id=head["snapshot_id"])
 
 
-def _write_input(root, *, catalog_path, objects_root, head, as_of=_AS_OF):
+def _write_input(root, *, catalog_path, objects_root, head, as_of=_AS_OF, overrides=None):
     root.mkdir(exist_ok=True)
     document = {
         "catalog_path": str(catalog_path), "objects_root": str(objects_root),
         "scope": "shadow", "expected_head_generation": head["generation"],
         "expected_head_snapshot_id": head["snapshot_id"], "as_of": as_of,
     }
+    if overrides:
+        document.update(overrides)
     (root / computed_moves_store.INPUT_PATH).write_text(canonical_json(document))
 
 
@@ -243,19 +246,20 @@ def test_run_computed_moves_refresh_cached_rerun_refetches_nothing(tmp_path, mon
     second = computed_moves_store.run_computed_moves_refresh(
         parameters2, root2, as_of=_AS_OF, fetcher=fetcher)
 
-    # The rerun re-fetches NOTHING (the point of this test, and the actually
-    # verified behavior): the fetcher is called exactly once, for the first
-    # run, never again. The result is still "complete", not "noop" -- a
-    # separate, tracked, pre-existing gap (see run_computed_moves_refresh's
-    # own docstring): computed_at embeds wall-clock time, so a rebuilt row is
-    # never byte-identical to the one it replaces even from cached bytes.
-    assert second.status == "complete"
-    assert second.coverage_advanced is True
+    # The rerun is now a TRUE no-op (fixed; was tracked as #41): every
+    # committed row's computed_at is derived from as_of, not the run's wall
+    # clock, so identical inputs (same as_of, same cached bytes) produce
+    # byte-identical fragment content -- the commit resolves back to the
+    # parent snapshot instead of a new generation, and the fetcher is never
+    # called again.
+    assert second.status == "noop"
+    assert second.coverage_advanced is False
     assert fetcher.calls == ["AAAA"]  # unchanged: the second run never re-fetched
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
     assert conn.execute(
         "SELECT COUNT(*) FROM data_computed_moves_captures WHERE ticker = ?",
         ("AAAA",)).fetchone()[0] == 1  # stable capture_id (round 2 fix) dedups the rerun
+    assert dict(_head_row(conn)) == dict(new_head)  # the head never actually moved
 
 
 def test_run_computed_moves_refresh_provider_failure_maps_to_its_code(tmp_path, monkeypatch):
@@ -302,3 +306,225 @@ def test_run_computed_moves_refresh_refuses_a_bad_as_of_before_any_io(bad_as_of)
         computed_moves_store.run_computed_moves_refresh(
             object(), None, as_of=bad_as_of, fetcher=None)
     assert err.value.code == "INVALID_REQUEST"
+
+
+# --------------------------------------------------------------------------
+# every other runner input validated before any I/O too (Opus gate BLOCK on
+# f7e4dfb, PR #39 round 4): scope, expected_head_generation, all_scoreable,
+# since, unknown document keys, document/parameters agreement, and a missing
+# document -- each refused with a typed INVALID_REQUEST before any fetch call
+# or receipt write.
+# --------------------------------------------------------------------------
+
+
+def _refusal_fixture(tmp_path):
+    """A valid parent snapshot + parameters + fetcher, ready to write a bad
+    input document against. Shared by every before-any-I/O refusal test."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(conn, clock, store, events_rows=())
+    parameters = _parameters(head, expected_ids=("CCCC",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+    fetcher = _CountingFetcher(_closes_csv())
+    return conn, head, parameters, fetcher
+
+
+def _assert_refused_before_any_io(conn, fetcher, *, err):
+    assert err.value.code == "INVALID_REQUEST"
+    assert fetcher.calls == []
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_computed_moves_captures").fetchone()[0] == 0
+
+
+def test_run_computed_moves_refresh_refuses_an_unknown_document_key(tmp_path):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"bogus_field": "nope"})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+@pytest.mark.parametrize("bad_scope", [None, "", "production", 7, True])
+def test_run_computed_moves_refresh_refuses_a_bad_scope(tmp_path, bad_scope):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"scope": bad_scope})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+@pytest.mark.parametrize("bad_generation", [None, True, 1.9, "3", -1])
+def test_run_computed_moves_refresh_refuses_a_bad_expected_head_generation(tmp_path,
+                                                                           bad_generation):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"expected_head_generation": bad_generation})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+def test_run_computed_moves_refresh_refuses_a_non_bool_all_scoreable(tmp_path):
+    """The old call site did ``bool(document.get("all_scoreable", True))`` --
+    ``bool("false")`` is ``True`` in Python, silently inverting the string
+    value instead of refusing it. This must now be a typed refusal, not a
+    silently-flipped selection mode."""
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"all_scoreable": "false"})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+@pytest.mark.parametrize("bad_since", [123, True, "not-a-date", "2024-01-01T00:00:00+00:00"])
+def test_run_computed_moves_refresh_refuses_a_bad_since(tmp_path, bad_since):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"since": bad_since})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+def test_target_tickers_from_snapshot_refuses_a_bad_since(tmp_path):
+    """:201's since handling must validate through the same ``_as_of_day``
+    helper as_of gets, not a bare ``pd.Timestamp(since).normalize()`` that
+    silently reads a number as a UNIX timestamp or accepts a tz-aware value.
+    """
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    repository = Repository(conn, store)
+    head = _build_parent(conn, clock, store, events_rows=())
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.target_tickers_from_snapshot(
+            repository, head["snapshot_id"], since="not-a-date", as_of=_AS_OF,
+            events=pd.DataFrame(), daily=pd.DataFrame())
+    assert err.value.code == "INVALID_REQUEST"
+
+
+def test_run_computed_moves_refresh_refuses_as_of_disagreeing_with_document(tmp_path):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                as_of="2024-02-06")  # disagrees with the as_of keyword below
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+@pytest.mark.parametrize("field,bad_value", [
+    ("catalog_path", "/somewhere/else.sqlite"),
+    ("scope", "smoke"),
+    ("expected_head_generation", 999),
+])
+def test_run_computed_moves_refresh_refuses_document_disagreeing_with_parameters(
+        tmp_path, field, bad_value):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={field: bad_value})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+def test_run_computed_moves_refresh_refuses_a_missing_input_document(tmp_path):
+    """A missing staged document must be a typed refusal with an error code
+    -- not ``status="failed"`` with no code at all (Opus review, PR #39)."""
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    root = tmp_path / "attempt_never_written"
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+
+
+# --------------------------------------------------------------------------
+# #41 closed by #39 (not by touching the shared computed_moves.py): a rerun
+# at a genuinely different wall-clock time must still commit byte-identical
+# fragment content and resolve to a true noop, because computed_at is
+# derived from as_of, never SystemClock().now().
+# --------------------------------------------------------------------------
+
+
+def test_run_computed_moves_refresh_rerun_at_a_different_clock_time_is_a_true_noop(
+        tmp_path, monkeypatch):
+    """Two runs on the SAME as_of/inputs, at two DIFFERENT injected clock
+    times (three hours apart), must commit byte-identical fragment content
+    (same fragment_id, same object content hash) and the second run must
+    resolve to a true noop -- never a fresh generation."""
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, real_clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = [_event_row("AAAA", d) for d in _EVENT_DAYS]
+    head = _build_parent(conn, real_clock, store, events_rows=events_rows)
+
+    fake_clock = FakeClock()
+    monkeypatch.setattr(computed_moves_store, "SystemClock", lambda: fake_clock)
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    fetcher = _CountingFetcher(_closes_csv())
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    first = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    assert first.status == "complete"
+
+    repository = Repository(conn, store)
+
+    def _fragment(snapshot_id):
+        resolved = repository.resolve_full(snapshot_id)
+        return next(record for record in resolved.records
+                   if record.table_contract_ref.contract_id
+                   == computed_moves_store.COMPUTED_MOVES_CONTRACT.contract_id
+                   and record.partition_key == "AAAA")
+
+    fragment1 = _fragment(first.candidate_snapshot_id)
+
+    fake_clock.advance(3 * 3600)  # a genuinely different wall-clock time
+
+    new_head = _head_row(conn)
+    root2 = tmp_path / "attempt2"
+    _write_input(root2, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=new_head)
+    parameters2 = _parameters(new_head, expected_ids=("AAAA",),
+                              catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    second = computed_moves_store.run_computed_moves_refresh(
+        parameters2, root2, as_of=_AS_OF, fetcher=fetcher)
+
+    assert second.status == "noop"
+    assert second.coverage_advanced is False
+    assert fetcher.calls == ["AAAA"]  # never re-fetched
+    assert dict(_head_row(conn)) == dict(new_head)  # the head never actually moved
+
+    fragment2 = _fragment(new_head["snapshot_id"])
+    assert fragment1.fragment_id == fragment2.fragment_id
+    assert fragment1.object_ref.content_hash == fragment2.object_ref.content_hash

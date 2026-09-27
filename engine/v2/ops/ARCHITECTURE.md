@@ -113,18 +113,31 @@ varies per job dispatch (a session date) so it cannot be pre-bound the way
 the fetcher is — it is an explicit, validated, required keyword instead. A
 later change adds the nightly stage, the per-dispatch closure that DOES
 satisfy the protocol, and the job-kind dispatch this doc's "Diagrams" section
-would then need to reflect. `tests/test_v2_ops_computed_moves_store.py`
-covers `_capture_id_for`'s stable, non-wall-clock, non-colliding capture
-identity, `_fence_check_for`'s real-`verify_fence` signature and its
-still-active production lease-expiry check, `as_of`'s pre-I/O validation, and
-`run_computed_moves_refresh` end to end (one complete unit, a cached rerun
-that re-fetches nothing, and a provider failure mapped to its typed code).
-Known, tracked gap (not fixed here, filed as
-[#41](https://github.com/yshewchuk/investment-validation/issues/41)): a
-same-session cached rerun still commits a fresh `complete` generation rather
-than resolving to a no-op, because `computed_at` (a column on every
-committed row) is the run's own wall-clock time and differs between attempts
-even when the fetched bytes and every other input are identical.
+would then need to reflect. Every field of the staged input document is
+validated up front (`_validate_input_document`, split into
+`_validate_document_identity`/`_validate_document_head`/
+`_validate_document_selection`/`_validate_document_matches_job` to stay under
+the complexity budget) before any sqlite connect, snapshot resolve, fetch, or
+receipt write: unknown keys, wrong types, and any value that disagrees with
+the job's own `RefreshParameters` (`catalog_path`/`scope`/
+`expected_head_generation`) are all refused, never coerced. `scope` is
+checked against `refresh_job_kind().namespaces` — the sibling
+`incremental_refresh` job kind's own `{"shadow", "smoke"}` — since this store
+has no `JobKind` of its own yet to carry that allowlist.
+`tests/test_v2_ops_computed_moves_store.py` covers `_capture_id_for`'s
+stable, non-wall-clock, non-colliding capture identity, `_fence_check_for`'s
+real-`verify_fence` signature and its still-active production lease-expiry
+check, `as_of`'s pre-I/O validation, the input document's own field-by-field
+validation, and `run_computed_moves_refresh` end to end (one complete unit, a
+same-`as_of` rerun that re-fetches nothing AND now genuinely no-ops even at a
+different wall-clock time, and a provider failure mapped to its typed code).
+Fixed (was tracked as
+[#41](https://github.com/yshewchuk/investment-validation/issues/41)): every
+committed row's `computed_at` is now derived from `as_of`, not the run's own
+wall clock, so a same-`as_of` rerun over identical inputs produces
+byte-identical fragment content (same `fragment_id`, same object content
+hash) and the commit resolves back to the parent snapshot instead of a fresh
+generation.
 
 ## Dependencies
 
