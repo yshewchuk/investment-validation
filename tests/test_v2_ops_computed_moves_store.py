@@ -672,6 +672,42 @@ def test_run_computed_moves_refresh_refuses_a_bad_fence(tmp_path, monkeypatch, b
     assert connect_calls == []
 
 
+def test_run_computed_moves_refresh_refuses_fence_set_without_attempt_id(
+        tmp_path, monkeypatch):
+    """Issue #58: a bare ``fence`` with no ``attempt_id`` would make
+    ``_fence_check_for`` a no-op (fail-open -- the commit goes through
+    unfenced). Refused up front instead of silently no-op'ing."""
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"fence": 3})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
+def test_run_computed_moves_refresh_refuses_attempt_id_set_without_fence(
+        tmp_path, monkeypatch):
+    """Issue #58: a bare ``attempt_id`` with no ``fence`` would previously
+    only fail later, inside ``verify_fence``, after the sqlite connection
+    opens and fetches happen. Refused up front instead."""
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"attempt_id": "attempt-1"})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
 @pytest.mark.parametrize("bad_parent_snapshot_id", ["", "x" * 129, 7, None])
 def test_run_computed_moves_refresh_refuses_a_bad_parent_snapshot_id(
         tmp_path, monkeypatch, bad_parent_snapshot_id):

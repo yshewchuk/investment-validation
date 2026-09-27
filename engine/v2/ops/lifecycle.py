@@ -58,6 +58,7 @@ __all__ = [
     "release_reservations",
     "renew_after_resume",
     "request_cancel",
+    "validated_attempt_fence_pair",
     "verify_fence",
 ]
 
@@ -99,6 +100,26 @@ def verify_fence(conn: sqlite3.Connection, attempt_id: str, fence: int,
     if format_timestamp(now) >= attempt["lease_expires_at"]:
         raise fail("LEASE_LOST", "the attempt's lease has expired", details=details)
     return job, attempt
+
+
+def validated_attempt_fence_pair(attempt_id: str | None, fence: int | None) -> None:
+    """Refused before any I/O when exactly one of ``attempt_id``/``fence`` is
+    set. Shared by every v2 ops store that stages an optional live-job
+    attempt/fence pair on an otherwise-manual commit (``forward_calendar_store``,
+    ``computed_moves_store``): a bare ``fence`` with no ``attempt_id`` would
+    make that store's own no-op fence-check path (activated only when
+    ``attempt_id`` is ``None``) silently skip the check, so the commit goes
+    through unfenced (fail-open). A bare ``attempt_id`` with no ``fence``
+    would otherwise only be refused later, inside ``verify_fence`` itself,
+    after I/O (a catalog connect, a provider fetch) has already happened.
+    Both ``None`` (the legacy/no-live-job default every manual or ad-hoc
+    caller uses) and both set (a live job fencing its own commit) are the
+    only two valid shapes.
+    """
+    if (attempt_id is None) != (fence is None):
+        raise fail("INVALID_REQUEST",
+                   f"attempt_id and fence must both be None or both be set, got "
+                   f"attempt_id={attempt_id!r} fence={fence!r}")
 
 
 # --------------------------------------------------------------------------
