@@ -782,6 +782,7 @@ def test_workflow_cache_key_and_restore_policy():
                  'tools/mutation_pilot.py config-hash "$MODULE"', "matrix.module"):
         assert part in key, part
     assert 'ch=$(python3 tools/mutation_pilot.py config-hash "$MODULE")' in key
+    assert "gremlin-base-fp/tools/mutation_pilot.py" not in key  # config-hash must run against the PR's own checkout, never the base-commit worktree
     assert "hashFiles('tools/mutation_pilot.toml')" not in key
     # the FULL tracked-input fingerprint joins the namespace, assigned under
     # set -e rather than interpolated into the echo (where echo's own exit
