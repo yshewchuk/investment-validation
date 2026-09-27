@@ -168,7 +168,15 @@ themselves are never held here, only remaining-call/reserve counts.
   `deployment.DeploymentError` (including an unstaged `release_id`) to
   `VALIDATION_FAILED`. A `training` plan with no bound legacy input manifest
   carries `blocked_prerequisites` and can never be submitted, exactly like a
-  manifest-less nightly plan. `models_promote`'s `store_domains` declares a
+  manifest-less nightly plan. A recipe job's `pairs_path`
+  (`ops plan training --pairs`) is validated twice: a malformed one
+  (absolute, containing `..`) fails `training_parameter_problems` at plan
+  time (`INVALID_REQUEST`); at execution it must additionally resolve, as a
+  plain relative path, beneath the attempt's staged legacy root (populated
+  only from the plan's pinned manifest), or the worker refuses
+  `INPUT_CHANGED` — a recipe can only ever read a pairs file that is one of
+  the job's pinned legacy inputs, never an arbitrary filesystem path.
+  `models_promote`'s `store_domains` declares a
   write lease on the single `deployment_pointer` domain, which serializes
   every `models_promote` claim globally against every other one regardless
   of the `release_root` each names — `deployment.promote`'s

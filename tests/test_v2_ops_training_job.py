@@ -507,6 +507,82 @@ def test_run_recipe_guards_before_building_the_dataset(tmp_path, monkeypatch):
     assert excinfo.value.code == "VALIDATION_FAILED"
 
 
+def test_run_recipe_pinned_pairs_path_loads(tmp_path, monkeypatch):
+    from tools import phase5_training_job as job
+
+    key = _recipe_key(calibration=False)
+    source = tmp_path / "legacy" / "data" / "pairs.parquet"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"x")
+    seen = []
+
+    monkeypatch.setattr(job, "_guard", lambda where: None)
+    monkeypatch.setattr(job, "build_dataset",
+                        lambda recipe, *, pairs_path=None: seen.append(pairs_path) or "dataset")
+    monkeypatch.setattr(job, "run_training_job",
+                        lambda *args, **kwargs: SimpleNamespace(outcomes=()))
+    training.run_training_worker(
+        _worker_params(mode="recipe", state="", recipe=key,
+                       pairs_path="data/pairs.parquet"), tmp_path)
+    assert seen == [str((tmp_path / "legacy" / "data" / "pairs.parquet").resolve())]
+
+
+def test_run_recipe_pairs_path_refuses_absolute(tmp_path, monkeypatch):
+    from tools import phase5_training_job as job
+
+    key = _recipe_key(calibration=False)
+
+    monkeypatch.setattr(job, "_guard", lambda where: None)
+    monkeypatch.setattr(job, "build_dataset",
+                        lambda *args, **kwargs: pytest.fail("build_dataset was reached"))
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(
+            _worker_params(mode="recipe", state="", recipe=key,
+                           pairs_path="/etc/passwd"), tmp_path)
+    assert excinfo.value.code == "INPUT_CHANGED"
+
+
+def test_run_recipe_pairs_path_refuses_dotdot(tmp_path, monkeypatch):
+    from tools import phase5_training_job as job
+
+    key = _recipe_key(calibration=False)
+
+    monkeypatch.setattr(job, "_guard", lambda where: None)
+    monkeypatch.setattr(job, "build_dataset",
+                        lambda *args, **kwargs: pytest.fail("build_dataset was reached"))
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(
+            _worker_params(mode="recipe", state="", recipe=key,
+                           pairs_path="../secret.parquet"), tmp_path)
+    assert excinfo.value.code == "INPUT_CHANGED"
+
+
+def test_run_recipe_pairs_path_refuses_unpinned(tmp_path, monkeypatch):
+    from tools import phase5_training_job as job
+
+    key = _recipe_key(calibration=False)
+
+    monkeypatch.setattr(job, "_guard", lambda where: None)
+    monkeypatch.setattr(job, "build_dataset",
+                        lambda *args, **kwargs: pytest.fail("build_dataset was reached"))
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(
+            _worker_params(mode="recipe", state="", recipe=key,
+                           pairs_path="data/not_pinned.parquet"), tmp_path)
+    assert excinfo.value.code == "INPUT_CHANGED"
+
+
+def test_recipe_pairs_path_syntax_checked_at_plan_time():
+    key = _recipe_key(calibration=False)
+    params = training.TrainingParameters(expected_ids=("training",), mode="recipe",
+                                         recipe=key, pairs_path="/abs/path")
+    assert "pairs_path must be a plain relative path" in \
+        training.training_parameter_problems(None, params)
+    clean = training.TrainingParameters(expected_ids=("training",), mode="recipe",
+                                        recipe=key, pairs_path="")
+    assert training.training_parameter_problems(None, clean) == []
+
+
 def test_promote_plan_stores_release_root_absolute():
     """A relative ``--release-root`` promotes where the operator meant: the
     worker's cwd is its code snapshot, never the planner's cwd."""

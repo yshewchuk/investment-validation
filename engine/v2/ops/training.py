@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from engine.v2.foundation import ArtifactError, safe_relative_path
 from engine.v2.ops.errors import fail
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.submission import JobKind, RetryPolicy
@@ -69,6 +70,11 @@ def _recipe_problems(params) -> list[str]:
             problems.append("a request_cutoff recipe needs at least one cutoff")
     elif params.alpha is not None or params.cutoffs:
         problems.append("alpha/cutoffs apply to request_cutoff recipes only")
+    if params.pairs_path:
+        try:
+            safe_relative_path(params.pairs_path)
+        except ArtifactError:
+            problems.append("pairs_path must be a plain relative path")
     return problems
 
 
@@ -233,7 +239,29 @@ def promote_plan(*, release_root, release_id) -> dict:
             "resource_class": "delivery"}
 
 
-def _run_recipe(parameters, out_dir) -> dict:
+def _pinned_pairs_path(root: Path, pairs_path: str) -> str | None:
+    """Resolve a recipe's ``pairs_path`` beneath the attempt's staged, pinned legacy read
+    set (``root / "legacy"``, populated ONLY from the plan's pinned manifest ``file_refs`` --
+    see ``supervisor.Service._populate_legacy_staging``), refusing anything that is not a
+    plain relative path staying inside that root -- same idiom as
+    ``experiments.py::input_manifest``. ``None`` (no override; the tool's own default path
+    applies) when ``pairs_path`` is empty."""
+    if not pairs_path:
+        return None
+    try:
+        safe_relative_path(pairs_path)
+    except ArtifactError:
+        raise fail("INPUT_CHANGED", "pairs_path is not a pinned legacy input",
+                   details={"pairs_path": pairs_path}) from None
+    base = (root / "legacy").resolve()
+    path = (base / pairs_path).resolve()
+    if not path.is_file() or path.is_symlink() or not str(path).startswith(str(base) + "/"):
+        raise fail("INPUT_CHANGED", "pairs_path is not a pinned legacy input",
+                   details={"pairs_path": pairs_path})
+    return str(path)
+
+
+def _run_recipe(parameters, out_dir, root) -> dict:
     from tools import phase5_training_job as job
 
     try:
@@ -241,7 +269,7 @@ def _run_recipe(parameters, out_dir) -> dict:
     except (KeyError, ValueError):
         raise fail("VALIDATION_FAILED", "recipe is not a current training recipe") from None
     job._guard("tools.phase5_training_job._run_recipe:" + recipe.recipe_id)
-    dataset = job.build_dataset(recipe, pairs_path=parameters["pairs_path"] or None)
+    dataset = job.build_dataset(recipe, pairs_path=_pinned_pairs_path(root, parameters["pairs_path"]))
     extra = ({"cutoffs": tuple(parameters["cutoffs"]), "alpha": parameters["alpha"]}
              if recipe.folds.kind == "request_cutoff" else {})
     result = job.run_training_job(recipe, dataset, out_dir, plan_only=False, **extra)
@@ -286,9 +314,9 @@ def _tool_failure(error: SystemExit):
     return fail("VALIDATION_FAILED", "training tool refused the job")
 
 
-def _dispatch_mode(job, mode, parameters, out_dir) -> dict:
+def _dispatch_mode(job, mode, parameters, out_dir, root) -> dict:
     if mode == "recipe":
-        return _run_recipe(parameters, out_dir)
+        return _run_recipe(parameters, out_dir, root)
     if mode == "state":
         return job.run_state_job(
             parameters["state"], out_dir, plan_only=False,
@@ -322,7 +350,7 @@ def run_training_worker(parameters, root) -> dict:
     root = Path(root)
     out_dir = root / "training"
     try:
-        summary = _dispatch_mode(job, parameters["mode"], parameters, out_dir)
+        summary = _dispatch_mode(job, parameters["mode"], parameters, out_dir, root)
     except SystemExit as exc:
         raise _tool_failure(exc) from exc
     except TrainingRefused as exc:
