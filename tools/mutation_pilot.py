@@ -126,6 +126,31 @@ def module_cfg(cfg: dict, name: str) -> dict:
     return modules[name]
 
 
+def config_hash(cfg: dict, name: str) -> str:
+    """sha256 hex digest of the canonical JSON of exactly what affects module
+    ``name``'s mutation run: ``cfg["defaults"]`` plus that module's own
+    ``[modules.<name>]`` section (via the existing ``module_cfg`` lookup, which
+    already exits non-zero with a message for an unknown module -- reused
+    here, not re-parsed by hand). Canonical = ``json.dumps(sort_keys=True,
+    separators=(",", ":"))``, so key order never perturbs the digest.
+
+    This is the CI cache-key ingredient (see cmd_config_hash / the
+    ``config-hash`` subcommand): it changes only when THIS module's own
+    section or the shared ``[defaults]`` table changes, never when a
+    different module's section changes or a new module is added, so one
+    module's cache is never busted by another module's edit.
+    """
+    mod = module_cfg(cfg, name)
+    resolved = {"defaults": cfg["defaults"], "module": mod}
+    blob = json.dumps(resolved, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def cmd_config_hash(cfg: dict, args) -> int:
+    print(config_hash(cfg, args.module))
+    return 0
+
+
 def enabled_modules(cfg: dict) -> list[str]:
     """Modules that run. One with an ``excluded`` reason is listed, never run."""
     return [name for name, mod in cfg["modules"].items() if not mod.get("excluded")]
@@ -547,10 +572,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("report")
     p.add_argument("modules", nargs="*")
     p.add_argument("--no-diffs", action="store_true")
+    p = sub.add_parser("config-hash",
+                       help="sha256 of [defaults] + this module's own section, for the CI cache key")
+    p.add_argument("module")
     args = parser.parse_args(argv)
     cfg = load_config()
     return {"list": cmd_list, "matrix": cmd_matrix, "count": cmd_count, "run": cmd_run,
-            "report": cmd_report}[args.cmd](cfg, args)
+            "report": cmd_report, "config-hash": cmd_config_hash}[args.cmd](cfg, args)
 
 
 if __name__ == "__main__":

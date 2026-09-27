@@ -155,9 +155,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Assign the fingerprint, never interpolate it inside the echo: the
-          # exit status of `echo "...=$(...)"` is echo's, so a failing digest
-          # would write a truncated prefix and the step would still pass.
+          # Assign the fingerprint and config-hash, never interpolate either
+          # inside the echo: the exit status of `echo "...=$(...)"` is echo's,
+          # so a failing digest would write a truncated prefix and the step
+          # would still pass.
           #
           # pull_request only: the fingerprint hashes every tracked file in
           # the CURRENT checkout (see cache_fingerprint), and a PR always
@@ -169,15 +170,21 @@ jobs:
           # cache" below), so a PR run only ever needs cache LOOKUP -- computed
           # from a detached checkout of the PR's base commit, matching the
           # tree main's own push last ran (and saved) against. fetch-depth: 0
-          # above makes the base commit's objects available locally.
+          # above makes the base commit's objects available locally. config-hash
+          # is computed from that SAME base-commit worktree for the same reason
+          # (run mutation_pilot.py FROM that tree, so its own toml resolves
+          # there) -- consistency with the fingerprint's tree, not because
+          # config-hash needs the whole-tree trick itself.
           if [ "$EVENT" = "pull_request" ]; then
             git worktree add --detach --quiet /tmp/gremlin-base-fp "$BASE_SHA"
             fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE" --cwd /tmp/gremlin-base-fp)
+            ch=$(python3 /tmp/gremlin-base-fp/tools/mutation_pilot.py config-hash "$MODULE")
             git worktree remove --force /tmp/gremlin-base-fp
           else
             fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE")
+            ch=$(python3 tools/mutation_pilot.py config-hash "$MODULE")
           fi
-          echo "prefix=mutation-gremlins${{ needs.plan.outputs.gremlins }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('tools/mutation_pilot.toml') }}-${{ matrix.module }}-${fp}-" >> "$GITHUB_OUTPUT"
+          echo "prefix=mutation-gremlins${{ needs.plan.outputs.gremlins }}-py${{ steps.py.outputs.python-version }}-${ch}-${{ matrix.module }}-${fp}-" >> "$GITHUB_OUTPUT"
       # Only the gremlins cache is restored, and only for incremental runs: a
       # full run starts fresh (--fresh clears .gremlins_cache and the workflow
       # skips the restore). The backend version is pinned in the key, so a
