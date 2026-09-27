@@ -1,0 +1,326 @@
+"""Board-universe enumeration: parity with legacy score_calendar's ATM pass
+for the native-covered strategies, DYN-SV shape, and refusal semantics.
+
+Fully synthetic: the legacy comparison monkeypatches engine.score.store and
+uses a fake calendar/scorer, so no real chain, panel, or store read happens
+anywhere in this file.
+"""
+from __future__ import annotations
+
+from collections import Counter
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from engine.v2.ops.errors import OpsError
+from engine.v2.ops.native_board_universe import BoardRequest, board_requests
+from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
+
+
+def _events(rows):
+    return pd.DataFrame(rows)
+
+
+class _FakeCalendar:
+    """Every event is out of calendar range: plan_events skips all of them,
+    so `score_calendar`'s pre-scoring chain-key pass needs no real chain
+    index (`load_chain_index` is never called because the resulting key set
+    is empty) — the comparison below stays fully synthetic."""
+
+    def resolve_offsets(self, *args, **kwargs):
+        raise KeyError("synthetic: no calendar range in this test")
+
+
+class _FakeScorer:
+    """Stands in for `engine.score.Scorer`: no chain, no panel, no model.
+    `.score()` returns a real `ScoreResult` (a plain dataclass) built purely
+    from the request's own identity fields plus fixed dummy numbers — never
+    read for correctness by this test, only present so
+    `dynamic_short_vol` (called at the very end of `score_calendar`) has the
+    columns it needs and does not raise."""
+
+    def __init__(self):
+        self.calendar = _FakeCalendar()
+        self._live_features_cache = {}
+
+    def score(self, request, chain_index=None):
+        from engine.score import ScoreResult
+
+        return ScoreResult(
+            ticker=request.ticker,
+            strategy=request.strategy,
+            as_of=pd.Timestamp("2026-01-01"),
+            event_date=request.event_date,
+            session=request.session,
+            spot=100.0,
+            exp_pnl_sim=0.01,
+        )
+
+
+def _legacy_atm_event_keys(monkeypatch, events_df, as_of, horizon_days, tickers, strategies):
+    """Occurrence counts of `(ticker, strategy, event_date, session)` the
+    legacy `score_calendar` would enumerate for `strategies`, on the ATM
+    pass, against `events_df` — fully mocked, read-only comparison, never a
+    second implementation of the filter."""
+    import engine.score as score_mod
+
+    monkeypatch.setattr(
+        score_mod.store, "read_table",
+        lambda *a, **k: events_df.copy(),
+    )
+    frame = score_mod.score_calendar(
+        as_of=as_of,
+        horizon_days=horizon_days,
+        strategies=strategies,
+        scorer=_FakeScorer(),
+        tickers=tickers,
+        progress_every=0,
+        quote_max_age_sessions=None,
+    )
+    atm = frame[frame["strategy"].isin(strategies)]
+    if "strike_offset" in atm.columns:
+        atm = atm[atm["strike_offset"].isna()]
+    return Counter(
+        (ticker, strategy, str(pd.Timestamp(event_date).date()), session)
+        for ticker, strategy, event_date, session
+        in atm[["ticker", "strategy", "event_date", "session"]]
+        .itertuples(index=False, name=None)
+    )
+
+
+class TestBoardUniverseParityWithLegacy:
+    def test_native_covered_pairs_match_score_calendar_atm_pass(self, monkeypatch):
+        events_df = _events([
+            {"event_id": "e1", "ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+            {"event_id": "e1b", "ticker": "AAA", "event_date": pd.Timestamp("2026-02-10"), "session": "AMC"},
+            {"event_id": "e2", "ticker": "BBB", "event_date": pd.Timestamp("2026-02-03"), "session": "AMC"},
+        ])
+        as_of = pd.Timestamp("2026-01-25")
+        horizon_days = 21
+        covered = sorted(SUPPORTED_STRATEGIES)
+
+        native_keys = Counter(
+            (r.ticker, r.strategy, str(r.event_date.date()), r.session)
+            for r in board_requests(as_of, horizon_days, None, events_df)
+            if r.strategy != "DYN-SV"
+        )
+        legacy_keys = _legacy_atm_event_keys(
+            monkeypatch, events_df, as_of, horizon_days, None, covered,
+        )
+        assert native_keys == legacy_keys
+        assert native_keys  # the fixture must actually exercise something
+
+
+class TestDynSvIsOncePerEvent:
+    def test_exactly_one_dyn_sv_request_per_event(self):
+        events_df = _events([
+            {"event_id": "e1", "ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+        ])
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 21, None, events_df,
+        )
+        dyn_sv = [r for r in requests if r.strategy == "DYN-SV"]
+        assert len(dyn_sv) == 1
+        assert dyn_sv[0].ticker == "AAA"
+
+
+class TestMalformedEventsTableRefuses:
+    @pytest.mark.parametrize("drop_column", ["ticker", "event_date", "session"])
+    def test_missing_required_column_raises_invalid_request(self, drop_column):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+        ]).drop(columns=[drop_column])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_object_dtype_numeric_event_date_raises_invalid_request(self):
+        event_dates = pd.Series([20260201, pd.Timestamp("2026-02-05")], dtype=object)
+        events_df = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "event_date": event_dates,
+            "session": ["BMO", "AMC"],
+        })
+        assert events_df["event_date"].dtype == object  # sanity: this is the object-dtype case, not numeric-dtype
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_object_dtype_numpy_int64_event_date_raises_invalid_request(self):
+        event_dates = pd.Series(
+            [np.int64(20260201), pd.Timestamp("2026-02-05")], dtype=object,
+        )
+        events_df = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "event_date": event_dates,
+            "session": ["BMO", "AMC"],
+        })
+        assert events_df["event_date"].dtype == object  # sanity: this is the object-dtype case, not numeric-dtype
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+
+class TestAsOfAndHorizonDaysValidation:
+    @staticmethod
+    def _valid_events_table():
+        return _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-01-25"), "session": "BMO"},
+        ])
+
+    def test_none_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(None, 21, None, self._valid_events_table())
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_nat_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.NaT, 21, None, self._valid_events_table())
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_timezone_aware_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25", tz="UTC"), 21, None,
+                self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_bool_horizon_days_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25"), True, None, self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_negative_horizon_days_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25"), -1, None, self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_float_horizon_days_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25"), 21.0, None, self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_int_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(20260130, 21, None, self._valid_events_table())
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_numpy_int64_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(np.int64(20260130), 21, None, self._valid_events_table())
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_valid_as_of_and_horizon_days_still_accepted(self):
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 0, None, self._valid_events_table(),
+        )
+        assert requests
+
+
+class TestDuplicateRequiredColumn:
+    def test_duplicate_required_column_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+        ])
+        events_df = pd.concat([events_df, events_df[["ticker"]]], axis=1)
+        assert list(events_df.columns).count("ticker") == 2
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+
+class TestEventDateColumnConversion:
+    def test_parseable_string_event_date_column_is_accepted(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "2026-02-01", "session": "BMO"},
+        ])
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 21, None, events_df,
+        )
+        non_dyn_sv = [r for r in requests if r.strategy != "DYN-SV"]
+        assert non_dyn_sv
+        assert all(r.event_date == pd.Timestamp("2026-02-01") for r in non_dyn_sv)
+
+    def test_unparseable_event_date_column_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "not-a-date", "session": "BMO"},
+        ])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_null_event_date_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+            {"ticker": "BBB", "event_date": None, "session": "AMC"},
+        ])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_timezone_aware_event_date_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "2026-02-01T00:00:00+00:00", "session": "BMO"},
+        ])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_mixed_date_only_and_iso_timestamp_event_dates_are_accepted(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "2026-02-01", "session": "BMO"},
+            {"ticker": "BBB", "event_date": "2026-02-02T10:30:00", "session": "AMC"},
+        ])
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 21, None, events_df,
+        )
+        by_ticker = {
+            r.ticker: r.event_date for r in requests if r.strategy != "DYN-SV"
+        }
+        assert by_ticker["AAA"] == pd.Timestamp("2026-02-01")
+        assert by_ticker["BBB"] == pd.Timestamp("2026-02-02T10:30:00")
+
+    def test_numeric_event_date_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": 20260201, "session": "BMO"},
+        ])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+
+class TestDeterministicOrder:
+    def test_output_order_is_sorted_events_then_strategies_then_dyn_sv_last(self):
+        events_df = _events([
+            {"ticker": "BBB", "event_date": pd.Timestamp("2026-02-03"), "session": "AMC"},
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+        ])
+        covered = sorted(SUPPORTED_STRATEGIES)
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 21, None, events_df,
+        )
+        expected = tuple(
+            BoardRequest(ticker, strategy, event_date, session)
+            for ticker, event_date, session in [
+                ("AAA", pd.Timestamp("2026-02-01"), "BMO"),
+                ("BBB", pd.Timestamp("2026-02-03"), "AMC"),
+            ]
+            for strategy in (*covered, "DYN-SV")
+        )
+        assert requests == expected
+
+    def test_two_calls_agree_and_are_not_just_agreeing_by_accident(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+        ])
+        first = board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        second = board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert first == second
