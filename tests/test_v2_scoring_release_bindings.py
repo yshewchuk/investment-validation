@@ -411,6 +411,37 @@ def test_payoff_member_missing_field_raises_model_not_ready(tmp_path):
     _assert_no_leak(tmp_path, error.value)
 
 
+def test_payoff_member_bad_value_raises_model_not_ready(tmp_path):
+    _stage_and_promote(tmp_path)
+    junk = json.dumps({
+        "schema_version": "payoff_line_artifact.v1.0",
+        "strategy": "STR-THRU", "driver": "driver_prediction", "alpha": 0.55,
+        "n": 2, "intercept": "abc", "slope": 0.2, "resid_sd": 0.01, "r": 0.5,
+        "residuals": [0.01, -0.01],
+    }).encode()
+    path = _write_object(_dep_root(tmp_path), junk)
+    _write_catalog(tmp_path, rows=[_row("payoff_line:STR-THRU", [_obj(path, _sha(junk))])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "payoff_line:STR-THRU"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_recalibration_member_bad_value_raises_model_not_ready(tmp_path):
+    _stage_and_promote(tmp_path)
+    junk = json.dumps({
+        "schema_version": "recalibration_map.v1.0",
+        "strategy": "STR-THRU", "alpha": 0.55, "min_pairs": 2,
+        "n": 3, "base_rate": 0.4, "x_thresholds": "abc", "y_thresholds": [0.35, 0.65],
+    }).encode()
+    path = _write_object(_dep_root(tmp_path), junk)
+    _write_catalog(tmp_path, rows=[_row("recalibration_map:STR-THRU", [_obj(path, _sha(junk))])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "recalibration_map:STR-THRU"
+    _assert_no_leak(tmp_path, error.value)
+
+
 def test_recalibration_member_hash_mismatch_raises_model_not_ready(tmp_path):
     _stage_and_promote(tmp_path)
     _recal, recal_bytes = _recalibration()

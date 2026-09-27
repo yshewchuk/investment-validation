@@ -332,7 +332,7 @@ def _load_payoff(dep_root: Path, member_id: str, obj: Mapping):
     try:
         return PayoffArtifactLoader(dep_root).load(
             PayoffArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
-    except (PayoffArtifactError, KeyError, TypeError) as exc:
+    except (PayoffArtifactError, KeyError, TypeError, ValueError) as exc:
         # A hash-valid document missing a required field raises a bare
         # KeyError out of PayoffArtifactLoader.load() (it does not guard its
         # own document-to-artifact conversion) -- caught here, not left to
@@ -344,7 +344,7 @@ def _load_recalibration(dep_root: Path, member_id: str, obj: Mapping):
     try:
         return RecalibrationArtifactLoader(dep_root).load(
             RecalibrationArtifactRef(path=obj["path"], content_hash=obj["content_hash"]))
-    except (RecalibrationArtifactError, KeyError, TypeError) as exc:
+    except (RecalibrationArtifactError, KeyError, TypeError, ValueError) as exc:
         raise ModelNotReady(member_id, "recalibration artifact could not be verified or loaded") from exc
 
 
