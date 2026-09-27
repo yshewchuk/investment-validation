@@ -1007,11 +1007,27 @@ network, or database access.
   cannot resolve at all (`NoCurrentRelease`/`ModelNotReady` — the WHOLE batch
   has no release to score against, so there is no per-row map to attempt).
   These are attempt failures (`WORKER_FAILED`/a typed `OpsError`), the same
-  as every other worker in this package.
+  as every other worker in this package. A colliding `request_hash` across
+  two DIFFERENT `BoardRequest` keys (CodeRabbit round 2, PR #66) is also a
+  batch-level `ValueError`, not a per-row refusal: `ScoreRequest` carries no
+  `ticker`/`event_date` of its own, so two distinct rows whose
+  `ScoreRequest` fields happen to coincide (most plausibly a duplicated
+  `calendar_row["event_id"]`) would otherwise silently collide in
+  `run_native_score_batch_worker`'s `fields_by_request` map, one row
+  clobbering the other's inputs with no refusal for either — nothing in
+  this module can say which of the two rows is "the bad one", so the whole
+  attempt fails instead of guessing.
 - **R1, missing input — per row (never raises; one bad row does not sink the
   batch).** Once a release is in hand, every OTHER failure is scoped to one
   `BoardRequest` and collected as a `NativeScoreBatchRowRefusal` in the
   returned tuple, not raised:
+  - `CALENDAR_ROW_KEY_MISMATCH` — `calendar_row["ticker"]`/`calendar_row[
+    "event_date"]` does not match the row's own `NightlyEventInputs.key`.
+    Checked first, before every other per-row check: nothing else in this
+    module or in `assemble_nightly_source_bundle` (which only checks
+    `panel_row` against `calendar_row`, never against the caller's
+    `BoardRequest`) verifies that a staged `calendar_row` actually belongs
+    to the key it was paired with.
   - `UNSUPPORTED_STRATEGY` — `key.strategy != "STR-THRU"` (this bounded
     assembler's one supported strategy, matching `nightly_source_bundle.py`'s
     own documented scope).

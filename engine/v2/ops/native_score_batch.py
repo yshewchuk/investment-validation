@@ -143,6 +143,24 @@ def _identity_context(as_of: Any, snapshot_id: str,
     }
 
 
+def _calendar_row_key_mismatch(key: BoardRequest, calendar_row: Mapping[str, Any]) -> str | None:
+    """``None`` if ``calendar_row``'s own ``ticker``/``event_date`` match
+    ``key``, else a detail string for a ``CALENDAR_ROW_KEY_MISMATCH``
+    refusal (CodeRabbit round 2, PR #66). Nothing else checks this:
+    ``assemble_nightly_source_bundle`` only checks ``panel_row`` against
+    ``calendar_row``, never against the caller's ``BoardRequest``, and
+    ``ScoreRequest`` itself carries no ticker/event_date of its own -- a
+    caller-side key/calendar_row pairing bug would otherwise pass silently
+    and could produce a duplicate ``request_hash`` (see
+    :func:`assemble_score_batch_inputs`) that corrupts a different row."""
+    calendar_ticker = calendar_row.get("ticker")
+    calendar_event_date = _iso(calendar_row.get("event_date"))
+    if calendar_ticker == key.ticker and calendar_event_date == _iso(key.event_date):
+        return None
+    return (f"calendar_row ticker={calendar_ticker!r} event_date="
+            f"{calendar_event_date!r} does not match key {key!r}")
+
+
 def _assemble_one_event(
     event: NightlyEventInputs,
     *,
@@ -162,6 +180,9 @@ def _assemble_one_event(
     """
     key = event.key
     strategy = key.strategy
+    mismatch = _calendar_row_key_mismatch(key, event.calendar_row)
+    if mismatch is not None:
+        return NativeScoreBatchRowRefusal(key, "CALENDAR_ROW_KEY_MISMATCH", mismatch)
     if strategy != _SUPPORTED_STRATEGY:
         return NativeScoreBatchRowRefusal(
             key, "UNSUPPORTED_STRATEGY",
@@ -239,10 +260,23 @@ def assemble_score_batch_inputs(
     STAGED`` (no caller-supplied threshold for the strategy -- gate thresholds
     are not part of the release binding), any re-wrapped
     ``NightlySourceBundleRefusal`` from the per-event bundle assembly,
-    ``MISSING_STAGED_INPUT`` (no ``event_id`` in the calendar row) and
+    ``MISSING_STAGED_INPUT`` (no ``event_id`` in the calendar row),
+    ``CALENDAR_ROW_KEY_MISMATCH`` (``calendar_row``'s own ``ticker``/
+    ``event_date`` does not match its ``NightlyEventInputs.key``) and
     ``NATIVE_INPUT_BUILD_FAILED`` (a ``ValueError`` from
     ``build_native_score_inputs``). Per-row assembly itself lives in
     :func:`_assemble_one_event`.
+
+    A colliding ``request_hash`` across two DIFFERENT ``BoardRequest`` keys
+    (CodeRabbit round 2, PR #66) also raises ``ValueError`` rather than
+    becoming a per-row refusal: ``ScoreRequest`` carries no ticker/event_date
+    of its own, so two distinct rows whose ``ScoreRequest`` fields coincide
+    (most plausibly a duplicated ``calendar_row["event_id"]``, since that is
+    the one genuinely per-event field) would otherwise silently collide in
+    ``run_native_score_batch_worker``'s ``fields_by_request`` map -- one row
+    clobbering the other's inputs with no visible refusal for either.
+    Nothing here can say which of the two rows is "the bad one", so this is
+    batch-level, not a row-level refusal.
     """
     if not isinstance(binding, ScoringReleaseBinding):
         raise TypeError("binding must be a ScoringReleaseBinding")
@@ -256,6 +290,7 @@ def assemble_score_batch_inputs(
 
     results: dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]] = {}
     refusals: list[NativeScoreBatchRowRefusal] = []
+    seen_hashes: dict[str, BoardRequest] = {}
     for event in events:
         outcome = _assemble_one_event(
             event, binding=binding, gate_policy=gate_policy, as_of=as_of,
@@ -264,8 +299,15 @@ def assemble_score_batch_inputs(
         )
         if isinstance(outcome, NativeScoreBatchRowRefusal):
             refusals.append(outcome)
-        else:
-            results[event.key] = outcome
+            continue
+        request, _ = outcome
+        row_hash = request_hash(request)
+        if row_hash in seen_hashes:
+            raise ValueError(
+                f"duplicate request_hash {row_hash} for {event.key!r} and "
+                f"{seen_hashes[row_hash]!r}")
+        seen_hashes[row_hash] = event.key
+        results[event.key] = outcome
     return results, tuple(refusals)
 
 

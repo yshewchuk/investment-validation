@@ -228,11 +228,30 @@ def test_post_as_of_panel_anchor_refuses_without_sinking_batch(tmp_path):
     bad = _event_inputs(
         key=BoardRequest(ticker="OTHER", strategy="STR-THRU",
                          event_date=pd.Timestamp("2026-01-15"), session="am"),
+        calendar_row=_calendar_row(ticker="OTHER"),
         panel_anchor="2026-01-11")  # after as_of (2026-01-10)
     assembled, refusals = _assemble(binding, [good, bad])
     assert list(assembled) == [good.key]
     assert len(refusals) == 1
     assert refusals[0].code == "POST_AS_OF_ROW"
+    assert refusals[0].key == bad.key
+
+
+def test_calendar_row_key_mismatch_refuses_without_sinking_batch(tmp_path):
+    """CodeRabbit round 2 (PR #66): calendar_row is never checked against its
+    own BoardRequest key anywhere else -- a staged calendar_row for the
+    wrong ticker/event_date is a per-row refusal, checked before every other
+    per-row check."""
+    binding = _stage_release(tmp_path)
+    good = _event_inputs()
+    bad = _event_inputs(
+        key=BoardRequest(ticker="OTHER", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15"), session="am"),
+        calendar_row=_calendar_row())  # calendar_row.ticker stays "TEST"
+    assembled, refusals = _assemble(binding, [good, bad])
+    assert list(assembled) == [good.key]
+    assert len(refusals) == 1
+    assert refusals[0].code == "CALENDAR_ROW_KEY_MISMATCH"
     assert refusals[0].key == bad.key
 
 
@@ -242,15 +261,49 @@ def test_duplicate_event_key_raises(tmp_path):
         _assemble(binding, [_event_inputs(), _event_inputs()])
 
 
+def test_duplicate_request_hash_across_distinct_keys_raises(tmp_path):
+    """CodeRabbit round 2 (PR #66): ScoreRequest carries no ticker of its
+    own, so two DISTINCT BoardRequest keys whose calendar_row shares the
+    same event_id (a caller-side data bug) collide into the same
+    request_hash. Nothing in this module can say which row is the bad one,
+    so the whole batch raises rather than letting one row silently clobber
+    the other's inputs in fields_by_request."""
+    binding = _stage_release(tmp_path)
+    first = _event_inputs(
+        key=BoardRequest(ticker="AAPL", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15"), session="am"),
+        calendar_row=_calendar_row(ticker="AAPL", event_id="evt-dup"))
+    second = _event_inputs(
+        key=BoardRequest(ticker="MSFT", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15"), session="am"),
+        calendar_row=_calendar_row(ticker="MSFT", event_id="evt-dup"))
+    with pytest.raises(ValueError, match="duplicate request_hash"):
+        _assemble(binding, [first, second])
+
+
 def test_mc_seed_matches_bootstrap_seed_from_snapshot_and_key(tmp_path):
+    """CodeRabbit round 2 (PR #66): the expected key/seed is built here from
+    the fixture's own declared literals, never read back out of
+    native_inputs.context -- a comparison against the object under test's
+    own field would pass even if assembly wrote the wrong snapshot/date.
+    Also checks repeatability (acceptance criterion 5): assembling the same
+    event twice must draw the identical seed."""
     binding = _stage_release(tmp_path)
     event = _event_inputs()
-    assembled, refusals = _assemble(binding, [event])
-    assert refusals == ()
-    _, native_inputs = assembled[event.key]
-    key = score_request_key(native_inputs.context)
-    expected = bootstrap_seed(native_inputs.context["snapshot"], key)
-    assert _model_seed(native_inputs, {}) == expected
+    expected_context = {
+        "ticker": "TEST", "strategy": "STR-THRU",
+        "requested_as_of": _AS_OF, "requested_event_date": "2026-01-15",
+        "requested_strike": None, "requested_expiry": "2026-01-16",
+        "fill_alpha": 0.5, "variant": None, "decision_offset": None,
+        "quote_max_age_sessions": None, "chain_as_of": _AS_OF,
+    }
+    expected = bootstrap_seed(_SNAPSHOT, score_request_key(expected_context))
+
+    for _ in range(2):  # repeatability: same event, same seed, every time
+        assembled, refusals = _assemble(binding, [event])
+        assert refusals == ()
+        _, native_inputs = assembled[event.key]
+        assert _model_seed(native_inputs, {}) == expected
 
 
 def _event_doc(strategy="STR-THRU", event_id="evt-1") -> dict:
@@ -283,6 +336,28 @@ def _worker_parameters(tmp_path, *, expected_ids) -> dict:
     }
 
 
+def _record_matches_identity(record, *, event_id, strategy_version, deployment_id) -> bool:
+    """Independent identity check for one score record's canonical_request
+    (CodeRabbit round 2, PR #66) -- shared by the regression assertion below
+    and the planted-defect test that proves it can actually fail."""
+    req = record["canonical_request"]
+    return (req["event_id"] == event_id and req["strategy_version"] == strategy_version
+            and req["deployment_id"] == deployment_id)
+
+
+def test_planted_record_identity_corruption_is_caught():
+    """Proves _record_matches_identity is not a tautology that would pass
+    regardless of the worker's real output: it must fail on a corrupted
+    canonical_request field."""
+    good = {"canonical_request": {"event_id": "evt-1", "strategy_version": "STR-THRU",
+                                  "deployment_id": "d1"}}
+    assert _record_matches_identity(good, event_id="evt-1", strategy_version="STR-THRU",
+                                    deployment_id="d1")
+    corrupted = {"canonical_request": {**good["canonical_request"], "event_id": "evt-WRONG"}}
+    assert not _record_matches_identity(
+        corrupted, event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
+
+
 def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     _stage_release(tmp_path)
     root = tmp_path / "staging"
@@ -299,6 +374,11 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     # assemble_nightly_source_bundle verifies panel_anchor itself.
     assert records_document["known_gaps"] == []
     assert len(records_document["records"]) == 1
+    # CodeRabbit round 2 (PR #66): compare actual record CONTENT against an
+    # independently-known expected identity, not just the record count.
+    assert _record_matches_identity(
+        records_document["records"][0], event_id="evt-1",
+        strategy_version="STR-THRU", deployment_id="d1")
     refusals_document = json.loads((root / "refusals.json").read_text())
     assert len(refusals_document) == 1
     assert refusals_document[0]["code"] == "UNSUPPORTED_STRATEGY"
