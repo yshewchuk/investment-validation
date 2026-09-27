@@ -31,14 +31,10 @@ later change.
 
 The package's declared public interface (enforced by `checks/package_readmes.py`
 against the real import graph; see `README.md`'s `<!-- public-interface: -->`
-directive) is, by module, for every module that exists in the tree today.
-`nightly_source_bundle.py` is listed separately below the table: this PR's
-first push is design-only (the doc you are reading), so that module is a
-**proposed** contract, not yet code, not yet in the tree, and not yet added
-to `README.md`'s machine-checked directive — adding it there before the
-module exists would make that check pass on a name nothing implements. The
-table below documents only modules that exist; the paragraph after it
-documents the proposal.
+directive) is, by module. `nightly_source_bundle.py` (new in this PR) is
+listed separately below the table rather than folded into it, because it is
+not yet part of that machine-checked directive — see the note just below
+the table for why.
 
 | Module | Owns |
 |---|---|
@@ -60,14 +56,19 @@ documents the proposal.
 | `native_payoff.py` | Answer-free reproduction of legacy's payoff-calibration/model layer; also imported by `engine/v2/models/training` (layer 6) for its pure fitting math. |
 | `native_residuals.py` | Reads a frozen residual artifact inside a score request, after a causal-key check. |
 
-**Proposed (not yet implemented — code lands in a follow-up push to this
-PR, per this repo's Design-first flow):** `nightly_source_bundle.py` will
-own `assemble_nightly_source_bundle()`, `quote_domain_map()`,
-`validated_as_of()`, and `NightlySourceBundleRefusal` — the per-night,
-per-(ticker, event) `SourceBundle` field assembler described in Inputs/
-Outputs/Failure semantics below. Once implemented, its symbols join
-`README.md`'s `<!-- public-interface: -->` directive alongside the table
-above, in the same push as the code.
+**`nightly_source_bundle.py`** owns `assemble_nightly_source_bundle()`,
+`quote_domain_map()`, `validated_as_of()`, and `NightlySourceBundleRefusal`
+— the per-night, per-(ticker, event) `SourceBundle` field assembler
+described in Inputs/Outputs/Failure semantics below. It is not yet listed
+in the table above or in `README.md`'s `<!-- public-interface: -->`
+directive: that directive is checked against the real cross-package import
+graph (`checks/package_readmes.py`), and today the only caller of this
+module is `tools/capture_tier0_corpus.py` (a script, outside the v2 package
+graph the directive covers — see Dependencies/Callers below, the same
+exemption this package's other `tools/*`/`checks/*` callers already have).
+Its symbols join the directive once a real `engine.v2.*` package consumer
+exists (PR-3, which wires a caller in) — adding them before then would
+declare an interface nothing in the checked graph actually uses.
 
 ## Inputs
 
@@ -98,7 +99,9 @@ above, in the same push as the code.
     domain-is-legitimately-empty cases (no chain found; pricing never
     reached).
   - `feature_names` — the caller-declared set of feature columns this
-    bundle projects from `panel_row`/`tier4_row`.
+    bundle projects from `panel_row`/`tier4_row`: for each name,
+    `tier4_row` wins when both rows carry it (Tier-4 is the more specific,
+    later-computed table), falling back to `panel_row`.
   - Everything else this function's `SourceBundle` needs but does not
     itself resolve — `model_identity`, `model_artifact_refs`,
     `forecast_recipes`, `residual_recipe`, `analog_recipe`, `gate_recipe`
@@ -190,6 +193,10 @@ function's — see Invariants (read-only, no I/O).
     it is omitted from `feature_vector` and marked `True` in
     `feature_missing_mask`. The mask is authoritative; a caller that skips
     checking it gets a silently-absent key, never a fabricated `0.0`/`NaN`.
+    A feature column that IS present but cannot be read as a finite number
+    (a string, an infinite value) is neither of these — it is a data
+    problem, not an absence, so it is its own refusal,
+    `INVALID_FEATURE_VALUE`, naming the feature and the value found.
   - **Leakage, answer/outcome fields.** Every assembled `context` and
     `feature_vector` value is passed through `source_inputs._reject_answers`
     (the same denylist `build_native_score_inputs` itself enforces) before
@@ -220,10 +227,16 @@ function's — see Invariants (read-only, no I/O).
     function's `ValueError` back into its own exception type so its
     existing behavior and tests are unchanged.
   - **Determinism (R6).** Same staged inputs, same output: no wall-clock
-    read, no random draw, no ordering that depends on dict/set iteration
-    order (every mapping this function returns is built with a stable, sorted
-    key order). Two calls with identical arguments produce `SourceBundle`
-    values equal under `==` (the dataclass's structural equality).
+    read and no random draw anywhere in the function. `context` and
+    `feature_vector`/`feature_missing_mask` are built by iterating a sorted
+    key order (`sorted(_CALENDAR_REQUIRED_FIELDS)`/`sorted(feature_names)`),
+    independent of any input mapping's own iteration order; `raw_quotes`
+    preserves `quote_rows`' own given order (unchanged from the original
+    `_quote_map`'s behavior) rather than sorting it, which is still fully
+    deterministic for the same `quote_rows` sequence, and dict equality does
+    not depend on key order regardless. Two calls with identical arguments
+    produce `SourceBundle` values equal under `==` (the dataclass's
+    structural equality).
   - **Read-only (R2–R5 do not apply).** The function performs no I/O: every
     staged input arrives as an already-loaded mapping/sequence, and nothing
     it does can mutate a store, a file, or its own arguments.

@@ -119,6 +119,7 @@ from engine.v2.models import (  # noqa: E402
 )
 from engine.v2.models.contracts import ArtifactMember  # noqa: E402
 from engine.v2.scoring import application as v2_application  # noqa: E402
+from engine.v2.scoring.nightly_source_bundle import quote_domain_map  # noqa: E402
 from engine.v2.scoring.stages import (  # noqa: E402
     NativeScoreInputs,
     StageObservation,
@@ -430,11 +431,6 @@ def _checkpoint_value_optional(candidate: Mapping[str, Any], name: str) -> Mappi
     return _checkpoint_value(candidate, name)
 
 
-#: ``source_inputs.quote_status`` values under which legacy recorded NO quote
-#: domain on purpose (``engine.score.Phase4TraceCollector.QUOTE_STATUSES``).
-_EMPTY_QUOTE_STATUSES = frozenset({"empty", "not_reached"})
-
-
 def _request_only_source(candidate: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """The request-only source bundle of a row legacy refused before any
     stage, or ``None``. It must be the trace's ONLY checkpoint group, carry
@@ -486,47 +482,6 @@ def _request_only_inputs(
         "chooser": {},
         "diagnostics": {},
     }
-
-
-def _quote_map(rows: Any, quote_status: Any = None) -> dict[str, dict[str, float]]:
-    """The native quote map. An empty domain is accepted only when legacy
-    recorded WHY it is empty (lookup found no chain, or the row never reached
-    pricing); an empty domain with no recorded status was never captured."""
-    if quote_status in _EMPTY_QUOTE_STATUSES:
-        if rows != []:
-            raise StrictTraceCaptureError(
-                f"quote_status {quote_status} but quote_domain is not empty"
-            )
-        return {}
-    if quote_status not in (None, "recorded", "priced"):
-        raise StrictTraceCaptureError(f"unknown quote_status {quote_status!r}")
-    if not isinstance(rows, list) or not rows:
-        raise StrictTraceCaptureError("source_inputs.quote_domain is empty")
-    quotes: dict[str, dict[str, float]] = {}
-    for index, row in enumerate(rows):
-        if not isinstance(row, Mapping):
-            raise StrictTraceCaptureError(f"quote_domain[{index}] is not an object")
-        try:
-            right = str(row["right"]).upper()
-            right = {"CALL": "C", "PUT": "P"}.get(right, right)
-            strike = float(row["strike"])
-            expiry = str(pd.Timestamp(row["expiry"]).date())
-            bid = float(row["bid"])
-            ask = float(row["ask"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise StrictTraceCaptureError(
-                f"quote_domain[{index}] lacks a complete contract quote"
-            ) from exc
-        if right not in {"C", "P"} or not all(
-            math.isfinite(value) for value in (strike, bid, ask)
-        ) or bid < 0.0 or ask < bid:
-            raise StrictTraceCaptureError(f"quote_domain[{index}] is invalid")
-        key = f"{right}:{strike}:{expiry}"
-        quote = {"bid": bid, "ask": ask}
-        if key in quotes and quotes[key] != quote:
-            raise StrictTraceCaptureError(f"conflicting source quote: {key}")
-        quotes[key] = quote
-    return quotes
 
 
 #: Legacy checkpoint role strings that ``tools/phase4_frozen_resources.py``
@@ -1478,7 +1433,10 @@ def _captured_blocks(candidate: Mapping[str, Any],
             context[key] = source_features[key]
     context["strategy"] = request.strategy_version
     quote_status = source.get("quote_status")
-    context["quotes"] = _quote_map(source.get("quote_domain"), quote_status)
+    try:
+        context["quotes"] = quote_domain_map(source.get("quote_domain"), quote_status)
+    except ValueError as exc:
+        raise StrictTraceCaptureError(str(exc)) from exc
     # A spot exists only once legacy priced the structure. A row whose chain
     # lookup came back empty, that never reached pricing, or whose pricer
     # raised has none, and native refuses it with its own code; a capture
