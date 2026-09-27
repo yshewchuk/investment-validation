@@ -255,6 +255,217 @@ class TestCarryOverGuards:
             )
 
 
+class TestPrefixGapBackfill:
+    """Regression test for the 2026-09 catch-up nightlies (logs 09-11, 09-14
+    through 09-17, and 09-25 all show the SAME error shape:
+    ``Tier4Error: Tier 3 has N events before <fold> that the existing Tier-4
+    table does not cover``) and for the identical gap still open on disk today
+    in ``data/features/tier4_forecasts.parquet`` (3 rows, one ticker, three
+    2021 dates).
+
+    The sibling test
+    ``TestCarryOverGuards.test_events_added_inside_the_carried_prefix_refuse_the_carry_over``
+    locks in the OTHER half of this behaviour: a gap in an UNSCORED prefix row
+    (older than ``FIRST_FOLD``) still refuses and raises, because there is no
+    fold to recompute for it. This class covers the SCORED case, which the fix
+    now backfills instead of refusing.
+    """
+
+    def test_a_gap_in_the_carried_prefix_is_backfilled_not_refused(self, panel, built):
+        # Must be a SCORED event (fold_start >= FIRST_FOLD) that falls INSIDE
+        # the bounded backfill window measured back from `since` — the
+        # earliest scored event in the whole fixture would be ~24 months
+        # back from `since` below, which BACKFILL_WINDOW_MONTHS (3) correctly
+        # treats as the separate out-of-window case the sibling test below
+        # covers. Pick the scored event closest to (but before) `since`
+        # instead, which this fixture's monthly cadence keeps well inside the
+        # window.
+        since = "2015-01-01"
+        scored = built[built["pred_abs_move"].notna()]
+        gap_date = scored.loc[scored["event_date"] < pd.Timestamp(since), "event_date"].max()
+        # Remove exactly ONE (ticker, event_date) key, not every ticker on
+        # that date. Tier 4 must be total at (ticker, event_date) grain —
+        # removing a whole date (40 tickers at once, in this fixture) would
+        # let a date-level backfill pass without proving an isolated key gets
+        # restored.
+        gap_ticker = scored.loc[scored["event_date"] == gap_date, "ticker"].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == gap_ticker) & (built["event_date"] == gap_date))
+        ]
+
+        # Today's incremental build raises Tier4Error here (see the sibling
+        # test in TestCarryOverGuards) and the caller — the legacy nightly's
+        # step 2b — treats that as "Tier 3/Tier 4 not rebuilt" and moves on,
+        # leaving the gap unfilled for every night after. The fix makes this
+        # call succeed instead of raising.
+        backfilled = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since,
+            existing=thinned, tier3_snapshot="snap", log=lambda _m: None,
+        )
+
+        # Total over Tier 3 again, exactly like a full rebuild.
+        assert len(backfilled) == len(panel)
+        restored = backfilled[
+            (backfilled["ticker"] == gap_ticker) & (backfilled["event_date"] == gap_date)
+        ]
+        assert len(restored) == 1
+        pd.testing.assert_frame_equal(
+            restored.reset_index(drop=True),
+            built[
+                (built["ticker"] == gap_ticker) & (built["event_date"] == gap_date)
+            ].reset_index(drop=True),
+        )
+
+        # The gap-fill must match a full rebuild bit-for-bit EVERYWHERE, not
+        # only at the restored key — the incremental producer seeds its
+        # residual pool from the carried prefix, so a gap-fill that
+        # recomputes the missing fold differently could still change LATER
+        # forecasts even though the one restored row looks right. Same risk
+        # TestSinceEquivalence exists to catch for the ordinary incremental
+        # path.
+        pd.testing.assert_frame_equal(
+            backfilled.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
+
+    def test_a_gap_outside_the_backfill_window_is_a_named_skip_not_a_crash(self, panel, built):
+        """Decision 3 (revised): a gap older than BACKFILL_WINDOW_MONTHS from
+        `since` must not raise (that would be today's behaviour again) and
+        must not get a null-forecast placeholder row either — a stored row,
+        even an empty one, would look covered to the NEXT run's own gap check
+        and hide the hole permanently. It stays ABSENT from the table (Tier 4
+        total over Tier 3 MINUS exactly this key) and is named in the
+        build's report.
+        """
+        scored = built[built["pred_abs_move"].notna()]
+        old_date = scored["event_date"].min()
+        old_ticker = scored.loc[scored["event_date"] == old_date, "ticker"].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == old_ticker) & (built["event_date"] == old_date))
+        ]
+
+        # Far enough past `old_date` that the bounded window cannot reach it.
+        since = (
+            old_date + pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS + 6)
+        ).strftime("%Y-%m-%d")
+        report: dict = {}
+        out = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
+            tier3_snapshot="snap", log=lambda _m: None, report=report,
+        )
+
+        assert len(out) == len(panel) - 1, "the out-of-window key must be ABSENT, not a null row"
+        row = out[(out["ticker"] == old_ticker) & (out["event_date"] == old_date)]
+        assert len(row) == 0, "a placeholder row hides the gap from the next run's own anti-join"
+
+        gap = report["pred_abs_move"]["out_of_window_gap"]
+        assert {"ticker": old_ticker, "event_date": old_date.date().isoformat()} in gap
+
+    def test_snapshot_is_not_backdated_past_the_effective_cut(self, panel, built):
+        """A gap-fill widens the producer's cut BACKWARD past the requested
+        `since`, to recompute a fold against TODAY's panel. Before the fix,
+        `build_forecasts` restored the OLD `tier3_snapshot` for every row
+        before the REQUESTED cut, including the widened span it had just
+        recomputed with the NEW panel — mislabeling freshly recomputed rows
+        with stale provenance. Rows from the effective (widened) cut onward
+        must carry the NEW snapshot; only rows still before the effective cut
+        may carry the OLD one.
+
+        `gap_date = 2014-04-15` and `since = 2014-07-01` are chosen so the
+        widened effective cut (`max(fold_start(gap_date), fold_start(since -
+        BACKFILL_WINDOW_MONTHS))`) lands on 2014-04-01 for both terms — a
+        3-month span (April, May, June) strictly before `since` that the
+        pre-fix code would have mis-stamped.
+        """
+        since = "2014-07-01"
+        gap_date = pd.Timestamp("2014-04-15")
+        gap_ticker = built.loc[
+            (built["event_date"] == gap_date) & built["pred_abs_move"].notna(), "ticker"
+        ].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == gap_ticker) & (built["event_date"] == gap_date))
+        ]
+
+        rebuilt = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since,
+            existing=thinned, tier3_snapshot="different", log=lambda _m: None,
+        )
+
+        effective_cut = pd.Timestamp("2014-04-01")
+        requested_cut = pd.Timestamp(since)
+
+        before = rebuilt[rebuilt["event_date"] < effective_cut]
+        assert len(before) > 0
+        assert before["tier3_snapshot"].eq("snap").all()
+
+        widened_span = rebuilt[
+            (rebuilt["event_date"] >= effective_cut) & (rebuilt["event_date"] < requested_cut)
+        ]
+        assert len(widened_span) > 0
+        assert widened_span["tier3_snapshot"].eq("different").all(), (
+            "rows recomputed by the gap-fill's widened cut must carry the "
+            "NEW snapshot, not the carried-over old one"
+        )
+
+        after = rebuilt[rebuilt["event_date"] >= requested_cut]
+        assert len(after) > 0
+        assert after["tier3_snapshot"].eq("different").all()
+
+    def test_an_out_of_window_gap_is_re_detected_and_stays_absent_across_two_runs(
+        self, panel, built
+    ):
+        """The whole point of leaving the key ABSENT instead of writing a
+        null-forecast placeholder: the SECOND night must see the SAME gap,
+        raise the SAME named skip, and produce a table IDENTICAL to the
+        first night's — not silently swallow it once a row exists.
+        """
+        scored = built[built["pred_abs_move"].notna()]
+        old_date = scored["event_date"].min()
+        old_ticker = scored.loc[scored["event_date"] == old_date, "ticker"].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == old_ticker) & (built["event_date"] == old_date))
+        ]
+        since = (
+            old_date + pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS + 6)
+        ).strftime("%Y-%m-%d")
+        expected_gap_entry = {
+            "ticker": old_ticker, "event_date": old_date.date().isoformat()
+        }
+
+        report1: dict = {}
+        night1 = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
+            tier3_snapshot="snap", log=lambda _m: None, report=report1,
+        )
+        assert expected_gap_entry in report1["pred_abs_move"]["out_of_window_gap"]
+        row1 = night1[(night1["ticker"] == old_ticker) & (night1["event_date"] == old_date)]
+        assert len(row1) == 0, "night 1: the gap key must be absent, not a null row"
+
+        # Night 2 runs the SAME --since against night 1's OWN output. If night
+        # 1 had written a placeholder row, this anti-join would now see the
+        # key as covered and the flag would never fire again — the exact
+        # defect this fix closes.
+        report2: dict = {}
+        night2 = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since, existing=night1,
+            tier3_snapshot="snap", log=lambda _m: None, report=report2,
+        )
+        assert expected_gap_entry in report2["pred_abs_move"]["out_of_window_gap"], (
+            "night 2 must re-detect the same gap — a stored row from night 1 "
+            "would have hidden it"
+        )
+        row2 = night2[(night2["ticker"] == old_ticker) & (night2["event_date"] == old_date)]
+        assert len(row2) == 0, "night 2: the gap key must still be absent"
+
+        # Idempotency: two runs over the same unresolved gap give identical
+        # tables (determinism, not a dedupe key — see the PR's Idempotency
+        # section).
+        pd.testing.assert_frame_equal(
+            night1.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            night2.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
+
+
 class TestTotalityAndNulls:
     def test_every_tier3_event_gets_a_row(self, panel, built):
         assert len(built) == len(panel)
@@ -1283,3 +1494,82 @@ def test_serving_model_artifact_ref_is_missing_when_never_served(tmp_path, monke
 
     with pytest.raises(FileNotFoundError):
         served.artifact_ref()
+
+
+class TestGapFreeNightMatchesMain:
+    """The PR's test plan promised this exactly: 'A gap-free night produces
+    byte-identical output to today's code path.' A self-comparison against
+    this SAME code cannot fail if the fix breaks the no-gap path — both sides
+    would move together, so this compares against ``main``'s code instead.
+
+    This used to pin a SHA-256 of ``pd.util.hash_pandas_object`` bytes,
+    computed once by running ``git show main:engine/data/features/tier4.py``
+    (commit 033ca3e, the base this PR branched from, before ANY gap-fill code
+    existed) locally. CI (2026-09-27, run 36283149928) produced a *different*
+    hash for this PR's code on the same fixture — same row count (1880) both
+    times, only the hash bytes moved. Reproduced locally: this exact fixture,
+    run against BOTH 033ca3e's tier4.py and this PR's, gives back the two
+    pinned hashes bit-for-bit on a dev machine, so the pin itself was sound
+    there — it is CI's runner that disagrees with it. The fit here
+    (``_Ridgeless`` via ``np.linalg.lstsq``, an SVD path) runs on OpenBLAS
+    built with ``DYNAMIC_ARCH``, which picks its kernel per CPU
+    microarchitecture at runtime; a different kernel on CI's runner than on
+    whatever machine computed the pin can return numerically-equivalent but
+    bit-different floats, which is enough to move a byte-hash without moving
+    a single value's meaning. A hash pinned from one machine's run is not
+    something any *other* machine's run of the identical code is obliged to
+    reproduce.
+
+    So instead of a hash pinned to one past machine, ``main``'s code
+    (frozen as of commit 033ca3e, before this PR, in
+    ``tests/fixtures/tier4_pre_gapfill_main_snapshot.py``) is loaded and run
+    IN THIS SAME PROCESS, and its output is compared directly against this
+    PR's code's output. Whatever kernel the machine running the test picks,
+    it picks the same one for both sides, so the comparison is robust to the
+    runner regardless of its CPU. It still fails if the gap-fill change
+    moves a row on an ordinary gap-free night — see
+    ``TestGapFreeNightMatchesMain`` mutation check in the PR body.
+    """
+
+    @staticmethod
+    def _load_main_module():
+        import importlib.util
+        import sys
+
+        path = Path(__file__).resolve().parent / "fixtures" / "tier4_pre_gapfill_main_snapshot.py"
+        spec = importlib.util.spec_from_file_location(
+            "tests_tier4_pre_gapfill_main_snapshot", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        # Registered in sys.modules before exec: the frozen module declares
+        # dataclasses, and `dataclasses` resolves a class's module via
+        # `sys.modules[cls.__module__]` — it must already be there.
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        module.FIRST_FOLD = pd.Timestamp("2013-01-01")
+        return module
+
+    def test_a_full_rebuild_matches_main(self, panel, built):
+        main = self._load_main_module()
+        expected = main.build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None,
+        )
+        assert len(built) == 1880
+        assert len(expected) == 1880
+        pd.testing.assert_frame_equal(built, expected)
+
+    def test_a_gap_free_incremental_build_matches_main(self, panel, built):
+        incr = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=built,
+            tier3_snapshot="snap", log=lambda _m: None,
+        )
+        main = self._load_main_module()
+        main_built = main.build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None,
+        )
+        main_incr = main.build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=main_built,
+            tier3_snapshot="snap", log=lambda _m: None,
+        )
+        assert len(incr) == 1880
+        pd.testing.assert_frame_equal(incr, main_incr)

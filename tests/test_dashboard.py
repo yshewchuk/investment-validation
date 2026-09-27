@@ -2125,6 +2125,8 @@ class TestTheNightlyRebuildsTheTiers:
         assert block.index("computed_moves") < block.index("rebuild_tables(("), \
             "realized moves must be refreshed before the tiers that read them"
         assert "moves_degraded" in block, "a failed moves refresh has to raise a flag"
+        assert "tier4_gap_partial" in block, \
+            "an out-of-window gap-fill skip has to raise a flag too, not just a degrade"
 
 
 class TestAssetCacheBusting:
@@ -2223,3 +2225,58 @@ class TestPanelStalenessGuard:
         monkeypatch.setattr("engine.features.load_panel", boom)
         flags = n._panel_staleness_flags("2026-09-10")
         assert [f["kind"] for f in flags] == ["panel_coverage_unknown"]
+
+
+class TestTier4GapPartialFlag:
+    """The count in `tier4_gap_partial` must be DISTINCT (ticker, event_date)
+    keys, not the sum of each producer's `out_of_window_gap` list — the same
+    keys are named in every producer's list (they all read one on-disk
+    table), so summing overcounts by a factor of however many producers are
+    wired: 3 real events across 4 producers must report as 3, not 12.
+    """
+
+    def test_the_same_three_events_across_four_producers_count_as_three(self):
+        from engine.dashboard.nightly import _tier4_gap_partial_flag
+
+        gap = [
+            {"ticker": "HR", "event_date": "2021-02-10"},
+            {"ticker": "HR", "event_date": "2021-08-04"},
+            {"ticker": "HR", "event_date": "2021-11-03"},
+        ]
+        gap_fill = {
+            "pred_abs_move": {"out_of_window_gap": list(gap)},
+            "pred_im_t1_d14": {"out_of_window_gap": list(gap)},
+            "pred_runup_abs_move_d14": {"out_of_window_gap": list(gap)},
+            "pred_iv_crush_30": {"out_of_window_gap": list(gap)},
+        }
+        flag = _tier4_gap_partial_flag(gap_fill)
+        assert flag is not None
+        assert flag["kind"] == "tier4_gap_partial"
+        assert "3 event(s)" in flag["detail"], flag["detail"]
+        assert "12 event(s)" not in flag["detail"]
+
+    def test_no_out_of_window_gap_returns_none(self):
+        from engine.dashboard.nightly import _tier4_gap_partial_flag
+
+        assert _tier4_gap_partial_flag({}) is None
+        assert _tier4_gap_partial_flag({"pred_abs_move": {"skipped_folds": []}}) is None
+
+    def test_the_detail_no_longer_calls_the_gap_a_null_forecast(self):
+        """The old wording said the unfilled event(s) carried a null
+        forecast; the fix is that they are ABSENT, not a null row — the
+        message must not claim the opposite of what the code now does."""
+        from engine.dashboard.nightly import _tier4_gap_partial_flag
+
+        gap_fill = {"pred_abs_move": {"out_of_window_gap": [
+            {"ticker": "HR", "event_date": "2021-02-10"},
+        ]}}
+        flag = _tier4_gap_partial_flag(gap_fill)
+
+        # Compare against the COMPLETE expected message built from the same
+        # inputs above (1 producer, 1 event) — a substring/either-or check
+        # can pass on contradictory wording; an exact match cannot.
+        expected = ("Tier 4 gap-fill left 1 event(s) beyond its backfill "
+                    "window unfilled (absent from the table, not a null "
+                    "forecast row) in ['pred_abs_move']; a full Tier-4 "
+                    "rebuild with no --since closes out-of-window gaps.")
+        assert flag["detail"] == expected

@@ -35,6 +35,7 @@ tests changed since the last run, and writes ``prerun-snapshot.json`` so
 from __future__ import annotations
 
 import argparse
+import ast
 import filecmp
 import fnmatch
 import hashlib
@@ -180,6 +181,635 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
     return expand(module_cfg(cfg, name).get("tests", []), tracked)
 
 
+# -- PR module selection: module ownership, transitive dependency, else the --
+# -- inert allowlist, else every enabled module (never zero for an          --
+# -- unrecognized path) -------------------------------------------------------
+#
+# `changed_modules` decides, per pull_request run, which enabled modules a
+# changed-file list can affect. The rule is "select ALL unless proven safe to
+# skip", never the reverse: a changed path that doesn't match a currently-
+# listed shape is not evidence it cannot affect a module, so it must never
+# quietly select zero modules. Per changed path, in order:
+#   1. some ENABLED module's own `mutate`/`tests` patterns match it
+#      (`module_owns_changed_path`, checked against the bare path string, so
+#      a deleted/renamed-away owned file still matches), OR the path is in
+#      that module's DEPENDENCY SET (`module_dependency_closure`: the
+#      transitive closure, over a static `ast` import graph of every tracked
+#      `.py` file (including `conftest.py` closure roots and the one literal
+#      `importlib.import_module("x.y")` shape -- `__import__`, in any form,
+#      is always dynamic now), of the imports
+#      reachable from the module's own `mutate` files plus its `tests` files) -> that
+#      module is selected. A module that OWNS a changed path is not
+#      necessarily the only one whose DEPENDENCY SET contains it: e.g.
+#      engine/v2/foundation/artifacts.py is owned by `foundation`, but every
+#      module whose tests or sources import `engine.v2.foundation`
+#      (transitively, through that package's `__init__.py`, which re-exports
+#      names from `artifacts.py`) has it in their dependency set too, and is
+#      selected alongside `foundation`.
+#   2. else it is on the small, docs-only inert allowlist
+#      (`tools/mutation_pilot.toml`'s `[pr_selection] inert`, minus
+#      `[pr_selection] inert_skip`) -> it selects nothing.
+#   3. else (unrecognized: no ENABLED module owns or transitively depends on
+#      it, and it is not inert) -> every requested module is selected,
+#      immediately, for the whole changed-file list.
+# An EXCLUDED module's ownership (e.g. `contracts` owning
+# `engine/v2/__init__.py`) does NOT count as "some module owns it" in step 1
+# -- an excluded module never runs, so a path only an excluded module claims
+# is exactly as unexplained as one no module claims, and must still fall
+# through to "select everything". Excluded modules are never given a
+# dependency set either (`module_dependency_closure` is only computed for
+# `enabled_modules(cfg)`).
+#
+# Fail safe: if the import graph cannot be built (any tracked `.py` file
+# fails to parse -- including a changed file with a syntax error, since the
+# graph is built from the current on-disk tree -- or any
+# other exception while building it), `changed_modules` selects every
+# requested module immediately and prints why, rather than silently falling
+# back to ownership-only selection.
+#
+# This governs both backends (gremlin_pilot.select_modules delegates to this
+# function unchanged) and, by the same "unrecognized -> everything" rule,
+# selects every enabled module when a PR changes the selector itself:
+# tools/mutation_pilot.py, tools/gremlin_pilot.py, tools/mutation_results.py,
+# tools/mutation_pilot.toml, or either mutation workflow file are none of
+# them module-owned, dependency-owned, or on the inert allowlist.
+
+def is_inert_changed_path(cfg: dict, path: str) -> bool:
+    """True if `path` matches the PR-selection inert allowlist
+    (`tools/mutation_pilot.toml`'s `[pr_selection] inert`, fnmatch patterns
+    where `*` also matches `/`, same convention as `mutate`/`tests`/`skip`)
+    and does NOT match `[pr_selection] inert_skip` (patterns carved back out
+    of the allowlist: e.g. a `.md` file under `engine/dashboard/static/` would
+    be a fingerprinted code asset, not documentation, if a future `inert`
+    pattern ever widened to reach it again). Kept small and docs-only on
+    purpose: anything the
+    mutation-tested code (engine/v2) might read at runtime, or a test might
+    load as a fixture, must NOT be on this list, or a real defect could hide
+    behind a skipped run. Checked against the bare path string, so a
+    deleted/renamed-away inert file still matches."""
+    section = cfg.get("pr_selection", {})
+    if any(fnmatch.fnmatchcase(path, pat) for pat in section.get("inert_skip", [])):
+        return False
+    return any(fnmatch.fnmatchcase(path, pat) for pat in section.get("inert", []))
+
+
+def read_changed_files(path: str) -> list[str]:
+    """NUL-delimited changed-file list (``git diff -z --name-only`` output),
+    empty tokens dropped. An empty/blank ``path`` returns ``[]`` -- "no
+    --changed-files given" is a deliberate no-op the caller decides the
+    meaning of. A NON-BLANK path that is not an existing file (missing, or a
+    directory) is refused with a clear error, never silently ``[]``: that
+    shape is an operator/workflow bug (a bad --changed-files argument), and
+    ``changed_modules([])`` treats an empty list as "select nothing", so
+    swallowing the bad path would silently produce an empty CI matrix and
+    skip every mutation job without ever failing.
+
+    NUL-delimited, not newline-delimited: ``-z`` disables git's C-style
+    quoting of paths with unusual bytes, so a non-ASCII or otherwise unusual
+    path comes through as its literal bytes instead of a quoted escape
+    sequence a newline-based reader would have to un-escape. Tokens are not
+    otherwise stripped: only an empty token (e.g. from a trailing NUL) is
+    dropped."""
+    if not path or not path.strip():
+        return []
+    p = Path(path)
+    if not p.is_file():
+        sys.exit(f"--changed-files {path!r} is not a file (missing, or a "
+                 f"directory); refusing rather than silently selecting no modules")
+    raw = p.read_bytes().decode("utf-8", "surrogateescape")
+    return [tok for tok in raw.split("\0") if tok]
+
+
+def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
+    """True if ``path`` matches module ``name``'s configured ``tests`` or
+    ``mutate`` (minus ``skip``) glob patterns, checked directly against the
+    path string -- independent of whether ``path`` is currently tracked.
+    ``mutate_files``/``test_files`` only return currently-tracked paths (via
+    ``expand``'s ``tracked`` list), so a DELETED source or test file that
+    still matches its module's own pattern would otherwise never select that
+    module, even though ``git diff --name-only`` reports the deletion."""
+    mod = module_cfg(cfg, name)
+    if any(fnmatch.fnmatchcase(path, pat) for pat in mod.get("tests", [])):
+        return True
+    if any(fnmatch.fnmatchcase(path, pat) for pat in mod["mutate"]) and \
+            not any(fnmatch.fnmatchcase(path, pat) for pat in mod.get("skip", [])):
+        return True
+    return False
+
+
+# -- reverse import closure: what could a changed file affect? ---------------
+#
+# `build_import_graph` parses (never executes) EVERY git-tracked `.py` file
+# in the repo with `ast`, and classifies each one STATIC or DYNAMIC by an
+# ALLOWLIST, not a denylist (`_is_dynamic_file`): a file is STATIC only if
+# every import-affecting construct in it is one of exactly three shapes --
+# a plain `import x.y [as z]`/`from x.y import z` (including a relative
+# import), resolved to a repo file the same way as before (`import x.y`/
+# `from x.y import z` resolve the dotted name `x.y` to `x/y.py`, or, if that
+# is a package, to `x/y/__init__.py`; a relative import resolves against the
+# importing file's own package first; a dotted name only resolves to a graph
+# node when its own top-level component is a tracked top-level package --
+# `_tracked_roots`, computed fresh from the tracked file list every run,
+# with no hand-kept allowlist to fall out of date -- so a stdlib or
+# third-party import's top-level name is simply never a candidate); the
+# single literal call `importlib.import_module("<absolute.name>")`
+# (`_allowed_import_module_call`); or a plain, unannotated
+# `pytest_plugins = [...]` assignment of string literals, at a conftest.py's
+# top level only (`_pytest_plugins_targets`). A file is DYNAMIC -- and
+# depends on EVERY OTHER TRACKED FILE, no narrower edge attempted -- the
+# moment its AST references, in ANY form (an import, an alias, an attribute
+# access, or a bare name), `sys.path`, `site`, `runpy`, `subprocess`,
+# `multiprocessing`, `pkgutil`, a dynamic-exec `os` function, `importlib`
+# used any way other than the one literal shape, or one of a short list of
+# standalone dangerous names -- see `_is_dynamic_file` for the exact list.
+# `subprocess` and every loader construct (`spec_from_file_location`,
+# `SourceFileLoader`, `runpy.run_path`) are dropped ENTIRELY as of this
+# round: no static resolution of a subprocess target or a loader's
+# file-path argument is attempted any more, literal or not -- any reference
+# fails the whole file safe outright.
+#
+# This is conservative for the known set of constructs above, NOT sound in
+# general: see https://github.com/yshewchuk/investment-validation/issues/42
+# for constructs it does not recognize at all (string-target
+# monkeypatch.setattr/mock.patch, pytest.importorskip, getattr-based
+# imports of importlib/sys, __import__ via globals()/builtins, asyncio
+# subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
+# outside a conftest.py or under an `if`, and `from pkg import *`
+# re-exports). None of that matters today: `tests/conftest.py` itself
+# always classifies DYNAMIC (its own `sys.path.insert`), every test file's
+# closure includes `tests/conftest.py`, and so every non-inert PR change
+# already selects all enabled modules regardless of those holes. A
+# synthetic-tree test in `tests/test_mutation_ci.py` fails loudly, naming
+# issue #42, the moment `tests/conftest.py` stops classifying DYNAMIC.
+def _tracked_roots(tracked_set: set[str]) -> set[str]:
+    """Every top-level package/module name present in `tracked_set` -- the
+    first path segment of each tracked `.py` file (or, for a tracked file
+    directly at the repo root with no `/`, its name minus `.py`). A dotted
+    import only resolves to a graph node when its own top-level component is
+    one of these, so a stdlib or third-party import (whose top-level name is
+    never a tracked directory) is never mistaken for a repo file. Computed
+    fresh from the tracked file list every time `build_import_graph` runs --
+    there is NO hand-kept allowlist, so a new top-level package (a future
+    `dashboard/`, `scripts/`, ...) is picked up automatically and can never
+    be silently missed the way `_GRAPH_ROOTS` (removed by this change) could
+    be."""
+    roots: set[str] = set()
+    for p in tracked_set:
+        parts = p.split("/", 1)
+        top = parts[0]
+        if len(parts) == 1:
+            top = top[:-3] if top.endswith(".py") else top
+        roots.add(top)
+    return roots
+
+
+def _resolve_dotted(dotted: str, tracked_set: set[str], roots: set[str]) -> str | None:
+    """`dotted` (e.g. "engine.v2.foundation" or "checks.phase4_frozen_bridge")
+    resolved to a tracked repo file, or None. A package name resolves to its
+    `__init__.py`; a dotted name whose top-level component is not in `roots`
+    (not a tracked top-level package) is out of scope."""
+    if not dotted:
+        return None
+    parts = dotted.split(".")
+    if parts[0] not in roots:
+        return None
+    as_module = "/".join(parts) + ".py"
+    if as_module in tracked_set:
+        return as_module
+    as_package = "/".join(parts) + "/__init__.py"
+    if as_package in tracked_set:
+        return as_package
+    return None
+
+
+def _relative_base(rel: str, level: int) -> str | None:
+    """The dotted package name `level` steps up from the package containing
+    `rel` (`ast.ImportFrom.level`: 1 means "this package", matching Python's
+    own relative-import semantics -- the package containing a plain module OR
+    a package's own `__init__.py` is the dotted name of its parent directory
+    either way). None if `level` climbs above the tracked tree's own root
+    (an import this graph cannot resolve)."""
+    dir_parts = rel.split("/")[:-1]
+    climb = level - 1
+    if climb > len(dir_parts):
+        return None
+    return ".".join(dir_parts[: len(dir_parts) - climb])
+
+
+def _join_dotted(base: str, tail: str | None) -> str:
+    if not tail:
+        return base
+    return f"{base}.{tail}" if base else tail
+
+
+def _ancestor_package_inits(dotted: str, tracked_set: set[str]) -> set[str]:
+    """Every tracked `__init__.py` of `dotted`'s STRICT ancestor packages
+    (excluding `dotted` itself). Python always runs a package's `__init__.py`
+    before any of its submodules, for both `import a.b.c` and
+    `from a.b import c` -- `build_import_graph` must add those edges too, or
+    a change to `a/__init__.py` looks unrelated to code that only ever
+    imports `a.b.c` directly."""
+    parts = dotted.split(".")
+    out: set[str] = set()
+    for i in range(1, len(parts)):
+        init = "/".join(parts[:i]) + "/__init__.py"
+        if init in tracked_set:
+            out.add(init)
+    return out
+
+
+_DYNAMIC_MODULES = {"site", "runpy", "subprocess", "multiprocessing", "pkgutil"}
+# "importlib" and "sys" are handled separately below: importing them plainly
+# is fine (needed for the one allowed import_module shape, and `import sys`
+# by itself is inert on its own) -- only specific attributes/names of theirs
+# are banned.
+
+_OS_DYNAMIC_ATTRS = {
+    "system", "popen",
+    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+    "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+}
+
+_DYNAMIC_NAMES = {
+    "__import__", "syspath_prepend", "addsitedir", "PYTHONPATH",
+    "exec", "eval", "compile", "spec_from_file_location", "SourceFileLoader",
+}
+
+
+def _bound_aliases(tree: ast.Module, module: str) -> set[str]:
+    """Every name this file binds to the top-level module `module` via a
+    plain `import module` or `import module as X`, wherever it appears (not
+    just at the top level) -- so `import sys as s` is recognized as binding
+    `sys` to `s`, and a later `s.path` reference is caught exactly like
+    `sys.path` would be. Does not follow `from module import x`; callers
+    check those `ast.ImportFrom` nodes directly instead."""
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == module:
+                    aliases.add(alias.asname or alias.name)
+    return aliases
+
+
+def _looks_like_import_module_call(func: ast.expr) -> bool:
+    """True if `func` (a `Call.func`) is an attribute access named
+    `import_module` (`importlib.import_module`, an aliased base, ...) or a
+    bare name `import_module` (after any `from ... import import_module`).
+    `_is_dynamic_file` uses this to recognize "this call is an ATTEMPT at
+    the one allowed shape" so it can fail the whole file safe on every
+    attempt that isn't EXACTLY that shape, rather than silently treating it
+    like an unrelated function call."""
+    return (isinstance(func, ast.Attribute) and func.attr == "import_module") \
+        or (isinstance(func, ast.Name) and func.id == "import_module")
+
+
+def _allowed_import_module_call(node: ast.Call) -> str | None:
+    """The literal absolute dotted target of `node`, if `node` is EXACTLY
+    `importlib.import_module("<literal>")`: an unaliased attribute access on
+    a bare `importlib` name, a single positional string-literal argument
+    with no leading dot (an absolute name), and no other positional or
+    keyword argument at all -- a `package=` keyword, or a second positional
+    argument however spelled, means the literal could be package-relative,
+    which this never attempts to resolve. None for every other shape,
+    including one that merely LOOKS like this call (an aliased `importlib`,
+    a bare `import_module` after a `from` import, `importlib.__import__`,
+    ...) -- `_is_dynamic_file` is what turns a None here into a whole-file
+    fail-safe, not this function."""
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "import_module"
+            and isinstance(func.value, ast.Name) and func.value.id == "importlib"):
+        return None
+    if len(node.args) != 1 or node.keywords:
+        return None
+    arg = node.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+            and not arg.value.startswith("."):
+        return arg.value
+    return None
+
+
+def _is_dynamic_file(tree: ast.Module) -> bool:
+    """True if `tree` contains ANY construct outside the narrow allowlist
+    `build_import_graph` resolves exactly (a plain import, the one literal
+    `import_module` shape, or a conftest.py's plain `pytest_plugins`
+    assignment -- checked separately). This tests AST node types and names
+    DIRECTLY, never a call-shape pattern match, so it trips the moment the
+    file references, in ANY form -- an import, an alias, an attribute
+    access, or a bare name -- any of:
+      - `sys.path`, however `sys` got bound (`_bound_aliases`), including
+        `from sys import path`;
+      - the modules `site`, `runpy`, `subprocess`, `multiprocessing`,
+        `pkgutil` (importing one AT ALL is enough, used or not);
+      - a dynamic-exec `os` function (`os.system`, `os.exec*`, `os.spawn*`,
+        `os.popen`), however `os` got bound;
+      - `importlib` used any way OTHER than the one literal `import_module`
+        shape (`_allowed_import_module_call`) -- including an aliased
+        `importlib` import, any `from importlib import ...`, and any other
+        `importlib.*` attribute (`importlib.util`, `importlib.reload`,
+        `importlib.__import__`, ...);
+      - the standalone names `__import__`, `syspath_prepend`, `addsitedir`,
+        `PYTHONPATH`, `exec`, `eval`, `compile`, `spec_from_file_location`,
+        `SourceFileLoader` -- as an import, an attribute, or a bare name.
+    Also true for an ANNOTATED `pytest_plugins` assignment ANYWHERE
+    (`ast.AnnAssign`) -- only a plain, unannotated one, at a conftest.py's
+    top level, is the allowed shape (checked by `_pytest_plugins_targets`,
+    called only for conftest.py).
+
+    `subprocess` is dropped ENTIRELY as of this round: earlier rounds tried
+    to tell a Python-launching subprocess call from any other one, and a
+    launched script's own path from an unresolvable one. That added
+    complexity for no real gain -- every module that reaches a `subprocess`
+    call already reaches `tests/conftest.py`'s own `sys.path.insert`, which
+    already fails safe -- so any reference to the module now fails the
+    whole file safe outright, with no attempt at a narrower edge. Loader
+    constructs (`spec_from_file_location`, `SourceFileLoader`, `runpy`) get
+    the same treatment: no static path evaluation is attempted for any of
+    them any more, literal or not."""
+    sys_aliases = _bound_aliases(tree, "sys") | {"sys"}
+    os_aliases = _bound_aliases(tree, "os") | {"os"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in _DYNAMIC_MODULES:
+                    return True
+                if top == "importlib" and alias.asname is not None:
+                    return True  # an aliased `importlib` can't reach the one allowed shape
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            top = module.split(".")[0] if module else ""
+            if top in _DYNAMIC_MODULES or top == "importlib":
+                return True  # every from-importlib import, no exceptions
+            if top == "sys" and any(a.name == "path" for a in node.names):
+                return True
+            if top == "os" and any(a.name in _OS_DYNAMIC_ATTRS for a in node.names):
+                return True
+            if any(a.name in _DYNAMIC_NAMES for a in node.names):
+                return True
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _DYNAMIC_NAMES or node.attr in _DYNAMIC_MODULES:
+                return True
+            if node.attr == "path" and isinstance(node.value, ast.Name) \
+                    and node.value.id in sys_aliases:
+                return True
+            if node.attr in _OS_DYNAMIC_ATTRS and isinstance(node.value, ast.Name) \
+                    and node.value.id in os_aliases:
+                return True
+            if isinstance(node.value, ast.Name) and node.value.id == "importlib" \
+                    and node.attr != "import_module":
+                return True
+        elif isinstance(node, ast.Name):
+            if node.id in _DYNAMIC_NAMES or node.id in _DYNAMIC_MODULES:
+                return True
+        elif isinstance(node, ast.Constant) and node.value == "PYTHONPATH":
+            return True
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id == "pytest_plugins":
+                return True
+        elif isinstance(node, ast.Call) and _looks_like_import_module_call(node.func):
+            if _allowed_import_module_call(node) is None:
+                return True
+    return False
+
+
+def _pytest_plugins_targets(tree: ast.Module) -> tuple[bool, list[str] | None]:
+    """(found, literal_dotted_names) for a module-level, UNANNOTATED
+    `pytest_plugins = ...` assignment -- pytest imports every name in this
+    list as a plugin BEFORE collecting or running any test, an execution
+    path `build_import_graph`'s ordinary import/call walk never sees on its
+    own. `found` is False if `tree`'s top level has no such assignment
+    (including only an augmented one, `pytest_plugins += [...]`, which this
+    never resolves -- see below). When found, `literal_dotted_names` is the
+    assigned names IF the value is a literal string or a literal list/tuple
+    of literal strings; None if it is anything else (a variable, a list
+    containing anything non-literal, a computed expression, an `AugAssign`,
+    ...) -- `build_import_graph` marks the WHOLE FILE dynamic for a None
+    here, the same as any other unresolvable construct. Only `tree`'s
+    TOP-LEVEL statements are scanned -- a `pytest_plugins` assigned inside a
+    function or an `if` block is not pytest's own collection hook either.
+    An ANNOTATED assignment (`pytest_plugins: list[str] = [...]`) is not
+    handled here at all -- it is an `ast.AnnAssign`, not an `ast.Assign`,
+    and `_is_dynamic_file` catches it separately, unconditionally, since it
+    is outside the allowlist's exact shape regardless of literal-ness."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in node.targets):
+            value = node.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return (True, [value.value])
+            if isinstance(value, (ast.List, ast.Tuple)):
+                names: list[str] = []
+                for elt in value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        names.append(elt.value)
+                    else:
+                        return (True, None)
+                return (True, names)
+            return (True, None)
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) \
+                and node.target.id == "pytest_plugins":
+            return (True, None)
+    return (False, None)
+
+
+def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
+    """Static import graph over EVERY git-tracked `.py` file in the repo (no
+    hand-kept root allowlist -- see `_tracked_roots`): maps each file to the
+    set of tracked files it imports, via `import`/`from ... import`
+    (resolved by `_resolve_dotted`) AND via the one allowed
+    `importlib.import_module("x.y")` shape (`_allowed_import_module_call`
+    then `_resolve_dotted`), PLUS the tracked `__init__.py` of every strict
+    ancestor package of each resolved import (`_ancestor_package_inits`) --
+    Python always runs a package's `__init__.py` before any of its
+    submodules, so `import engine.pkg.inner` depends on
+    `engine/pkg/__init__.py` even when neither the import statement nor
+    `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`.
+
+    A file that is DYNAMIC by `_is_dynamic_file`'s allowlist (or has a
+    non-literal/annotated conftest.py `pytest_plugins`) skips this precise
+    resolution entirely and instead depends on EVERY OTHER TRACKED FILE
+    (`edges |= tracked_set - {rel}`), never a narrower guess. This
+    classification is conservative for the constructs `_is_dynamic_file`
+    recognizes, NOT sound in general -- see
+    https://github.com/yshewchuk/investment-validation/issues/42 for
+    constructs it misses entirely (string-target monkeypatch/mock.patch,
+    pytest.importorskip, getattr-based imports, __import__ via
+    globals()/builtins, asyncio subprocess-exec calls, __path__/meta_path
+    edits, pytest_plugins outside a conftest.py, `from pkg import *`).
+    Today `tests/conftest.py` itself is always DYNAMIC (its own
+    `sys.path.insert`), so every test file's closure already includes it
+    and every non-inert change already selects every enabled module -- the
+    holes in issue #42 are masked by that fail-safe until something narrows
+    selection past it. Every tracked file is a key, even one with no
+    resolvable imports (an empty set), so `module_dependency_closure` can
+    always look it up. Raises `SyntaxError` (via `ast.parse`) on the first
+    file that fails to parse -- a real syntax error in the current tree,
+    never swallowed into a silently partial graph; `changed_modules` treats
+    that as "select every module"."""
+    tracked = tracked if tracked is not None else [
+        p for p in _tracked(["."]) if p.endswith(".py")]
+    tracked_set = set(tracked)
+    roots = _tracked_roots(tracked_set)
+    graph: dict[str, set[str]] = {rel: set() for rel in tracked}
+    for rel in tracked:
+        source = (REPO / rel).read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source, filename=rel)
+        except SyntaxError as exc:
+            raise SyntaxError(f"{rel}: {exc}") from exc
+        edges = graph[rel]
+        dynamic = _is_dynamic_file(tree)
+        if rel.rsplit("/", 1)[-1] == "conftest.py":
+            found, dotted_names = _pytest_plugins_targets(tree)
+            if found:
+                if dotted_names is None:
+                    dynamic = True
+                else:
+                    for dotted in dotted_names:
+                        target = _resolve_dotted(dotted, tracked_set, roots)
+                        if target:
+                            edges.add(target)
+                        edges |= _ancestor_package_inits(dotted, tracked_set)
+        if not dynamic:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        target = _resolve_dotted(alias.name, tracked_set, roots)
+                        if target:
+                            edges.add(target)
+                        edges |= _ancestor_package_inits(alias.name, tracked_set)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level:
+                        base = _relative_base(rel, node.level)
+                        dotted = _join_dotted(base, node.module) if base is not None else None
+                    else:
+                        dotted = node.module or ""
+                    if dotted:
+                        target = _resolve_dotted(dotted, tracked_set, roots)
+                        if target:
+                            edges.add(target)
+                        edges |= _ancestor_package_inits(dotted, tracked_set)
+                        for alias in node.names:
+                            sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set, roots)
+                            if sub:
+                                edges.add(sub)
+                elif isinstance(node, ast.Call):
+                    target = _allowed_import_module_call(node)
+                    if target:
+                        resolved = _resolve_dotted(target, tracked_set, roots)
+                        if resolved:
+                            edges.add(resolved)
+                        edges |= _ancestor_package_inits(target, tracked_set)
+        if dynamic:
+            edges |= tracked_set - {rel}
+    return graph
+
+
+def _conftest_ancestors(rel: str, tracked_set: set[str]) -> set[str]:
+    """Every tracked `conftest.py` in `rel`'s own directory or any ancestor
+    directory up to the repo root -- pytest applies every one of these to a
+    test file, so a change reachable only through a conftest.py's OWN
+    imports (not the test file's) can still affect that test's behavior.
+    `rel` is expected to be a test file path; a `conftest.py` at the repo
+    root itself is included when tracked."""
+    parts = rel.split("/")[:-1]
+    out: set[str] = set()
+    for i in range(len(parts), -1, -1):
+        candidate = "/".join(parts[:i] + ["conftest.py"]) if parts[:i] else "conftest.py"
+        if candidate in tracked_set:
+            out.add(candidate)
+    return out
+
+
+def _closure_roots(mod: dict, tracked_set: set[str]) -> set[str]:
+    """Module `mod`'s own `tests`/`mutate` (minus `skip`) glob patterns,
+    expanded against `tracked_set`, PLUS every tracked `conftest.py` that
+    applies to one of its `tests` files (`_conftest_ancestors`) -- a
+    conftest.py's own imports become part of the closure even though the
+    conftest file itself never matches a `mutate`/`tests` pattern. Unlike
+    `expand`, a pattern matching nothing here is NOT an error: this powers
+    dependency-closure roots, which must tolerate a `tracked_set` that does
+    not happen to contain one of the module's configured files (e.g. a
+    unit-test fixture, or a graph built from a narrower tree) without
+    raising -- ownership (`module_owns_changed_path`) is unaffected either
+    way, since it never consults a tracked list."""
+    test_pats, mutate_pats = mod.get("tests", []), mod["mutate"]
+    skip_pats = mod.get("skip", [])
+    out: set[str] = set()
+    test_hits: set[str] = set()
+    for p in tracked_set:
+        if any(fnmatch.fnmatchcase(p, pat) for pat in test_pats):
+            out.add(p)
+            test_hits.add(p)
+            continue
+        if any(fnmatch.fnmatchcase(p, pat) for pat in mutate_pats) and \
+                not any(fnmatch.fnmatchcase(p, pat) for pat in skip_pats):
+            out.add(p)
+    for t in test_hits:
+        out |= _conftest_ancestors(t, tracked_set)
+    return out
+
+
+def module_dependency_closure(cfg: dict, name: str, graph: dict[str, set[str]],
+                              tracked_set: set[str] | None = None) -> set[str]:
+    """Every file module `name` transitively imports: the closure of
+    `graph`'s edges starting from `name`'s own `mutate` files plus `tests`
+    files (`_closure_roots`). This is a FORWARD dependency set -- what
+    `name` relies on -- and `changed_modules` uses it in REVERSE: a changed
+    path in this set means code `name`'s own tests exercise has changed, so
+    `name`'s cached mutation verdict may now be stale even though `name`
+    does not OWN that path."""
+    tracked_set = tracked_set if tracked_set is not None else set(graph)
+    seen: set[str] = set()
+    stack = list(_closure_roots(module_cfg(cfg, name), tracked_set))
+    while stack:
+        f = stack.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        stack.extend(graph.get(f, ()))
+    return seen
+
+
+def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
+                    graph: dict[str, set[str]] | None = None) -> list[str]:
+    """The subset of ``names`` (already ``--only``-filtered) a changed-file
+    list selects, under the "select ALL unless proven safe to skip" rule
+    documented above. An empty ``changed`` selects nothing -- a PR with no
+    diff is not "select everything"; that is the one intentional
+    zero-selection default. Any other unrecognized path selects every name
+    in ``names``, never zero. ``graph`` is normally left ``None`` (built
+    fresh via `build_import_graph`); tests pass a small synthetic graph to
+    exercise the closure rule without depending on this repo's real files."""
+    changed_set = set(changed)
+    if not changed_set:
+        return []
+    enabled = enabled_modules(cfg)
+    if graph is None:
+        try:
+            graph = build_import_graph()
+        except Exception as exc:
+            print(f"[mutation_pilot] import graph build failed "
+                  f"({type(exc).__name__}: {exc}); selecting every enabled "
+                  f"module for the whole changed-file list", flush=True)
+            return list(names)
+    tracked_set = set(graph)
+    dep_sets = {n: module_dependency_closure(cfg, n, graph, tracked_set) for n in enabled}
+    owned: set[str] = set()
+    for path in changed_set:
+        selectors = {n for n in enabled
+                     if module_owns_changed_path(cfg, n, path) or path in dep_sets[n]}
+        if selectors:
+            owned.update(selectors)
+            continue
+        if is_inert_changed_path(cfg, path):
+            continue
+        return list(names)
+    return [n for n in names if n in owned]
+
+
 # -- work copy ---------------------------------------------------------------
 
 def _tracked(paths: list[str]) -> list[str]:
@@ -294,6 +924,9 @@ def cmd_matrix(cfg: dict, args) -> int:
         if bad:
             sys.exit(f"not enabled modules: {bad}; enabled: {', '.join(names)}")
         names = [n for n in names if n in wanted]
+    changed_files = getattr(args, "changed_files", "")
+    if changed_files and changed_files.strip():
+        names = changed_modules(cfg, names, read_changed_files(changed_files))
     print(json.dumps(names))
     return 0
 
@@ -559,6 +1192,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list")
     p = sub.add_parser("matrix", help="JSON list of enabled modules, for the CI matrix")
     p.add_argument("--only", default="", help="comma-separated subset")
+    p.add_argument("--changed-files", default="", metavar="PATH",
+                   help="path to a NUL-delimited changed-file list (git diff -z --no-renames "
+                        "--name-only); when given, a path selects every enabled module that "
+                        "owns it OR transitively depends on it (a static ast import-graph "
+                        "closure), a path on the inert allowlist selects nothing, and any "
+                        "other path selects every enabled module (never zero on an "
+                        "unrecognized change, and never zero if the import graph itself "
+                        "cannot be built); a path that is not an existing file is a hard "
+                        "failure, not a silent empty selection. Omitted/blank: unchanged "
+                        "behavior.")
     p = sub.add_parser("count")
     p.add_argument("modules", nargs="*")
     p = sub.add_parser("run")
