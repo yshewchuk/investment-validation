@@ -40,9 +40,10 @@
 #   `mutation-mutmut-report` can only ever describe the whole planned run.
 #
 # mutmut needs no cache fingerprint of its own beyond the key below: its state
-# is keyed by the backend version, Python, the toml hash and the module, and
-# every function's verdict is validated against that function's source hash
-# inside the restored state, so changed code is re-tested even on a cache hit.
+# is keyed by the backend version, Python, the per-module config-hash (see the
+# "key" step below) and the module, and every function's verdict is validated
+# against that function's source hash inside the restored state, so changed
+# code is re-tested even on a cache hit.
 name: mutation-mutmut
 
 on:
