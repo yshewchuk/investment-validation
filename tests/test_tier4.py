@@ -1500,31 +1500,76 @@ class TestGapFreeNightMatchesMain:
     """The PR's test plan promised this exactly: 'A gap-free night produces
     byte-identical output to today's code path.' A self-comparison against
     this SAME code cannot fail if the fix breaks the no-gap path — both sides
-    would move together. These hashes were computed by running
-    ``git show main:engine/data/features/tier4.py`` (commit 033ca3e, the base
-    this PR branched from, before ANY gap-fill code existed) against this
-    exact fixture, so a regression in the ordinary no-gap path — the one this
-    PR's Decision on 'Unchanged-output guarantee' says must not change at
-    all — has a real, external value to fail against.
+    would move together, so this compares against ``main``'s code instead.
+
+    This used to pin a SHA-256 of ``pd.util.hash_pandas_object`` bytes,
+    computed once by running ``git show main:engine/data/features/tier4.py``
+    (commit 033ca3e, the base this PR branched from, before ANY gap-fill code
+    existed) locally. CI (2026-09-27, run 36283149928) produced a *different*
+    hash for this PR's code on the same fixture — same row count (1880) both
+    times, only the hash bytes moved. Reproduced locally: this exact fixture,
+    run against BOTH 033ca3e's tier4.py and this PR's, gives back the two
+    pinned hashes bit-for-bit on a dev machine, so the pin itself was sound
+    there — it is CI's runner that disagrees with it. The fit here
+    (``_Ridgeless`` via ``np.linalg.lstsq``, an SVD path) runs on OpenBLAS
+    built with ``DYNAMIC_ARCH``, which picks its kernel per CPU
+    microarchitecture at runtime; a different kernel on CI's runner than on
+    whatever machine computed the pin can return numerically-equivalent but
+    bit-different floats, which is enough to move a byte-hash without moving
+    a single value's meaning. A hash pinned from one machine's run is not
+    something any *other* machine's run of the identical code is obliged to
+    reproduce.
+
+    So instead of a hash pinned to one past machine, ``main``'s code
+    (frozen as of commit 033ca3e, before this PR, in
+    ``tests/fixtures/tier4_pre_gapfill_main_snapshot.py``) is loaded and run
+    IN THIS SAME PROCESS, and its output is compared directly against this
+    PR's code's output. Whatever kernel the machine running the test picks,
+    it picks the same one for both sides, so the comparison is robust to the
+    runner regardless of its CPU. It still fails if the gap-fill change
+    moves a row on an ordinary gap-free night — see
+    ``TestGapFreeNightMatchesMain`` mutation check in the PR body.
     """
 
-    _MAIN_FULL_REBUILD_HASH = "20e852b6e73300b54c4e38919b55a57b55ddbfcfb8e3d16ca70de33ad1fa66ae"
-    _MAIN_INCREMENTAL_NO_GAP_HASH = "39fa4b79b8b4d9904dc7249012c61e3c0e61960219a1dd2fddafe182e7e381d9"
-
     @staticmethod
-    def _frame_hash(frame: pd.DataFrame) -> str:
-        import hashlib
-        b = pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes()
-        return hashlib.sha256(b).hexdigest()
+    def _load_main_module():
+        import importlib.util
+        import sys
 
-    def test_a_full_rebuild_matches_mains_pinned_hash(self, panel, built):
+        path = Path(__file__).resolve().parent / "fixtures" / "tier4_pre_gapfill_main_snapshot.py"
+        spec = importlib.util.spec_from_file_location(
+            "tests_tier4_pre_gapfill_main_snapshot", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        # Registered in sys.modules before exec: the frozen module declares
+        # dataclasses, and `dataclasses` resolves a class's module via
+        # `sys.modules[cls.__module__]` — it must already be there.
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        module.FIRST_FOLD = pd.Timestamp("2013-01-01")
+        return module
+
+    def test_a_full_rebuild_matches_main(self, panel, built):
+        main = self._load_main_module()
+        expected = main.build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None,
+        )
         assert len(built) == 1880
-        assert self._frame_hash(built) == self._MAIN_FULL_REBUILD_HASH
+        assert len(expected) == 1880
+        pd.testing.assert_frame_equal(built, expected)
 
-    def test_a_gap_free_incremental_build_matches_mains_pinned_hash(self, panel, built):
+    def test_a_gap_free_incremental_build_matches_main(self, panel, built):
         incr = build_forecasts(
             panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=built,
             tier3_snapshot="snap", log=lambda _m: None,
         )
+        main = self._load_main_module()
+        main_built = main.build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap", log=lambda _m: None,
+        )
+        main_incr = main.build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=main_built,
+            tier3_snapshot="snap", log=lambda _m: None,
+        )
         assert len(incr) == 1880
-        assert self._frame_hash(incr) == self._MAIN_INCREMENTAL_NO_GAP_HASH
+        pd.testing.assert_frame_equal(incr, main_incr)
