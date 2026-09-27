@@ -31,14 +31,20 @@ later change.
 
 The package's declared public interface (enforced by `checks/package_readmes.py`
 against the real import graph; see `README.md`'s `<!-- public-interface: -->`
-directive) is, by module:
+directive) is, by module, for every module that exists in the tree today.
+`nightly_source_bundle.py` is listed separately below the table: this PR's
+first push is design-only (the doc you are reading), so that module is a
+**proposed** contract, not yet code, not yet in the tree, and not yet added
+to `README.md`'s machine-checked directive — adding it there before the
+module exists would make that check pass on a name nothing implements. The
+table below documents only modules that exist; the paragraph after it
+documents the proposal.
 
 | Module | Owns |
 |---|---|
 | `application.py` | The scoring kernel: `score_one`, `score_many`, `score_batch`, `score_event`, `score_frozen`, `replay`. |
 | `stages.py` | `NativeScoreInputs`, `StageReceipt`, `StageObservation`, `receipt()`, `flags_refuse()`, `assemble_native_values()` — the ~90 stage helpers that implement every stage of the execution graph. |
 | `source_inputs.py` | `SourceBundle`, `build_native_score_inputs()`, `SUPPORTED_STRATEGIES`, `fold_pool()` — the answer-free source boundary. |
-| `nightly_source_bundle.py` (new) | `assemble_nightly_source_bundle()`, `quote_domain_map()`, `validated_as_of()`, `NightlySourceBundleRefusal` — the per-night, per-(ticker, event) `SourceBundle` field assembler described below. |
 | `chooser_inputs.py` | `chooser_block()`, `frozen_chooser_block()` — the DYN-SV chooser block of a `SourceBundle`. |
 | `compatibility.py` | `score_legacy_request()` — the one narrow legacy-scoring seam used while native stages are extracted; the only module in this package that imports legacy `engine.*` (done lazily, inside the function). |
 | `financial.py` | `entry_cost_pct()`, `financial_diagnostics()` — financial values independent of display formatting. |
@@ -53,6 +59,15 @@ directive) is, by module:
 | `native_gate_features.py` | Derived gate/chooser feature columns (forecast interval, analog summary). |
 | `native_payoff.py` | Answer-free reproduction of legacy's payoff-calibration/model layer; also imported by `engine/v2/models/training` (layer 6) for its pure fitting math. |
 | `native_residuals.py` | Reads a frozen residual artifact inside a score request, after a causal-key check. |
+
+**Proposed (not yet implemented — code lands in a follow-up push to this
+PR, per this repo's Design-first flow):** `nightly_source_bundle.py` will
+own `assemble_nightly_source_bundle()`, `quote_domain_map()`,
+`validated_as_of()`, and `NightlySourceBundleRefusal` — the per-night,
+per-(ticker, event) `SourceBundle` field assembler described in Inputs/
+Outputs/Failure semantics below. Once implemented, its symbols join
+`README.md`'s `<!-- public-interface: -->` directive alongside the table
+above, in the same push as the code.
 
 ## Inputs
 
