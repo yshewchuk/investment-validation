@@ -262,6 +262,29 @@ def run_forward_calendar_worker(parameters, root, *, refresh_callback=None) -> d
         failure_message="forward calendar refresh did not produce complete coverage")
 
 
+def _validate_calendar_moves_coverage(params: CalendarMovesParameters, result) -> None:
+    """Same contract as ``incremental_data._validate_refresh_coverage``, but
+    set-based rather than ordered-tuple: neither calendar/moves store
+    promises to return ``completed_ids`` in the caller's ``expected_ids``
+    order (both sort internally on their "complete" paths, and
+    ``computed_moves_store``'s nothing-rebuilt noop path orders by its own
+    catalog scan) -- an ordered comparison would fail a correctly covered,
+    already-committed result on order alone.
+    """
+    expected = set(params.expected_ids)
+    completed = result.completed_ids
+    if len(set(completed)) != len(completed):
+        raise fail("VALIDATION_FAILED", "calendar/moves refresh coverage differs",
+                   details={"field": "completed_ids"})
+    if result.status in ("complete", "noop"):
+        if set(completed) != expected:
+            raise fail("VALIDATION_FAILED", "calendar/moves refresh coverage differs",
+                       details={"field": "completed_ids"})
+    elif not set(completed).issubset(expected):
+        raise fail("VALIDATION_FAILED", "incomplete refresh reported unknown coverage",
+                   details={"field": "completed_ids"})
+
+
 def _run_calendar_moves_worker(params: CalendarMovesParameters, root, *, kind, result_path,
                                schema, callback, failure_message) -> dict:
     """Every argument the two public worker functions above already resolved:
@@ -280,7 +303,7 @@ def _run_calendar_moves_worker(params: CalendarMovesParameters, root, *, kind, r
 
     result = incremental_data.validate_refresh_result_document(callback(params, root))
     incremental_data._validate_refresh_binding(params, result)
-    incremental_data._validate_refresh_coverage(params, result)
+    _validate_calendar_moves_coverage(params, result)
     incremental_data._validate_refresh_status(result)
     Path(root).joinpath(result_path).write_text(canonical_json(
         incremental_data.refresh_result_document(result)))

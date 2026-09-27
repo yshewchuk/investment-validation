@@ -255,8 +255,13 @@ to build the closure that actually satisfies the protocol, then validates
 the closure's `RefreshCallbackResult` the same way
 `incremental_data.run_refresh_worker` does for `incremental_refresh`
 (`validate_refresh_result_document`, `_validate_refresh_binding`,
-`_validate_refresh_coverage`, `_validate_refresh_status` — reused directly,
-not reimplemented) before writing `computed_moves_refresh_result.json`/
+`_validate_refresh_status` — reused directly, not reimplemented — plus
+`calendar_moves_jobs._validate_calendar_moves_coverage`, a set-based
+variant of `incremental_data._validate_refresh_coverage` written for this
+job family specifically: neither store promises `completed_ids` in the
+caller's `expected_ids` order, so the shared ordered-tuple comparison would
+fail an already-committed, fully-covered result on order alone) before
+writing `computed_moves_refresh_result.json`/
 `forward_calendar_refresh_result.json` into the attempt's staging root
 itself: unlike `run_daily_market_refresh`, neither
 `run_computed_moves_refresh` nor `run_forward_calendar_refresh` writes its

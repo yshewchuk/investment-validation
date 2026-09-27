@@ -190,6 +190,35 @@ def test_run_forward_calendar_worker_happy_path(tmp_path):
     assert written["status"] == "complete"
 
 
+def test_run_computed_moves_worker_happy_path_tolerates_reordered_coverage(tmp_path):
+    """expected_ids is a caller-supplied, unsorted tuple; the store returns
+    completed_ids sorted. Same ticker set, different order -- must still
+    validate as complete, not fail a commit that already happened."""
+    params = _params(expected_ids=("MSFT", "AAPL"))
+    result = _result(completed_ids=("AAPL", "MSFT"))
+
+    def _callback(parameters, root):
+        return result
+
+    output = calendar_moves_jobs.run_computed_moves_worker(
+        to_document(params), tmp_path, refresh_callback=_callback)
+
+    assert sorted(output["completed_ids"]) == ["AAPL", "MSFT"]
+
+
+def test_run_forward_calendar_worker_happy_path_tolerates_reordered_coverage(tmp_path):
+    params = _params(expected_ids=("MSFT", "AAPL"))
+    result = _result(completed_ids=("AAPL", "MSFT"))
+
+    def _callback(parameters, root):
+        return result
+
+    output = calendar_moves_jobs.run_forward_calendar_worker(
+        to_document(params), tmp_path, refresh_callback=_callback)
+
+    assert sorted(output["completed_ids"]) == ["AAPL", "MSFT"]
+
+
 # --------------------------------------------------------------------------
 # a cached re-run comes back noop
 # --------------------------------------------------------------------------
