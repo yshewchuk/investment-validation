@@ -54,6 +54,7 @@ from engine.v2.ops.incremental_data import (
     RefreshUnit,
     plan_refresh,
 )
+from engine.v2.ops.lifecycle import validated_attempt_fence_pair as _validated_attempt_fence_pair
 from engine.v2.ops.lifecycle import verify_fence
 from engine.v2.ops.unit_receipts import (
     NATIVE_NASDAQ_ACCOUNT,
@@ -312,20 +313,6 @@ def _validated_fence(value) -> int | None:
         raise fail("INVALID_REQUEST",
                    f"fence must be an int >= 1 or None, got {value!r}")
     return value
-
-
-def _validated_attempt_fence_pair(attempt_id: str | None, fence: int | None) -> None:
-    """Refused before any I/O (Opus gate finding on PR #55) when exactly one
-    of ``attempt_id``/``fence`` is set. A bare ``fence`` with no
-    ``attempt_id`` would make ``_fence_check_for`` a no-op -- the commit goes
-    through unfenced (fail-open). A bare ``attempt_id`` with no ``fence``
-    would only be refused later, inside ``verify_fence``, after the network
-    fetch. Both ``None`` (the legacy/no-live-job default) and both set are
-    the only valid shapes."""
-    if (attempt_id is None) != (fence is None):
-        raise fail("INVALID_REQUEST",
-                   f"attempt_id and fence must both be None or both be set, got "
-                   f"attempt_id={attempt_id!r} fence={fence!r}")
 
 
 def _validated_catalog_path(catalog_path) -> str:

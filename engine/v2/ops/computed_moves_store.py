@@ -49,7 +49,7 @@ from engine.v2.ops.incremental_data import (
     plan_refresh,
     refresh_job_kind,
 )
-from engine.v2.ops.lifecycle import verify_fence
+from engine.v2.ops.lifecycle import validated_attempt_fence_pair, verify_fence
 from engine.v2.ops.unit_receipts import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     cached_unit_outcomes,
@@ -487,7 +487,17 @@ def _validate_document_attempt(document: dict) -> None:
     """The optional staged-job identity fields: attempt id and fence. Never
     checked against the catalog here -- a head mismatch is caught at commit
     time (``SNAPSHOT_CONFLICT``), after any fetches; this is format-only,
-    before any I/O."""
+    before any I/O. The two fields are then cross-checked against each
+    other (``engine.v2.ops.lifecycle.validated_attempt_fence_pair``, issue
+    #58): exactly one set is refused up front, before any I/O, as
+    ``INVALID_REQUEST`` -- a bare ``fence`` with no ``attempt_id`` would
+    otherwise make this module's own ``_fence_check_for`` a no-op,
+    committing unfenced (fail-open), and a bare ``attempt_id`` with no
+    ``fence`` would otherwise only be refused later, inside
+    ``verify_fence`` itself, after I/O. ``None``/``None`` (no live job
+    behind this call) and both set are the only two valid shapes; this
+    same helper also guards ``forward_calendar_store``'s identical
+    ``attempt_id``/``fence`` keyword pair."""
     attempt_id = document.get("attempt_id")
     if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id):
         raise fail("INVALID_REQUEST", "attempt_id must be a non-empty string when present")
@@ -495,6 +505,7 @@ def _validate_document_attempt(document: dict) -> None:
     if fence is not None and (isinstance(fence, bool) or not isinstance(fence, int)
                               or fence < 1):
         raise fail("INVALID_REQUEST", "fence must be an int >= 1 when present")
+    validated_attempt_fence_pair(attempt_id, fence)
 
 
 def _validate_document_selection(document: dict) -> None:
