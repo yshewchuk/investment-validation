@@ -16,9 +16,11 @@
 # See mutation.yml's own header comment ("PR context: workflow_run") for the
 # full rationale (why mutation used to starve Tests for account-wide runners,
 # how the PR's branch/base sha/number are recovered from the workflow_run
-# payload without indexing its possibly-empty pull_requests array, and why
-# this only takes effect for PRs opened after this file's change reaches
-# main). `.github/workflows/cancel-stale-runs.yml` cancels a leftover run of
+# payload without indexing its possibly-empty pull_requests array, what
+# running in the base repository's context does and does not isolate this job
+# from, and why this gate applies to every qualifying Tests completion once
+# this file's change reaches main, including for PRs opened before that).
+# `.github/workflows/cancel-stale-runs.yml` cancels a leftover run of
 # this workflow (or Tests, or mutation.yml) when its PR closes first.
 #
 # Behavior (same shape as the gremlins workflow, mutmut's own state model):
@@ -89,10 +91,12 @@ concurrency:
   # workflow_run (a PR's Tests run completing) gets a per-branch group with
   # cancel-in-progress true, mirroring the gremlins workflow's own group
   # above -- see there for why head_branch, not the PR number (unsafe to
-  # index at this top level; see mutation.yml's "PR context" comment). push
+  # index at this top level; see mutation.yml's "PR context" comment), AND
+  # why workflow_run.event is folded in too (so a dispatched/non-PR Tests
+  # run on a PR's branch cannot cancel that PR's real mutation run). push
   # also cancels an in-progress older push run on main. schedule and
   # workflow_dispatch keep the exact old group and stay non-cancelling.
-  group: mutation-mutmut-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
+  group: mutation-mutmut-${{ github.event_name == 'workflow_run' && format('{0}-{1}', github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}
 
 env:

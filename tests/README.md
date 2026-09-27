@@ -250,9 +250,10 @@ alongside it on every PR). `.github/workflows/cancel-stale-runs.yml` cancels
 any in-progress/queued `Tests`, `mutation` or `mutation-mutmut` run still
 tied to a PR once that PR closes. Neither mutation workflow queues behind,
 cancels, caches over or merges into the other -- every shared resource is
-namespaced per backend; each backend's concurrency group now also cancels an
-older still-running push-to-main run of itself, on top of the pre-existing
-per-PR cancellation:
+namespaced per backend; each backend's concurrency group is keyed per PR
+branch (qualified by the triggering event, so a dispatched/non-PR `Tests` run
+on that branch can't cancel the PR's own mutation run) and cancels an older
+still-running run of itself for both that PR and a push to main:
 
 | workflow | backend | concurrency group | cache namespace | module artifacts | aggregate artifact |
 |---|---|---|---|---|---|

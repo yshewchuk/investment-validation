@@ -57,12 +57,26 @@
 # PR context: workflow_run. GitHub evaluates a `workflow_run` trigger, its
 # `if:` conditions and its permissions using the workflow file version ON THE
 # DEFAULT BRANCH, never the PR branch's own copy -- a PR cannot edit this file
-# to change how (or whether) it runs against itself, and it never sees repo
-# secrets or a write token (permissions stay `contents: read` below, same as
-# always; the mutate job's checkout of `head_sha` is read-only code review,
-# nothing here ever pushes or publishes with elevated rights). One
-# consequence: this new gate only takes effect for PRs opened after this PR
-# merges to main, since main's copy of the file is what GitHub consults.
+# to change how (or whether) it runs against itself. Be accurate about what
+# that DOES and does NOT buy: the job still runs in the BASE REPOSITORY's
+# context, meaning it CAN read this repo's secrets, and the `mutate` job
+# checks out the PR's own `head_sha` and then runs that PR's code (pip
+# installing its `requirements.txt`, running its `tools/*.py`) inside that
+# context -- this is not a sandboxed, secret-free review. `permissions:
+# contents: read` below only narrows the auto-issued GITHUB_TOKEN's own
+# scope; it does not block a `secrets.FOO` reference (none exist in this
+# file today) or the ambient runtime token every job carries for
+# actions/cache. Skipping the "Save gremlins cache"/"Save mutmut state" step
+# on a PR run (see below) keeps our OWN steps from writing under main's
+# cache key, but does not by itself stop PR code from calling the cache API
+# directly with that ambient token. The real security boundary is the
+# same-repository gate on `workflow_run.pull_requests` (below): only a
+# contributor who already has push access to this repository can reach this
+# job at all, so this does not open a privilege a same-repo contributor
+# didn't already have. A fork PR never reaches here (see below). One
+# consequence of using main's copy of the file: after this change merges,
+# the gate applies to every qualifying Tests completion from then on,
+# including for PRs that were opened before the merge -- not only new ones.
 # `github.event.workflow_run.pull_requests` -- the array holding the PR's
 # number/branch/base sha -- is populated only when the PR's head repository is
 # this same repository; for a fork PR it is empty (a documented GitHub
@@ -115,12 +129,21 @@ concurrency:
   # inside the pull_requests array (see "PR context" above), which is unsafe
   # to index here (a top-level `concurrency:` expression error would fail the
   # whole run to start), while head_branch is a plain top-level field that is
-  # always present, PR or not. push also cancels an in-progress older push run
-  # on main, so a fast string of merges cannot queue up behind itself. schedule
-  # and workflow_dispatch keep the exact old group and stay non-cancelling:
-  # neither github.event_name is 'workflow_run' nor 'push', so the ternary's
-  # false branch -- the unchanged literal ref-based group -- is what they get.
-  group: mutation-gremlins-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
+  # always present, PR or not. The group ALSO folds in
+  # workflow_run.event: Tests fires workflow_run for every trigger it has
+  # (push, schedule, dispatch, AND pull_request), not only the pull_request
+  # one this workflow's plan job actually acts on (see "PR context" above) --
+  # without this, a manually re-run/dispatched Tests run on a PR's branch
+  # would land in the SAME group as that PR's real pull_request-triggered
+  # mutation run and cancel it, even though the dispatch-flavored workflow_run
+  # itself does nothing (the plan job's `if:` skips it), losing that PR's
+  # mutation coverage for no benefit. push also cancels an in-progress older
+  # push run on main, so a fast string of merges cannot queue up behind
+  # itself. schedule and workflow_dispatch keep the exact old group and stay
+  # non-cancelling: neither github.event_name is 'workflow_run' nor 'push',
+  # so the ternary's false branch -- the unchanged literal ref-based group --
+  # is what they get.
+  group: mutation-gremlins-${{ github.event_name == 'workflow_run' && format('{0}-{1}', github.event.workflow_run.head_branch, github.event.workflow_run.event) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}
 
 env:

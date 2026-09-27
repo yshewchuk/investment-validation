@@ -7,31 +7,35 @@
 # `workflow_run` gated on Tests succeeding (see mutation.yml's "PR context:
 # workflow_run" comment) and so can still be mid-run when the PR closes.
 #
-# Same-repo PRs only. `permissions: actions: write` above is what lets the
-# cancel calls below succeed at all; for a FORK pull_request, GitHub forces
-# the run's GITHUB_TOKEN to read-only regardless of what this file requests,
-# so the calls below would just fail closed (403) with no effect. The `if:`
-# guard on the job skips that case outright instead of leaving a noisy failed
-# run behind for something that could never have worked, which is also the
-# safe behavior for a fork PR: nothing here ever runs with write access to a
-# fork's own code or a secret.
+# Same-repo PRs only. The `cancel` job's own `actions: write` permission
+# (scoped there, not at workflow level, so a future job added to this file
+# does not inherit it for free) is what lets the cancel calls below succeed
+# at all; for a FORK pull_request, GitHub forces the run's GITHUB_TOKEN to
+# read-only regardless of what this file requests, so the calls below would
+# just fail closed (403) with no effect. The `if:` guard on the job skips
+# that case outright instead of leaving a noisy failed run behind for
+# something that could never have worked, which is also the safe behavior
+# for a fork PR: nothing here ever runs with write access to a fork's own
+# code or a secret.
 name: cancel-stale-runs
 
 on:
   pull_request:
     types: [closed]
 
-permissions:
-  actions: write
-
 concurrency:
   group: cancel-stale-runs-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   cancel:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    # Required to list and cancel repository Actions runs through gh api;
+    # scoped to this one job so it is never inherited by a future job added
+    # to this workflow.
+    permissions:
+      actions: write
     steps:
       - name: Cancel in-progress/queued Tests/mutation/mutation-mutmut runs for this PR
         env:
@@ -43,26 +47,43 @@ jobs:
           set -euo pipefail
           for wf in Tests mutation mutation-mutmut; do
             for status in in_progress queued; do
-              # List across the whole repo's runs (not one workflow file), then
-              # keep only this backend's by its `name:` field -- avoids needing
-              # each workflow's own numeric/file id.
-              ids=$(gh api --paginate "repos/$REPO/actions/runs?status=$status" \
-                -q ".workflow_runs[] | select(.name == \"$wf\") | .id")
+              # The runs endpoint's own `branch=` filter narrows the list
+              # server-side (mutation/mutation-mutmut runs started by
+              # workflow_run carry the originating Tests run's head_branch,
+              # i.e. this PR's branch), so this never needs to page through
+              # every in-progress/queued run repo-wide. PR_BRANCH is passed
+              # as a `-f` query parameter, not interpolated into a filter
+              # string, so it can never change what is requested regardless
+              # of what characters a branch name contains. $wf is one of the
+              # three literal names above, never attacker input, so binding
+              # it via --arg here is a hygiene choice, not a required one.
+              ids=$(gh api --paginate -X GET "repos/$REPO/actions/runs" \
+                  -f status="$status" -f branch="$PR_BRANCH" \
+                | jq -r --arg wf "$wf" '.workflow_runs[] | select(.name == $wf) | .id')
               for id in $ids; do
-                # Two ways a run can belong to this PR: Tests is triggered
-                # directly by `pull_request` and its own head_branch is the
-                # PR's branch; mutation/mutation-mutmut are triggered by
-                # `workflow_run` instead, whose head_branch/head_sha describe
-                # the Tests run they followed, but the run resource itself
-                # still carries the same linked pull_requests[].number (see
-                # mutation.yml's "PR context: workflow_run" comment on why
-                # that array can be empty for a fork PR -- `// []` below
-                # keeps that case a plain no-match instead of a jq error).
+                # Confirm the match instead of trusting the branch filter
+                # alone: two ways a run can belong to this PR, checked as
+                # jq DATA via --arg/--argjson, never string-interpolated
+                # into the filter text (a branch name may legally contain a
+                # `"`, which would otherwise let a crafted branch name widen
+                # the filter to match runs on other branches/PRs). Tests is
+                # triggered directly by `pull_request` and its own
+                # head_branch is the PR's branch; mutation/mutation-mutmut
+                # are triggered by `workflow_run` instead, whose
+                # head_branch/head_sha describe the Tests run they followed,
+                # but the run resource itself still carries the same linked
+                # pull_requests[].number (see mutation.yml's "PR context:
+                # workflow_run" comment on why that array can be empty for a
+                # fork PR -- `// []` below keeps that case a plain no-match
+                # instead of a jq error).
                 match=$(gh api "repos/$REPO/actions/runs/$id" \
-                  -q "select(.head_branch == \"$PR_BRANCH\" or ((.pull_requests // []) | any(.number == $PR_NUMBER))) | .id")
+                  | jq -r --arg b "$PR_BRANCH" --argjson n "$PR_NUMBER" \
+                    'select(.head_branch == $b or ((.pull_requests // []) | any(.number == $n))) | .id')
                 if [ -n "$match" ]; then
                   echo "cancelling $wf run $id (status=$status, branch=$PR_BRANCH, pr=$PR_NUMBER)"
-                  gh api -X POST "repos/$REPO/actions/runs/$id/cancel" >/dev/null || true
+                  if ! gh api -X POST "repos/$REPO/actions/runs/$id/cancel" >/dev/null; then
+                    echo "::warning::failed to cancel $wf run $id"
+                  fi
                 fi
               done
             done

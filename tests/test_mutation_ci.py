@@ -740,6 +740,8 @@ def test_matrix_is_built_from_the_toml(capsys):
 
 
 def test_workflow_triggers_and_concurrency():
+    """PR runs are gated behind Tests via workflow_run, never a direct
+    pull_request trigger; push/schedule/dispatch keep their old triggers."""
     on = WORKFLOW.get("on", WORKFLOW.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
     assert "pull_request" not in on  # PR runs are gated behind Tests via workflow_run instead
@@ -751,10 +753,15 @@ def test_workflow_triggers_and_concurrency():
     # this top level -- see the workflow's "PR context: workflow_run"
     # comment) and cancels its predecessor; push also cancels an older
     # still-running push. schedule/dispatch keep the exact old group value
-    # and stay non-cancelling.
+    # and stay non-cancelling. The group also folds in
+    # workflow_run.event (via format()): Tests fires workflow_run for every
+    # trigger it has, not only pull_request, so head_branch alone would let
+    # a dispatched Tests run on a PR branch cancel that PR's real mutation
+    # run even though the dispatch-flavored workflow_run itself is a no-op.
     assert WORKFLOW["concurrency"]["group"] == (
-        "mutation-gremlins-${{ github.event_name == 'workflow_run' "
-        "&& github.event.workflow_run.head_branch || github.ref }}"
+        "mutation-gremlins-${{ github.event_name == 'workflow_run' && "
+        "format('{0}-{1}', github.event.workflow_run.head_branch, "
+        "github.event.workflow_run.event) || github.ref }}"
     )
     assert WORKFLOW["concurrency"]["cancel-in-progress"] == \
         "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
@@ -893,6 +900,8 @@ def test_workflow_run_gate_requires_success_and_a_same_repo_pr():
 
 
 def test_workflow_run_recovers_pr_base_sha_without_indexing_pull_requests_zero():
+    """BASE_SHA/EVENT are read from the workflow_run payload via a safe
+    join() projection, and a PR run never saves back to the shared cache."""
     key_step = _step("mutate", lambda s: s.get("id") == "key")
     key_env = key_step["env"]
     assert key_env["EVENT"] == \
@@ -934,6 +943,8 @@ MUT_JOBS = MUTMUT["jobs"]
 
 
 def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
+    """Mirrors test_workflow_triggers_and_concurrency for the mutmut backend
+    -- same workflow_run gate, same event-qualified concurrency group."""
     on = MUTMUT.get("on", MUTMUT.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
     assert "pull_request" not in on  # PR runs are gated behind Tests via workflow_run instead
@@ -941,8 +952,9 @@ def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
     assert MUTMUT["concurrency"]["group"] == (
-        "mutation-mutmut-${{ github.event_name == 'workflow_run' "
-        "&& github.event.workflow_run.head_branch || github.ref }}"
+        "mutation-mutmut-${{ github.event_name == 'workflow_run' && "
+        "format('{0}-{1}', github.event.workflow_run.head_branch, "
+        "github.event.workflow_run.event) || github.ref }}"
     )
     assert MUTMUT["concurrency"]["cancel-in-progress"] == \
         "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
@@ -1091,6 +1103,8 @@ def test_mutmut_workflow_run_gate_and_pr_context_mirror_the_gremlins_workflow():
 
 
 def test_mutmut_workflow_run_never_saves_state_or_reads_pull_requests_zero():
+    """Mirrors the gremlins workflow's own cache-save-skip and safe BEFORE
+    recovery for the mutmut backend."""
     save = _step("mutate", lambda s: s.get("name") == "Save mutmut state", MUT_JOBS)
     assert save["if"] == \
         "always() && steps.key.outcome == 'success' && github.event_name != 'workflow_run'"
@@ -1162,9 +1176,21 @@ CANCEL_JOBS = CANCEL["jobs"]
 
 
 def test_cancel_stale_runs_triggers_on_pr_close_with_actions_write():
+    """actions: write is scoped to the cancel job, not the workflow, so a
+    future job added here would not inherit it for free."""
     on = CANCEL.get("on", CANCEL.get(True))  # PyYAML reads a bare `on` as True
     assert on["pull_request"]["types"] == ["closed"]
-    assert CANCEL["permissions"] == {"actions": "write"}
+    assert "permissions" not in CANCEL  # scoped to the job instead, see below
+    assert CANCEL_JOBS["cancel"]["permissions"] == {"actions": "write"}
+
+
+def test_cancel_stale_runs_concurrency_cancels_in_progress():
+    """closed fires once per PR close, so a per-PR group with
+    cancel-in-progress: true has no downside and matches repo convention for
+    pull_request-triggered workflows."""
+    assert CANCEL["concurrency"]["group"] == \
+        "cancel-stale-runs-${{ github.event.pull_request.number }}"
+    assert CANCEL["concurrency"]["cancel-in-progress"] is True
 
 
 def test_cancel_stale_runs_is_guarded_to_same_repo_prs():
@@ -1177,6 +1203,11 @@ def test_cancel_stale_runs_is_guarded_to_same_repo_prs():
 
 
 def test_cancel_stale_runs_covers_all_three_workflows_by_branch_or_pr_number():
+    """The branch filter is a bound gh api query parameter and every jq match
+    uses --arg/--argjson, never string-interpolated filter text -- a branch
+    name may legally contain a double quote, and interpolating it into a jq
+    program would let a crafted branch name widen the filter to match runs on
+    other branches or PRs."""
     step = CANCEL_JOBS["cancel"]["steps"][0]
     run = step["run"]
     for wf in ("Tests", "mutation", "mutation-mutmut"):
@@ -1186,13 +1217,27 @@ def test_cancel_stale_runs_covers_all_three_workflows_by_branch_or_pr_number():
     assert "PR_BRANCH" in step["env"] and "PR_NUMBER" in step["env"]
     assert step["env"]["PR_BRANCH"] == "${{ github.event.pull_request.head.ref }}"
     assert step["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
+    # PR_BRANCH is never interpolated into filter text: it is a bound `-f`
+    # query parameter on the list call, and a bound --arg on every jq match.
+    assert '-f branch="$PR_BRANCH"' in run
+    assert 'jq -r --arg wf "$wf"' in run
+    assert '--arg b "$PR_BRANCH" --argjson n "$PR_NUMBER"' in run
+    # \\*"\\* tolerates both a bare quote and the backslash-escaped quote a
+    # `-q "select(... \"$wf\" ...)"`-style regression would use (the exact
+    # historical shape of this bug) -- a plain '"$wf"' substring check would
+    # miss that escaped form since the extra backslash breaks a literal match.
+    assert not re.search(r'\.name\s*==\s*\\*"\$wf\\*"', run)
+    assert not re.search(r'\.head_branch\s*==\s*\\*"\$PR_BRANCH\\*"', run)
     # matches by head_branch (covers Tests, a direct pull_request trigger) OR
     # by the run's own linked pull_requests[].number (covers mutation/
     # mutation-mutmut, triggered via workflow_run) -- `// []` so an empty
     # array (a fork PR) is a plain no-match, not a jq error.
-    assert ".head_branch ==" in run
+    assert ".head_branch == $b" in run
     assert "pull_requests // []" in run
-    assert "any(.number ==" in run
+    assert "any(.number == $n)" in run
+    # a failed cancel call is logged, not silently swallowed
+    assert "::warning::failed to cancel" in run
+    assert "|| true" not in run
 
 
 # -- merge expected-modules contract: the aggregate can never lie about scope ----------
