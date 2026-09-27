@@ -202,8 +202,13 @@ market-data provider account this package's `provider-account` command
 budgets against (`engine/v2/ops/providers/`, e.g. ORATS) — credentials
 themselves are never held here, only remaining-call/reserve counts.
 `native_board_universe.py` adds no new external system: `pandas` (already
-a transitive dependency of this package) is its only library, for the
-events-table filter and the `BoardRequest.event_date` type; no file,
+a transitive dependency of this package) is its main library, for the
+events-table filter and the `BoardRequest.event_date` type; it also imports
+`numpy` (an existing transitive dependency of `pandas`, now imported
+directly) and the standard-library `numbers` module, both used only for the
+`isinstance(v, (numbers.Number, np.number))` scalar-type check that refuses
+a bare number wherever a date is expected (a numpy scalar such as
+`np.int64` in an `object`-dtype column, or as `as_of` itself) — no file,
 network, or database access.
 
 ## Failure semantics
@@ -215,10 +220,12 @@ network, or database access.
   or `session`; holding more than one column under any of those three
   labels (checked before any column is read by label); holding an
   `event_date` column of numeric dtype, or an `object`-dtype `event_date`
-  column holding any Python `int`/`float` element (checked per element,
-  before any parsing is attempted — never read as an epoch-relative
-  offset, e.g. `20260201`, regardless of whether pandas inferred a numeric
-  dtype or left the column as `object`); holding an `event_date` column
+  column holding any `numbers.Number`/`np.number` element — Python
+  `int`/`float`/`bool` or a numpy scalar such as `np.int64`/`np.float64`
+  (checked per element, before any parsing is attempted — never read as an
+  epoch-relative offset, e.g. `20260201`, regardless of whether pandas
+  inferred a numeric dtype or left the column as `object`, and regardless
+  of whether the numeric value is a Python or numpy type); holding an `event_date` column
   that otherwise cannot be parsed as timestamps (e.g. an unparseable
   string); holding an `event_date` value that parses to null (`NaT`, e.g.
   a `None`/`NaN` cell); or holding a timezone-aware `event_date` column,
@@ -233,11 +240,15 @@ network, or database access.
   `event_date` is refused in every representation — there is no
   ISO-string exception to the timezone-naive rule.
   `as_of` must be a timezone-naive `datetime`/`pandas.Timestamp`: `None`,
-  `NaT`, and a timezone-aware value are each refused (`OpsError`,
-  `INVALID_REQUEST`). `horizon_days` must be a non-negative `int`; `bool`
-  is refused even though it is an `int` subtype in Python (so `True`/
-  `False` cannot silently pass as `1`/`0`), and any other type or a
-  negative value is refused the same way.
+  `NaT`, a timezone-aware value, and a bare number (`bool`, Python
+  `int`/`float`, or a numpy scalar such as `np.int64`) are each refused
+  (`OpsError`, `INVALID_REQUEST`) — `pandas.Timestamp` reads a bare number
+  as epoch time, not a calendar date (`pandas.Timestamp(20260130)` is
+  `1970-01-01 00:00:00.020260130`, not 2026-01-30), so this is a real,
+  silent-corruption risk, not a defensive-only check. `horizon_days` must
+  be a non-negative `int`; `bool` is refused even though it is an `int`
+  subtype in Python (so `True`/`False` cannot silently pass as `1`/`0`),
+  and any other type or a negative value is refused the same way.
 - **Cache** — none of this package's own state is a cache; the catalog is
   the durable record. `board_requests` holds no cache either; it reads
   only the table its caller passes in.

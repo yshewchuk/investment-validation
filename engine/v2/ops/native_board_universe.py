@@ -15,9 +15,11 @@ appends its chooser row once per event after scoring the frame.
 """
 from __future__ import annotations
 
+import numbers
 from dataclasses import dataclass
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
 from engine.v2.ops.errors import OpsError, make_problem
@@ -101,7 +103,7 @@ def _validated_event_dates(events_table: pd.DataFrame) -> pd.Series:
         ))
     if pd.api.types.is_object_dtype(event_date_column):
         for v in event_date_column:
-            if isinstance(v, (int, float)) and not pd.isna(v):
+            if isinstance(v, (numbers.Number, np.number)) and not pd.isna(v):
                 raise OpsError(make_problem(
                     "INVALID_REQUEST",
                     f"events_table event_date column holds a numeric value ({v!r}) in an "
@@ -146,6 +148,12 @@ def _validated_as_of(as_of) -> pd.Timestamp:
     if as_of is None:
         raise OpsError(make_problem(
             "INVALID_REQUEST", "as_of must not be None",
+        ))
+    if isinstance(as_of, bool) or isinstance(as_of, (numbers.Number, np.number)):
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            f"as_of must be a date/timestamp, not a bare number ({as_of!r}); a numeric "
+            f"value would be misread as epoch time rather than a calendar date",
         ))
     try:
         as_of_ts = pd.Timestamp(as_of)

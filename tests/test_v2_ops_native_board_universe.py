@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -146,6 +147,20 @@ class TestMalformedEventsTableRefuses:
             board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
         assert excinfo.value.code == "INVALID_REQUEST"
 
+    def test_object_dtype_numpy_int64_event_date_raises_invalid_request(self):
+        event_dates = pd.Series(
+            [np.int64(20260201), pd.Timestamp("2026-02-05")], dtype=object,
+        )
+        events_df = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "event_date": event_dates,
+            "session": ["BMO", "AMC"],
+        })
+        assert events_df["event_date"].dtype == object  # sanity: this is the object-dtype case, not numeric-dtype
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
 
 class TestAsOfAndHorizonDaysValidation:
     @staticmethod
@@ -191,6 +206,16 @@ class TestAsOfAndHorizonDaysValidation:
             board_requests(
                 pd.Timestamp("2026-01-25"), 21.0, None, self._valid_events_table(),
             )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_int_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(20260130, 21, None, self._valid_events_table())
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_numpy_int64_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(np.int64(20260130), 21, None, self._valid_events_table())
         assert excinfo.value.code == "INVALID_REQUEST"
 
     def test_valid_as_of_and_horizon_days_still_accepted(self):
