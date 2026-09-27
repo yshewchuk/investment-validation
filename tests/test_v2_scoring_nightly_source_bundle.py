@@ -335,18 +335,11 @@ def test_quote_domain_map_matches_capture_call_site():
     assert capture_quote_domain_map(rows) == expected
 
 
-def test_capture_shim_preserves_original_message_via_detail():
-    # Regression for the capture shim (tools/capture_tier0_corpus.py's one
-    # call site): NightlySourceBundleRefusal's own str() carries a
-    # "CODE: " prefix StrictTraceCaptureError's messages never had, so the
-    # shim re-raises with `.detail` (the original text), not `str(exc)`.
-    # tests/test_phase4_capture_strict.py's own
-    # test_probe_still_refuses_unrecorded_or_contradictory_quote_domains
-    # exercises the real call site end to end (via substring `match=`); this
-    # pins the exact mechanism the shim relies on.
-    with pytest.raises(NightlySourceBundleRefusal) as exc:
-        quote_domain_map([{"right": "C", "strike": 100.0}])
-    from tools.capture_tier0_corpus import StrictTraceCaptureError
-    wrapped = StrictTraceCaptureError(getattr(exc.value, "detail", str(exc.value)))
-    assert str(wrapped) == exc.value.detail
-    assert not str(wrapped).startswith("INVALID_QUOTE_DOMAIN:")
+# The capture shim's message-fidelity regression
+# (tools.capture_tier0_corpus's real quote_domain_map call site preserving
+# .detail, not str(exc), through _captured_blocks) lives in
+# tests/test_phase4_capture_strict.py::test_probe_preserves_incomplete_quote_message,
+# which exercises the real call site through native_inputs_from_capture. A
+# synthetic StrictTraceCaptureError built directly in this test file (as a
+# prior version of this test did) never executes that call site's own
+# exception translation, so it cannot catch a regression there.

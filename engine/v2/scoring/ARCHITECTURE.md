@@ -60,15 +60,19 @@ the table for why.
 `quote_domain_map()`, `validated_as_of()`, and `NightlySourceBundleRefusal`
 — the per-night, per-(ticker, event) `SourceBundle` field assembler
 described in Inputs/Outputs/Failure semantics below. It is not yet listed
-in the table above or in `README.md`'s `<!-- public-interface: -->`
-directive: that directive is checked against the real cross-package import
-graph (`checks/package_readmes.py`), and today the only caller of this
-module is `tools/capture_tier0_corpus.py` (a script, outside the v2 package
-graph the directive covers — see Dependencies/Callers below, the same
-exemption this package's other `tools/*`/`checks/*` callers already have).
-Its symbols join the directive once a real `engine.v2.*` package consumer
-exists (PR-3, which wires a caller in) — adding them before then would
-declare an interface nothing in the checked graph actually uses.
+in the table above. `quote_domain_map` IS listed in `README.md`'s
+`<!-- public-interface: -->` directive (a real `__all__` export the
+directive's own check requires be declared); the other three symbols are
+not, because `checks/package_readmes.py` checks that directive against the
+real cross-package import graph, and today the only caller of any of this
+module's symbols is `tools/capture_tier0_corpus.py`'s call to
+`quote_domain_map()` — a script, outside the v2 package graph the directive
+covers (see Dependencies/Callers below, the same exemption this package's
+other `tools/*`/`checks/*` callers already have). `assemble_nightly_source_bundle()`,
+`validated_as_of()`, and `NightlySourceBundleRefusal` join the directive
+once a real `engine.v2.*` package consumer exists (PR-3, which wires a
+caller in) — adding them before then would declare an interface nothing in
+the checked graph actually uses.
 
 ## Inputs
 
