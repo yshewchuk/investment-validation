@@ -1,9 +1,15 @@
 # Contributing
 
-Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before changing a component: a
-change to a component's public interface, its dependencies, its
-inputs/outputs, or its failure semantics documents that change there,
-before the code that implements it.
+Before changing a component, read the root [`ARCHITECTURE.md`](ARCHITECTURE.md)
+and, if it exists, that component's own `ARCHITECTURE.md` (the root doc's
+"Component docs" index lists every one, and lists the rest as `(pending)`).
+A cross-cutting change updates the root doc, in the same pull request,
+before the code that implements it. A change to a component's public
+interface, its dependencies, its inputs/outputs, or its failure semantics
+updates that component's `ARCHITECTURE.md`, in the same pull request,
+before the code that implements it. Legacy code slated for removal has no
+component doc of its own; its design goes in the pull request body
+instead.
 
 ## Scope and deferred work
 
@@ -26,6 +32,6 @@ in one pass. If the description needs "and also", split it.
 
 Aim for roughly 300 changed non-test lines and about 5 non-test files;
 tests and generated fixtures don't count toward that target. A pull
-request that goes over should say why it can't be split. Every fix made
-in response to review feedback ships with a test that fails without it,
-in the same push.
+request that goes over either target should say why it can't be split.
+Every fix made in response to review feedback ships with a test that
+fails without it, in the same push.
