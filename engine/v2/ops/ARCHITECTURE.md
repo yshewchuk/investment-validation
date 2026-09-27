@@ -573,12 +573,14 @@ network, or database access.
   or an `int >= 1` — each refused before any I/O the moment it is
   malformed. `None`/`None` is a valid, meaningful request (a manual/ad-hoc
   invocation with no live job attempt behind it), not merely an omitted
-  default; a non-`None` `attempt_id` given without a valid `fence` is not
-  itself a validation-time refusal (the two fields are not cross-checked
-  against each other here) but fails safely later, inside the fence check
-  itself, the moment `verify_fence` compares a `fence` that cannot equal
-  the job's own integer fence. When `attempt_id` is given, the commit's own
-  `_fence_check_for`
+  default, and both set is the other valid shape. The two fields ARE then
+  cross-checked against each other (`_validated_attempt_fence_pair`,
+  Opus gate finding on #55): exactly one set is refused up front, before
+  any I/O, as `INVALID_REQUEST` — a bare `fence` with no `attempt_id`
+  would otherwise make `_fence_check_for` a no-op, committing unfenced
+  (fail-open), and a bare `attempt_id` with no `fence` would otherwise
+  only be refused later, inside `verify_fence` itself, after the network
+  fetch. When both are given, the commit's own `_fence_check_for`
   calls `engine.v2.ops.lifecycle.verify_fence(conn, attempt_id, fence, now)`
   inside the SAME transaction `generic_incremental.commit_generic_table_candidate`
   opens for the head compare-and-swap — a job whose fence is void
