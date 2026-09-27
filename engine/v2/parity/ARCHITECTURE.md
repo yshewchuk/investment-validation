@@ -108,7 +108,8 @@ second implementation). No other package imports this one.
 ## External systems and libraries
 
 None. Pure in-memory computation over already-decoded Python mappings;
-`math`/`time`/`dataclasses` from the standard library only.
+standard library only (`dataclasses`, `datetime`, `fnmatch`, `math`,
+`time`, `typing`).
 
 ## Failure semantics
 

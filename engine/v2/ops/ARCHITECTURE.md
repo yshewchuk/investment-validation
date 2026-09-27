@@ -213,8 +213,9 @@ nothing before this PR builds real dicts to hand them.
   set-based check are all unchanged by this PR.
 - **`native_parity_report.py` gains a caller-supplied "explained" bucket**,
   the mechanism for classifying a known structural difference (legacy's
-  stale-px rule; legacy finality drift — memory `d14-corpus-parity`'s
-  measured 212/124 counts) as accepted rather than a defect, without
+  stale-px rule; legacy finality drift — a prior D14 Phase 2 gate
+  investigation measured 212 stale-archive rows and 124 finality-drift
+  rows) as accepted rather than a defect, without
   hiding the finding or touching `engine/v2/parity`'s comparator. New
   `ROW_EXPLANATION_CODES = frozenset({"LEGACY_STALE_PX",
   "LEGACY_FINALITY_DRIFT"})` and a new keyword-only parameter on both
@@ -265,8 +266,8 @@ nothing before this PR builds real dicts to hand them.
   PR does not build the per-night enumeration/staging of those events; it
   accepts them as an explicit input file, exactly as
   `run_native_score_batch_worker` itself does, and leaves "who stages
-  `events.json` for every `BoardRequest`" to cutover PR-6 per
-  `scratchpad/cutover_wiring_plan.md`); calls
+  `events.json` for every `BoardRequest`" to cutover PR-6, a later PR in
+  this same cutover sequence); calls
   `native_score_batch.assemble_score_batch_inputs` (PR-3) to get
   `requests_by_key`; calls
   `engine.v2.serving.native_shadow_render.build_native_bundle_rows`
