@@ -264,6 +264,26 @@ each backend has three disjoint concurrency groups, one per trigger family
 none of the three can ever cancel a run from a different family, and each of
 the first two cancels an older still-running run of its own family:
 
+**A `workflow_run`-triggered run never attaches to the PR's own Checks tab --
+GitHub always lists it under the default branch's Actions history instead --
+so, since 2026-09-27, each backend's last job, `report_status`, posts the
+outcome onto the PR's own head commit itself
+(`github.event.workflow_run.head_sha`) as a plain commit status: never a
+check run, and never added to branch protection, so it can never become a
+required check.** `report_status` needs `[plan, report]` and its own `if:`
+only lets it run when `plan` actually resolved a PR
+(`needs.plan.outputs.pr_number != ''`); a fork PR, or a Tests run that
+failed, was cancelled, or was not itself a `pull_request` run, never gets
+this far (`plan` is skipped, or leaves `pr_number` empty), so nothing is
+ever posted for them -- fail closed, the same as the rest of the workflow.
+When `plan`'s own matrix is empty (`modules == '[]'`: a PR that closed
+before checkout, or a docs-only PR the `[pr_selection] inert` allowlist
+ruled out) the status is `success` with a "skipped by design" description
+rather than silence; otherwise it mirrors the `report` job's own result
+(`success` maps to `success`, anything else to `failure`). The two
+contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from each
+other and from the `Tests` check.
+
 | workflow | backend | concurrency groups | cache namespace | module artifacts | aggregate artifact |
 |---|---|---|---|---|---|
 | `mutation.yml` | pytest-gremlins 1.9.0 (`tools/gremlin_pilot.py`) | `mutation-gremlins-pr-<n>` (workflow_run, PR number known) / `mutation-gremlins-<repo>-<branch>-<event>` (workflow_run fallback) / `mutation-gremlins-push-<ref>` (push) / `mutation-gremlins-<ref>` (schedule, dispatch) | `mutation-gremlins<ver>-...` (per-module tracked-input fingerprint) over `.gremlins_cache` | `mutation-module-<module>` | `mutation-report` |
