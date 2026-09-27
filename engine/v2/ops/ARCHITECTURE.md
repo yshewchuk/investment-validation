@@ -104,15 +104,20 @@ it, same as `computed_moves_store`) and otherwise calls
 the head compare-and-swap runs in, so a cancelled job (`CANCELLED`) or an
 expired lease (`LEASE_LOST`) is refused before anything commits — never
 after. `generic_incremental.commit_generic_table_candidate` gained a new
-optional `fence_check` parameter for this (default `None` keeps its
-existing `_head_fence`-only behavior for its other two callers,
-`engine/v2/data/incremental.py`'s generic-refresh path and
-`engine/v2/research/_trades_publish.py`, neither of which is touched by
-this change); `catalog.commit_snapshot`'s own head compare-and-swap still
-runs regardless of which `fence_check` is supplied, so a caller-supplied
-`fence_check` need not re-check the head itself — the same relationship
-`engine/v2/ops/snapshots.py`'s own `fence_check=lambda c: verify_fence(...)`
-already has to it. This runner still has no job-layer bridge: registering
+optional `fence_check` parameter for this, COMPOSED with (never a
+replacement for) its existing `_head_fence` check: `_head_fence` always
+runs first, then the supplied `fence_check` (if any) runs after it, both
+inside the one callable `catalog.commit_snapshot` invokes — CodeRabbit
+review, PR #55 round 2 (`catalog.commit_snapshot` skips its own
+`_check_head_expectation` call on an idempotent-replay shortcut
+(`_existing_receipt`), but it always calls whatever `fence_check` it was
+given BEFORE that shortcut lookup, so composing here is what keeps
+head-conflict detection active on that shortcut path too). Omitting
+`fence_check` (the default) keeps this function's previous, unchanged
+behavior for its other two callers, `engine/v2/data/incremental.py`'s
+generic-refresh path and `engine/v2/research/_trades_publish.py`, neither
+of which is touched by this change. This runner still has no job-layer
+bridge: registering
 `forward_calendar_refresh` as a `JobKind` (worker dispatch, a loader
 callback, parameter validation) is a separate, later change — see "Primary
 contracts" above. Its pure helpers (`horizon_dates`, `date_units`,

@@ -138,27 +138,39 @@ def commit_generic_table_candidate(
     fault: Callable[[str], None] | None = None,
     fence_check: Callable[[Any], None] | None = None,
 ):
-    """``fence_check``, when supplied, REPLACES the default ``_head_fence``
-    check below (it is never composed with it) -- safe because
-    ``catalog.commit_snapshot`` always runs its own
-    ``_check_head_expectation`` immediately after ``fence_check(conn)``
-    inside the same transaction, regardless of which ``fence_check`` runs.
-    A caller that wants an attempt-lease check
-    (``engine.v2.ops.lifecycle.verify_fence``) alongside the head check
-    passes ``fence_check=lambda c: verify_fence(c, attempt_id, fence, now)``
-    -- see ``forward_calendar_store.py``'s and ``computed_moves_store.py``'s
-    own ``_fence_check_for`` for the pattern (this module, in
+    """``fence_check``, when supplied, is COMPOSED with the default
+    ``_head_fence`` check, never a replacement for it: ``_head_fence`` always
+    runs first, on every call, then ``fence_check`` (if supplied) runs after
+    it -- both inside the same ``fence_check(conn)`` callable
+    ``catalog.commit_snapshot`` invokes. This matters because
+    ``catalog.commit_snapshot`` skips its OWN ``_check_head_expectation``
+    call whenever an idempotent-replay shortcut matches
+    (``_existing_receipt``), but it always calls whatever ``fence_check`` it
+    was given BEFORE that shortcut lookup -- so composing here is what keeps
+    head-conflict detection active on that shortcut path too, for every
+    caller, not only when no custom ``fence_check`` is supplied. A caller
+    that ALSO wants an attempt-lease check
+    (``engine.v2.ops.lifecycle.verify_fence``) passes
+    ``fence_check=lambda c: verify_fence(c, attempt_id, fence, now)`` -- see
+    ``forward_calendar_store.py``'s and ``computed_moves_store.py``'s own
+    ``_fence_check_for`` for the pattern (this module, in
     ``engine/v2/data/``, cannot import ``engine.v2.ops.lifecycle`` itself --
     see the layering note in ``engine/v2/data/catalog.py``). Omitting it
     (the default) keeps this function's previous, unchanged behavior for
     its other two callers (``engine/v2/data/incremental.py``'s
     ``_run_generic_refresh`` and ``engine/v2/research/_trades_publish.py``'s
-    ``publish``), neither of which passes this parameter.
+    ``publish``): ``_head_fence`` alone, exactly as before.
     """
     clock = clock or SystemClock()
     request_hash = request_hash or content_hash({"changeset": candidate.changeset_hash})
     receipt_id = receipt_id or "receipt_" + request_hash.removeprefix(CONTENT_HASH_PREFIX)[:32]
     attempt_id = attempt_id or "attempt_" + request_hash.removeprefix(CONTENT_HASH_PREFIX)[:32]
+
+    def _combined_fence_check(conn_: Any) -> None:
+        _head_fence(conn_, scope, expected_head_snapshot_id, expected_head_generation)
+        if fence_check is not None:
+            fence_check(conn_)
+
     return catalog.commit_snapshot(
         conn, scope=scope, request_hash=request_hash, contracts=candidate.contracts,
         objects=candidate.objects, records=candidate.records,
@@ -168,8 +180,7 @@ def commit_generic_table_candidate(
         expected_head_snapshot_id=expected_head_snapshot_id,
         expected_head_generation=expected_head_generation, receipt_id=receipt_id,
         attempt_id=attempt_id, fence=fence,
-        fence_check=fence_check or (lambda c: _head_fence(c, scope, expected_head_snapshot_id,
-                                          expected_head_generation)),
+        fence_check=_combined_fence_check,
         clock=clock, fault=fault, store=store,
         record_references=lambda c, rid: _record_references(c, rid, candidate, clock),
         audit_partitions=True)
