@@ -52,9 +52,11 @@ explicit, fully keyword-only signature (`catalog_path`, `objects_root`,
 `parent_snapshot_id`, `refresh_plan_hash`, `as_of`, `tickers`,
 `horizon_days`, `scope`, `expected_head_generation`,
 `expected_head_snapshot_id`, `nasdaq_fetcher`, `earnings_fetcher`) that
-validates every one of `as_of`/`tickers`/`horizon_days`/`scope`/
-`expected_head_generation` before touching the catalog or a provider (see
-"Failure semantics" below); Part 3 wires it into a `RefreshCallback`-shaped
+validates every one of its nine arguments before touching the catalog or a
+provider, including `scope` (must be `"shadow"` or `"smoke"`) and
+`expected_head_generation` (non-negative); `tickers=()` is valid and means
+the whole market (see "Failure semantics" below); Part 3 wires it into a
+`RefreshCallback`-shaped
 adapter that reads the job's staged parameters/input document and calls
 this runner with explicit keyword arguments — that adaptation, and this
 runner's own dispatch into `nightly.py`'s `GRAPH`/job kinds, does not exist
@@ -214,26 +216,42 @@ direct HTTP client of its own.
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
   code (root doc §5), never defaulted. `forward_calendar_store.py`'s
-  `run_forward_calendar_refresh` validates every one of its five
-  request-shaped arguments — `as_of`, `tickers`, `horizon_days`, `scope`,
-  `expected_head_generation` — before opening the catalog connection,
-  constructing the artifact store, or making a provider call: each raises
-  `INVALID_REQUEST` (root doc §5's typed-`Problem` shape) the moment it is
-  missing or malformed, never a bare `AttributeError`/`KeyError` reached
-  deeper in the function. `as_of` refuses `None`, a bare number or `bool`
-  (which would misread as epoch time), an unparseable value, `NaT`, and a
-  timezone-aware value — mirroring `native_board_universe._validated_as_of`
-  (PR #16, not yet on `main`, so mirrored rather than imported).
-  `tickers` refuses a bare `str` (a common caller mistake that `set()`/
-  iteration would otherwise silently accept character-by-character), any
-  other non-iterable, and any element that is not a non-empty `str`.
-  `horizon_days` refuses a non-`int` (a `bool` is explicitly excluded even
-  though it is an `int` subclass in Python) and anything outside
-  `[1, MAX_HORIZON_DAYS]` (366 — one year plus a leap day; no existing
-  forward-calendar or board-universe horizon constant already bounds this,
-  so this is a new, deliberately generous ceiling, not a tuned limit).
-  `scope`/`expected_head_generation` are simply required (a non-empty `str`/
-  an `int` respectively) — the old code read these via `document["scope"]`/
+  `run_forward_calendar_refresh` validates every one of its nine arguments
+  before opening the catalog connection, constructing the artifact store, or
+  making a provider call: each raises `INVALID_REQUEST` (root doc §5's
+  typed-`Problem` shape) the moment it is missing or malformed, never a bare
+  `AttributeError`/`KeyError`/`sqlite3.OperationalError` reached deeper in
+  the function. `catalog_path` must already exist as a file — `sqlite3.connect`
+  is never allowed to silently create one that does not, which it would by
+  default. `objects_root` must already exist as a directory.
+  `parent_snapshot_id` must be a bounded nonempty string and `refresh_plan_hash`
+  a `sha256:`-prefixed 32-byte hex digest, matching (not importing — that name
+  is private) `incremental_data.RefreshParameters`'s own rules for these same
+  two fields (`_refresh_identity_problems`/`_is_hash`). `as_of` refuses `None`,
+  a bare number or `bool` (which would misread as epoch time), an unparseable
+  value, `NaT`, and a timezone-aware value — mirroring
+  `native_board_universe._validated_as_of` (PR #16, not yet on `main`, so
+  mirrored rather than imported). `tickers` refuses a bare `str` (a common
+  caller mistake that `set()`/iteration would otherwise silently accept
+  character-by-character), any other non-iterable, and any element that is
+  not a non-empty `str` — but `tickers=()` is a valid, meaningful request: it
+  means the whole market (the nightly refreshes everything), since an empty
+  `wanted` set never filters a Nasdaq date's claimed rows
+  (`nasdaq_claims_from_rows`); the yfinance fan-out stays bounded by that
+  Nasdaq result for the horizon either way (`pending_tickers`), not by how
+  many tickers were requested. `horizon_days` refuses a non-`int` (a `bool`
+  is explicitly excluded even though it is an `int` subclass in Python) and
+  anything outside `[1, MAX_HORIZON_DAYS]` (366 — one year plus a leap day;
+  no existing forward-calendar or board-universe horizon constant already
+  bounds this, so this is a new, deliberately generous ceiling, not a tuned
+  limit). `scope` must be one of the two commit-destination namespaces v2
+  ops ever authorizes for a job like this one, `{"shadow", "smoke"}` — the
+  same pair every `JobKind` in `stages.py`/`cli.py`/
+  `incremental_data.refresh_job_kind` already registers as
+  `namespaces=frozenset({"shadow", "smoke"})` (reused here as a local
+  constant, since no single module exports it by name).
+  `expected_head_generation` must be a non-negative `int` — the old code read
+  `scope`/`expected_head_generation` via `document["scope"]`/
   `document["expected_head_generation"]`, so a missing key surfaced as a
   `KeyError` partway through the run instead of a refusal before any I/O.
   An unconfigured fetcher pair (`nasdaq_fetcher`/`earnings_fetcher` not
