@@ -114,10 +114,15 @@ entrypoints:
   `SourceBundle` already declares
   them** (`source_inputs.py:313-314`, fields `frozen_inference` and
   `model_release`) and **exactly what `_frozen_recipe_executor`
-  (`source_inputs.py:540-580`) consumes**: the cutover-wiring PR assigns
-  `bundle.model_release = binding.model_release` and
-  `bundle.frozen_inference = binding.frozen_inference` directly. That PR must
-  not call `deployment.resolve_release`, construct its own `FrozenInference`,
+  (`source_inputs.py:540-580`) consumes**: `SourceBundle` is a frozen
+  dataclass (`@dataclass(frozen=True, kw_only=True)`, `source_inputs.py:193`),
+  so a plain attribute assignment (`bundle.model_release = ...`) would raise
+  `FrozenInstanceError` — the real construction path is
+  `dataclasses.replace(bundle, model_release=binding.model_release,
+  frozen_inference=binding.frozen_inference)`, which the cutover-wiring PR
+  calls to produce a new `SourceBundle` carrying every other field over
+  unchanged. That PR must not call `deployment.resolve_release`, construct
+  its own `FrozenInference`,
   or otherwise re-resolve or re-verify anything this module already
   verified — the whole point of this module is that its caller only ever
   holds objects `resolve_release_binding` itself produced.
@@ -697,14 +702,23 @@ Package-specific: `release_bindings.py` never imports `engine.score`/
   same convention `engine/v2/features/panel_math.py::daily_state_lookup`
   already established for exactly this "row present, some columns absent"
   shape.
-- **No leakage past `as_of`.** This is a new invariant `nightly_source_bundle.py`
-  adds: nothing in this package previously checked a row's own observation
-  date against a cutoff (`source_inputs.py` has no `as_of` concept of its
-  own; the closest existing fact, `calendar_observed_through`, was carried
-  through without being validated against anything). `nightly_source_bundle.py`
-  is the first place in this package that enforces it, and it is
-  enforced on every staged input this function reads, not only on the
-  calendar row.
+- **No leakage past `as_of`, for inputs that carry an observation anchor.**
+  This is a new invariant `nightly_source_bundle.py` adds: nothing in this
+  package previously checked a row's own observation date against a cutoff
+  (`source_inputs.py` has no `as_of` concept of its own; the closest
+  existing fact, `calendar_observed_through`, was carried through without
+  being validated against anything). `nightly_source_bundle.py` is the
+  first place in this package that enforces it — but only for the inputs
+  that actually carry an observation-time anchor: `calendar_row`'s
+  `calendar_observed_through`, every `quote_rows` entry's own
+  `observed_at`, and a used, non-null Tier-4 feature's own base metric
+  `fold_start` (see "Leakage, post-`as_of` rows — the real stamp contract"
+  above). `panel_row` carries no such anchor at all — its only check is
+  `PANEL_ROW_WRONG_EVENT` (`panel_row["date"]` identifies WHICH event the
+  row is for, not WHEN its market-state features were observed) — and a
+  null Tier-4 value skips the gate entirely (see "Known gap, escalated
+  rather than invented" above for why the panel side of this is a real,
+  documented gap, not an oversight this invariant papers over).
 - **`model_identity`/`model_artifact_refs`/recipe fields are
   `nightly_source_bundle.py`'s explicit non-goal.** `SourceBundle` requires
   them, but resolving a model identity or artifact reference from a live
