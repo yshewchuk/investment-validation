@@ -10,7 +10,9 @@ existing generic subcommands.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
@@ -91,6 +93,8 @@ def _state_problems(params) -> list[str]:
         problems.append("mode=state needs a frozen P5-4 state")
     if len(params.cutoffs) > 1 or (params.cutoffs and params.state != "paired_residual_pool"):
         problems.append("at most one cutoff, only for paired_residual_pool")
+    if params.pairs_path:
+        problems.append("mode=state does not take pairs_path")
     return problems
 
 
@@ -102,6 +106,8 @@ def _board_analog_problems(params) -> list[str]:
         problems.append("mode=board_analog needs at least one cutoff")
     if params.recipe or params.state:
         problems.append("mode=board_analog must not name a recipe or state")
+    if params.pairs_path:
+        problems.append("mode=board_analog does not take pairs_path")
     return problems
 
 
@@ -115,6 +121,30 @@ def _trailing_cutoff_problems(params) -> list[str]:
         problems.append("mode=trailing_cutoff does not take strategies")
     if params.recipe or params.state:
         problems.append("mode=trailing_cutoff must not name a recipe or state")
+    if params.pairs_path:
+        problems.append("mode=trailing_cutoff does not take pairs_path")
+    return problems
+
+
+def _shape_problems(params) -> list[str]:
+    """Checks independent of ``mode`` -- a plan built directly via
+    :func:`training_plan` skips ``from_document``'s own type/finite/bool checks entirely (see
+    module docstring notes), so this is the only place a submitted ``ticker_chunk``, ``alpha`` or
+    ``cutoffs`` entry is checked for being a sane VALUE, not just the right JSON type."""
+    problems = []
+    if (isinstance(params.ticker_chunk, bool) or not isinstance(params.ticker_chunk, int)
+            or params.ticker_chunk <= 0):
+        problems.append("ticker_chunk must be a positive int")
+    if params.alpha is not None:
+        if (isinstance(params.alpha, bool) or not isinstance(params.alpha, (int, float))
+                or not math.isfinite(params.alpha) or params.alpha < 0):
+            problems.append("alpha must be a finite, non-negative number")
+    for cutoff in params.cutoffs:
+        try:
+            date.fromisoformat(cutoff)
+        except (TypeError, ValueError):
+            problems.append("cutoffs must be valid ISO dates (YYYY-MM-DD)")
+            break
     return problems
 
 
@@ -123,6 +153,7 @@ def training_parameter_problems(job, params) -> list[str]:
     problems = []
     if params.expected_ids != ("training",):
         problems.append("expected_ids must be exactly ('training',)")
+    problems.extend(_shape_problems(params))
     if params.mode not in MODES:
         problems.append("mode must be one of " + ", ".join(MODES))
         return problems
@@ -244,8 +275,11 @@ def _pinned_pairs_path(root: Path, pairs_path: str) -> str | None:
     set (``root / "legacy"``, populated ONLY from the plan's pinned manifest ``file_refs`` --
     see ``supervisor.Service._populate_legacy_staging``), refusing anything that is not a
     plain relative path staying inside that root -- same idiom as
-    ``experiments.py::input_manifest``. ``None`` (no override; the tool's own default path
-    applies) when ``pairs_path`` is empty."""
+    ``experiments.py::input_manifest``. The symlink check runs on the PRE-resolve candidate:
+    a post-resolve check can never fire, since resolving a path already follows every symlink
+    component to its target, and it catches a same-root symlink substitution that the
+    post-resolve prefix check alone would miss. ``None`` (no override; the tool's own default
+    path applies) when ``pairs_path`` is empty."""
     if not pairs_path:
         return None
     try:
@@ -254,8 +288,12 @@ def _pinned_pairs_path(root: Path, pairs_path: str) -> str | None:
         raise fail("INPUT_CHANGED", "pairs_path is not a pinned legacy input",
                    details={"pairs_path": pairs_path}) from None
     base = (root / "legacy").resolve()
-    path = (base / pairs_path).resolve()
-    if not path.is_file() or path.is_symlink() or not str(path).startswith(str(base) + "/"):
+    candidate = base / pairs_path
+    if candidate.is_symlink():
+        raise fail("INPUT_CHANGED", "pairs_path is not a pinned legacy input",
+                   details={"pairs_path": pairs_path})
+    path = candidate.resolve()
+    if not path.is_file() or not str(path).startswith(str(base) + "/"):
         raise fail("INPUT_CHANGED", "pairs_path is not a pinned legacy input",
                    details={"pairs_path": pairs_path})
     return str(path)

@@ -176,6 +176,11 @@ themselves are never held here, only remaining-call/reserve counts.
   only from the plan's pinned manifest), or the worker refuses
   `INPUT_CHANGED` — a recipe can only ever read a pairs file that is one of
   the job's pinned legacy inputs, never an arbitrary filesystem path.
+  `training_parameter_problems` also refuses, before submission, a
+  non-positive/non-int `ticker_chunk`, a non-finite or negative `alpha`, a
+  `cutoffs` entry that is not a valid ISO date, and a `pairs_path` supplied to
+  any mode other than `recipe` — each `INVALID_REQUEST`, never a value that
+  reaches the worker unexamined.
   `models_promote`'s `store_domains` declares a
   write lease on the single `deployment_pointer` domain, which serializes
   every `models_promote` claim globally against every other one regardless

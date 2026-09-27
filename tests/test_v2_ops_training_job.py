@@ -154,6 +154,36 @@ def test_state_mode_rejects_extra_cutoff_on_non_paired_pool_member():
                      cutoffs=("2026-09-18",)) == []
 
 
+def test_ticker_chunk_must_be_a_positive_int():
+    for bad in (0, -1, "1000", True, 1.5):
+        assert any("ticker_chunk" in p for p in _problems(ticker_chunk=bad)), bad
+    assert _problems(ticker_chunk=1) == []
+
+
+def test_alpha_must_be_finite_and_non_negative():
+    for bad in (float("nan"), float("inf"), float("-inf"), -0.1, True, "0.5"):
+        assert any("alpha" in p for p in _problems(alpha=bad)), bad
+        assert any("finite, non-negative" in p for p in _problems(alpha=bad)), bad
+
+
+def test_cutoffs_must_be_valid_iso_dates():
+    for bad in ("2026-13-40", "not-a-date", "", "2026/09/18"):
+        assert any("cutoff" in p for p in _problems(cutoffs=(bad,))), bad
+    assert not any("valid ISO dates" in p for p in _problems(cutoffs=("2026-09-18",)))
+
+
+@pytest.mark.parametrize("changes,message", [
+    ({"mode": "state", "state": "paired_residual_pool"}, "mode=state does not take pairs_path"),
+    ({"mode": "board_analog", "state": "", "alpha": 0.5, "cutoffs": ("2026-09-18",)},
+     "mode=board_analog does not take pairs_path"),
+    ({"mode": "trailing_cutoff", "state": "", "cutoffs": ("2026-09-18",)},
+     "mode=trailing_cutoff does not take pairs_path"),
+])
+def test_pairs_path_refused_outside_recipe_mode(changes, message):
+    problems = _problems(pairs_path="data/pairs.parquet", **changes)
+    assert message in problems
+
+
 def test_training_plan_names_experiment_heavy_and_refuses_invalid_params():
     plan = training.training_plan(mode="state", state="paired_residual_pool")
     assert plan["kind"] == "training"
