@@ -67,7 +67,12 @@ strategy, plus one `DYN-SV` meta-request per event.
   performs no I/O itself — the caller loads the table. `event_date` may
   also be given as ISO 8601 strings (date-only or full timestamp, mixed
   within one column); numeric values are rejected rather than read as
-  epoch-relative offsets (see "Failure semantics").
+  epoch-relative offsets, whether the column's dtype is numeric or a mixed
+  `object` column holding Python `int`/`float` elements (see "Failure
+  semantics"). `as_of` must be a timezone-naive `datetime`/
+  `pandas.Timestamp` (`None`, `NaT`, and a timezone-aware value are
+  refused); `horizon_days` must be a non-negative `int` (`bool` is refused
+  despite being an `int` subtype in Python) — see "Failure semantics".
 
 ## Outputs
 
@@ -154,18 +159,25 @@ legacy chain index and fill model), and `engine.structures`'s own
 top-level import block pulls in `engine.fills` directly — importing
 either, even solely to read a registry key set for a read-only
 comparison, would violate the isolation invariant at import time, before
-any call happens. It also does not import the dependency-free
-`engine.strategy_policy` (which holds `DISABLED_STRATEGIES`, extracted
-from `engine.score` for exactly this kind of read): any v2 → legacy
-import must be declared in `checks/legacy_adapters.json`, whose adapter
-count may only shrink, and `engine.v2.ops` already has its one allowed
-adapter module (`legacy_adapter.py`, above). `SUPPORTED_STRATEGIES`
-already excludes both disabled strategies by construction (it comes from
-native's own input builder, which has no entry for CAL-P/CND-P), so no
-such check is needed — this module reads the native-covered set from
+any call happens. It also performs no read-only consistency check against
+`engine.score.DISABLED_STRATEGIES` (the legacy scorer's own
+strategy-refusal set, unextracted, unexported): any v2 → legacy import
+must be declared in `checks/legacy_adapters.json`, whose adapter count may
+only shrink, and `engine.v2.ops` already has its one allowed adapter
+module (`legacy_adapter.py`, above). `SUPPORTED_STRATEGIES` already
+excludes both disabled strategies by construction (it comes from native's
+own input builder, which has no entry for CAL-P/CND-P), so no such check
+is needed — this module reads the native-covered set from
 `engine.v2.scoring.source_inputs` only, and checks it against
 `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid
-once at import time, no I/O, no legacy dependency).
+once at import time, no I/O, no legacy dependency). `SUPPORTED_STRATEGIES`
+is `engine.v2.scoring.source_inputs`'s public alias for its own
+pre-existing internal strategy set (`_STRATEGY_FORECAST_OUTPUTS`'s key
+set: `STR-THRU`, `STR-RUNUP`, and the seven `DYNAMIC_MENU` members) — the
+same value that module already computed for its own input-building use;
+exporting it added a name, not a behavior, and gave this module the one
+fact it needs (which strategies native can build scoring inputs for)
+without duplicating that set here.
 
 Callers: `engine.v2.dashboard._server`'s lazy, documented import of
 `cli.refresh_action` (root doc §4); the `tools/v2_*.py` operator CLIs
@@ -202,18 +214,30 @@ network, or database access.
   rule for its own input: `events_table` missing `ticker`, `event_date`,
   or `session`; holding more than one column under any of those three
   labels (checked before any column is read by label); holding an
-  `event_date` column of numeric dtype (rejected outright — never read as
-  an epoch-relative offset, e.g. `20260201`); holding an `event_date`
-  column that otherwise cannot be parsed as timestamps (e.g. an
-  unparseable string); holding an `event_date` value that parses to null
-  (`NaT`, e.g. a `None`/`NaN` cell); or holding a timezone-aware
-  `event_date` column (this function only supports timezone-naive event
-  dates, matching `as_of`) — each is a whole-call typed refusal
-  (`OpsError`, code `INVALID_REQUEST`), raised before any row is read —
-  never a partial or silently smaller result. `event_date` values already
-  typed as `datetime64` (naive or tz-aware) or given as ISO 8601 strings
-  (date-only and full-timestamp forms may be mixed within one column) are
-  accepted.
+  `event_date` column of numeric dtype, or an `object`-dtype `event_date`
+  column holding any Python `int`/`float` element (checked per element,
+  before any parsing is attempted — never read as an epoch-relative
+  offset, e.g. `20260201`, regardless of whether pandas inferred a numeric
+  dtype or left the column as `object`); holding an `event_date` column
+  that otherwise cannot be parsed as timestamps (e.g. an unparseable
+  string); holding an `event_date` value that parses to null (`NaT`, e.g.
+  a `None`/`NaN` cell); or holding a timezone-aware `event_date` column,
+  whether the column arrives already `datetime64` with a timezone or as a
+  tz-aware ISO 8601 string (e.g. `"...+00:00"`) — this function only
+  supports timezone-naive event dates, matching `as_of` — each is a
+  whole-call typed refusal (`OpsError`, code `INVALID_REQUEST`), raised
+  before any row is read — never a partial or silently smaller result.
+  `event_date` values already typed as timezone-naive `datetime64`, or
+  given as timezone-naive ISO 8601 strings (date-only and full-timestamp
+  forms may be mixed within one column), are accepted; a timezone-aware
+  `event_date` is refused in every representation — there is no
+  ISO-string exception to the timezone-naive rule.
+  `as_of` must be a timezone-naive `datetime`/`pandas.Timestamp`: `None`,
+  `NaT`, and a timezone-aware value are each refused (`OpsError`,
+  `INVALID_REQUEST`). `horizon_days` must be a non-negative `int`; `bool`
+  is refused even though it is an `int` subtype in Python (so `True`/
+  `False` cannot silently pass as `1`/`0`), and any other type or a
+  negative value is refused the same way.
 - **Cache** — none of this package's own state is a cache; the catalog is
   the durable record. `board_requests` holds no cache either; it reads
   only the table its caller passes in.
@@ -287,8 +311,7 @@ invariant (above) and adds two of its own, scoped to that module:
   `DYN-SV` literal, never from the events table. The module's one
   consistency assertion (`DYNAMIC_MENU` is a subset of
   `SUPPORTED_STRATEGIES`) reads only v2-native names — it does not import
-  `engine.strategy_policy`'s `DISABLED_STRATEGIES` or any other
-  legacy-owned name.
+  `engine.score`'s `DISABLED_STRATEGIES` or any other legacy-owned name.
 - **Isolation** — this module never loads the legacy option-chain index
   and never constructs a legacy `Scorer`; it also never *imports*
   `engine.score` or `engine.structures`, so its import graph never reaches

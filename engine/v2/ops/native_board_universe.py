@@ -30,9 +30,9 @@ __all__ = ["BoardRequest", "board_requests"]
 #: a frozenset's own iteration order — that order is not stable across a
 #: process restart with a different PYTHONHASHSEED), plus one DYN-SV request.
 #:
-#: This module deliberately does not import `engine.strategy_policy` (or
-#: `engine.score`/`engine.structures`) even for a read-only consistency
-#: check against `DISABLED_STRATEGIES`/`STRUCTURES`: any v2 -> legacy import
+#: This module deliberately does not import `engine.score` or
+#: `engine.structures` even for a read-only consistency check against
+#: `DISABLED_STRATEGIES`/`STRUCTURES`: any v2 -> legacy import
 #: must be declared in checks/legacy_adapters.json, whose adapter count may
 #: only shrink, and engine.v2.ops already has its one allowed adapter module
 #: (`legacy_adapter.py`, §4.2). `SUPPORTED_STRATEGIES` already excludes both
@@ -69,9 +69,10 @@ def _validated_event_dates(events_table: pd.DataFrame) -> pd.Series:
 
     Raises `OpsError` (code `INVALID_REQUEST`) for every case
     `board_requests` documents: a missing or duplicated required column, a
-    numeric `event_date` dtype, an `event_date` value that cannot be parsed
-    as a timestamp, a null/`NaT` `event_date`, or a timezone-aware
-    `event_date` column.
+    numeric `event_date` dtype, a numeric value held in an object-dtype
+    `event_date` column, an `event_date` value that cannot be parsed as a
+    timestamp, a null/`NaT` `event_date`, or a timezone-aware `event_date`
+    column.
     """
     missing = [c for c in _REQUIRED_COLUMNS if c not in events_table.columns]
     if missing:
@@ -98,6 +99,16 @@ def _validated_event_dates(events_table: pd.DataFrame) -> pd.Series:
             "20260201 would be misread as an epoch-relative offset rather "
             "than a calendar date",
         ))
+    if pd.api.types.is_object_dtype(event_date_column):
+        for v in event_date_column:
+            if isinstance(v, (int, float)) and not pd.isna(v):
+                raise OpsError(make_problem(
+                    "INVALID_REQUEST",
+                    f"events_table event_date column holds a numeric value ({v!r}) in an "
+                    f"object-dtype column, not a timestamp or ISO 8601 string; a numeric value "
+                    f"such as 20260201 would be misread as an epoch-relative offset or ISO "
+                    f"basic date rather than a calendar date",
+                ))
 
     try:
         if pd.api.types.is_datetime64_any_dtype(event_date_column):
@@ -125,6 +136,57 @@ def _validated_event_dates(events_table: pd.DataFrame) -> pd.Series:
     return event_dates
 
 
+def _validated_as_of(as_of) -> pd.Timestamp:
+    """Validate and normalize `as_of`.
+
+    Raises `OpsError` (code `INVALID_REQUEST`) if `as_of` is `None`, `NaT`,
+    cannot be parsed as a timestamp at all, or is timezone-aware — this
+    function only supports a timezone-naive `as_of`, matching `event_date`.
+    """
+    if as_of is None:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST", "as_of must not be None",
+        ))
+    try:
+        as_of_ts = pd.Timestamp(as_of)
+    except (TypeError, ValueError) as exc:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST", f"as_of could not be parsed as a timestamp: {exc}",
+        )) from exc
+    if pd.isna(as_of_ts):
+        raise OpsError(make_problem(
+            "INVALID_REQUEST", "as_of must not be NaT",
+        ))
+    if as_of_ts.tzinfo is not None:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            "as_of is timezone-aware; board_requests only supports a "
+            "timezone-naive as_of, matching event_date",
+        ))
+    return as_of_ts
+
+
+def _validated_horizon_days(horizon_days) -> int:
+    """Validate `horizon_days`.
+
+    Raises `OpsError` (code `INVALID_REQUEST`) unless `horizon_days` is a
+    non-negative `int`. `bool` is explicitly excluded even though it is an
+    `int` subclass in Python, so `True`/`False` cannot silently pass as
+    `1`/`0`.
+    """
+    if isinstance(horizon_days, bool) or not isinstance(horizon_days, int):
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            f"horizon_days must be a non-negative int, got {horizon_days!r}",
+        ))
+    if horizon_days < 0:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            f"horizon_days must be non-negative, got {horizon_days!r}",
+        ))
+    return horizon_days
+
+
 def board_requests(
     as_of,
     horizon_days: int,
@@ -139,16 +201,20 @@ def board_requests(
     native-covered strategies in sorted (alphabetical) order, then one
     `DYN-SV` request last.
 
-    Raises `OpsError` (code `INVALID_REQUEST`) if `events_table` is missing
-    any of `ticker`/`event_date`/`session`, if `event_date` cannot be parsed
-    as timestamps or contains a null/unparseable value, or if `event_date`
-    is timezone-aware (this module only supports timezone-naive event
-    dates, matching `as_of`) — a whole-call refusal raised before any row
-    is read, never a partial or silently empty/smaller result.
+    Raises `OpsError` (code `INVALID_REQUEST`) if `as_of` is `None`/`NaT`/
+    timezone-aware, or if `horizon_days` is not a non-negative `int` (a
+    `bool` value is refused, not treated as `0`/`1`). Also raises if
+    `events_table` is missing any of `ticker`/`event_date`/`session`, if
+    `event_date` cannot be parsed as timestamps or contains a null/
+    unparseable value, or if `event_date` is timezone-aware (this module
+    only supports timezone-naive event dates, matching `as_of`) — a
+    whole-call refusal raised before any row is read, never a partial or
+    silently empty/smaller result.
     """
+    as_of_ts = _validated_as_of(as_of).normalize()
+    horizon_days = _validated_horizon_days(horizon_days)
     event_dates = _validated_event_dates(events_table)
 
-    as_of_ts = pd.Timestamp(as_of).normalize()
     horizon = as_of_ts + pd.Timedelta(days=horizon_days)
 
     events = events_table.assign(event_date=event_dates)

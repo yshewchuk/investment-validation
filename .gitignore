@@ -32,7 +32,6 @@
 !/guides/*.md
 !/docs/*.md
 !/engine/**/*.md
-!ARCHITECTURE.md
 !/checks/*.md
 !/tests/*.md
 !/tools/*.md

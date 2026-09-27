@@ -134,6 +134,71 @@ class TestMalformedEventsTableRefuses:
             board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
         assert excinfo.value.code == "INVALID_REQUEST"
 
+    def test_object_dtype_numeric_event_date_raises_invalid_request(self):
+        event_dates = pd.Series([20260201, pd.Timestamp("2026-02-05")], dtype=object)
+        events_df = pd.DataFrame({
+            "ticker": ["AAA", "BBB"],
+            "event_date": event_dates,
+            "session": ["BMO", "AMC"],
+        })
+        assert events_df["event_date"].dtype == object  # sanity: this is the object-dtype case, not numeric-dtype
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+
+class TestAsOfAndHorizonDaysValidation:
+    @staticmethod
+    def _valid_events_table():
+        return _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-01-25"), "session": "BMO"},
+        ])
+
+    def test_none_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(None, 21, None, self._valid_events_table())
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_nat_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.NaT, 21, None, self._valid_events_table())
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_timezone_aware_as_of_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25", tz="UTC"), 21, None,
+                self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_bool_horizon_days_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25"), True, None, self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_negative_horizon_days_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25"), -1, None, self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_float_horizon_days_raises_invalid_request(self):
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(
+                pd.Timestamp("2026-01-25"), 21.0, None, self._valid_events_table(),
+            )
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_valid_as_of_and_horizon_days_still_accepted(self):
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 0, None, self._valid_events_table(),
+        )
+        assert requests
+
 
 class TestDuplicateRequiredColumn:
     def test_duplicate_required_column_raises_invalid_request(self):
