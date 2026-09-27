@@ -328,6 +328,7 @@ mutate = [
     "engine/v2/data/incremental.py",
     "engine/v2/data/generic_incremental.py",
     "engine/v2/data/incremental_tables.py",
+    "engine/v2/data/computed_moves.py",
 ]
 tests = [
     "tests/test_v2_data_generic_incremental.py",
@@ -852,6 +853,7 @@ mutate = [
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",
     "engine/v2/ops/fingerprints.py",
+    "engine/v2/ops/forward_calendar_store.py",
     "engine/v2/ops/incremental_data.py",
     "engine/v2/ops/training.py",
     "engine/v2/ops/unit_receipts.py",
@@ -864,6 +866,7 @@ tests = [
     "tests/test_v2_ops_explain_from_logs.py",
     "tests/test_v2_ops_fingerprints_code_assets.py",
     "tests/test_v2_ops_fingerprints_model_scan.py",
+    "tests/test_v2_ops_forward_calendar_store.py",
     "tests/test_v2_ops_incremental_data.py",
     "tests/test_v2_ops_incremental_refresh_wiring.py",
     "tests/test_v2_ops_incremental_registration.py",

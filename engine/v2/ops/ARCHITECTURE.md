@@ -58,6 +58,32 @@ alongside the nightly stage kinds, not in
 session)` and the function that enumerates one per event × native-covered
 strategy, plus one `DYN-SV` meta-request per event.
 
+A small number of natively-fetched data stores live directly in this
+package rather than delegating computation to another v2 layer — like
+`price-history capture` above, `forward_calendar_store.py` (spec s4c) is
+one of these. It does NOT claim `RefreshCallback` compatibility: `main`'s
+`RefreshParameters` (`incremental_data.py`) has no `as_of`/`tickers` field,
+only Part 3's job-kind-specific parameters dataclass will, so a function
+shaped `(parameters, root)` cannot actually run on `main` today.
+`run_forward_calendar_refresh` is instead a standalone runner with an
+explicit, fully keyword-only signature (`catalog_path`, `objects_root`,
+`parent_snapshot_id`, `refresh_plan_hash`, `as_of`, `tickers`,
+`horizon_days`, `scope`, `expected_head_generation`,
+`expected_head_snapshot_id`, `nasdaq_fetcher`, `earnings_fetcher`) that
+validates every one of its nine arguments before touching the catalog or a
+provider, including `scope` (must be `"shadow"` or `"smoke"`) and
+`expected_head_generation` (non-negative); `tickers=()` is valid and means
+the whole market (see "Failure semantics" below); Part 3 wires it into a
+`RefreshCallback`-shaped
+adapter that reads the job's staged parameters/input document and calls
+this runner with explicit keyword arguments — that adaptation, and this
+runner's own dispatch into `nightly.py`'s `GRAPH`/job kinds, does not exist
+yet (spec s4c Parts 3-4). Its pure helpers (`horizon_dates`, `date_units`,
+`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
+`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
+are unit-testable without a catalog or a network. Today this runner has no
+production caller, only its own test module.
+
 ## Inputs
 
 - Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan`
@@ -68,6 +94,20 @@ strategy, plus one `DYN-SV` meta-request per event.
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture` and `price-refresh`.
+- `forward_calendar_store.py`'s own inputs: the pinned parent snapshot's
+  `daily_market` sessions (one scan, grouped by ticker, fed to
+  `engine.v2.data.computed_moves.native_trading_calendar` for the horizon
+  calendar — a snapshot without a `daily_market` session falls back to plain
+  weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
+  (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
+  `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
+  `expected_head_snapshot_id`) — there is no staged input-document file for
+  this runner (see "Primary contracts" above: it is not `RefreshCallback`-
+  shaped, so it reads nothing from a job's private working directory); and
+  the two injected network edges, `providers.nasdaq_calendar.
+  nasdaq_calendar_fetcher` (one call per discovery date) and
+  `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
+  still missing a session after the Nasdaq pass).
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
   `session` columns — e.g. `engine.data.store`'s `earnings_events` Tier-2
   table's shape, where `event_date` is schema-typed `datetime64[ns]`), an
@@ -114,6 +154,18 @@ strategy, plus one `DYN-SV` meta-request per event.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
+- `forward_calendar_store.run_forward_calendar_refresh` commits revisions
+  into the EXISTING `earnings_events` contract through
+  `engine.v2.data.generic_incremental` — never
+  `engine.data.rebuild.rebuild` — and returns a `RefreshCallbackResult`
+  (`status` one of `complete`/`noop` — invalid input or an unconfigured
+  fetcher pair raises `OpsError` instead of returning a `"failed"` result;
+  `completed_ids`, `coverage_advanced`, and `warnings` carrying any
+  weekday-calendar-fallback degradation as evidence rather than only a log
+  line). A run whose merged claims equal the parent snapshot's own rows
+  resolves back to the parent (the commit layer's own equality check
+  decides this, never key presence in the parent), so it reports `noop`
+  rather than a spurious `complete`.
 - `training`/`models_promote` are ordinary `_core_kinds()` job kinds, not
   `supervisor._COORDINATOR_EFFECT_KINDS` members: the worker subprocess does
   the real write itself. `run_training_worker` (worker `"training"`) calls
@@ -140,7 +192,11 @@ including inside function bodies):
   `DYNAMIC_MENU` import), `engine.v2.scoring` (5.0, `native_board_universe.py`'s
   `SUPPORTED_STRATEGIES` import), `engine.v2.ledger` (6.0), `engine.v2.parity`
   (6.5) — all strictly below this package's own layer (7.0), per the root
-  doc's §2 rule.
+  doc's §2 rule. `forward_calendar_store.py` adds one new `engine.v2.data`
+  submodule to this package's dependency surface,
+  `engine.v2.data.computed_moves` (`native_trading_calendar`, layer 1.0),
+  alongside its existing top-level use of `generic_incremental`,
+  `incremental_tables` and `repository.Repository`.
 - Lazy, function-local: `engine.v2.contracts` also appears lazily
   (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
   `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
@@ -222,9 +278,22 @@ that job's first step — out of scope for this change.
 
 `sqlite3` (the operations catalog); the local filesystem (artifact store,
 snapshot roots, legacy px/fetch-cache trees read through the adapter); the
-market-data provider account this package's `provider-account` command
-budgets against (`engine/v2/ops/providers/`, e.g. ORATS) — credentials
-themselves are never held here, only remaining-call/reserve counts.
+market-data provider accounts this package's `provider-account` command
+budgets against (`engine/v2/ops/providers/`) — credentials themselves are
+never held here, only remaining-call/reserve counts. Three accounts exist
+today: `orats-daily-market` (keyed, reads `ORATS_API_KEY`); and, as of spec
+s4c, `nasdaq` and `yfinance` — both unmetered and keyless (their
+`PROVIDER_CREDENTIAL_VARIABLES` tuples are empty), but still
+operator-provisioned budget rows so the shared scheduler reserves against
+them like any keyed account. `providers/nasdaq_calendar.py` calls Nasdaq's
+public `api.nasdaq.com/api/calendar/earnings` endpoint (one date per call,
+a plain keyless HTTPS GET with a browser user-agent — the endpoint refuses
+the default client UA with a 403); `providers/yfinance_edge.py` wraps the
+third-party `yfinance` library (imported lazily, only inside the default
+callables, so importing the module touches no network) — one
+`Ticker.history`/`Ticker.get_earnings_dates` call per ticker, never a
+direct HTTP client of its own.
+
 `native_board_universe.py` adds no new external system: `pandas` (already
 a transitive dependency of this package) is its main library, for the
 events-table filter and the `BoardRequest.event_date` type; it also imports
@@ -273,6 +342,53 @@ network, or database access.
   be a non-negative `int`; `bool` is refused even though it is an `int`
   subtype in Python (so `True`/`False` cannot silently pass as `1`/`0`),
   and any other type or a negative value is refused the same way.
+  `forward_calendar_store.py`'s `run_forward_calendar_refresh` validates
+  every one of its nine arguments before opening the catalog connection,
+  constructing the artifact store, or making a provider call: each raises
+  `INVALID_REQUEST` (root doc §5's typed-`Problem` shape) the moment it is
+  missing or malformed, never a bare
+  `AttributeError`/`KeyError`/`sqlite3.OperationalError` reached deeper in
+  the function. `catalog_path` must already exist as a file — `sqlite3.connect`
+  is never allowed to silently create one that does not, which it would by
+  default. `objects_root` must already exist as a directory.
+  `parent_snapshot_id` must be a bounded nonempty string and `refresh_plan_hash`
+  a `sha256:`-prefixed 32-byte hex digest, matching (not importing — that name
+  is private) `incremental_data.RefreshParameters`'s own rules for these same
+  two fields (`_refresh_identity_problems`/`_is_hash`). `as_of` refuses `None`,
+  a bare number or `bool` (which would misread as epoch time), an unparseable
+  value, `NaT`, and a timezone-aware value — mirroring
+  `native_board_universe._validated_as_of` (PR #16, not yet on `main`, so
+  mirrored rather than imported). `tickers` refuses a bare `str` (a common
+  caller mistake that `set()`/iteration would otherwise silently accept
+  character-by-character), any other non-iterable, and any element that is
+  not a non-empty `str` — but `tickers=()` is a valid, meaningful request: it
+  means the whole market (the nightly refreshes everything), since an empty
+  `wanted` set never filters a Nasdaq date's claimed rows
+  (`nasdaq_claims_from_rows`); the yfinance fan-out stays bounded by that
+  Nasdaq result for the horizon either way (`pending_tickers`), not by how
+  many tickers were requested. `horizon_days` refuses a non-`int` (a `bool`
+  is explicitly excluded even though it is an `int` subclass in Python) and
+  anything outside `[1, MAX_HORIZON_DAYS]` (366 — one year plus a leap day;
+  no existing forward-calendar or board-universe horizon constant already
+  bounds this, so this is a new, deliberately generous ceiling, not a tuned
+  limit). `scope` must be one of the two commit-destination namespaces v2
+  ops ever authorizes for a job like this one, `{"shadow", "smoke"}` — the
+  same pair every `JobKind` in `stages.py`/`cli.py`/
+  `incremental_data.refresh_job_kind` already registers as
+  `namespaces=frozenset({"shadow", "smoke"})` (reused here as a local
+  constant, since no single module exports it by name).
+  `expected_head_generation` must be a non-negative `int` — the old code read
+  `scope`/`expected_head_generation` via `document["scope"]`/
+  `document["expected_head_generation"]`, so a missing key surfaced as a
+  `KeyError` partway through the run instead of a refusal before any I/O.
+  An unconfigured fetcher pair (`nasdaq_fetcher`/`earnings_fetcher` not
+  passed) is the same typed-`Problem` shape: `RESOURCE_UNAVAILABLE`. A
+  parent snapshot with no `daily_market` session is not a missing-input
+  refusal at all — it is the documented weekday-calendar fallback, recorded
+  as a result `warning` (see "Diagrams" below for its narrowed
+  `except ValueError`, which now wraps only the one call
+  (`native_trading_calendar`) whose `ValueError` that fallback is
+  documented to catch, not the calendar-scan/arithmetic around it).
 - **Training/promote refusal** — `run_training_worker` maps every refusal
   the underlying tool can raise to a typed `OpsError` rather than an
   untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
@@ -309,14 +425,28 @@ network, or database access.
   `legitimate_empty` payload is always re-verified against the live source
   on the next run, and a `not_final`/`transient`/`refused` response is
   never written to the cache at all (`record_unit_receipt` refuses to
-  store one). `unit_receipts.py` breaks a `received_at` tie by `rowid`
-  (the table's own append-only insertion order); `nightly.py`'s older,
-  narrower lookup does not carry that tie-break. On the acquisition side,
-  a provider response that cannot be used maps to one of two non-retried
-  failure codes — `refused` (an unparseable body or other non-auth 4xx) to
-  `SOURCE_INVALID`, `credential_invalid` (the provider's own 401/403) to
-  `CREDENTIAL_INVALID` — while only `transient` is retried; everything
-  else about this package's own job/lease/history state, including the
+  store one). `forward_calendar_store.py`'s `_cached_nasdaq`/`_cached_yfinance`
+  are thin wrappers over `cached_unit_outcomes` for the `nasdaq`/`yfinance`
+  source+endpoint pairs; its `_fetch_nasdaq`/`_fetch_yfinance` then re-read
+  the wanted units' bytes through `cached_unit_payloads` before falling back
+  to a fresh fetch, so a same-session retry rebuilds every unit's claims —
+  fresh and cache-hit alike — exactly as a clean single run would.
+  `unit_receipts.py` breaks a `received_at` tie by `rowid` (the table's own
+  append-only insertion order); `nightly.py`'s older, narrower lookup does
+  not carry that tie-break. On the acquisition side, a provider response
+  that cannot be used maps to one of four failure codes via
+  `provider_failure_code` — two registered retryable (`checks`/
+  `contracts/operations.py`'s `("source", True)`): `not_final` (Nasdaq's
+  404, a date not yet published) to `SOURCE_NOT_FINAL` and `transient`
+  (network errors, 429, 5xx) to `TRANSIENT_SOURCE`; and two non-retryable
+  (`("source", False)`): `refused` (an unparseable body or other non-auth
+  4xx) to `SOURCE_INVALID` and `credential_invalid` (the provider's own
+  401/403) to `CREDENTIAL_INVALID`. A mixed batch of unit kinds reports the
+  worst code among them, ranked `TRANSIENT_SOURCE` <
+  `SOURCE_NOT_FINAL` < `SOURCE_INVALID` < `CREDENTIAL_INVALID` — retryable
+  or not, the job still fails on the first non-`complete`/`legitimate_empty`
+  unit rather than committing a partial claim set. Everything else about
+  this package's own job/lease/history state, including the
   `training`/`models_promote` job kinds' own state, is not a cache, and the
   catalog remains the durable record of it. `board_requests` holds no
   cache of its own either way; it reads only the table its caller passes
@@ -470,6 +600,49 @@ called from the coordinator, not the worker — `_coordinator_effect`
 dispatches to `effects_graph.py` for some kinds and to
 `decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own
 `supervisor.py` methods for the rest (see "Outputs").
+
+### Forward-calendar refresh: two-source, cache-first fetch (`forward_calendar_store.py`)
+
+```mermaid
+flowchart TD
+    V{"validate as_of, tickers,<br/>horizon_days, scope,<br/>expected_head_generation"}
+    V -->|any invalid| VF["INVALID_REQUEST<br/>-- no catalog connection,<br/>no provider call"]
+    V -->|all valid| A["parent snapshot's daily_market<br/>-> native_trading_calendar<br/>(weekday fallback + warning if absent)"]
+    A --> B["horizon_dates -> date_units"]
+    B --> C{"unit cached complete?"}
+    C -->|yes| D["cached_unit_payloads:<br/>re-read receipt bytes"]
+    C -->|no| E["nasdaq_calendar_fetcher<br/>(one call per date)"]
+    D -->|kind=complete| F["nasdaq_claims_from_rows"]
+    E -->|complete: parseable,<br/>has rows| G["record_unit_receipt"] --> F
+    E -->|legitimate_empty:<br/>parseable, no rows| G2["record_unit_receipt<br/>(no claims folded)"]
+    E -->|not_final/transient/refused/<br/>credential_invalid| H["provider_failure_code<br/>-> job fails, nothing committed"]
+    F --> I["pending_tickers:<br/>tickers with no nasdaq session"]
+    I --> J{"unit cached complete?"}
+    J -->|yes| K["cached_unit_payloads:<br/>re-read receipt bytes"]
+    J -->|no| L["yfinance_earnings_fetcher<br/>(one call per pending ticker)"]
+    K -->|kind=complete| M["fold session into claims"]
+    L -->|complete: frame has rows| N["record_unit_receipt"] --> M
+    L -->|legitimate_empty:<br/>empty frame, no bytes<br/>-- never cached| M2["no claim, no receipt"]
+    L -->|transient/refused| H
+    M --> O["_commit_claims -> generic_incremental<br/>into the existing earnings_events contract"]
+    O --> P{"merged rows == parent's?"}
+    P -->|yes| Q["status=noop, head unmoved"]
+    P -->|no| R["status=complete,<br/>candidate_snapshot_id set"]
+```
+
+Nasdaq runs first and is the *discovery* pass (which tickers have a date at
+all); yfinance runs only against `pending_tickers` — the tickers Nasdaq's
+pass left without a resolved session — as a *confirmation* pass. Both
+passes are cache-first and unit-independent: a same-session retry re-reads
+every already-cached unit's bytes by receipt (`cached_unit_payloads`) and
+only fetches the units that are still missing, so the retry's claims are
+identical to a clean single run's. `provider_failure_code` is checked once,
+after both passes, over the combined kind list: the yfinance pass still
+runs and still caches its own successful units' receipts even when a
+Nasdaq unit already failed (each unit records its own receipt as soon as
+it resolves, spec R3 — one unit's failure never discards another unit's
+already-recorded receipt within the same run), but no `generic_incremental`
+commit happens until the combined kind list is clean.
 
 ### `native_board_universe.py`: `board_requests`
 
