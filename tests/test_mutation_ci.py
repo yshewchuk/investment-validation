@@ -739,39 +739,80 @@ def test_matrix_is_built_from_the_toml(capsys):
 
 
 def test_workflow_triggers_and_concurrency():
+    """PR runs are gated behind Tests via workflow_run, never a direct
+    pull_request trigger; push/schedule/dispatch keep their old triggers."""
     on = WORKFLOW.get("on", WORKFLOW.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
-    assert on["pull_request"]["branches"] == ["main"]
+    assert "pull_request" not in on  # PR runs are gated behind Tests via workflow_run instead
+    assert on["workflow_run"] == {"workflows": ["Tests"], "types": ["completed"]}
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
-    # PR runs get their own per-PR group and cancel their predecessor; push/
-    # schedule/dispatch keep the exact old group value and stay non-cancelling
-    # (github.event_name == 'pull_request' is false for all three, so the
-    # ternary's false branch -- the unchanged literal -- is what they get).
-    assert WORKFLOW["concurrency"]["group"] == (
-        "mutation-gremlins-${{ github.event_name == 'pull_request' "
-        "&& github.event.pull_request.number || github.ref }}"
-    )
+    # Three disjoint groups (workflow_run / push / schedule+dispatch) --
+    # see test_workflow_concurrency_group_keys_on_repo_and_pr_number and
+    # test_push_schedule_and_dispatch_get_disjoint_concurrency_groups below
+    # for the detailed assertions and rationale.
+    assert WORKFLOW["concurrency"]["group"].startswith("mutation-gremlins-${{ ")
     assert WORKFLOW["concurrency"]["cancel-in-progress"] == \
-        "${{ github.event_name == 'pull_request' }}"
+        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
     assert WORKFLOW["permissions"] == {"contents": "read"}
     plan = JOBS["plan"]["steps"][-1]["run"]
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
+
+
+def test_workflow_concurrency_group_keys_on_repo_and_pr_number():
+    """Opus fix 1 (originally): the concurrency group must disambiguate a
+    workflow_run by the repository that actually triggered it, not only
+    head_branch -- a fork branch sharing a same-repo PR's branch name must
+    never land in that PR's group and cancel it. Fix #45 replaced the old
+    PR-number arm (a join() over workflow_run.pull_requests, which lists PRs
+    across ANY repository sharing a head branch NAME -- see
+    test_select_pr_jq_filter_matches_only_the_real_same_repo_pr) with
+    head_repository.full_name + head_branch alone, which already uniquely
+    identifies the branch that triggered this run without trusting that
+    array. Must fail on c1585fb (keyed on head_branch alone) AND on 0377071
+    (still joins over pull_requests)."""
+    group = WORKFLOW["concurrency"]["group"]
+    assert "github.event.workflow_run.head_repository.full_name" in group
+    assert "github.event.workflow_run.head_branch" in group
+    assert "join(" not in group
+    assert "pull_requests" not in group
+
+
+def test_push_schedule_and_dispatch_get_disjoint_concurrency_groups():
+    """Opus fix 2: push, schedule and workflow_dispatch on main used to
+    share the single group `refs/heads/main`, so a merge's
+    cancel-in-progress could kill a running Sunday full run or a dispatched
+    run. push must get its own, separately-named group; schedule/dispatch
+    keep the plain ref-only group this expression falls back to. Must fail
+    on c1585fb, where push has no group of its own."""
+    group = WORKFLOW["concurrency"]["group"]
+    assert "github.event_name == 'push' &&" in group
+    assert "format('push-{0}', github.ref)" in group
+    # schedule/dispatch: neither 'push' nor 'workflow_run' matches, so they
+    # fall through to the bare, unqualified ref -- the exact group every
+    # trigger shared before this fix.
+    assert group.rstrip().endswith("|| github.ref }}")
+    assert WORKFLOW["concurrency"]["cancel-in-progress"] == \
+        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
 
 
 def test_gremlins_plan_checks_out_full_history_only_for_pull_request():
     # fetch-depth 0 is needed to diff against the PR base sha; push/schedule/
     # dispatch keep the default shallow depth (1) -- byte-identical to before,
     # since the ternary's false branch is a literal 1, not an omitted default.
-    checkout = JOBS["plan"]["steps"][0]
+    checkout = JOBS["plan"]["steps"][2]  # steps[0]/[1] are select_pr/pr_open
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"]["fetch-depth"] == \
-        "${{ github.event_name == 'pull_request' && '0' || 1 }}"
+        "${{ github.event_name == 'workflow_run' && '0' || 1 }}"
 
 
 def test_gremlins_plan_narrows_the_matrix_on_pull_request_via_changed_files():
     plan_step = JOBS["plan"]["steps"][-1]
-    assert plan_step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert plan_step["env"]["BASE_SHA"] == (
+        "${{ github.event_name == 'workflow_run' && "
+        "steps.select_pr.outputs.base_sha || "
+        "github.event.pull_request.base.sha }}"
+    )
     plan = plan_step["run"]
     # push/schedule/dispatch: CHANGED_ARGS stays empty, so the matrix command is
     # byte-identical to the pre-selection command (no --changed-files at all,
@@ -822,7 +863,8 @@ def test_workflow_cache_key_and_restore_policy():
     assert restore["with"]["key"] == exact  # version+python+TOML+module+fingerprint...
     assert save["with"]["key"] == exact  # ...the SAME full namespace on both sides
     assert restore["with"]["restore-keys"] == prefix  # the same key without the sha
-    assert restore["if"] == "needs.plan.outputs.mode == 'incremental'"  # full: no restore
+    assert restore["if"] == \
+        "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"  # full or closed PR: no restore
     assert "always()" in save["if"]
     paths = restore["with"]["path"].splitlines()
     assert paths == save["with"]["path"].splitlines()
@@ -860,6 +902,157 @@ def test_workflow_is_report_only():
     assert tomllib.loads((ROOT / "tools" / "mutation_pilot.toml").read_text())  # parses
 
 
+def test_workflow_run_gate_requires_success_and_a_same_repo_pr():
+    """The plan job's own `if:` is what stops a PR's mutation matrix from
+    starting before its Tests run has succeeded, and skips it outright for a
+    fork-originated Tests run (head_repository.full_name mismatches) or a
+    workflow_run from a non-PR Tests run (push/schedule/dispatch). It no
+    longer inspects workflow_run.pull_requests at all: which PR actually
+    triggered this run is resolved separately by the "Select the triggering
+    PR" step (see test_select_pr_jq_filter_matches_only_the_real_same_repo_pr),
+    never trusted as "exactly one same-repo PR" via join()."""
+    gate = JOBS["plan"]["if"]
+    assert "github.event_name != 'workflow_run'" in gate
+    assert "github.event.workflow_run.conclusion == 'success'" in gate
+    assert "github.event.workflow_run.event == 'pull_request'" in gate
+    assert "pull_requests" not in gate
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in gate
+    plan_checkout = JOBS["plan"]["steps"][2]  # steps[0]/[1] are select_pr/pr_open
+    assert plan_checkout["with"]["ref"] == \
+        "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}"
+    # a skipped plan (fork PR / unsuccessful or non-PR workflow_run) must not
+    # let mutate start anyway: outputs.modules is unset, not '[]', on a
+    # skipped job, so the guard checks needs.plan.result first.
+    assert JOBS["mutate"]["if"] == "needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'"
+    mutate_checkout = next(s for s in JOBS["mutate"]["steps"] if s.get("uses") == "actions/checkout@v4")
+    assert mutate_checkout["with"]["ref"] == \
+        "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}"
+
+
+def test_fork_gate_also_requires_head_repository_to_match():
+    """Opus fix 4: a non-empty pull_requests array alone is not the whole
+    same-repo signal the plan job's execution gate relies on; it must also
+    require the workflow_run that completed Tests to have run in THIS
+    repository. Must fail on c1585fb, whose gate has no head_repository
+    check at all."""
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" \
+        in JOBS["plan"]["if"]
+
+
+def test_plan_job_checks_the_triggering_pr_is_still_open():
+    """Opus fix 3, first half: cancel-stale-runs.yml cannot reliably cancel
+    a workflow_run-triggered mutation run (its head_branch reports the
+    default branch, never the PR's -- see that workflow's own header
+    comment). The plan job instead asks gh api directly, by PR number
+    resolved by the "Select the triggering PR" step (never a raw join() over
+    workflow_run.pull_requests -- see
+    test_select_pr_jq_filter_matches_only_the_real_same_repo_pr for why that
+    array can list more than one PR), using the default token with a
+    job-scoped read-only pull-requests permission, and forces an explicitly
+    empty (but still valid) plan when that PR is no longer open OR when
+    select_pr resolved zero/multiple PRs. Must fail on c1585fb and on
+    0377071, neither of which has a select_pr step at all."""
+    assert JOBS["plan"]["permissions"] == {"contents": "read", "pull-requests": "read"}
+    select_pr = JOBS["plan"]["steps"][0]
+    assert select_pr["id"] == "select_pr"
+    assert select_pr["if"] == "github.event_name == 'workflow_run'"
+    assert select_pr["env"]["PULL_REQUESTS_JSON"] == \
+        "${{ toJSON(github.event.workflow_run.pull_requests) }}"
+    assert select_pr["env"]["REPO_ID"] == "${{ github.repository_id }}"
+    assert select_pr["env"]["HEAD_SHA"] == "${{ github.event.workflow_run.head_sha }}"
+    pr_open = JOBS["plan"]["steps"][1]
+    assert pr_open["id"] == "pr_open"
+    assert pr_open["if"] == "github.event_name == 'workflow_run'"
+    assert pr_open["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert pr_open["env"]["PR_NUMBER"] == "${{ steps.select_pr.outputs.number }}"
+    run = pr_open["run"]
+    assert "gh api" in run and "repos/$REPO/pulls/$PR_NUMBER" in run
+    assert "--jq '.state'" in run
+    assert 'echo "open=$open"' in run
+    # the matrix-building step always runs (even for a closed PR) and is
+    # itself what forces modules to an explicit '[]': a SKIPPED step's own
+    # outputs read back as '', not '[]', which `mutate`'s own
+    # `if: ... != '[]'` would misread as "there is a real plan to run".
+    plan_step = _step("plan", lambda s: s.get("id") == "plan")
+    assert "if" not in plan_step
+    assert plan_step["env"]["PR_OPEN"] == "${{ steps.pr_open.outputs.open }}"
+    plan_run = plan_step["run"]
+    assert 'if [ "$PR_OPEN" = "false" ]; then' in plan_run
+    assert 'echo "modules=[]" >> "$GITHUB_OUTPUT"' in plan_run
+    assert "exit 0" in plan_run
+    assert plan_run.index('if [ "$PR_OPEN" = "false" ]') < plan_run.index("gremlins=$(sed")
+
+
+def test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
+    """Opus fix 3, second half: a matrix job can sit queued behind the
+    account's runner pool well past when the plan job's own check ran, so
+    each `mutate` matrix job repeats the same gh api check as its very
+    first step, and every step ahead of `key` is gated on its result (every
+    step from `key` on already gates on steps.key.outcome == 'success', so
+    skipping `key` itself cascades to them for free). Must fail on c1585fb,
+    which has no such step."""
+    assert JOBS["mutate"]["permissions"] == {"contents": "read", "pull-requests": "read"}
+    steps = JOBS["mutate"]["steps"]
+    pr_open = steps[0]
+    assert pr_open["id"] == "pr_open"
+    assert pr_open["if"] == "github.event_name == 'workflow_run'"
+    assert "repos/$REPO/pulls/$PR_NUMBER" in pr_open["run"]
+    checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
+    setup_py = next(s for s in steps if s.get("id") == "py")
+    pip_install = next(s for s in steps if s.get("run", "").strip() ==
+                        "python -m pip install -r requirements.txt -r requirements-dev.txt")
+    key_step = next(s for s in steps if s.get("id") == "key")
+    run_step = next(s for s in steps if s.get("id") == "run")
+    for step in (checkout, setup_py, pip_install, key_step, run_step):
+        assert step["if"] == "steps.pr_open.outputs.open != 'false'", step
+    restore = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache/restore"))
+    assert restore["if"] == \
+        "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"
+
+
+def test_no_pip_cache_under_workflow_run():
+    """Opus fix 4 (nit): a PR's mutate job must never be able to write into
+    main's shared pip cache scope under a PR-controlled key. An empty
+    `cache` value disables actions/setup-python's cache entirely (restore
+    AND save), not merely a save step, for the workflow_run event. Must
+    fail on c1585fb, which sets the literal `cache: pip`."""
+    setup_py = next(s for s in JOBS["mutate"]["steps"] if s.get("id") == "py")
+    assert setup_py["with"]["cache"] == \
+        "${{ github.event_name != 'workflow_run' && 'pip' || '' }}"
+
+
+def test_workflow_run_recovers_pr_base_sha_without_indexing_pull_requests_zero():
+    """BASE_SHA/EVENT are read from plan's own resolved outputs (never a
+    join() over the raw workflow_run.pull_requests array -- see
+    test_select_pr_jq_filter_matches_only_the_real_same_repo_pr for why that
+    was unsafe), and a PR run never saves back to the shared cache."""
+    key_step = _step("mutate", lambda s: s.get("id") == "key")
+    key_env = key_step["env"]
+    assert key_env["EVENT"] == \
+        "${{ github.event_name == 'workflow_run' && 'pull_request' || github.event_name }}"
+    assert key_env["BASE_SHA"] == (
+        "${{ github.event_name == 'workflow_run' && "
+        "needs.plan.outputs.base_sha || "
+        "github.event.pull_request.base.sha }}"
+    )
+    assert "pull_requests" not in key_env["BASE_SHA"]
+    # a PR run must never overwrite main's incremental cache: the save step
+    # is skipped whenever the event is workflow_run (which, by the plan
+    # job's own gate, is only ever a PR run for this workflow).
+    save = _step("mutate", lambda s: s.get("name") == "Save gremlins cache")
+    assert save["if"] == \
+        "always() && steps.key.outcome == 'success' && github.event_name != 'workflow_run'"
+    run_step = _step("mutate", lambda s: s.get("id") == "run")
+    assert run_step["timeout-minutes"] == "${{ github.event_name == 'workflow_run' && 60 || 330 }}"
+    export_env = _step("mutate", lambda s: s.get("name") == "Export report")["env"]
+    assert export_env["BEFORE"] == (
+        "${{ github.event_name == 'push' && github.event.before || "
+        "(github.event_name == 'workflow_run' && "
+        "needs.plan.outputs.base_sha || '') }}"
+    )
+    assert "pull_requests" not in export_env["BEFORE"]
+
+
 # -- dual CI: the independent mutmut workflow (mutation-mutmut.yml) --------------------
 #
 # Both backends must keep running with their DISTINCT results: separate
@@ -875,17 +1068,19 @@ MUT_JOBS = MUTMUT["jobs"]
 
 
 def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
+    """Mirrors test_workflow_triggers_and_concurrency for the mutmut backend
+    -- same workflow_run gate, same event-qualified concurrency group."""
     on = MUTMUT.get("on", MUTMUT.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
-    assert on["pull_request"]["branches"] == ["main"]
+    assert "pull_request" not in on  # PR runs are gated behind Tests via workflow_run instead
+    assert on["workflow_run"] == {"workflows": ["Tests"], "types": ["completed"]}
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
-    assert MUTMUT["concurrency"]["group"] == (
-        "mutation-mutmut-${{ github.event_name == 'pull_request' "
-        "&& github.event.pull_request.number || github.ref }}"
-    )
+    # Three disjoint groups -- see test_mutmut_workflow_concurrency_group_keys_on_repo_and_pr_number
+    # and test_mutmut_push_schedule_and_dispatch_get_disjoint_concurrency_groups below.
+    assert MUTMUT["concurrency"]["group"].startswith("mutation-mutmut-${{ ")
     assert MUTMUT["concurrency"]["cancel-in-progress"] == \
-        "${{ github.event_name == 'pull_request' }}"
+        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
     gremlin_on = WORKFLOW.get("on", WORKFLOW.get(True))
     assert MUTMUT["concurrency"]["group"] != WORKFLOW["concurrency"]["group"]
     assert MUTMUT["permissions"] == {"contents": "read"}
@@ -897,16 +1092,41 @@ def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
 
 
+def test_mutmut_workflow_concurrency_group_keys_on_repo_and_pr_number():
+    """Mirrors test_workflow_concurrency_group_keys_on_repo_and_pr_number for
+    the mutmut backend."""
+    group = MUTMUT["concurrency"]["group"]
+    assert "github.event.workflow_run.head_repository.full_name" in group
+    assert "github.event.workflow_run.head_branch" in group
+    assert "join(" not in group
+    assert "pull_requests" not in group
+
+
+def test_mutmut_push_schedule_and_dispatch_get_disjoint_concurrency_groups():
+    """Mirrors test_push_schedule_and_dispatch_get_disjoint_concurrency_groups
+    for the mutmut backend."""
+    group = MUTMUT["concurrency"]["group"]
+    assert "github.event_name == 'push' &&" in group
+    assert "format('push-{0}', github.ref)" in group
+    assert group.rstrip().endswith("|| github.ref }}")
+    assert MUTMUT["concurrency"]["cancel-in-progress"] == \
+        "${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}"
+
+
 def test_mutmut_plan_checks_out_full_history_only_for_pull_request():
-    checkout = MUT_JOBS["plan"]["steps"][0]
+    checkout = MUT_JOBS["plan"]["steps"][2]  # steps[0]/[1] are select_pr/pr_open
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"]["fetch-depth"] == \
-        "${{ github.event_name == 'pull_request' && '0' || 1 }}"
+        "${{ github.event_name == 'workflow_run' && '0' || 1 }}"
 
 
 def test_mutmut_plan_narrows_the_matrix_on_pull_request_via_changed_files():
     plan_step = MUT_JOBS["plan"]["steps"][-1]
-    assert plan_step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert plan_step["env"]["BASE_SHA"] == (
+        "${{ github.event_name == 'workflow_run' && "
+        "steps.select_pr.outputs.base_sha || "
+        "github.event.pull_request.base.sha }}"
+    )
     plan = plan_step["run"]
     assert 'CHANGED_ARGS=""' in plan
     assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
@@ -926,7 +1146,8 @@ def test_mutmut_plan_step_uses_the_mutmut_driver_and_gates_its_own_failure():
     assert 'mutmut=$(sed -n' in plan and 'echo "mutmut=$(' not in plan
     # matrix --only refuses a names-nothing value (below), so a mistyped subset
     # aborts the plan instead of publishing the empty matrix.
-    assert MUT_JOBS["mutate"]["if"] == "needs.plan.outputs.modules != '[]'"
+    assert MUT_JOBS["mutate"]["if"] == \
+        "needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'"
 
 
 def test_mutmut_matrix_refuses_a_names_nothing_subset_not_an_empty_matrix(capsys):
@@ -960,7 +1181,8 @@ def test_mutmut_workflow_caches_only_mutmut_state_in_its_own_namespace():
     exact = prefix + "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
     assert restore["with"]["key"] == exact == save["with"]["key"]
     assert restore["with"]["restore-keys"] == prefix
-    assert restore["if"] == "needs.plan.outputs.mode == 'incremental'"  # full: no restore
+    assert restore["if"] == \
+        "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"  # full or closed PR: no restore
     assert "always()" in save["if"]
     paths = restore["with"]["path"].splitlines()
     assert paths == save["with"]["path"].splitlines()
@@ -1003,6 +1225,207 @@ def test_mutmut_workflow_is_report_only():
     assert {u["with"]["name"] for u in uploads} == {"mutation-mutmut-module-${{ matrix.module }}",
                                                     "mutation-mutmut-report"}
     assert all("always()" in u["if"] for u in uploads)
+
+
+def test_mutmut_workflow_run_gate_and_pr_context_mirror_the_gremlins_workflow():
+    """Same rationale as the gremlins workflow's own
+    test_workflow_run_gate_requires_success_and_a_same_repo_pr -- see there
+    for why. This backend's plan job carries an identical gate."""
+    gate = MUT_JOBS["plan"]["if"]
+    assert "github.event_name != 'workflow_run'" in gate
+    assert "github.event.workflow_run.conclusion == 'success'" in gate
+    assert "github.event.workflow_run.event == 'pull_request'" in gate
+    assert "pull_requests" not in gate
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" in gate
+    plan_checkout = MUT_JOBS["plan"]["steps"][2]  # steps[0]/[1] are select_pr/pr_open
+    assert plan_checkout["with"]["ref"] == \
+        "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}"
+    assert MUT_JOBS["mutate"]["if"] == \
+        "needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'"
+    mutate_checkout = next(s for s in MUT_JOBS["mutate"]["steps"] if s.get("uses") == "actions/checkout@v4")
+    assert mutate_checkout["with"]["ref"] == \
+        "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}"
+
+
+def test_mutmut_fork_gate_also_requires_head_repository_to_match():
+    """Mirrors test_fork_gate_also_requires_head_repository_to_match for the
+    mutmut backend."""
+    assert "github.event.workflow_run.head_repository.full_name == github.repository" \
+        in MUT_JOBS["plan"]["if"]
+
+
+def test_mutmut_plan_job_checks_the_triggering_pr_is_still_open():
+    """Mirrors test_plan_job_checks_the_triggering_pr_is_still_open for the
+    mutmut backend."""
+    assert MUT_JOBS["plan"]["permissions"] == {"contents": "read", "pull-requests": "read"}
+    select_pr = MUT_JOBS["plan"]["steps"][0]
+    assert select_pr["id"] == "select_pr"
+    assert select_pr["if"] == "github.event_name == 'workflow_run'"
+    assert select_pr["env"]["PULL_REQUESTS_JSON"] == \
+        "${{ toJSON(github.event.workflow_run.pull_requests) }}"
+    pr_open = MUT_JOBS["plan"]["steps"][1]
+    assert pr_open["id"] == "pr_open"
+    assert pr_open["if"] == "github.event_name == 'workflow_run'"
+    assert pr_open["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert pr_open["env"]["PR_NUMBER"] == "${{ steps.select_pr.outputs.number }}"
+    run = pr_open["run"]
+    assert "gh api" in run and "repos/$REPO/pulls/$PR_NUMBER" in run
+    assert "--jq '.state'" in run
+    plan_step = _step("plan", lambda s: s.get("id") == "plan", MUT_JOBS)
+    assert "if" not in plan_step
+    assert plan_step["env"]["PR_OPEN"] == "${{ steps.pr_open.outputs.open }}"
+    plan_run = plan_step["run"]
+    assert 'if [ "$PR_OPEN" = "false" ]; then' in plan_run
+    assert 'echo "modules=[]" >> "$GITHUB_OUTPUT"' in plan_run
+    assert "exit 0" in plan_run
+    assert plan_run.index('if [ "$PR_OPEN" = "false" ]') < plan_run.index("mutmut=$(sed")
+
+
+def test_mutmut_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
+    """Mirrors test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step
+    for the mutmut backend."""
+    assert MUT_JOBS["mutate"]["permissions"] == {"contents": "read", "pull-requests": "read"}
+    steps = MUT_JOBS["mutate"]["steps"]
+    pr_open = steps[0]
+    assert pr_open["id"] == "pr_open"
+    assert pr_open["if"] == "github.event_name == 'workflow_run'"
+    assert "repos/$REPO/pulls/$PR_NUMBER" in pr_open["run"]
+    checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
+    setup_py = next(s for s in steps if s.get("id") == "py")
+    pip_install = next(s for s in steps if s.get("run", "").strip() ==
+                        "python -m pip install -r requirements.txt -r requirements-dev.txt")
+    key_step = next(s for s in steps if s.get("id") == "key")
+    run_step = next(s for s in steps if s.get("id") == "run")
+    for step in (checkout, setup_py, pip_install, key_step, run_step):
+        assert step["if"] == "steps.pr_open.outputs.open != 'false'", step
+    restore = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache/restore"))
+    assert restore["if"] == \
+        "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"
+
+
+def test_mutmut_no_pip_cache_under_workflow_run():
+    """Mirrors test_no_pip_cache_under_workflow_run for the mutmut backend."""
+    setup_py = next(s for s in MUT_JOBS["mutate"]["steps"] if s.get("id") == "py")
+    assert setup_py["with"]["cache"] == \
+        "${{ github.event_name != 'workflow_run' && 'pip' || '' }}"
+
+
+def test_mutmut_workflow_run_never_saves_state_or_reads_pull_requests_zero():
+    """Mirrors the gremlins workflow's own cache-save-skip and safe BEFORE
+    recovery for the mutmut backend."""
+    save = _step("mutate", lambda s: s.get("name") == "Save mutmut state", MUT_JOBS)
+    assert save["if"] == \
+        "always() && steps.key.outcome == 'success' && github.event_name != 'workflow_run'"
+    export_env = _step("mutate", lambda s: s.get("name") == "Export report", MUT_JOBS)["env"]
+    assert export_env["BEFORE"] == (
+        "${{ github.event_name == 'push' && github.event.before || "
+        "(github.event_name == 'workflow_run' && "
+        "needs.plan.outputs.base_sha || '') }}"
+    )
+    assert "pull_requests" not in export_env["BEFORE"]
+
+
+def _select_pr_step(jobs):
+    return _step("plan", lambda s: s.get("id") == "select_pr", jobs)
+
+
+def _select_pr_filter(jobs):
+    m = re.search(r"FILTER='([^']*)'", _select_pr_step(jobs)["run"])
+    assert m, "select_pr step has no FILTER='...' jq program"
+    return m.group(1)
+
+
+def _all_expression_strings(jobs):
+    for job in jobs.values():
+        if isinstance(job.get("if"), str):
+            yield job["if"]
+        for v in (job.get("outputs") or {}).values():
+            if isinstance(v, str):
+                yield v
+        for step in job.get("steps", []):
+            if isinstance(step.get("if"), str):
+                yield step["if"]
+            for v in (step.get("env") or {}).values():
+                if isinstance(v, str):
+                    yield v
+            if isinstance(step.get("run"), str):
+                yield step["run"]
+            for v in (step.get("with") or {}).values():
+                if isinstance(v, str):
+                    yield v
+
+
+def test_no_join_over_pull_requests_remains_anywhere_and_group_is_pr_safe():
+    """Opus BLOCK(1) / #45: workflow_run.pull_requests lists every open PR
+    whose head branch NAME matches this run's, in ANY repository -- not only
+    same-repo PRs (see test_select_pr_jq_filter_matches_only_the_real_same_repo_pr
+    for the concrete collision). Treating it as "exactly one same-repo PR"
+    via join(...pull_requests.*.number, ',') let a same-named fork PR turn
+    that join into "45,7": `gh api pulls/45,7` 404s and a base-sha join like
+    "a,b" breaks `git diff` -- a denial of service any outside contributor
+    could trigger against our own PR's mutation run. Must fail on 0377071,
+    whose plan job `if:`, concurrency group, PR-open checks and BASE_SHA/
+    BEFORE all still join() over the raw array."""
+    for jobs, group in ((JOBS, WORKFLOW["concurrency"]["group"]),
+                        (MUT_JOBS, MUTMUT["concurrency"]["group"])):
+        for value in _all_expression_strings(jobs):
+            assert not re.search(r"join\([^)]*pull_requests", value), value
+        assert "pull_requests" not in group
+        filt = _select_pr_filter(jobs)
+        # base.repo.id, never base.repo.full_name: the pull-request-minimal
+        # object GitHub actually sends has no full_name field at all (see
+        # test_select_pr_jq_filter_matches_only_the_real_same_repo_pr and
+        # tests/fixtures/workflow_run_pull_requests.py).
+        assert "base.repo.id" in filt
+        assert "base.repo.full_name" not in filt
+        assert "head.sha" in filt
+        assert "select(" in filt
+        assert jobs["plan"]["outputs"]["pr_number"] == "${{ steps.select_pr.outputs.number }}"
+        assert jobs["plan"]["outputs"]["base_sha"] == "${{ steps.select_pr.outputs.base_sha }}"
+        assert jobs["mutate"]["steps"][0]["env"]["PR_NUMBER"] == "${{ needs.plan.outputs.pr_number }}"
+
+
+# Real GitHub `workflow_run.pull_requests` entries (the pull-request-minimal
+# schema: base/head.repo carry ONLY id/name/url, never full_name) -- see
+# tests/fixtures/workflow_run_pull_requests.py for exactly where each one
+# came from (fetched read-only via `gh api`) and why. `_SAME_REPO_PR` is this
+# repo's own real PR #45; `_FORK_PR` is a real PR from a different public
+# repository, kept only for its genuine minimal-schema shape (its numbers
+# are unrelated to investment-validation, which is exactly what must fail to
+# match).
+from tests.fixtures.workflow_run_pull_requests import FORK_PR as _FORK_PR  # noqa: E402
+from tests.fixtures.workflow_run_pull_requests import SAME_REPO_PR as _SAME_REPO_PR  # noqa: E402
+
+_SAME_REPO_ID = _SAME_REPO_PR["base"]["repo"]["id"]
+_SAME_REPO_HEAD_SHA = _SAME_REPO_PR["head"]["sha"]
+
+
+def _run_select_pr_filter(filt, payload):
+    out = subprocess.run(
+        ["jq", "-c", "--argjson", "repo_id", str(_SAME_REPO_ID),
+         "--arg", "sha", _SAME_REPO_HEAD_SHA, filt],
+        input=json.dumps(payload), capture_output=True, text=True, check=True,
+    ).stdout
+    return json.loads(out)
+
+
+@pytest.mark.parametrize("jobs", [JOBS, MUT_JOBS], ids=["gremlins", "mutmut"])
+def test_select_pr_jq_filter_matches_only_the_real_same_repo_pr(jobs):
+    """Opus BLOCK(1) / #45 AND its own re-gate on d2d9bae: runs the SHIPPED
+    jq filter (extracted from the select_pr step's own script, never a hand
+    copy) against real `workflow_run.pull_requests` entries (see
+    tests/fixtures/workflow_run_pull_requests.py) -- this repo's own real
+    PR #45 alone (selected), that PR plus a real PR from a different
+    repository (only ours selected), and only the other repository's PR (no
+    match, skip). A filter on `.base.repo.full_name` (d2d9bae) matches NONE
+    of these, including the first -- that field does not exist on the real
+    payload, so mutation CI never ran for any PR. Must fail on both 0377071
+    (no select_pr step at all) and d2d9bae (select_pr exists but its filter
+    can never match)."""
+    filt = _select_pr_filter(jobs)
+    assert _run_select_pr_filter(filt, [_SAME_REPO_PR]) == [_SAME_REPO_PR]
+    assert _run_select_pr_filter(filt, [_SAME_REPO_PR, _FORK_PR]) == [_SAME_REPO_PR]
+    assert _run_select_pr_filter(filt, [_FORK_PR]) == []
 
 
 def test_mutmut_report_job_gates_the_merge_on_the_planned_module_set():
@@ -1054,6 +1477,78 @@ def test_both_mutation_matrices_cap_parallelism_so_tests_never_starve():
     total = JOBS["mutate"]["strategy"]["max-parallel"] + \
         MUT_JOBS["mutate"]["strategy"]["max-parallel"]
     assert total <= 6
+
+
+# -- cancel-stale-runs.yml: no leftover Tests/mutation/mutation-mutmut runs ------------
+
+CANCEL_YML = ROOT / ".github" / "workflows" / "cancel-stale-runs.yml"
+CANCEL = yaml.safe_load(CANCEL_YML.read_text())
+CANCEL_JOBS = CANCEL["jobs"]
+
+
+def test_cancel_stale_runs_triggers_on_pr_close_with_actions_write():
+    """An explicit deny-all workflow-level baseline (zizmor:
+    excessive-permissions) plus a job-level grant, so a future job added
+    here would not inherit actions: write for free."""
+    on = CANCEL.get("on", CANCEL.get(True))  # PyYAML reads a bare `on` as True
+    assert on["pull_request"]["types"] == ["closed"]
+    assert CANCEL["permissions"] == {}  # deny-all baseline, not the repo default
+    assert CANCEL_JOBS["cancel"]["permissions"] == {"actions": "write"}
+
+
+def test_cancel_stale_runs_concurrency_cancels_in_progress():
+    """closed fires once per PR close, so a per-PR group with
+    cancel-in-progress: true has no downside and matches repo convention for
+    pull_request-triggered workflows."""
+    assert CANCEL["concurrency"]["group"] == \
+        "cancel-stale-runs-${{ github.event.pull_request.number }}"
+    assert CANCEL["concurrency"]["cancel-in-progress"] is True
+
+
+def test_cancel_stale_runs_is_guarded_to_same_repo_prs():
+    # A fork PR's GITHUB_TOKEN is forced read-only for pull_request-triggered
+    # workflows no matter what `permissions:` asks for, so the cancel calls
+    # could never succeed there; this guard skips the job outright instead
+    # of leaving a noisy failed run.
+    assert CANCEL_JOBS["cancel"]["if"] == \
+        "github.event.pull_request.head.repo.full_name == github.repository"
+
+
+def test_cancel_stale_runs_covers_all_three_workflows_by_branch_or_pr_number():
+    """The list call's branch filter narrows server-side by branch name, but
+    the per-run match requires the run's own linked pull_requests[].number --
+    head_branch carries no owner/fork identity, so a same-named sibling
+    branch could otherwise collide; this job only ever runs for a same-repo
+    PR, whose own runs are guaranteed to have pull_requests[] populated."""
+    step = CANCEL_JOBS["cancel"]["steps"][0]
+    run = step["run"]
+    for wf in ("Tests", "mutation", "mutation-mutmut"):
+        assert wf in run
+    assert "in_progress" in run and "queued" in run
+    assert "actions/runs/$id/cancel" in run
+    assert "PR_BRANCH" in step["env"] and "PR_NUMBER" in step["env"]
+    assert step["env"]["PR_BRANCH"] == "${{ github.event.pull_request.head.ref }}"
+    assert step["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
+    # PR_BRANCH is never interpolated into filter text: it is a bound `-f`
+    # query parameter on the list call, and a bound --arg on every jq match.
+    assert '-f branch="$PR_BRANCH"' in run
+    assert 'jq -r --arg wf "$wf"' in run
+    assert '--argjson n "$PR_NUMBER"' in run
+    # \\*"\\* tolerates both a bare quote and the backslash-escaped quote a
+    # `-q "select(... \"$wf\" ...)"`-style regression would use (the exact
+    # historical shape of this bug) -- a plain '"$wf"' substring check would
+    # miss that escaped form since the extra backslash breaks a literal match.
+    assert not re.search(r'\.name\s*==\s*\\*"\$wf\\*"', run)
+    # the per-run match is PR-number only now -- no head_branch fallback,
+    # and no --arg b binding for it either (head_branch carries no
+    # owner/fork identity, so it could match an unrelated same-named branch).
+    assert ".head_branch ==" not in run
+    assert "--arg b" not in run
+    assert "pull_requests // []" in run
+    assert "any(.number == $n)" in run
+    # a failed cancel call is logged, not silently swallowed
+    assert "::warning::failed to cancel" in run
+    assert "|| true" not in run
 
 
 # -- merge expected-modules contract: the aggregate can never lie about scope ----------
