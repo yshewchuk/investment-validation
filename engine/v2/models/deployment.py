@@ -459,6 +459,12 @@ def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
         ),)) from exc
     if existing is None:
         raise ReleaseNotStaged(release_id)
+    if existing.release.release_id != release_id:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="RELEASE_ID_MISMATCH",
+            detail=f"staged manifest at this path declares release_id "
+                    f"{existing.release.release_id!r}, not {release_id!r}",
+        ),))
     if not _manifest_hash_matches(existing):
         raise StagingRefused((ReleaseIssue(
             path=f"$.releases[{release_id}]", code="RELEASE_ID_REUSED",

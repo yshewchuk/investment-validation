@@ -604,3 +604,20 @@ def test_promote_refuses_a_release_it_never_saw_regardless_of_hash_version(tmp_p
     # at all -- StaleReleaseHash is only ever raised once a manifest exists.
     with pytest.raises(ReleaseNotStaged):
         promote(tmp_path, "ghost")
+
+
+def test_restage_semantic_hash_refuses_a_manifest_whose_release_id_does_not_match_the_path(tmp_path):
+    """A manifest whose own declared release_id differs from the release_id
+    the caller asked to restage is refused, even though its hash verifies
+    fine under its own (different) release_id -- the manifest at this path
+    belongs to a different release."""
+    r1, inv1, pay1 = _fixture("r1")
+    r2, inv2, pay2 = _fixture("r2")
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    r1_manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    r2_manifest_path = deployment_module._manifest_path(tmp_path, "r2")
+    r1_manifest_path.write_bytes(r2_manifest_path.read_bytes())
+    with pytest.raises(StagingRefused) as error:
+        restage_semantic_hash(tmp_path, "r1")
+    assert error.value.issues[0].code == "RELEASE_ID_MISMATCH"
