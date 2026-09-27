@@ -67,6 +67,22 @@ entrypoints:
   `artifact_hash` (`engine.v2.foundation.content_hash` over the binding's own
   sorted, verified member content hashes — never re-derived from unverified
   bytes; `model_artifact_refs[binding_id]` carries this same value).
+  `model_release: ModelRelease` (`engine.v2.models.contracts.ModelRelease` —
+  the exact staged object, hash-verified against its own manifest's
+  `release_hash` before this module trusts it; see Failure semantics R1(c))
+  and `frozen_inference: FrozenInference` (`engine.v2.models.loader.
+  FrozenInference`, constructed `FrozenInference(deployment_root(
+  release_root))`, the same construction `checks/phase5_consumers.py:410`
+  uses) are carried **in exactly the form `SourceBundle` already declares
+  them** (`source_inputs.py:313-314`, fields `frozen_inference` and
+  `model_release`) and **exactly what `_frozen_recipe_executor`
+  (`source_inputs.py:540-580`) consumes**: PR-3 assigns
+  `bundle.model_release = binding.model_release` and
+  `bundle.frozen_inference = binding.frozen_inference` directly. PR-3 must
+  not call `deployment.resolve_release`, construct its own `FrozenInference`,
+  or otherwise re-resolve or re-verify anything this module already
+  verified — the whole point of this module is that PR-3 only ever holds
+  objects `resolve_release_binding` itself produced.
   `payoff_artifacts`, `recalibration_artifacts`, `analog_artifacts` are each
   `Mapping[str, tuple[...]]` **keyed by the loaded artifact's own `.strategy`
   field** (never by the manifest row's declared `strategies` list — the
@@ -172,14 +188,49 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
 ### `release_bindings.py` (the 4c R1–R6 template)
 
 - **R1, missing input.** `resolve_release_binding(release_root)` validates
-  its one argument (a non-empty path) before any I/O. `deployment.
-  current_pointer()` returns `None`, rather than raising, when nothing has
-  ever been promoted at `release_root`; this module turns that into a typed
-  refusal, `NoCurrentRelease` (distinct from the per-member refusal below —
-  there is no release to resolve members *against* yet). A malformed or
-  nonexistent `release_root` resolves to the same refusal (`current_pointer`
-  treats a missing `DEPLOYED` file and a missing directory identically), not
-  a crash.
+  its one argument (a non-empty path) before any I/O, then computes the
+  deployment store root as `Path(release_root) / "deployment"` inline (the
+  same one-line join `checks/phase5_release.py`'s `deployment_root` performs
+  — ported, not imported, since that module is under `checks`). The live
+  pointer file (`DEPLOYED`) lives at `<release_root>/deployment/DEPLOYED`,
+  **not** directly under `release_root`. Three sub-cases, each a distinct
+  typed refusal:
+  - **(a) no pointer at all.** `deployment.current_pointer(deployment_root)`
+    returns `None`, rather than raising, when nothing has ever been promoted
+    (or `release_root`/its `deployment/` subdirectory does not exist —
+    `current_pointer` treats a missing `DEPLOYED` file and a missing
+    directory identically). This module turns that into `NoCurrentRelease`.
+  - **(b) the pointer names a release that will not resolve.**
+    `deployment.resolve_release(deployment_root, pointer.release_id)` can
+    raise `ReleaseNotStaged` (no staged manifest for that id) or
+    `DeploymentError` (e.g. an unsafe `release_id` — contains `/` or is `.`/
+    `..` — raised inside `_release_dir`, `deployment.py:132`; or another
+    `DeploymentError` subclass from the same call chain, `deployment.py:
+    368-370`). This module never lets either propagate raw: both are caught
+    and re-raised as `ModelNotReady("model_release", detail=str(exc))`.
+  - **(c) the `DEPLOYED` file itself is corrupt or unparseable.**
+    `current_pointer`'s decode (`deployment.py:384`,
+    `_decode(PointerState, path.read_bytes())`) can raise a bare
+    `json.JSONDecodeError` or `engine.v2.foundation.typed.DocumentError`
+    (malformed JSON, or JSON that does not match `PointerState`'s schema) —
+    neither is a `DeploymentError` subclass. This module catches both
+    explicitly and re-raises as `ModelNotReady("DEPLOYED", detail=str(exc))`;
+    it is a corrupt member of the deployment store, not the "nothing
+    promoted yet" case (a), so it is never conflated with `NoCurrentRelease`.
+- **R1 (continued), the staged release's own hash.** `deployment.
+  resolve_release`'s public path reads the staged manifest and returns
+  `manifest.release` without checking the manifest's own `release_hash` —
+  that check is not part of its contract. Before trusting any binding's
+  member hashes, this module re-reads the manifest as
+  `deployment._read_manifest(deployment_root, release_id)` and verifies
+  `deployment._manifest_hash_matches(manifest)`, the exact function
+  `checks/phase5_acceptance.py:185`'s `_load_model_release` calls for the
+  same purpose (both `deployment._read_manifest` and
+  `deployment._manifest_hash_matches` are called directly off the
+  `engine.v2.models.deployment` module this module already depends on —
+  not imported from `checks`). A mismatch raises
+  `ModelNotReady("model_release", "release_hash disagrees with manifest")`
+  before any binding's members are loaded.
 - **R1 (continued), a member missing or corrupt.** Once a release is
   resolved, every model binding's member objects and every declared
   payoff/recalibration/analog state object is hash-verified and typed-loaded
@@ -194,7 +245,12 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
   specific object name inside it. The `phase5_release.json` catalog itself
   is verified the same way before any of its rows are trusted: it must
   parse as a JSON object whose own declared `manifest_hash` matches a fresh
-  `content_hash` of its other fields, and its `release_id` must equal the
+  `content_hash` of its other fields, its `schema_version` must equal
+  `checks/phase5_release.py`'s `PHASE5_RELEASE_SCHEMA`
+  (`"phase5_staged_release.v1.0"`) by exact string equality — the same check
+  `read_manifest` performs there (any other value, older or newer, is not a
+  shape this module knows how to read, so it refuses rather than guessing)
+  — and its `release_id` must equal the
   live pointer's `release_id` — the layout assumes one catalog file
   describes the release root's *current* release, an assumption a rollback
   to an older staged release would break — a `phase5_release.json` that
@@ -257,9 +313,10 @@ flowchart LR
     NSI --> SO["application.score_one"]
     SO --> SR["ScoreRecord\n(deep-frozen)"]
 
-    DP["deployment.current_pointer(release_root)"] -->|None| NCR["NoCurrentRelease"]
-    DP -->|PointerState| RR["deployment.resolve_release\n+ phase5_release.json catalog"]
-    RR -->|member missing/corrupt/\nhash mismatch| MNR["ModelNotReady(member_id)"]
-    RR -->|every member verified| RB["ScoringReleaseBinding\n(model identity, artifact refs,\nanalog/payoff/recalibration artifacts)"]
-    RB -.->|no caller yet;\ncutover PR-3 wires this in| SB
+    DP["deployment.current_pointer(\nrelease_root/deployment)"] -->|None| NCR["NoCurrentRelease"]
+    DP -->|corrupt DEPLOYED| MNRD["ModelNotReady(\"DEPLOYED\")"]
+    DP -->|PointerState| RR["deployment.resolve_release\n+ _manifest_hash_matches\n+ phase5_release.json catalog"]
+    RR -->|ReleaseNotStaged/DeploymentError/\nhash mismatch/member missing| MNR["ModelNotReady(member_id)"]
+    RR -->|release + every member verified| RB["ScoringReleaseBinding\n(model_release, frozen_inference,\nmodel identity, artifact refs,\nanalog/payoff/recalibration artifacts)"]
+    RB -.->|no caller yet;\ncutover PR-3 assigns\nbundle.model_release/\nbundle.frozen_inference directly| SB
 ```
