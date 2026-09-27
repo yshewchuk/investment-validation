@@ -167,6 +167,22 @@ def _add_refresh_mode_arguments(plan):
                            "when omitted the shadow head builds the plan at submission")
 
 
+def _add_operator_plan_arguments(plan):
+    """``ops plan training``/``promote``'s arguments (P6 slice 5). ``--mode``
+    is already nightly's, hence ``--training-mode``."""
+    plan.add_argument("--training-mode",
+                      choices=("recipe", "state", "board_analog", "trailing_cutoff"))
+    plan.add_argument("--recipe", default="")
+    plan.add_argument("--state", default="")
+    plan.add_argument("--alpha", type=float)
+    plan.add_argument("--cutoff", action="append", default=[])
+    plan.add_argument("--strategy", action="append", default=[])
+    plan.add_argument("--pairs", default="")
+    plan.add_argument("--ticker-chunk", type=int, default=1000)
+    plan.add_argument("--release-root", default="")
+    plan.add_argument("--release-id", default="")
+
+
 def _add_reconcile_command(commands):
     """The ``ops reconcile`` subparser, split out of :func:`parser` to keep
     that function under the line budget."""
@@ -227,27 +243,11 @@ def _add_plan_ledger_arguments(plan):
                            "--no-ledger.")
 
 
-def parser():
-    result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--root", default="data/operations")
-    commands = result.add_subparsers(dest="command", required=True)
-    for name in ("init", "doctor", "health"):
-        sub = commands.add_parser(name)
-        sub.add_argument("--root", default=argparse.SUPPRESS)
-        sub.add_argument("--json", action="store_true")
-        if name == "health":
-            sub.add_argument("--out", type=Path, default=None,
-                             help="also write the authenticated sidecar health.json here")
-    server = commands.add_parser("serve")
-    server.add_argument("--root", default=argparse.SUPPRESS)
-    server.add_argument("--once", action="store_true")
-    server.add_argument("--store-root", type=Path, default=None,
-                        help="the legacy checkout a snapshot-backed job's pinned read set and "
-                             "materialization roots resolve against; defaults to this code "
-                             "checkout (Service's own default) when omitted. Never inferred from "
-                             "a plan or manifest -- always exactly what was passed here.")
+def _add_plan_command(commands):
+    """The ``ops plan`` subparser, split out of :func:`parser` to keep that
+    function under the line budget."""
     plan = commands.add_parser("plan")
-    plan.add_argument("kind", choices=("nightly", "experiment"))
+    plan.add_argument("kind", choices=("nightly", "experiment", "training", "promote"))
     plan.add_argument("--as-of")
     plan.add_argument("--mode", default="shadow", choices=("shadow",))
     plan.add_argument("--spec", type=Path)
@@ -270,7 +270,30 @@ def parser():
     plan.add_argument("--input-mode", default="legacy", choices=("legacy", "snapshot"),
                       help="snapshot: pin one data snapshot head at plan time (P2-6)")
     plan.add_argument("--snapshot-scope", default=None)
+    _add_operator_plan_arguments(plan)
     _add_refresh_mode_arguments(plan)
+
+
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--root", default="data/operations")
+    commands = result.add_subparsers(dest="command", required=True)
+    for name in ("init", "doctor", "health"):
+        sub = commands.add_parser(name)
+        sub.add_argument("--root", default=argparse.SUPPRESS)
+        sub.add_argument("--json", action="store_true")
+        if name == "health":
+            sub.add_argument("--out", type=Path, default=None,
+                             help="also write the authenticated sidecar health.json here")
+    server = commands.add_parser("serve")
+    server.add_argument("--root", default=argparse.SUPPRESS)
+    server.add_argument("--once", action="store_true")
+    server.add_argument("--store-root", type=Path, default=None,
+                        help="the legacy checkout a snapshot-backed job's pinned read set and "
+                             "materialization roots resolve against; defaults to this code "
+                             "checkout (Service's own default) when omitted. Never inferred from "
+                             "a plan or manifest -- always exactly what was passed here.")
+    _add_plan_command(commands)
     submission = commands.add_parser("submit")
     submission.add_argument("--plan", required=True)
     submission.add_argument("--idempotency-key", required=True)
@@ -385,13 +408,14 @@ def _check_submitted_nightly_manifest(plan, conn, store):
     _check_nightly_manifest(store.read_verified(artifact(conn, store, plan["input_manifest_ref"])))
 
 
-def _read_input_manifest_ref(args, root, conn, clock):
+def _read_input_manifest_ref(args, root, conn, clock, *, nightly=True):
     if not args.input_manifest:
         return None
     if not args.input_manifest.is_file() or args.input_manifest.is_symlink():
         raise fail("INPUT_CHANGED", "input manifest is missing")
     raw_bytes = args.input_manifest.read_bytes()
-    _check_nightly_manifest(raw_bytes)
+    if nightly:
+        _check_nightly_manifest(raw_bytes)
     manifest = ArtifactStore(root).publish_bytes(
         raw_bytes, schema_ref="legacy_input_manifest.v1.0")
     from engine.v2.ops.checkpoints import register_artifact
@@ -477,6 +501,16 @@ def _plan_command(args, root, conn, clock):
                                                              population),
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
                             catalog_path=_catalog_path(conn), objects_root=str(root))
+    elif args.kind == "training":
+        from engine.v2.ops.training import training_plan
+        plan = training_plan(mode=args.training_mode, recipe=args.recipe or "",
+                             state=args.state or "", alpha=args.alpha,
+                             cutoffs=tuple(args.cutoff), strategies=tuple(args.strategy),
+                             pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk,
+                             manifest_ref=_read_input_manifest_ref(args, root, conn, clock, nightly=False))
+    elif args.kind == "promote":
+        from engine.v2.ops.training import promote_plan
+        plan = promote_plan(release_root=args.release_root, release_id=args.release_id)
     else:
         from engine.v2.ops.experiments import experiment_plan
         if args.no_ledger and args.activate_ledger:

@@ -20,9 +20,10 @@ Component detail moves out of this document as each component gets its own
 `ARCHITECTURE.md` next to its code (e.g. `engine/v2/ops/ARCHITECTURE.md`).
 This PR gives that detailed treatment to `engine/v2/ops` and both
 dashboards (`engine/v2/dashboard`, `engine/dashboard`); the rest of
-`engine/v2/**` and legacy `engine/**` are still documented only here, at
-the level this root doc covers, until a follow-up PR gives them their own
-component doc.
+`engine/v2/**` is still documented only here, at the level this root doc
+covers, until a follow-up PR gives it its own component doc. Legacy
+`engine/**` outside `engine/v2/**` is documented only here and never gets
+a component doc of its own — see the legacy exemption below.
 
 ## Component docs
 
@@ -33,6 +34,14 @@ no doc of its own yet — it is documented only at this root doc's level
 (`docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`). `tests/test_architecture_docs.py`
 checks that every `**/ARCHITECTURE.md` in the tree, except this one, is
 linked below, and that every link here resolves.
+
+A legacy component (`engine/**` outside `engine/v2/**`) gets no new
+component doc: it is labelled `(legacy — removed at cutover; no component
+doc)` in the table below, or, where a doc already exists from before this
+rule (the legacy dashboard), `(legacy — minimal record; removed at
+cutover)`. A change to a legacy component puts its design in the pull
+request body and, if durable, in the operator guides instead — see
+`CONTRIBUTING.md`.
 
 | Component | Doc |
 |---|---|
@@ -56,8 +65,8 @@ linked below, and that every link here resolves.
 | `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
 | `engine/v2/diagnosis/` | (pending) |
 | `engine/v2/dashboard/`, `ui/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
-| `engine/dashboard/` (legacy) | [`engine/dashboard/ARCHITECTURE.md`](engine/dashboard/ARCHITECTURE.md) |
-| legacy `engine/**` (undivided) | (pending — see §1) |
+| `engine/dashboard/` (legacy) | [`engine/dashboard/ARCHITECTURE.md`](engine/dashboard/ARCHITECTURE.md) (legacy — minimal record; removed at cutover) |
+| legacy `engine/**` (undivided) | (legacy — removed at cutover; no component doc) |
 
 ## 1. Two trees
 
@@ -408,6 +417,11 @@ inputs/outputs, or its failure semantics without updating that component's
 `ARCHITECTURE.md` in the same PR is incomplete, even if the code and tests
 are otherwise correct.
 
+Exception: a legacy component (`engine/**` outside `engine/v2/**`) gets no
+new component doc, ever — see "Component docs" above. A change to a legacy
+component instead puts its design in the PR body and, if durable, in the
+operator guides; see `CONTRIBUTING.md`.
+
 A change under ~50 lines with no new interface or behaviour (a typo, a CI
 flag, a one-line fix) is exempt and says so in its PR body instead
 ("Docs: n/a (trivial)" plus the reason).
@@ -415,3 +429,10 @@ flag, a one-line fix) is exempt and says so in its PR body instead
 Every `ARCHITECTURE.md` — this one and every component's — is public: no
 strategy thresholds, gate-logic numbers, edge figures, or local filesystem
 paths.
+
+Scope: a PR fixes only defects inside its stated scope (the lines it
+changes, plus anything that change breaks elsewhere) and never a
+pre-existing defect it merely happens to touch, unless the PR makes that
+defect worse or newly reachable. `CONTRIBUTING.md` ("Scope and deferred
+work") has the full rule, including the GitHub-issue format for a real
+finding that falls outside it.

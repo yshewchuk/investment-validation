@@ -116,6 +116,35 @@ def test_opencode_config_denies_the_dangerous_edits_and_everything_else():
     assert config["permission"]["edit"]["tools/oc_check.py"] == "deny"
     assert config["permission"]["edit"][".oc_logs/*"] == "deny"
 
+@pytest.mark.parametrize(
+    "config_name", ["opencode_config.json", "opencode_review_config.json"]
+)
+def test_opencode_config_has_no_root_level_models_key(config_name):
+    """opencode ignores a root-level "models" key entirely; every per-model
+    override must live under provider.openrouter.models or it silently does
+    nothing. This must fail if a root "models" key is ever added back."""
+    config = json.loads((ROOT / "tools" / config_name).read_text())
+    assert "models" not in config, (
+        f"{config_name}: root-level 'models' key is ignored by opencode; "
+        "move per-model overrides under provider.openrouter.models"
+    )
+
+
+@pytest.mark.parametrize(
+    "config_name", ["opencode_config.json", "opencode_review_config.json"]
+)
+def test_opencode_config_openrouter_model_overrides_set_skip_title(config_name):
+    """Every per-model override under provider.openrouter.models must set
+    options.skip-title, matching the layout on main."""
+    config = json.loads((ROOT / "tools" / config_name).read_text())
+    models = config["provider"]["openrouter"]["models"]
+    assert models, f"{config_name}: expected at least one openrouter model override"
+    for model_id, override in models.items():
+        assert override.get("options", {}).get("skip-title") is True, (
+            f"{config_name}: provider.openrouter.models[{model_id!r}] is "
+            "missing options.skip-title"
+        )
+
 def test_bounded_run_exit_75_is_a_resource_wait_not_a_test_failure(monkeypatch, capsys):
     done = subprocess.CompletedProcess([], 75, "", "[bounded] RESOURCE WAIT timed out\n")
     monkeypatch.setattr(oc_check.subprocess, "run", lambda *a, **k: done)

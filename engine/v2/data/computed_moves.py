@@ -224,16 +224,21 @@ def projected_trading_days(start, end) -> pd.DatetimeIndex:
     return days[~days.isin(pd.DatetimeIndex(sorted(holidays)))]
 
 
-def native_trading_calendar(daily_by_ticker, extend_days: int = 400) -> NativeTradingCalendar:
+def native_trading_calendar(daily_by_ticker, extend_days: int = 400, *,
+                            horizon_end=None) -> NativeTradingCalendar:
     """The forward calendar sourced from the pinned snapshot's own ``daily_market``.
 
     ``daily_by_ticker`` is one pass of the snapshot's ``daily_market`` rows
     grouped by ticker (``engine/v2/ops/*_store``'s single scan). The observed
-    sessions are the DISTINCT ``date`` values across every ticker — the same
+    sessions are the DISTINCT ``date`` values across every ticker -- the same
     "a day the index did not trade is a day no chain was observed" rule the
     legacy calendar derives from its S&P series, but read from the pinned
     snapshot instead of a mutable legacy CSV. Future dates are rule-projected
-    (``projected_trading_days``), never observed.
+    (``projected_trading_days``), never observed. ``horizon_end``, when given,
+    is the caller's actual requested horizon end (as_of + horizon_days): the
+    projection always extends through at least ``last + extend_days`` AND at
+    least ``horizon_end``, so a stale panel (an old last observed session) or
+    a wide horizon can never silently truncate the requested date range.
     """
     observed = sorted({
         pd.Timestamp(value).normalize()
@@ -243,5 +248,10 @@ def native_trading_calendar(daily_by_ticker, extend_days: int = 400) -> NativeTr
     if not observed:
         raise ValueError("native trading calendar needs at least one daily_market session")
     last = observed[-1]
-    future = projected_trading_days(last, last + pd.Timedelta(days=extend_days))
+    end = last + pd.Timedelta(days=extend_days)
+    if horizon_end is not None:
+        target = pd.Timestamp(horizon_end).normalize()
+        if target > end:
+            end = target
+    future = projected_trading_days(last, end)
     return NativeTradingCalendar(tuple(observed) + tuple(future), last)

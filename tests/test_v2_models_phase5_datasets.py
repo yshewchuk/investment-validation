@@ -396,9 +396,9 @@ def test_paired_pool_job_writes_the_direct_builder_bytes(monkeypatch, tmp_path, 
     inputs = data.paired_pool_inputs(forecasts=forecasts, panel=panel, ticker_chunk=3)
     monkeypatch.setattr(data, "paired_pool_inputs", lambda **_: inputs)
     out = tmp_path / "paired"
-    assert job.main(["--state", "paired_residual_pool", "--cutoff", "2021-01-01",
-                     "--out", str(out), "--plan-only"]) == 0
-    assert not (out / "paired_residual_pool.json").exists()
+    # run_state_job refuses --plan-only outright (building the artifact IS
+    # the whole cost, so there is nothing cheap to preview); run it for real
+    # and assert the written bytes directly.
     assert job.main(["--state", "paired_residual_pool", "--cutoff", "2021-01-01",
                      "--out", str(out)]) == 0
 

@@ -259,3 +259,13 @@ def test_recovery_hook_detects_done_retry_and_conflict_without_mutation():
     decision = incremental_data.recovery_decision(conn, candidate)
     assert decision.action == "refuse_conflict"
     assert (decision.snapshot_id, decision.generation) == ("snap-other", 8)
+
+
+def test_refresh_callback_result_carries_warnings():
+    """S4C: a job's own degradation evidence (e.g. a calendar fallback) is a
+    field on the result, not only a log line."""
+    result = incremental_data.RefreshCallbackResult(
+        status="noop", completed_ids=(), coverage_advanced=False,
+        parent_snapshot_id="snap-1", refresh_plan_hash="sha256:" + "a" * 64,
+        warnings=("weekday calendar fallback: no daily_market session",))
+    assert result.warnings == ("weekday calendar fallback: no daily_market session",)

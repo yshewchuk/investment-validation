@@ -14,6 +14,12 @@ boundary. It does not decide research conclusions (`engine/v2/evaluation`)
 and does not compute a score (`engine/v2/scoring`) — it only sequences and
 persists the jobs that call into those packages.
 
+This doc also covers `native_board_universe.py`: a pure, answer-free
+enumerator that reproduces legacy `engine.score.score_calendar`'s event ×
+strategy enumeration for the strategies native scoring supports, without
+touching the legacy chain index or constructing a legacy `Scorer`. It has
+no production caller yet — see "Dependencies" below.
+
 ## Primary contracts and public interfaces
 
 The operator interface is the versioned command protocol
@@ -22,7 +28,11 @@ derived directly from its `argparse` definitions:
 
 - `init`, `doctor`, `health`
 - `serve` — starts the supervisor loop
-- `plan {nightly,experiment}` — builds and saves a plan document
+- `plan {nightly,experiment,training,promote}` — builds and saves a plan
+  document; `training`/`promote` (P6 slice 5) take operator-only arguments
+  (`--training-mode`, `--recipe`, `--state`, `--alpha`, `--cutoff`,
+  `--strategy`, `--pairs`, `--ticker-chunk`, `--release-root`,
+  `--release-id`) and are never part of the nightly DAG
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
@@ -38,7 +48,41 @@ derived directly from its `argparse` definitions:
 Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`,
 `NO_JOB_STAGES`, `build_nightly_plan`, `build_legacy_job_requests`,
 `_stage_sequence` (see §"Diagrams" below); `supervisor.Service`/`serve`;
-the coordinator-effect functions in `effects_graph.py`.
+the coordinator-effect functions in `effects_graph.py`; `training.py`'s
+`training_job_kind`/`promote_job_kind` (registered in `stages.py::_core_kinds`,
+alongside the nightly stage kinds, not in
+`supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan` and
+`run_training_worker`/`run_promote_worker`; `BoardRequest`/
+`board_requests(as_of, horizon_days, tickers, events_table)`
+(`native_board_universe.py`) — a pure key `(ticker, strategy, event_date,
+session)` and the function that enumerates one per event × native-covered
+strategy, plus one `DYN-SV` meta-request per event.
+
+A small number of natively-fetched data stores live directly in this
+package rather than delegating computation to another v2 layer — like
+`price-history capture` above, `forward_calendar_store.py` (spec s4c) is
+one of these. It does NOT claim `RefreshCallback` compatibility: `main`'s
+`RefreshParameters` (`incremental_data.py`) has no `as_of`/`tickers` field,
+only Part 3's job-kind-specific parameters dataclass will, so a function
+shaped `(parameters, root)` cannot actually run on `main` today.
+`run_forward_calendar_refresh` is instead a standalone runner with an
+explicit, fully keyword-only signature (`catalog_path`, `objects_root`,
+`parent_snapshot_id`, `refresh_plan_hash`, `as_of`, `tickers`,
+`horizon_days`, `scope`, `expected_head_generation`,
+`expected_head_snapshot_id`, `nasdaq_fetcher`, `earnings_fetcher`) that
+validates every one of its nine arguments before touching the catalog or a
+provider, including `scope` (must be `"shadow"` or `"smoke"`) and
+`expected_head_generation` (non-negative); `tickers=()` is valid and means
+the whole market (see "Failure semantics" below); Part 3 wires it into a
+`RefreshCallback`-shaped
+adapter that reads the job's staged parameters/input document and calls
+this runner with explicit keyword arguments — that adaptation, and this
+runner's own dispatch into `nightly.py`'s `GRAPH`/job kinds, does not exist
+yet (spec s4c Parts 3-4). Its pure helpers (`horizon_dates`, `date_units`,
+`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
+`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
+are unit-testable without a catalog or a network. Today this runner has no
+production caller, only its own test module.
 
 ## Inputs
 
@@ -59,6 +103,33 @@ the coordinator-effect functions in `effects_graph.py`.
   per target ticker. Target tickers are the ORATS-confirmed-session rule
   `target_tickers_from_snapshot` re-implements from the legacy pull, read
   through the v2 snapshot instead of the legacy store.
+- `forward_calendar_store.py`'s own inputs: the pinned parent snapshot's
+  `daily_market` sessions (one scan, grouped by ticker, fed to
+  `engine.v2.data.computed_moves.native_trading_calendar` for the horizon
+  calendar — a snapshot without a `daily_market` session falls back to plain
+  weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
+  (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
+  `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
+  `expected_head_snapshot_id`) — there is no staged input-document file for
+  this runner (see "Primary contracts" above: it is not `RefreshCallback`-
+  shaped, so it reads nothing from a job's private working directory); and
+  the two injected network edges, `providers.nasdaq_calendar.
+  nasdaq_calendar_fetcher` (one call per discovery date) and
+  `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
+  still missing a session after the Nasdaq pass).
+- `board_requests`: an already-loaded events table (`ticker`, `event_date`,
+  `session` columns — e.g. `engine.data.store`'s `earnings_events` Tier-2
+  table's shape, where `event_date` is schema-typed `datetime64[ns]`), an
+  `as_of` date, a horizon in days, and an optional ticker filter. It
+  performs no I/O itself — the caller loads the table. `event_date` may
+  also be given as ISO 8601 strings (date-only or full timestamp, mixed
+  within one column); numeric values are rejected rather than read as
+  epoch-relative offsets, whether the column's dtype is numeric or a mixed
+  `object` column holding Python `int`/`float` elements (see "Failure
+  semantics"). `as_of` must be a timezone-naive `datetime`/
+  `pandas.Timestamp` (`None`, `NaT`, and a timezone-aware value are
+  refused); `horizon_days` must be a non-negative `int` (`bool` is refused
+  despite being an `int` subtype in Python) — see "Failure semantics".
 
 ## Outputs
 
@@ -103,6 +174,31 @@ the coordinator-effect functions in `effects_graph.py`.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
+- `forward_calendar_store.run_forward_calendar_refresh` commits revisions
+  into the EXISTING `earnings_events` contract through
+  `engine.v2.data.generic_incremental` — never
+  `engine.data.rebuild.rebuild` — and returns a `RefreshCallbackResult`
+  (`status` one of `complete`/`noop` — invalid input or an unconfigured
+  fetcher pair raises `OpsError` instead of returning a `"failed"` result;
+  `completed_ids`, `coverage_advanced`, and `warnings` carrying any
+  weekday-calendar-fallback degradation as evidence rather than only a log
+  line). A run whose merged claims equal the parent snapshot's own rows
+  resolves back to the parent (the commit layer's own equality check
+  decides this, never key presence in the parent), so it reports `noop`
+  rather than a spurious `complete`.
+- `training`/`models_promote` are ordinary `_core_kinds()` job kinds, not
+  `supervisor._COORDINATOR_EFFECT_KINDS` members: the worker subprocess does
+  the real write itself. `run_training_worker` (worker `"training"`) calls
+  one of `tools/phase5_training_job.py`'s four job functions and writes
+  `training_result.json` (`training_job_result.v1.0`); `run_promote_worker`
+  (worker `"models_promote"`) calls `engine.v2.models.deployment.promote`'s
+  release-store pointer swap and writes `pointer_state.json`
+  (`promote_pointer_state.v1.0`). Neither ever runs inside the nightly DAG —
+  both are submitted by an operator's own `ops plan training|promote` +
+  `ops submit`.
+- `board_requests`: a tuple of `BoardRequest`, ordered by
+  `(event_date, ticker)` outer, native-covered strategies alphabetically
+  then `DYN-SV` last inner. No side effect, no write.
 
 **`computed_moves_store.py` is not yet wired to production.** No CLI
 subcommand, no `nightly.py` `GRAPH`/`OPTIONAL` entry, no `supervisor` job
@@ -164,9 +260,15 @@ every `.py` file that reports every `engine.*` import at any depth,
 including inside function bodies):
 
 - Top-level: `engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5),
-  `engine.v2.data` (1.0), `engine.v2.ledger` (6.0), `engine.v2.parity`
+  `engine.v2.data` (1.0), `engine.v2.registry` (3.0, `native_board_universe.py`'s
+  `DYNAMIC_MENU` import), `engine.v2.scoring` (5.0, `native_board_universe.py`'s
+  `SUPPORTED_STRATEGIES` import), `engine.v2.ledger` (6.0), `engine.v2.parity`
   (6.5) — all strictly below this package's own layer (7.0), per the root
-  doc's §2 rule.
+  doc's §2 rule. `forward_calendar_store.py` adds one new `engine.v2.data`
+  submodule to this package's dependency surface,
+  `engine.v2.data.computed_moves` (`native_trading_calendar`, layer 1.0),
+  alongside its existing top-level use of `generic_incremental`,
+  `incremental_tables` and `repository.Repository`.
 - Lazy, function-local: `engine.v2.contracts` also appears lazily
   (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
   `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
@@ -181,12 +283,17 @@ including inside function bodies):
   (`cli.py::_restored_model_block` — `payoff_artifact`,
   `cli.py::rescore_command` — `no_fit`, `worker.py::_dispatch_adhoc_rescore`
   — `no_fit`, both layer 3.5); `engine.v2.domain.generation` is lazy-only
-  (`cli.py::_load_native_score_inputs` — `Geometry`/`Pricing`, layer 2.0);
-  `engine.v2.scoring` is lazy-only (`cli.py::_load_native_score_inputs` —
-  `stages`, `cli.py::rescore_command` and `worker.py::_dispatch_adhoc_rescore`
-  — `application.score_one`, layer 4.0). All three lazy-only imports back
-  `rescore`/ad-hoc-rescore's read-only re-score path (root doc's CLI list,
-  `rescore --request --native-inputs`), still strictly below layer 7.0.
+  (`cli.py::_load_native_score_inputs` — `Geometry`/`Pricing`, layer 2.0).
+  `engine.v2.scoring` is no longer lazy-only: alongside its existing lazy
+  call sites (`cli.py::_load_native_score_inputs` — `stages`,
+  `cli.py::rescore_command` and `worker.py::_dispatch_adhoc_rescore` —
+  `application.score_one`, backing `rescore`/ad-hoc-rescore's read-only
+  re-score path, root doc's CLI list `rescore --request --native-inputs`),
+  `native_board_universe.py` now imports `engine.v2.scoring.source_inputs`
+  at top level — still strictly below layer 7.0.
+  `native_board_universe.py` itself has no lazy imports: both of its
+  `engine.v2.*` imports (`registry`, `scoring`) are top-level, alongside
+  its top-level `engine.v2.ops.errors` import.
 
 It does not import its layer-7.0 peers `engine.v2.serving` or
 `engine.v2.research`, or anything above it (`engine.v2.diagnosis` at 7.5,
@@ -197,6 +304,33 @@ imports (`engine.calendar`, `engine.data*`, `engine.dashboard`,
 `engine.evaluate`, `engine.features`, …) are exactly the adapter's job and
 are not layer-checked v2 dependencies.
 
+`native_board_universe.py` deliberately does not depend on `engine.score`,
+`engine.structures`, `engine.replay`, or `engine.fills`: `engine.score`'s
+own top-level import block pulls in `engine.replay` → `engine.fills` (the
+legacy chain index and fill model), and `engine.structures`'s own
+top-level import block pulls in `engine.fills` directly — importing
+either, even solely to read a registry key set for a read-only
+comparison, would violate the isolation invariant at import time, before
+any call happens. It also performs no read-only consistency check against
+`engine.score.DISABLED_STRATEGIES` (the legacy scorer's own
+strategy-refusal set, unextracted, unexported): any v2 → legacy import
+must be declared in `checks/legacy_adapters.json`, whose adapter count may
+only shrink, and `engine.v2.ops` already has its one allowed adapter
+module (`legacy_adapter.py`, above). `SUPPORTED_STRATEGIES` already
+excludes both disabled strategies by construction (it comes from native's
+own input builder, which has no entry for CAL-P/CND-P), so no such check
+is needed — this module reads the native-covered set from
+`engine.v2.scoring.source_inputs` only, and checks it against
+`engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid
+once at import time, no I/O, no legacy dependency). `SUPPORTED_STRATEGIES`
+is `engine.v2.scoring.source_inputs`'s public alias for its own
+pre-existing internal strategy set (`_STRATEGY_FORECAST_OUTPUTS`'s key
+set: `STR-THRU`, `STR-RUNUP`, and the seven `DYNAMIC_MENU` members) — the
+same value that module already computed for its own input-building use;
+exporting it added a name, not a behavior, and gave this module the one
+fact it needs (which strategies native can build scoring inputs for)
+without duplicating that set here.
+
 Callers: `engine.v2.dashboard._server`'s lazy, documented import of
 `cli.refresh_action` (root doc §4); the `tools/v2_*.py` operator CLIs
 (direct import — permitted, since `tools/*` is not a layered production
@@ -205,21 +339,154 @@ package per the root doc's §1); `experiments/*` runners submitting plans;
 and the `tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package
 above layer 7.0 imports this package, and no legacy `engine/**` module
 does either — none except the documented lazy `engine.v2.dashboard._server`
-caller of `cli.refresh_action` noted above.
+caller of `cli.refresh_action` noted above. `board_requests` has no
+production caller today: it is a library function exercised only by its
+own tests (`tests/test_v2_ops_native_board_universe.py`), part of the
+`tests/test_v2_ops_*.py` suite above. It becomes reachable once a later
+stage adds a `native_score` job kind to the nightly graph and calls it as
+that job's first step — out of scope for this change.
 
 ## External systems and libraries
 
 `sqlite3` (the operations catalog); the local filesystem (artifact store,
 snapshot roots, legacy px/fetch-cache trees read through the adapter); the
-market-data provider account this package's `provider-account` command
-budgets against (`engine/v2/ops/providers/`, e.g. ORATS) — credentials
-themselves are never held here, only remaining-call/reserve counts.
+market-data provider accounts this package's `provider-account` command
+budgets against (`engine/v2/ops/providers/`) — credentials themselves are
+never held here, only remaining-call/reserve counts. Three accounts exist
+today: `orats-daily-market` (keyed, reads `ORATS_API_KEY`); and, as of spec
+s4c, `nasdaq` and `yfinance` — both unmetered and keyless (their
+`PROVIDER_CREDENTIAL_VARIABLES` tuples are empty), but still
+operator-provisioned budget rows so the shared scheduler reserves against
+them like any keyed account. `providers/nasdaq_calendar.py` calls Nasdaq's
+public `api.nasdaq.com/api/calendar/earnings` endpoint (one date per call,
+a plain keyless HTTPS GET with a browser user-agent — the endpoint refuses
+the default client UA with a 403); `providers/yfinance_edge.py` wraps the
+third-party `yfinance` library (imported lazily, only inside the default
+callables, so importing the module touches no network) — one
+`Ticker.history`/`Ticker.get_earnings_dates` call per ticker, never a
+direct HTTP client of its own.
+
+`native_board_universe.py` adds no new external system: `pandas` (already
+a transitive dependency of this package) is its main library, for the
+events-table filter and the `BoardRequest.event_date` type; it also imports
+`numpy` (an existing transitive dependency of `pandas`, now imported
+directly) and the standard-library `numbers` module, both used only for the
+`isinstance(v, (numbers.Number, np.number))` scalar-type check that refuses
+a bare number wherever a date is expected (a numpy scalar such as
+`np.int64` in an `object`-dtype column, or as `as_of` itself) — no file,
+network, or database access.
 
 ## Failure semantics
 
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
-  code (root doc §5), never defaulted.
+  code (root doc §5), never defaulted. `board_requests` follows the same
+  rule for its own input: `events_table` missing `ticker`, `event_date`,
+  or `session`; holding more than one column under any of those three
+  labels (checked before any column is read by label); holding an
+  `event_date` column of numeric dtype, or an `object`-dtype `event_date`
+  column holding any `numbers.Number`/`np.number` element — Python
+  `int`/`float`/`bool` or a numpy scalar such as `np.int64`/`np.float64`
+  (checked per element, before any parsing is attempted — never read as an
+  epoch-relative offset, e.g. `20260201`, regardless of whether pandas
+  inferred a numeric dtype or left the column as `object`, and regardless
+  of whether the numeric value is a Python or numpy type); holding an `event_date` column
+  that otherwise cannot be parsed as timestamps (e.g. an unparseable
+  string); holding an `event_date` value that parses to null (`NaT`, e.g.
+  a `None`/`NaN` cell); or holding a timezone-aware `event_date` column,
+  whether the column arrives already `datetime64` with a timezone or as a
+  tz-aware ISO 8601 string (e.g. `"...+00:00"`) — this function only
+  supports timezone-naive event dates, matching `as_of` — each is a
+  whole-call typed refusal (`OpsError`, code `INVALID_REQUEST`), raised
+  before any row is read — never a partial or silently smaller result.
+  `event_date` values already typed as timezone-naive `datetime64`, or
+  given as timezone-naive ISO 8601 strings (date-only and full-timestamp
+  forms may be mixed within one column), are accepted; a timezone-aware
+  `event_date` is refused in every representation — there is no
+  ISO-string exception to the timezone-naive rule.
+  `as_of` must be a timezone-naive `datetime`/`pandas.Timestamp`: `None`,
+  `NaT`, a timezone-aware value, and a bare number (`bool`, Python
+  `int`/`float`, or a numpy scalar such as `np.int64`) are each refused
+  (`OpsError`, `INVALID_REQUEST`) — `pandas.Timestamp` reads a bare number
+  as epoch time, not a calendar date (`pandas.Timestamp(20260130)` is
+  `1970-01-01 00:00:00.020260130`, not 2026-01-30), so this is a real,
+  silent-corruption risk, not a defensive-only check. `horizon_days` must
+  be a non-negative `int`; `bool` is refused even though it is an `int`
+  subtype in Python (so `True`/`False` cannot silently pass as `1`/`0`),
+  and any other type or a negative value is refused the same way.
+  `forward_calendar_store.py`'s `run_forward_calendar_refresh` validates
+  every one of its nine arguments before opening the catalog connection,
+  constructing the artifact store, or making a provider call: each raises
+  `INVALID_REQUEST` (root doc §5's typed-`Problem` shape) the moment it is
+  missing or malformed, never a bare
+  `AttributeError`/`KeyError`/`sqlite3.OperationalError` reached deeper in
+  the function. `catalog_path` must already exist as a file — `sqlite3.connect`
+  is never allowed to silently create one that does not, which it would by
+  default. `objects_root` must already exist as a directory.
+  `parent_snapshot_id` must be a bounded nonempty string and `refresh_plan_hash`
+  a `sha256:`-prefixed 32-byte hex digest, matching (not importing — that name
+  is private) `incremental_data.RefreshParameters`'s own rules for these same
+  two fields (`_refresh_identity_problems`/`_is_hash`). `as_of` refuses `None`,
+  a bare number or `bool` (which would misread as epoch time), an unparseable
+  value, `NaT`, and a timezone-aware value — mirroring
+  `native_board_universe._validated_as_of` (PR #16, not yet on `main`, so
+  mirrored rather than imported). `tickers` refuses a bare `str` (a common
+  caller mistake that `set()`/iteration would otherwise silently accept
+  character-by-character), any other non-iterable, and any element that is
+  not a non-empty `str` — but `tickers=()` is a valid, meaningful request: it
+  means the whole market (the nightly refreshes everything), since an empty
+  `wanted` set never filters a Nasdaq date's claimed rows
+  (`nasdaq_claims_from_rows`); the yfinance fan-out stays bounded by that
+  Nasdaq result for the horizon either way (`pending_tickers`), not by how
+  many tickers were requested. `horizon_days` refuses a non-`int` (a `bool`
+  is explicitly excluded even though it is an `int` subclass in Python) and
+  anything outside `[1, MAX_HORIZON_DAYS]` (366 — one year plus a leap day;
+  no existing forward-calendar or board-universe horizon constant already
+  bounds this, so this is a new, deliberately generous ceiling, not a tuned
+  limit). `scope` must be one of the two commit-destination namespaces v2
+  ops ever authorizes for a job like this one, `{"shadow", "smoke"}` — the
+  same pair every `JobKind` in `stages.py`/`cli.py`/
+  `incremental_data.refresh_job_kind` already registers as
+  `namespaces=frozenset({"shadow", "smoke"})` (reused here as a local
+  constant, since no single module exports it by name).
+  `expected_head_generation` must be a non-negative `int` — the old code read
+  `scope`/`expected_head_generation` via `document["scope"]`/
+  `document["expected_head_generation"]`, so a missing key surfaced as a
+  `KeyError` partway through the run instead of a refusal before any I/O.
+  An unconfigured fetcher pair (`nasdaq_fetcher`/`earnings_fetcher` not
+  passed) is the same typed-`Problem` shape: `RESOURCE_UNAVAILABLE`. A
+  parent snapshot with no `daily_market` session is not a missing-input
+  refusal at all — it is the documented weekday-calendar fallback, recorded
+  as a result `warning` (see "Diagrams" below for its narrowed
+  `except ValueError`, which now wraps only the one call
+  (`native_trading_calendar`) whose `ValueError` that fallback is
+  documented to catch, not the calendar-scan/arithmetic around it).
+- **Training/promote refusal** — `run_training_worker` maps every refusal
+  the underlying tool can raise to a typed `OpsError` rather than an
+  untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
+  `RuntimeFitForbidden` -> `VALIDATION_FAILED`, any other `SystemExit` ->
+  `_tool_failure`'s mapping. `run_promote_worker` maps
+  `deployment.DeploymentError` (including an unstaged `release_id`) to
+  `VALIDATION_FAILED`. A `training` plan with no bound legacy input manifest
+  carries `blocked_prerequisites` and can never be submitted, exactly like a
+  manifest-less nightly plan. A recipe job's `pairs_path`
+  (`ops plan training --pairs`) is validated twice: a malformed one
+  (absolute, containing `..`) fails `training_parameter_problems` at plan
+  time (`INVALID_REQUEST`); at execution it must additionally resolve, as a
+  plain relative path, beneath the attempt's staged legacy root (populated
+  only from the plan's pinned manifest), or the worker refuses
+  `INPUT_CHANGED` — a recipe can only ever read a pairs file that is one of
+  the job's pinned legacy inputs, never an arbitrary filesystem path.
+  `training_parameter_problems` also refuses, before submission, a
+  non-positive/non-int `ticker_chunk`, a non-finite or negative `alpha`, a
+  `cutoffs` entry that is not a valid ISO date, and a `pairs_path` supplied to
+  any mode other than `recipe` — each `INVALID_REQUEST`, never a value that
+  reaches the worker unexamined.
+  `models_promote`'s `store_domains` declares a
+  write lease on the single `deployment_pointer` domain, which serializes
+  every `models_promote` claim globally against every other one regardless
+  of the `release_root` each names — `deployment.promote`'s
+  read-current-pointer/append-history swap has no locking of its own.
 - **Cache** — one part of this package's own state *is* a cache, read
   through the operations catalog's own `data_raw_receipts` table (the same
   connection this package's stages already use for `data_snapshot_heads`
@@ -236,19 +503,38 @@ themselves are never held here, only remaining-call/reserve counts.
   `legitimate_empty` payload is always re-verified against the live source
   on the next run, and a `not_final`/`transient`/`refused` response is
   never written to the cache at all (`record_unit_receipt` refuses to
-  store one). `unit_receipts.py` breaks a `received_at` tie by `rowid`
-  (the table's own append-only insertion order); `nightly.py`'s older,
-  narrower lookup does not carry that tie-break. On the acquisition side,
-  a provider response that cannot be used maps to one of two non-retried
-  failure codes — `refused` (an unparseable body or other non-auth 4xx) to
-  `SOURCE_INVALID`, `credential_invalid` (the provider's own 401/403) to
-  `CREDENTIAL_INVALID` — while only `transient` is retried; everything
-  else about this package's own job/lease/history state is not a cache,
-  and the catalog remains the durable record of it.
+  store one). `forward_calendar_store.py`'s `_cached_nasdaq`/`_cached_yfinance`
+  are thin wrappers over `cached_unit_outcomes` for the `nasdaq`/`yfinance`
+  source+endpoint pairs; its `_fetch_nasdaq`/`_fetch_yfinance` then re-read
+  the wanted units' bytes through `cached_unit_payloads` before falling back
+  to a fresh fetch, so a same-session retry rebuilds every unit's claims —
+  fresh and cache-hit alike — exactly as a clean single run would.
+  `unit_receipts.py` breaks a `received_at` tie by `rowid` (the table's own
+  append-only insertion order); `nightly.py`'s older, narrower lookup does
+  not carry that tie-break. On the acquisition side, a provider response
+  that cannot be used maps to one of four failure codes via
+  `provider_failure_code` — two registered retryable (`checks`/
+  `contracts/operations.py`'s `("source", True)`): `not_final` (Nasdaq's
+  404, a date not yet published) to `SOURCE_NOT_FINAL` and `transient`
+  (network errors, 429, 5xx) to `TRANSIENT_SOURCE`; and two non-retryable
+  (`("source", False)`): `refused` (an unparseable body or other non-auth
+  4xx) to `SOURCE_INVALID` and `credential_invalid` (the provider's own
+  401/403) to `CREDENTIAL_INVALID`. A mixed batch of unit kinds reports the
+  worst code among them, ranked `TRANSIENT_SOURCE` <
+  `SOURCE_NOT_FINAL` < `SOURCE_INVALID` < `CREDENTIAL_INVALID` — retryable
+  or not, the job still fails on the first non-`complete`/`legitimate_empty`
+  unit rather than committing a partial claim set. Everything else about
+  this package's own job/lease/history state, including the
+  `training`/`models_promote` job kinds' own state, is not a cache, and the
+  catalog remains the durable record of it. `board_requests` holds no
+  cache of its own either way; it reads only the table its caller passes
+  in.
 - **Retry** — `lifecycle.py`'s `attempt_receipts`/`request_cancel` and
   `recovery.py`'s `reconcile_attempt`/`prove_ownership_gone` govern retry
   and ownership recovery after a crash; a stale lease is reclaimed only
-  after ownership is proven gone, never assumed.
+  after ownership is proven gone, never assumed. `board_requests` is pure
+  and deterministic for a given table snapshot; re-execution is safe,
+  nothing to undo.
 - **Transaction** — catalog writes go through `catalog.py`'s `transaction`
   context manager; coordinator effects must make their filesystem writes
   replay-safe and idempotent rather than atomic with the DB commit (root
@@ -261,7 +547,9 @@ themselves are never held here, only remaining-call/reserve counts.
   `_ran_row_exists` skips appending a second "ran" row for it.
 - **Partial write** — artifact publication is atomic (`ArtifactStore`); a
   killed process leaves either the old artifact or nothing, never a
-  half-written one.
+  half-written one. `board_requests` performs no write at all — not
+  possible to leave partial, since the function returns a complete tuple
+  or raises.
 - **Idempotency** — job identity is `job_id_for("shadow", key)`, where
   `key` folds in the session, a scope hash and the stage name; a retry of
   the same saved plan reproduces the same keys. This package's ledger- and
@@ -275,7 +563,12 @@ themselves are never held here, only remaining-call/reserve counts.
   nothing changes"`), `outbox.py`, `decision_commit.py`, `publication.py`,
   `experiments.py` and `ledger_history_import.py` all raise it on that
   same-key/different-content case; a same-key/same-content resubmission is
-  the idempotent no-op this section otherwise describes.
+  the idempotent no-op this section otherwise describes. `board_requests`
+  has no job identity of its own: the same `(as_of, horizon_days, tickers,
+  events_table)` always returns the same tuple in the same order.
+  Idempotency of anything built from this enumeration downstream (a job's
+  own commit key, once `native_score` exists) is that later stage's
+  concern.
 
 ## Invariants
 
@@ -297,6 +590,21 @@ published carries a local path, raw exception text, or an unsanitised
 free-text field — `worker.py`'s convention (a caught traceback goes to a
 private per-attempt file, never the result pipe) is the model other
 stages in this package follow.
+
+`native_board_universe.py` touches the same missing-input typed-refusal
+invariant (above) and adds two of its own, scoped to that module:
+- **Native vs. legacy values** — `ticker`, `event_date`, and `session` come
+  from the shared events table, which neither side owns; `strategy` comes
+  from the native-covered strategy set (`SUPPORTED_STRATEGIES`) or the
+  `DYN-SV` literal, never from the events table. The module's one
+  consistency assertion (`DYNAMIC_MENU` is a subset of
+  `SUPPORTED_STRATEGIES`) reads only v2-native names — it does not import
+  `engine.score`'s `DISABLED_STRATEGIES` or any other legacy-owned name.
+- **Isolation** — this module never loads the legacy option-chain index
+  and never constructs a legacy `Scorer`; it also never *imports*
+  `engine.score` or `engine.structures`, so its import graph never reaches
+  `engine.replay`/`engine.fills` either — the isolation holds at import
+  time, not only at call time.
 
 ## Diagrams
 
@@ -370,3 +678,61 @@ called from the coordinator, not the worker — `_coordinator_effect`
 dispatches to `effects_graph.py` for some kinds and to
 `decision_commit.py`/`snapshot_promotion.py`/`snapshot_stages.py`/its own
 `supervisor.py` methods for the rest (see "Outputs").
+
+### Forward-calendar refresh: two-source, cache-first fetch (`forward_calendar_store.py`)
+
+```mermaid
+flowchart TD
+    V{"validate as_of, tickers,<br/>horizon_days, scope,<br/>expected_head_generation"}
+    V -->|any invalid| VF["INVALID_REQUEST<br/>-- no catalog connection,<br/>no provider call"]
+    V -->|all valid| A["parent snapshot's daily_market<br/>-> native_trading_calendar<br/>(weekday fallback + warning if absent)"]
+    A --> B["horizon_dates -> date_units"]
+    B --> C{"unit cached complete?"}
+    C -->|yes| D["cached_unit_payloads:<br/>re-read receipt bytes"]
+    C -->|no| E["nasdaq_calendar_fetcher<br/>(one call per date)"]
+    D -->|kind=complete| F["nasdaq_claims_from_rows"]
+    E -->|complete: parseable,<br/>has rows| G["record_unit_receipt"] --> F
+    E -->|legitimate_empty:<br/>parseable, no rows| G2["record_unit_receipt<br/>(no claims folded)"]
+    E -->|not_final/transient/refused/<br/>credential_invalid| H["provider_failure_code<br/>-> job fails, nothing committed"]
+    F --> I["pending_tickers:<br/>tickers with no nasdaq session"]
+    I --> J{"unit cached complete?"}
+    J -->|yes| K["cached_unit_payloads:<br/>re-read receipt bytes"]
+    J -->|no| L["yfinance_earnings_fetcher<br/>(one call per pending ticker)"]
+    K -->|kind=complete| M["fold session into claims"]
+    L -->|complete: frame has rows| N["record_unit_receipt"] --> M
+    L -->|legitimate_empty:<br/>empty frame, no bytes<br/>-- never cached| M2["no claim, no receipt"]
+    L -->|transient/refused| H
+    M --> O["_commit_claims -> generic_incremental<br/>into the existing earnings_events contract"]
+    O --> P{"merged rows == parent's?"}
+    P -->|yes| Q["status=noop, head unmoved"]
+    P -->|no| R["status=complete,<br/>candidate_snapshot_id set"]
+```
+
+Nasdaq runs first and is the *discovery* pass (which tickers have a date at
+all); yfinance runs only against `pending_tickers` — the tickers Nasdaq's
+pass left without a resolved session — as a *confirmation* pass. Both
+passes are cache-first and unit-independent: a same-session retry re-reads
+every already-cached unit's bytes by receipt (`cached_unit_payloads`) and
+only fetches the units that are still missing, so the retry's claims are
+identical to a clean single run's. `provider_failure_code` is checked once,
+after both passes, over the combined kind list: the yfinance pass still
+runs and still caches its own successful units' receipts even when a
+Nasdaq unit already failed (each unit records its own receipt as soon as
+it resolves, spec R3 — one unit's failure never discards another unit's
+already-recorded receipt within the same run), but no `generic_incremental`
+commit happens until the combined kind list is clean.
+
+### `native_board_universe.py`: `board_requests`
+
+```mermaid
+flowchart LR
+    ET[events_table] --> BR[board_requests]
+    SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
+    DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
+    BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
+    BR -.->|"no caller yet"| NC[(future native_score job)]
+```
+
+No production job feeds `board_requests` today; the dashed edge marks the
+future `native_score` job kind this enumeration is built for (see
+"Dependencies" → "Callers" above).
