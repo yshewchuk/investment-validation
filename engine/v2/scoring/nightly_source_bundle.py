@@ -164,11 +164,19 @@ def _checked_against_as_of(
 
 
 def _feature_is_missing(value: Any) -> bool:
-    """Whether a projected feature column counts as missing."""
+    """Whether a projected feature column counts as missing.
+
+    A recognized "no value" sentinel (an absent key, ``None``, ``pandas.NA``,
+    or a NaN of any Python/NumPy floating type) is missing. A value that is
+    present but the wrong shape entirely (a string, an infinite number) is
+    not missing -- that is `_project_features`'s own `INVALID_FEATURE_VALUE`
+    refusal, a data problem distinct from an absence.
+    """
     return (
         value is _MISSING
         or value is None
-        or (isinstance(value, float) and math.isnan(value))
+        or value is pd.NA
+        or (isinstance(value, (float, np.floating)) and math.isnan(value))
     )
 
 

@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -107,6 +108,20 @@ def test_feature_value_none_is_missing():
 def test_feature_value_nan_is_missing():
     bundle = assemble_nightly_source_bundle(**_valid_kwargs(
         tier4_row={"observed_at": "2026-01-09", "pred_abs_move": float("nan")}))
+    assert "pred_abs_move" not in bundle.feature_vector
+    assert bundle.feature_missing_mask["pred_abs_move"] is True
+
+
+def test_feature_value_numpy_float32_nan_is_missing():
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        tier4_row={"observed_at": "2026-01-09", "pred_abs_move": np.float32("nan")}))
+    assert "pred_abs_move" not in bundle.feature_vector
+    assert bundle.feature_missing_mask["pred_abs_move"] is True
+
+
+def test_feature_value_pandas_na_is_missing():
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        tier4_row={"observed_at": "2026-01-09", "pred_abs_move": pd.NA}))
     assert "pred_abs_move" not in bundle.feature_vector
     assert bundle.feature_missing_mask["pred_abs_move"] is True
 
@@ -271,3 +286,20 @@ def test_quote_domain_map_matches_capture_call_site():
          "bid": 0.2, "ask": 0.3},
     ]
     assert quote_domain_map(rows) == capture_quote_domain_map(rows)
+
+
+def test_capture_shim_preserves_original_message_via_detail():
+    # Regression for the capture shim (tools/capture_tier0_corpus.py's one
+    # call site): NightlySourceBundleRefusal's own str() carries a
+    # "CODE: " prefix StrictTraceCaptureError's messages never had, so the
+    # shim re-raises with `.detail` (the original text), not `str(exc)`.
+    # tests/test_phase4_capture_strict.py's own
+    # test_probe_still_refuses_unrecorded_or_contradictory_quote_domains
+    # exercises the real call site end to end (via substring `match=`); this
+    # pins the exact mechanism the shim relies on.
+    with pytest.raises(NightlySourceBundleRefusal) as exc:
+        quote_domain_map([{"right": "C", "strike": 100.0}])
+    from tools.capture_tier0_corpus import StrictTraceCaptureError
+    wrapped = StrictTraceCaptureError(getattr(exc.value, "detail", str(exc.value)))
+    assert str(wrapped) == exc.value.detail
+    assert not str(wrapped).startswith("INVALID_QUOTE_DOMAIN:")

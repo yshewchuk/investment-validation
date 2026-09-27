@@ -1436,7 +1436,12 @@ def _captured_blocks(candidate: Mapping[str, Any],
     try:
         context["quotes"] = quote_domain_map(source.get("quote_domain"), quote_status)
     except ValueError as exc:
-        raise StrictTraceCaptureError(str(exc)) from exc
+        # NightlySourceBundleRefusal's own str() carries a "CODE: " prefix
+        # StrictTraceCaptureError never had; .detail is the original message
+        # unchanged. A plain ValueError (none raised by quote_domain_map
+        # today, but a defensive fallback) has no .detail, so str(exc) is
+        # exactly its own message either way.
+        raise StrictTraceCaptureError(getattr(exc, "detail", str(exc))) from exc
     # A spot exists only once legacy priced the structure. A row whose chain
     # lookup came back empty, that never reached pricing, or whose pricer
     # raised has none, and native refuses it with its own code; a capture
