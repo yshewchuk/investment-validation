@@ -199,7 +199,14 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
   describes the release root's *current* release, an assumption a rollback
   to an older staged release would break — a `phase5_release.json` that
   fails either check raises `ModelNotReady("phase5_release.json", ...)`
-  before any state-family row is read.
+  before any state-family row is read. This is a known, pre-existing
+  limitation of the single-catalog-per-root layout
+  (`checks/phase5_release.py`), not a defect this module introduces —
+  after a rollback, resolution refuses rather than silently serving a
+  stale-release catalog. See
+  [issue #49](https://github.com/yshewchuk/investment-validation/issues/49)
+  for the follow-up that would make the catalog survive a rollback
+  (a release-scoped catalog store, out of this module's scope).
 - **A hash mismatch never falls back.** There is no branch anywhere in this
   module that substitutes a different object, an older cached value, or a
   default when a hash disagrees — `ModelNotReady` is the only outcome. This
