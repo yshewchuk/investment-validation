@@ -574,3 +574,23 @@ def test_resolve_production_release_binding_reads_the_configured_root(monkeypatc
     monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
     binding = resolve_production_release_binding()
     assert binding.release_id == _RELEASE_ID
+
+
+def test_promote_plan_and_resolve_production_release_binding_agree_on_the_same_configured_root(monkeypatch, tmp_path):
+    """The two named consumers of MODEL_RELEASE_ROOT must resolve the SAME
+    on-disk deployment directory for the SAME configured value.
+    promote_plan's plan-time release_root (via production_deployment_root)
+    and resolve_release_binding's own dep_root (via
+    resolve_production_release_binding) must be identical -- this is the
+    defect an Opus merge-gate review found: promote and scoring disagreed
+    by one directory level for the same MODEL_RELEASE_ROOT."""
+    from engine.v2.models import deployment
+    from engine.v2.ops import training
+    _stage_and_promote(tmp_path)
+    _happy_catalog(tmp_path)
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    plan = training.promote_plan(release_root="", release_id=_RELEASE_ID)
+    assert plan["parameters"]["release_root"] == str(_dep_root(tmp_path))
+    assert plan["parameters"]["release_root"] == str(deployment.production_deployment_root())
+    binding = resolve_production_release_binding()
+    assert binding.release_id == _RELEASE_ID

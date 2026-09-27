@@ -621,3 +621,12 @@ def test_restage_semantic_hash_refuses_a_manifest_whose_release_id_does_not_matc
     with pytest.raises(StagingRefused) as error:
         restage_semantic_hash(tmp_path, "r1")
     assert error.value.issues[0].code == "RELEASE_ID_MISMATCH"
+
+
+def test_production_deployment_root_is_one_level_below_production_release_root(monkeypatch, tmp_path):
+    """production_deployment_root() is production_release_root() / "deployment"
+    -- the directory this module's own promote/stage_release/etc. actually
+    take as their root, one level below the configured MODEL_RELEASE_ROOT."""
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    assert deployment_module.production_deployment_root() == tmp_path / "deployment"
+    assert deployment_module.production_deployment_root() == production_release_root() / "deployment"

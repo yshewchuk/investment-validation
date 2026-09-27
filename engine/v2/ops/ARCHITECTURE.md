@@ -797,10 +797,11 @@ network, or database access.
   (new) a release staged under a superseded hash version --
   `deployment.StaleReleaseHash`) to `VALIDATION_FAILED`. `promote_plan`
   (new, this PR) resolves an omitted `--release-root` from
-  `engine.v2.models.deployment.production_release_root()` (config key
-  `MODEL_RELEASE_ROOT`, `engine/v2/models/ARCHITECTURE.md` §7.4) at PLAN
-  time, before submission: a missing key is `INVALID_REQUEST` there, so it
-  never reaches the worker with an empty `release_root`. `nightly.py`,
+  `engine.v2.models.deployment.production_deployment_root()` (config key
+  `MODEL_RELEASE_ROOT`, one level below the value that key itself names —
+  `engine/v2/models/ARCHITECTURE.md` §7.4) at PLAN time, before submission:
+  a missing key is `INVALID_REQUEST` there, so it never reaches the worker
+  with an empty `release_root`. `nightly.py`,
   `worker.py` and `stages.py` do not read this config key — out of this
   PR's scope. A `training` plan with no bound legacy input manifest
   carries `blocked_prerequisites` and can never be submitted, exactly like a

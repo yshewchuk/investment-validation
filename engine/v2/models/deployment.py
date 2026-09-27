@@ -68,6 +68,7 @@ __all__ = [
     "current_pointer",
     "current_release",
     "pointer_history",
+    "production_deployment_root",
     "production_release_root",
     "promote",
     "resolve_release",
@@ -139,25 +140,49 @@ class StaleReleaseHash(DeploymentError):
 
 
 def production_release_root() -> Path:
-    """The one configured production release root -- read fresh from
-    ``MODEL_RELEASE_ROOT`` on every call, never cached. ``release_bindings.
-    resolve_production_release_binding`` and the ``models_promote`` job's
-    ``promote_plan`` (``engine/v2/ops/training.py``) both resolve their
-    release root through this one function, so a single environment
-    variable is the whole production configuration surface for "which
-    release root is live". Raises :class:`MissingReleaseRoot` when the
-    variable is unset or blank -- there is no fallback default, because a
-    silent default here would let an operator promote or resolve against
-    the wrong store without any signal. Always returns an absolute,
-    ``~``-expanded path (the same ``Path(...).expanduser().resolve()``
-    normalization ``promote_plan`` applies to an explicit ``--release-root``)
-    so every consumer of this function agrees on the exact directory
-    regardless of its own current working directory.
+    """The one configured production STORE root -- read fresh from
+    ``MODEL_RELEASE_ROOT`` on every call, never cached. This is the store
+    root, NOT this module's own ``root`` parameter:
+    ``release_bindings.resolve_release_binding`` and
+    ``checks/phase5_release.py`` both navigate from a value at this level
+    by appending their own ``deployment/`` subdirectory
+    (``<release_root>/deployment/DEPLOYED``); this module's own
+    :func:`promote`/:func:`rollback`/:func:`resolve_release`/
+    :func:`current_release`/:func:`stage_release`/
+    :func:`restage_semantic_hash` all take THAT ``deployment/`` directory
+    itself as their ``root`` -- see :func:`production_deployment_root`,
+    which is what a caller of any of those wants, not this function
+    directly. Raises :class:`MissingReleaseRoot` when the variable is
+    unset or blank -- there is no fallback default, because a silent
+    default here would let an operator promote or resolve against the
+    wrong store without any signal. Always returns an absolute,
+    ``~``-expanded path (``Path(...).expanduser().resolve()``).
     """
     value = os.environ.get(MODEL_RELEASE_ROOT_ENV, "").strip()
     if not value:
         raise MissingReleaseRoot()
     return Path(value).expanduser().resolve()
+
+
+def production_deployment_root() -> Path:
+    """``production_release_root() / "deployment"`` -- the directory this
+    module's own root-taking functions (:func:`promote`, :func:`rollback`,
+    :func:`resolve_release`, :func:`current_release`, :func:`stage_release`,
+    :func:`restage_semantic_hash`) expect as their ``root`` argument when
+    operating against the ONE configured production store, matching the
+    same ``<release_root>/deployment/`` layout
+    ``release_bindings.resolve_release_binding`` and
+    ``checks/phase5_release.py`` already use for the identical value.
+    ``training.promote_plan`` resolves an omitted ``--release-root``
+    through THIS function, never through :func:`production_release_root`
+    directly -- the two disagreed on which directory ``MODEL_RELEASE_ROOT``
+    named until this function existed (2026-09-27 Opus gate finding:
+    scoring's resolution and promote's resolution pointed at directories
+    one level apart for the same configured value). Raises
+    :class:`MissingReleaseRoot` exactly as :func:`production_release_root`
+    does, for the same reason.
+    """
+    return production_release_root() / "deployment"
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

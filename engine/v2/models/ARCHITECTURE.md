@@ -88,13 +88,19 @@ non-model state) — never by opening a staged object file directly outside
   `{content_hash: bytes}` payload map for every member across every
   binding.
 - **`deployment.promote`/`rollback`/`resolve_release`/`current_release`**:
-  a `release_id` and the release-store root; they read only what
-  `stage_release` and earlier promotions already wrote under that root —
-  never a live panel, a request, or anything outside the store.
+  a `release_id` and this module's own root — the `deployment/` directory
+  itself (`root/releases/<id>/manifest.json`, `root/DEPLOYED`), NOT the
+  broader production store root `production_release_root` returns; they
+  read only what `stage_release` and earlier promotions already wrote
+  under that root — never a live panel, a request, or anything outside
+  the store.
 - **`deployment.production_release_root`**: the `MODEL_RELEASE_ROOT`
-  environment variable — the store root, one level ABOVE its own
-  `deployment/` subdirectory (matching `release_bindings.resolve_release_binding`'s
-  and `checks/phase5_release.py`'s layout: `<release_root>/deployment/DEPLOYED`).
+  environment variable — the store root, one level ABOVE the
+  `deployment/` directory this module's own functions take as `root`
+  (matching `release_bindings.resolve_release_binding`'s and
+  `checks/phase5_release.py`'s layout: `<release_root>/deployment/DEPLOYED`).
+  `production_deployment_root` (§7.4) is `production_release_root() /
+  "deployment"` — what a caller of THIS module's own functions wants.
 - **`deployment.restage_semantic_hash`**: the target `release_id`'s
   already-staged manifest (read once, verified under its own declared
   hash version before anything is trusted) — no payload bytes, no
@@ -252,7 +258,14 @@ third-party service. `hashlib.sha256` for every content hash;
   always resolves the same `ModelRelease`, since a staged manifest is
   immutable once written).
 
-### 7.4 `production_release_root` (new, this PR)
+### 7.4 `production_release_root` / `production_deployment_root` (new,
+this PR; `production_deployment_root` added in this PR's Opus-gate fix
+round)
+
+`production_release_root` and `production_deployment_root` share ONE
+`MODEL_RELEASE_ROOT` environment variable and the same failure semantics
+below; `production_deployment_root` is `production_release_root() /
+"deployment"` -- nothing else differs.
 
 - **R1, missing input.** Reads the `MODEL_RELEASE_ROOT` environment
   variable fresh on every call (never cached at import time or otherwise —
@@ -262,16 +275,31 @@ third-party service. `hashlib.sha256` for every content hash;
   fallback to a repo-relative or `INVESTING_PLAN_ROOT`-relative path: this
   is the ONE config key that names "which release root is production", and
   a silent default would let an operator resolve or promote against the
-  wrong store without any signal). This is the one config key
-  `release_bindings.resolve_production_release_binding` (§7.4 of
-  `engine/v2/scoring/ARCHITECTURE.md`) and `engine/v2/ops/training.py`'s
-  `promote_plan` both read; neither `nightly.py`, `worker.py` nor
-  `stages.py` reads it (out of this PR's scope — a later PR wires the
-  per-night `SourceBundle` assembler to it).
+  wrong store without any signal). `release_bindings.
+  resolve_production_release_binding` (§7.4 of
+  `engine/v2/scoring/ARCHITECTURE.md`) reads `production_release_root`
+  (the STORE root; it derives its own `deployment/` subdirectory
+  internally, via the pre-existing `resolve_release_binding`).
+  `engine/v2/ops/training.py`'s `promote_plan` reads
+  `production_deployment_root` instead (the `deployment/` directory
+  itself) -- this module's own `promote`/`rollback`/`resolve_release`/
+  `current_release`/`stage_release`/`restage_semantic_hash` have always
+  taken THAT directory as their `root`, one level below what
+  `production_release_root` returns. Both functions read the SAME
+  `MODEL_RELEASE_ROOT` value; they differ only in how many path segments
+  they append before returning it, so the same configured value serves
+  both consumers correctly (2026-09-27 Opus gate finding: before
+  `production_deployment_root` existed, `promote_plan` read
+  `production_release_root` directly, one directory level short of what
+  `deployment.promote` needed, so the same `MODEL_RELEASE_ROOT` value
+  made scoring and promote look in different directories). Neither
+  `nightly.py`, `worker.py` nor `stages.py` reads either function (out of
+  this PR's scope — a later PR wires the per-night `SourceBundle`
+  assembler to it).
 - **R2–R6.** No cache (fresh env read every call, R2); nothing to retry
-  (R3); not a transaction or a write (R4/R5 do not apply — this function
-  performs no I/O beyond the environment read); idempotent for an
-  unchanged environment (R6).
+  (R3); not a transaction or a write (R4/R5 do not apply — neither
+  function performs I/O beyond the environment read and one path join);
+  idempotent for an unchanged environment (R6).
 
 ### 7.5 `restage_semantic_hash` (new, this PR)
 

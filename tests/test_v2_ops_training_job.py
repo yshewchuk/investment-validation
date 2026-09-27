@@ -623,19 +623,20 @@ def test_promote_plan_stores_release_root_absolute():
 
 def test_promote_plan_resolves_the_configured_release_root_when_omitted(monkeypatch, tmp_path):
     """An empty release_root at plan time falls back to
-    production_release_root()."""
+    production_deployment_root() -- one level below the configured
+    MODEL_RELEASE_ROOT, matching deployment.py's own root convention."""
     monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
     plan = training.promote_plan(release_root="", release_id="r1")
-    assert plan["parameters"]["release_root"] == str(tmp_path.resolve())
+    assert plan["parameters"]["release_root"] == str((tmp_path / "deployment").resolve())
 
 
-def test_promote_plan_release_root_matches_production_release_root(monkeypatch, tmp_path):
+def test_promote_plan_release_root_matches_production_deployment_root(monkeypatch, tmp_path):
     """The plan's resolved release_root is identical to what
-    production_release_root() itself returns for the same env."""
+    production_deployment_root() itself returns for the same env."""
     from engine.v2.models import deployment
     monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path) + "/nested")
     plan = training.promote_plan(release_root="", release_id="r1")
-    assert plan["parameters"]["release_root"] == str(deployment.production_release_root())
+    assert plan["parameters"]["release_root"] == str(deployment.production_deployment_root())
 
 
 def test_promote_plan_with_no_release_root_and_no_config_refuses(monkeypatch):
