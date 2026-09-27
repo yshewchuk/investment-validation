@@ -88,6 +88,20 @@ def _unit_request(unit) -> dict:
             "partition_key": unit.partition_key, "keys": list(unit.expected_keys)}
 
 
+#: The newest receipt for a given (source, endpoint, request_hash). Two
+#: receipts can share ``received_at`` (same-second reruns, or a coarse clock),
+#: so the tie is broken by ``rowid`` -- the table's own insertion sequence
+#: (data_raw_receipts is append-only, spec R2, so rowid only grows) -- and not
+#: left to whatever order the query planner's chosen index happens to return.
+#: Extracted to a constant so its tie-break is unit-tested directly, against a
+#: bare table, independent of which index (if any) answers the WHERE clause.
+_LATEST_RECEIPT_SQL = (
+    "SELECT raw_receipt_id, raw_hash, response_kind FROM data_raw_receipts "
+    "WHERE source = ? AND endpoint = ? AND request_hash = ? "
+    "ORDER BY received_at DESC, rowid DESC LIMIT 1"
+)
+
+
 def record_unit_receipt(conn, store, unit, payload: bytes, *, source: str, endpoint: str,
                         received_at: str, response_kind: str = "complete"):
     """Cache one unit's acquired bytes so a rerun resolves it without a fetch.
@@ -128,10 +142,7 @@ def cached_unit_outcomes(conn, units: Sequence, *, source: str, endpoint: str) -
     for unit in units:
         request_hash = content_hash(_jsonable(dict(_unit_request(unit))))
         row = conn.execute(
-            "SELECT raw_receipt_id, raw_hash, response_kind FROM data_raw_receipts "
-            "WHERE source = ? AND endpoint = ? AND request_hash = ? "
-            "ORDER BY received_at DESC LIMIT 1",
-            (source, endpoint, request_hash)).fetchone()
+            _LATEST_RECEIPT_SQL, (source, endpoint, request_hash)).fetchone()
         if row is None or row["response_kind"] != "complete":
             continue
         outcomes[unit.request_id] = classify_response(
