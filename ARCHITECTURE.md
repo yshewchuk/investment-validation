@@ -34,6 +34,14 @@ no doc of its own yet — it is documented only at this root doc's level
 checks that every `**/ARCHITECTURE.md` in the tree, except this one, is
 linked below, and that every link here resolves.
 
+A legacy component (`engine/**` outside `engine/v2/**`) gets no new
+component doc: it is labelled `(legacy — removed at cutover; no component
+doc)` in the table below, or, where a doc already exists from before this
+rule (the legacy dashboard), `(legacy — minimal record; removed at
+cutover)`. A change to a legacy component puts its design in the pull
+request body and, if durable, in the operator guides instead — see
+`CONTRIBUTING.md`.
+
 | Component | Doc |
 |---|---|
 | `engine/v2/contracts/` | (pending) |
@@ -56,8 +64,8 @@ linked below, and that every link here resolves.
 | `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
 | `engine/v2/diagnosis/` | (pending) |
 | `engine/v2/dashboard/`, `ui/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
-| `engine/dashboard/` (legacy) | [`engine/dashboard/ARCHITECTURE.md`](engine/dashboard/ARCHITECTURE.md) |
-| legacy `engine/**` (undivided) | (pending — see §1) |
+| `engine/dashboard/` (legacy) | [`engine/dashboard/ARCHITECTURE.md`](engine/dashboard/ARCHITECTURE.md) (legacy — minimal record; removed at cutover) |
+| legacy `engine/**` (undivided) | (legacy — removed at cutover; no component doc) |
 
 ## 1. Two trees
 

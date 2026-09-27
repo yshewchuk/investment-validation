@@ -2,14 +2,21 @@
 
 Before changing a component, read the root [`ARCHITECTURE.md`](ARCHITECTURE.md)
 and, if it exists, that component's own `ARCHITECTURE.md` (the root doc's
-"Component docs" index lists every one, and lists the rest as `(pending)`).
-A cross-cutting change updates the root doc, in the same pull request,
-before the code that implements it. A change to a component's public
-interface, its dependencies, its inputs/outputs, or its failure semantics
-updates that component's `ARCHITECTURE.md`, in the same pull request,
-before the code that implements it. Legacy code slated for removal has no
-component doc of its own; its design goes in the pull request body
-instead.
+"Component docs" index lists every one, and lists the rest as `(pending)`,
+or, for a legacy `engine/**` component, `(legacy — removed at cutover; no
+component doc)`). A cross-cutting change updates the root doc, in the same
+pull request, before the code that implements it. A change to a
+component's public interface, its dependencies, its inputs/outputs, or its
+failure semantics updates that component's `ARCHITECTURE.md`, in the same
+pull request, before the code that implements it. A legacy component
+(`engine/**` outside `engine/v2/**`) gets no new component doc; a change
+to it puts its design in the pull request body and, if durable, in the
+operator guides instead.
+
+A change under ~50 lines with no new interface or behaviour (a typo, a CI
+flag, a one-line fix) is exempt from the doc-update rules above and says
+so in its PR body instead (`ARCHITECTURE.md` §7: "Docs: n/a (trivial)"
+plus the reason).
 
 ## Scope and deferred work
 
