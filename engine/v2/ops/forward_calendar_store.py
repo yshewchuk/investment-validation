@@ -30,9 +30,10 @@ from __future__ import annotations
 import io
 import json
 import logging
+import numbers
 import sqlite3
-from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from engine.v2.contracts import (
@@ -72,11 +73,15 @@ __all__ = [
     "ticker_units",
 ]
 
-INPUT_PATH = "forward_calendar_refresh_input.json"
 TABLE_NAME = "earnings_events"
 MAX_SCAN_ROWS = 2_000_000
 NASDAQ_SOURCE = "nasdaq"
 YFINANCE_SOURCE = "yfinance"
+
+#: No existing forward-calendar or board-universe horizon constant already
+#: bounds a maximum; this is a new, deliberately generous ceiling (one year
+#: plus a leap day), not a tuned limit.
+MAX_HORIZON_DAYS = 366
 
 #: Which source's session wins, best first -- moved verbatim from
 #: ``engine.calendar.SESSION_PRIORITY`` (the legacy module stays untouched and
@@ -173,11 +178,86 @@ def resolve_session_claims(claims: dict) -> tuple[str | None, str | None]:
 
 
 def _as_of_day(as_of) -> str:
-    """The job's as_of date as ``YYYY-MM-DD``; a missing as_of is refused (R4/R5)."""
-    day = pd.Timestamp(as_of).normalize()
+    """The job's as_of date as ``YYYY-MM-DD``, strictly validated (R4/R5).
+
+    Mirrors ``engine.v2.ops.native_board_universe._validated_as_of`` (PR #16,
+    not yet on ``main``, so mirrored here rather than imported): refuses
+    ``None``, a bare number/``bool`` (which would misread as epoch time), an
+    unparseable value, ``NaT``, and a timezone-aware value -- this job only
+    ever deals in a timezone-naive calendar date.
+    """
+    if as_of is None:
+        raise fail("INVALID_REQUEST", "as_of must not be None")
+    if isinstance(as_of, bool) or isinstance(as_of, (numbers.Number, np.number)):
+        raise fail("INVALID_REQUEST",
+                   f"as_of must be a date/timestamp, not a bare number ({as_of!r}); a "
+                   f"numeric value would be misread as epoch time rather than a calendar date")
+    try:
+        day = pd.Timestamp(as_of)
+    except (TypeError, ValueError) as exc:
+        raise fail("INVALID_REQUEST",
+                   f"as_of could not be parsed as a timestamp: {exc}") from exc
     if pd.isna(day):
-        raise fail("INVALID_REQUEST", "forward calendar refresh needs an as_of date")
+        raise fail("INVALID_REQUEST", "as_of must not be NaT")
+    day = day.normalize()
+    if day.tzinfo is not None:
+        raise fail("INVALID_REQUEST",
+                   "as_of is timezone-aware; forward_calendar only supports a "
+                   "timezone-naive as_of")
     return str(day.date())
+
+
+def _validated_tickers(tickers) -> tuple[str, ...]:
+    """``tickers`` must be a non-string iterable of non-empty ``str``.
+
+    A bare ``str`` is refused outright (rather than silently iterated
+    character-by-character, e.g. ``set("AAPL")``); any other non-iterable is
+    refused the same way; every element must be a non-empty ``str``.
+    """
+    if tickers is None or isinstance(tickers, (str, bytes)):
+        raise fail("INVALID_REQUEST",
+                   f"tickers must be a non-string iterable of ticker symbols, "
+                   f"got {tickers!r}")
+    try:
+        items = list(tickers)
+    except TypeError as exc:
+        raise fail("INVALID_REQUEST",
+                   f"tickers must be an iterable of ticker symbols, got {tickers!r}") from exc
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            raise fail("INVALID_REQUEST",
+                       f"every ticker must be a non-empty str, got {item!r}")
+    return tuple(items)
+
+
+def _validated_horizon_days(horizon_days) -> int:
+    """``horizon_days`` must be a real ``int`` (not ``bool``) in
+    ``[1, MAX_HORIZON_DAYS]``."""
+    if isinstance(horizon_days, bool) or not isinstance(horizon_days, int):
+        raise fail("INVALID_REQUEST",
+                   f"horizon_days must be an int, got {horizon_days!r}")
+    if not 1 <= horizon_days <= MAX_HORIZON_DAYS:
+        raise fail("INVALID_REQUEST",
+                   f"horizon_days must be between 1 and {MAX_HORIZON_DAYS}, "
+                   f"got {horizon_days!r}")
+    return horizon_days
+
+
+def _validated_scope(scope) -> str:
+    """``scope`` is required: a non-empty ``str``, refused before any I/O."""
+    if not isinstance(scope, str) or not scope.strip():
+        raise fail("INVALID_REQUEST",
+                   f"scope is required and must be a non-empty str, got {scope!r}")
+    return scope
+
+
+def _validated_expected_head_generation(value) -> int:
+    """``expected_head_generation`` is required: an ``int``, refused before any I/O."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise fail("INVALID_REQUEST",
+                   f"expected_head_generation is required and must be an int, "
+                   f"got {value!r}")
+    return value
 
 
 def date_units(dates, *, as_of) -> tuple[RefreshUnit, ...]:
@@ -465,7 +545,7 @@ def _coverage(contract, revision_ids, tickers, *, day_range, created_at: str) ->
 
 
 def _commit_claims(conn, store, parent, claims: dict, existing: dict, *, scope, clock,
-                   document):
+                   expected_head_generation: int, expected_head_snapshot_id: str | None):
     contract = next(item for item in parent.contracts if item.table_name == TABLE_NAME)
     received_at = clock.now().isoformat()
     revisions = []
@@ -483,9 +563,8 @@ def _commit_claims(conn, store, parent, claims: dict, existing: dict, *, scope, 
         parent_snapshot_id=parent.snapshot.snapshot_id)
     return generic_incremental.commit_generic_table_candidate(
         conn, store, candidate, scope=scope,
-        expected_head_snapshot_id=document.get("expected_head_snapshot_id",
-                                               parent.snapshot.snapshot_id),
-        expected_head_generation=int(document["expected_head_generation"]), clock=clock,
+        expected_head_snapshot_id=expected_head_snapshot_id or parent.snapshot.snapshot_id,
+        expected_head_generation=expected_head_generation, clock=clock,
         request_hash=content_hash({"kind": "forward_calendar_generation", "scope": scope,
                                    "base": parent.snapshot.snapshot_id,
                                    "revisions": sorted(r.candidate.revision_id
@@ -493,28 +572,8 @@ def _commit_claims(conn, store, parent, claims: dict, existing: dict, *, scope, 
 
 
 # --------------------------------------------------------------------------
-# the RefreshCallback-compatible entrypoint
+# the standalone runner (NOT RefreshCallback-shaped -- see module docstring)
 # --------------------------------------------------------------------------
-
-
-def _input_document(root: Path) -> dict | None:
-    path = root / INPUT_PATH
-    if not path.is_file():
-        return None
-    try:
-        document = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    return document if document.get("catalog_path") and document.get("objects_root") else None
-
-
-def _failed(parameters) -> RefreshCallbackResult:
-    return RefreshCallbackResult(
-        status="failed", completed_ids=(), coverage_advanced=False,
-        parent_snapshot_id=parameters.parent_snapshot_id,
-        refresh_plan_hash=parameters.refresh_plan_hash)
 
 
 def _cached_nasdaq(conn, units) -> dict:
@@ -537,31 +596,51 @@ def _native_calendar(repository, parent, *, as_of, horizon_days) \
     actual requested horizon end, passed through as ``horizon_end`` so a
     stale panel or a wide horizon can never silently truncate the returned
     calendar's date range (the projection always extends through the greater
-    of the default 400-day window and the requested horizon).
+    of the default 400-day window and the requested horizon). The
+    ``try``/``except`` below wraps ONLY the ``native_trading_calendar`` call:
+    a ``ValueError`` from the calendar scan or the horizon arithmetic before
+    it is a real bug, not the documented no-session fallback, and must not be
+    swallowed into it.
     """
+    horizon_end = pd.Timestamp(as_of).normalize() + pd.Timedelta(days=int(horizon_days))
+    daily = daily_by_ticker(repository, parent.snapshot)
     try:
-        horizon_end = pd.Timestamp(as_of).normalize() + pd.Timedelta(days=int(horizon_days))
-        return native_trading_calendar(daily_by_ticker(repository, parent.snapshot),
-                                       horizon_end=horizon_end), ()
+        return native_trading_calendar(daily, horizon_end=horizon_end), ()
     except ValueError as exc:
         warning = f"weekday calendar fallback: {exc}"
         _LOGGER.warning("forward_calendar: %s", warning)
         return None, (warning,)
 
 
-def _result(parameters, *, status: str, completed_ids, coverage_advanced: bool,
-            warnings, candidate_snapshot_id=None) -> RefreshCallbackResult:
+def _result(*, parent_snapshot_id: str, refresh_plan_hash: str, status: str, completed_ids,
+            coverage_advanced: bool, warnings, candidate_snapshot_id=None) \
+        -> RefreshCallbackResult:
     """One job-result document; ``warnings`` carries any degradation evidence."""
     return RefreshCallbackResult(
         status=status, completed_ids=completed_ids, coverage_advanced=coverage_advanced,
-        parent_snapshot_id=parameters.parent_snapshot_id,
-        refresh_plan_hash=parameters.refresh_plan_hash,
+        parent_snapshot_id=parent_snapshot_id, refresh_plan_hash=refresh_plan_hash,
         candidate_snapshot_id=candidate_snapshot_id, warnings=warnings)
 
 
-def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
-                                 earnings_fetcher=None) -> RefreshCallbackResult:
-    """The ``RefreshCallback`` this job's worker calls (spec s4b Change 5).
+def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
+                                 parent_snapshot_id: str, refresh_plan_hash: str,
+                                 as_of=None, tickers=None, horizon_days=None,
+                                 scope=None, expected_head_generation=None,
+                                 expected_head_snapshot_id: str | None = None,
+                                 nasdaq_fetcher=None, earnings_fetcher=None) \
+        -> RefreshCallbackResult:
+    """The forward-calendar refresh's standalone runner (spec s4b Change 5).
+
+    NOT ``RefreshCallback``-shaped: ``main``'s ``RefreshParameters`` has no
+    ``as_of``/``tickers`` field (only a later job-kind-specific parameters
+    dataclass will), so this runner takes every value it needs as an
+    explicit keyword argument instead, and validates ``as_of``/``tickers``/
+    ``horizon_days``/``scope``/``expected_head_generation`` up front -- before
+    the catalog connection opens, before the artifact store is constructed,
+    and before any provider call or receipt write -- raising a typed
+    ``INVALID_REQUEST`` for each. A later PR wires a ``RefreshCallback``-
+    shaped adapter that reads a job's staged parameters/input document and
+    calls this runner with explicit keyword arguments.
 
     Never calls ``engine.data.rebuild.rebuild``: the claims merge into the
     existing ``earnings_events`` contract through ``generic_incremental``
@@ -574,29 +653,48 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
     anything is committed (spec R3). A same-session retry rebuilds EVERY unit's
     claims -- fresh fetches plus the cached complete receipts re-read by
     receipt -- so it commits exactly what a clean single run would. Whether the
-    result is a no-op is decided only by the commit itself: a candidate whose
-    merged rows equal the parent's resolves back to the parent snapshot, and
-    key presence in the parent is never mistaken for this run's content.
+    result is a no-op is decided only by the commit itself (see
+    ``_execute_forward_calendar_refresh``): a candidate whose merged rows equal
+    the parent's resolves back to the parent snapshot, and key presence in the
+    parent is never mistaken for this run's content.
     """
-    root = Path(root)
-    document = _input_document(root)
-    if document is None:
-        return _failed(parameters)
+    as_of = _as_of_day(as_of)
+    tickers = _validated_tickers(tickers)
+    horizon_days = _validated_horizon_days(horizon_days)
+    scope = _validated_scope(scope)
+    expected_head_generation = _validated_expected_head_generation(expected_head_generation)
     if nasdaq_fetcher is None or earnings_fetcher is None:
         raise fail("RESOURCE_UNAVAILABLE", "no forward_calendar fetchers are configured")
-    conn = sqlite3.connect(document["catalog_path"])
+    return _execute_forward_calendar_refresh(
+        catalog_path=catalog_path, objects_root=objects_root,
+        parent_snapshot_id=parent_snapshot_id, refresh_plan_hash=refresh_plan_hash,
+        as_of=as_of, tickers=tickers, horizon_days=horizon_days, scope=scope,
+        expected_head_generation=expected_head_generation,
+        expected_head_snapshot_id=expected_head_snapshot_id,
+        nasdaq_fetcher=nasdaq_fetcher, earnings_fetcher=earnings_fetcher)
+
+
+def _execute_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
+                                      parent_snapshot_id: str, refresh_plan_hash: str,
+                                      as_of: str, tickers: tuple[str, ...], horizon_days: int,
+                                      scope: str, expected_head_generation: int,
+                                      expected_head_snapshot_id: str | None,
+                                      nasdaq_fetcher, earnings_fetcher) \
+        -> RefreshCallbackResult:
+    """Every argument already validated -- opens the catalog and runs the
+    two-source cache-first fetch, merge, and commit (see
+    ``run_forward_calendar_refresh``'s docstring for the full contract)."""
+    conn = sqlite3.connect(catalog_path)
     conn.row_factory = sqlite3.Row
     clock = SystemClock()
     try:
-        store = ArtifactStore(document["objects_root"])
+        store = ArtifactStore(objects_root)
         repository = Repository(conn, store)
-        parent = repository.resolve_full(parameters.parent_snapshot_id)
-        as_of = _as_of_day(document.get("as_of") or parameters.as_of)
-        horizon = int(document.get("horizon_days", 21))
-        wanted = {str(ticker) for ticker in (document.get("tickers") or parameters.tickers)}
+        parent = repository.resolve_full(parent_snapshot_id)
+        wanted = set(tickers)
         calendar, warnings = _native_calendar(repository, parent, as_of=as_of,
-                                              horizon_days=horizon)
-        dates = horizon_dates(as_of, horizon, calendar=calendar)
+                                              horizon_days=horizon_days)
+        dates = horizon_dates(as_of, horizon_days, calendar=calendar)
         received_at = clock.now().isoformat()
 
         nasdaq_units = date_units(dates, as_of=as_of)
@@ -616,20 +714,28 @@ def run_forward_calendar_refresh(parameters, root, *, nasdaq_fetcher=None,
         if code:
             raise fail(code, "forward calendar provider response was not complete")
         if not claims:
-            return _result(parameters, status="noop", completed_ids=tuple(sorted(wanted)),
+            return _result(parent_snapshot_id=parent_snapshot_id,
+                           refresh_plan_hash=refresh_plan_hash, status="noop",
+                           completed_ids=tuple(sorted(wanted)),
                            coverage_advanced=False, warnings=warnings)
         existing = _existing_index(repository, parent)
         receipt = _commit_claims(conn, store, parent, claims, existing,
-                                 scope=str(document["scope"]), clock=clock, document=document)
+                                 scope=scope, clock=clock,
+                                 expected_head_generation=expected_head_generation,
+                                 expected_head_snapshot_id=expected_head_snapshot_id)
         if receipt is None or receipt.resulting_head_snapshot_id == parent.snapshot.snapshot_id:
-            # The commit layer's own result decides: a candidate whose merged
-            # rows equal the parent's resolves back to the parent snapshot, so
-            # the head did not move and nothing was committed. Key presence in
-            # the parent is never consulted -- a cached receipt or a foreign
-            # source's row is not this run's committed content.
-            return _result(parameters, status="noop", completed_ids=tuple(sorted(wanted)),
+            # A candidate whose merged rows equal the parent's resolves back to
+            # the parent snapshot, so the head did not move and nothing was
+            # committed. Key presence in the parent is never consulted -- a
+            # cached receipt or a foreign source's row is not this run's
+            # committed content.
+            return _result(parent_snapshot_id=parent_snapshot_id,
+                           refresh_plan_hash=refresh_plan_hash, status="noop",
+                           completed_ids=tuple(sorted(wanted)),
                            coverage_advanced=False, warnings=warnings)
-        return _result(parameters, status="complete", completed_ids=tuple(sorted(wanted)),
+        return _result(parent_snapshot_id=parent_snapshot_id,
+                       refresh_plan_hash=refresh_plan_hash, status="complete",
+                       completed_ids=tuple(sorted(wanted)),
                        coverage_advanced=True, warnings=warnings,
                        candidate_snapshot_id=receipt.resulting_head_snapshot_id)
     finally:

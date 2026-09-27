@@ -7,10 +7,12 @@ legacy ``engine.calendar.SESSION_PRIORITY`` module as an oracle.
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from engine.calendar import SESSION_PRIORITY
 from engine.v2.contracts import SnapshotRef
 from engine.v2.ops import forward_calendar_store
+from engine.v2.ops.errors import OpsError
 from engine.v2.ops.forward_calendar_store import (
     SESSION_BY_TIME,
     date_units,
@@ -131,11 +133,6 @@ def test_native_calendar_extends_through_the_requested_horizon(monkeypatch):
     assert max(calendar.days) >= horizon_end
 
 
-def test_input_document_rejects_a_non_object_json_body(tmp_path):
-    (tmp_path / forward_calendar_store.INPUT_PATH).write_text("[1, 2, 3]")
-    assert forward_calendar_store._input_document(tmp_path) is None
-
-
 def test_no_provider_call_when_all_cached():
     """Every unit has a satisfying cached outcome: zero reserved calls and
     the fake fetcher is never touched (cache-first, not fetch-then-discard)."""
@@ -148,3 +145,98 @@ def test_no_provider_call_when_all_cached():
         _snapshot(), dates, (), as_of=AS_OF, cached_nasdaq=cached, cached_yfinance={})
     assert nasdaq.provider_calls == 0
     assert nasdaq.fetch_units == ()
+
+
+def _poison_fetcher(*_args, **_kwargs):
+    raise AssertionError("a provider fetcher must never be called before validation passes")
+
+
+#: A structurally valid call: every field is well-typed and well-shaped, but
+#: catalog_path/objects_root point nowhere, and the fetchers explode if
+#: called. Each refusal test overrides exactly one field with an invalid
+#: value. If validation runs before any I/O (as required), the run raises
+#: OpsError(INVALID_REQUEST) without ever opening a catalog connection or
+#: calling a fetcher -- either of which would raise a DIFFERENT exception
+#: (sqlite3.OperationalError / FileNotFoundError / AssertionError) instead,
+#: which pytest.raises(OpsError) below would not swallow.
+_VALID_KWARGS = dict(
+    catalog_path="/no/such/forward_calendar_catalog.db",
+    objects_root="/no/such/forward_calendar_objects",
+    parent_snapshot_id="snap-parent",
+    refresh_plan_hash="sha256:" + "a" * 64,
+    as_of=AS_OF,
+    tickers=("AAPL",),
+    horizon_days=21,
+    scope="shadow",
+    expected_head_generation=0,
+    nasdaq_fetcher=_poison_fetcher,
+    earnings_fetcher=_poison_fetcher,
+)
+
+
+def _refused(**overrides):
+    """Run with one field overridden; assert INVALID_REQUEST, no I/O reached."""
+    kwargs = dict(_VALID_KWARGS, **overrides)
+    with pytest.raises(OpsError) as exc_info:
+        forward_calendar_store.run_forward_calendar_refresh(**kwargs)
+    assert exc_info.value.code == "INVALID_REQUEST"
+
+
+def test_as_of_none_is_refused_before_any_io():
+    _refused(as_of=None)
+
+
+def test_as_of_unparseable_string_is_refused_before_any_io():
+    _refused(as_of="not-a-date")
+
+
+def test_as_of_bare_number_is_refused_before_any_io():
+    _refused(as_of=20260918)
+
+
+def test_as_of_bool_is_refused_before_any_io():
+    _refused(as_of=True)
+
+
+def test_as_of_nat_is_refused_before_any_io():
+    _refused(as_of=pd.NaT)
+
+
+def test_as_of_timezone_aware_is_refused_before_any_io():
+    _refused(as_of=pd.Timestamp(AS_OF, tz="UTC"))
+
+
+def test_tickers_bare_str_is_refused_before_any_io():
+    _refused(tickers="AAPL")
+
+
+def test_tickers_non_iterable_is_refused_before_any_io():
+    _refused(tickers=123)
+
+
+def test_tickers_empty_string_element_is_refused_before_any_io():
+    _refused(tickers=("AAPL", ""))
+
+
+def test_horizon_days_non_int_is_refused_before_any_io():
+    _refused(horizon_days="21")
+
+
+def test_horizon_days_bool_is_refused_before_any_io():
+    _refused(horizon_days=True)
+
+
+def test_horizon_days_below_range_is_refused_before_any_io():
+    _refused(horizon_days=0)
+
+
+def test_horizon_days_above_range_is_refused_before_any_io():
+    _refused(horizon_days=forward_calendar_store.MAX_HORIZON_DAYS + 1)
+
+
+def test_scope_missing_is_refused_before_any_io():
+    _refused(scope=None)
+
+
+def test_expected_head_generation_missing_is_refused_before_any_io():
+    _refused(expected_head_generation=None)
