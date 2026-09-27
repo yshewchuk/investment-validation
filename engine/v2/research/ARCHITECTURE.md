@@ -197,10 +197,13 @@ and message on stderr rather than a bare traceback.
     `_trades_publish.py`, not `_scan.py`). `_snapshot.read_table` raises a
     bare `ValueError`, not a `DataError`, when it cannot build even one
     `KeyPredicate` — the table contract declares no partition column, or
-    no partition values are available (e.g. an explicitly empty
-    `partition_keys`, or a snapshot with no fragments for that table at
-    all). Partition keys that are simply valid-but-non-matching still
-    build a predicate and return an empty frame, same as `_scan.py`. The
+    no partition values are available at all, i.e. the snapshot has no
+    fragments for that table. An explicitly empty `partition_keys=[]` is
+    falsy in Python, so it is treated the same as omitted and falls back
+    to deriving values from the snapshot's own fragment records — it does
+    not by itself trigger this path. Partition keys that are simply
+    valid-but-non-matching still build a predicate and return an empty
+    frame, same as `_scan.py`. The
     CLIs built on this path (`v2_replay.py`, `v2_build_trades.py`,
     `v2_reconcile_trades.py`) catch only `DataError` at `main()`, so this
     one condition escapes as an uncaught traceback rather than the typed
