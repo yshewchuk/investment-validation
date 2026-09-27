@@ -190,25 +190,42 @@ entrypoints:
     real schema has only one `fold_start` per metric), checked only for a
     name actually used AND non-null (a NULL forecast, legacy's own "no
     forecast," skips this gate — see Failure semantics).
-  - `panel_anchor` (new, issue #53) — the as-of timestamp `panel_row`'s
-    market-state feature values (`spy_*`, `ret*`, `or_*`, `pre_iv*`,
-    `dist_*`) were actually computed against. Required, no default: the
-    caller states it, this module does not infer or recompute it (see
-    Failure semantics — this is the same "trusted caller-declared fact,
-    checked only against `as_of`" shape already used for
-    `calendar_row["calendar_observed_through"]` and each quote row's own
-    `observed_at`, not a third, independent classifier that could disagree
-    with `live_features`'s own accounting). For a row built by
-    `engine/features.py::live_features(as_of=...)` (a forward/upcoming
-    event), this is exactly the `as_of` value that call was made with — the
-    caller already holds it, since `live_features` never returns its own
-    internal anchor (see Failure semantics, the former "Known gap", now
-    closed). For a persisted `panel.parquet` row describing an
-    already-realized historical event, this is `panel_row["date"]` itself
-    (`engine/data/features/panel.py`'s dropped `ANCHOR_COLUMNS` —
-    `regime_asof`/`runup_asof`/`orats_asof` — all equal `date` by
-    construction for a historical row, so the caller loses nothing by
-    passing it through).
+  - `panel_anchor` (new, issue #53) — the caller-declared upper bound on
+    when every one of `panel_row`'s market-state feature values (`spy_*`,
+    `ret*`, `or_*`, `pre_iv*`, `dist_*`) was actually observed. Required,
+    no default: the caller states it, this module does not infer or
+    recompute it (see Failure semantics — this is the same "trusted
+    caller-declared fact, checked only against `as_of`" shape already used
+    for `calendar_row["calendar_observed_through"]` and each quote row's
+    own `observed_at`; it is a single upper bound, not a third,
+    independent per-feature classifier that could disagree with
+    `engine/audit.py`'s own accounting). Two real sources, precisely:
+    - For a row built by `engine/features.py::live_features(...)`: the
+      returned `FeatureVector.as_of` (`engine/audit.py`) — NOT one of the
+      plain values a caller flattens into `panel_row`, but a field on the
+      `FeatureVector` wrapper the caller already holds before it does that
+      flattening. `live_features` itself calls `assert_causal(vector)`
+      before returning, which raises unless every entry of
+      `vector.feature_as_of` (per-feature: history features stamped at the
+      last prior event; each market block stamped at the real daily row
+      `add_regime_features`/`add_runup_features`/`add_orats_features`
+      actually read, which can differ block to block and can each precede
+      the decision date) is `<= vector.as_of` — so `vector.as_of` is
+      already a proven-safe upper bound for every feature in `vector.values`,
+      not a value this module or its caller has to newly derive.
+    - For a persisted `panel.parquet` row describing an already-realized
+      historical event (or `engine/features.py::panel_features(...)`'s own
+      return): `panel_row["date"]` (the event date) is a safe, deliberately
+      loose upper bound. The row's real, tighter anchor —
+      `engine/features.py::panel_features`'s own local `panel_anchor =
+      cal.last_pre_print(event_date, BMO)`, the exact name and concept this
+      parameter borrows — always precedes `date` (the panel reads the last
+      close *strictly before* the print), and the dropped `ANCHOR_COLUMNS`
+      (`regime_asof`/`runup_asof`/`orats_asof`) that would carry it exactly
+      are unavailable on a real `panel.parquet` row (see Failure
+      semantics). Passing the looser `date` costs nothing for a genuinely
+      historical row, where `as_of` is at or after the event by
+      definition, so `panel_anchor <= date <= as_of` holds either way.
   - `quote_rows` — the Tier-1 option-quote rows in the domain scored for
     this event (each: `right`, `strike`, `expiry`, `bid`, `ask`,
     `observed_at`), plus an optional `quote_status` for the two
@@ -629,19 +646,26 @@ also uses in this package):
   `PANEL_ROW_WRONG_EVENT` nor the fold_start checks above verify WHEN a
   panel row's market-derived FEATURE values were actually computed
   relative to `as_of` — only that the row names the right event.
-  `engine/features.py::live_features` does compute a real decision anchor
-  for its synthetic row (`_as_of`, which can precede `event_date`/`date`
-  for a genuine upcoming-event score), but that anchor is never written
-  into the row values `live_features` returns, and the persisted-panel
-  equivalent (`regime_asof`/`runup_asof`/`orats_asof`, `ANCHOR_COLUMNS`)
-  is explicitly dropped before `panel.parquet` is written
+  `engine/features.py::live_features` does compute a real per-feature
+  decision anchor for its synthetic row (`FeatureVector.feature_as_of`,
+  `engine/audit.py` — each market block stamped at the real daily row it
+  was read at, which can precede `event_date`/`date`/`as_of` for a genuine
+  upcoming-event score, verified `<= vector.as_of` by `live_features`'s own
+  `assert_causal(vector)` call before it returns), but the flattened row
+  values a caller stages as `panel_row` are not that `FeatureVector` — they
+  are `vector.values`, a plain `name -> float` mapping with no stamp of any
+  kind attached (the anchor lives on the `FeatureVector` wrapper, in
+  `.as_of`/`.feature_as_of`, not inside `.values`). The persisted-panel
+  equivalent (`regime_asof`/`runup_asof`/`orats_asof`, `ANCHOR_COLUMNS`) is
+  explicitly dropped before `panel.parquet` is written
   (`engine/data/features/panel.py:912-918` — safe to drop only because,
   for a HISTORICAL row, those all equal `date` by construction, an
   equivalence that does not hold for a live per-event row). No column
-  survives to a `panel_row` this function can read that records that
-  anchor, so this module cannot check it without inventing a stamp the
-  real data does not carry — the earlier version of this doc escalated
-  that as a known gap rather than inventing one. The fix lands as a
+  survives to a `panel_row` this function can read that records any of
+  this, so this module cannot check it from `panel_row` alone without
+  inventing a stamp the real data does not carry — the earlier version of
+  this doc escalated that as a known gap rather than inventing one. The
+  fix lands as a
   deliberate interface change: `assemble_nightly_source_bundle` gains a
   new required, no-default keyword-only parameter, `panel_anchor` (see
   Inputs above) — the caller states the anchor `panel_row`'s market-state
@@ -817,7 +841,7 @@ engine.v2.ops / engine.v2.serving (layer 7, callers, not shown as dependents bel
 flowchart LR
     CAL["calendar_row\n(ticker, event/entry/exit dates,\nexpiry, spot,\ncalendar_observed_through)"]
     PANEL["panel_row\n(date + feature columns)"]
-    PANCHOR["panel_anchor\n(issue #53: caller-declared as-of\nfor panel_row's market-state values)"]
+    PANCHOR["panel_anchor\n(issue #53: caller-declared upper bound\non panel_row's market-state stamps --\nFeatureVector.as_of for a live row,\npanel_row.date for a historical one)"]
     TIER4["tier4_row\n(feature columns, each with its own\nname_fold_start stamp)"]
     QUOTES["quote_rows\n(right, strike, expiry,\nbid, ask, observed_at)"]
     ASOF["as_of"]
