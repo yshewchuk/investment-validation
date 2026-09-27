@@ -6,11 +6,20 @@ legacy ``engine.calendar.SESSION_PRIORITY`` module as an oracle.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import pytest
 
 from engine.calendar import SESSION_PRIORITY
-from engine.v2.contracts import SnapshotRef
+from engine.v2.contracts import SnapshotRef, TableContract, TableContractRef
+from engine.v2.data import generic_incremental
+from engine.v2.data.catalog import commit_snapshot as data_commit_snapshot
+from engine.v2.data.legacy_mapping import build_legacy_mapping
+from engine.v2.data.manifests import dataset_manifest, snapshot_ref
+from engine.v2.data.objects import inspect_fragment
+from engine.v2.data.repository import Repository
+from engine.v2.foundation import ArtifactStore, content_hash, from_document
 from engine.v2.ops import forward_calendar_store
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError
@@ -42,6 +51,81 @@ def _cached(unit):
     return classify_response(200, unit.expected_keys, returned_keys=unit.expected_keys,
                              request_id=unit.request_id, receipt_ref="cache:" + unit.request_id,
                              cache_hit=True)
+
+
+def _seeded_parent(conn, store, clock, *, scope: str):
+    """A minimal, synthetic ``earnings_events`` base snapshot (no real
+    ``data/`` dependency -- built the same way
+    ``tests/test_v2_data_generic_incremental.py``'s
+    ``test_generic_refresh_worker_commits_json_timestamp_rows`` does),
+    committed at generation 0 -> 1, for exercising ``_commit_claims``
+    directly against a real resolvable parent snapshot."""
+    contract = from_document(TableContract, build_legacy_mapping()["tables"]["earnings_events"])
+    contract_ref = TableContractRef(contract_id=contract.contract_id,
+                                    definition_hash=contract.definition_hash)
+    base_row = {
+        "event_id": "event-1", "ticker": "AAA", "event_date": datetime(2025, 1, 15),
+        "year": 2025, "session": "AMC", "session_src": None, "annc_tod": None,
+        "src_orats": True, "src_oquants": False, "src_nasdaq": False, "src_yfinance": False,
+        "date_agree": True, "date_conflict": False, "updated_at": None,
+        "event_cluster_id": None, "claim_count": None, "reconciliation": None,
+    }
+    base_bytes = generic_incremental._parquet_bytes(contract, (base_row,))
+    published = store.publish_bytes(base_bytes, schema_ref="parquet_fragment.v1.0")
+    obj = generic_incremental.ObjectRef(kind="parquet_fragment", object_id=published.artifact_id,
+                                        content_hash=published.content_hash,
+                                        byte_size=published.byte_size)
+    inspection = inspect_fragment(store, obj, contract, contract_ref, "2025")
+    receipt_ref = content_hash({"fixture": "forward_calendar_fence_" + scope})
+    record = generic_incremental.manifests.fragment_record(
+        inspection, contract_ref, input_receipt_refs=(receipt_ref,),
+        import_request_hash=receipt_ref)
+    manifest = dataset_manifest(
+        contract_ref, (record,), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent_ref = snapshot_ref(
+        {"earnings_events": manifest}, calendar_version="cal.v1",
+        source_priority_version="fixture", finality_receipt_refs=(receipt_ref,))
+    data_commit_snapshot(
+        conn, scope=scope, request_hash=content_hash({"base": scope}),
+        contracts=(contract,), objects=(obj,), records=(record,), manifests=(manifest,),
+        snapshot=parent_ref, expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="base-receipt-" + scope, attempt_id="base-attempt-" + scope, fence=1,
+        fence_check=lambda _conn: None, clock=clock, store=store)
+    return Repository(conn, store).resolve_full(parent_ref.snapshot_id)
+
+
+def test_commit_claims_refuses_a_cancelled_attempt_and_does_not_move_the_head(tmp_path):
+    """Runner-level regression (CodeRabbit, PR #55 round 1): ``_commit_claims``
+    -- the function ``run_forward_calendar_refresh`` actually calls to commit
+    -- must itself refuse a cancelled attempt's fence, and the snapshot head
+    row must not change. Complements, without duplicating, the direct
+    ``_fence_check_for`` unit tests below: this proves the runner's OWN
+    commit path actually wires its ``fence_check`` into
+    ``generic_incremental.commit_generic_table_candidate``, not merely that
+    the helper works in isolation."""
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    scope = "fwd-cal-fence-test"
+    parent = _seeded_parent(conn, store, clock, scope=scope)
+    claim = enqueue_claim(conn, clock, supervisor)
+    request_cancel(conn, claim.job_id, claim.attempt_id, clock=clock)
+    before = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+        (scope,)).fetchone()
+
+    claims = {("BBB", "2026-10-01"): {"nasdaq": "BMO"}}
+    with pytest.raises(OpsError) as err:
+        forward_calendar_store._commit_claims(
+            conn, store, parent, claims, {}, scope=scope, clock=clock,
+            expected_head_generation=1, expected_head_snapshot_id=parent.snapshot.snapshot_id,
+            attempt_id=claim.attempt_id, fence=claim.fence)
+    assert err.value.code == "CANCELLED"
+
+    after = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
+        (scope,)).fetchone()
+    assert tuple(after) == tuple(before)
 
 
 def test_fence_check_for_matches_the_real_verify_fence_and_keeps_the_lease_check(tmp_path):
@@ -334,13 +418,18 @@ def test_expected_head_snapshot_id_too_long_is_refused_before_any_io(tmp_path):
 
 
 def test_attempt_id_empty_string_is_refused_before_any_io(tmp_path):
+    """An empty ``attempt_id`` is refused, not silently treated as ``None``."""
     _refused(tmp_path, attempt_id="")
 
 
 def test_attempt_id_non_str_is_refused_before_any_io(tmp_path):
+    """A non-``str`` ``attempt_id`` is refused before any I/O."""
     _refused(tmp_path, attempt_id=123)
 
 
 @pytest.mark.parametrize("bad_fence", [True, 0, -1, 1.5, "1"])
 def test_fence_is_refused_before_any_io(tmp_path, bad_fence):
+    """``fence`` must be a real ``int >= 1``: a ``bool`` (an ``int`` subclass
+    in Python), zero, negative, a float, and a numeric string are each
+    refused before any I/O."""
     _refused(tmp_path, fence=bad_fence)

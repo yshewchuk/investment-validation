@@ -666,6 +666,15 @@ def _fence_check_for(staged_attempt_id, staged_fence, clock):
 def _commit_claims(conn, store, parent, claims: dict, existing: dict, *, scope, clock,
                    expected_head_generation: int, expected_head_snapshot_id: str | None,
                    attempt_id: str | None = None, fence: int | None = None):
+    """Merge ``claims`` into the existing ``earnings_events`` contract and
+    commit one new snapshot generation through ``generic_incremental``.
+
+    ``attempt_id``/``fence`` (issue #52), when not ``None``, fence this
+    commit to a live job attempt via ``_fence_check_for``: a cancelled job
+    or an expired lease is refused inside the same transaction the head
+    compare-and-swap runs in, before any row is inserted. Returns ``None``
+    when ``claims`` is empty (nothing to merge, nothing committed).
+    """
     contract = next(item for item in parent.contracts if item.table_name == TABLE_NAME)
     received_at = clock.now().isoformat()
     revisions = []
