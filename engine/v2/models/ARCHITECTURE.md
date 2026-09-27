@@ -220,8 +220,13 @@ third-party service. `hashlib.sha256` for every content hash;
   pointer on the next call, so a crash between the pointer write and the
   history append is self-healing, not a lost record).
 - **R5, partial write.** The pointer file is never partially written
-  (same atomic-write primitive as staging); a crash leaves `DEPLOYED`
-  exactly as it was before the call.
+  (same atomic-write primitive as staging): a crash during the write
+  leaves `DEPLOYED` as either the OLD value or the fully-written NEW
+  value, never a corrupt or truncated one. A crash AFTER that write
+  succeeds but before the history append (R4 above) does not lose the
+  live pointer's history entry -- `_repair_history` derives it from the
+  live pointer on the next call, so `DEPLOYED` is not guaranteed to be
+  unchanged, only ever internally consistent.
 - **R6, idempotency.** Promoting the same already-live `release_id` twice
   is exactly one no-op, not two history entries.
 
@@ -233,10 +238,12 @@ third-party service. `hashlib.sha256` for every content hash;
   recorded against a legacy-hashed release must keep resolving it — a
   score recorded years ago cannot be retroactively made unreplayable by a
   later hashing-scheme change. `current_release` follows the live pointer,
-  which §7.2 already guarantees can only ever point at a
-  `RELEASE_HASH_SEMANTIC_V2` release going forward, so this distinction is
-  invisible from `current_release` alone; it matters for
-  `resolve_release(root, some_older_id)` and for
+  and this PR's write-side gate (§7.2) only constrains a NEW `promote`/
+  `rollback` call -- it never inspects, upgrades, or removes an EXISTING
+  `DEPLOYED` pointer, so `current_release` can still resolve a
+  legacy-hashed release if one was already live before this gate existed.
+  This distinction matters for `resolve_release(root, some_older_id)`,
+  for a pre-existing live pointer, and for
   `checks/phase5_acceptance.py`/`release_bindings.py`, both of which
   verify a manifest's hash against its OWN declared version
   (`_manifest_hash_matches`) rather than requiring the current one.
@@ -269,11 +276,20 @@ third-party service. `hashlib.sha256` for every content hash;
 ### 7.5 `restage_semantic_hash` (new, this PR)
 
 - **R1, missing input.** Refuses `ReleaseNotStaged(release_id)` if nothing
-  is staged under that id. Refuses `StagingRefused` (`RELEASE_ID_REUSED`,
-  same code `stage_release` uses for the same condition) if the EXISTING
-  manifest does not verify under its OWN declared `release_hash_version`
-  first — a corrupt or tampered manifest is never a starting point for a
-  rewrite, and this check runs before anything is trusted or written.
+  is staged under that id. Refuses `StagingRefused` (`MANIFEST_UNREADABLE`)
+  if the existing `manifest.json` will not parse or read at all. Refuses
+  `StagingRefused` (`RELEASE_ID_REUSED`, same code `stage_release` uses for
+  the same condition) if the EXISTING manifest does not verify under its
+  OWN declared `release_hash_version` first, and this check runs before
+  anything is trusted or written. For a `RELEASE_HASH_MEMBER_V1` manifest
+  this verification is only as strong as `_legacy_release_hash` itself: it
+  covers `release_id` and every member's `content_hash`, but NOT
+  `adapter`/`feature_order`/`output_names` -- a legacy manifest whose
+  members are unchanged but one of those binding fields was altered still
+  verifies and gets restaged. The semantic hash this function then computes
+  covers all of them going forward; it cannot retroactively prove the
+  legacy source it started from was never tampered with in a field the
+  legacy hash never looked at.
 - **R2, cache.** None: reads the manifest fresh, recomputes the semantic
   hash fresh from the release it already declares (no payload re-read —
   the hash is a pure function of the already-verified `ModelRelease`
@@ -328,7 +344,8 @@ stateDiagram-v2
     Staged --> Deployed: promote()\nrefuses StaleReleaseHash\nunless hash_version == v2
     Deployed --> Deployed: promote() same id (no-op)
     Deployed --> Deployed: rollback()\nrefuses StaleReleaseHash on the\nprevious release too
-    Staged --> [*]: resolve_release() / current_release()\n(read-only; accepts v1 or v2)
+    Staged --> [*]: resolve_release()\n(read-only, by id; accepts v1 or v2)
+    Deployed --> [*]: current_release()\n(follows DEPLOYED; None if unset)
 ```
 
 ```mermaid

@@ -558,6 +558,8 @@ def test_repeated_calls_do_not_share_a_cache_across_release_changes(tmp_path):
 
 
 def test_resolve_production_release_binding_missing_env_var_raises_model_not_ready(monkeypatch):
+    """No MODEL_RELEASE_ROOT configured raises ModelNotReady, not
+    MissingReleaseRoot directly."""
     monkeypatch.delenv("MODEL_RELEASE_ROOT", raising=False)
     with pytest.raises(ModelNotReady) as error:
         resolve_production_release_binding()
@@ -565,6 +567,8 @@ def test_resolve_production_release_binding_missing_env_var_raises_model_not_rea
 
 
 def test_resolve_production_release_binding_reads_the_configured_root(monkeypatch, tmp_path):
+    """resolve_production_release_binding() resolves the release staged
+    under the configured MODEL_RELEASE_ROOT."""
     _stage_and_promote(tmp_path)
     _happy_catalog(tmp_path)
     monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))

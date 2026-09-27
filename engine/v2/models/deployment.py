@@ -111,6 +111,7 @@ class MissingReleaseRoot(DeploymentError):
     code = "MISSING_RELEASE_ROOT"
 
     def __init__(self) -> None:
+        """Build the MISSING_RELEASE_ROOT refusal message."""
         super().__init__(f"{self.code}: set {MODEL_RELEASE_ROOT_ENV} to the "
                           f"production release root")
 
@@ -124,6 +125,8 @@ class StaleReleaseHash(DeploymentError):
     code = "STALE_RELEASE_HASH"
 
     def __init__(self, release_id: str, hash_version: str) -> None:
+        """Build the STALE_RELEASE_HASH refusal message, naming the release
+        and its stale hash version."""
         self.release_id = release_id
         self.hash_version = hash_version
         super().__init__(f"{self.code}: {release_id} is staged under hash version "
@@ -145,12 +148,16 @@ def production_release_root() -> Path:
     release root is live". Raises :class:`MissingReleaseRoot` when the
     variable is unset or blank -- there is no fallback default, because a
     silent default here would let an operator promote or resolve against
-    the wrong store without any signal.
+    the wrong store without any signal. Always returns an absolute,
+    ``~``-expanded path (the same ``Path(...).expanduser().resolve()``
+    normalization ``promote_plan`` applies to an explicit ``--release-root``)
+    so every consumer of this function agrees on the exact directory
+    regardless of its own current working directory.
     """
     value = os.environ.get(MODEL_RELEASE_ROOT_ENV, "").strip()
     if not value:
         raise MissingReleaseRoot()
-    return Path(value)
+    return Path(value).expanduser().resolve()
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -437,7 +444,19 @@ def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
     ``RELEASE_HASH_SEMANTIC_V2`` is returned unchanged (idempotent no-op).
     """
     root = Path(root)
-    existing = _read_manifest(root, release_id)
+    try:
+        existing = _read_manifest(root, release_id)
+    except (OSError, ValueError) as exc:
+        # _read_manifest's decode can raise a bare json.JSONDecodeError or
+        # engine.v2.foundation.typed.DocumentError (both ValueError
+        # subclasses), or a bare OSError racing the is_file() check --
+        # exactly the same failure family engine/v2/scoring/
+        # release_bindings.py's _read_and_verify_manifest already catches
+        # for the identical read. Never left to escape uncaught.
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="MANIFEST_UNREADABLE",
+            detail="the existing staged manifest could not be read",
+        ),)) from exc
     if existing is None:
         raise ReleaseNotStaged(release_id)
     if not _manifest_hash_matches(existing):
