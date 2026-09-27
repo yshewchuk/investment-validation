@@ -79,6 +79,11 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "SOURCE_NOT_FOUND": ("source", False),
     "SOURCE_EMPTY": ("source", False),
     "SOURCE_NOT_FINAL": ("source", True),
+    # S4C review round 3: a provider body that does not parse (or any non-auth
+    # 4xx) is bad source data, never a credential problem -- only a 401/403 is
+    # CREDENTIAL_INVALID. Non-retryable: a retry sends the same request to the
+    # same unusable answer.
+    "SOURCE_INVALID": ("source", False),
     "INPUT_CHANGED": ("dependency", False),
     # P6 experiment pre-registration (review fix item 4): the registered
     # runner's legacy spec.yaml no longer hashes to the PLANNED ledger row's

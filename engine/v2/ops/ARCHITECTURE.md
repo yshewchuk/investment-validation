@@ -99,7 +99,13 @@ including inside function bodies):
   (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
   `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
   `engine.v2.ledger` also have lazy call sites (`cli.py`, `bootstrap.py`)
-  in addition to their top-level ones; `engine.v2.models` is lazy-only
+  in addition to their top-level ones; `unit_receipts.py` adds further
+  lazy `engine.v2.data` call sites of its own — `record_unit_receipt` and
+  `cached_unit_payloads` each import `engine.v2.data.incremental`
+  (`cache_raw_receipt`/`RawPayload`, and `load_raw_receipt`), and
+  `cached_unit_outcomes` imports both `engine.v2.data.incremental`'s
+  `_jsonable` and `engine.v2.foundation`'s `content_hash`;
+  `engine.v2.models` is lazy-only
   (`cli.py::_restored_model_block` — `payoff_artifact`,
   `cli.py::rescore_command` — `no_fit`, `worker.py::_dispatch_adhoc_rescore`
   — `no_fit`, both layer 3.5); `engine.v2.domain.generation` is lazy-only
@@ -142,8 +148,25 @@ themselves are never held here, only remaining-call/reserve counts.
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
   code (root doc §5), never defaulted.
-- **Cache** — none of this package's own state is a cache; the catalog is
-  the durable record.
+- **Cache** — one part of this package's own state *is* a cache, read
+  through the operations catalog's own `data_raw_receipts` table (the same
+  connection this package's stages already use for `data_snapshot_heads`
+  and other catalog rows): `unit_receipts.py`'s `cached_unit_outcomes`/
+  `cached_unit_payloads` and `nightly.py`'s `_native_cached_outcome` each
+  look up the newest receipt for a `(source, endpoint, request_hash)` key
+  and reuse it only when its recorded `response_kind` is `complete` — a
+  `legitimate_empty` payload is always re-verified against the live source
+  on the next run, and a `not_final`/`transient`/`refused` response is
+  never written to the cache at all (`record_unit_receipt` refuses to
+  store one). `unit_receipts.py` breaks a `received_at` tie by `rowid`
+  (the table's own append-only insertion order); `nightly.py`'s older,
+  narrower lookup does not carry that tie-break. On the acquisition side,
+  a provider response that cannot be used maps to one of two non-retried
+  failure codes — `refused` (an unparseable body or other non-auth 4xx) to
+  `SOURCE_INVALID`, `credential_invalid` (the provider's own 401/403) to
+  `CREDENTIAL_INVALID` — while only `transient` is retried; everything
+  else about this package's own job/lease/history state is not a cache,
+  and the catalog remains the durable record of it.
 - **Retry** — `lifecycle.py`'s `attempt_receipts`/`request_cancel` and
   `recovery.py`'s `reconcile_attempt`/`prove_ownership_gone` govern retry
   and ownership recovery after a crash; a stale lease is reclaimed only
