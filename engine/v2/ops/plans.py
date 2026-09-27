@@ -152,13 +152,19 @@ def save_plan(conn, root, document, *, clock):
 
 
 #: Plan kinds enabled for submission, with the effect scope each must carry.
-_ENABLED_PLAN_KINDS = {"artifact_check": ["private_artifacts"], "experiment": ["staged"]}
+_ENABLED_PLAN_KINDS = {"artifact_check": ["private_artifacts"], "experiment": ["staged"],
+                       "training": ["staged"], "promote": ["staged"]}
 
 #: The checkpoint contract each enabled kind's registered ``JobKind`` declares
 #: (``engine.v2.ops.stages.registry()``); a submission whose contract differs
 #: from its kind is refused by ``submission.validate_request``.
 _PLAN_CHECKPOINT_CONTRACTS = {"artifact_check": "receipt.v1.0",
-                              "experiment": "experiment_receipt.v1.0"}
+                              "experiment": "experiment_receipt.v1.0",
+                              "training": "training_job_result.v1.0",
+                              "promote": "promote_pointer_state.v1.0"}
+
+#: Plan kinds whose registered job kind differs from the plan kind itself.
+_PLAN_JOB_KINDS = {"promote": "models_promote"}
 
 
 def request_from_plan(plan, key):
@@ -166,7 +172,8 @@ def request_from_plan(plan, key):
         raise fail("INVALID_REQUEST", "plan has unsupported schema or blocked prerequisites")
     if plan["kind"] not in _ENABLED_PLAN_KINDS or plan["effects"] != _ENABLED_PLAN_KINDS[plan["kind"]]:
         raise fail("INVALID_REQUEST", "plan kind is not enabled for submission")
-    job = JobSpec(kind=plan["kind"], implementation_ref=plan["implementation_ref"],
+    job = JobSpec(kind=_PLAN_JOB_KINDS.get(plan["kind"], plan["kind"]),
+                  implementation_ref=plan["implementation_ref"],
                   spec_hash=plan.get("spec_hash"), environment_ref=plan["environment_ref"],
                   parameters=plan["parameters"], input_refs=tuple(plan["input_refs"]),
                   output_namespace=plan["mode"], resource_class=plan["resource_class"],

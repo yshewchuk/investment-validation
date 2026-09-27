@@ -94,6 +94,13 @@ jobs:
       gremlins: ${{ steps.plan.outputs.gremlins }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # pull_request only: full history, so the changed-file diff below
+          # can reach the PR's base commit. push/schedule/dispatch keep the
+          # default shallow checkout (depth 1) -- byte-identical to before,
+          # since the ternary's false branch is the literal old default, not
+          # an omitted option.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || 1 }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -102,6 +109,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           FRESH: ${{ inputs.fresh }}
           ONLY: ${{ inputs.modules }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = "push" ] || [ "$EVENT" = "pull_request" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
@@ -111,13 +119,51 @@ jobs:
           fi
           gremlins=$(sed -n 's/^pytest-gremlins==\([^ ]*\).*/\1/p' requirements-dev.txt)
           test -n "$gremlins"
+          # pull_request only: narrow the matrix to the modules the PR's diff
+          # can actually affect -- each changed path selects every enabled
+          # module that owns it OR transitively depends on it (a static ast
+          # import-graph closure over every tracked .py file, ALLOWLIST-
+          # classified: a plain import, the one literal
+          # importlib.import_module("x.y") call, or a conftest.py's plain
+          # pytest_plugins list resolve to specific edges (including
+          # conftest.py closure roots); anything else the file references at
+          # all -- sys.path, subprocess, a loader construct, __import__ in
+          # any form, or a short list of other dangerous names/modules --
+          # fails the WHOLE FILE safe, depending on every other tracked file;
+          # the shared changed_modules selection rule), or nothing if it is on
+          # the small docs-only inert allowlist (tools/mutation_pilot.toml's
+          # [pr_selection] inert), or EVERY enabled module if it is neither
+          # (an unrecognized path is never assumed safe to skip) or if the
+          # import graph itself cannot be built. -z pairs with a
+          # NUL-splitting reader so a non-ASCII changed path is not quoted.
+          # push/schedule/dispatch never set CHANGED_ARGS, so the matrix
+          # command below stays byte-identical to before (an empty unquoted
+          # expansion contributes zero argv words).
+          # This static analysis is conservative for the constructs named
+          # above, NOT sound in general -- see issue #42 for constructs it
+          # misses entirely (string-target monkeypatch/mock.patch,
+          # importorskip, getattr-based imports, __import__ via
+          # globals/builtins, asyncio subprocess-exec, __path__/meta_path
+          # edits, pytest_plugins outside a conftest.py, from-pkg-import-star
+          # re-exports). Today tests/conftest.py itself always classifies
+          # DYNAMIC (its own sys.path.insert), so every test file's closure
+          # already includes it and every non-inert PR change already
+          # selects every enabled module regardless of those holes;
+          # tests/test_mutation_ci.py has a synthetic-tree test that fails
+          # loudly, naming issue #42, if that ever stops being true.
+          CHANGED_ARGS=""
+          if [ "$EVENT" = "pull_request" ]; then
+            CHANGED_FILE="$RUNNER_TEMP/pr-changed-files.txt"
+            git diff -z --no-renames --name-only "$BASE_SHA"...HEAD > "$CHANGED_FILE"
+            CHANGED_ARGS="--changed-files $CHANGED_FILE"
+          fi
           # Assign in its own command, never inside the echo: the exit status of
           # `echo "modules=$(...)"` is echo's, so a failing matrix command would
           # write an empty module list and the step would still pass. Under
           # `set -e` a command substitution in a plain assignment does abort, and
           # `gremlin_pilot.py matrix --only ,` now refuses instead of emitting
           # the empty matrix that would silently skip the whole matrix job.
-          modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY")
+          modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)
           {
             echo "modules=$modules"
             echo "mode=$mode"
