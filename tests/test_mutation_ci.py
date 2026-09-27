@@ -2478,12 +2478,75 @@ def test_a_leaf_module_change_now_selects_every_module_via_the_sys_path_failsafe
     assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == names
 
 
+# -- import-graph build budget: CPU time, self-calibrated per run ------------
+#
+# time.process_time() (CPU seconds this process actually consumed), not
+# time.monotonic() (wall clock): build_import_graph is pure CPU-bound work
+# (file reads + ast.parse + a dict-based graph walk, no network/threads/
+# sleeps), and the Tests workflow runs pytest -n auto with many workers
+# sharing a small runner -- wall-clock time includes however long this
+# worker sat descheduled while a sibling worker held the CPU. process_time()
+# does not advance while descheduled or blocked on I/O, so shared-runner
+# contention no longer inflates the measurement.
+#
+# The budget itself is a ratio against _cpu_calibration_seconds(), a small,
+# fixed, pure-CPU busy loop measured in the SAME process, NOT a hardcoded
+# wall-clock number: a fixed absolute budget drifts stale as the repo's
+# tracked-file count grows with every merge (this test's own budget already
+# needed bumping once for exactly that reason -- see the "whole repo now"
+# comment below), and a ratio against an independent in-process benchmark
+# self-normalizes to both "how fast is this host right now" and "how big is
+# the repo right now." The calibration loop must never call
+# build_import_graph or touch the filesystem -- it has to be independent of
+# the code under test, or a genuine regression there would inflate the
+# calibration too and never trip the budget.
+CALIBRATION_ITERATIONS = 20_000_000
+IMPORT_GRAPH_BUDGET_RATIO = 10.0  # measured ratio on an idle box is ~3x; see PR body
+
+
+def _cpu_calibration_seconds() -> float:
+    start = time.process_time()
+    total = 0
+    for i in range(CALIBRATION_ITERATIONS):
+        total += i * i
+    return time.process_time() - start
+
+
+def _assert_import_graph_builds_within_budget(tracked=None, ratio=IMPORT_GRAPH_BUDGET_RATIO):
+    calibration = _cpu_calibration_seconds()
+    start = time.process_time()
+    graph = pilot.build_import_graph(tracked)
+    elapsed = time.process_time() - start
+    budget = calibration * ratio
+    assert elapsed < budget, (
+        f"import graph build took {elapsed:.2f}s of CPU time "
+        f"(budget: {budget:.2f}s = {ratio:g}x this run's {calibration:.2f}s CPU calibration)")
+    return graph
+
+
 def test_import_graph_build_is_fast():
-    start = time.monotonic()
-    graph = pilot.build_import_graph()
-    elapsed = time.monotonic() - start
-    assert elapsed < 15.0, f"import graph build took {elapsed:.2f}s (budget: 15s)"
+    graph = _assert_import_graph_builds_within_budget()
     assert len(graph) > 800  # whole repo now, not just engine/+tests/
+
+
+def test_import_graph_build_flags_a_planted_slowdown(monkeypatch):
+    """Negative control for the CPU-time switch above: a genuine per-file
+    CPU regression must still fail the check. The plant is real CPU work (a
+    busy loop equal to one full calibration), NOT time.sleep() -- sleeping
+    consumes no CPU, so process_time() correctly would not see it, and a
+    sleep-based plant would prove nothing about this CPU-time-based check."""
+    real_parse = pilot.ast.parse
+
+    def slow_parse(*args, **kwargs):
+        total = 0
+        for i in range(2 * CALIBRATION_ITERATIONS):
+            total += i * i
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(pilot.ast, "parse", slow_parse)
+    subset = [p for p in _tracked(".") if p.endswith(".py")][:10]
+    with pytest.raises(AssertionError, match="budget"):
+        _assert_import_graph_builds_within_budget(subset)
 
 
 # -- mutate job summary: mutant-level cache reuse vs re-tested this run ------
