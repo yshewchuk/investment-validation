@@ -1176,11 +1176,12 @@ CANCEL_JOBS = CANCEL["jobs"]
 
 
 def test_cancel_stale_runs_triggers_on_pr_close_with_actions_write():
-    """actions: write is scoped to the cancel job, not the workflow, so a
-    future job added here would not inherit it for free."""
+    """An explicit deny-all workflow-level baseline (zizmor:
+    excessive-permissions) plus a job-level grant, so a future job added
+    here would not inherit actions: write for free."""
     on = CANCEL.get("on", CANCEL.get(True))  # PyYAML reads a bare `on` as True
     assert on["pull_request"]["types"] == ["closed"]
-    assert "permissions" not in CANCEL  # scoped to the job instead, see below
+    assert CANCEL["permissions"] == {}  # deny-all baseline, not the repo default
     assert CANCEL_JOBS["cancel"]["permissions"] == {"actions": "write"}
 
 
@@ -1203,11 +1204,11 @@ def test_cancel_stale_runs_is_guarded_to_same_repo_prs():
 
 
 def test_cancel_stale_runs_covers_all_three_workflows_by_branch_or_pr_number():
-    """The branch filter is a bound gh api query parameter and every jq match
-    uses --arg/--argjson, never string-interpolated filter text -- a branch
-    name may legally contain a double quote, and interpolating it into a jq
-    program would let a crafted branch name widen the filter to match runs on
-    other branches or PRs."""
+    """The list call's branch filter narrows server-side by branch name, but
+    the per-run match requires the run's own linked pull_requests[].number --
+    head_branch carries no owner/fork identity, so a same-named sibling
+    branch could otherwise collide; this job only ever runs for a same-repo
+    PR, whose own runs are guaranteed to have pull_requests[] populated."""
     step = CANCEL_JOBS["cancel"]["steps"][0]
     run = step["run"]
     for wf in ("Tests", "mutation", "mutation-mutmut"):
@@ -1221,18 +1222,17 @@ def test_cancel_stale_runs_covers_all_three_workflows_by_branch_or_pr_number():
     # query parameter on the list call, and a bound --arg on every jq match.
     assert '-f branch="$PR_BRANCH"' in run
     assert 'jq -r --arg wf "$wf"' in run
-    assert '--arg b "$PR_BRANCH" --argjson n "$PR_NUMBER"' in run
+    assert '--argjson n "$PR_NUMBER"' in run
     # \\*"\\* tolerates both a bare quote and the backslash-escaped quote a
     # `-q "select(... \"$wf\" ...)"`-style regression would use (the exact
     # historical shape of this bug) -- a plain '"$wf"' substring check would
     # miss that escaped form since the extra backslash breaks a literal match.
     assert not re.search(r'\.name\s*==\s*\\*"\$wf\\*"', run)
-    assert not re.search(r'\.head_branch\s*==\s*\\*"\$PR_BRANCH\\*"', run)
-    # matches by head_branch (covers Tests, a direct pull_request trigger) OR
-    # by the run's own linked pull_requests[].number (covers mutation/
-    # mutation-mutmut, triggered via workflow_run) -- `// []` so an empty
-    # array (a fork PR) is a plain no-match, not a jq error.
-    assert ".head_branch == $b" in run
+    # the per-run match is PR-number only now -- no head_branch fallback,
+    # and no --arg b binding for it either (head_branch carries no
+    # owner/fork identity, so it could match an unrelated same-named branch).
+    assert ".head_branch ==" not in run
+    assert "--arg b" not in run
     assert "pull_requests // []" in run
     assert "any(.number == $n)" in run
     # a failed cancel call is logged, not silently swallowed
