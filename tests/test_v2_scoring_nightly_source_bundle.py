@@ -126,10 +126,20 @@ def test_feature_value_pandas_na_is_missing():
     assert bundle.feature_missing_mask["pred_abs_move"] is True
 
 
-def test_feature_value_non_numeric_refuses():
+def test_feature_value_non_numeric_is_missing():
+    # A value that cannot be coerced to a float at all never had a usable
+    # number to lose -- it is missing, not INVALID_FEATURE_VALUE (which is
+    # reserved for a value that DOES coerce but is infinite).
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        tier4_row={"observed_at": "2026-01-09", "pred_abs_move": "not-a-number"}))
+    assert "pred_abs_move" not in bundle.feature_vector
+    assert bundle.feature_missing_mask["pred_abs_move"] is True
+
+
+def test_feature_value_infinite_refuses():
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         assemble_nightly_source_bundle(**_valid_kwargs(
-            tier4_row={"observed_at": "2026-01-09", "pred_abs_move": "not-a-number"}))
+            tier4_row={"observed_at": "2026-01-09", "pred_abs_move": float("inf")}))
     assert exc.value.code == "INVALID_FEATURE_VALUE"
 
 

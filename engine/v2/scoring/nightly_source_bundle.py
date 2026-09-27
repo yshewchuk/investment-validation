@@ -164,13 +164,15 @@ def _checked_against_as_of(
 
 
 def _feature_is_missing(value: Any) -> bool:
-    """Whether a projected feature column counts as missing.
+    """Whether a projected feature column counts as missing outright.
 
     A recognized "no value" sentinel (an absent key, ``None``, ``pandas.NA``,
-    or a NaN of any Python/NumPy floating type) is missing. A value that is
-    present but the wrong shape entirely (a string, an infinite number) is
-    not missing -- that is `_project_features`'s own `INVALID_FEATURE_VALUE`
-    refusal, a data problem distinct from an absence.
+    or a NaN of any Python/NumPy floating type) is missing. This is only the
+    fast-path check; `_project_features` also treats a value that cannot be
+    coerced to a number at all (e.g. a string) as missing -- it never had a
+    usable number to lose. Only an actual finite-vs-infinite distinction
+    among coercible numbers (an infinite value) is its own
+    ``INVALID_FEATURE_VALUE`` refusal, a data problem distinct from either.
     """
     return (
         value is _MISSING
@@ -208,7 +210,15 @@ def _project_features(
     panel_row: Mapping[str, Any],
     feature_names: Sequence[str],
 ) -> tuple[dict[str, float], dict[str, bool]]:
-    """Project ``feature_names`` from the Tier-4 row, falling back to the panel."""
+    """Project ``feature_names`` from the Tier-4 row, falling back to the panel.
+
+    A value that is absent, ``None``/``pandas.NA``/NaN, or not coercible to
+    ``float`` at all is missing: omitted from ``feature_vector``,
+    ``feature_missing_mask[name] = True``. A value that coerces to an
+    infinite float is a distinct, louder problem -- an
+    ``INVALID_FEATURE_VALUE`` refusal naming the feature and the value found,
+    not silently masked as missing.
+    """
     feature_vector: dict[str, float] = {}
     feature_missing_mask: dict[str, bool] = {}
     for name in sorted(feature_names):
@@ -220,11 +230,9 @@ def _project_features(
             continue
         try:
             number = float(value)
-        except (TypeError, ValueError) as exc:
-            raise NightlySourceBundleRefusal(
-                "INVALID_FEATURE_VALUE",
-                f"{name} is present but not a finite number: {value!r}",
-            ) from exc
+        except (TypeError, ValueError):
+            feature_missing_mask[name] = True
+            continue
         if not math.isfinite(number):
             raise NightlySourceBundleRefusal(
                 "INVALID_FEATURE_VALUE",

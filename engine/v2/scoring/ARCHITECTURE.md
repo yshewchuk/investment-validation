@@ -189,13 +189,14 @@ function's — see Invariants (read-only, no I/O).
     `calendar_observed_through` → `MISSING_STAGED_INPUT`, naming the input
     and (for `calendar_row`) the missing key(s). This is distinct from a
     *partial* `panel_row`/`tier4_row` — an individual feature column named
-    in `feature_names` but absent from the row (or `NaN`) is not a refusal:
-    it is omitted from `feature_vector` and marked `True` in
-    `feature_missing_mask`. The mask is authoritative; a caller that skips
-    checking it gets a silently-absent key, never a fabricated `0.0`/`NaN`.
-    A feature column that IS present but cannot be read as a finite number
-    (a string, an infinite value) is neither of these — it is a data
-    problem, not an absence, so it is its own refusal,
+    in `feature_names` but absent from the row, `None`/`pandas.NA`/`NaN`, or
+    not coercible to a number at all (a string that never had a usable
+    number to lose) is not a refusal: it is omitted from `feature_vector`
+    and marked `True` in `feature_missing_mask`. The mask is authoritative;
+    a caller that skips checking it gets a silently-absent key, never a
+    fabricated `0.0`/`NaN`. Only a value that DOES coerce to a float but is
+    infinite is a distinct, louder problem — a real numeric-data defect
+    rather than an absence — so it is its own refusal,
     `INVALID_FEATURE_VALUE`, naming the feature and the value found.
   - **Leakage, answer/outcome fields.** Every assembled `context` and
     `feature_vector` value is passed through `source_inputs._reject_answers`
