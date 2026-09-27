@@ -408,14 +408,185 @@ def _call_name(func: ast.expr) -> str | None:
     return None
 
 
-def _loader_call_path(node: ast.Call) -> tuple[bool, str | None]:
-    """(True, literal_path) if `node` calls one of `_FILE_PATH_LOADERS`
+def _eval_file_relative_path(expr: ast.expr, rel: str) -> list[str] | None:
+    """Best-effort static evaluation of a directory/file-path expression
+    built ONLY from `__file__` combined with an optional outer `str(...)`,
+    `pathlib.Path(...)`'s
+    `.resolve()`/`.parent`/`.parents[N]`, or `os.path.dirname`/`.abspath`/
+    `.join` calls whose extra arguments are string literals -- returns the
+    result's REPO-RELATIVE path components (`[]` for the repo root itself,
+    a list ending in a filename for a file path), or None if `expr` is not
+    one of these forms (a bare variable, an environment lookup, a function
+    call whose result isn't one of the above, ...) or if it climbs above
+    the repo root -- deliberately narrow: no cross-statement variable
+    tracking, no `Path(...) / "x"` operator, no other transforms. `rel` is
+    the CURRENT file's own tracked path (e.g. "checks/phase0_audit.py"),
+    what a bare `__file__` in it resolves to."""
+    if isinstance(expr, ast.Name) and expr.id == "__file__":
+        return rel.split("/")
+    if isinstance(expr, ast.Attribute) and expr.attr == "parent":
+        base = _eval_file_relative_path(expr.value, rel)
+        return base[:-1] if base else None
+    if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Attribute) \
+            and expr.value.attr == "parents":
+        base = _eval_file_relative_path(expr.value.value, rel)
+        if base is None:
+            return None
+        idx = expr.slice
+        if not (isinstance(idx, ast.Constant) and isinstance(idx.value, int)):
+            return None
+        climb = idx.value + 1
+        return base[:-climb] if climb <= len(base) else None
+    if isinstance(expr, ast.Call):
+        name = _call_name(expr.func)
+        if name == "str" and len(expr.args) == 1 and not expr.keywords:
+            return _eval_file_relative_path(expr.args[0], rel)
+        if name == "Path" and len(expr.args) == 1 and not expr.keywords:
+            return _eval_file_relative_path(expr.args[0], rel)
+        if name == "resolve" and isinstance(expr.func, ast.Attribute) and not expr.args:
+            return _eval_file_relative_path(expr.func.value, rel)
+        if name == "abspath" and len(expr.args) == 1:
+            return _eval_file_relative_path(expr.args[0], rel)
+        if name == "dirname" and len(expr.args) == 1:
+            base = _eval_file_relative_path(expr.args[0], rel)
+            return base[:-1] if base else None
+        if name == "join" and expr.args:
+            base = _eval_file_relative_path(expr.args[0], rel)
+            if base is None:
+                return None
+            parts = list(base)
+            for arg in expr.args[1:]:
+                if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                    return None
+                for seg in arg.value.split("/"):
+                    if seg in ("", "."):
+                        continue
+                    if seg == "..":
+                        if not parts:
+                            return None
+                        parts.pop()
+                    else:
+                        parts.append(seg)
+            return parts
+        return None
+    return None
+
+
+def _dir_is_tracked(components: list[str], tracked_set: set[str]) -> bool:
+    """True if `components` (repo-relative directory path parts, `[]` for
+    the repo root) names the repo root itself or a directory that actually
+    contains at least one tracked file. Used to tell a genuine sys.path
+    widening onto a real part of this repo from one that computes a
+    directory this tracked tree has nothing under (treated the same as
+    unresolvable)."""
+    if not components:
+        return True
+    prefix = "/".join(components) + "/"
+    return any(f.startswith(prefix) for f in tracked_set)
+
+
+def _sys_path_call_attr(node: ast.Call) -> str | None:
+    """"insert"/"append"/"extend" if `node` calls that method on `sys.path`
+    (`sys.path.insert(...)`/`.append(...)`/`.extend(...)`), else None."""
+    func = node.func
+    if (isinstance(func, ast.Attribute) and func.attr in ("insert", "append", "extend")
+            and isinstance(func.value, ast.Attribute) and func.value.attr == "path"
+            and isinstance(func.value.value, ast.Name) and func.value.value.id == "sys"):
+        return func.attr
+    return None
+
+
+_SUBPROCESS_FUNCS = {"run", "call", "check_call", "check_output", "Popen"}
+
+
+def _is_python_interpreter_arg(arg: ast.expr) -> bool:
+    """True if `arg` is `sys.executable`, or the literal string "python" or
+    "python3" -- the forms `_subprocess_python_target` recognizes as
+    "this subprocess call launches the CURRENT Python interpreter"."""
+    if isinstance(arg, ast.Attribute) and arg.attr == "executable" \
+            and isinstance(arg.value, ast.Name) and arg.value.id == "sys":
+        return True
+    return isinstance(arg, ast.Constant) and arg.value in ("python", "python3")
+
+
+def _subprocess_python_target(node: ast.Call, rel: str, tracked_set: set[str],
+                               roots: set[str]) -> tuple[bool, str | None, bool]:
+    """(matched, resolved_edge, fail_safe) for a call to a `subprocess.*`
+    runner (`run`/`call`/`check_call`/`check_output`/`Popen`, however
+    imported). `matched` is True only when the first positional argument is
+    an argv LIST/TUPLE whose first element is the Python interpreter
+    (`_is_python_interpreter_arg`) -- a subprocess call to any OTHER program
+    (git, gh, a shell tool, ...), or one whose first argument isn't a
+    literal list/tuple at all, is NOT matched and must NEVER be treated as
+    fail-safe: this graph only cares about launching the CURRENT
+    interpreter on more tracked code. When matched: `fail_safe` is True if
+    the script/module argv cannot be resolved (a variable, a computed path
+    with no `_eval_file_relative_path` form, ...) -- an unresolvable
+    Python-interpreter subprocess genuinely could run arbitrary tracked
+    code, unlike a non-Python one. Otherwise `resolved_edge` is the literal
+    or `__file__`-relative script path resolved to a tracked file via
+    `_resolve_literal_path`, or a literal `-m <module>` pair resolved via
+    `_resolve_dotted` -- either may be None (nothing to add, or the
+    resolved path/module isn't a tracked file) without being a fail-safe."""
+    name = _call_name(node.func)
+    if name not in _SUBPROCESS_FUNCS or not node.args:
+        return (False, None, False)
+    argv = node.args[0]
+    if not isinstance(argv, (ast.List, ast.Tuple)) or not argv.elts:
+        return (False, None, False)
+    if not _is_python_interpreter_arg(argv.elts[0]):
+        return (False, None, False)
+    rest = argv.elts[1:]
+    if not rest:
+        return (True, None, False)
+    if isinstance(rest[0], ast.Constant) and rest[0].value == "-m" and len(rest) > 1:
+        mod_arg = rest[1]
+        if isinstance(mod_arg, ast.Constant) and isinstance(mod_arg.value, str):
+            return (True, _resolve_dotted(mod_arg.value, tracked_set, roots), False)
+        return (True, None, True)
+    script = rest[0]
+    if isinstance(script, ast.Constant) and isinstance(script.value, str):
+        return (True, _resolve_literal_path(script.value, tracked_set), False)
+    components = _eval_file_relative_path(script, rel)
+    if components is not None:
+        return (True, _resolve_literal_path("/".join(components), tracked_set), False)
+    return (True, None, True)
+
+
+def _run_module_target(node: ast.Call) -> tuple[bool, str | None]:
+    """(True, dotted_name) if `node` calls `runpy.run_module(...)` (however
+    imported) with a literal string module-name argument (positional or
+    `mod_name=`); (True, None) if it calls run_module with a non-literal
+    argument -- ALWAYS fail-safe (run_module executes in the CURRENT
+    interpreter, so an unresolvable target genuinely could be anything
+    tracked -- there is no "other program" escape hatch the way there is
+    for `_subprocess_python_target`); (False, None) if `node` does not call
+    run_module at all."""
+    if _call_name(node.func) != "run_module":
+        return (False, None)
+    arg = node.args[0] if node.args else None
+    if arg is None:
+        for keyword in node.keywords:
+            if keyword.arg == "mod_name":
+                arg = keyword.value
+                break
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return (True, arg.value)
+    return (True, None)
+
+
+def _loader_call_path(node: ast.Call, rel: str) -> tuple[bool, str | None]:
+    """(True, resolved_path) if `node` calls one of `_FILE_PATH_LOADERS`
     (`importlib.util.spec_from_file_location`, `importlib.machinery.
     SourceFileLoader`, or `runpy.run_path`, however imported) and its file
-    path argument is a string literal; (True, None) if it calls one of them
-    with a NON-literal (dynamic) or missing path argument -- the caller must
-    treat that as the file-path-loader fail-safe; (False, None) if `node`
-    calls none of them at all."""
+    path argument is a string literal OR a `__file__`-relative expression
+    `_eval_file_relative_path` can statically evaluate (`resolved_path` is
+    the resulting repo-relative path string -- NOT necessarily a tracked
+    file, the caller still checks that); (True, None) if it calls one of
+    them with an argument neither form resolves -- the caller must treat
+    that as the file-path-loader fail-safe; (False, None) if `node` calls
+    none of them at all. `rel` is the calling file's own tracked path,
+    passed through to `_eval_file_relative_path`."""
     name = _call_name(node.func)
     if name not in _FILE_PATH_LOADERS:
         return (False, None)
@@ -426,8 +597,13 @@ def _loader_call_path(node: ast.Call) -> tuple[bool, str | None]:
             if keyword.arg == kw:
                 arg = keyword.value
                 break
+    if arg is None:
+        return (True, None)
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return (True, arg.value)
+    components = _eval_file_relative_path(arg, rel)
+    if components is not None:
+        return (True, "/".join(components))
     return (True, None)
 
 
@@ -444,24 +620,18 @@ def _resolve_literal_path(lit: str, tracked_set: set[str]) -> str | None:
 
 
 def _mutates_sys_path(node: ast.AST) -> bool:
-    """True if `node` is a call to `sys.path.insert(...)`,
-    `sys.path.append(...)`, or `sys.path.extend(...)`, or an assignment
-    (`Assign`/`AugAssign`) whose target is `sys.path` itself or a subscript
-    of it (`sys.path[0] = ...`, `sys.path[:0] = [...]`, `sys.path += [...]`).
-    Any of these can put an arbitrary, unresolvable directory on the import
-    path, after which a plain `import x` elsewhere in the same process may
-    resolve to a file this static graph cannot predict -- the caller treats
-    this the same as a dynamic loader-call path: the whole file is marked as
-    depending on everything."""
+    """True if `node` is an assignment (`Assign`/`AugAssign`) whose target is
+    `sys.path` itself or a subscript of it (`sys.path = [...]`,
+    `sys.path[0] = ...`, `sys.path[:0] = [...]`, `sys.path += [...]`) --
+    ALWAYS a fail-safe case; `_eval_file_relative_path` is never attempted
+    for these, only for `sys.path.insert`/`.append` (see
+    `_sys_path_call_attr` and its use in `build_import_graph`), because a
+    whole-list reassignment or slice write can put anything on the import
+    path, not just a single computed directory."""
     def is_sys_path(expr: ast.expr) -> bool:
         return (isinstance(expr, ast.Attribute) and expr.attr == "path"
                 and isinstance(expr.value, ast.Name) and expr.value.id == "sys")
 
-    if isinstance(node, ast.Call):
-        func = node.func
-        return (isinstance(func, ast.Attribute)
-                and func.attr in ("insert", "append", "extend")
-                and is_sys_path(func.value))
     if isinstance(node, ast.Assign):
         targets = node.targets
     elif isinstance(node, ast.AugAssign):
@@ -507,6 +677,7 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
             raise SyntaxError(f"{rel}: {exc}") from exc
         edges = graph[rel]
         dynamic = False
+        extra_dirs: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -537,12 +708,49 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                         edges.add(target)
                     edges |= _ancestor_package_inits(dotted_str, tracked_set)
                     continue
-                is_loader, literal = _loader_call_path(node)
-                if is_loader:
-                    if literal is None:
+                subproc_matched, subproc_edge, subproc_fail = \
+                    _subprocess_python_target(node, rel, tracked_set, roots)
+                if subproc_matched:
+                    if subproc_fail:
+                        dynamic = True
+                    elif subproc_edge:
+                        edges.add(subproc_edge)
+                    continue
+                is_run_module, run_module_dotted = _run_module_target(node)
+                if is_run_module:
+                    if run_module_dotted is None:
                         dynamic = True
                     else:
-                        resolved = _resolve_literal_path(literal, tracked_set)
+                        target = _resolve_dotted(run_module_dotted, tracked_set, roots)
+                        if target:
+                            edges.add(target)
+                        edges |= _ancestor_package_inits(run_module_dotted, tracked_set)
+                    continue
+                sys_path_attr = _sys_path_call_attr(node)
+                if sys_path_attr == "extend":
+                    dynamic = True
+                    continue
+                if sys_path_attr in ("insert", "append"):
+                    path_arg = (node.args[1] if sys_path_attr == "insert" and len(node.args) > 1
+                                else node.args[0] if sys_path_attr == "append" and node.args
+                                else None)
+                    components = (_eval_file_relative_path(path_arg, rel)
+                                  if path_arg is not None else None)
+                    if components is None:
+                        dynamic = True
+                    elif not components:
+                        pass  # repo root: normal dotted resolution already covers it
+                    elif _dir_is_tracked(components, tracked_set):
+                        extra_dirs.add("/".join(components))
+                    else:
+                        dynamic = True
+                    continue
+                is_loader, resolved_path = _loader_call_path(node, rel)
+                if is_loader:
+                    if resolved_path is None:
+                        dynamic = True
+                    else:
+                        resolved = _resolve_literal_path(resolved_path, tracked_set)
                         if resolved:
                             edges.add(resolved)
                 elif _mutates_sys_path(node):
@@ -550,6 +758,18 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
             elif isinstance(node, (ast.Assign, ast.AugAssign)):
                 if _mutates_sys_path(node):
                     dynamic = True
+        if extra_dirs:
+            for node2 in ast.walk(tree):
+                if isinstance(node2, ast.Import):
+                    for alias in node2.names:
+                        rel_mod = alias.name.replace(".", "/")
+                        for extra_dir in extra_dirs:
+                            candidate_mod = f"{extra_dir}/{rel_mod}.py"
+                            candidate_pkg = f"{extra_dir}/{rel_mod}/__init__.py"
+                            if candidate_mod in tracked_set:
+                                edges.add(candidate_mod)
+                            elif candidate_pkg in tracked_set:
+                                edges.add(candidate_pkg)
         if dynamic:
             edges |= tracked_set - {rel}
     return graph

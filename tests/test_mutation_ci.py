@@ -1335,6 +1335,26 @@ def _sel_cfg():
     }
 
 
+@pytest.fixture(autouse=True)
+def _empty_import_graph_for_synthetic_cfg(request, monkeypatch):
+    """Every test marked `synthetic_cfg` builds a throwaway cfg via
+    `_sel_cfg()`/`_defect_list_cfg()` whose `mutate`/`tests` paths
+    (engine/a.py, tests/test_b.py, ...) never exist as real tracked files --
+    so a call to `changed_modules` without an explicit `graph=` kwarg was
+    ALREADY getting an empty dependency closure for every one of those
+    modules (`module_dependency_closure`'s `_closure_roots` never matches a
+    fictional path against the real tracked set), just after silently
+    building the whole real ~884-file graph first to get there. This
+    fixture skips straight to that same empty closure by patching
+    `build_import_graph` to return `{}` -- no assertion's outcome changes,
+    only the wasted real-repo parse does. Tests against the real `CFG`
+    (test_real_toml_*, the artifacts/frozen_inputs/research-replay closure
+    tests, ...) are never marked `synthetic_cfg` and always build the real
+    graph."""
+    if request.node.get_closest_marker("synthetic_cfg"):
+        monkeypatch.setattr(pilot, "build_import_graph", lambda *a, **k: {})
+
+
 def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
     assert pilot.read_changed_files("") == []
     with pytest.raises(SystemExit):  # missing: an operator/workflow bug, not "no changes"
@@ -1348,12 +1368,14 @@ def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
     assert pilot.read_changed_files(str(f)) == ["engine/a.py", "tests/test_b.py"]
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_selects_only_the_owning_module():
     cfg2 = _sel_cfg()
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha"]
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_b.py"]) == ["beta"]
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_a_deleted_own_test_file_still_selects_its_module():
     # alpha's test file, tests/test_a.py, was deleted by this PR: git diff
     # --name-only reports it in `changed`, but module_owns_changed_path
@@ -1363,6 +1385,7 @@ def test_changed_modules_a_deleted_own_test_file_still_selects_its_module():
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_a.py"]) == ["alpha"]
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_a_deleted_own_source_file_still_selects_its_module():
     # The source-side mirror of the test above: engine/a.py, alpha's mutate
     # file, deleted by this PR.
@@ -1386,6 +1409,7 @@ def test_changed_modules_a_deleted_own_source_file_selects_via_glob_ownership():
     assert pilot.changed_modules(cfg2, ["gamma", "beta"], ["engine/pkg/gone.py"]) == ["gamma"]
 
 
+@pytest.mark.synthetic_cfg
 def test_module_owns_changed_path_matches_tests_and_mutate_minus_skip():
     cfg2 = _sel_cfg()
     assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_a.py") is True
@@ -1394,6 +1418,7 @@ def test_module_owns_changed_path_matches_tests_and_mutate_minus_skip():
     assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_b.py") is False
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_respects_the_incoming_names_subset():
     # beta's own file changed, but beta was already excluded (e.g. by
     # --only). beta still OWNS engine/b.py (it is an enabled module in the
@@ -1404,28 +1429,33 @@ def test_changed_modules_respects_the_incoming_names_subset():
     assert pilot.changed_modules(cfg2, ["alpha"], ["engine/b.py"]) == []
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_empty_change_selects_nothing():
     cfg2 = _sel_cfg()
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], []) == []
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_an_inert_path_selects_nothing():
     cfg2 = _sel_cfg()
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["docs/readme.md"]) == []
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_all_docs_change_selects_nothing():
     cfg2 = _sel_cfg()
     changed = ["README.md", "docs/design/notes.md", "guides/how_to.md"]
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed) == []
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_mixed_docs_and_owned_change_selects_just_that_module():
     cfg2 = _sel_cfg()
     changed = ["docs/design/notes.md", "engine/a.py"]
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed) == ["alpha"]
 
 
+@pytest.mark.synthetic_cfg
 def test_is_inert_changed_path_matches_only_the_configured_patterns():
     cfg2 = _sel_cfg()
     assert pilot.is_inert_changed_path(cfg2, "README.md") is True
@@ -1472,6 +1502,7 @@ _DEFECT_LIST_PATHS = [
 ]
 
 
+@pytest.mark.synthetic_cfg
 @pytest.mark.parametrize("changed_path", _DEFECT_LIST_PATHS)
 def test_changed_modules_selects_every_enabled_module_for_an_unrecognized_path(changed_path):
     # Each of these is a real path that the pre-2026-09-26 rule selected ZERO
@@ -1486,6 +1517,7 @@ def test_changed_modules_selects_every_enabled_module_for_an_unrecognized_path(c
     assert pilot.changed_modules(cfg2, names, [changed_path]) == names
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_respects_only_even_when_selecting_everything():
     # The "select everything" branch selects every name in the INCOMING
     # `names` (already --only-filtered), not every module in the cfg.
@@ -1493,6 +1525,7 @@ def test_changed_modules_respects_only_even_when_selecting_everything():
     assert pilot.changed_modules(cfg2, ["alpha"], ["tools/mutation_pilot.py"]) == ["alpha"]
 
 
+@pytest.mark.synthetic_cfg
 def test_cmd_matrix_changed_files_narrows_the_matrix(tmp_path, monkeypatch, capsys):
     cfg2 = _sel_cfg()
     monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
@@ -1503,6 +1536,7 @@ def test_cmd_matrix_changed_files_narrows_the_matrix(tmp_path, monkeypatch, caps
     assert json.loads(capsys.readouterr().out) == ["alpha"]
 
 
+@pytest.mark.synthetic_cfg
 def test_cmd_matrix_without_changed_files_is_unaffected(monkeypatch, capsys):
     cfg2 = _sel_cfg()
     monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
@@ -1511,6 +1545,7 @@ def test_cmd_matrix_without_changed_files_is_unaffected(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == ["alpha", "beta"]
 
 
+@pytest.mark.synthetic_cfg
 def test_cmd_matrix_accepts_missing_changed_files_attr_for_backward_compatibility(monkeypatch, capsys):
     # older call sites (and the pre-existing tests above) build an
     # `args` namespace with no `changed_files` at all; that must keep working.
@@ -1540,6 +1575,7 @@ def test_real_toml_inert_allowlist_is_the_small_docs_only_list():
     ]
 
 
+@pytest.mark.synthetic_cfg
 def test_is_inert_changed_path_respects_inert_skip():
     cfg2 = _sel_cfg()
     cfg2["pr_selection"]["inert_skip"] = ["engine/dashboard/static/*.md"]
@@ -1665,6 +1701,7 @@ def test_build_import_graph_raises_on_a_syntax_error(tmp_path, monkeypatch):
         pilot.build_import_graph(["engine/broken.py"])
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_falls_back_to_selecting_all_when_the_graph_build_raises(monkeypatch):
     cfg2 = _sel_cfg()
 
@@ -1675,6 +1712,7 @@ def test_changed_modules_falls_back_to_selecting_all_when_the_graph_build_raises
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha", "beta"]
 
 
+@pytest.mark.synthetic_cfg
 def test_module_dependency_closure_follows_edges_transitively():
     graph = {
         "engine/a.py": {"engine/b.py"},
@@ -1687,6 +1725,7 @@ def test_module_dependency_closure_follows_edges_transitively():
     assert closure == {"engine/a.py", "engine/b.py", "engine/c.py", "tests/test_a.py"}
 
 
+@pytest.mark.synthetic_cfg
 def test_changed_modules_selects_a_module_that_only_transitively_depends_on_the_changed_path():
     # alpha does not OWN engine/c.py, but alpha's own test file imports
     # alpha's source file, which imports engine/c.py transitively -- alpha
@@ -1882,6 +1921,121 @@ def test_build_import_graph_a_sys_path_insert_selects_every_enabled_module(tmp_p
     }
     selected = pilot.changed_modules(cfg2, ["target"], ["engine/unrelated.py"], graph=graph)
     assert selected == ["target"]
+
+
+def test_build_import_graph_the_repo_root_sys_path_insert_idiom_is_a_no_op(tmp_path, monkeypatch):
+    # `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))` in a
+    # file one directory below the repo root always computes the repo root
+    # itself -- a value the graph already resolves dotted imports from, so
+    # this must NOT trigger the "depends on everything" fail-safe.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == set()
+
+
+def test_build_import_graph_a_subdirectory_sys_path_insert_resolves_bare_imports(tmp_path, monkeypatch):
+    # `sys.path.insert(0, str(Path(__file__).parent))` widens the import
+    # path to the file's OWN directory -- a bare `import helper` (no
+    # top-level tracked-root prefix) then resolves against that directory.
+    (tmp_path / "tools" / "sub").mkdir(parents=True)
+    (tmp_path / "tools" / "sub" / "runner.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent))\n"
+        "import helper\n")
+    (tmp_path / "tools" / "sub" / "helper.py").write_text("H = 1\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/sub/runner.py", "tools/sub/helper.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/sub/runner.py"] == {"tools/sub/helper.py"}
+
+
+def test_build_import_graph_an_env_var_sys_path_insert_still_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys, os\n"
+        "sys.path.insert(0, os.environ['SOME_PATH'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_a_real_checks_file_with_the_repo_root_idiom_no_longer_fails_safe():
+    # checks/phase0_audit.py uses the exact
+    # `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))` idiom.
+    # Before this change it depended on every tracked file; now it must not.
+    graph = pilot.build_import_graph()
+    tracked_set = set(graph)
+    assert graph["checks/phase0_audit.py"] != tracked_set - {"checks/phase0_audit.py"}
+
+
+def test_build_import_graph_a_python_subprocess_literal_script_is_an_edge(tmp_path, monkeypatch):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, 'tools/worker.py'])\n")
+    (tmp_path / "tools" / "worker.py").write_text("W = 1\n")
+    tracked = ["tools/runner.py", "tools/worker.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"tools/worker.py"}
+
+
+def test_build_import_graph_a_python_subprocess_dash_m_literal_is_an_edge(tmp_path, monkeypatch):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "worker.py").write_text("W = 1\n")
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, '-m', 'checks.worker'])\n")
+    tracked = ["tools/runner.py", "checks/worker.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "checks/worker.py" in graph["tools/runner.py"]
+
+
+def test_build_import_graph_a_dynamic_python_subprocess_target_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "def go(script):\n"
+        "    subprocess.run([sys.executable, script])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_non_python_subprocess_adds_no_edges_and_does_not_fail_safe(tmp_path, monkeypatch):
+    # `git`/`gh`/any non-Python program: not this graph's concern, and
+    # critically NOT a fail-safe trigger even though its own argv is fully
+    # dynamic -- only a PYTHON-interpreter subprocess can run tracked code.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess\n"
+        "def go(args):\n"
+        "    subprocess.run(['git', *args])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == set()
 
 
 def test_conftest_own_imports_are_a_closure_root_for_tests_under_its_directory(tmp_path, monkeypatch):
