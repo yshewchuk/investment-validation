@@ -247,11 +247,40 @@ recovered safely), and that workflow_run's own `head_repository` is this
 repository too -- see the workflows' own "PR context: workflow_run" comments
 for the full mechanics and why mutation used to starve `Tests` for the
 account's shared pool of Actions runners by starting its 30+-job matrix
-alongside it on every PR. Each plan job (and, again, each `mutate` matrix
-job as its first step) also calls `gh api` to check whether that PR is still
-open; if it closed or merged after its Tests run started, the plan emits an
-empty matrix and the whole run finishes in seconds, and a matrix job already
-queued when the PR closes exits just as fast instead of running a full pass.
+alongside it on every PR. Each plan job also calls `gh api` to check
+whether that PR is still open; if it closed or merged after its Tests run
+started, the plan emits an empty matrix and the whole run finishes in
+seconds. Each `mutate` matrix job repeats that same check as its own
+first step, because a queued matrix job can outlive the PR that scheduled
+it -- but (fixed 2026-09-27, issue #64) only the actual mutation pass
+reads that result now: checkout/setup-python/pip-install/the cache-key
+step always run regardless (cheap, and the export step below needs the
+checked-out module file list either way), and the mutation-tool step
+itself stays gated on `steps.key.outcome == 'success'`, never `always()`
+(the 733fd56 gate: `always()` let a full mutation pass start even after a
+cancel-in-progress landed during one of those setup steps, or after any
+of them genuinely failed) -- a PR-closed job writes a
+clean `run_exit_code=0` no-op -- mutmut's own build-rows already treats a
+missing state dir as "0 mutants"; gremlins' job writes a stub raw report
+(0 of every count, an empty results list, valid against `validate_raw`'s
+shape check) -- instead of skipping its own upload. The export step then
+passes `--skipped-reason` to `mutation_results.py`/`gremlin_results.py`,
+so the module's own `summary.json` carries an explicit `skipped_reason`
+(never inferred from a plain `run_exit_code=0`, which a real 0-mutant
+module also reports): `merge_dirs` reads it and reports that module in
+`skipped_modules`, marking the whole run `complete: false` and its score
+withheld, but -- unlike a true `MISSING_MODULES`/`RUN_INCOMPLETE` tool
+error -- `tool_error: false`, because a merge race is an expected outcome
+of a fast-merging PR, not a broken workflow. The earlier design skipped
+the upload outright, so any module still queued when its PR closed simply
+vanished from that run's artifact set, and `report`'s merge correctly
+refused the resulting short set as `MISSING_MODULES` -- on an
+actively-developed PR (where a merge race is common, not rare) this made
+nearly every PR's `report` end in a tool error, which `report_status`
+(below) would then have posted as a red status on nearly every PR; without
+the `skipped_reason` marker, the fix for that would instead have made
+`report` -- and so `report_status` -- silently read a stubbed, partial run
+as a clean green pass.
 `.github/workflows/cancel-stale-runs.yml` reliably cancels any in-progress/
 queued `Tests` run tied to a PR once that PR closes (it also tries for
 `mutation`/`mutation-mutmut`, but a workflow_run-triggered run's own
@@ -268,6 +297,49 @@ the first two cancels an older still-running run of its own family:
 |---|---|---|---|---|---|
 | `mutation.yml` | pytest-gremlins 1.9.0 (`tools/gremlin_pilot.py`) | `mutation-gremlins-pr-<n>` (workflow_run, PR number known) / `mutation-gremlins-<repo>-<branch>-<event>` (workflow_run fallback) / `mutation-gremlins-push-<ref>` (push) / `mutation-gremlins-<ref>` (schedule, dispatch) | `mutation-gremlins<ver>-...` (per-module tracked-input fingerprint) over `.gremlins_cache` | `mutation-module-<module>` | `mutation-report` |
 | `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-pr-<n>` / `mutation-mutmut-<repo>-<branch>-<event>` / `mutation-mutmut-push-<ref>` / `mutation-mutmut-<ref>` (same four cases) | `mutation-mutmut<ver>-py<ver>-<config-hash>-<module>-...` (per-module config-hash) over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
+
+**A `workflow_run`-triggered run never attaches to the PR's own Checks tab --
+GitHub always lists it under the default branch's Actions history instead --
+so, since 2026-09-27, each backend's own last job, `report_status`, posts
+the outcome onto the PR's own head commit itself
+(`github.event.workflow_run.head_sha`) as a plain commit status: this
+design does not add either context to branch protection's required-checks
+list, so nothing here starts blocking merges on its own (a repo admin
+requiring a status context by name is a separate, later, explicit action,
+not something this change does or enables by itself).** `report_status`
+needs `[plan, report]` and declares `statuses: write` for its
+`GITHUB_TOKEN` in both workflows (the existing workflow-level token grants
+only `contents: read`; every scope a job doesn't list itself becomes
+`none`), with `if: always() && needs.plan.outputs.pr_number != ''` (the
+`always()` is required: without it, GitHub Actions would skip
+`report_status` outright whenever `report` itself failed or was skipped,
+which is exactly when a result still needs posting; the condition
+deliberately omits a `needs.plan.result == 'success'` guard too, for the
+same reason -- `plan`'s own steps can fail *after* `select_pr` already set
+`pr_number` (e.g. its checkout or pip install step), and a
+`result == 'success'` guard would then skip `report_status` too, silently
+recreating the exact invisible-PR problem this job exists to fix; posting
+a `failure` status attributed to a "report" that never ran is still
+strictly more informative than nothing). A fork PR, or a Tests run that
+failed, was cancelled, or was not itself a `pull_request` run, never
+reaches this far (`plan` is skipped, or leaves `pr_number` empty), so
+nothing is posted for them -- fail closed, the same as the rest of the
+workflow. When
+`plan`'s own matrix is empty (`modules == '[]'`: a PR that closed before
+checkout, or a docs-only PR the `[pr_selection] inert` allowlist ruled out)
+the status is `success` with a "skipped by design" description rather
+than silence; a `report` job that itself failed or was skipped maps to
+`failure`. In between those two, `report` can also exit 0 having merged
+one or more PR-closed placeholder modules (issue #64, above: `merge_dirs`'s
+`skipped_modules`) -- not a tool error, but not a real measurement either,
+so `report_status` reads `report`'s own `skipped_count` output (a `jq`
+count of `merged/summary.json`'s `skipped_modules`, computed by `report`'s
+own `skip` step) and posts `failure` with a "skipped (PR closed)"
+description instead: this must never read as `success`, which would claim
+every module was measured when some were only a stub. Only when none of
+that applies does the status mirror `report`'s own result as `success`.
+The two contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from
+each other and from the `Tests` check.
 
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,
