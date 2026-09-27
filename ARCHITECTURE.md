@@ -55,7 +55,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/domain/scenarios/` | (pending) |
 | `engine/v2/domain/valuation/` | (pending) |
 | `engine/v2/domain/simulation/` | (pending) |
-| `engine/v2/scoring/` | (pending) |
+| `engine/v2/scoring/` | [`engine/v2/scoring/ARCHITECTURE.md`](engine/v2/scoring/ARCHITECTURE.md) |
 | `engine/v2/evaluation/` | (pending) |
 | `engine/v2/ledger/` | (pending) |
 | `engine/v2/models/training/` | (pending) |

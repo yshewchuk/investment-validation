@@ -1,5 +1,8 @@
 # `engine/v2/scoring`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and invariants.
+
 ## Ownership
 
 Implements the **Scoring application — forecasts, shape, pricing, gate/chooser decisions, diagnostics** row of the §4 owner table of
