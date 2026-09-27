@@ -134,7 +134,14 @@ only, gated on cutover PR-3 (`native_score_batch.py`, `#66`) merging before
 any of the code below is written).** Three additions close the gap the
 root doc §4 and this doc's own "Diagrams" section both name today:
 `run_shadow_nightly` "has no production caller, only tests ... call it,"
-so `native_parity` always compares `{}` in practice. None of the three
+so in production `native_parity` never actually compares anything — a
+production run supplies no `parity_rows`, `_registered_handlers` defaults
+both sides to `{}`, and `compare_native_vs_legacy`'s own
+`_refuse_empty_inputs` raises `VALIDATION_FAILED` before any comparison
+runs, which `_run_stage` turns into a `"degraded"` receipt for this
+`OPTIONAL` stage (see "Outputs" below for why this is NOT the same claim
+as "writes an empty-input report" — no report is ever written either).
+None of the three
 changes `run_shadow_nightly`'s own stage-walk or `native_parity_handler`'s
 signature contract (both already correctly consume real
 `legacy_rows`/`native_rows` dicts today — proven by
@@ -144,44 +151,55 @@ nothing before this PR builds real dicts to hand them.
 - **`nightly.legacy_parity_rows(score_document: Mapping[str, Any]) ->
   dict[str, dict]`** (new, this package). Keys the legacy `score.json`
   document's own `"rows"` array by
-  `engine.v2.ops.legacy_adapter.population_key`'s `"ticker|strategy|
-  event_date"` format — REUSED, not re-derived: it is the identical
-  three-field format `engine.v2.serving.native_render.native_row_key`
-  already derives for a native `ScoreRecord` (that module's own docstring:
-  `"the native twin of bridge._population_key"`), so a legacy row and its
-  native counterpart land under the same string key once both sides are
-  handed to `native_parity_report.compare_native_vs_legacy`. Pure: no
+  `engine.v2.ops.decision_validation.population_key`'s `"ticker|strategy|
+  event_date"` format — REUSED, not re-derived and not re-added: this
+  public function already exists (`decision_replay.py`'s own population
+  comparison already imports it), and it is the identical three-field
+  format `engine.v2.serving.native_render.native_row_key` already derives
+  for a native `ScoreRecord` (that module's own docstring: `"the native
+  twin of bridge._population_key"` — `legacy_adapter._population_key` is a
+  second, private, byte-identical copy of the same format used only for
+  `_action_score`'s own population check; this PR reuses the PUBLIC one
+  `decision_validation` already exports, adding no new function). Pure: no
   filesystem, no clock, and — the point of putting this here rather than
   in the composing script below — no import of `engine.v2.serving` (a
   layer-7.0 peer of `engine.v2.ops`, per the root doc's layer table;
-  `checks/import_layers.py` would refuse that edge). `legacy_adapter.py`
-  gains one new one-line public function, `population_key`, a thin wrapper
-  over its existing private `_population_key` so this cross-module reuse
-  never reaches into another module's underscore-prefixed name; the
-  private original and its one existing caller (`_action_score`'s
-  population check) are unchanged. A `score_document` with no `"rows"` key
-  returns `{}` (not a refusal — `native_parity_handler`'s existing
-  `_refuse_empty_inputs` already turns an empty `legacy_rows` into
-  `VALIDATION_FAILED` downstream, so this function does not need its own
-  empty-input check). **Unlike `population_key` itself, `legacy_parity_rows`
-  does NOT reuse its `.get(key, "")` empty-string substitution for a
-  missing `ticker`/`strategy`/`event_date`** (root doc §5: "a missing or
-  unusable input produces an explicit withheld/refused status," never a
-  silent default) — reusing that substitution here would let one malformed
-  row's empty-string-keyed entry either collide with a genuinely
-  empty-fielded row, or, more likely with real data, simply end up unique
-  and reported as an ordinary `only_legacy` row: quietly absorbed into the
-  report as a population difference rather than surfaced as the malformed
-  input it actually is. `legacy_parity_rows` therefore validates each row
-  before keying it: `ticker`/`strategy`/`event_date` must each be present
-  and a non-empty value, or the WHOLE call raises `OpsError`
-  (`INVALID_REQUEST`, detail naming the row's index and the missing
-  field) — a batch-level refusal, not a per-row skip, so a legacy
-  `score.json` this malformed is never silently read as "smaller than it
-  is." `population_key`'s own `.get(key, "")` substitution and its one
-  existing caller (`_action_score`'s population check, which validates the
-  full expected/observed population separately and would itself already
-  disagree on an empty-strategy row) are unchanged.
+  `checks/import_layers.py` would refuse that edge). A `score_document`
+  with no `"rows"` key returns `{}` (not a refusal —
+  `native_parity_handler`'s existing `_refuse_empty_inputs` already turns
+  an empty `legacy_rows` into `VALIDATION_FAILED` downstream, so this
+  function does not need its own empty-input check).
+  **`legacy_parity_rows` does NOT reuse `population_key`'s own
+  `.get(key, "")` empty-string substitution for a missing
+  `ticker`/`strategy`/`event_date`** (root doc §5: "a missing or unusable
+  input produces an explicit withheld/refused status," never a silent
+  default) — reusing that substitution here would let one malformed row's
+  empty-string-keyed entry either collide with a genuinely empty-fielded
+  row, or, more likely with real data, simply end up unique and reported
+  as an ordinary `only_legacy` row: quietly absorbed into the report as a
+  population difference rather than surfaced as the malformed input it
+  actually is. **Duplicate keys are the same class of finding, not a
+  separate one**: `_action_score`'s own population check
+  (`observed_keys = {_population_key(row) for row in rows}`) compares
+  `population_key` values only as a SET, so a `score.json` carrying two
+  rows under one `ticker|strategy|event_date` key (sibling precedent:
+  `decision_replay.decision_population` rejects a duplicate population
+  key explicitly, via `VALIDATION_FAILED`; `_action_score` does not)
+  already passes that check today without ever proving the two rows
+  agree — a plain `{key: row for row in rows}` comprehension in
+  `legacy_parity_rows` would then silently keep whichever row iterated
+  last and drop the other with no trace. `legacy_parity_rows` therefore
+  validates every row before keying any of them: a missing/empty
+  `ticker`/`strategy`/`event_date`, OR two rows sharing one
+  `population_key` value, each raises `OpsError` — matching
+  `decision_population`'s own code, `VALIDATION_FAILED` (detail naming
+  the row index/missing field, or the repeated key and both rows'
+  indices) — for the WHOLE call, before any dict is constructed: a
+  batch-level refusal, never a per-row skip or a last-write-wins
+  collision, so a malformed or duplicate-keyed `score.json` is never
+  silently read as smaller, or different, than it actually is.
+  `population_key`, `_population_key`, and `_action_score`'s own
+  set-based check are all unchanged by this PR.
 - **`native_parity_report.py` gains a caller-supplied "explained" bucket**,
   the mechanism for classifying a known structural difference (legacy's
   stale-px rule; legacy finality drift — memory `d14-corpus-parity`'s
@@ -1074,13 +1092,15 @@ consumed by the legacy board. There is no code path from this script back
 into `engine.dashboard.nightly`.
 
 - **R1, missing input.** `legacy_parity_rows` raises `OpsError`
-  (`INVALID_REQUEST`) for the whole call — never a per-row skip, and never
-  `population_key`'s own `.get(key, "")` substitution reused here — the
-  moment any row is missing a non-empty `ticker`/`strategy`/`event_date`
-  (see "Primary contracts" above for why). A `score_document` missing
-  `"rows"` entirely still returns `{}`, not a refusal: there is no row to
-  be malformed. This is a REAL join-format risk stated explicitly, not a
-  defensive-only note: `population_key` and
+  (`VALIDATION_FAILED`, matching `decision_population`'s own sibling
+  refusal code — see "Primary contracts" above) for the whole call —
+  never a per-row skip, and never `population_key`'s own `.get(key, "")`
+  substitution reused here — the moment any row is missing a non-empty
+  `ticker`/`strategy`/`event_date`, or two rows share one `population_key`
+  value. A `score_document` missing `"rows"` entirely still returns `{}`,
+  not a refusal: there is no row to be malformed or to collide. This is a
+  REAL join-format risk stated explicitly, not a defensive-only note:
+  `population_key` and
   `native_row_key` must format `event_date` identically (e.g. both an ISO
   date string, never one side a `pandas.Timestamp.__str__()` and the other
   a plain date string) or a legitimately-shared event silently lands in
