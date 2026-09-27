@@ -446,7 +446,7 @@ class Service:
             receipt = submit_computed_moves_refresh_if_ready(
                 self.conn, self.registry, policy, self.store,
                 catalog_path=_catalog_path(self.conn), objects_root=str(self.root),
-                clock=self.clock)
+                code_source=self.code_source, clock=self.clock)
         except Exception as exc:
             self._computed_moves_backoff(memo, now)
             self._report_computed_moves_problem(exc)

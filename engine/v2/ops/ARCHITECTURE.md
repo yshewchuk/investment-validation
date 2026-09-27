@@ -912,11 +912,22 @@ closure keyed to where `nightly.py` itself sits on disk, independent of
 the plan's `source_root`/`catalog_path`/`objects_root`. That fingerprint
 answers "what worker code is running," not "which data root," so it is
 never redirected by a request's or plan's root; nothing else in this
-package may adopt the same pattern for a data or artifact path; nothing
-published carries a local path, raw exception text, or an unsanitised
-free-text field — `worker.py`'s convention (a caught traceback goes to a
-private per-attempt file, never the result pipe) is the model other
-stages in this package follow.
+package may adopt the same pattern for a data or artifact path. That
+exemption does NOT extend to `submit_computed_moves_refresh_if_ready`
+(Part 4, CodeRabbit finding on the Opus re-gate): `build_legacy_job_requests`
+is CLI/plan-driven, with no `Service` in its call chain, so its self-derived
+root and `cli.py`'s own separately self-derived `Service(code_source=...)`
+happen to agree only because both files sit in the same checkout at the
+same relative depth; `submit_computed_moves_refresh_if_ready` instead runs
+INSIDE a live `Service` (called from `Service._reconcile_computed_moves_refresh`),
+which already has its own authoritative worker-source root
+(`self.code_source`, what `Service._launch` validates `implementation_ref`
+against) — so it takes `code_source` as a caller-supplied parameter and
+fingerprints THAT, never a root of its own; nothing published carries a
+local path, raw exception text, or an unsanitised free-text field —
+`worker.py`'s convention (a caught traceback goes to a private per-attempt
+file, never the result pipe) is the model other stages in this package
+follow.
 
 `native_board_universe.py` touches the same missing-input typed-refusal
 invariant (above) and adds two of its own, scoped to that module:

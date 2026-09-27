@@ -294,7 +294,7 @@ def test_fully_cached_plan_omits_the_provider_budget_ref(tmp_path):
 def test_no_conn_returns_none():
     assert submit_computed_moves_refresh_if_ready(
         None, registry(), _POLICY, None, catalog_path=None, objects_root=None,
-        clock=SystemClock()) is None
+        code_source=ROOT, clock=SystemClock()) is None
 
 
 def test_no_succeeded_refresh_yet_returns_none(tmp_path):
@@ -303,7 +303,7 @@ def test_no_succeeded_refresh_yet_returns_none(tmp_path):
     _commit_parent(conn, clock, store)
     assert submit_computed_moves_refresh_if_ready(
         conn, registry(), _POLICY, store, catalog_path=str(tmp_path / "ops.sqlite"),
-        objects_root=str(tmp_path), clock=clock) is None
+        objects_root=str(tmp_path), code_source=ROOT, clock=clock) is None
 
 
 def test_submits_after_refresh_succeeds_and_is_idempotent_on_a_same_session_rerun(
@@ -321,7 +321,7 @@ def test_submits_after_refresh_succeeds_and_is_idempotent_on_a_same_session_reru
 
     receipt = submit_computed_moves_refresh_if_ready(
         conn, registry(), _POLICY, store, catalog_path=str(tmp_path / "ops.sqlite"),
-        objects_root=str(tmp_path), clock=clock)
+        objects_root=str(tmp_path), code_source=ROOT, clock=clock)
     assert receipt is not None
     assert receipt.job_id == job_id_for("shadow", _computed_moves_refresh_key("2026-09-18"))
     row = conn.execute("SELECT kind FROM jobs WHERE job_id = ?", (receipt.job_id,)).fetchone()
@@ -329,7 +329,7 @@ def test_submits_after_refresh_succeeds_and_is_idempotent_on_a_same_session_reru
 
     again = submit_computed_moves_refresh_if_ready(
         conn, registry(), _POLICY, store, catalog_path=str(tmp_path / "ops.sqlite"),
-        objects_root=str(tmp_path), clock=clock)
+        objects_root=str(tmp_path), code_source=ROOT, clock=clock)
     assert again is None
     count = conn.execute(
         "SELECT COUNT(*) AS n FROM jobs WHERE kind = ?", (COMPUTED_MOVES_REFRESH_ACTION,)
@@ -382,7 +382,7 @@ def test_resolves_the_head_refresh_just_committed_not_a_stale_one(tmp_path, monk
 
     receipt = submit_computed_moves_refresh_if_ready(
         conn, registry(), _POLICY, store, catalog_path=str(tmp_path / "ops.sqlite"),
-        objects_root=str(tmp_path), clock=clock)
+        objects_root=str(tmp_path), code_source=ROOT, clock=clock)
     assert receipt is not None
     row = conn.execute("SELECT spec_json FROM jobs WHERE job_id = ?", (receipt.job_id,)).fetchone()
     params = json.loads(row["spec_json"])["parameters"]
@@ -661,3 +661,35 @@ def test_reconcile_submits_through_the_real_production_service_construction(tmp_
     assert row is not None, "submission never reached the catalog -- see issue #63"
     assert row["state"] == "queued"
     assert service._computed_moves_memo is None  # cleared: a job now exists
+
+
+def test_implementation_ref_uses_the_callers_code_source_not_this_module(tmp_path, monkeypatch):
+    """CodeRabbit finding on the Opus re-gate: implementation_ref must
+    come from the CALLER's own code_source (Service.code_source in
+    production -- the exact root Service._launch validates
+    implementation_ref against), never a root nightly.py derives from its
+    own file position, which risks disagreeing with Service.code_source
+    under a pinned/worktree execution model. Proven by spying on
+    worker_source_manifest and asserting it is called with exactly the
+    code_source this function was given, never anything self-derived."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAPL"], {}))
+    seen = []
+
+    def _spy(root):
+        seen.append(root)
+        return {"marker": str(root)}
+
+    monkeypatch.setattr("engine.v2.ops.fingerprints.worker_source_manifest", _spy)
+    other_root = tmp_path / "other-checkout"
+
+    receipt = submit_computed_moves_refresh_if_ready(
+        conn, registry(), _POLICY, store, catalog_path=str(tmp_path / "ops.sqlite"),
+        objects_root=str(tmp_path), code_source=other_root, clock=clock)
+
+    assert receipt is not None
+    assert seen == [other_root]  # exactly the caller's code_source, called exactly once

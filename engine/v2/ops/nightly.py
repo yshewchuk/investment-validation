@@ -782,10 +782,32 @@ def _session_from_refresh_key(idempotency_key):
 
 
 def _build_computed_moves_refresh_request(as_of, key, *, catalog_path, objects_root,
-                                          conn, store, clock):
+                                          code_source, conn, store, clock):
     """S4C Part 4 (revised): the ``computed_moves_refresh`` ``SubmitRequest``
     for one session, or ``None`` when there is nothing to submit -- see
-    ``submit_computed_moves_refresh_if_ready``, the only caller."""
+    ``submit_computed_moves_refresh_if_ready``, the only caller.
+
+    ``code_source`` (CodeRabbit finding on the Opus re-gate): unlike
+    ``build_legacy_job_requests``'s own ``implementation_ref``, this is
+    NOT the "documented exemption" ARCHITECTURE.md's Invariants section
+    describes -- that exemption covers a CLI/plan-driven function with no
+    ``Service`` in its call chain, where a self-derived
+    ``Path(__file__).resolve().parents[3]`` and the SEPARATELY
+    self-derived root ``cli.py``'s own ``dispatch()`` constructs ``Service``
+    with happen to agree only because both files sit in the same checkout
+    at the same relative depth. This function's ONLY caller
+    (``submit_computed_moves_refresh_if_ready``, called from
+    ``Service._reconcile_computed_moves_refresh``) runs inside a live
+    ``Service``, which already has an authoritative worker-source root of
+    its own -- ``self.code_source``, the exact root ``Service._launch``
+    recomputes ``worker_source_manifest`` from to validate
+    ``implementation_ref`` at dispatch. Deriving a SEPARATE root here (this
+    module's own file position) risks disagreeing with that root under a
+    pinned/worktree execution model where the supervisor's checkout is not
+    wherever Python happened to import ``nightly.py`` from -- silently
+    refusing every real submission as ``INPUT_CHANGED`` at launch. Passing
+    the caller's own root through, instead, makes them agree by
+    construction, the same way ``Service._launch`` itself does."""
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
@@ -796,7 +818,7 @@ def _build_computed_moves_refresh_request(as_of, key, *, catalog_path, objects_r
         return None
     refresh_plan_obj, expected_ids = built
     parameters = CalendarMovesParameters(expected_ids=expected_ids, as_of=as_of)
-    implementation_ref = content_hash(worker_source_manifest(Path(__file__).resolve().parents[3]))
+    implementation_ref = content_hash(worker_source_manifest(code_source))
     environment_ref = content_hash(
         environment_identity(_thread_count(COMPUTED_MOVES_REFRESH_ACTION)))
     return _refresh_submit_request(
@@ -834,7 +856,7 @@ def _computed_moves_identity(conn):
 
 
 def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, catalog_path,
-                                           objects_root, clock):
+                                           objects_root, code_source, clock):
     """S4C Part 4 (revised after Opus BLOCK(3) on ``dc7f9360``): the ONLY
     place ``computed_moves_refresh`` is ever submitted. Called every
     ``supervisor.Service.tick()`` (``Service._reconcile_computed_moves_refresh``),
@@ -861,6 +883,13 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
     pandas scan via ``computed_moves_store.target_tickers_from_snapshot``)
     work is never repeated every tick, all day, for a session with nothing
     to submit -- see that method's own docstring for the schedule.
+
+    ``code_source`` (CodeRabbit finding on the Opus re-gate): the caller's
+    own worker-source root -- ``Service.code_source`` when called from
+    ``Service._reconcile_computed_moves_refresh`` -- used for
+    ``implementation_ref`` instead of a root this module would derive from
+    its own file position; see ``_build_computed_moves_refresh_request``'s
+    docstring for why that self-derivation is unsafe here specifically.
     """
     from engine.v2.ops.submission import job_id_for, submit
 
@@ -877,7 +906,7 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
         return None
     request = _build_computed_moves_refresh_request(
         as_of, key, catalog_path=catalog_path, objects_root=objects_root,
-        conn=conn, store=store, clock=clock)
+        code_source=code_source, conn=conn, store=store, clock=clock)
     if request is None:
         return None
     return submit(conn, registry, policy, request, clock=clock)
