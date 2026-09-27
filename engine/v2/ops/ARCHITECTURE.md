@@ -254,8 +254,8 @@ job kind from the nightly graph. `nightly.py` is not touched by this PR.
   a typed `.code`/`.detail`/`.key` refusal object. `run_native_score_batch_worker`
   writes this as two staged files: `records.json` (an envelope document,
   `{"schema_version": "native_score_batch_records.v1.0", "authoritative":
-  false, "known_gaps": [...], "records": [...]}` — see "Failure semantics"
-  for `authoritative`/`known_gaps` — whose `records` array is the `tuple[
+  false, "known_gaps": [], "records": [...]}` — see "Failure semantics" for
+  `authoritative`/`known_gaps` — whose `records` array is the `tuple[
   ScoreRecord, ...]` `score_batch` returns, each `to_document`-serialized,
   in `ScoreBatch.requests` order, never reordered to match `events.json`)
   and `refusals.json` (one document per row refusal, `{"key": ..., "code":
@@ -1054,23 +1054,26 @@ network, or database access.
   did not anticipate should not be silently absorbed into "one more
   refusal."
 - **The post-`as_of` panel-feature anchor gap ([issue #53](
-  https://github.com/yshewchuk/investment-validation/issues/53)) is not
-  fixed here either.** This PR is explicitly shadow-only (per the user's
-  cutover-wiring decision) and must not present as authoritative. Rather
-  than mutate a `ScoreRecord` after `score_one` has already fixed its
-  content-addressed `score_id` (which this module never re-derives —
-  scoring's own identity computation is out of this PR's scope, and a
-  record this module did not itself score must not have its identity
-  recomputed by a caller), `run_native_score_batch_worker` marks the whole
-  output instead: `records.json`'s top-level document is
-  `{"schema_version": "native_score_batch_records.v1.0", "authoritative":
-  false, "known_gaps": ["PANEL_ANCHOR_UNVERIFIED"], "records": [...]}` —
-  every record in one attempt's output carries the SAME gap marker at the
-  envelope level, unconditionally (the gap applies to every panel-sourced
-  feature this assembler can stage, not only ones a heuristic flags), so no
-  consumer can read `records.json` and mistake its contents for an
-  authoritative, fully-verified score. No caller may drop `known_gaps` or
-  treat `authoritative: false` output as a board-serving input.
+  https://github.com/yshewchuk/investment-validation/issues/53)) is fixed
+  upstream (#67) and closed for this module too.** `assemble_nightly_
+  source_bundle` now takes a required, no-default `panel_anchor` keyword
+  argument and refuses `POST_AS_OF_ROW` itself when it is staged after
+  `as_of` — this module threads it straight through: `NightlyEventInputs`
+  carries a required `panel_anchor` field (mirroring `assemble_nightly_
+  source_bundle`'s own new parameter — this module derives nothing about it
+  itself; the caller who builds `events.json` is the one who owns "was
+  this the real FeatureVector.as_of/panel_row['date'] anchor"), and a
+  planted post-`as_of` `panel_anchor` on one row is a `POST_AS_OF_ROW`
+  `NativeScoreBatchRowRefusal` for that row exactly like every other
+  re-wrapped `NightlySourceBundleRefusal`, never a batch-level failure.
+  `records.json`'s envelope still carries `known_gaps` (now empty for a
+  normal batch: `{"schema_version": "native_score_batch_records.v1.0",
+  "authoritative": false, "known_gaps": [], "records": [...]}`) — the key
+  stays in the schema for a future gap this module might need to flag, but
+  nothing populates it today. `authoritative` stays `false` regardless:
+  that flag is this PR's own shadow-only design decision (per the user's
+  cutover-wiring decision), independent of the panel-anchor gap, and no
+  caller may treat `authoritative: false` output as a board-serving input.
 - **The MC-seed identity fields (user decision, 2026-09-23: native MC seed
   = `sha256(snapshot|request.key())`).** `assemble_nightly_source_bundle`'s
   own `context` carries only the calendar-required fields (no `snapshot`,
