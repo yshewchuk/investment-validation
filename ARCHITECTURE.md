@@ -47,7 +47,7 @@ request body and, if durable, in the operator guides instead — see
 |---|---|
 | `engine/v2/contracts/` | (pending) |
 | `engine/v2/foundation/` | (pending) |
-| `engine/v2/data/` | (pending) |
+| `engine/v2/data/` | [`engine/v2/data/ARCHITECTURE.md`](engine/v2/data/ARCHITECTURE.md) |
 | `engine/v2/features/` | [`engine/v2/features/ARCHITECTURE.md`](engine/v2/features/ARCHITECTURE.md) |
 | `engine/v2/models/` | [`engine/v2/models/ARCHITECTURE.md`](engine/v2/models/ARCHITECTURE.md) |
 | `engine/v2/registry/` | (pending) |

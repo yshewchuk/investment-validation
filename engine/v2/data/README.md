@@ -1,5 +1,8 @@
 # `engine/v2/data`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and invariants.
+
 ## Ownership
 
 Implements the **Ingestion — fetch receipts, normalization, coverage, finality, source revisions** row of the §4 owner table of
