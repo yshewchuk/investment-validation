@@ -21,15 +21,18 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import SubmitRequest
-from engine.v2.foundation import ArtifactStore, SystemClock
+from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
 from engine.v2.data.repository import Repository
 from engine.v2.ops import computed_moves_store, incremental_data
+from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.calendar_moves_jobs import (
     COMPUTED_MOVES_REFRESH_ACTION,
     CalendarMovesParameters,
     calendar_moves_job_spec,
 )
+from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.incremental_data import AcquisitionOutcome
+from engine.v2.ops.profiles import profile_named
 from engine.v2.ops.nightly import (
     NATIVE_COMPUTED_MOVES_ACCOUNT,
     NATIVE_REFRESH_ACTION,
@@ -47,7 +50,7 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit
 from engine.v2.ops.supervisor import Service
 from tests.data_scan_support import commit_tables, contract_for
-from tests.ops_support import catalog
+from tests.ops_support import TEST_POLICY, AdmissionWatch, catalog, request
 
 ROOT = Path(__file__).resolve().parents[1]
 _EVENTS = contract_for("earnings_events")
@@ -576,3 +579,54 @@ def test_a_new_session_resets_the_attempt_count_even_past_the_cap(tmp_path, monk
                             scope_hash="secondsession")
     service._reconcile_computed_moves_refresh()
     assert len(calls) == 6
+
+
+def test_tick_survives_an_identity_lookup_exception_and_legacy_dispatch_still_runs(tmp_path, monkeypatch):
+    """Opus re-gate, thread 3 (comment on supervisor.py:380): the identity
+    lookup and the job-exists SELECT now run inside the SAME try block as
+    submit_computed_moves_refresh_if_ready, matching
+    _reconcile_publication_status -- a raise from either must not escape
+    _reconcile_computed_moves_refresh, must not stop tick() from returning
+    normally, and must not stop the SAME tick's legacy dispatch
+    (claim_next/_launch) from running. Proven with a real "artifact_check"
+    job -- the same minimal always-registered kind and real-dispatch
+    fixture shape tests/test_v2_ops_worker_typed_failures.py's own
+    real-Service tests use (SystemClock + open_catalog, not the FakeClock
+    ``catalog()`` helper the rest of this file uses)."""
+    root = tmp_path / "svc"
+    root.mkdir()
+    store_root = root / "prod"
+    store_root.mkdir()
+    clock = SystemClock()
+    conn = open_catalog(root / "ops.sqlite", clock=clock)
+
+    def _boom(conn):
+        raise ValueError("planted identity lookup failure")
+
+    monkeypatch.setattr("engine.v2.ops.nightly._computed_moves_identity", _boom)
+
+    profile = profile_named(TEST_POLICY, "delivery")
+    job = submit(conn, registry(), _POLICY, request(
+        "dispatch-check", kind="artifact_check", checkpoint_contract_ref="receipt.v1.0",
+        parameters={"expected_ids": ["a"], "input_bindings": None},
+        implementation_ref=content_hash(worker_source_manifest(ROOT)),
+        environment_ref=content_hash(
+            environment_identity(profile.thread_count or profile.cpu_count))), clock=clock)
+
+    service = Service(conn, root, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=store_root)
+    try:
+        service.start()
+        if service.tick() is not True:  # must still claim+launch despite the sidecar's own raise
+            AdmissionWatch(conn, job.job_id).check(final=True)  # RESOURCE WAIT, if that is why
+            pytest.fail("tick did not claim/launch the legacy job")
+
+        state = conn.execute("SELECT state FROM jobs WHERE job_id = ?",
+                             (job.job_id,)).fetchone()["state"]
+        assert state != "queued"  # legacy dispatch happened despite the sidecar's own exception
+
+        assert service._computed_moves_memo is not None
+        assert service._computed_moves_memo["attempts"] == 1  # logged and backed off, not silent
+    finally:
+        service.close()
+        conn.close()

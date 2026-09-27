@@ -324,26 +324,78 @@ class Service:
                           "problem": {field: to_document(problem)[field]
                                       for field in ("code", "category", "retryable", "message")}}))
 
+    def _computed_moves_identity_or_none(self, now):
+        """The two CHEAP checks (plain indexed ``SELECT``s, no pandas scan)
+        ``_reconcile_computed_moves_refresh`` needs every tick --
+        ``nightly._computed_moves_identity`` (the session to key off and
+        the current head), and whether a job already exists under that
+        session's key -- split out to stay under the function-line budget.
+
+        Both run inside a ``try`` -- CodeRabbit finding on the Opus
+        re-gate: before this fix they ran BEFORE any ``try`` in the caller,
+        so a raise from either (a locked database, a malformed idempotency
+        key making ``_session_from_refresh_key``'s ``split`` choke) would
+        escape and crash ``tick()`` itself, contradicting ARCHITECTURE.md's
+        "never interrupt the tick or required dispatch" claim -- unlike
+        every other failure path here, matching
+        ``_reconcile_publication_status``'s own shape, whose entire body is
+        inside its ``try``. Such a raise is recorded against a dedicated
+        ``identity: None`` memo entry (there is no real identity to key it
+        by yet) via the same ``_computed_moves_backoff`` schedule, but
+        WITHOUT the ``_COMPUTED_MOVES_MAX_ATTEMPTS`` cap the caller applies
+        once a real identity is known: a transient failure here (the lock
+        clearing) has no "new identity" signal of its own to reset on, so
+        giving up permanently after 5 tries would silently and
+        irrecoverably stop this stage for the rest of the process's life;
+        instead it keeps retrying forever, just at the schedule's slowest
+        (1h) cadence past the 5th attempt.
+
+        Returns the real identity tuple when the caller should proceed, or
+        ``None`` when it should return immediately -- covering a caught
+        exception (reported and backed off here), "no identity yet"
+        (nothing succeeded), and "already submitted" (a job exists under
+        that key); the last two clear ``self._computed_moves_memo``
+        themselves, since there is nothing to back off from once a job
+        exists."""
+        from engine.v2.ops.nightly import _computed_moves_identity, _computed_moves_refresh_key
+        from engine.v2.ops.submission import job_id_for
+
+        memo = self._computed_moves_memo
+        if memo is not None and memo["identity"] is None and now < memo["not_before"]:
+            return None
+        try:
+            identity = _computed_moves_identity(self.conn)
+            exists = identity is not None and self.conn.execute(
+                "SELECT 1 FROM jobs WHERE job_id = ?",
+                (job_id_for("shadow", _computed_moves_refresh_key(identity[0])),)).fetchone() is not None
+        except Exception as exc:
+            error_memo = memo if (memo is not None and memo["identity"] is None) else {
+                "identity": None, "attempts": 0, "not_before": 0.0}
+            self._computed_moves_backoff(error_memo, now)
+            self._report_computed_moves_problem(exc)
+            return None
+        self._last_computed_moves_problem = None
+        if identity is None or exists:
+            self._computed_moves_memo = None
+            return None
+        return identity
+
     def _reconcile_computed_moves_refresh(self):
         """S4C Part 4 (revised after Opus BLOCK(3) on ``dc7f9360``, then
-        again after the Opus re-gate on ``e6be41a``): the ONLY place
-        ``computed_moves_refresh`` is submitted -- never bundled into
-        ``build_legacy_job_requests``'s single ``submit_graph`` call, so it
-        can never race or fail the required "refresh" stage
-        (``_check_head_expectation`` rejects whichever native job commits
-        its pinned head second).
+        again after the Opus re-gate on ``e6be41a``, then again after the
+        Opus re-gate on ``f531b07``): the ONLY place ``computed_moves_refresh``
+        is submitted -- never bundled into ``build_legacy_job_requests``'s
+        single ``submit_graph`` call, so it can never race or fail the
+        required "refresh" stage (``_check_head_expectation`` rejects
+        whichever native job commits its pinned head second).
 
-        Two CHEAP checks (plain indexed ``SELECT``s, no pandas scan) run
-        every tick unconditionally: ``nightly._computed_moves_identity``
-        (the session to key off and the current head), and whether a job
-        already exists under that session's key. Either "no identity yet"
-        or "already submitted" clears ``self._computed_moves_memo`` and
-        returns -- there is nothing to back off from once a job exists;
-        every later tick keeps hitting this same cheap branch for free.
+        ``_computed_moves_identity_or_none`` runs the two CHEAP checks (see
+        its own docstring for their failure semantics) and returns either a
+        real identity to proceed with, or ``None`` to return immediately.
 
-        Only when NEITHER short-circuits does this method reach the
-        EXPENSIVE path -- ``nightly.submit_computed_moves_refresh_if_ready``,
-        which (when there is no job yet) runs the full
+        Only past that does this method reach the EXPENSIVE path --
+        ``nightly.submit_computed_moves_refresh_if_ready``, which (when
+        there is no job yet) runs the full
         ``computed_moves_store.target_tickers_from_snapshot`` scan and
         builds+submits a request -- and even then only if
         ``self._computed_moves_memo`` (keyed by THIS identity; a new head
@@ -355,33 +407,23 @@ class Service:
         scoreable target) or a raised exception (a resolve/target-selection
         error, admission rejecting the request) -- counts as one spent
         attempt and schedules the next one via
-        ``_COMPUTED_MOVES_BACKOFF_SECONDS``. An exception is still caught
-        and reported the same redacted way ``_reconcile_publication_status``
-        reports its own, never left to crash the tick or block dispatch of
-        any other job. See ``nightly.submit_computed_moves_refresh_if_ready``
-        and ARCHITECTURE.md "Outputs"/"Failure semantics" for the full
-        account.
+        ``_COMPUTED_MOVES_BACKOFF_SECONDS``. Every exception this method can
+        see is caught and reported the same redacted way
+        ``_reconcile_publication_status`` reports its own, never left to
+        crash the tick or block dispatch of any other job. See
+        ``nightly.submit_computed_moves_refresh_if_ready`` and
+        ARCHITECTURE.md "Outputs"/"Failure semantics" for the full account.
         """
-        from engine.v2.ops.nightly import (
-            _computed_moves_identity,
-            _computed_moves_refresh_key,
-            submit_computed_moves_refresh_if_ready,
-        )
+        from engine.v2.ops.nightly import submit_computed_moves_refresh_if_ready
         from engine.v2.ops.snapshot_stages import _catalog_path
-        from engine.v2.ops.submission import job_id_for
 
-        identity = _computed_moves_identity(self.conn)
+        now = self.clock.monotonic()
+        identity = self._computed_moves_identity_or_none(now)
         if identity is None:
-            self._computed_moves_memo = None
-            return
-        job_id = job_id_for("shadow", _computed_moves_refresh_key(identity[0]))
-        if self.conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone() is not None:
-            self._computed_moves_memo = None
             return
         memo = self._computed_moves_memo
         if memo is None or memo["identity"] != identity:
             memo = {"identity": identity, "attempts": 0, "not_before": 0.0}
-        now = self.clock.monotonic()
         if (memo["attempts"] >= self._COMPUTED_MOVES_MAX_ATTEMPTS
                 or now < memo["not_before"]):
             self._computed_moves_memo = memo
