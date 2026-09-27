@@ -56,8 +56,8 @@ reviews:
         test) and any code the PR adds that cannot work against `main` as
         it stands.
 
-        Flag a PR that changes more than about 300 non-test lines across
-        more than about 5 non-test files and states no reason for the
+        Flag a PR that changes more than about 300 changed non-test lines
+        or more than about 5 non-test files and states no reason for the
         size — tests and generated fixtures don't count toward that
         figure.
 
