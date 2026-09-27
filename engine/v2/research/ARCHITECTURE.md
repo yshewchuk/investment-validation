@@ -185,19 +185,27 @@ and message on stderr rather than a bare traceback.
     `Repository.resolve`/`resolve_full`/`scan` raises `MANIFEST_CORRUPT`
     (`category="integrity"`, not retryable) — a tampered snapshot is
     refused rather than read.
-  - **A table absent from the resolved snapshot, or with no recorded
-    fragment time bounds** (`_scan.py`'s path) **or no declared partition
-    column** (`_snapshot.py`'s path, `_scan.py`'s path with no fragment
-    records at all). `CONTRACT_MISMATCH` (`category="validation"`, not
-    retryable) — except `_snapshot.read_table` (the `replay.py`/
-    `_chains.py`/`_trades_publish.py` path only, not `_scan.py`): a table
-    with fragments but no matching partition-key values raises a bare
-    `ValueError`, not a `DataError`. The CLIs built on this path
-    (`v2_replay.py`, `v2_build_trades.py`, `v2_reconcile_trades.py`) catch
-    only `DataError` at `main()`, so this specific condition escapes as
-    an uncaught traceback rather than the typed refusal every other
-    condition here gets. Pre-existing, not introduced or fixed by this
-    doc; tracked as a follow-up (see hand-back).
+  - **A table absent from the resolved snapshot, or whose fragments carry
+    no recorded time bounds** (`_scan.py`'s path). `CONTRACT_MISMATCH`
+    (`category="validation"`, not retryable). `_scan.read_table` itself
+    returns an *empty* frame, not a refusal, when a partition filter
+    simply matches no fragment records — `CONTRACT_MISMATCH` here is only
+    for a table the snapshot doesn't have, or one whose matched fragments
+    lack `time_min`/`time_max`.
+  - **No declared partition column, or no partition values available at
+    all** (`_snapshot.py`'s path only — `replay.py`/`_chains.py`/
+    `_trades_publish.py`, not `_scan.py`). `_snapshot.read_table` raises a
+    bare `ValueError`, not a `DataError`, when it cannot build even one
+    `KeyPredicate` — the table contract declares no partition column, or
+    no partition values are available (e.g. an explicitly empty
+    `partition_keys`, or a snapshot with no fragments for that table at
+    all). Partition keys that are simply valid-but-non-matching still
+    build a predicate and return an empty frame, same as `_scan.py`. The
+    CLIs built on this path (`v2_replay.py`, `v2_build_trades.py`,
+    `v2_reconcile_trades.py`) catch only `DataError` at `main()`, so this
+    one condition escapes as an uncaught traceback rather than the typed
+    refusal every other condition here gets. Pre-existing, not introduced
+    or fixed by this doc; tracked as a follow-up (see hand-back).
   - **A single day-partition scan that still exceeds
     `maximum_result_rows`** (`_scan.py`'s path only — `_snapshot.py` has no
     finer split to fall back to). `RESULT_LIMIT_EXCEEDED`
