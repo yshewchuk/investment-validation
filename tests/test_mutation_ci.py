@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import signal
 import subprocess
@@ -984,13 +985,27 @@ def test_plan_job_checks_the_triggering_pr_is_still_open():
 
 
 def test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
-    """Opus fix 3, second half: a matrix job can sit queued behind the
-    account's runner pool well past when the plan job's own check ran, so
-    each `mutate` matrix job repeats the same gh api check as its very
-    first step, and every step ahead of `key` is gated on its result (every
-    step from `key` on already gates on steps.key.outcome == 'success', so
-    skipping `key` itself cascades to them for free). Must fail on c1585fb,
-    which has no such step."""
+    """Opus fix 3, second half, REVISED for issue #64 and again on the
+    733fd56 gate: a matrix job can sit queued behind the account's runner
+    pool well past when the plan job's own check ran, so each `mutate`
+    matrix job repeats the same gh api check as its very first step.
+    Originally every later step gated on its result, but that made a
+    PR-closed-mid-run module skip its upload entirely while `plan` had
+    already promised `report` that module would exist -- `report`'s merge
+    correctly refused the resulting short set as MISSING_MODULES, so nearly
+    every actively-developed PR's report ended in a tool error. Now
+    checkout/setup-python/pip-install/key always run (cheap, and `export`
+    needs the checked-out module file list either way), and `run_step`
+    reads the PR-open result inside its own script, writing a clean rc=0
+    no-op instead of doing the run when the PR closed, so the module is
+    always reported, never missing. `run_step` itself stays gated on
+    `steps.key.outcome == 'success'`, never `always()`: the 733fd56 gate
+    found that `always()` let a full mutation pass start even after a
+    cancel-in-progress landed during checkout/setup-python/pip-install/key,
+    or after any of those genuinely failed. Must fail on c1585fb, which has
+    no `pr_open` step at all, on 9cbebac, whose `run_step` (and everything
+    ahead of it) still skips on steps.pr_open.outputs.open != 'false', and
+    on the issue-#64 fix's own first pass, which used `always()` here."""
     assert JOBS["mutate"]["permissions"] == {"contents": "read", "pull-requests": "read"}
     steps = JOBS["mutate"]["steps"]
     pr_open = steps[0]
@@ -1002,9 +1017,17 @@ def test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
     pip_install = next(s for s in steps if s.get("run", "").strip() ==
                         "python -m pip install -r requirements.txt -r requirements-dev.txt")
     key_step = next(s for s in steps if s.get("id") == "key")
+    for step in (checkout, setup_py, pip_install, key_step):
+        assert "if" not in step, step  # always run now, never gated on pr_open
     run_step = next(s for s in steps if s.get("id") == "run")
-    for step in (checkout, setup_py, pip_install, key_step, run_step):
-        assert step["if"] == "steps.pr_open.outputs.open != 'false'", step
+    assert run_step["if"] == "steps.key.outcome == 'success'"  # never always(): see docstring
+    assert run_step["env"]["PR_OPEN"] == "${{ steps.pr_open.outputs.open }}"
+    run_script = run_step["run"]
+    assert 'if [ "$PR_OPEN" = "false" ]; then' in run_script
+    assert 'echo "0" > "$RUNNER_TEMP/gremlin-rc"' in run_script
+    assert 'coverage/gremlins/gremlins.json' in run_script
+    assert '"results": []' in run_script  # a valid, empty raw report: never missing, never real mutants
+    assert run_script.index('if [ "$PR_OPEN" = "false" ]') < run_script.index('FRESH=""')
     restore = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache/restore"))
     assert restore["if"] == \
         "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"
@@ -1283,7 +1306,13 @@ def test_mutmut_plan_job_checks_the_triggering_pr_is_still_open():
 
 def test_mutmut_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
     """Mirrors test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step
-    for the mutmut backend."""
+    for the mutmut backend. Unlike gremlins, mutmut needs no stub raw
+    report: build_rows() already treats a missing .meta file as "0 rows"
+    (no state was restored, since "Restore mutmut state" stays gated on
+    pr_open), so a bare rc=0 is enough for a genuine, complete, 0-mutant
+    module -- though, since the 733fd56 gate, merge_dirs only accepts that
+    as genuine when --skipped-reason was NOT passed (see
+    test_mutation_results.py)."""
     assert MUT_JOBS["mutate"]["permissions"] == {"contents": "read", "pull-requests": "read"}
     steps = MUT_JOBS["mutate"]["steps"]
     pr_open = steps[0]
@@ -1295,9 +1324,18 @@ def test_mutmut_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step(
     pip_install = next(s for s in steps if s.get("run", "").strip() ==
                         "python -m pip install -r requirements.txt -r requirements-dev.txt")
     key_step = next(s for s in steps if s.get("id") == "key")
+    for step in (checkout, setup_py, pip_install, key_step):
+        assert "if" not in step, step  # always run now, never gated on pr_open
     run_step = next(s for s in steps if s.get("id") == "run")
-    for step in (checkout, setup_py, pip_install, key_step, run_step):
-        assert step["if"] == "steps.pr_open.outputs.open != 'false'", step
+    # never always(): the 733fd56 gate found that always() let a full
+    # mutation pass start even after a cancel-in-progress landed during
+    # checkout/setup-python/pip-install/key, or after any of those failed.
+    assert run_step["if"] == "steps.key.outcome == 'success'"
+    assert run_step["env"]["PR_OPEN"] == "${{ steps.pr_open.outputs.open }}"
+    run_script = run_step["run"]
+    assert 'if [ "$PR_OPEN" = "false" ]; then' in run_script
+    assert 'echo "0" > "$RUNNER_TEMP/mutation-rc"' in run_script
+    assert run_script.index('if [ "$PR_OPEN" = "false" ]') < run_script.index('BUDGET=$((52')
     restore = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache/restore"))
     assert restore["if"] == \
         "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"
@@ -1460,6 +1498,97 @@ def test_the_two_workflows_own_disjoint_artifact_names():
                         MUT_JOBS)
     assert gre_pattern["with"]["pattern"] != mut_pattern["with"]["pattern"]
     assert WORKFLOW["name"] != MUTMUT["name"]
+
+
+@pytest.mark.parametrize("jobs", [JOBS, MUT_JOBS], ids=["gremlins", "mutmut"])
+def test_report_job_counts_skipped_modules_for_report_status(jobs):
+    """Opus gate on 733fd56, issue #64: `report` must surface how many
+    modules a merge race stubbed (mutation_results.py/gremlin_results.py's
+    merge_dirs `skipped_modules` field) as its own job output, so
+    report_status can tell "every module was measured" apart from "some
+    were only a PR-closed placeholder" -- both look identical from
+    `needs.report.result` alone (merge exits 0 for both)."""
+    assert jobs["report"]["outputs"]["skipped_count"] == "${{ steps.skip.outputs.count }}"
+    step = _step("report", lambda s: s.get("id") == "skip", jobs)
+    assert step["if"] == "always()"  # must run even if the merge step itself failed
+    assert ".skipped_modules // {} | length" in step["run"]
+    assert 'echo "count=$n" >> "$GITHUB_OUTPUT"' in step["run"]
+    # runs after the merge writes merged/summary.json, before the gate step
+    steps = jobs["report"]["steps"]
+    merge_idx = next(i for i, s in enumerate(steps) if s.get("name") == "Merge module reports")
+    gate_idx = next(i for i, s in enumerate(steps)
+                    if str(s.get("name", "")).startswith("Fail only on a merge error"))
+    skip_idx = next(i for i, s in enumerate(steps) if s.get("id") == "skip")
+    assert merge_idx < skip_idx < gate_idx
+
+
+def _report_status_step(jobs):
+    return _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation status"),
+                jobs)
+
+
+@pytest.mark.parametrize("jobs,context", [(JOBS, "mutation/pr"), (MUT_JOBS, "mutation-mutmut/pr")],
+                         ids=["gremlins", "mutmut"])
+def test_report_status_job_only_runs_when_plan_resolved_a_pr(jobs, context):
+    """report_status must need [plan, report] with always() (a
+    `needs.plan.result == 'success'` guard would skip this job whenever
+    `plan` itself fails after `select_pr` already set pr_number -- see
+    tests/README.md, "Mutation CI" -- silently recreating the invisible-PR
+    problem this job exists to fix) and only proceed once `plan` actually
+    resolved a PR number; a fork PR or a non-PR/failed/cancelled Tests run
+    never reaches this far because `plan` itself is skipped or leaves
+    pr_number empty."""
+    job = jobs["report_status"]
+    assert job["needs"] == ["plan", "report"]
+    assert job["if"] == "always() && needs.plan.outputs.pr_number != ''"
+    assert job["permissions"] == {"statuses": "write"}
+    step = _report_status_step(jobs)
+    assert step["env"]["SHA"] == "${{ github.event.workflow_run.head_sha }}"
+    assert step["env"]["MODULES"] == "${{ needs.plan.outputs.modules }}"
+    assert step["env"]["REPORT_RESULT"] == "${{ needs.report.result }}"
+    assert step["env"]["SKIPPED_COUNT"] == "${{ needs.report.outputs.skipped_count }}"
+    assert f'-f context="{context}"' in step["run"]
+    assert '-f state="$state"' in step["run"]
+    assert '-f description="$desc"' in step["run"]
+    assert '-f target_url="$RUN_URL"' in step["run"]
+    assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
+
+
+def _run_status_decision(run_script, modules, report_result, skipped_count="0"):
+    # Runs everything the SHIPPED script computes before its `gh api` call
+    # (the real state/desc decision, never a hand copy) against fixture
+    # inputs, with no network call.
+    decision = run_script[:run_script.index("gh api")]
+    script = "set -euo pipefail\n" + decision + '\necho "${state}|${desc}"\n'
+    env = dict(os.environ, MODULES=modules, REPORT_RESULT=report_result,
+              SKIPPED_COUNT=skipped_count)
+    out = subprocess.run(["bash", "-c", script], input="", capture_output=True,
+                         text=True, check=True, env=env).stdout.strip()
+    state, desc = out.split("|", 1)
+    return state, desc
+
+
+@pytest.mark.parametrize("jobs", [JOBS, MUT_JOBS], ids=["gremlins", "mutmut"])
+def test_report_status_decision_covers_skip_success_and_failure(jobs):
+    """Runs the shipped decision logic directly (extracted from the real
+    step, never a hand copy) against the four cases it must distinguish: a
+    plan that found no eligible module (closed PR or docs-only, by design),
+    a report that actually published every module, a report job failure, and
+    -- Opus gate on 733fd56, issue #64 -- a report that exited 0 (not a tool
+    error) but merged one or more PR-closed placeholder modules, which must
+    NEVER read as `success`: that would claim every module was measured when
+    some were only a stub."""
+    run_script = _report_status_step(jobs)["run"]
+    state, desc = _run_status_decision(run_script, "[]", "skipped")
+    assert state == "success" and "by design" in desc
+    state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success")
+    assert state == "success" and "2" in desc
+    state, desc = _run_status_decision(run_script, '["pnl_sim"]', "failure")
+    assert state == "failure" and "failure" in desc
+    state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success",
+                                       skipped_count="1")
+    assert state == "failure"  # never success on a partial (stubbed) measurement
+    assert "skipped (PR closed)" in desc and "1" in desc
 
 
 def test_both_mutation_matrices_cap_parallelism_so_tests_never_starve():
