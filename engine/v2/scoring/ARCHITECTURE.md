@@ -175,22 +175,36 @@ function's — see Invariants (read-only, no I/O).
   `metadata`, a malformed quote, or an unknown recipe field. Typed refusals
   with a machine-checkable `.code`/`.detail` exist at two points further
   down the pipeline: `FrozenStageRefusal` (`frozen_executor.py`, e.g.
-  `MODEL_NOT_READY`) and `AnalogRefusal` (`native_analog.py`). No caching,
-  retrying, or partial-write concern applies anywhere in this package: it
-  is pure computation over its arguments, with no I/O and no side effects
-  (R2–R5 of the 4c template do not apply); every call is idempotent by
-  construction (R6).
+  `MODEL_NOT_READY`) and `AnalogRefusal` (`native_analog.py`). No retrying
+  or partial-write concern applies anywhere in this package: there is no
+  I/O and no partial write (R3–R5 of the 4c template do not apply); every
+  call is idempotent by construction (R6). One exception to "no caching":
+  `native_residuals.paired_arrays_from_artifact` keeps a process-wide,
+  in-memory `_ARRAY_CACHE` of at most 4 entries, keyed by the frozen
+  artifact's own `content_hash` — since the key is a content hash, a hit
+  and a miss always return the identical arrays (`setflags(write=False)`,
+  so neither call can mutate what the other reads); at capacity it evicts
+  the oldest-inserted entry (FIFO, not LRU) and recomputes on the next
+  request for that artifact. A miss costs one extra array-build; it never
+  changes a result or a refusal (R2 of the 4c template: cache is an
+  optimization over content-addressed, immutable data, not a correctness
+  dependency).
 - **`nightly_source_bundle.py`** (new), following the `code`/`detail`
   convention (`AnalogRefusal`/`FrozenStageRefusal`, not the plain-`ValueError`
   convention `frozen_inputs.py`/`FrozenInputsError` also uses in this
   package):
   - `class NightlySourceBundleRefusal(ValueError)` — `__init__(self, code: str, detail: str)`, message `f"{code}: {detail}"`.
   - **R1, missing input.** `calendar_row`, `panel_row`, `tier4_row`, or
-    `quote_rows` wholly absent, `calendar_row` missing any of `ticker`/
-    `event_date`/`entry_date`/`exit_date`/`expiry`/`spot`/
-    `calendar_observed_through`, or `panel_row`/`tier4_row` missing its own
-    `observed_at` key → `MISSING_STAGED_INPUT`, naming the input and (for
-    `calendar_row`) the missing key(s). This is distinct from a
+    `quote_rows` wholly absent or not a sequence, `calendar_row` missing any
+    of `ticker`/`event_date`/`entry_date`/`exit_date`/`expiry`/`spot`/
+    `calendar_observed_through`, `panel_row`/`tier4_row` missing its own
+    `observed_at` key, or any `quote_rows[i]` missing its own `observed_at`
+    key → `MISSING_STAGED_INPUT`, naming the input and (for `calendar_row`,
+    or the quote row's own index) the missing key(s). A quote row without
+    `observed_at` is refused rather than silently skipped, because skipping
+    it would let that row reach `raw_quotes` never checked against `as_of`
+    at all — worse than merely "unchecked and flagged," genuinely
+    unvalidated. This is distinct from a
     *partial* `panel_row`/`tier4_row` — an individual feature column named
     in `feature_names` but absent from the row, `None`/`pandas.NA`/`NaN`, or
     not coercible to a number at all (a string that never had a usable

@@ -92,6 +92,32 @@ def test_missing_quote_rows_refuses():
     assert exc.value.code == "MISSING_STAGED_INPUT"
 
 
+def test_quote_row_missing_observed_at_refuses():
+    # A quote row without its own observed_at must never reach raw_quotes
+    # unchecked against as_of -- skipping it silently (the prior behavior)
+    # is worse than "unchecked and flagged," it is genuinely unvalidated.
+    quote_rows = [
+        {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
+         "bid": 1.0, "ask": 1.2},  # no observed_at
+    ]
+    with pytest.raises(NightlySourceBundleRefusal) as exc:
+        assemble_nightly_source_bundle(**_valid_kwargs(quote_rows=quote_rows))
+    assert exc.value.code == "MISSING_STAGED_INPUT"
+    assert "quote_rows[0]" in str(exc.value)
+
+
+def test_quote_rows_accepts_a_tuple():
+    # quote_rows is typed as Sequence[Mapping[str, Any]], not list; a tuple
+    # (a valid Sequence) must not be misread as an absent/wrong-shaped input.
+    kwargs = _valid_kwargs()
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        quote_rows=tuple(kwargs["quote_rows"])))
+    assert bundle.raw_quotes == {
+        "C:100.0:2026-01-16": {"bid": 1.0, "ask": 1.2},
+        "P:100.0:2026-01-16": {"bid": 1.1, "ask": 1.3},
+    }
+
+
 def test_partial_feature_vector_marks_missing_mask():
     bundle = assemble_nightly_source_bundle(**_valid_kwargs())
     assert "missing_one" not in bundle.feature_vector

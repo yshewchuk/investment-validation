@@ -131,14 +131,19 @@ def _contract_quote(
     return right, strike, expiry, bid, ask
 
 
-def _staged_observed_at(quote_rows: Any) -> list[tuple[int, Any]]:
-    """Every ``observed_at`` a staged quote row owns, with its row index."""
+def _staged_observed_at(quote_rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Any]]:
+    """Every quote row's own ``observed_at``, with its row index.
+
+    Every quote row must carry one -- a row without it would reach
+    ``raw_quotes`` never checked against ``as_of`` at all, not merely
+    unchecked-and-flagged, so this refuses rather than skips it.
+    """
     found: list[tuple[int, Any]] = []
-    if quote_rows is None or not isinstance(quote_rows, Sequence):
-        return found
     for index, row in enumerate(quote_rows):
-        if isinstance(row, Mapping) and "observed_at" in row:
-            found.append((index, row["observed_at"]))
+        if not isinstance(row, Mapping) or "observed_at" not in row:
+            raise NightlySourceBundleRefusal(
+                "MISSING_STAGED_INPUT", f"quote_rows[{index}] is missing observed_at")
+        found.append((index, row["observed_at"]))
     return found
 
 
@@ -201,7 +206,11 @@ def _require_staged_inputs_present(
         if "observed_at" not in row:
             raise NightlySourceBundleRefusal(
                 "MISSING_STAGED_INPUT", f"{name} is missing observed_at")
-    if quote_rows is None:
+    if (
+        quote_rows is None
+        or isinstance(quote_rows, (str, bytes))
+        or not isinstance(quote_rows, Sequence)
+    ):
         raise NightlySourceBundleRefusal("MISSING_STAGED_INPUT", "quote_rows is missing")
 
 
@@ -275,7 +284,7 @@ def assemble_nightly_source_bundle(
     observed = _staged_observed_at(quote_rows)
     as_of_ts = validated_as_of(as_of, label="as_of")
     _checked_against_as_of(calendar_row, panel_row, tier4_row, observed, as_of_ts)
-    raw_quotes = quote_domain_map(quote_rows, quote_status)
+    raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
     feature_vector, feature_missing_mask = _project_features(
         tier4_row, panel_row, feature_names)
