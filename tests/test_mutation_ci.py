@@ -1490,6 +1490,28 @@ def test_the_two_workflows_own_disjoint_artifact_names():
     assert WORKFLOW["name"] != MUTMUT["name"]
 
 
+@pytest.mark.parametrize("jobs", [JOBS, MUT_JOBS], ids=["gremlins", "mutmut"])
+def test_report_job_counts_skipped_modules_for_report_status(jobs):
+    """Opus gate on 733fd56, issue #64: `report` must surface how many
+    modules a merge race stubbed (mutation_results.py/gremlin_results.py's
+    merge_dirs `skipped_modules` field) as its own job output, so
+    report_status can tell "every module was measured" apart from "some
+    were only a PR-closed placeholder" -- both look identical from
+    `needs.report.result` alone (merge exits 0 for both)."""
+    assert jobs["report"]["outputs"]["skipped_count"] == "${{ steps.skip.outputs.count }}"
+    step = _step("report", lambda s: s.get("id") == "skip", jobs)
+    assert step["if"] == "always()"  # must run even if the merge step itself failed
+    assert ".skipped_modules // {} | length" in step["run"]
+    assert 'echo "count=$n" >> "$GITHUB_OUTPUT"' in step["run"]
+    # runs after the merge writes merged/summary.json, before the gate step
+    steps = jobs["report"]["steps"]
+    merge_idx = next(i for i, s in enumerate(steps) if s.get("name") == "Merge module reports")
+    gate_idx = next(i for i, s in enumerate(steps)
+                    if str(s.get("name", "")).startswith("Fail only on a merge error"))
+    skip_idx = next(i for i, s in enumerate(steps) if s.get("id") == "skip")
+    assert merge_idx < skip_idx < gate_idx
+
+
 def _report_status_step(jobs):
     return _step("report_status", lambda s: str(s.get("name", "")).startswith("Post mutation status"),
                 jobs)
@@ -1514,6 +1536,7 @@ def test_report_status_job_only_runs_when_plan_resolved_a_pr(jobs, context):
     assert step["env"]["SHA"] == "${{ github.event.workflow_run.head_sha }}"
     assert step["env"]["MODULES"] == "${{ needs.plan.outputs.modules }}"
     assert step["env"]["REPORT_RESULT"] == "${{ needs.report.result }}"
+    assert step["env"]["SKIPPED_COUNT"] == "${{ needs.report.outputs.skipped_count }}"
     assert f'-f context="{context}"' in step["run"]
     assert '-f state="$state"' in step["run"]
     assert '-f description="$desc"' in step["run"]
@@ -1521,13 +1544,14 @@ def test_report_status_job_only_runs_when_plan_resolved_a_pr(jobs, context):
     assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
 
 
-def _run_status_decision(run_script, modules, report_result):
+def _run_status_decision(run_script, modules, report_result, skipped_count="0"):
     # Runs everything the SHIPPED script computes before its `gh api` call
     # (the real state/desc decision, never a hand copy) against fixture
     # inputs, with no network call.
     decision = run_script[:run_script.index("gh api")]
     script = "set -euo pipefail\n" + decision + '\necho "${state}|${desc}"\n'
-    env = dict(os.environ, MODULES=modules, REPORT_RESULT=report_result)
+    env = dict(os.environ, MODULES=modules, REPORT_RESULT=report_result,
+              SKIPPED_COUNT=skipped_count)
     out = subprocess.run(["bash", "-c", script], input="", capture_output=True,
                          text=True, check=True, env=env).stdout.strip()
     state, desc = out.split("|", 1)
@@ -1537,9 +1561,13 @@ def _run_status_decision(run_script, modules, report_result):
 @pytest.mark.parametrize("jobs", [JOBS, MUT_JOBS], ids=["gremlins", "mutmut"])
 def test_report_status_decision_covers_skip_success_and_failure(jobs):
     """Runs the shipped decision logic directly (extracted from the real
-    step, never a hand copy) against the three cases it must distinguish:
-    a plan that found no eligible module (closed PR or docs-only, by
-    design), a report that actually published, and anything else."""
+    step, never a hand copy) against the four cases it must distinguish: a
+    plan that found no eligible module (closed PR or docs-only, by design),
+    a report that actually published every module, a report job failure, and
+    -- Opus gate on 733fd56, issue #64 -- a report that exited 0 (not a tool
+    error) but merged one or more PR-closed placeholder modules, which must
+    NEVER read as `success`: that would claim every module was measured when
+    some were only a stub."""
     run_script = _report_status_step(jobs)["run"]
     state, desc = _run_status_decision(run_script, "[]", "skipped")
     assert state == "success" and "by design" in desc
@@ -1547,6 +1575,10 @@ def test_report_status_decision_covers_skip_success_and_failure(jobs):
     assert state == "success" and "2" in desc
     state, desc = _run_status_decision(run_script, '["pnl_sim"]', "failure")
     assert state == "failure" and "failure" in desc
+    state, desc = _run_status_decision(run_script, '["pnl_sim","canonical"]', "success",
+                                       skipped_count="1")
+    assert state == "failure"  # never success on a partial (stubbed) measurement
+    assert "skipped (PR closed)" in desc and "1" in desc
 
 
 def test_both_mutation_matrices_cap_parallelism_so_tests_never_starve():

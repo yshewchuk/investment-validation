@@ -471,7 +471,8 @@ def read_jsonl(path: Path) -> list[dict]:
 
 def export_module(work: Path, module: str, files: list[str], out: Path, *, mode: str,
                   changed_base: str | None = None, run_exit_code: int | None = None,
-                  elapsed: float | None = None, diffs: bool = True) -> dict:
+                  elapsed: float | None = None, diffs: bool = True,
+                  skipped_reason: str | None = None) -> dict:
     info = run_info(mode)
     snap_path = work / SNAPSHOT_NAME
     before = json.loads(snap_path.read_text()) if snap_path.exists() else None
@@ -482,8 +483,13 @@ def export_module(work: Path, module: str, files: list[str], out: Path, *, mode:
             changed = changed_functions(changed_base, info["sha"], files)
         except subprocess.CalledProcessError:
             changed = None  # base not fetched: fall back to "re-tested this run"
+    # skipped_reason (issue #64's stub, e.g. "pr_closed_mid_run") marks a
+    # module that never ran mutmut at all: rc=0 and 0 rows look identical to
+    # a real 0-mutant module, so this field is the only thing that tells
+    # merge_dirs() the difference -- a genuine measurement vs. a placeholder
+    # that must never be read as one.
     summary = summarize(rows, module, info, files, run_exit_code=run_exit_code,
-                        elapsed_seconds=elapsed)
+                        elapsed_seconds=elapsed, skipped_reason=skipped_reason)
     out.mkdir(parents=True, exist_ok=True)
     write_jsonl(out / "results.jsonl", rows)
     (out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -512,7 +518,13 @@ def merge_dirs(inputs: list[Path], out: Path,
     so it does not fail the gate; the same 124 in a full run (no time box to
     exempt it) remains one, and so does -1 in either mode -- it never means a
     clean stop, only a step timeout kill or a missing rc file (GitHub's hard
-    kill, or a skipped step). Counts stay auditable for what really arrived,
+    kill, or a skipped step). A module whose per-module summary carries a
+    ``skipped_reason`` (issue #64: the triggering PR closed while it was
+    queued, so its ``mutate`` job wrote a clean rc=0 no-op instead of running
+    mutmut at all) is likewise incomplete and withholds the score -- its 0
+    rows are a placeholder, not a real 0-mutant measurement -- but is also not
+    a tool error: a merge race is an expected outcome of a fast-merging PR,
+    never a broken workflow. Counts stay auditable for what really arrived,
     except when nothing arrived or one module reported twice, where every count
     is null (never a fabricated zero or a silently doubled total)."""
     out.mkdir(parents=True, exist_ok=True)
@@ -563,6 +575,14 @@ def merge_dirs(inputs: list[Path], out: Path,
                        for m, codes in failed.items()}
         gate_failed = {m: codes for m, codes in gate_failed.items() if codes}
         contract_violated = not complete_set or bool(mismatch)
+        # A module reported with skipped_reason set never ran mutmut at all
+        # (issue #64's PR-closed no-op): its rc is 0 and its rows are empty,
+        # exactly like a real 0-mutant module, so this is the only signal
+        # that tells the two apart. Present in `seen` (MISSING_MODULES does
+        # NOT fire), but not a real measurement (`complete` must be false)
+        # and not a tool error (a merge race is expected, not a defect).
+        skipped_modules = {s["module"]: s["skipped_reason"] for s in summaries
+                           if s.get("skipped_reason")}
         reasons = []
         if not inputs:
             reasons.append("NO_MODULE_REPORTS: no module artifact directory was downloaded")
@@ -587,11 +607,14 @@ def merge_dirs(inputs: list[Path], out: Path,
                                + _RC_PAREN.get(rc, "")
                                + ": its results are partial, so the aggregate is not a "
                                  "complete measurement")
+        for name, reason in sorted(skipped_modules.items()):
+            reasons.append(f"PR_CLOSED_SKIPPED: {name}'s run was skipped ({reason}); its "
+                           "report is a 0-mutant placeholder, not a real measurement")
         if not summaries or duplicates:
             # Nothing honest to aggregate: null counts, not zeros over an empty
             # set and not a total that silently double-counts.
             merged = {**merged, **null_block()}
-        elif contract_violated or failed:
+        elif contract_violated or failed or skipped_modules:
             # Counts cover only what really arrived; a partial run's own score is
             # not a full measurement and a recomputed aggregate score would be a
             # number no input measurement ever made, so it is withheld.
@@ -608,7 +631,8 @@ def merge_dirs(inputs: list[Path], out: Path,
                                               for n, ds in sorted(duplicates.items())},
                                 "complete_set": complete_set},
             "failed_run_modules": failed,
-            "complete": not (contract_violated or bool(failed)),
+            "skipped_modules": skipped_modules,
+            "complete": not (contract_violated or bool(failed) or bool(skipped_modules)),
             "tool_error": contract_violated or bool(gate_failed),
             "failure_reasons": reasons,
         })
@@ -647,13 +671,20 @@ def merge_dirs(inputs: list[Path], out: Path,
                                        "UNEXPECTED_MODULES", "DUPLICATE_MODULES",
                                        "RUN_PROVENANCE", "TIMEOUT_KILL",
                                        "TIME_BUDGET_STOP", "RUN_INCOMPLETE"))]
-        elif failed:
-            lines += ["", f"**A planned module hit the per-push time box "
-                      f"({', '.join(failed)}): its results are PARTIAL, so this run is "
-                      "INCOMPLETE -- not a tool failure, and not a valid full run. "
-                      "Score withheld, counts cover only what really arrived.**"]
+        elif failed or skipped_modules:
+            if failed:
+                lines += ["", f"**A planned module hit the per-push time box "
+                          f"({', '.join(failed)}): its results are PARTIAL, so this run is "
+                          "INCOMPLETE -- not a tool failure, and not a valid full run. "
+                          "Score withheld, counts cover only what really arrived.**"]
+            if skipped_modules:
+                lines += ["", f"**{len(skipped_modules)} module(s) were skipped "
+                          f"({', '.join(sorted(skipped_modules))}) because the triggering "
+                          "PR closed before their run started: this run is INCOMPLETE -- "
+                          "not a tool failure, and not a valid full run. Score withheld, "
+                          "counts cover only what really arrived.**"]
             lines += [f"- {r}" for r in merged["failure_reasons"]
-                      if r.startswith("TIME_BUDGET_STOP")]
+                      if r.startswith(("TIME_BUDGET_STOP", "PR_CLOSED_SKIPPED"))]
     (out / "summary.md").write_text("\n".join(lines) + "\n")
     return merged
 
@@ -672,6 +703,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run-exit-code", type=int, default=None)
     p.add_argument("--elapsed", type=float, default=None, help="run wall time, seconds")
     p.add_argument("--no-diffs", action="store_true")
+    p.add_argument("--skipped-reason", default=None,
+                   help="issue #64: mutmut never ran for this module (e.g. the triggering "
+                        "PR closed while it was queued); marks the module's report as an "
+                        "explicit placeholder, not a real 0-mutant measurement")
     p = sub.add_parser("merge", help="merge per-module outputs into one report")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--expected-modules", default=None,
@@ -701,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = export_module(pilot.home() / args.module, args.module, files, args.out,
                             mode=args.mode, changed_base=args.changed_base,
                             run_exit_code=args.run_exit_code, elapsed=args.elapsed,
-                            diffs=not args.no_diffs)
+                            diffs=not args.no_diffs, skipped_reason=args.skipped_reason)
     print(f"{args.module}: {summary['total']} mutants, score {_pct(summary['score'])}, "
           f"{summary['survived_untriaged']} untriaged survivors -> {args.out}")
     return 0

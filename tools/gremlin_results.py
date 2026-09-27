@@ -451,7 +451,8 @@ def normalize_raw_paths(doc, root) -> None:
 
 def export_module(module: str, raw_path: Path, out: Path, *, mode: str,
                   changed_base: str | None = None, run_exit_code: int | None = None,
-                  elapsed: float | None = None, source_root: Path = REPO) -> dict:
+                  elapsed: float | None = None, source_root: Path = REPO,
+                  skipped_reason: str | None = None) -> dict:
     info = run_info(mode)
     doc, raw_bytes, problems = load_raw(raw_path)
     fatal, incons = list(problems), []
@@ -498,8 +499,18 @@ def export_module(module: str, raw_path: Path, out: Path, *, mode: str,
         reasons.append("TIMEOUT_KILL" if run_exit_code == -1 else "RUN_INCOMPLETE")
     if counts_b.get("error"):
         reasons.append("ERROR_RESULTS")
-    complete = usable and not incons and run_exit_code in (None, 0)
-    tool_error = not complete or bool(counts_b.get("error"))
+    # issue #64: the "Run pytest-gremlins" step never ran the tool when the
+    # triggering PR closed mid-run -- it writes a valid, empty stub raw report
+    # and rc=0 instead, indistinguishable from a real 0-mutant module without
+    # this marker. Incomplete (not a real measurement), but never a tool
+    # error: a merge race is an expected outcome of a fast-merging PR, not a
+    # broken workflow.
+    skipped = skipped_reason is not None
+    if skipped:
+        reasons.append(f"PR_CLOSED_SKIPPED: run was skipped ({skipped_reason}); its report "
+                       "is a placeholder, not a real measurement")
+    complete = usable and not incons and run_exit_code in (None, 0) and not skipped
+    tool_error = (not complete and not skipped) or bool(counts_b.get("error"))
 
     summary_doc = {
         "schema_version": SCHEMA_VERSION, "backend": BACKEND,
@@ -511,6 +522,7 @@ def export_module(module: str, raw_path: Path, out: Path, *, mode: str,
         "raw_sha256": hashlib.sha256(raw_bytes).hexdigest() if raw_bytes is not None else None,
         "raw_age_seconds": round(age, 1) if age is not None and usable else None,
         "run_exit_code": run_exit_code, "elapsed_seconds": elapsed,
+        "skipped_reason": skipped_reason,
         **block, "counts_backend": counts_b, "raw_summary": summary,
         "files": by_file,
         "complete": complete, "tool_error": tool_error,
@@ -654,14 +666,22 @@ def merge_dirs(inputs: list[Path], out: Path,
     elif all(s["total"] is not None for s in summaries):
         merged_block = score_block(Counter(r["status"] for r in rows))
         if (any(s["score"] is None and s["checked"] != 0 for s in summaries)
-                or not provenance_ok or contract_violated):
-            # A module withheld its score (inconsistent raw), the inputs are not
-            # one run/mode, or the module set is not the expected one: the
+                or not provenance_ok or contract_violated
+                or any(s.get("skipped_reason") for s in summaries)):
+            # A module withheld its score (inconsistent raw), was skipped
+            # (issue #64's PR-closed placeholder), the inputs are not one
+            # run/mode, or the module set is not the expected one: the
             # merged artifact must not recompute a number no input measurement
             # actually made. Counts stay auditable for what really arrived.
             merged_block = {**merged_block, "score": None}
     else:
         merged_block = null_block()
+    # issue #64: present in `seen` (so MISSING_MODULES does not fire), but
+    # not a real measurement -- surfaced separately from `failed_run_modules`-
+    # style tool errors so report_status can tell "the plan ran, and every
+    # module was measured" apart from "a merge race skipped some of them".
+    skipped_modules = {s["module"]: s["skipped_reason"] for s in summaries
+                       if s.get("skipped_reason")}
     complete = (all(s["complete"] for s in summaries) if summaries else False) \
         and provenance_ok and not contract_violated
     reasons = [f"{s['module']}: {r}" for s in summaries for r in s["failure_reasons"]]
@@ -692,6 +712,7 @@ def merge_dirs(inputs: list[Path], out: Path,
         "complete": complete,
         "tool_error": any(s["tool_error"] for s in summaries) or not provenance_ok
                       or contract_violated,
+        "skipped_modules": skipped_modules,
         "failure_reasons": reasons,
         "expected_modules": list(expected) if expected is not None else None,
         "module_contract": None if expected is None else {
@@ -776,6 +797,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--elapsed", type=float, default=None, help="run wall time, seconds")
     p.add_argument("--source-root", type=Path, default=REPO,
                    help="root the raw file_path values are relative to (function lookup)")
+    p.add_argument("--skipped-reason", default=None,
+                   help="issue #64: pytest-gremlins never ran for this module (e.g. the "
+                        "triggering PR closed while it was queued); marks the module's "
+                        "report as an explicit placeholder, not a real measurement")
     p = sub.add_parser("merge", help="merge per-module gremlins artifacts into one report")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--expected-modules", default=None,
@@ -806,7 +831,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = export_module(args.module, args.raw, args.out, mode=args.mode,
                             changed_base=args.changed_base,
                             run_exit_code=args.run_exit_code, elapsed=args.elapsed,
-                            source_root=args.source_root)
+                            source_root=args.source_root, skipped_reason=args.skipped_reason)
     state = "TOOL FAILURE" if summary["tool_error"] else (
         "complete" if summary["complete"] else "INCOMPLETE")
     print(f"{args.module}: {_num(summary['total'])} gremlins, score {_pct(summary['score'])}, "

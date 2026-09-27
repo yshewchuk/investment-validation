@@ -83,7 +83,8 @@ def ci_env(monkeypatch):
 
 
 def export(tmp_path, doc=None, *, rc=0, elapsed=60, mode="full", name="toy",
-           raw_text=None, no_raw=False, mtime_age=None, changed_base=None):
+           raw_text=None, no_raw=False, mtime_age=None, changed_base=None,
+           skipped_reason=None):
     """Synthetic run: checkout with SOURCE, raw report, export call -> (rc, out)."""
     source_root = tmp_path / "checkout"
     (source_root / "engine" / "v2").mkdir(parents=True, exist_ok=True)
@@ -101,6 +102,8 @@ def export(tmp_path, doc=None, *, rc=0, elapsed=60, mode="full", name="toy",
             "--source-root", str(source_root)]
     if changed_base is not None:  # exactly the flag the push workflow appends
         argv += ["--changed-base", changed_base]
+    if skipped_reason is not None:  # issue #64: the export step's --skipped-reason
+        argv += ["--skipped-reason", skipped_reason]
     return gr.main(argv), out
 
 
@@ -316,6 +319,66 @@ def test_nonzero_run_exit_writes_an_honest_partial_artifact(tmp_path, ci_env):
     assert s["run_exit_code"] == -1 and "TIMEOUT_KILL" in s["failure_reasons"]
     md = (out / "summary.md").read_text()
     assert "INCOMPLETE" in md and "-1" in md
+
+
+# -- issue #64: a PR-closed-mid-run module is a skipped placeholder, never a pass ------------
+
+def test_skipped_reason_is_incomplete_but_never_a_tool_error(tmp_path, ci_env):
+    """Opus gate on 733fd56: a module whose ``mutate`` job wrote the
+    workflow's stub raw report (0 of every count, an empty results list --
+    exactly the JSON `mutation.yml`'s "Run pytest-gremlins" step writes when
+    the triggering PR closed mid-run) and rc=0 used to be indistinguishable
+    from a genuine 0-mutant module: `export_module` reported it complete,
+    and `merge_dirs` counted it as measured. `--skipped-reason` must mark it
+    incomplete (not a real measurement) while still not a tool error -- a
+    merge race is an expected outcome of a fast-merging PR, not a defect."""
+    stub_raw = {"summary": {"total": 0, "zapped": 0, "survived": 0, "timeout": 0,
+                            "error": 0, "pardoned": 0, "percentage": 0},
+                "files": {}, "results": []}
+    code, out = export(tmp_path, raw_text=json.dumps(stub_raw),
+                       skipped_reason="pr_closed_mid_run")
+    assert code == 0  # never a tool error
+    s = summary_of(out)
+    assert s["complete"] is False and s["tool_error"] is False
+    assert s["skipped_reason"] == "pr_closed_mid_run"
+    assert s["total"] == 0 and s["checked"] == 0 and s["score"] is None
+    assert any(r.startswith("PR_CLOSED_SKIPPED") and "pr_closed_mid_run" in r
+              for r in s["failure_reasons"])
+    # without the marker, the identical stub raw looks like a real pass
+    code2, out2 = export(tmp_path, raw_text=json.dumps(stub_raw), name="unmarked")
+    assert code2 == 0
+    s2 = summary_of(out2)
+    assert s2["complete"] is True and s2["skipped_reason"] is None
+
+
+def test_merge_treats_a_skipped_module_as_incomplete_never_a_tool_error(tmp_path, ci_env):
+    """The blocker in the Opus gate on 733fd56: report_status must be able to
+    tell "every module was measured" apart from "a merge race skipped one of
+    them" -- both currently look like a clean `report` success. One real
+    module (alpha) plus one PR-closed stub (beta, its module's own report
+    carrying `skipped_reason`, built from the real export() shape above) must
+    merge to `complete: false`, a withheld score, `skipped_modules` naming
+    beta, and -- critically -- `tool_error: false`, so `report_status` never
+    posts a false green status on a merge race, but also never a false red
+    one that looks like a broken workflow."""
+    _, a = export(tmp_path, raw_doc([gremlin("a1", "zapped", 5),
+                                     gremlin("a2", "survived", 12)]), name="alpha")
+    stub_raw = {"summary": {"total": 0, "zapped": 0, "survived": 0, "timeout": 0,
+                            "error": 0, "pardoned": 0, "percentage": 0},
+                "files": {}, "results": []}
+    _, b = export(tmp_path, raw_text=json.dumps(stub_raw), name="beta",
+                  skipped_reason="pr_closed_mid_run")
+    code, out = merge(tmp_path, [a, b], expected=json.dumps(["alpha", "beta"]))
+    assert code == 0  # NOT a tool error: report must not go red on a merge race
+    m = summary_of(out)
+    assert m["complete"] is False  # NOT a valid full run either: report must not go green
+    assert m["tool_error"] is False
+    assert m["score"] is None  # counts stay auditable, but no number no real run made
+    assert (m["total"], m["killed"], m["survived"]) == (2, 1, 1)  # alpha's real counts
+    assert m["skipped_modules"] == {"beta": "pr_closed_mid_run"}
+    assert set(m["modules"]) == {"alpha", "beta"}  # present: MISSING_MODULES must not fire
+    assert contract(out)["missing"] == [] and contract(out)["complete_set"] is True
+    assert any(r.startswith("beta: PR_CLOSED_SKIPPED") for r in m["failure_reasons"])
 
 
 # -- changed-base provenance (finding 1) ----------------------------------------------------
