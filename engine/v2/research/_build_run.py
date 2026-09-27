@@ -3,6 +3,13 @@
 Split out of ``engine.v2.research.build_trades`` (review blocker: module
 fan-out) with the body unchanged; ``run`` is the same function the CLI and the
 tests called there, now imported from here.
+
+``run`` resolves the replay calendar from the SAME pinned snapshot
+(``_pricing.trading_calendar_from_snapshot``, over ``daily_market``) rather
+than leaving ``replay``'s ``calendar`` argument unset — see
+``_replay_run.py``'s module docstring for why an unset ``calendar`` breaks
+reproducibility from ``snapshot_id`` (Opus-gate finding on PR-12,
+2026-09-27).
 """
 from __future__ import annotations
 
@@ -11,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+from engine.v2.research import _pricing, replay
 from engine.v2.research._trades_publish import (
     DEFAULT_SCOPE,
     publish,
@@ -24,7 +32,6 @@ from engine.v2.research._trades_revisions import (
     revisions_for_rebuild,
 )
 from engine.v2.research._trades_table import to_trades_table
-from engine.v2.research.replay import replay
 
 __all__ = ["run"]
 
@@ -42,7 +49,8 @@ def run(repository, *, strategies: Sequence[str], years=None,
     started = time.time()
     snapshot = resolve(repository, scope=scope, snapshot_id=snapshot_id)
     events = filter_events(read_event_rows(repository, snapshot), years=years)
-    results = [replay(repository, snapshot, strategy, events)
+    calendar = _pricing.trading_calendar_from_snapshot(repository, snapshot)
+    results = [replay.replay(repository, snapshot, strategy, events, calendar=calendar)
                for strategy in strategies]
     engine_rows = to_trades_table(results)
     if len(engine_rows):

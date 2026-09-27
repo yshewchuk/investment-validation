@@ -25,7 +25,7 @@ from engine.v2.contracts.data import DatasetManifest  # noqa: E402
 from engine.v2.data import catalog, manifests  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.research import _chains, _plan, _pricing, _replay_run, replay  # noqa: E402
+from engine.v2.research import _chains, _pricing, _replay_run, replay  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
     contract_for,
@@ -192,6 +192,19 @@ def _chain_rows(exit_call=(3.0, 3.4), exit_put=(2.0, 2.4)) -> list[dict]:
     return rows
 
 
+def _daily_market_rows(ticker="MKT") -> list[dict]:
+    """One ticker's daily_market rows over the same window ``_calendar()`` uses.
+
+    Only ``ticker``/``date``/``year`` are set — every other ``daily_market``
+    column is nullable, so a row missing them is a valid partial row (see
+    ``tests/data_scan_support.table_from_rows``).
+    """
+    return [
+        {"ticker": ticker, "date": date, "year": int(date.year)}
+        for date in pd.bdate_range("2024-03-01", periods=60)
+    ]
+
+
 def _event_rows() -> list[dict]:
     return [
         {
@@ -213,16 +226,25 @@ def _published(store, name, rows, partition_key):
 
 
 def _commit(conn, clock, store, *, chain_rows, event_rows, receipt_id,
-            expected_head=None, generation=0):
+            expected_head=None, generation=0, include_daily_market=True):
     """A real multi-table snapshot with an explicit expected head.
 
     ``tests/data_scan_support.commit_tables`` is hardcoded to an empty scope;
     the moved-head case needs the same commit with the prior head pinned.
+    ``include_daily_market=False`` omits the ``daily_market`` table, for the
+    typed-refusal test — every other test in this file wants it present, so
+    it defaults on.
     """
     oc_contract, oc_ref, oc_record = _published(store, "option_chains", chain_rows, "2024")
     ee_contract, ee_ref, ee_record = _published(store, "earnings_events", event_rows, "2024")
     contracts = {"option_chains": oc_contract, "earnings_events": ee_contract}
     tables = {"option_chains": [oc_record], "earnings_events": [ee_record]}
+    if include_daily_market:
+        dm_contract, dm_ref, dm_record = _published(
+            store, "daily_market", _daily_market_rows(), "2024"
+        )
+        contracts["daily_market"] = dm_contract
+        tables["daily_market"] = [dm_record]
     table_manifests: dict[str, DatasetManifest] = {}
     all_records, all_objects = [], []
     for table_name, records in tables.items():
@@ -251,7 +273,6 @@ def test_replay_output_carries_pinned_snapshot_id(tmp_path, monkeypatch):
     conn, clock, store = catalog_and_store(tmp_path)
     snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
                    event_rows=_event_rows(), receipt_id="r1")
-    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
     events = _replay_run.events_frame(repository, snap)
     outcome = _replay_run.run(
@@ -277,7 +298,6 @@ def test_replay_explicit_snapshot_id_ignores_a_moved_head(tmp_path, monkeypatch)
                      event_rows=_event_rows(), receipt_id="r2",
                      expected_head=first.snapshot_id, generation=1)
     assert second.snapshot_id != first.snapshot_id
-    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
     events = _replay_run.events_frame(repository, first)
 
@@ -307,7 +327,6 @@ def test_replay_refuses_a_corrupt_manifest(tmp_path, monkeypatch):
         (snap.snapshot_id,)).fetchone()[0]
     conn.execute("DELETE FROM data_version_fragments WHERE dataset_version_id = ?",
                  (dsv_id,))
-    monkeypatch.setattr(_plan, "trading_calendar", lambda: _calendar())
     repository = Repository(conn, store)
     with pytest.raises(DataError) as err:
         _replay_run.run(repository, strategies=["STR-THRU"], events=_events(),
@@ -341,3 +360,67 @@ def test_replay_missing_chain_index_entry_refuses_not_partial():
     assert len(result.trades) == 0
     assert result.skipped["bad_quote"] == 1
     assert result.planned == 1
+
+
+def test_replay_run_unaffected_by_a_changed_legacy_csv(tmp_path, monkeypatch):
+    """A run pinned to snapshot_id is unaffected by any change to the legacy CSV.
+
+    Plants a legacy CSV with a wildly different date range under a fake
+    ``INVESTING_PLAN_ROOT`` between two otherwise-identical runs of the same
+    pinned snapshot. If ``_replay_run.run`` read that file at all, the second
+    run's calendar (and therefore its trades) would differ from the first;
+    it must not.
+    """
+    conn, clock, store = catalog_and_store(tmp_path)
+    snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
+                   event_rows=_event_rows(), receipt_id="r1")
+    repository = Repository(conn, store)
+    events = _replay_run.events_frame(repository, snap)
+
+    before = _replay_run.run(
+        repository, strategies=["STR-THRU"], events=events,
+        reports_dir=tmp_path / "before", snapshot_id=snap.snapshot_id,
+        stamp="before",
+    )
+
+    fake_root = tmp_path / "fake_root"
+    csv_dir = fake_root / "earnings_predictions" / "data" / "raw" / "polygon"
+    csv_dir.mkdir(parents=True)
+    (csv_dir / "gspc_daily.csv").write_text(
+        "Price,Close,High,Low,Open,Volume\n"
+        "Ticker,^GSPC,^GSPC,^GSPC,^GSPC,^GSPC\n"
+        "Date,,,,,\n"
+        + "\n".join(
+            f"{d.date()},1,1,1,1,1" for d in pd.bdate_range("2030-01-01", periods=5)
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("INVESTING_PLAN_ROOT", str(fake_root))
+
+    after = _replay_run.run(
+        repository, strategies=["STR-THRU"], events=events,
+        reports_dir=tmp_path / "after", snapshot_id=snap.snapshot_id,
+        stamp="after",
+    )
+
+    pd.testing.assert_frame_equal(before["trades"], after["trades"])
+    conn.close()
+
+
+def test_replay_run_refuses_a_snapshot_with_no_daily_market_table(tmp_path):
+    """No ``daily_market`` table in the pinned snapshot: a typed refusal.
+
+    Never a fall back to the legacy CSV, and never an invented calendar.
+    """
+    conn, clock, store = catalog_and_store(tmp_path)
+    snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
+                   event_rows=_event_rows(), receipt_id="r1",
+                   include_daily_market=False)
+    repository = Repository(conn, store)
+    events = _replay_run.events_frame(repository, snap)
+
+    with pytest.raises(DataError) as err:
+        _replay_run.run(repository, strategies=["STR-THRU"], events=events,
+                        reports_dir=tmp_path / "reports", snapshot_id=snap.snapshot_id)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    conn.close()

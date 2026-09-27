@@ -72,9 +72,17 @@ snapshot-read helpers), `_pricing.py`, `_trades_revisions.py`.
 - Tier-2 tables, read through `Repository.scan` against that one snapshot:
   `option_chains` (ORATS EOD quotes — fill quality, replay's chain reads),
   `option_daily` (Polygon traded bars — fill quality), `daily_market`
-  (signal screen), `trades` (build-trades' read-before-append, reconcile's
+  (signal screen; also the replay/build-trades planning calendar, see
+  below), `trades` (build-trades' read-before-append, reconcile's
   read-before-prune) and `earnings_events` (the canonical event universe
   both trade-table tools filter to).
+- Replay and build-trades derive the trading-day calendar `plan_events`
+  needs from that same pinned snapshot's `daily_market` table
+  (`_pricing.trading_calendar_from_snapshot`, reading only the `date`
+  column through `_scan.read_table`) — never from a local file or
+  `INVESTING_PLAN_ROOT`. A snapshot with no `daily_market` table refuses
+  (`CONTRACT_MISMATCH`) rather than inventing a calendar; see Failure
+  semantics.
 - `--since`, `--min-date`, `--years`, `--strategy` (repeatable, from
   `_pricing.STRUCTURES`): per-tool read/filter narrowing; never widen a read
   past the resolved snapshot.
@@ -146,14 +154,22 @@ leaves listed above, which the layering hook does not parse.
 
 None directly: no network call (Polygon/ORATS pulls stay in
 `engine/data/pulls/`, legacy and unmoved). Snapshot access uses
-`ArtifactStore` and the sqlite catalog connection it is handed — never a
-direct filesystem or database call of this package's own. Report writers
-(`fill_quality.write_report`, `signal_screen.write_report`,
-`polygon_fills.run`'s own write step) are the one exception: they write
-Markdown/parquet/CSV/JSON files directly under the caller-provided
-`reports_dir`/`out_dir`, outside `ArtifactStore` — those are this
-package's plain local files, not snapshot-store objects. No third-party
-service. `pandas`/`numpy`/`pyarrow` for frame arithmetic.
+`ArtifactStore` and the sqlite catalog connection it is handed. Two
+exceptions, both plain local files outside `ArtifactStore` and never
+snapshot-store objects: report writers (`fill_quality.write_report`,
+`signal_screen.write_report`, `polygon_fills.run`'s own write step) write
+Markdown/parquet/CSV/JSON directly under the caller-provided
+`reports_dir`/`out_dir`; and `_pricing.trading_calendar()` reads a local
+CSV (`earnings_predictions/data/raw/polygon/gspc_daily.csv`, off
+`INVESTING_PLAN_ROOT` or the worktree root). That CSV reader is kept only
+for legacy-parity tests and direct library callers — no production
+entrypoint in this package calls it. `_replay_run.run` and
+`_build_run.run` instead resolve the replay/build-trades calendar from
+the pinned snapshot's own `daily_market` table
+(`_pricing.trading_calendar_from_snapshot`), so a run's calendar is fixed
+by its `snapshot_id` like everything else it reads (see Failure
+semantics, Invariants). No third-party service. `pandas`/`numpy`/`pyarrow`
+for frame arithmetic.
 
 ## Failure semantics
 
@@ -191,7 +207,12 @@ and message on stderr rather than a bare traceback.
     returns an *empty* frame, not a refusal, when a partition filter
     simply matches no fragment records — `CONTRACT_MISMATCH` here is only
     for a table the snapshot doesn't have, or one whose matched fragments
-    lack `time_min`/`time_max`.
+    lack `time_min`/`time_max`. This is also what a replay or build-trades
+    run gets when its pinned snapshot has no `daily_market` table:
+    `_pricing.trading_calendar_from_snapshot` reads `daily_market` through
+    this same `_scan.read_table` path, so a snapshot that cannot supply a
+    calendar is refused here rather than falling back to
+    `trading_calendar()`'s local CSV.
   - **No declared partition column, or no partition values available at
     all** (`_snapshot.py`'s path only — `replay.py`/`_chains.py`/
     `_trades_publish.py`, not `_scan.py`). `_snapshot.read_table` raises a
@@ -272,6 +293,16 @@ and message on stderr rather than a bare traceback.
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.
+- No production entrypoint derives its calendar from a local file or
+  environment variable: `_replay_run.run` and `_build_run.run` resolve the
+  planning calendar from the pinned snapshot's own `daily_market` table
+  (`_pricing.trading_calendar_from_snapshot`), and refuse
+  (`CONTRACT_MISMATCH`) rather than falling back to
+  `trading_calendar()`'s CSV read when that table is absent. Changing the
+  CSV cannot change a replay or build-trades run's output; only a
+  different pinned `snapshot_id` can. `trading_calendar()` itself stays,
+  unchanged, for legacy-parity tests and direct library callers — it is
+  never reached from a CLI in this package.
 - Never mutates the legacy trades ledger and never calls a network
   provider; `engine/build_trades.py` and `engine/data/pulls` (legacy,
   unchanged) keep doing both.
