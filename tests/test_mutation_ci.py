@@ -13,7 +13,6 @@ import re
 import signal
 import subprocess
 import sys
-import time
 import tomllib
 import types
 from pathlib import Path
@@ -2478,12 +2477,74 @@ def test_a_leaf_module_change_now_selects_every_module_via_the_sys_path_failsafe
     assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == names
 
 
-def test_import_graph_build_is_fast():
-    start = time.monotonic()
-    graph = pilot.build_import_graph()
-    elapsed = time.monotonic() - start
-    assert elapsed < 15.0, f"import graph build took {elapsed:.2f}s (budget: 15s)"
+# -- import-graph build guard: deterministic parse-count property ------------
+#
+# No clock, no calibration, no budget ratio: this checks the actual
+# algorithmic property that matters instead of a timing proxy for it.
+# `build_import_graph` (see tools/mutation_pilot.py) loops once over its
+# `tracked` argument and calls `ast.parse` exactly once per file in that
+# loop. A counting spy on `pilot.ast.parse` (installed via monkeypatch, so
+# it is restored automatically) records how many times each filename was
+# actually parsed. The guard then asserts (1) no tracked file was parsed
+# more than once, and (2) the total number of parses never exceeds the
+# number of files the builder was given -- so a bug that re-parses even one
+# file, or that parses files outside the given set, fails deterministically
+# on every run, on any host, with no flake.
+def _install_parse_spy(monkeypatch, multiply=1):
+    """Monkeypatch pilot.ast.parse with a spy that calls the real ast.parse
+    `multiply` times per invocation (default 1: real behavior, one call in
+    one call out) and records, per filename, how many times the real parse
+    actually ran. Returns the running counts dict; monkeypatch restores the
+    original pilot.ast.parse when the test ends."""
+    real_parse = pilot.ast.parse
+    parse_counts: dict[str, int] = {}
+
+    def spy(source, filename="<unknown>", *args, **kwargs):
+        result = None
+        for _ in range(multiply):
+            parse_counts[filename] = parse_counts.get(filename, 0) + 1
+            result = real_parse(source, filename, *args, **kwargs)
+        return result
+
+    monkeypatch.setattr(pilot.ast, "parse", spy)
+    return parse_counts
+
+
+def _assert_parsed_at_most_once(tracked, parse_counts):
+    assert set(parse_counts) == set(tracked), (
+        "the parse spy did not observe every tracked file being parsed -- "
+        "either build_import_graph stopped calling ast.parse through the "
+        "patched pilot.ast.parse attribute (e.g. a `from ast import parse` "
+        "rebinding that bypasses the monkeypatch), or it parsed files "
+        f"outside the tracked set: missing="
+        f"{set(tracked) - set(parse_counts)}, "
+        f"unexpected={set(parse_counts) - set(tracked)}")
+    over_parsed = {f: n for f, n in parse_counts.items() if n > 1}
+    assert not over_parsed, f"parsed more than once: {over_parsed}"
+    assert sum(parse_counts.values()) <= len(tracked), (
+        f"{sum(parse_counts.values())} total parses exceeds "
+        f"{len(tracked)} tracked files considered")
+
+
+def test_import_graph_build_parses_each_tracked_file_at_most_once(monkeypatch):
+    tracked = [p for p in _tracked(".") if p.endswith(".py")]
+    parse_counts = _install_parse_spy(monkeypatch)
+    graph = pilot.build_import_graph(tracked)
     assert len(graph) > 800  # whole repo now, not just engine/+tests/
+    _assert_parsed_at_most_once(tracked, parse_counts)
+
+
+def test_import_graph_build_flags_a_planted_double_parse(monkeypatch):
+    """Negative control for the guard above: if the builder parsed a
+    tracked file twice, `_assert_parsed_at_most_once` must catch it. The
+    plant is a spy that genuinely calls the real ast.parse twice per file
+    (not a fake counter bump), so this proves the guard detects real
+    double-parsing, not just a rigged count."""
+    tracked = [p for p in _tracked(".") if p.endswith(".py")][:10]
+    parse_counts = _install_parse_spy(monkeypatch, multiply=2)
+    pilot.build_import_graph(tracked)
+    with pytest.raises(AssertionError, match="parsed more than once"):
+        _assert_parsed_at_most_once(tracked, parse_counts)
 
 
 # -- mutate job summary: mutant-level cache reuse vs re-tested this run ------

@@ -126,7 +126,15 @@ def test_per_test_timeout_fails_the_test_by_name_and_the_run_continues(tmp_path,
         "def test_sleeps():\n    time.sleep(30)\n\n"
         "def test_after():\n    assert True\n")
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *workers,
+        # no:gremlins: pytest-gremlins (requirements-dev.txt, installed in every CI
+        # env that runs this suite) implements xdist's pytest_configure_node hook;
+        # with xdist disabled (the "serial" case's -p no:xdist) pluggy's plugin
+        # validation then raises PluginValidationError and pytest exits via
+        # INTERNALERROR instead of the per-test-timeout failure this test checks for
+        # (same fact tools/gremlin_pilot.py documents about not disabling xdist
+        # while gremlins is loaded). This test never wants gremlins active either
+        # way, so disable it unconditionally.
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:gremlins", *workers,
          "-p", "tests.conftest", "--test-timeout", "1", str(case)],
         cwd=REPO, capture_output=True, text=True, timeout=60,
         env={**os.environ, "PYTHONPATH": str(REPO)})
