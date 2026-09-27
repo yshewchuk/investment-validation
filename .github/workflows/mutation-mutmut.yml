@@ -307,11 +307,16 @@ jobs:
       STATE: ~/.cache/investing-plan-mutation-pilot/${{ matrix.module }}/mutants
     steps:
       # See mutation.yml's mutate job for the identical rationale: a queued
-      # matrix job can outlive the PR that scheduled it, and this lets it
-      # exit in seconds instead of running a full mutation pass for nothing.
-      # Reuses `needs.plan.outputs.pr_number` -- already resolved and
-      # validated by plan's "Select the triggering PR" step -- rather than
-      # re-deriving it from the raw pull_requests array a second time.
+      # matrix job can outlive the PR that scheduled it. Reuses
+      # `needs.plan.outputs.pr_number` -- already resolved and validated by
+      # plan's "Select the triggering PR" step -- rather than re-deriving it
+      # from the raw pull_requests array a second time. Only the "Run
+      # mutmut" step below actually reads this check's result (issue #64):
+      # checkout/setup-python/pip-install/key all run regardless, because
+      # "Export report" needs the checked-out module file list either way,
+      # and skipping their upload entirely used to leave `report`'s merge
+      # short of the module count `plan` promised -- a tool-error MISSING_MODULES
+      # on every PR whose mutate matrix outlived even one runner-pool wait.
       - name: Check the triggering PR is still open
         id: pr_open
         if: github.event_name == 'workflow_run'
@@ -326,12 +331,10 @@ jobs:
           [ "$state" = "open" ] && open=true
           echo "open=$open" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
-        if: steps.pr_open.outputs.open != 'false'
         with:
           fetch-depth: 0  # the push's base commit, to find the functions it changed
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
       - id: py
-        if: steps.pr_open.outputs.open != 'false'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -344,10 +347,8 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
-      - if: steps.pr_open.outputs.open != 'false'
-        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - id: key
-        if: steps.pr_open.outputs.open != 'false'
         run: |
           set -euo pipefail
           # Assigned before the echo, never interpolated inside it: the exit
@@ -380,11 +381,34 @@ jobs:
           restore-keys: ${{ steps.key.outputs.prefix }}
       - name: Run mutmut
         id: run
-        if: steps.pr_open.outputs.open != 'false'
+        if: always()
         timeout-minutes: ${{ needs.plan.outputs.mode == 'incremental' && 60 || 330 }}
+        env:
+          PR_OPEN: ${{ steps.pr_open.outputs.open }}
         run: |
           set -euo pipefail
           date +%s > "$RUNNER_TEMP/mutation-start"
+          # PR_OPEN is only ever "true"/"false" (workflow_run: set by "Check
+          # the triggering PR is still open" above) or "" (every other
+          # trigger, where that step never runs) -- never attacker input.
+          # "false" means the PR closed while this job was queued: running
+          # mutmut for a PR that is already gone wastes CI time, but the old
+          # behavior (skip this whole step AND its upload) left `report`'s
+          # merge with fewer module artifacts than `plan` promised, which it
+          # correctly refuses as MISSING_MODULES (issue #64) -- every module
+          # queued behind even one runner-pool wait vanished this way, so
+          # nearly every actively-developed PR's report ended in a tool
+          # error. rc=0 here is a clean, DELIBERATE no-op (never -1, which
+          # means "unexpectedly killed"), so "Export report" below runs
+          # `mutation_results.py export` against an empty (no cache
+          # restored) state dir -- build_rows already treats a missing
+          # .meta file as "0 rows", so this reports a genuine, complete
+          # 0-mutant module instead of leaving it missing.
+          if [ "$PR_OPEN" = "false" ]; then
+            echo "::notice::PR closed while $MODULE was queued; skipping mutmut, reporting a clean 0-mutant module instead of leaving it missing"
+            echo "0" > "$RUNNER_TEMP/mutation-rc"
+            exit 0
+          fi
           set +e
           if [ "$MODE" = "incremental" ]; then BUDGET=$((52 * 60)); else BUDGET=$((322 * 60)); fi
           python -u tools/mutation_pilot.py run "$MODULE" --max-children "$(nproc)" --time-budget-seconds "$BUDGET"

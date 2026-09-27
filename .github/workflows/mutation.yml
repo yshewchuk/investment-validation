@@ -455,13 +455,18 @@ jobs:
       # A matrix job can sit queued for a while behind the account's runner
       # pool; the plan job's own check (and the job `if:` above, both proven
       # against the PR's state at plan time) cannot see a close that happens
-      # after the matrix was already scheduled. Re-checking here, as the
-      # first step of every matrix job, lets a queued job exit in seconds
-      # instead of running a full mutation pass for a PR that is already gone.
-      # Reuses `needs.plan.outputs.pr_number` -- the one PR plan's own
-      # "Select the triggering PR" step already resolved (and validated
-      # against base.repo/head.sha) -- rather than re-deriving it from the
-      # raw, untrustworthy pull_requests array a second time.
+      # after the matrix was already scheduled. Reuses
+      # `needs.plan.outputs.pr_number` -- the one PR plan's own "Select the
+      # triggering PR" step already resolved (and validated against
+      # base.repo/head.sha) -- rather than re-deriving it from the raw,
+      # untrustworthy pull_requests array a second time. Only the "Run
+      # pytest-gremlins" step below actually reads this check's result
+      # (issue #64): checkout/setup-python/pip-install/key all run
+      # regardless, because "Export report" needs the checked-out module
+      # file list either way, and skipping their upload entirely used to
+      # leave `report`'s merge short of the module count `plan` promised --
+      # a tool-error MISSING_MODULES on every PR whose mutate matrix
+      # outlived even one runner-pool wait.
       - name: Check the triggering PR is still open
         id: pr_open
         if: github.event_name == 'workflow_run'
@@ -476,12 +481,10 @@ jobs:
           [ "$state" = "open" ] && open=true
           echo "open=$open" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
-        if: steps.pr_open.outputs.open != 'false'
         with:
           fetch-depth: 0  # the push's base commit, for the report adapter's change window
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
       - id: py
-        if: steps.pr_open.outputs.open != 'false'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -497,10 +500,8 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
-      - if: steps.pr_open.outputs.open != 'false'
-        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - id: key
-        if: steps.pr_open.outputs.open != 'false'
         env:
           EVENT: ${{ github.event_name == 'workflow_run' && 'pull_request' || github.event_name }}
           # workflow_run: the base sha `select_pr` already resolved in the
@@ -568,15 +569,36 @@ jobs:
           restore-keys: ${{ steps.key.outputs.prefix }}
       - name: Run pytest-gremlins
         id: run
-        if: steps.pr_open.outputs.open != 'false'
+        if: always()
         # 60 min on a PR's gated workflow_run: incremental PR checks must stay
         # bounded and never queue behind (or emulate) main's full 330-min
         # budget. main's push/schedule/dispatch runs are unaffected -- only
         # the event differs.
         timeout-minutes: ${{ github.event_name == 'workflow_run' && 60 || 330 }}
+        env:
+          PR_OPEN: ${{ steps.pr_open.outputs.open }}
         run: |
           set -euo pipefail
           date +%s > "$RUNNER_TEMP/gremlin-start"
+          # PR_OPEN is only ever "true"/"false" (workflow_run: set by "Check
+          # the triggering PR is still open" above) or "" (every other
+          # trigger, where that step never runs) -- never attacker input.
+          # See mutation-mutmut.yml's "Run mutmut" step for the identical
+          # rationale (issue #64): running pytest-gremlins for a PR that
+          # already closed wastes CI time, but skipping this step AND its
+          # upload used to leave `report`'s merge short of the module count
+          # `plan` promised -- a tool-error MISSING_MODULES on nearly every
+          # actively-developed PR. The stub raw report below is valid
+          # against validate_raw's shape check (0 of every count, an empty
+          # results list), so "Export report" reports a genuine, complete
+          # 0-mutant module instead of leaving it missing.
+          if [ "$PR_OPEN" = "false" ]; then
+            echo "::notice::PR closed while $MODULE was queued; skipping pytest-gremlins, reporting a clean 0-mutant module instead of leaving it missing"
+            mkdir -p coverage/gremlins
+            printf '%s\n' '{"summary": {"total": 0, "zapped": 0, "survived": 0, "timeout": 0, "error": 0, "pardoned": 0, "percentage": 0}, "files": {}, "results": []}' > coverage/gremlins/gremlins.json
+            echo "0" > "$RUNNER_TEMP/gremlin-rc"
+            exit 0
+          fi
           # --fresh only for a full run: it clears .gremlins_cache. Incremental
           # keeps the cache this job restored above. A plain string (not an
           # array) so it never trips `set -u` when empty.

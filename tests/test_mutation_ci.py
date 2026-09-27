@@ -985,13 +985,22 @@ def test_plan_job_checks_the_triggering_pr_is_still_open():
 
 
 def test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
-    """Opus fix 3, second half: a matrix job can sit queued behind the
-    account's runner pool well past when the plan job's own check ran, so
-    each `mutate` matrix job repeats the same gh api check as its very
-    first step, and every step ahead of `key` is gated on its result (every
-    step from `key` on already gates on steps.key.outcome == 'success', so
-    skipping `key` itself cascades to them for free). Must fail on c1585fb,
-    which has no such step."""
+    """Opus fix 3, second half, REVISED for issue #64: a matrix job can sit
+    queued behind the account's runner pool well past when the plan job's
+    own check ran, so each `mutate` matrix job repeats the same gh api
+    check as its very first step. Originally every later step gated on its
+    result, but that made a PR-closed-mid-run module skip its upload
+    entirely while `plan` had already promised `report` that module would
+    exist -- `report`'s merge correctly refused the resulting short set as
+    MISSING_MODULES, so nearly every actively-developed PR's report ended
+    in a tool error. Now only the actual mutation pass (`run_step`) reads
+    the result: checkout/setup-python/pip-install/key always run (cheap,
+    and `export` needs the checked-out module file list either way), and
+    `run_step` itself writes a clean rc=0 no-op instead of doing the run
+    when the PR closed, so the module is always reported, never missing.
+    Must fail on c1585fb, which has no `pr_open` step at all, and on
+    9cbebac, whose `run_step` (and everything ahead of it) still skips on
+    steps.pr_open.outputs.open != 'false'."""
     assert JOBS["mutate"]["permissions"] == {"contents": "read", "pull-requests": "read"}
     steps = JOBS["mutate"]["steps"]
     pr_open = steps[0]
@@ -1003,9 +1012,17 @@ def test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
     pip_install = next(s for s in steps if s.get("run", "").strip() ==
                         "python -m pip install -r requirements.txt -r requirements-dev.txt")
     key_step = next(s for s in steps if s.get("id") == "key")
+    for step in (checkout, setup_py, pip_install, key_step):
+        assert "if" not in step, step  # always run now, never gated on pr_open
     run_step = next(s for s in steps if s.get("id") == "run")
-    for step in (checkout, setup_py, pip_install, key_step, run_step):
-        assert step["if"] == "steps.pr_open.outputs.open != 'false'", step
+    assert run_step["if"] == "always()"
+    assert run_step["env"]["PR_OPEN"] == "${{ steps.pr_open.outputs.open }}"
+    run_script = run_step["run"]
+    assert 'if [ "$PR_OPEN" = "false" ]; then' in run_script
+    assert 'echo "0" > "$RUNNER_TEMP/gremlin-rc"' in run_script
+    assert 'coverage/gremlins/gremlins.json' in run_script
+    assert '"results": []' in run_script  # a valid, empty raw report: never missing, never real mutants
+    assert run_script.index('if [ "$PR_OPEN" = "false" ]') < run_script.index('FRESH=""')
     restore = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache/restore"))
     assert restore["if"] == \
         "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"
@@ -1284,7 +1301,11 @@ def test_mutmut_plan_job_checks_the_triggering_pr_is_still_open():
 
 def test_mutmut_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step():
     """Mirrors test_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step
-    for the mutmut backend."""
+    for the mutmut backend. Unlike gremlins, mutmut needs no stub raw
+    report: build_rows() already treats a missing .meta file as "0 rows"
+    (no state was restored, since "Restore mutmut state" stays gated on
+    pr_open), so a bare rc=0 is enough for a genuine, complete, 0-mutant
+    module."""
     assert MUT_JOBS["mutate"]["permissions"] == {"contents": "read", "pull-requests": "read"}
     steps = MUT_JOBS["mutate"]["steps"]
     pr_open = steps[0]
@@ -1296,9 +1317,15 @@ def test_mutmut_mutate_job_checks_the_triggering_pr_is_still_open_as_first_step(
     pip_install = next(s for s in steps if s.get("run", "").strip() ==
                         "python -m pip install -r requirements.txt -r requirements-dev.txt")
     key_step = next(s for s in steps if s.get("id") == "key")
+    for step in (checkout, setup_py, pip_install, key_step):
+        assert "if" not in step, step  # always run now, never gated on pr_open
     run_step = next(s for s in steps if s.get("id") == "run")
-    for step in (checkout, setup_py, pip_install, key_step, run_step):
-        assert step["if"] == "steps.pr_open.outputs.open != 'false'", step
+    assert run_step["if"] == "always()"
+    assert run_step["env"]["PR_OPEN"] == "${{ steps.pr_open.outputs.open }}"
+    run_script = run_step["run"]
+    assert 'if [ "$PR_OPEN" = "false" ]; then' in run_script
+    assert 'echo "0" > "$RUNNER_TEMP/mutation-rc"' in run_script
+    assert run_script.index('if [ "$PR_OPEN" = "false" ]') < run_script.index('BUDGET=$((52')
     restore = next(s for s in steps if str(s.get("uses", "")).startswith("actions/cache/restore"))
     assert restore["if"] == \
         "needs.plan.outputs.mode == 'incremental' && steps.pr_open.outputs.open != 'false'"

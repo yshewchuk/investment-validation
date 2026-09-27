@@ -247,11 +247,25 @@ recovered safely), and that workflow_run's own `head_repository` is this
 repository too -- see the workflows' own "PR context: workflow_run" comments
 for the full mechanics and why mutation used to starve `Tests` for the
 account's shared pool of Actions runners by starting its 30+-job matrix
-alongside it on every PR. Each plan job (and, again, each `mutate` matrix
-job as its first step) also calls `gh api` to check whether that PR is still
-open; if it closed or merged after its Tests run started, the plan emits an
-empty matrix and the whole run finishes in seconds, and a matrix job already
-queued when the PR closes exits just as fast instead of running a full pass.
+alongside it on every PR. Each plan job also calls `gh api` to check
+whether that PR is still open; if it closed or merged after its Tests run
+started, the plan emits an empty matrix and the whole run finishes in
+seconds. Each `mutate` matrix job repeats that same check as its own
+first step, because a queued matrix job can outlive the PR that scheduled
+it -- but (fixed 2026-09-27, issue #64) only the actual mutation pass
+reads that result now: checkout/setup-python/pip-install/the cache-key
+step always run regardless (cheap, and the export step below needs the
+checked-out module file list either way), and a PR-closed job writes a
+clean `run_exit_code=0` no-op -- mutmut's own build-rows already treats a
+missing state dir as "0 mutants"; gremlins' job writes a stub raw report
+(0 of every count, an empty results list, valid against `validate_raw`'s
+shape check) -- instead of skipping its own upload. The earlier design
+skipped the upload outright, so any module still queued when its PR
+closed simply vanished from that run's artifact set, and `report`'s merge
+correctly refused the resulting short set as `MISSING_MODULES` -- on an
+actively-developed PR (where a merge race is common, not rare) this made
+nearly every PR's `report` end in a tool error, which `report_status`
+(below) would then have posted as a red status on nearly every PR.
 `.github/workflows/cancel-stale-runs.yml` reliably cancels any in-progress/
 queued `Tests` run tied to a PR once that PR closes (it also tries for
 `mutation`/`mutation-mutmut`, but a workflow_run-triggered run's own
@@ -263,6 +277,11 @@ each backend has three disjoint concurrency groups, one per trigger family
 (a PR's `workflow_run`, a push to main, and schedule/dispatch together), so
 none of the three can ever cancel a run from a different family, and each of
 the first two cancels an older still-running run of its own family:
+
+| workflow | backend | concurrency groups | cache namespace | module artifacts | aggregate artifact |
+|---|---|---|---|---|---|
+| `mutation.yml` | pytest-gremlins 1.9.0 (`tools/gremlin_pilot.py`) | `mutation-gremlins-pr-<n>` (workflow_run, PR number known) / `mutation-gremlins-<repo>-<branch>-<event>` (workflow_run fallback) / `mutation-gremlins-push-<ref>` (push) / `mutation-gremlins-<ref>` (schedule, dispatch) | `mutation-gremlins<ver>-...` (per-module tracked-input fingerprint) over `.gremlins_cache` | `mutation-module-<module>` | `mutation-report` |
+| `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-pr-<n>` / `mutation-mutmut-<repo>-<branch>-<event>` / `mutation-mutmut-push-<ref>` / `mutation-mutmut-<ref>` (same four cases) | `mutation-mutmut<ver>-py<ver>-<config-hash>-<module>-...` (per-module config-hash) over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
 
 **A `workflow_run`-triggered run never attaches to the PR's own Checks tab --
 GitHub always lists it under the default branch's Actions history instead --
@@ -298,11 +317,6 @@ than silence; otherwise it mirrors the `report` job's own result
 (`success` maps to `success`, anything else to `failure`). The two
 contexts, `mutation-mutmut/pr` and `mutation/pr`, are distinct from each
 other and from the `Tests` check.
-
-| workflow | backend | concurrency groups | cache namespace | module artifacts | aggregate artifact |
-|---|---|---|---|---|---|
-| `mutation.yml` | pytest-gremlins 1.9.0 (`tools/gremlin_pilot.py`) | `mutation-gremlins-pr-<n>` (workflow_run, PR number known) / `mutation-gremlins-<repo>-<branch>-<event>` (workflow_run fallback) / `mutation-gremlins-push-<ref>` (push) / `mutation-gremlins-<ref>` (schedule, dispatch) | `mutation-gremlins<ver>-...` (per-module tracked-input fingerprint) over `.gremlins_cache` | `mutation-module-<module>` | `mutation-report` |
-| `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-pr-<n>` / `mutation-mutmut-<repo>-<branch>-<event>` / `mutation-mutmut-push-<ref>` / `mutation-mutmut-<ref>` (same four cases) | `mutation-mutmut<ver>-py<ver>-<config-hash>-<module>-...` (per-module config-hash) over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
 
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,
