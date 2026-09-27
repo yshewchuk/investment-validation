@@ -2511,6 +2511,14 @@ def _install_parse_spy(monkeypatch, multiply=1):
 
 
 def _assert_parsed_at_most_once(tracked, parse_counts):
+    assert set(parse_counts) == set(tracked), (
+        "the parse spy did not observe every tracked file being parsed -- "
+        "either build_import_graph stopped calling ast.parse through the "
+        "patched pilot.ast.parse attribute (e.g. a `from ast import parse` "
+        "rebinding that bypasses the monkeypatch), or it parsed files "
+        f"outside the tracked set: missing="
+        f"{set(tracked) - set(parse_counts)}, "
+        f"unexpected={set(parse_counts) - set(tracked)}")
     over_parsed = {f: n for f, n in parse_counts.items() if n > 1}
     assert not over_parsed, f"parsed more than once: {over_parsed}"
     assert sum(parse_counts.values()) <= len(tracked), (
