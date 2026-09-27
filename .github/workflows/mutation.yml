@@ -122,8 +122,10 @@ jobs:
           # pull_request only: narrow the matrix to the modules the PR's diff
           # can actually affect -- each changed path selects every enabled
           # module that owns it OR transitively depends on it (a static ast
-          # import-graph closure over engine/**/*.py and tests/**/*.py; the
-          # shared changed_modules selection rule), or nothing if it is on
+          # import-graph closure over every tracked .py file, including
+          # conftest.py closure roots and literal importlib.import_module/
+          # __import__ strings; the shared changed_modules selection rule),
+          # or nothing if it is on
           # the small docs-only inert allowlist (tools/mutation_pilot.toml's
           # [pr_selection] inert), or EVERY enabled module if it is neither
           # (an unrecognized path is never assumed safe to skip) or if the

@@ -170,8 +170,9 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
 #      a deleted/renamed-away owned file still matches), OR the path is in
 #      that module's DEPENDENCY SET (`module_dependency_closure`: the
 #      transitive closure, over a static `ast` import graph of every tracked
-#      engine/**/*.py and tests/**/*.py file, of the imports reachable from
-#      the module's own `mutate` files plus its `tests` files) -> that
+#      `.py` file (including `conftest.py` closure roots and literal
+#      `importlib.import_module`/`__import__` strings), of the imports
+#      reachable from the module's own `mutate` files plus its `tests` files) -> that
 #      module is selected. A module that OWNS a changed path is not
 #      necessarily the only one whose DEPENDENCY SET contains it: e.g.
 #      engine/v2/foundation/artifacts.py is owned by `foundation`, but every
@@ -193,9 +194,9 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
 # dependency set either (`module_dependency_closure` is only computed for
 # `enabled_modules(cfg)`).
 #
-# Fail safe: if the import graph cannot be built (a `.py` file under
-# engine/tests fails to parse -- including a changed file with a syntax
-# error, since the graph is built from the current on-disk tree -- or any
+# Fail safe: if the import graph cannot be built (any tracked `.py` file
+# fails to parse -- including a changed file with a syntax error, since the
+# graph is built from the current on-disk tree -- or any
 # other exception while building it), `changed_modules` selects every
 # requested module immediately and prints why, rather than silently falling
 # back to ownership-only selection.
@@ -212,9 +213,10 @@ def is_inert_changed_path(cfg: dict, path: str) -> bool:
     (`tools/mutation_pilot.toml`'s `[pr_selection] inert`, fnmatch patterns
     where `*` also matches `/`, same convention as `mutate`/`tests`/`skip`)
     and does NOT match `[pr_selection] inert_skip` (patterns carved back out
-    of the allowlist: e.g. a `.md` file under `engine/dashboard/static/` is a
-    fingerprinted code asset, not documentation, even though it matches the
-    broad `*.md` pattern). Kept small and docs-only on purpose: anything the
+    of the allowlist: e.g. a `.md` file under `engine/dashboard/static/` would
+    be a fingerprinted code asset, not documentation, if a future `inert`
+    pattern ever widened to reach it again). Kept small and docs-only on
+    purpose: anything the
     mutation-tested code (engine/v2) might read at runtime, or a test might
     load as a fixture, must NOT be on this list, or a real defect could hide
     behind a skipped run. Checked against the bare path string, so a
@@ -385,6 +387,95 @@ def _string_import_target(node: ast.Call) -> str | None:
     return None
 
 
+_FILE_PATH_LOADERS = {
+    # call name -> (positional arg index, keyword arg name) of the file path
+    "spec_from_file_location": (1, "location"),
+    "SourceFileLoader": (1, "path"),
+    "run_path": (0, "path_name"),
+}
+
+
+def _call_name(func: ast.expr) -> str | None:
+    """The bare called name of a `Call.func` node: `f.attr` for `x.y.f(...)`,
+    `f.id` for a bare `f(...)`, else None (e.g. the callee is itself a call
+    result or subscript). Used to recognize a loader call regardless of how
+    its module was imported (`importlib.util.spec_from_file_location(...)`
+    or a bare `spec_from_file_location(...)` after a `from` import)."""
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _loader_call_path(node: ast.Call) -> tuple[bool, str | None]:
+    """(True, literal_path) if `node` calls one of `_FILE_PATH_LOADERS`
+    (`importlib.util.spec_from_file_location`, `importlib.machinery.
+    SourceFileLoader`, or `runpy.run_path`, however imported) and its file
+    path argument is a string literal; (True, None) if it calls one of them
+    with a NON-literal (dynamic) or missing path argument -- the caller must
+    treat that as the file-path-loader fail-safe; (False, None) if `node`
+    calls none of them at all."""
+    name = _call_name(node.func)
+    if name not in _FILE_PATH_LOADERS:
+        return (False, None)
+    idx, kw = _FILE_PATH_LOADERS[name]
+    arg = node.args[idx] if len(node.args) > idx else None
+    if arg is None:
+        for keyword in node.keywords:
+            if keyword.arg == kw:
+                arg = keyword.value
+                break
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return (True, arg.value)
+    return (True, None)
+
+
+def _resolve_literal_path(lit: str, tracked_set: set[str]) -> str | None:
+    """A literal file-path string (from a loader call's path argument)
+    resolved to a tracked file, or None. Only an exact, already-repo-relative
+    literal resolves (an optional leading "./" is stripped first) -- this
+    does not walk the filesystem or evaluate a computed expression like
+    `os.path.join(...)` or `Path(__file__).parent / "x.py"` (those are not
+    string literals and never reach this function; `_loader_call_path`
+    returns `None` for them, which the fail-safe handles)."""
+    norm = lit[2:] if lit.startswith("./") else lit
+    return norm if norm in tracked_set else None
+
+
+def _mutates_sys_path(node: ast.AST) -> bool:
+    """True if `node` is a call to `sys.path.insert(...)`,
+    `sys.path.append(...)`, or `sys.path.extend(...)`, or an assignment
+    (`Assign`/`AugAssign`) whose target is `sys.path` itself or a subscript
+    of it (`sys.path[0] = ...`, `sys.path[:0] = [...]`, `sys.path += [...]`).
+    Any of these can put an arbitrary, unresolvable directory on the import
+    path, after which a plain `import x` elsewhere in the same process may
+    resolve to a file this static graph cannot predict -- the caller treats
+    this the same as a dynamic loader-call path: the whole file is marked as
+    depending on everything."""
+    def is_sys_path(expr: ast.expr) -> bool:
+        return (isinstance(expr, ast.Attribute) and expr.attr == "path"
+                and isinstance(expr.value, ast.Name) and expr.value.id == "sys")
+
+    if isinstance(node, ast.Call):
+        func = node.func
+        return (isinstance(func, ast.Attribute)
+                and func.attr in ("insert", "append", "extend")
+                and is_sys_path(func.value))
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AugAssign):
+        targets = [node.target]
+    else:
+        return False
+    for target in targets:
+        if is_sys_path(target):
+            return True
+        if isinstance(target, ast.Subscript) and is_sys_path(target.value):
+            return True
+    return False
+
+
 def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     """Static import graph over EVERY git-tracked `.py` file in the repo (no
     hand-kept root allowlist -- see `_tracked_roots`): maps each file to the
@@ -415,6 +506,7 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
         except SyntaxError as exc:
             raise SyntaxError(f"{rel}: {exc}") from exc
         edges = graph[rel]
+        dynamic = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -444,6 +536,22 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                     if target:
                         edges.add(target)
                     edges |= _ancestor_package_inits(dotted_str, tracked_set)
+                    continue
+                is_loader, literal = _loader_call_path(node)
+                if is_loader:
+                    if literal is None:
+                        dynamic = True
+                    else:
+                        resolved = _resolve_literal_path(literal, tracked_set)
+                        if resolved:
+                            edges.add(resolved)
+                elif _mutates_sys_path(node):
+                    dynamic = True
+            elif isinstance(node, (ast.Assign, ast.AugAssign)):
+                if _mutates_sys_path(node):
+                    dynamic = True
+        if dynamic:
+            edges |= tracked_set - {rel}
     return graph
 
 

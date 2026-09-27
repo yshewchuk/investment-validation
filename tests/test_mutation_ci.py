@@ -1524,9 +1524,20 @@ def test_cmd_matrix_accepts_missing_changed_files_attr_for_backward_compatibilit
 def test_real_toml_inert_allowlist_is_the_small_docs_only_list():
     # Locks in the intended small allowlist: widening it (even by one
     # pattern) is a real design decision, not something that should drift
-    # silently through an unrelated toml edit.
+    # silently through an unrelated toml edit. The allowlist names root-level
+    # Markdown files explicitly (2026-09-26) rather than a broad "*.md",
+    # which used to make every package-local README.md (e.g.
+    # engine/v2/foundation/README.md) inert too.
     cfg2 = pilot.load_config()
-    assert cfg2["pr_selection"]["inert"] == ["*.md", "docs/*", "guides/*"]
+    assert cfg2["pr_selection"]["inert"] == [
+        "README.md",
+        "EARNINGS_VOL_PROGRAM_PLAN.md",
+        "PROJECT_ASSESSMENT_2026-09-05.md",
+        "RECOVERY.md",
+        "TECH_DEBT.md",
+        "docs/*",
+        "guides/*",
+    ]
 
 
 def test_is_inert_changed_path_respects_inert_skip():
@@ -1539,15 +1550,28 @@ def test_is_inert_changed_path_respects_inert_skip():
 def test_real_toml_inert_skip_carves_dashboard_static_out_of_the_md_pattern():
     assert CFG["pr_selection"]["inert_skip"] == ["engine/dashboard/static/*.md"]
     assert pilot.is_inert_changed_path(CFG, "engine/dashboard/static/notes.md") is False
-    # README.md/ARCHITECTURE.md elsewhere are still inert -- only the
-    # dashboard's fingerprinted static asset tree is carved out.
+    # The root-level Markdown files named explicitly in `inert` are still
+    # inert -- but a package-local README.md (e.g. under engine/v2/) is NOT:
+    # `inert` no longer has a broad "*.md" pattern for `inert_skip` to carve
+    # anything out of, so an engine/**/README.md change now correctly
+    # selects every enabled module instead of being silently skipped.
     assert pilot.is_inert_changed_path(CFG, "README.md") is True
-    assert pilot.is_inert_changed_path(CFG, "engine/v2/foundation/README.md") is True
+    assert pilot.is_inert_changed_path(CFG, "engine/v2/foundation/README.md") is False
 
 
 def test_a_md_file_under_dashboard_static_selects_every_enabled_module():
     names = pilot.enabled_modules(CFG)
     assert pilot.changed_modules(CFG, names, ["engine/dashboard/static/CHANGELOG.md"]) == names
+
+
+def test_a_package_local_readme_is_no_longer_inert_and_selects_every_module():
+    # Regression for the pre-2026-09-26 broad "*.md" inert pattern, which
+    # made a real, non-dashboard package README (e.g.
+    # engine/v2/foundation/README.md) inert and silently skipped the whole
+    # PR matrix. The allowlist now names root-level Markdown files
+    # explicitly, so this unrecognized path selects every enabled module.
+    names = pilot.enabled_modules(CFG)
+    assert pilot.changed_modules(CFG, names, ["engine/v2/foundation/README.md"]) == names
 
 
 # -- reverse import closure ---------------------------------------------------
@@ -1783,6 +1807,83 @@ def test_build_import_graph_ignores_a_non_literal_import_module_argument(tmp_pat
     assert graph["tests/test_dynamic.py"] == set()
 
 
+def test_build_import_graph_resolves_a_literal_spec_from_file_location_path(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib.util\n"
+        "spec = importlib.util.spec_from_file_location('y', 'engine/y.py')\n")
+    tracked = ["engine/y.py", "tools/loader.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "engine/y.py" in graph["tools/loader.py"]
+
+
+def test_build_import_graph_resolves_a_literal_run_path_target(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import runpy\n"
+        "runpy.run_path('engine/y.py', run_name='__main__')\n")
+    tracked = ["engine/y.py", "tools/runner.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "engine/y.py" in graph["tools/runner.py"]
+
+
+def test_build_import_graph_a_dynamic_loader_path_selects_every_enabled_module(tmp_path, monkeypatch):
+    # A non-literal path argument to spec_from_file_location cannot be
+    # resolved statically -- the whole file is marked as depending on
+    # everything, so a change to any tracked file makes changed_modules
+    # select every module that reaches this file (here, "target" itself,
+    # since the dynamic-loader file IS target's own mutate file).
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "dynamic.py").write_text(
+        "import importlib.util\n"
+        "def load(path):\n"
+        "    return importlib.util.spec_from_file_location('m', path)\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/dynamic.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/dynamic.py"] == {"engine/unrelated.py"}
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "target": {"why": "x", "mutate": ["engine/dynamic.py"], "tests": []},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["target"], ["engine/unrelated.py"], graph=graph)
+    assert selected == ["target"]
+
+
+def test_build_import_graph_a_sys_path_insert_selects_every_enabled_module(tmp_path, monkeypatch):
+    # sys.path.insert(...) can make a later plain `import x` resolve to a
+    # file this static graph cannot predict -- same fail-safe as a dynamic
+    # loader-call path.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "pathhack.py").write_text(
+        "import sys\n"
+        "sys.path.insert(0, 'somewhere')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/pathhack.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/pathhack.py"] == {"engine/unrelated.py"}
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "target": {"why": "x", "mutate": ["engine/pathhack.py"], "tests": []},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["target"], ["engine/unrelated.py"], graph=graph)
+    assert selected == ["target"]
+
+
 def test_conftest_own_imports_are_a_closure_root_for_tests_under_its_directory(tmp_path, monkeypatch):
     (tmp_path / "engine").mkdir()
     (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
@@ -1821,12 +1922,24 @@ def test_domain_valuation_init_change_selects_its_dependents():
     assert "scoring_application" in selected
 
 
-def test_a_leaf_module_change_selects_only_that_module():
-    # engine/v2/research/*.py is imported by nothing outside the research
-    # module itself, so its dependency closure never reaches into any other
-    # module's tests/sources -- the changed path selects exactly its owner.
+def test_a_leaf_module_change_now_selects_every_module_via_the_sys_path_failsafe():
+    # Before 2026-09-26, engine/v2/research/*.py was imported by nothing
+    # outside the research module itself, so this changed path selected
+    # exactly ["research"]. The path-based-loader fail-safe added that day
+    # changed this: a large share of tracked checks/*.py files use the
+    # common `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))`
+    # idiom to make themselves runnable as standalone scripts, which the
+    # fail-safe (deliberately, per spec) cannot distinguish from a genuinely
+    # unpredictable sys.path mutation -- each such file is marked as
+    # depending on EVERY tracked file. Because nearly every enabled module's
+    # test suite transitively reaches at least one checks/*.py file (the
+    # same "chooser via checks bridge" path proven elsewhere in this file),
+    # this is no longer a leaf change: it now selects all 33 enabled
+    # modules, same as an unrecognized path would. This is a real, reported
+    # breadth effect of the fail-safe (see PR discussion), not a bug in this
+    # test.
     names = pilot.enabled_modules(CFG)
-    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == ["research"]
+    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == names
 
 
 def test_import_graph_build_is_fast():
