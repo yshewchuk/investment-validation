@@ -37,9 +37,13 @@ caller in production yet — see "Production call path" below.
 ## Inputs
 
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
-  `session` columns — e.g. the `earnings_events` Tier-2 table's shape), an
-  `as_of` date, a horizon in days, and an optional ticker filter. It performs
-  no I/O itself — the caller loads the table.
+  `session` columns — e.g. the `earnings_events` Tier-2 table's shape,
+  where `event_date` is schema-typed `datetime64[ns]`), an `as_of` date, a
+  horizon in days, and an optional ticker filter. It performs no I/O itself
+  — the caller loads the table. `event_date` may also be given as ISO 8601
+  strings (date-only or full timestamp, mixed within one column); numeric
+  values are rejected rather than read as epoch-relative offsets (see
+  "Failure semantics").
 - The rest of the package: job plans, submitted requests, resource profiles,
   catalog state — unchanged.
 
@@ -92,13 +96,20 @@ type. No file, network, or database access.
 ## Failure semantics (4c R1–R6)
 
 - **Missing or malformed input:** `events_table` missing `ticker`,
-  `event_date`, or `session`; holding an `event_date` column that cannot be
-  parsed as timestamps (e.g. an unparseable string); holding an
-  `event_date` value that parses to null (`NaT`, e.g. a `None`/`NaN`
-  cell); or holding a timezone-aware `event_date` column (this module only
-  supports timezone-naive event dates, matching `as_of`) — each is a
-  whole-call typed refusal (`OpsError`, code `INVALID_REQUEST`), raised
-  before any row is read — never a partial or silently smaller result.
+  `event_date`, or `session`; holding more than one column under any of
+  those three labels (checked before any column is read by label); holding
+  an `event_date` column of numeric dtype (rejected outright — never read
+  as an epoch-relative offset, e.g. `20260201`); holding an `event_date`
+  column that otherwise cannot be parsed as timestamps (e.g. an
+  unparseable string); holding an `event_date` value that parses to null
+  (`NaT`, e.g. a `None`/`NaN` cell); or holding a timezone-aware
+  `event_date` column (this module only supports timezone-naive event
+  dates, matching `as_of`) — each is a whole-call typed refusal
+  (`OpsError`, code `INVALID_REQUEST`), raised before any row is read —
+  never a partial or silently smaller result. `event_date` values already
+  typed as `datetime64` (naive or tz-aware) or given as ISO 8601 strings
+  (date-only and full-timestamp forms may be mixed within one column) are
+  accepted.
 - **Cache:** none. The function holds no cache; it reads only the table its
   caller passes in.
 - **Retry:** pure and deterministic for a given table snapshot; re-execution

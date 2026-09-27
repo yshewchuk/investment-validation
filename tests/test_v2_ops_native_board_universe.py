@@ -135,6 +135,18 @@ class TestMalformedEventsTableRefuses:
         assert excinfo.value.code == "INVALID_REQUEST"
 
 
+class TestDuplicateRequiredColumn:
+    def test_duplicate_required_column_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": pd.Timestamp("2026-02-01"), "session": "BMO"},
+        ])
+        events_df = pd.concat([events_df, events_df[["ticker"]]], axis=1)
+        assert list(events_df.columns).count("ticker") == 2
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+
 class TestEventDateColumnConversion:
     def test_parseable_string_event_date_column_is_accepted(self):
         events_df = _events([
@@ -167,6 +179,28 @@ class TestEventDateColumnConversion:
     def test_timezone_aware_event_date_raises_invalid_request(self):
         events_df = _events([
             {"ticker": "AAA", "event_date": "2026-02-01T00:00:00+00:00", "session": "BMO"},
+        ])
+        with pytest.raises(OpsError) as excinfo:
+            board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        assert excinfo.value.code == "INVALID_REQUEST"
+
+    def test_mixed_date_only_and_iso_timestamp_event_dates_are_accepted(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": "2026-02-01", "session": "BMO"},
+            {"ticker": "BBB", "event_date": "2026-02-02T10:30:00", "session": "AMC"},
+        ])
+        requests = board_requests(
+            pd.Timestamp("2026-01-25"), 21, None, events_df,
+        )
+        by_ticker = {
+            r.ticker: r.event_date for r in requests if r.strategy != "DYN-SV"
+        }
+        assert by_ticker["AAA"] == pd.Timestamp("2026-02-01")
+        assert by_ticker["BBB"] == pd.Timestamp("2026-02-02T10:30:00")
+
+    def test_numeric_event_date_raises_invalid_request(self):
+        events_df = _events([
+            {"ticker": "AAA", "event_date": 20260201, "session": "BMO"},
         ])
         with pytest.raises(OpsError) as excinfo:
             board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)

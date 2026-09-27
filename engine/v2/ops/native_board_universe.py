@@ -63,6 +63,68 @@ class BoardRequest:
     session: str
 
 
+def _validated_event_dates(events_table: pd.DataFrame) -> pd.Series:
+    """Validate `events_table`'s required columns and return its
+    `event_date` column parsed to timezone-naive timestamps.
+
+    Raises `OpsError` (code `INVALID_REQUEST`) for every case
+    `board_requests` documents: a missing or duplicated required column, a
+    numeric `event_date` dtype, an `event_date` value that cannot be parsed
+    as a timestamp, a null/`NaT` `event_date`, or a timezone-aware
+    `event_date` column.
+    """
+    missing = [c for c in _REQUIRED_COLUMNS if c not in events_table.columns]
+    if missing:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            f"events_table missing required columns: {sorted(missing)}",
+        ))
+    column_counts = events_table.columns.value_counts()
+    duplicated = sorted(
+        c for c in _REQUIRED_COLUMNS if column_counts.get(c, 0) > 1
+    )
+    if duplicated:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            f"events_table has duplicate required columns: {duplicated}",
+        ))
+
+    event_date_column = events_table["event_date"]
+    if pd.api.types.is_numeric_dtype(event_date_column):
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            "events_table event_date column holds numeric values, not "
+            "timestamps or ISO 8601 strings; a numeric value such as "
+            "20260201 would be misread as an epoch-relative offset rather "
+            "than a calendar date",
+        ))
+
+    try:
+        if pd.api.types.is_datetime64_any_dtype(event_date_column):
+            event_dates = pd.to_datetime(event_date_column)
+        else:
+            event_dates = pd.to_datetime(event_date_column, format="ISO8601")
+    except (ValueError, TypeError) as exc:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            f"events_table event_date column could not be parsed as timestamps: {exc}",
+        )) from exc
+
+    if event_dates.isna().any():
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            "events_table event_date column contains null or unparseable "
+            "timestamps",
+        ))
+    if getattr(event_dates.dt, "tz", None) is not None:
+        raise OpsError(make_problem(
+            "INVALID_REQUEST",
+            "events_table event_date column is timezone-aware; "
+            "board_requests only supports timezone-naive event dates",
+        ))
+    return event_dates
+
+
 def board_requests(
     as_of,
     horizon_days: int,
@@ -84,36 +146,10 @@ def board_requests(
     dates, matching `as_of`) — a whole-call refusal raised before any row
     is read, never a partial or silently empty/smaller result.
     """
-    missing = [c for c in _REQUIRED_COLUMNS if c not in events_table.columns]
-    if missing:
-        raise OpsError(make_problem(
-            "INVALID_REQUEST",
-            f"events_table missing required columns: {sorted(missing)}",
-        ))
+    event_dates = _validated_event_dates(events_table)
 
     as_of_ts = pd.Timestamp(as_of).normalize()
     horizon = as_of_ts + pd.Timedelta(days=horizon_days)
-
-    try:
-        event_dates = pd.to_datetime(events_table["event_date"])
-    except (ValueError, TypeError) as exc:
-        raise OpsError(make_problem(
-            "INVALID_REQUEST",
-            f"events_table event_date column could not be parsed as timestamps: {exc}",
-        )) from exc
-
-    if event_dates.isna().any():
-        raise OpsError(make_problem(
-            "INVALID_REQUEST",
-            "events_table event_date column contains null or unparseable "
-            "timestamps",
-        ))
-    if getattr(event_dates.dt, "tz", None) is not None:
-        raise OpsError(make_problem(
-            "INVALID_REQUEST",
-            "events_table event_date column is timezone-aware; "
-            "board_requests only supports timezone-naive event dates",
-        ))
 
     events = events_table.assign(event_date=event_dates)
     events = events[
