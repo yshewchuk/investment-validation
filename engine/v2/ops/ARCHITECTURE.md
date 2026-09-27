@@ -163,10 +163,25 @@ nothing before this PR builds real dicts to hand them.
   returns `{}` (not a refusal — `native_parity_handler`'s existing
   `_refuse_empty_inputs` already turns an empty `legacy_rows` into
   `VALIDATION_FAILED` downstream, so this function does not need its own
-  empty-input check); a row missing `ticker`/`strategy`/`event_date` keys
-  under `""` for that field, exactly as `population_key` already does —
-  no new behavior invented here, and see "Failure semantics" below for why
-  that is a real, tested risk rather than a defensive-only note.
+  empty-input check). **Unlike `population_key` itself, `legacy_parity_rows`
+  does NOT reuse its `.get(key, "")` empty-string substitution for a
+  missing `ticker`/`strategy`/`event_date`** (root doc §5: "a missing or
+  unusable input produces an explicit withheld/refused status," never a
+  silent default) — reusing that substitution here would let one malformed
+  row's empty-string-keyed entry either collide with a genuinely
+  empty-fielded row, or, more likely with real data, simply end up unique
+  and reported as an ordinary `only_legacy` row: quietly absorbed into the
+  report as a population difference rather than surfaced as the malformed
+  input it actually is. `legacy_parity_rows` therefore validates each row
+  before keying it: `ticker`/`strategy`/`event_date` must each be present
+  and a non-empty value, or the WHOLE call raises `OpsError`
+  (`INVALID_REQUEST`, detail naming the row's index and the missing
+  field) — a batch-level refusal, not a per-row skip, so a legacy
+  `score.json` this malformed is never silently read as "smaller than it
+  is." `population_key`'s own `.get(key, "")` substitution and its one
+  existing caller (`_action_score`'s population check, which validates the
+  full expected/observed population separately and would itself already
+  disagree on an empty-strategy row) are unchanged.
 - **`native_parity_report.py` gains a caller-supplied "explained" bucket**,
   the mechanism for classifying a known structural difference (legacy's
   stale-px rule; legacy finality drift — memory `d14-corpus-parity`'s
@@ -350,15 +365,25 @@ never invented here to make a real-data run look cleaner than it is.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
-- Cutover PR-4 (design; see "Primary contracts" above): once
-  `tools/native_parity_run.py` supplies real rows, `native_parity_report.json`
-  (already written by `native_parity_handler` today, just always over
-  empty inputs in production) carries a real `"compared"`/`"only_legacy"`/
-  `"only_native"`/`"mismatches"` split, plus the new `"explained"` list
-  (each entry `mismatches`-shaped plus `"reason"`) for a caller-classified
-  known structural difference. Still private-shadow-only, same as every
-  other artifact in this bullet list; nothing here writes to the legacy
-  board.
+- Cutover PR-4 (design; see "Primary contracts" above): `native_parity_report.json`
+  is NOT written in production today, and this correction matters, not
+  only the file it is written to — `compare_native_vs_legacy`'s own
+  `_refuse_empty_inputs` raises `VALIDATION_FAILED` on an empty
+  `legacy_rows`/`native_rows`/no shared key, `native_parity_handler`
+  propagates that raise, and `_run_stage` catches it for the `OPTIONAL`
+  `native_parity` stage as a `"degraded"` receipt — `write_parity_report`
+  is never reached, so no file lands on disk. That is consistent with,
+  not in tension with, "`run_shadow_nightly` has no production caller,
+  only tests ... call it": today's only callers hand it real dicts (the
+  tests) or nothing at all (nobody in production), never an empty
+  `parity_rows` that reaches `compare_native_vs_legacy` and then writes a
+  report anyway. Once `tools/native_parity_run.py` supplies real rows,
+  `native_parity_report.json` will, for the first time in production,
+  carry a real `"compared"`/`"only_legacy"`/`"only_native"`/`"mismatches"`
+  split, plus the new `"explained"` list (each entry `mismatches`-shaped
+  plus `"reason"`) for a caller-classified known structural difference.
+  Still private-shadow-only, same as every other artifact in this bullet
+  list; nothing here writes to the legacy board.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the EXISTING `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never
@@ -1048,11 +1073,14 @@ partway through a `NightlyReceipt` that is itself private and never
 consumed by the legacy board. There is no code path from this script back
 into `engine.dashboard.nightly`.
 
-- **R1, missing input.** `legacy_parity_rows` never refuses: a
-  `score_document` missing `"rows"` returns `{}`; a row missing
-  `ticker`/`strategy`/`event_date` keys under `""` (`population_key`'s
-  existing behavior, not new). This is a REAL join-format risk stated
-  explicitly, not a defensive-only note: `population_key` and
+- **R1, missing input.** `legacy_parity_rows` raises `OpsError`
+  (`INVALID_REQUEST`) for the whole call — never a per-row skip, and never
+  `population_key`'s own `.get(key, "")` substitution reused here — the
+  moment any row is missing a non-empty `ticker`/`strategy`/`event_date`
+  (see "Primary contracts" above for why). A `score_document` missing
+  `"rows"` entirely still returns `{}`, not a refusal: there is no row to
+  be malformed. This is a REAL join-format risk stated explicitly, not a
+  defensive-only note: `population_key` and
   `native_row_key` must format `event_date` identically (e.g. both an ISO
   date string, never one side a `pandas.Timestamp.__str__()` and the other
   a plain date string) or a legitimately-shared event silently lands in
@@ -1088,11 +1116,22 @@ into `engine.dashboard.nightly`.
   (unchanged by this PR) writes one JSON file after
   `compare_native_vs_legacy` fully returns; there is no multi-step commit
   to make atomic.
-- **R5, partial write.** `write_parity_report` still writes once, after
-  comparison finishes — unchanged. `tools/native_parity_run.py` writes no
-  file of its own; `run_shadow_nightly`'s own `receipt_path` write (if
-  given) is unchanged pre-existing behavior, guarded by the same
-  `path.parent.mkdir`/single `write_text` it already uses.
+- **R5, partial write.** `write_parity_report` calls `comparison` fully
+  before writing, and calls `Path.write_text` exactly once — but that call
+  is a plain, non-atomic write (no temp-file-plus-rename, unlike
+  `ArtifactStore`'s atomic publication elsewhere in this package), and
+  this PR does not change that. A process killed mid-`write_text` can
+  leave a truncated or invalid-JSON `native_parity_report.json` on disk;
+  this PR names that risk rather than silently inheriting it, and does
+  not widen it — `write_parity_report`'s call site and body are both
+  unchanged by this PR. Recovery is by rerun, not atomicity: a truncated
+  report has no attempt/lease state of its own to reconcile (this is a
+  manual, operator-invoked script, not a supervised job — see "R3, retry"
+  above), so the operator re-invokes `tools/native_parity_run.py`, which
+  overwrites the file with a fresh, complete write. `run_shadow_nightly`'s
+  own `receipt_path` write (if given) has the identical non-atomic shape
+  and the identical rerun-to-recover story, both pre-existing and both
+  unchanged by this PR.
 - **R6, idempotency.** Same `score.json` + same `events.json` + same
   resolved release + same `row_explanations` → the same
   `native_parity_report.json`, byte-for-byte: `legacy_parity_rows` is a
