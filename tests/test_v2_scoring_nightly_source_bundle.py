@@ -285,6 +285,11 @@ def test_quote_domain_map_none_rows_with_empty_status_still_refuses():
 
 
 def test_quote_domain_map_matches_capture_call_site():
+    # capture_tier0_corpus.quote_domain_map is the SAME imported function
+    # object as this module's, so comparing the two calls to each other
+    # would compare the implementation with itself, vacuously. Assert
+    # against an independently-computed expected map instead, covering both
+    # the CALL->C normalization and a second strike at the same expiry.
     from tools.capture_tier0_corpus import quote_domain_map as capture_quote_domain_map
 
     rows = [
@@ -295,7 +300,13 @@ def test_quote_domain_map_matches_capture_call_site():
         {"right": "CALL", "strike": 105.0, "expiry": "2026-01-16",
          "bid": 0.2, "ask": 0.3},
     ]
-    assert quote_domain_map(rows) == capture_quote_domain_map(rows)
+    expected = {
+        "C:100.0:2026-01-16": {"bid": 1.0, "ask": 1.2},
+        "P:95.0:2026-01-16": {"bid": 0.5, "ask": 0.7},
+        "C:105.0:2026-01-16": {"bid": 0.2, "ask": 0.3},
+    }
+    assert quote_domain_map(rows) == expected
+    assert capture_quote_domain_map(rows) == expected
 
 
 def test_capture_shim_preserves_original_message_via_detail():

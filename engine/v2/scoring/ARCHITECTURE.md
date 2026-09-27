@@ -155,7 +155,9 @@ declare an interface nothing in the checked graph actually uses.
   `checks/*` and `tools/*` (including `tools/capture_tier0_corpus.py`) call
   deeper into the package for offline capture/acceptance use; they sit
   outside the package's machine-checked `<!-- consumers: -->` allowlist by
-  design. `nightly_source_bundle.py` has no caller yet (see Purpose).
+  design. `assemble_nightly_source_bundle()` has no production caller yet;
+  `tools/capture_tier0_corpus.py` calls `quote_domain_map()` for offline
+  capture (see Purpose).
 
 ## External systems and libraries
 
@@ -184,10 +186,11 @@ function's — see Invariants (read-only, no I/O).
   package):
   - `class NightlySourceBundleRefusal(ValueError)` — `__init__(self, code: str, detail: str)`, message `f"{code}: {detail}"`.
   - **R1, missing input.** `calendar_row`, `panel_row`, `tier4_row`, or
-    `quote_rows` wholly absent, or `calendar_row` missing any of `ticker`/
+    `quote_rows` wholly absent, `calendar_row` missing any of `ticker`/
     `event_date`/`entry_date`/`exit_date`/`expiry`/`spot`/
-    `calendar_observed_through` → `MISSING_STAGED_INPUT`, naming the input
-    and (for `calendar_row`) the missing key(s). This is distinct from a
+    `calendar_observed_through`, or `panel_row`/`tier4_row` missing its own
+    `observed_at` key → `MISSING_STAGED_INPUT`, naming the input and (for
+    `calendar_row`) the missing key(s). This is distinct from a
     *partial* `panel_row`/`tier4_row` — an individual feature column named
     in `feature_names` but absent from the row, `None`/`pandas.NA`/`NaN`, or
     not coercible to a number at all (a string that never had a usable
