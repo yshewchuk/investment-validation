@@ -364,22 +364,33 @@ def _ancestor_package_inits(dotted: str, tracked_set: set[str]) -> set[str]:
     return out
 
 
-def _string_import_target(node: ast.Call) -> str | None:
-    """The dotted module name of an `importlib.import_module("x.y")` or
-    `__import__("x.y")` call (however `import_module` itself was imported:
-    `importlib.import_module(...)`, a bare `import_module(...)` after
-    `from importlib import import_module`, or `__import__(...)`), when the
-    first positional argument is a string literal. None for every other
-    call, including one whose argument is a variable, an f-string, or any
-    other computed expression -- those are dynamic and this static graph
-    cannot see them (the existing "failed to parse -> select all" fail-safe
-    protects the overall selection; this function does not try to)."""
+def _is_import_module_call(node: ast.Call) -> bool:
+    """True if `node`'s callee is `importlib.import_module` (attribute or a
+    bare name after `from importlib import import_module`) or a bare
+    `__import__(...)`, however imported. `build_import_graph` uses this
+    SEPARATELY from `_string_import_target` to tell "this call has the
+    import-module SHAPE but its argument doesn't resolve" (a fail-safe
+    case) apart from "this call isn't shaped like this at all" (ignore and
+    keep checking other call shapes)."""
     func = node.func
-    is_import_call = (
+    return (
         (isinstance(func, ast.Attribute) and func.attr == "import_module")
         or (isinstance(func, ast.Name) and func.id in ("import_module", "__import__"))
     )
-    if not is_import_call or not node.args:
+
+
+def _string_import_target(node: ast.Call) -> str | None:
+    """The dotted module name of an `importlib.import_module("x.y")` or
+    `__import__("x.y")` call (`_is_import_module_call`), when the first
+    positional argument is a string literal. None for every other call,
+    including one whose argument is a variable, an f-string, or any other
+    computed expression, or one that also passes a `package=` keyword (a
+    relative name, which needs the calling file's own package to resolve
+    and this function does not attempt) -- `build_import_graph` marks the
+    WHOLE FILE dynamic for any of these (it checks `_is_import_module_call`
+    and this function together), never silently drops the edge the way an
+    unrelated function call is silently ignored."""
+    if not _is_import_module_call(node) or not node.args:
         return None
     arg = node.args[0]
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
@@ -472,82 +483,72 @@ def _eval_file_relative_path(expr: ast.expr, rel: str) -> list[str] | None:
     return None
 
 
-def _dir_is_tracked(components: list[str], tracked_set: set[str]) -> bool:
-    """True if `components` (repo-relative directory path parts, `[]` for
-    the repo root) names the repo root itself or a directory that actually
-    contains at least one tracked file. Used to tell a genuine sys.path
-    widening onto a real part of this repo from one that computes a
-    directory this tracked tree has nothing under (treated the same as
-    unresolvable)."""
-    if not components:
-        return True
-    prefix = "/".join(components) + "/"
-    return any(f.startswith(prefix) for f in tracked_set)
-
-
-def _sys_path_call_attr(node: ast.Call) -> str | None:
-    """"insert"/"append"/"extend" if `node` calls that method on `sys.path`
-    (`sys.path.insert(...)`/`.append(...)`/`.extend(...)`), else None."""
-    func = node.func
-    if (isinstance(func, ast.Attribute) and func.attr in ("insert", "append", "extend")
-            and isinstance(func.value, ast.Attribute) and func.value.attr == "path"
-            and isinstance(func.value.value, ast.Name) and func.value.value.id == "sys"):
-        return func.attr
-    return None
-
-
 _SUBPROCESS_FUNCS = {"run", "call", "check_call", "check_output", "Popen"}
 
 
 def _is_python_interpreter_arg(arg: ast.expr) -> bool:
-    """True if `arg` is `sys.executable`, or the literal string "python" or
-    "python3" -- the forms `_subprocess_python_target` recognizes as
-    "this subprocess call launches the CURRENT Python interpreter"."""
+    """True if `arg` is `sys.executable`, or a literal string starting with
+    "python" (covers "python", "python3", "python3.11", "pythonw", ...) --
+    the forms `_subprocess_call_effect` recognizes as "this subprocess call
+    launches a Python interpreter". Anything else (a variable, an
+    f-string, `sys.argv[0]`, ...) falls through to `_subprocess_call_effect`'s
+    own fail-safe, since this graph cannot rule out that an unresolvable
+    first argv element is ALSO a Python interpreter."""
     if isinstance(arg, ast.Attribute) and arg.attr == "executable" \
             and isinstance(arg.value, ast.Name) and arg.value.id == "sys":
         return True
-    return isinstance(arg, ast.Constant) and arg.value in ("python", "python3")
+    return isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+        and arg.value.startswith("python")
 
 
-def _subprocess_python_target(node: ast.Call, rel: str, tracked_set: set[str],
-                               roots: set[str]) -> tuple[bool, str | None, bool]:
+def _subprocess_call_effect(node: ast.Call, rel: str, tracked_set: set[str],
+                             roots: set[str]) -> tuple[bool, str | None, bool]:
     """(matched, resolved_edge, fail_safe) for a call to a `subprocess.*`
     runner (`run`/`call`/`check_call`/`check_output`/`Popen`, however
-    imported). `matched` is True only when the first positional argument is
-    an argv LIST/TUPLE whose first element is the Python interpreter
-    (`_is_python_interpreter_arg`) -- a subprocess call to any OTHER program
-    (git, gh, a shell tool, ...), or one whose first argument isn't a
-    literal list/tuple at all, is NOT matched and must NEVER be treated as
-    fail-safe: this graph only cares about launching the CURRENT
-    interpreter on more tracked code. When matched: `fail_safe` is True if
-    the script/module argv cannot be resolved (a variable, a computed path
-    with no `_eval_file_relative_path` form, ...) -- an unresolvable
-    Python-interpreter subprocess genuinely could run arbitrary tracked
-    code, unlike a non-Python one. Otherwise `resolved_edge` is the literal
-    or `__file__`-relative script path resolved to a tracked file via
-    `_resolve_literal_path`, or a literal `-m <module>` pair resolved via
-    `_resolve_dotted` -- either may be None (nothing to add, or the
-    resolved path/module isn't a tracked file) without being a fail-safe."""
+    imported). `matched` is False ONLY when `node` calls none of these at
+    all -- once it IS one of these calls, sound by construction means this
+    graph must account for it one way or another: an argv that isn't a
+    literal list/tuple, a first argv element that is neither a literal
+    string nor recognized as the Python interpreter
+    (`_is_python_interpreter_arg`), a Python interpreter invoked with `-c`
+    (arbitrary inline code, never resolvable to a tracked file), a `-m`
+    followed by a non-literal module, or a script-path argument that
+    resolves via neither a literal string nor `_eval_file_relative_path`,
+    are ALL `fail_safe=True` -- an unresolvable case might be launching the
+    CURRENT interpreter on arbitrary tracked code, so it is never silently
+    ignored the way a call to some unrelated function is. Only a fully
+    literal argv whose first element resolves to a NON-Python program (any
+    OTHER literal string) is safe to treat as inert (`fail_safe=False`,
+    `resolved_edge=None`) -- this graph has no way to reach tracked code
+    through git/gh/a shell tool/etc."""
     name = _call_name(node.func)
-    if name not in _SUBPROCESS_FUNCS or not node.args:
+    if name not in _SUBPROCESS_FUNCS:
         return (False, None, False)
+    if not node.args:
+        return (True, None, True)
     argv = node.args[0]
     if not isinstance(argv, (ast.List, ast.Tuple)) or not argv.elts:
-        return (False, None, False)
-    if not _is_python_interpreter_arg(argv.elts[0]):
-        return (False, None, False)
+        return (True, None, True)
+    first = argv.elts[0]
+    if _is_python_interpreter_arg(first):
+        pass
+    elif isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return (True, None, False)  # a literal, non-Python command: inert
+    else:
+        return (True, None, True)  # can't tell what program this launches
     rest = argv.elts[1:]
     if not rest:
         return (True, None, False)
-    if isinstance(rest[0], ast.Constant) and rest[0].value == "-m" and len(rest) > 1:
-        mod_arg = rest[1]
-        if isinstance(mod_arg, ast.Constant) and isinstance(mod_arg.value, str):
-            return (True, _resolve_dotted(mod_arg.value, tracked_set, roots), False)
+    first_rest = rest[0]
+    if isinstance(first_rest, ast.Constant) and first_rest.value == "-c":
         return (True, None, True)
-    script = rest[0]
-    if isinstance(script, ast.Constant) and isinstance(script.value, str):
-        return (True, _resolve_literal_path(script.value, tracked_set), False)
-    components = _eval_file_relative_path(script, rel)
+    if isinstance(first_rest, ast.Constant) and first_rest.value == "-m":
+        if len(rest) > 1 and isinstance(rest[1], ast.Constant) and isinstance(rest[1].value, str):
+            return (True, _resolve_dotted(rest[1].value, tracked_set, roots), False)
+        return (True, None, True)
+    if isinstance(first_rest, ast.Constant) and isinstance(first_rest.value, str):
+        return (True, _resolve_literal_path(first_rest.value, tracked_set), False)
+    components = _eval_file_relative_path(first_rest, rel)
     if components is not None:
         return (True, _resolve_literal_path("/".join(components), tracked_set), False)
     return (True, None, True)
@@ -620,18 +621,28 @@ def _resolve_literal_path(lit: str, tracked_set: set[str]) -> str | None:
 
 
 def _mutates_sys_path(node: ast.AST) -> bool:
-    """True if `node` is an assignment (`Assign`/`AugAssign`) whose target is
-    `sys.path` itself or a subscript of it (`sys.path = [...]`,
-    `sys.path[0] = ...`, `sys.path[:0] = [...]`, `sys.path += [...]`) --
-    ALWAYS a fail-safe case; `_eval_file_relative_path` is never attempted
-    for these, only for `sys.path.insert`/`.append` (see
-    `_sys_path_call_attr` and its use in `build_import_graph`), because a
-    whole-list reassignment or slice write can put anything on the import
-    path, not just a single computed directory."""
+    """True if `node` is a call to `sys.path.insert(...)`,
+    `sys.path.append(...)`, or `sys.path.extend(...)`, or an assignment
+    (`Assign`/`AugAssign`) whose target is `sys.path` itself or a subscript
+    of it (`sys.path = [...]`, `sys.path[0] = ...`, `sys.path[:0] = [...]`,
+    `sys.path += [...]`). ALWAYS a fail-safe case, UNCONDITIONALLY -- no
+    static evaluation (not even the exact-value `_eval_file_relative_path`
+    this graph trusts for a loader/subprocess path argument) is attempted
+    for a sys.path mutation, because widening sys.path changes how EVERY
+    OTHER bare import in the file (and files parsed after it, and any
+    ancestor `__init__.py` under the widened path) resolves -- getting
+    that right needs its own careful design, not a narrow value
+    computation. Until then, the whole file is marked as depending on
+    everything."""
     def is_sys_path(expr: ast.expr) -> bool:
         return (isinstance(expr, ast.Attribute) and expr.attr == "path"
                 and isinstance(expr.value, ast.Name) and expr.value.id == "sys")
 
+    if isinstance(node, ast.Call):
+        func = node.func
+        return (isinstance(func, ast.Attribute)
+                and func.attr in ("insert", "append", "extend")
+                and is_sys_path(func.value))
     if isinstance(node, ast.Assign):
         targets = node.targets
     elif isinstance(node, ast.AugAssign):
@@ -644,6 +655,43 @@ def _mutates_sys_path(node: ast.AST) -> bool:
         if isinstance(target, ast.Subscript) and is_sys_path(target.value):
             return True
     return False
+
+
+def _pytest_plugins_targets(tree: ast.Module) -> tuple[bool, list[str] | None]:
+    """(found, literal_dotted_names) for a module-level `pytest_plugins = ...`
+    assignment -- pytest imports every name in this list as a plugin BEFORE
+    collecting or running any test, an execution path `build_import_graph`'s
+    ordinary import/call walk never sees on its own. `found` is False if
+    `tree`'s top level has no such assignment (including only an augmented
+    one, `pytest_plugins += [...]`, which this never resolves -- see below).
+    When found, `literal_dotted_names` is the assigned names IF the value
+    is a literal string or a literal list/tuple of literal strings; None if
+    it is anything else (a variable, a list containing anything
+    non-literal, a computed expression, an `AugAssign`, ...) --
+    `build_import_graph` marks the WHOLE FILE dynamic for a None here, the
+    same as an unresolvable loader/subprocess target. Only `tree`'s
+    TOP-LEVEL statements are scanned -- a `pytest_plugins` assigned inside
+    a function or an `if` block is not pytest's own collection hook
+    either."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in node.targets):
+            value = node.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return (True, [value.value])
+            if isinstance(value, (ast.List, ast.Tuple)):
+                names: list[str] = []
+                for elt in value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        names.append(elt.value)
+                    else:
+                        return (True, None)
+                return (True, names)
+            return (True, None)
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) \
+                and node.target.id == "pytest_plugins":
+            return (True, None)
+    return (False, None)
 
 
 def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
@@ -677,7 +725,17 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
             raise SyntaxError(f"{rel}: {exc}") from exc
         edges = graph[rel]
         dynamic = False
-        extra_dirs: set[str] = set()
+        if rel.rsplit("/", 1)[-1] == "conftest.py":
+            found, dotted_names = _pytest_plugins_targets(tree)
+            if found:
+                if dotted_names is None:
+                    dynamic = True
+                else:
+                    for dotted in dotted_names:
+                        target = _resolve_dotted(dotted, tracked_set, roots)
+                        if target:
+                            edges.add(target)
+                        edges |= _ancestor_package_inits(dotted, tracked_set)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -701,15 +759,19 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                         if sub:
                             edges.add(sub)
             elif isinstance(node, ast.Call):
-                dotted_str = _string_import_target(node)
-                if dotted_str:
-                    target = _resolve_dotted(dotted_str, tracked_set, roots)
-                    if target:
-                        edges.add(target)
-                    edges |= _ancestor_package_inits(dotted_str, tracked_set)
+                if _is_import_module_call(node):
+                    has_package_kw = any(kw.arg == "package" for kw in node.keywords)
+                    dotted_str = None if has_package_kw else _string_import_target(node)
+                    if dotted_str:
+                        target = _resolve_dotted(dotted_str, tracked_set, roots)
+                        if target:
+                            edges.add(target)
+                        edges |= _ancestor_package_inits(dotted_str, tracked_set)
+                    else:
+                        dynamic = True
                     continue
                 subproc_matched, subproc_edge, subproc_fail = \
-                    _subprocess_python_target(node, rel, tracked_set, roots)
+                    _subprocess_call_effect(node, rel, tracked_set, roots)
                 if subproc_matched:
                     if subproc_fail:
                         dynamic = True
@@ -726,25 +788,6 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                             edges.add(target)
                         edges |= _ancestor_package_inits(run_module_dotted, tracked_set)
                     continue
-                sys_path_attr = _sys_path_call_attr(node)
-                if sys_path_attr == "extend":
-                    dynamic = True
-                    continue
-                if sys_path_attr in ("insert", "append"):
-                    path_arg = (node.args[1] if sys_path_attr == "insert" and len(node.args) > 1
-                                else node.args[0] if sys_path_attr == "append" and node.args
-                                else None)
-                    components = (_eval_file_relative_path(path_arg, rel)
-                                  if path_arg is not None else None)
-                    if components is None:
-                        dynamic = True
-                    elif not components:
-                        pass  # repo root: normal dotted resolution already covers it
-                    elif _dir_is_tracked(components, tracked_set):
-                        extra_dirs.add("/".join(components))
-                    else:
-                        dynamic = True
-                    continue
                 is_loader, resolved_path = _loader_call_path(node, rel)
                 if is_loader:
                     if resolved_path is None:
@@ -758,18 +801,6 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
             elif isinstance(node, (ast.Assign, ast.AugAssign)):
                 if _mutates_sys_path(node):
                     dynamic = True
-        if extra_dirs:
-            for node2 in ast.walk(tree):
-                if isinstance(node2, ast.Import):
-                    for alias in node2.names:
-                        rel_mod = alias.name.replace(".", "/")
-                        for extra_dir in extra_dirs:
-                            candidate_mod = f"{extra_dir}/{rel_mod}.py"
-                            candidate_pkg = f"{extra_dir}/{rel_mod}/__init__.py"
-                            if candidate_mod in tracked_set:
-                                edges.add(candidate_mod)
-                            elif candidate_pkg in tracked_set:
-                                edges.add(candidate_pkg)
         if dynamic:
             edges |= tracked_set - {rel}
     return graph

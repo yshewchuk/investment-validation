@@ -1830,9 +1830,10 @@ def test_build_import_graph_resolves_an_importlib_import_module_string_literal(t
     assert "engine/y.py" in graph["tests/test_dynamic.py"]
 
 
-def test_build_import_graph_ignores_a_non_literal_import_module_argument(tmp_path, monkeypatch):
+def test_build_import_graph_a_non_literal_import_module_argument_fails_safe(tmp_path, monkeypatch):
     # A computed/variable argument is dynamic and this static graph cannot
-    # see it -- it must not be mistaken for an edge to nowhere or crash.
+    # see it -- sound by construction means the WHOLE FILE fails safe,
+    # never a silent no-op.
     (tmp_path / "engine").mkdir()
     (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
     (tmp_path / "tests").mkdir()
@@ -1840,10 +1841,132 @@ def test_build_import_graph_ignores_a_non_literal_import_module_argument(tmp_pat
         "import importlib\n"
         "name = 'engine.' + 'y'\n"
         "importlib.import_module(name)\n")
-    tracked = ["engine/y.py", "tests/test_dynamic.py"]
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["tests/test_dynamic.py"] == set()
+    assert graph["tests/test_dynamic.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_import_module_with_package_kwarg_fails_safe(tmp_path, monkeypatch):
+    # A `package=` keyword makes the name relative to the CALLING file's own
+    # package -- this graph does not attempt that resolution, even when the
+    # name itself is a literal, so the whole file fails safe.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib\n"
+        "importlib.import_module('.y', package='engine')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_with_non_literal_argv_fails_safe(tmp_path, monkeypatch):
+    # The argv itself is a variable -- this graph cannot see whether it
+    # launches Python or not, so it must fail safe rather than silently
+    # ignore the call.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess\n"
+        "def go(argv):\n"
+        "    subprocess.run(argv)\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_with_a_variable_interpreter_fails_safe(tmp_path, monkeypatch):
+    # The argv IS a literal list, but its first element is a variable this
+    # graph cannot prove is or isn't the Python interpreter.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess\n"
+        "def go(interp):\n"
+        "    subprocess.run([interp, 'engine/unrelated.py'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_dash_c_fails_safe(tmp_path, monkeypatch):
+    # `-c` runs arbitrary inline code -- never resolvable to a tracked file,
+    # always fail-safe when the interpreter is Python.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, '-c', 'print(1)'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_any_sys_path_mutation_fails_safe_including_the_file_relative_form(tmp_path, monkeypatch):
+    # The repo-root idiom, and any other sys.path mutation, is ALWAYS
+    # fail-safe again -- static __file__-relative evaluation for sys.path
+    # was removed in this round.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_conftest_pytest_plugins_literal_is_an_edge(tmp_path, monkeypatch):
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "myplugin.py").write_text("P = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "pytest_plugins = ['checks.myplugin']\n")
+    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")
+    tracked = ["checks/myplugin.py", "tests/conftest.py", "tests/test_a.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "checks/myplugin.py" in graph["tests/conftest.py"]
+
+
+def test_build_import_graph_a_conftest_pytest_plugins_non_literal_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import os\n"
+        "pytest_plugins = [os.environ.get('PLUGIN', 'x')]\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tests/conftest.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/conftest.py"] == {"engine/unrelated.py"}
+
+
+def test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert():
+    # tests/conftest.py itself does
+    # `REPO_ROOT = Path(__file__).resolve().parents[1]` then
+    # `sys.path.insert(0, str(REPO_ROOT))` -- a two-statement form this
+    # graph never resolves (no cross-statement variable tracking), so it
+    # fails safe. Every test file's dependency closure includes
+    # tests/conftest.py via `_conftest_ancestors`, so this is why a
+    # non-inert change today still selects all 33 enabled modules.
+    graph = pilot.build_import_graph()
+    tracked_set = set(graph)
+    assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}
 
 
 def test_build_import_graph_resolves_a_literal_spec_from_file_location_path(tmp_path, monkeypatch):
@@ -1923,43 +2046,6 @@ def test_build_import_graph_a_sys_path_insert_selects_every_enabled_module(tmp_p
     assert selected == ["target"]
 
 
-def test_build_import_graph_the_repo_root_sys_path_insert_idiom_is_a_no_op(tmp_path, monkeypatch):
-    # `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))` in a
-    # file one directory below the repo root always computes the repo root
-    # itself -- a value the graph already resolves dotted imports from, so
-    # this must NOT trigger the "depends on everything" fail-safe.
-    (tmp_path / "checks").mkdir()
-    (tmp_path / "checks" / "script.py").write_text(
-        "import sys\n"
-        "from pathlib import Path\n"
-        "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n")
-    (tmp_path / "engine").mkdir()
-    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
-    tracked = ["checks/script.py", "engine/unrelated.py"]
-    monkeypatch.setattr(pilot, "REPO", tmp_path)
-    graph = pilot.build_import_graph(tracked)
-    assert graph["checks/script.py"] == set()
-
-
-def test_build_import_graph_a_subdirectory_sys_path_insert_resolves_bare_imports(tmp_path, monkeypatch):
-    # `sys.path.insert(0, str(Path(__file__).parent))` widens the import
-    # path to the file's OWN directory -- a bare `import helper` (no
-    # top-level tracked-root prefix) then resolves against that directory.
-    (tmp_path / "tools" / "sub").mkdir(parents=True)
-    (tmp_path / "tools" / "sub" / "runner.py").write_text(
-        "import sys\n"
-        "from pathlib import Path\n"
-        "sys.path.insert(0, str(Path(__file__).parent))\n"
-        "import helper\n")
-    (tmp_path / "tools" / "sub" / "helper.py").write_text("H = 1\n")
-    (tmp_path / "engine").mkdir()
-    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
-    tracked = ["tools/sub/runner.py", "tools/sub/helper.py", "engine/unrelated.py"]
-    monkeypatch.setattr(pilot, "REPO", tmp_path)
-    graph = pilot.build_import_graph(tracked)
-    assert graph["tools/sub/runner.py"] == {"tools/sub/helper.py"}
-
-
 def test_build_import_graph_an_env_var_sys_path_insert_still_fails_safe(tmp_path, monkeypatch):
     (tmp_path / "checks").mkdir()
     (tmp_path / "checks" / "script.py").write_text(
@@ -1971,15 +2057,6 @@ def test_build_import_graph_an_env_var_sys_path_insert_still_fails_safe(tmp_path
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
     assert graph["checks/script.py"] == {"engine/unrelated.py"}
-
-
-def test_a_real_checks_file_with_the_repo_root_idiom_no_longer_fails_safe():
-    # checks/phase0_audit.py uses the exact
-    # `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))` idiom.
-    # Before this change it depended on every tracked file; now it must not.
-    graph = pilot.build_import_graph()
-    tracked_set = set(graph)
-    assert graph["checks/phase0_audit.py"] != tracked_set - {"checks/phase0_audit.py"}
 
 
 def test_build_import_graph_a_python_subprocess_literal_script_is_an_edge(tmp_path, monkeypatch):
