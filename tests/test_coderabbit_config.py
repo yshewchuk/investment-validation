@@ -72,6 +72,27 @@ def test_path_instructions_globs_match_existing_files():
         assert matches, f"path_instructions pattern {pattern!r} matches no existing file"
 
 
+def test_wildcard_path_instructions_state_strict_scope_rule():
+    config = _load_config()
+    path_instructions = config["reviews"]["path_instructions"]
+    wildcard = next(e for e in path_instructions if e["path"] == "**/*")
+    text = wildcard["instructions"]
+    assert "Out of scope (suggest an issue)" in text
+    assert "CHANGES_REQUESTED" in text
+
+
+def test_wildcard_path_instructions_state_legacy_doc_exemption():
+    # A legacy component (engine/** outside engine/v2/**) never gets a new
+    # ARCHITECTURE.md; that must not be flaggable as a missing-doc defect.
+    config = _load_config()
+    path_instructions = config["reviews"]["path_instructions"]
+    wildcard = next(e for e in path_instructions if e["path"] == "**/*")
+    text = wildcard["instructions"]
+    assert "engine/v2/**" in text
+    assert "gets no new `ARCHITECTURE.md`" in text
+    assert "PR body carries the design" in text
+
+
 def test_gitignore_admits_architecture_md_anywhere():
     # Root and nested component docs must be trackable...
     for rel in ("ARCHITECTURE.md", "engine/v2/ops/ARCHITECTURE.md",

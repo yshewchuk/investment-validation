@@ -243,7 +243,7 @@ or merges into the other -- every shared resource is namespaced per backend:
 | workflow | backend | concurrency group | cache namespace | module artifacts | aggregate artifact |
 |---|---|---|---|---|---|
 | `mutation.yml` | pytest-gremlins 1.9.0 (`tools/gremlin_pilot.py`) | `mutation-gremlins-<ref>` | `mutation-gremlins<ver>-...` (per-module tracked-input fingerprint) over `.gremlins_cache` | `mutation-module-<module>` | `mutation-report` |
-| `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-<ref>` | `mutation-mutmut<ver>-py<ver>-<toml hash>-<module>-...` over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
+| `mutation-mutmut.yml` | mutmut 3.8.0 (`tools/mutation_pilot.py`) | `mutation-mutmut-<ref>` | `mutation-mutmut<ver>-py<ver>-<config-hash>-<module>-...` (per-module config-hash) over mutmut's state | `mutation-mutmut-module-<module>` | `mutation-mutmut-report` |
 
 **The two scores measure different things and are never comparable.** mutmut's
 score is (killed + timeout) / checked -- every mutant the run considered,
@@ -299,8 +299,28 @@ its 330-minute step timeout.
 | trigger | mode | state |
 |---|---|---|
 | push to main | incremental | restores the module's newest cached mutmut state |
+| pull_request | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects every ENABLED module that owns a changed path OR transitively depends on it (a static `ast` import-graph closure over every tracked `.py` file, ALLOWLIST-classified (`build_import_graph`/`_is_dynamic_file`): a plain import, the one literal `importlib.import_module("x.y")` call, or a conftest.py's plain `pytest_plugins` list resolve to specific edges (including `conftest.py` closure roots); anything else the file references at all -- `sys.path`, `subprocess`, a loader construct, `__import__` in any form, or a short list of other dangerous names/modules -- fails the WHOLE FILE safe, depending on every other tracked file (`module_dependency_closure`), else nothing for a path on the small docs-only `[pr_selection] inert` allowlist minus `inert_skip` (`tools/mutation_pilot.toml`), else EVERY enabled module for anything else -- an unrecognized path, or one the import graph itself cannot be built for (a syntax error or any other failure), is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix |
 | weekly (gremlins Sun 05:23 UTC, mutmut Sun 22:23 UTC — staggered) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
+
+- **Static analysis is conservative, not sound.** The import-graph
+  classifier used above (`build_import_graph`/`_is_dynamic_file`) only
+  resolves the three shapes named in the table row; anything else fails
+  the whole file DYNAMIC rather than guessing narrower. That is
+  conservative for the constructs it recognizes, NOT a sound analysis in
+  general -- see [issue #42](https://github.com/yshewchuk/investment-validation/issues/42)
+  for constructs it does not recognize at all (string-target
+  `monkeypatch.setattr`/`mock.patch`, `pytest.importorskip`,
+  `getattr`-based imports, `__import__` via `globals()`/`builtins`,
+  `asyncio.create_subprocess_exec`, `__path__`/`sys.meta_path` edits,
+  `pytest_plugins` outside a conftest.py or under an `if`, and
+  `from pkg import *` re-exports). None of those holes matter today:
+  `tests/conftest.py` itself always classifies DYNAMIC (its own
+  `sys.path.insert`), every test file's closure includes
+  `tests/conftest.py`, and so every non-inert PR change already selects
+  every enabled module regardless of the holes. `tests/test_mutation_ci.py`
+  has a synthetic-tree test that fails loudly, naming issue #42, the
+  moment `tests/conftest.py` stops classifying DYNAMIC.
 
 - **Scope.** All of `engine/v2`, split into 23 modules plus the six pilot
   modules. The only legacy files are the pilot's `engine/pnl_sim.py` and
@@ -322,13 +342,20 @@ its 330-minute step timeout.
 - **Cache.** One `actions/cache` entry per module holds only mutmut's state:
   `mutants/**/*.meta`, `mutmut-stats.json` and the driver's
   `mutation-ci-state.json`. The key is
-  `mutation-mutmut<ver>-py<ver>-<hash of mutation_pilot.toml>-<module>-<sha>-<run id>-<attempt>`.
+  `mutation-mutmut<ver>-py<ver>-<config-hash>-<module>-<sha>-<run id>-<attempt>`,
+  where `<config-hash>` is `tools/mutation_pilot.py config-hash <module>` --
+  a hash of `[defaults]` plus that module's own `[modules.<name>]` section,
+  not the whole toml file. Editing one module's section (or `[defaults]`,
+  shared by every module) changes the config-hash for the modules whose
+  effective config actually changed, and restarts only those; a comment-only
+  edit, or an edit confined to a different module's section, leaves this
+  module's cache namespace untouched. Bumping mutmut or changing Python still
+  restarts every module (both are in the key too).
   The `mutation-mutmut` namespace never touches the gremlins workflow's
   `mutation-gremlins` keys or cache paths. Restore uses the same key without
   the sha, so each run gets the newest
   state. The work copy and mutated files are rebuilt from the checkout. mutmut
-  then keeps every verdict whose function hash is unchanged. Editing the toml,
-  bumping mutmut or changing Python restarts every module.
+  then keeps every verdict whose function hash is unchanged.
 - **What incremental re-tests.** mutmut re-tests a mutant only when its own
   function's source changed. The driver adds one rule: when a module's
   selected tests or the shared `tests/*.py` helpers change, it resets that

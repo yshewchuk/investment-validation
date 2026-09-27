@@ -641,12 +641,29 @@ def test_training_job_trips_the_scoring_no_fit_guard_before_touching_disk(tmp_pa
 
 
 def test_no_scoring_or_legacy_module_imports_the_training_package():
+    """The invariant this guards is scoring/legacy's, per the layer map's
+    models non-responsibilities ("Fit anything" / "Reach into a training
+    recipe" -> engine/v2/models/training): nothing that runs inside a score
+    request may reach into training internals.
+
+    ``engine.v2.ops.training`` is an explicit, documented exception: ops (7)
+    is below training (6) in the layer map's numeric rule, and P6 slice 5
+    makes ops the operator-submitted training/promote job runner -- it
+    already calls straight into ``tools.phase5_training_job`` (run_state_job,
+    run_board_analog_job, run_trailing_cutoff_job) to dispatch a training
+    job's mode, and catching ``TrainingRefused`` to map it onto a typed
+    OpsError is the same orchestration relationship, not a scoring-time
+    dependency.
+    """
     from checks.import_layers import build_graph
 
     files = {str(p.relative_to(ROOT)): p.read_bytes() for p in (ROOT / "engine").rglob("*.py")}
     edges = build_graph(files).edges
     importers = {e.importer for e in edges if e.imported.startswith("engine.v2.models.training")}
-    assert importers and all(i.startswith("engine.v2.models.training") for i in importers)
+    allowed_outside_prefixes = ("engine.v2.ops.training",)
+    assert importers and all(
+        i.startswith("engine.v2.models.training") or i in allowed_outside_prefixes
+        for i in importers)
 
 
 def test_training_job_tool_lists_every_recipe_and_bounds_label_dates(capsys):

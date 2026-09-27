@@ -42,9 +42,33 @@ reviews:
         this is a stronger requirement than "nice to have," on par with an
         unmet acceptance criterion.
 
+        Exception: a legacy component (`engine/**` outside `engine/v2/**`)
+        gets no new `ARCHITECTURE.md` — it is never a defect that a legacy
+        change has no component doc. For that change, check instead that
+        the PR body carries the design (and, if durable, that the operator
+        guides do too, per `CONTRIBUTING.md`); flag it as a defect only if
+        neither the PR body nor the operator guides state the design.
+
         If the PR includes an `**/ARCHITECTURE.md` file, check its claims
         against the code (see the `**/ARCHITECTURE.md` path instruction
         below) and flag any undocumented deviation between the two.
+
+        Judge scope from the PR body's own stated scope (its "Design"
+        section and any "Out of scope" note, or the Spec block). A finding
+        about code the PR does not touch, a feature request, or a
+        refactor of neighbouring code the PR did not need to make is out
+        of scope: label it "Out of scope (suggest an issue)" and do not
+        let it alone justify CHANGES_REQUESTED. Still flag, as in-scope,
+        anything the PR's own change breaks elsewhere (a caller, a doc, a
+        test), any code the PR adds that cannot work against `main` as it
+        stands, and any part of a pre-existing defect the PR makes worse
+        or newly reachable.
+
+        Flag a PR that changes more than about 300 changed non-test lines
+        or more than about 5 non-test files and states no reason for the
+        size — tests and generated fixtures don't count toward that
+        figure.
+
     - path: "**/ARCHITECTURE.md"
       instructions: |
         Review as an architecture change, not as prose:
