@@ -339,6 +339,47 @@ def test_expand_is_ordered_and_refuses_dead_patterns():
         pilot.expand(["engine/v2/c/*.py"], tracked)
 
 
+def test_config_hash_is_stable_across_calls():
+    assert pilot.config_hash(CFG, "no_fit") == pilot.config_hash(CFG, "no_fit")
+
+
+def test_config_hash_changes_when_the_modules_own_section_changes():
+    base = pilot.config_hash(CFG, "no_fit")
+    import copy
+    mutated = copy.deepcopy(CFG)
+    mutated["modules"]["no_fit"]["why"] = mutated["modules"]["no_fit"]["why"] + " (edited)"
+    assert pilot.config_hash(mutated, "no_fit") != base
+
+
+def test_config_hash_changes_when_defaults_changes():
+    base = pilot.config_hash(CFG, "no_fit")
+    import copy
+    mutated = copy.deepcopy(CFG)
+    mutated["defaults"]["timeout_multiplier"] = mutated["defaults"]["timeout_multiplier"] + 1
+    assert pilot.config_hash(mutated, "no_fit") != base
+
+
+def test_config_hash_ignores_a_different_modules_section():
+    base = pilot.config_hash(CFG, "no_fit")
+    import copy
+    mutated = copy.deepcopy(CFG)
+    mutated["modules"]["canonical"]["why"] = mutated["modules"]["canonical"]["why"] + " (edited)"
+    assert pilot.config_hash(mutated, "no_fit") == base
+
+
+def test_config_hash_ignores_a_newly_added_module():
+    base = pilot.config_hash(CFG, "no_fit")
+    import copy
+    mutated = copy.deepcopy(CFG)
+    mutated["modules"]["brand_new_module"] = dict(mutated["modules"]["no_fit"])
+    assert pilot.config_hash(mutated, "no_fit") == base
+
+
+def test_config_hash_refuses_an_unknown_module():
+    with pytest.raises(SystemExit):
+        pilot.config_hash(CFG, "not_a_real_module")
+
+
 # -- mutmut diagnostics on the ops_legacy CI shard (run 36001042208) ---------
 #
 # mutmut only logs "failed to collect stats. runner returned 1" and swallows the
@@ -738,15 +779,18 @@ def test_workflow_cache_key_and_restore_policy():
     assert WORKFLOW["env"]["GREMLINS_CACHE"] == ".gremlins_cache"
     key = _step("mutate", lambda s: s.get("id") == "key")["run"]
     for part in ("needs.plan.outputs.gremlins", "steps.py.outputs.python-version",
-                 "hashFiles('tools/mutation_pilot.toml')", "matrix.module"):
+                 'tools/mutation_pilot.py config-hash "$MODULE"', "matrix.module"):
         assert part in key, part
+    assert 'ch=$(python3 tools/mutation_pilot.py config-hash "$MODULE")' in key
+    assert "gremlin-base-fp/tools/mutation_pilot.py" not in key  # config-hash must run against the PR's own checkout, never the base-commit worktree
+    assert "hashFiles('tools/mutation_pilot.toml')" not in key
     # the FULL tracked-input fingerprint joins the namespace, assigned under
     # set -e rather than interpolated into the echo (where echo's own exit
     # status would mask a failed digest and a truncated key go live)
     assert "set -euo pipefail" in key
     assert 'fp=$(python3 tools/gremlin_pilot.py fingerprint "$MODULE")' in key
     prefix_line = next(ln.strip() for ln in key.splitlines() if "prefix=" in ln)
-    assert "${fp}" in prefix_line and "$(" not in prefix_line
+    assert "${fp}" in prefix_line and "${ch}" in prefix_line and "$(" not in prefix_line
     restore = _step("mutate", lambda s: s.get("uses", "").startswith("actions/cache/restore"))
     save = _step("mutate", lambda s: s.get("uses", "").startswith("actions/cache/save"))
     prefix = "${{ steps.key.outputs.prefix }}"
@@ -861,8 +905,10 @@ def test_mutmut_matrix_refuses_a_names_nothing_subset_not_an_empty_matrix(capsys
 def test_mutmut_workflow_caches_only_mutmut_state_in_its_own_namespace():
     key = _step("mutate", lambda s: s.get("id") == "key", MUT_JOBS)["run"]
     for part in ("needs.plan.outputs.mutmut", "steps.py.outputs.python-version",
-                 "hashFiles('tools/mutation_pilot.toml')", "matrix.module"):
+                 'tools/mutation_pilot.py config-hash "$MODULE"', "matrix.module"):
         assert part in key, part
+    assert 'ch=$(python3 tools/mutation_pilot.py config-hash "$MODULE")' in key
+    assert "hashFiles('tools/mutation_pilot.toml')" not in key
     assert "mutation-mutmut" in key
     restore = _step("mutate", lambda s: str(s.get("uses", "")).startswith("actions/cache/restore"),
                     MUT_JOBS)
@@ -949,6 +995,23 @@ def test_the_two_workflows_own_disjoint_artifact_names():
                         MUT_JOBS)
     assert gre_pattern["with"]["pattern"] != mut_pattern["with"]["pattern"]
     assert WORKFLOW["name"] != MUTMUT["name"]
+
+
+def test_both_mutation_matrices_cap_parallelism_so_tests_never_starve():
+    """A public-repo free-plan account gets 20 concurrent Actions runners
+    total. Each backend's matrix has 30+ per-module jobs with no
+    max-parallel, so one cold run of either workflow can occupy every
+    runner and every PR's `test` job queues behind it. Both matrices cap at
+    3: with two PRs open at once (each capable of running both workflows),
+    that is at most 2 x 2 x 3 = 12 mutation runners account-wide, leaving
+    >= 8 free for Tests/plan/report."""
+    assert JOBS["mutate"]["strategy"]["max-parallel"] == 3
+    assert MUT_JOBS["mutate"]["strategy"]["max-parallel"] == 3
+    assert JOBS["mutate"]["strategy"]["fail-fast"] is False
+    assert MUT_JOBS["mutate"]["strategy"]["fail-fast"] is False
+    total = JOBS["mutate"]["strategy"]["max-parallel"] + \
+        MUT_JOBS["mutate"]["strategy"]["max-parallel"]
+    assert total <= 6
 
 
 # -- merge expected-modules contract: the aggregate can never lie about scope ----------
