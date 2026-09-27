@@ -94,9 +94,14 @@ the checked graph actually uses.
     the one calendar fact `SourceBundle.context` may carry directly; never
     a computed calendar verdict).
   - `panel_row`, `tier4_row` — one already-staged row apiece from the
-    legacy panel/Tier-4 tables for this ticker, each carrying its own
-    `observed_at` plus whatever feature columns the caller names in
-    `feature_names`.
+    legacy panel/Tier-4 tables for this ticker, plus whatever feature
+    columns the caller names in `feature_names`. Neither real table has an
+    `observed_at` column: `panel_row` carries its own row-level `date`
+    column instead (`data/features/panel.parquet`'s real schema, legacy's
+    `_KEY_COLUMNS`); `tier4_row` carries no row-level date at all — each
+    metric column instead stamps its own `"<metric>_fold_start"`
+    (`data/features/tier4_forecasts.parquet`'s real schema), checked only
+    for a name actually used from that row (see Failure semantics).
   - `quote_rows` — the Tier-1 option-quote rows in the domain scored for
     this event (each: `right`, `strike`, `expiry`, `bid`, `ask`,
     `observed_at`), plus an optional `quote_status` for the two
@@ -105,7 +110,12 @@ the checked graph actually uses.
   - `feature_names` — the caller-declared set of feature columns this
     bundle projects from `panel_row`/`tier4_row`: for each name,
     `tier4_row` wins when both rows carry it (Tier-4 is the more specific,
-    later-computed table), falling back to `panel_row`.
+    later-computed table), falling back to `panel_row`. Must be a
+    non-string sequence of non-empty, non-duplicate `str` (a bare `str`
+    would otherwise be silently iterated character-by-character); a
+    realized panel outcome, `driver_name` itself, or a Tier-4 stamp/band
+    column may never appear in it (see Failure semantics, leakage).
+  - `calendar_row["spot"]` must be a finite, strictly positive number.
   - Everything else this function's `SourceBundle` needs but does not
     itself resolve — `model_identity`, `model_artifact_refs`,
     `forecast_recipes`, `residual_recipe`, `analog_recipe`, `gate_recipe`
@@ -135,9 +145,9 @@ the checked graph actually uses.
   (application only). `compatibility.py` is the package's one legacy
   `engine.*` import, done lazily inside its single function. Third-party:
   `numpy` (several stage modules), `scipy.stats.norm` (`stages.py`),
-  `pandas` (`compatibility.py`). No module in this package imports
-  `engine.v2.ops` or `engine.v2.serving` — both are higher layers (7.0), and
-  scoring (5.0) may only import downward.
+  `pandas` (`compatibility.py`, `nightly_source_bundle.py`). No module in
+  this package imports `engine.v2.ops` or `engine.v2.serving` — both are
+  higher layers (7.0), and scoring (5.0) may only import downward.
 - **`nightly_source_bundle.py`** adds exactly one new import edge,
   intra-package: `.source_inputs` (`SourceBundle`, `_reject_answers`), for
   its own leakage check. It does **not** import `engine.v2.data`: no module
@@ -199,44 +209,100 @@ function's — see Invariants (read-only, no I/O).
   package):
   - `class NightlySourceBundleRefusal(ValueError)` — `__init__(self, code: str, detail: str)`, message `f"{code}: {detail}"`.
   - **R1, missing input.** `calendar_row`, `panel_row`, `tier4_row`, or
-    `quote_rows` wholly absent or not a sequence, `calendar_row` missing any
+    `quote_rows` wholly absent or not a sequence; `calendar_row` missing any
     of `ticker`/`event_date`/`entry_date`/`exit_date`/`expiry`/`spot`/
-    `calendar_observed_through`, `panel_row`/`tier4_row` missing its own
-    `observed_at` key, or any `quote_rows[i]` missing its own `observed_at`
-    key → `MISSING_STAGED_INPUT`, naming the input and (for `calendar_row`,
-    or the quote row's own index) the missing key(s). A quote row without
+    `calendar_observed_through`; `panel_row` missing its own `date` column
+    (the real panel key column, NOT `observed_at` — neither
+    `panel.parquet` nor `tier4_forecasts.parquet` has ever carried that
+    name); or any `quote_rows[i]` missing its own `observed_at` key →
+    `MISSING_STAGED_INPUT`, naming the input and (for `calendar_row`, or
+    the quote row's own index) the missing key(s). A quote row without
     `observed_at` is refused rather than silently skipped, because skipping
     it would let that row reach `raw_quotes` never checked against `as_of`
     at all — worse than merely "unchecked and flagged," genuinely
-    unvalidated. This is distinct from a
-    *partial* `panel_row`/`tier4_row` — an individual feature column named
-    in `feature_names` but absent from the row, `None`/`pandas.NA`/`NaN`, or
-    not coercible to a number at all (a string that never had a usable
-    number to lose) is not a refusal: it is omitted from `feature_vector`
-    and marked `True` in `feature_missing_mask`. The mask is authoritative;
-    a caller that skips checking it gets a silently-absent key, never a
-    fabricated `0.0`/`NaN`. Only a value that DOES coerce to a float but is
-    infinite is a distinct, louder problem — a real numeric-data defect
-    rather than an absence — so it is its own refusal,
-    `INVALID_FEATURE_VALUE`, naming the feature and the value found.
+    unvalidated. `tier4_row` itself has no required key at this stage — it
+    only need be a mapping — because it carries no row-level date at all;
+    see the Tier-4 stamp contract below for what IS required once a name is
+    actually resolved from it.
+  - **Values are passed through, never classified here.** A feature name
+    resolved from `tier4_row`/`panel_row` is projected into `feature_vector`
+    EXACTLY as staged — `None`, NaN of any Python/NumPy/pandas flavor,
+    `+/-inf`, or a non-numeric string included, unconverted and
+    unfiltered. This module used to coerce each value to `float` and refuse
+    a non-finite one as its own `INVALID_FEATURE_VALUE`; that has been
+    removed — classifying a value as missing vs. invalid is the real
+    consumer's job (`FrozenStageExecutor._row`, frozen_executor.py: a
+    non-finite value, including a numeric-looking string like `"nan"`, is
+    `MISSING_FEATURES`; a value that cannot convert to `float` at all,
+    e.g. `pandas.NA` or `"abc"`, is `INVALID_FEATURE`;
+    `application._feature_fields`, application.py, independently derives
+    its own `null_masks` from `model_inputs` the same way), never this
+    assembler's — a second, independent classification here could disagree
+    with the real one and either fabricate a refusal the real pipeline
+    would have accepted, or accept a value the real pipeline would refuse.
+    `feature_missing_mask` is therefore a pure PRESENCE fact (the name was
+    found in neither row), not a value-quality judgement, and is kept only
+    because `SourceBundle`'s dataclass shape requires the field — no real
+    consumer today reads it once it reaches `NativeScoreInputs.features
+    ["missing_mask"]`.
+    `tests/test_v2_scoring_nightly_source_bundle.py::
+    test_bundle_feature_value_matches_real_executor_classification` proves
+    this by running a value table (`None`, NaN, `np.float32` NaN,
+    `pandas.NA`, `inf`, `"nan"`, `Decimal("NaN")`, `"abc"`, `1.0`) through
+    the bundle and then through `FrozenStageExecutor._row`, asserting the
+    outcome equals classifying the same raw value directly, with no bundle
+    in between.
+  - **Leakage, feature name denylist.** Checked on `feature_names` alone,
+    before any row is read, independently of `source_inputs._ANSWER_FIELDS`
+    (a different denylist of calculated SCORING outputs, checked next): a
+    name that is (a) a realized panel outcome column — `"move"`/`"abs_move"`,
+    an independent copy of legacy's own `engine.features.OUTCOME_COLUMNS`,
+    kept equal to it by
+    `test_panel_outcome_columns_matches_legacy`; (b) equal to `driver_name`
+    — the value being forecast can never be its own feature; or (c) a
+    Tier-4 stamp/band/metadata column — any name ending in `"_fold_start"`
+    or `"_model_id"`, the literal `"tier3_snapshot"`, or any name starting
+    with `"pred_iv_crush_30"` (its whole stamp/band family, not only its
+    fold_start/model_id suffixes) — all real columns of
+    `data/features/tier4_forecasts.parquet` that describe HOW/WHEN a
+    forecast was produced, never a legitimate input to anything else → all
+    refuse `LEAKED_FEATURE_NAME`, naming the offending column(s) and reason.
   - **Leakage, answer/outcome fields.** Every assembled `context` and
     `feature_vector` value is passed through `source_inputs._reject_answers`
     (the same denylist `build_native_score_inputs` itself enforces) before
     the function returns → plain `ValueError` naming the offending field
     path, exactly as `_reject_answers` already raises elsewhere in this
-    package. This function does not re-implement or loosen that check.
-  - **Leakage, post-`as_of` rows.** `as_of` itself, and every row's own
-    `observed_at` (`panel_row`, `tier4_row`, each `quote_rows` entry) and
-    `calendar_row["calendar_observed_through"]`, are each validated by
-    `validated_as_of` (rejects `None`, `NaT`, a bare number/bool, an
-    unparseable value, or a timezone-aware value — mirroring
-    `engine/v2/ops/native_board_universe.py::_validated_as_of`, issue #16's
-    pattern) and then compared: any row whose own `observed_at` (or the
-    calendar's `calendar_observed_through`) is strictly after `as_of` →
-    `POST_AS_OF_ROW`, naming the input and its date. `calendar_row`'s
-    `event_date`/`entry_date`/`exit_date`/`expiry` are exempt from this
-    comparison — they describe the (future) event being scored, not a
-    fact observed after `as_of`.
+    package. This function does not re-implement or loosen that check; it
+    is a second, independent layer on top of the feature-name denylist
+    above, catching a calculated scoring answer (e.g. `gate_pass`) that is
+    not itself a raw panel/Tier-4 source-table column.
+  - **Leakage, post-`as_of` rows — the real stamp contract.** Neither
+    `panel.parquet` nor `tier4_forecasts.parquet` carries `observed_at`;
+    the prior version of this check compared against a column that does
+    not exist on either table. The real contract: `as_of` itself,
+    `calendar_row["calendar_observed_through"]`, `panel_row`'s own `"date"`
+    column, and each `quote_rows` entry's own `observed_at` (quotes DO
+    carry it) are each validated by `validated_as_of` (rejects `None`,
+    `NaT`, a bare number/bool, an unparseable value, or a timezone-aware
+    value — mirroring `engine/v2/ops/native_board_universe.py::
+    _validated_as_of`, issue #16's pattern) and then compared: any strictly
+    after `as_of` → `POST_AS_OF_ROW`, naming the input and its date.
+    `calendar_row`'s `event_date`/`entry_date`/`exit_date`/`expiry` are
+    exempt from this comparison — they describe the (future) event being
+    scored, not a fact observed after `as_of`. `tier4_row` has no row-level
+    date to check here at all: instead, a feature name actually resolved
+    from `tier4_row` is allowed only when that metric's own
+    `"{name}_fold_start"` is staged (else `MISSING_STAGED_INPUT`, naming
+    the feature) and `<= as_of` (else `POST_AS_OF_ROW`, naming the
+    `fold_start` field and its date) — checked per used feature inside
+    `_project_features`, not against the whole row up front. A feature
+    resolved from `panel_row` instead needs no per-feature stamp check,
+    since `panel_row["date"]` already gates the whole row.
+  - **Other input validation.** `calendar_row["spot"]` not coercible to
+    `float`, non-finite, or `<= 0.0` → `INVALID_SPOT`, naming the value
+    found. `feature_names` a bare `str`/`bytes`, not a `Sequence`,
+    containing a non-`str` or empty-`str` entry, or containing a duplicate
+    → `INVALID_FEATURE_NAMES`, naming the problem.
   - **Malformed quotes.** `quote_domain_map` (the extracted, behavior-identical
     copy of `tools/capture_tier0_corpus.py`'s `_quote_map`) refuses a quote
     row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized
@@ -267,8 +333,15 @@ function's — see Invariants (read-only, no I/O).
 
 - **Answer-free source boundary (root doc §5).** `_reject_answers`/
   `_ANSWER_FIELDS` (`source_inputs.py`) is the single enforcement point for
-  what counts as a calculated answer; `nightly_source_bundle.py` calls it
-  rather than keeping a second copy of the denylist.
+  what counts as a calculated SCORING answer; `nightly_source_bundle.py`
+  calls it rather than keeping a second copy of that denylist.
+  `nightly_source_bundle.py` additionally enforces its own, distinct
+  denylist over raw SOURCE-TABLE columns that were never scoring outputs at
+  all (a realized panel outcome, `driver_name`, or a Tier-4 stamp/band
+  column — see Failure semantics, leakage) — a different boundary than
+  `_ANSWER_FIELDS`, not a duplicate of it, because `_ANSWER_FIELDS` has no
+  entry for most of these real column names (e.g. `"move"`,
+  `"pred_abs_move_fold_start"`).
 - **Typed refusal, no fabrication.** A missing staged input is a named
   refusal; a missing individual feature is a mask entry. Neither is ever a
   silently substituted default (`0`, `None`, or an imputed value) — the
@@ -334,19 +407,25 @@ engine.v2.ops / engine.v2.serving (layer 7, callers, not shown as dependents bel
 ```mermaid
 flowchart LR
     CAL["calendar_row\n(ticker, event/entry/exit dates,\nexpiry, spot,\ncalendar_observed_through)"]
-    PANEL["panel_row\n(observed_at + feature columns)"]
-    TIER4["tier4_row\n(observed_at + feature columns)"]
+    PANEL["panel_row\n(date + feature columns)"]
+    TIER4["tier4_row\n(feature columns, each with its own\nname_fold_start stamp)"]
     QUOTES["quote_rows\n(right, strike, expiry,\nbid, ask, observed_at)"]
     ASOF["as_of"]
+    NAMES["feature_names"]
 
-    CAL --> VALIDATE["validated_as_of\n(reject tz-aware / bare number /\nunparseable; reject any\nobserved_at after as_of)"]
+    CAL --> SPOTCHK["spot finite > 0"]
+    NAMES --> NAMECHK["feature_names shape\n(non-string sequence,\nnon-empty str, no dupes)"]
+    NAMECHK --> LEAKNAMES["feature-name denylist\n(move/abs_move, driver_name,\n*_fold_start, *_model_id,\ntier3_snapshot, pred_iv_crush_30*)"]
+
+    CAL --> VALIDATE["validated_as_of\n(reject tz-aware / bare number /\nunparseable; reject calendar_observed_through,\npanel_row.date, quote observed_at\nafter as_of)"]
     PANEL --> VALIDATE
-    TIER4 --> VALIDATE
     QUOTES --> VALIDATE
     ASOF --> VALIDATE
 
     VALIDATE --> CONTEXT["context\n(calendar facts)"]
-    VALIDATE --> FEATURES["feature_vector +\nfeature_missing_mask\n(project feature_names from\npanel_row/tier4_row)"]
+    LEAKNAMES --> FEATURES["feature_vector (raw pass-through) +\nfeature_missing_mask (presence only)\n(project feature_names from tier4_row/panel_row;\ntier4 use gated by that metric's own\nfold_start <= as_of)"]
+    TIER4 --> FEATURES
+    PANEL --> FEATURES
     QUOTES --> QMAP["quote_domain_map\n(extracted from\ncapture_tier0_corpus._quote_map)"]
     QMAP --> RAWQ["raw_quotes"]
 
