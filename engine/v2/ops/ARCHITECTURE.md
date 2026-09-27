@@ -28,7 +28,11 @@ derived directly from its `argparse` definitions:
 
 - `init`, `doctor`, `health`
 - `serve` — starts the supervisor loop
-- `plan {nightly,experiment}` — builds and saves a plan document
+- `plan {nightly,experiment,training,promote}` — builds and saves a plan
+  document; `training`/`promote` (P6 slice 5) take operator-only arguments
+  (`--training-mode`, `--recipe`, `--state`, `--alpha`, `--cutoff`,
+  `--strategy`, `--pairs`, `--ticker-chunk`, `--release-root`,
+  `--release-id`) and are never part of the nightly DAG
 - `submit --plan --idempotency-key`
 - `rescore --request --native-inputs` — read-only, no provider pulls, no fitting
 - `capture-inputs --as-of --tickers --context-tickers --year-start --year-end --source-root --output`
@@ -44,7 +48,11 @@ derived directly from its `argparse` definitions:
 Internally: `nightly.py`'s `GRAPH`, `graph_order()`, `OPTIONAL`,
 `NO_JOB_STAGES`, `build_nightly_plan`, `build_legacy_job_requests`,
 `_stage_sequence` (see §"Diagrams" below); `supervisor.Service`/`serve`;
-the coordinator-effect functions in `effects_graph.py`; `BoardRequest`/
+the coordinator-effect functions in `effects_graph.py`; `training.py`'s
+`training_job_kind`/`promote_job_kind` (registered in `stages.py::_core_kinds`,
+alongside the nightly stage kinds, not in
+`supervisor._COORDINATOR_EFFECT_KINDS`), `training_plan`/`promote_plan` and
+`run_training_worker`/`run_promote_worker`; `BoardRequest`/
 `board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — a pure key `(ticker, strategy, event_date,
 session)` and the function that enumerates one per event × native-covered
@@ -106,6 +114,16 @@ strategy, plus one `DYN-SV` meta-request per event.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
+- `training`/`models_promote` are ordinary `_core_kinds()` job kinds, not
+  `supervisor._COORDINATOR_EFFECT_KINDS` members: the worker subprocess does
+  the real write itself. `run_training_worker` (worker `"training"`) calls
+  one of `tools/phase5_training_job.py`'s four job functions and writes
+  `training_result.json` (`training_job_result.v1.0`); `run_promote_worker`
+  (worker `"models_promote"`) calls `engine.v2.models.deployment.promote`'s
+  release-store pointer swap and writes `pointer_state.json`
+  (`promote_pointer_state.v1.0`). Neither ever runs inside the nightly DAG —
+  both are submitted by an operator's own `ops plan training|promote` +
+  `ops submit`.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
@@ -219,6 +237,8 @@ network, or database access.
 
 ## Failure semantics
 
+- **Missing input** — a stage with an unmet dependency, or a job whose
+  bound input artifact is absent, is refused with a typed `Problem`/error
   code (root doc §5), never defaulted. `board_requests` follows the same
   rule for its own input: `events_table` missing `ticker`, `event_date`,
   or `session`; holding more than one column under any of those three
@@ -253,6 +273,32 @@ network, or database access.
   be a non-negative `int`; `bool` is refused even though it is an `int`
   subtype in Python (so `True`/`False` cannot silently pass as `1`/`0`),
   and any other type or a negative value is refused the same way.
+- **Training/promote refusal** — `run_training_worker` maps every refusal
+  the underlying tool can raise to a typed `OpsError` rather than an
+  untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
+  `RuntimeFitForbidden` -> `VALIDATION_FAILED`, any other `SystemExit` ->
+  `_tool_failure`'s mapping. `run_promote_worker` maps
+  `deployment.DeploymentError` (including an unstaged `release_id`) to
+  `VALIDATION_FAILED`. A `training` plan with no bound legacy input manifest
+  carries `blocked_prerequisites` and can never be submitted, exactly like a
+  manifest-less nightly plan. A recipe job's `pairs_path`
+  (`ops plan training --pairs`) is validated twice: a malformed one
+  (absolute, containing `..`) fails `training_parameter_problems` at plan
+  time (`INVALID_REQUEST`); at execution it must additionally resolve, as a
+  plain relative path, beneath the attempt's staged legacy root (populated
+  only from the plan's pinned manifest), or the worker refuses
+  `INPUT_CHANGED` — a recipe can only ever read a pairs file that is one of
+  the job's pinned legacy inputs, never an arbitrary filesystem path.
+  `training_parameter_problems` also refuses, before submission, a
+  non-positive/non-int `ticker_chunk`, a non-finite or negative `alpha`, a
+  `cutoffs` entry that is not a valid ISO date, and a `pairs_path` supplied to
+  any mode other than `recipe` — each `INVALID_REQUEST`, never a value that
+  reaches the worker unexamined.
+  `models_promote`'s `store_domains` declares a
+  write lease on the single `deployment_pointer` domain, which serializes
+  every `models_promote` claim globally against every other one regardless
+  of the `release_root` each names — `deployment.promote`'s
+  read-current-pointer/append-history swap has no locking of its own.
 - **Cache** — one part of this package's own state *is* a cache, read
   through the operations catalog's own `data_raw_receipts` table (the same
   connection this package's stages already use for `data_snapshot_heads`
@@ -270,10 +316,11 @@ network, or database access.
   failure codes — `refused` (an unparseable body or other non-auth 4xx) to
   `SOURCE_INVALID`, `credential_invalid` (the provider's own 401/403) to
   `CREDENTIAL_INVALID` — while only `transient` is retried; everything
-  else about this package's own job/lease/history state is not a cache,
-  and the catalog remains the durable record of it. `board_requests`
-  holds no cache of its own either way; it reads only the table its
-  caller passes in.
+  else about this package's own job/lease/history state, including the
+  `training`/`models_promote` job kinds' own state, is not a cache, and the
+  catalog remains the durable record of it. `board_requests` holds no
+  cache of its own either way; it reads only the table its caller passes
+  in.
 - **Retry** — `lifecycle.py`'s `attempt_receipts`/`request_cancel` and
   `recovery.py`'s `reconcile_attempt`/`prove_ownership_gone` govern retry
   and ownership recovery after a crash; a stale lease is reclaimed only
