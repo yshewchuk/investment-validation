@@ -182,6 +182,24 @@ def test_missing_model_binding_object_raises_model_not_ready(tmp_path):
     assert error.value.member_id.startswith("model:")
 
 
+def test_unreadable_model_binding_object_raises_model_not_ready_without_leaking_path(tmp_path):
+    release = _stage_and_promote(tmp_path)
+    member_path = _dep_root(tmp_path) / release.bindings[0].members[0].path
+    real_read = Path.read_bytes
+
+    def failing_read(self):
+        if self == member_path:
+            raise OSError("simulated read failure")
+        return real_read(self)
+
+    with unittest.mock.patch.object(Path, "read_bytes", failing_read):
+        with pytest.raises(ModelNotReady) as error:
+            resolve_release_binding(tmp_path)
+    assert error.value.member_id.startswith("model:")
+    assert str(member_path) not in error.value.detail
+    assert "simulated read failure" not in error.value.detail
+
+
 def test_model_binding_hash_mismatch_raises_model_not_ready_never_falls_back(tmp_path):
     release = _stage_and_promote(tmp_path)
     member_path = _dep_root(tmp_path) / release.bindings[0].members[0].path
@@ -231,6 +249,16 @@ def test_recalibration_member_hash_mismatch_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "recalibration_map:STR-THRU"
+
+
+def test_malformed_object_reference_in_catalog_raises_model_not_ready_without_leaking_content(tmp_path):
+    _stage_and_promote(tmp_path)
+    _write_catalog(tmp_path, rows=[_row("payoff_line:STR-THRU", [
+        {"path": "objects/whatever", "content_hash": None}])])
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path)
+    assert error.value.member_id == "payoff_line:STR-THRU"
+    assert "whatever" not in error.value.detail
 
 
 def test_analog_member_unloadable_raises_model_not_ready(tmp_path):

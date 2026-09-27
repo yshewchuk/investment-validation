@@ -227,7 +227,7 @@ def _verify_object_bytes(dep_root: Path, member_id: str, name: str, path: str,
     try:
         payload = target.read_bytes()
     except OSError as exc:
-        raise ModelNotReady(member_id, f"{name}: cannot read object at {path}: {exc}") from exc
+        raise ModelNotReady(member_id, f"{name}: cannot read the staged object") from exc
     actual = "sha256:" + hashlib.sha256(payload).hexdigest()
     if actual != expected_hash:
         raise ModelNotReady(member_id, f"{name}: object hash disagrees with the pointer")
@@ -312,7 +312,7 @@ def _resolve_state_group(
             if (not isinstance(obj, Mapping)
                     or not isinstance(obj.get("path"), str)
                     or not isinstance(obj.get("content_hash"), str)):
-                raise ModelNotReady(member_id, f"malformed object reference: {obj!r}")
+                raise ModelNotReady(member_id, "malformed object reference in phase5_release.json")
             artifact = loader(dep_root, member_id, obj)
             grouped.setdefault(artifact.strategy, []).append(artifact)
     return {strategy: tuple(items) for strategy, items in grouped.items()}
