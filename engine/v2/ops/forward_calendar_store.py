@@ -314,6 +314,20 @@ def _validated_fence(value) -> int | None:
     return value
 
 
+def _validated_attempt_fence_pair(attempt_id: str | None, fence: int | None) -> None:
+    """Refused before any I/O (Opus gate finding on PR #55) when exactly one
+    of ``attempt_id``/``fence`` is set. A bare ``fence`` with no
+    ``attempt_id`` would make ``_fence_check_for`` a no-op -- the commit goes
+    through unfenced (fail-open). A bare ``attempt_id`` with no ``fence``
+    would only be refused later, inside ``verify_fence``, after the network
+    fetch. Both ``None`` (the legacy/no-live-job default) and both set are
+    the only valid shapes."""
+    if (attempt_id is None) != (fence is None):
+        raise fail("INVALID_REQUEST",
+                   f"attempt_id and fence must both be None or both be set, got "
+                   f"attempt_id={attempt_id!r} fence={fence!r}")
+
+
 def _validated_catalog_path(catalog_path) -> str:
     """``catalog_path`` must already exist as a file -- ``sqlite3.connect``
     is never allowed to silently create one that does not."""
@@ -806,7 +820,8 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
 
     ``attempt_id``/``fence`` (issue #52): ``None``/``None`` is a no-op fence
     check; otherwise the commit is fenced via
-    ``engine.v2.ops.lifecycle.verify_fence`` before anything commits.
+    ``engine.v2.ops.lifecycle.verify_fence`` before anything commits. Exactly
+    one set (Opus gate finding) is refused up front, before any I/O.
     """
     catalog_path = _validated_catalog_path(catalog_path)
     objects_root = _validated_objects_root(objects_root)
@@ -820,6 +835,7 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
     expected_head_snapshot_id = _validated_expected_head_snapshot_id(expected_head_snapshot_id)
     attempt_id = _validated_attempt_id(attempt_id)
     fence = _validated_fence(fence)
+    _validated_attempt_fence_pair(attempt_id, fence)
     if nasdaq_fetcher is None or earnings_fetcher is None:
         raise fail("RESOURCE_UNAVAILABLE", "no forward_calendar fetchers are configured")
     return _execute_forward_calendar_refresh(

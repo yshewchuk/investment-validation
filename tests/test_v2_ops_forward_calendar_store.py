@@ -433,3 +433,29 @@ def test_fence_is_refused_before_any_io(tmp_path, bad_fence):
     in Python), zero, negative, a float, and a numeric string are each
     refused before any I/O."""
     _refused(tmp_path, fence=bad_fence)
+
+
+def test_fence_set_without_attempt_id_is_refused_before_any_io(tmp_path):
+    """Opus gate finding on PR #55: a bare ``fence`` with no ``attempt_id``
+    would make ``_fence_check_for`` a no-op (fail-open -- the commit goes
+    through unfenced). Refused up front instead of silently no-op'ing."""
+    _refused(tmp_path, fence=3)
+
+
+def test_attempt_id_set_without_fence_is_refused_before_any_io(tmp_path):
+    """Opus gate finding on PR #55: a bare ``attempt_id`` with no ``fence``
+    would previously only fail later, inside ``verify_fence``, after the
+    network fetch. Refused up front instead."""
+    _refused(tmp_path, attempt_id="attempt-1")
+
+
+def test_attempt_fence_pair_both_none_is_valid_the_legacy_default():
+    """Both ``None`` is the default every legacy/no-live-job caller uses --
+    it must not be refused (Opus gate finding on PR #55)."""
+    forward_calendar_store._validated_attempt_fence_pair(None, None)
+
+
+def test_attempt_fence_pair_both_set_is_valid():
+    """Both set (a live job attempt fencing the commit) is the other valid
+    shape."""
+    forward_calendar_store._validated_attempt_fence_pair("attempt-1", 3)
