@@ -128,18 +128,22 @@ contracts" above. Its pure helpers (`horizon_dates`, `date_units`,
 are unit-testable without a catalog or a network. Today this runner has no
 production caller, only its own test module.
 
-`native_score_batch.py` (new, cutover PR-3): the batch-shaped seam between
-the board universe (`native_board_universe.BoardRequest`) and
+`native_score_batch.py` (this PR adds this module, its `stages.py` job kind
+and its `worker.py` dispatch branch together — this doc describes the
+module as this PR leaves it, not a pre-existing fact): the batch-shaped
+seam between the board universe (`native_board_universe.BoardRequest`) and
 `engine.v2.scoring.application.score_batch`. `assemble_score_batch_inputs`
 turns one release binding (`engine.v2.scoring.release_bindings.
 ScoringReleaseBinding`, PR-1) plus a sequence of one already-staged
-`NightlySourceBundleInput` per event (calendar/panel/Tier-4/quote rows, the
+`NightlyEventInputs` per event (calendar/panel/Tier-4/quote rows, the
 same shape `engine.v2.scoring.nightly_source_bundle.
 assemble_nightly_source_bundle`, PR-2, already accepts) into
 `dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple of
 typed per-row `NativeScoreBatchRowRefusal`s — never a raised exception for a
 bad row (see "Failure semantics" below). It is a pure function: no catalog,
-no filesystem, no network. `run_native_score_batch_worker(parameters, root)`
+no filesystem, no network. An empty `events` sequence is a legitimate no-op,
+never a refusal or an error: the returned map and refusal tuple are both
+empty. `run_native_score_batch_worker(parameters, root)`
 is the `native_score_batch` job kind's worker entrypoint (dispatched from
 `worker.py`, registered in `stages.py::_core_kinds`): it resolves the
 release once via `resolve_release_binding(parameters["release_root"])`,
@@ -149,7 +153,12 @@ own `input_bindings` exactly like `adhoc_rescore`'s `request.json`/
 `native_inputs.json`), calls `assemble_score_batch_inputs`, then
 `engine.v2.scoring.application.score_batch` under `engine.v2.models.no_fit.
 no_fit_guard()` (the same guard `_dispatch_adhoc_rescore` already uses), and
-writes `records.json`/`refusals.json`. **This bounded batch assembler
+writes `records.json`/`refusals.json`. An `events.json` decoding to an empty
+list produces empty `records.json`/`refusals.json` and
+`completed_ids=list(parameters["expected_ids"])`/`no_work=not
+parameters["expected_ids"]` — the same "no work" shape `artifact_check`
+already reports for an empty `expected_ids`, never a distinct code of its
+own. **This bounded batch assembler
 supports `STR-THRU` only** (the same strategy `nightly_source_bundle.py`'s
 own bounded builder documents as its scope) — any other `BoardRequest.strategy`
 in the input sequence refuses per-row (`UNSUPPORTED_STRATEGY`), never raises
