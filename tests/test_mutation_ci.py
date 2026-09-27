@@ -1488,6 +1488,9 @@ def test_report_status_job_only_runs_when_plan_resolved_a_pr(jobs, context):
     assert step["env"]["MODULES"] == "${{ needs.plan.outputs.modules }}"
     assert step["env"]["REPORT_RESULT"] == "${{ needs.report.result }}"
     assert f'-f context="{context}"' in step["run"]
+    assert '-f state="$state"' in step["run"]
+    assert '-f description="$desc"' in step["run"]
+    assert '-f target_url="$RUN_URL"' in step["run"]
     assert "/statuses/$SHA" in step["run"] and "gh api" in step["run"]
 
 
