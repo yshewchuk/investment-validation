@@ -48,9 +48,37 @@ entrypoints:
   batch boundary (`score_frozen_batch`) and inference-input builder
   (`build_inference_requests`, `validate_answer_free`).
 - `release_bindings.py` (new) — `resolve_release_binding(release_root) ->
-  ReleaseBinding`: the production reader of a live deployment's model
+  ScoringReleaseBinding`: the production reader of a live deployment's model
   identity, model artifact refs, and analog/payoff/recalibration artifacts.
   See its own section below.
+  `ScoringReleaseBinding` (frozen dataclass, every mapping field a read-only
+  `MappingProxyType` set in `__post_init__` — the `FrozenStageResult`
+  convention `frozen_executor.py` already uses) fields: `release_id: str`;
+  `model_identity: Mapping[str, ModelIdentity]`, **keyed `"{role}:{strategy_id}"`**
+  (never by `role` alone — a release binds `role="gate"` twice, once per
+  strategy, e.g. `("gate", "STR-THRU")` and `("gate", "STR-RUNUP")`, so
+  `role` is not a unique key; two bindings that resolve to the same
+  `"{role}:{strategy_id}"` key is itself a release defect and refuses
+  `ModelNotReady` naming that key, not a silently-overwritten dict entry);
+  `model_artifact_refs: Mapping[str, str]`, **keyed by `binding_id`**
+  (every release binding's `binding_id` is unique by construction, unlike
+  `role`). `ModelIdentity` carries `role`, `strategy_id`, `decision_clock_id`,
+  `model_id`, `binding_id`, `adapter`, `feature_order`, `output_names`, and
+  `artifact_hash` (`engine.v2.foundation.content_hash` over the binding's own
+  sorted, verified member content hashes — never re-derived from unverified
+  bytes; `model_artifact_refs[binding_id]` carries this same value).
+  `payoff_artifacts`, `recalibration_artifacts`, `analog_artifacts` are each
+  `Mapping[str, tuple[...]]` **keyed by the loaded artifact's own `.strategy`
+  field** (never by the manifest row's declared `strategies` list — the
+  artifact's own field is what a per-request lookup can trust), holding
+  every hash-verified, causally-keyed object of that family the release
+  stages (a family can hold several per strategy: e.g. one
+  `payoff_line:STR-THRU` object per calibration fold). Picking the one
+  object matching a request's own `(strategy, alpha, cutoff)` — over each
+  artifact's own `.key` property — and mapping a resolved binding to the
+  specific forecast-output name(s) `SourceBundle.model_artifact_refs`
+  expects (e.g. `"driver_prediction"`) are both the per-request assembler's
+  job (cutover PR-2/3), not this module's.
 - `identity.py`, `financial.py`, `chooser_inputs.py`, `native_*.py` —
   content-addressed request/record identity, financial diagnostics, and the
   native (non-legacy) arithmetic for the analog stage, the DYN-SV chooser,
@@ -87,7 +115,7 @@ nested mapping/sequence field deep-frozen (`frozen_record.py`) before it
 leaves this package. `identity.py` derives the record's content-addressed
 `score_id`/`request_hash` from the immutable payload, excluding operational
 timestamps, so a replay of the same inputs reproduces the same id.
-`release_bindings.py` additionally returns a `ReleaseBinding` — an
+`release_bindings.py` additionally returns a `ScoringReleaseBinding` — an
 in-process, immutable snapshot of one release's resolved catalog; it is not
 persisted anywhere and carries no operational envelope of its own.
 
@@ -120,7 +148,7 @@ wires it into the per-night `SourceBundle` assembler.
 
 No network. Local filesystem only: the deployment content-addressed store
 and `phase5_release.json` (via `engine.v2.models`, read-only from this
-package), and `data/models/tier4` fold files elsewhere in the release
+package), and fold files elsewhere in the release
 pipeline (not read directly by this package). `numpy`/`scipy.stats.norm`
 (`stages.py`, `native_*.py` — deterministic arithmetic, no fitting) and
 `pandas` (`compatibility.py`, legacy request construction only).
@@ -163,7 +191,15 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
   MODEL_NOT_READY` and the `FrozenStageRefusal` convention above), naming
   the exact `member_id` (e.g. `"model:gate:STR-THRU"`,
   `"payoff_line:STR-THRU"`, `"board_analog_matcher"`) and, where useful, the
-  specific object name inside it.
+  specific object name inside it. The `phase5_release.json` catalog itself
+  is verified the same way before any of its rows are trusted: it must
+  parse as a JSON object whose own declared `manifest_hash` matches a fresh
+  `content_hash` of its other fields, and its `release_id` must equal the
+  live pointer's `release_id` — the layout assumes one catalog file
+  describes the release root's *current* release, an assumption a rollback
+  to an older staged release would break — a `phase5_release.json` that
+  fails either check raises `ModelNotReady("phase5_release.json", ...)`
+  before any state-family row is read.
 - **A hash mismatch never falls back.** There is no branch anywhere in this
   module that substitutes a different object, an older cached value, or a
   default when a hash disagrees — `ModelNotReady` is the only outcome. This
@@ -181,13 +217,13 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
   scratch.
 - **R4, transaction.** Not applicable — read-only, single-pass, no
   multi-step state to roll back. Resolution either completes and returns
-  one immutable `ReleaseBinding`, or raises before returning anything.
+  one immutable `ScoringReleaseBinding`, or raises before returning anything.
 - **R5, partial write.** None possible: this module performs no writes.
   Every function it calls into (`deployment.current_pointer`/
   `resolve_release`, the artifact loaders' `.load`) is documented read-only
   in its own module; `release_bindings.py` adds none of its own.
 - **R6, idempotency.** Resolving the same `release_root` while its pointer
-  is unchanged always returns an equal `ReleaseBinding` (frozen dataclasses,
+  is unchanged always returns an equal `ScoringReleaseBinding` (frozen dataclasses,
   structural equality); resolving it again after a promotion or rollback
   reflects the new pointer, never a stale one, because nothing is cached
   between calls.
@@ -217,6 +253,6 @@ flowchart LR
     DP["deployment.current_pointer(release_root)"] -->|None| NCR["NoCurrentRelease"]
     DP -->|PointerState| RR["deployment.resolve_release\n+ phase5_release.json catalog"]
     RR -->|member missing/corrupt/\nhash mismatch| MNR["ModelNotReady(member_id)"]
-    RR -->|every member verified| RB["ReleaseBinding\n(model identity, artifact refs,\nanalog/payoff/recalibration artifacts)"]
+    RR -->|every member verified| RB["ScoringReleaseBinding\n(model identity, artifact refs,\nanalog/payoff/recalibration artifacts)"]
     RB -.->|no caller yet;\ncutover PR-3 wires this in| SB
 ```
