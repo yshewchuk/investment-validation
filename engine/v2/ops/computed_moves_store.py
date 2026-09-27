@@ -396,7 +396,7 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
 
 
 # --------------------------------------------------------------------------
-# the RefreshCallback-compatible entrypoint
+# the standalone runner (Part 3 adapts this to RefreshCallback)
 # --------------------------------------------------------------------------
 
 

@@ -50,8 +50,9 @@ the coordinator-effect functions in `effects_graph.py`.
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture` and `price-refresh`.
-- `computed_moves_store.py`'s `run_computed_moves_refresh` (the
-  `RefreshCallback` a future job's worker calls — see "Not yet wired" below):
+- `computed_moves_store.py`'s `run_computed_moves_refresh` (a standalone
+  runner, not itself a `RefreshCallback` — a future nightly-wiring change
+  adapts it to one with a per-dispatch closure; see "Not yet wired" below):
   reads `earnings_events`/`daily_market` off the pinned parent snapshot
   through `Repository`, exactly once each per run (`_scan_once`), and calls
   an injected yfinance history fetcher (never `legacy_adapter.new_fetcher`)
