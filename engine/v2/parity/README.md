@@ -1,5 +1,8 @@
 # `engine/v2/parity`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and failure semantics.
+
 ## Ownership
 
 Not a §4 owner-table row. Added by `spec_ns_c` part c, at layer **—** (6.5) of

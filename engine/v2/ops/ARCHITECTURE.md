@@ -1185,13 +1185,18 @@ into `engine.dashboard.nightly`.
   and the identical rerun-to-recover story, both pre-existing and both
   unchanged by this PR.
 - **R6, idempotency.** Same `score.json` + same `events.json` + same
-  resolved release + same `row_explanations` → the same
-  `native_parity_report.json`, byte-for-byte: `legacy_parity_rows` is a
-  pure function of `score_document`, `assemble_score_batch_inputs`/
+  resolved release + same `row_explanations` + same `tolerance_policy` →
+  the same `native_parity_report.json`, byte-for-byte: `legacy_parity_rows`
+  is a pure function of `score_document`, `assemble_score_batch_inputs`/
   `build_native_bundle_rows` are pure functions of their inputs (PR-3's
   own R6; `build_native_bundle_rows`'s `score_one` calls are
   content-addressed), and `compare_native_vs_legacy` is a pure function of
-  `(legacy_rows, native_rows, dimensions, row_explanations)`. Promoting a
+  `(legacy_rows, native_rows, dimensions, row_explanations, tolerance_policy)`.
+  `tolerance_policy` defaults to `SCORE_RECORD_V1` and is not itself
+  content-addressed into the report, so a caller that changes it without
+  changing anything else gets a different report for the same inputs — a
+  deliberate policy change producing a different comparison, not a
+  violation of this invariant. Promoting a
   new release between two runs changes the resolved bindings and therefore
   the native side's values — a different release genuinely producing a
   different report is the correct, by-design outcome, matching PR-3's own

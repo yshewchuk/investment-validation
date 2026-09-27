@@ -39,6 +39,8 @@ from engine.v2.ops.native_parity_report import (
     native_parity_handler,
     write_parity_report,
 )
+from engine.v2.parity.dimensions import compare_dimension
+from engine.v2.parity.tolerance import Tolerance, TolerancePolicy
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
 from engine.v2.ops.nightly import (
     GRAPH,
@@ -328,6 +330,28 @@ def test_native_parity_handler_status_is_explicit_and_the_report_is_separate(tmp
     assert report["mismatches"] == []
 
 
+def test_native_parity_handler_threads_tolerance_policy_into_written_report(tmp_path):
+    """The report file on disk carries the caller's tolerance_policy_id,
+    not just the in-memory return value."""
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    key = sorted(rows)[0]
+    legacy = {k: dict(v) for k, v in rows.items()}
+    legacy[key]["exp_pnl_model"] = legacy[key]["exp_pnl_model"] + 0.01
+    report_path = tmp_path / "parity_report.json"
+    loose = TolerancePolicy(
+        policy_id="test.loose.v1",
+        rules=(("exp_pnl_model", Tolerance(absolute=1.0, reason="test")),))
+
+    native = native_parity_handler(
+        _NATIVE_PLAN, legacy_rows=legacy, native_rows=rows,
+        report_path=report_path, tolerance_policy=loose)({"session": _EVENT_DATE})
+
+    assert native["native_parity"]["status"] == "compared"
+    report = json.loads(report_path.read_text())
+    assert report["tolerance_policy_id"] == "test.loose.v1"
+    assert report["mismatches"] == []
+
+
 def test_compare_reports_a_mismatch_without_raising_or_reconciling():
     """G2: a difference is a return-value finding, never an exception."""
     rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
@@ -342,6 +366,36 @@ def test_compare_reports_a_mismatch_without_raising_or_reconciling():
     assert "exp_pnl_model" in report["mismatches"][0]["finding_fields"]
     # No code path copies either side's value into the other row.
     assert rows[key]["exp_pnl_model"] != legacy[key]["exp_pnl_model"]
+
+
+def test_tolerance_policy_is_threaded_through_compare_dimension_and_report():
+    """A caller-supplied TolerancePolicy changes the verdict; the default
+    (SCORE_RECORD_V1, exact) does not. Proves the new ``tolerance_policy``
+    keyword on ``compare_dimension`` and ``compare_native_vs_legacy`` is
+    real, not a name that nothing reads."""
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    key = sorted(rows)[0]
+    legacy_row = {**rows[key], "exp_pnl_model": rows[key]["exp_pnl_model"] + 0.01}
+    legacy = {key: legacy_row}
+    loose = TolerancePolicy(
+        policy_id="test.loose.v1",
+        rules=(("exp_pnl_model", Tolerance(absolute=1.0, reason="test")),))
+
+    exact_dim = compare_dimension(legacy_row, rows[key], "simulation")
+    assert exact_dim["agree"] is False
+
+    loose_dim = compare_dimension(legacy_row, rows[key], "simulation",
+                                  tolerance_policy=loose)
+    assert loose_dim["agree"] is True
+
+    default_report = compare_native_vs_legacy(legacy, rows, PARITY_DIMENSIONS)
+    assert default_report["mismatches"] != []
+    assert default_report["tolerance_policy_id"] == "score_record.exact.v1"
+
+    loose_report = compare_native_vs_legacy(
+        legacy, rows, PARITY_DIMENSIONS, tolerance_policy=loose)
+    assert loose_report["mismatches"] == []
+    assert loose_report["tolerance_policy_id"] == "test.loose.v1"
 
 
 def test_compare_refuses_an_unknown_dimension_and_write_propagates_oserror(tmp_path):
