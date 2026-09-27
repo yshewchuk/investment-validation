@@ -268,19 +268,28 @@ the first two cancels an older still-running run of its own family:
 GitHub always lists it under the default branch's Actions history instead --
 so a planned `report_status` job (design only as of 2026-09-27; not yet
 implemented) will post the outcome onto the PR's own head commit itself
-(`github.event.workflow_run.head_sha`) as a plain commit status: never a
-check run, and never added to branch protection, so it can never become a
-required check.** `report_status` will need `[plan, report]` and
-`statuses: write` for its `GITHUB_TOKEN` in both workflows (the existing
-workflow-level token grants only `contents: read`; every scope a job
-doesn't list itself becomes `none`), with
-`if: always() && needs.plan.outputs.pr_number != ''` (the `always()` is
-required: without it, GitHub Actions would skip `report_status` outright
-whenever `report` itself failed or was skipped, which is exactly when a
-result still needs posting); a fork PR, or a Tests run that failed, was
-cancelled, or was not itself a `pull_request` run, will never reach this
-far (`plan` is skipped, or leaves `pr_number` empty), so nothing will be
-posted for them -- fail closed, the same as the rest of the workflow. When
+(`github.event.workflow_run.head_sha`) as a plain commit status: this
+design does not add either context to branch protection's required-checks
+list, so nothing here starts blocking merges on its own (a repo admin
+requiring a status context by name is a separate, later, explicit action,
+not something this change does or enables by itself).** `report_status`
+will need `[plan, report]` and `statuses: write` for its `GITHUB_TOKEN` in
+both workflows (the existing workflow-level token grants only
+`contents: read`; every scope a job doesn't list itself becomes `none`),
+with `if: always() && needs.plan.outputs.pr_number != ''` (the `always()`
+is required: without it, GitHub Actions would skip `report_status`
+outright whenever `report` itself failed or was skipped, which is exactly
+when a result still needs posting; the condition deliberately omits a
+`needs.plan.result == 'success'` guard too, for the same reason --
+`plan`'s own steps can fail *after* `select_pr` already set `pr_number`
+(e.g. its checkout or pip install step), and a `result == 'success'` guard
+would then skip `report_status` too, silently recreating the exact
+invisible-PR problem this job exists to fix; posting a `failure` status
+attributed to a "report" that never ran is still strictly more informative
+than nothing). A fork PR, or a Tests run that failed, was cancelled, or
+was not itself a `pull_request` run, will never reach this far (`plan` is
+skipped, or leaves `pr_number` empty), so nothing will be posted for them
+-- fail closed, the same as the rest of the workflow. When
 `plan`'s own matrix is empty (`modules == '[]'`: a PR that closed before
 checkout, or a docs-only PR the `[pr_selection] inert` allowlist ruled out)
 the status will be `success` with a "skipped by design" description
