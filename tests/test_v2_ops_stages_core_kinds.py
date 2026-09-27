@@ -34,6 +34,11 @@ rather than glossed over:
   three core kinds' parameter classes DO have distinguishing fields and are
   proven through ``_check_parameters`` (a real consumer) instead. Direct
   assertion for these three only.
+- ``parameters`` for computed_moves_refresh/forward_calendar_refresh: both
+  use the same ``CalendarMovesParameters`` class (see
+  ``calendar_moves_jobs._job_kind``), so, like the three kinds above, no
+  schema-shape consumer can tell them apart either. Direct assertion
+  (``test_structurally_identical_parameter_classes_are_declared_correctly``).
 - the LAST ``backoff_seconds`` element for decision_evidence/adhoc_rescore/
   snapshot_import/legacy_materialize (2 entries, but max_attempts is also 2:
   ``advance_job`` fails the job outright at attempt 2, before ever calling
@@ -50,6 +55,7 @@ import pytest
 
 from engine.v2.foundation import format_timestamp
 from engine.v2.ops import stages, store_barrier
+from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.lifecycle import Outcome, commit_attempt
@@ -91,11 +97,18 @@ _CASES = {
         resource_class="io_fetch",
         checkpoint_contract="decisions_supersede_receipt.v1.0",
         max_attempts=2, backoff=(5, 30), extra_field=("reason", "x")),
+    "computed_moves_refresh": dict(
+        resource_class="io_fetch", checkpoint_contract="incremental_refresh_result.v1.0",
+        max_attempts=3, backoff=(5, 65), extra_field=None),
+    "forward_calendar_refresh": dict(
+        resource_class="io_fetch", checkpoint_contract="incremental_refresh_result.v1.0",
+        max_attempts=3, backoff=(5, 65), extra_field=None),
 }
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
                       "legacy_rebuild_candidate", "legacy_materialize",
-                      "decisions_supersede")
+                      "decisions_supersede", "computed_moves_refresh",
+                      "forward_calendar_refresh")
 
 
 def _extra_params(name):
@@ -200,10 +213,14 @@ def test_submission_reads_resource_class_checkpoint_retry_and_max_refs(tmp_path,
 def test_structurally_identical_parameter_classes_are_declared_correctly():
     """CheckParameters/RescoreParameters/SnapshotImportParameters are
     identical in shape (see module docstring) -- no consumer can distinguish
-    them, so this is a direct, explicitly-named fallback."""
+    them, so this is a direct, explicitly-named fallback. computed_moves_refresh
+    and forward_calendar_refresh go further: they share the literal same
+    parameters class, so there is no distinguishing field between them either."""
     assert _ACTUAL["artifact_check"].parameters is stages.CheckParameters
     assert _ACTUAL["adhoc_rescore"].parameters is stages.RescoreParameters
     assert _ACTUAL["snapshot_import"].parameters is stages.SnapshotImportParameters
+    assert _ACTUAL["computed_moves_refresh"].parameters is CalendarMovesParameters
+    assert _ACTUAL["forward_calendar_refresh"].parameters is CalendarMovesParameters
 
 
 def _fail_once(conn, clock, supervisor):

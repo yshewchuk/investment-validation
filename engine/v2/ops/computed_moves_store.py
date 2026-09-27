@@ -357,7 +357,14 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
         expected_head_generation=generation, receipt_id=receipt_id, attempt_id=attempt_id,
         fence=1,
         fence_check=(lambda connection: verify_fence(
-            connection, staged_attempt_id, staged_fence, clock.now()))
+            connection, staged_attempt_id, staged_fence, clock.now(),
+            check_lease_time=False))
+        # check_lease_time=False: this runs inside the worker subprocess,
+        # whose only clock is SystemClock() (see module top). lease_expires_at
+        # was written by the supervisor's own clock (a FakeClock in tests),
+        # which the worker cannot obtain across the process boundary. The
+        # identity/CAS check alone still rejects a superseded attempt's
+        # commit once the supervisor has reassigned the job.
         if staged_attempt_id is not None else (lambda connection: None),
         clock=clock, store=store,
         record_references=lambda connection, rid: _insert_captures(connection, attempts),

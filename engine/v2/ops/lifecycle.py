@@ -81,8 +81,18 @@ class Outcome:
 
 
 def verify_fence(conn: sqlite3.Connection, attempt_id: str, fence: int,
-                 now: datetime) -> tuple[sqlite3.Row, sqlite3.Row]:
-    """Inside the caller's transaction: this attempt may still commit. Returns (job, attempt)."""
+                 now: datetime, *, check_lease_time: bool = True) -> tuple[sqlite3.Row, sqlite3.Row]:
+    """Inside the caller's transaction: this attempt may still commit. Returns (job, attempt).
+
+    ``check_lease_time=False`` skips the wall-clock lease-expiry check and
+    verifies only the identity/CAS invariant (active attempt, fence, job and
+    attempt state). Use this only when the caller's clock cannot be
+    reconciled with whichever clock wrote ``lease_expires_at`` -- e.g. a
+    worker subprocess checking a lease the supervisor process wrote with its
+    own (possibly test) clock. Every in-process caller (the supervisor's own
+    launch/heartbeat/cancel machinery) keeps the default and must not pass
+    this.
+    """
     attempt = conn.execute("SELECT * FROM attempts WHERE attempt_id = ?",
                            (attempt_id,)).fetchone()
     if attempt is None:
@@ -96,7 +106,7 @@ def verify_fence(conn: sqlite3.Connection, attempt_id: str, fence: int,
             and attempt["state"] in ("starting", "running"))
     if not live:
         raise fail("LEASE_LOST", "the attempt no longer holds the job's fence", details=details)
-    if format_timestamp(now) >= attempt["lease_expires_at"]:
+    if check_lease_time and format_timestamp(now) >= attempt["lease_expires_at"]:
         raise fail("LEASE_LOST", "the attempt's lease has expired", details=details)
     return job, attempt
 
