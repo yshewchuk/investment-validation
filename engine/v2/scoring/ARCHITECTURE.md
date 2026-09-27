@@ -69,11 +69,15 @@ entrypoints:
   bytes; `model_artifact_refs[binding_id]` carries this same value).
   `model_release: ModelRelease` (`engine.v2.models.contracts.ModelRelease` —
   the exact staged object, hash-verified against its own manifest's
-  `release_hash` before this module trusts it; see Failure semantics R1(c))
+  `release_hash` before this module trusts it; see Failure semantics R1(f))
   and `frozen_inference: FrozenInference` (`engine.v2.models.loader.
   FrozenInference`, constructed `FrozenInference(deployment_root(
   release_root))`, the same construction `checks/phase5_consumers.py:410`
-  uses) are carried **in exactly the form `SourceBundle` already declares
+  uses, declared `field(compare=False)` — `FrozenInference` is a plain class
+  with no value equality and a mutable, growing member cache of its own,
+  never a value this dataclass's `__eq__` can meaningfully compare; see
+  Failure semantics R2 and R6) are carried **in exactly the form
+  `SourceBundle` already declares
   them** (`source_inputs.py:313-314`, fields `frozen_inference` and
   `model_release`) and **exactly what `_frozen_recipe_executor`
   (`source_inputs.py:540-580`) consumes**: PR-3 assigns
@@ -132,8 +136,13 @@ leaves this package. `identity.py` derives the record's content-addressed
 `score_id`/`request_hash` from the immutable payload, excluding operational
 timestamps, so a replay of the same inputs reproduces the same id.
 `release_bindings.py` additionally returns a `ScoringReleaseBinding` — an
-in-process, immutable snapshot of one release's resolved catalog; it is not
-persisted anywhere and carries no operational envelope of its own.
+in-process snapshot of one release's resolved catalog; it is not persisted
+anywhere and carries no operational envelope of its own. Every field except
+`frozen_inference` is a genuinely immutable value (frozen dataclass,
+`MappingProxyType` mappings); `frozen_inference` is the one field whose
+referenced object holds its own mutable, growing cache after this call
+returns (Failure semantics R2), so "immutable snapshot" describes the
+binding's own fields, not everything reachable through it.
 
 ## Dependencies
 
@@ -193,44 +202,59 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
   same one-line join `checks/phase5_release.py`'s `deployment_root` performs
   — ported, not imported, since that module is under `checks`). The live
   pointer file (`DEPLOYED`) lives at `<release_root>/deployment/DEPLOYED`,
-  **not** directly under `release_root`. Three sub-cases, each a distinct
-  typed refusal:
+  **not** directly under `release_root`. Six sub-cases below (a)-(f), each a
+  distinct typed refusal, cover resolving the pointer and then the one
+  staged-manifest read that follows it:
   - **(a) no pointer at all.** `deployment.current_pointer(deployment_root)`
     returns `None`, rather than raising, when nothing has ever been promoted
     (or `release_root`/its `deployment/` subdirectory does not exist —
     `current_pointer` treats a missing `DEPLOYED` file and a missing
     directory identically). This module turns that into `NoCurrentRelease`.
-  - **(b) the pointer names a release that will not resolve.**
-    `deployment.resolve_release(deployment_root, pointer.release_id)` can
-    raise `ReleaseNotStaged` (no staged manifest for that id) or
-    `DeploymentError` (e.g. an unsafe `release_id` — contains `/` or is `.`/
-    `..` — raised inside `_release_dir`, `deployment.py:132`; or another
-    `DeploymentError` subclass from the same call chain, `deployment.py:
-    368-370`). This module never lets either propagate raw: both are caught
-    and re-raised as `ModelNotReady("model_release", detail=str(exc))`.
-  - **(c) the `DEPLOYED` file itself is corrupt or unparseable.**
+  - **(b) the `DEPLOYED` file itself is corrupt or unparseable.**
     `current_pointer`'s decode (`deployment.py:384`,
     `_decode(PointerState, path.read_bytes())`) can raise a bare
     `json.JSONDecodeError` or `engine.v2.foundation.typed.DocumentError`
     (malformed JSON, or JSON that does not match `PointerState`'s schema) —
     neither is a `DeploymentError` subclass. This module catches both
-    explicitly and re-raises as `ModelNotReady("DEPLOYED", detail=str(exc))`;
+    explicitly and re-raises as `ModelNotReady("DEPLOYED", str(exc))`;
     it is a corrupt member of the deployment store, not the "nothing
     promoted yet" case (a), so it is never conflated with `NoCurrentRelease`.
-- **R1 (continued), the staged release's own hash.** `deployment.
-  resolve_release`'s public path reads the staged manifest and returns
-  `manifest.release` without checking the manifest's own `release_hash` —
-  that check is not part of its contract. Before trusting any binding's
-  member hashes, this module re-reads the manifest as
-  `deployment._read_manifest(deployment_root, release_id)` and verifies
-  `deployment._manifest_hash_matches(manifest)`, the exact function
-  `checks/phase5_acceptance.py:185`'s `_load_model_release` calls for the
-  same purpose (both `deployment._read_manifest` and
-  `deployment._manifest_hash_matches` are called directly off the
-  `engine.v2.models.deployment` module this module already depends on —
-  not imported from `checks`). A mismatch raises
-  `ModelNotReady("model_release", "release_hash disagrees with manifest")`
-  before any binding's members are loaded.
+
+  Once a live `pointer.release_id` is known, this module reads the staged
+  manifest **exactly once**, via `deployment._read_manifest(deployment_root,
+  release_id)` — never through the public `resolve_release()` wrapper (which
+  would read the same file again), and never re-read later for the hash
+  check below. Every way that one read can fail is its own typed refusal,
+  and only once all of them pass does `manifest.release` become this
+  module's trusted `ModelRelease`:
+  - **(c) an unsafe `release_id`.** `_read_manifest` builds its path through
+    `_manifest_path`/`_release_dir`, which raises `DeploymentError` for a
+    `release_id` containing `/` or equal to `.`/`..` (`deployment.py:132`)
+    before touching the filesystem at all. Caught and re-raised as
+    `ModelNotReady("model_release", str(exc))`.
+  - **(d) no staged manifest for that id.** `_read_manifest` returns `None`
+    when `releases/<release_id>/manifest.json` does not exist
+    (`deployment.py:179-180`) — the exact condition the public
+    `resolve_release()` turns into `ReleaseNotStaged`, which this module
+    never raises because it never calls that wrapper. Raised directly as
+    `ModelNotReady("model_release", "release not staged")`.
+  - **(e) a `manifest.json` that exists but will not parse.** `_read_manifest`'s
+    own decode (`deployment.py:181`, `_decode(StagedManifest,
+    path.read_bytes())`) can raise a bare `json.JSONDecodeError` or
+    `DocumentError` — again not a `DeploymentError` subclass, same failure
+    shape as (b) above. Caught explicitly and re-raised as
+    `ModelNotReady("manifest.json", str(exc))`.
+  - **(f) the staged manifest's own hash disagrees.** Once a `StagedManifest`
+    is in hand, this module calls `deployment._manifest_hash_matches(manifest)`
+    on that same object — the exact function `checks/phase5_acceptance.py:
+    185`'s `_load_model_release` calls for the same purpose (both
+    `deployment._read_manifest` and `deployment._manifest_hash_matches` are
+    called directly off the `engine.v2.models.deployment` module this module
+    already depends on, not imported from `checks`) — **before** trusting
+    `manifest.release` or any binding's member hashes. `resolve_release()`'s
+    public path never performs this check itself, which is why this module
+    cannot use it. A mismatch raises `ModelNotReady("model_release",
+    "release_hash disagrees with manifest")`.
 - **R1 (continued), a member missing or corrupt.** Once a release is
   resolved, every model binding's member objects and every declared
   payoff/recalibration/analog state object is hash-verified and typed-loaded
@@ -269,11 +293,31 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
   is a property of the control flow (one verify-then-load path per member,
   no alternate source), proven by a test that a mismatched object never
   yields a resolved binding of any kind.
-- **R2, cache.** None beyond the single call's own artifact loaders (each
-  constructed fresh inside `resolve_release_binding`, discarded when it
-  returns). Two calls against the same `release_root` re-read and
-  re-verify every byte from disk; nothing is memoized across calls or
-  persisted to disk by this module.
+- **R2, cache.** None, for every field except `frozen_inference`: the other
+  fields' own artifact loaders (`PayoffArtifactLoader`/
+  `RecalibrationArtifactLoader`/`FrozenStateLoader`) are each constructed
+  fresh inside `resolve_release_binding` and never returned to the caller,
+  so they are discarded when it returns; two calls against the same
+  `release_root` re-read and re-verify every byte from disk for
+  `model_identity`, `model_artifact_refs`, `model_release`,
+  `payoff_artifacts`, `recalibration_artifacts` and `analog_artifacts` —
+  nothing about them is memoized across calls or persisted to disk by this
+  module. `frozen_inference` is the deliberate exception: a
+  `FrozenInference` instance owns its own mutable, growing member cache
+  (`loader.py:27`, `self._cache: dict[tuple[object, ...], ReadOnlyArtifact]`),
+  populated lazily inside `.infer()` and keyed by `(adapter, feature_order,
+  output_names, member content hashes)` — a content-hash key specifically
+  so a changed artifact can never return a stale cached entry
+  (`loader.py`'s own module docstring: "cache-independent loading"). This
+  module never clears or bounds that cache; it lives exactly as long as the
+  `FrozenInference` instance this call constructs and returns lives — i.e.
+  for as long as the caller holds the returned `ScoringReleaseBinding` (or
+  its `frozen_inference` field) alive, across every `.infer()` call the
+  caller makes with it, by design: persisting that cache across many score
+  requests is the entire reason to return a live `FrozenInference` rather
+  than a snapshot. A fresh call to `resolve_release_binding` always
+  constructs a brand-new `FrozenInference` with an empty cache; nothing is
+  shared between separate `resolve_release_binding` calls.
 - **R3, retry.** None. A refusal is not retried internally; a caller that
   wants to retry (e.g. after promoting a new release) calls
   `resolve_release_binding` again, which re-resolves the pointer from
@@ -282,13 +326,25 @@ the same `ScoreRecord` (`identity.py`'s content-addressed `score_id`).
   multi-step state to roll back. Resolution either completes and returns
   one immutable `ScoringReleaseBinding`, or raises before returning anything.
 - **R5, partial write.** None possible: this module performs no writes.
-  Every function it calls into (`deployment.current_pointer`/
-  `resolve_release`, the artifact loaders' `.load`) is documented read-only
-  in its own module; `release_bindings.py` adds none of its own.
+  Every function it calls into (`deployment.current_pointer`,
+  `deployment._read_manifest`, `deployment._manifest_hash_matches`, the
+  artifact loaders' `.load`) is documented read-only in its own module;
+  `FrozenInference.__init__` performs no I/O either (it only resolves the
+  root path and initializes an empty in-memory cache — reading happens
+  later, inside a caller's own `.infer()` calls, outside this module).
+  `release_bindings.py` adds no write of its own.
 - **R6, idempotency.** Resolving the same `release_root` while its pointer
-  is unchanged always returns an equal `ScoringReleaseBinding` (frozen dataclasses,
-  structural equality); resolving it again after a promotion or rollback
-  reflects the new pointer, never a stale one, because nothing is cached
+  is unchanged always returns a `ScoringReleaseBinding` equal (dataclass
+  `__eq__`) to the previous one, on every field except `frozen_inference` —
+  which is declared `field(compare=False)` precisely because it can never
+  hold: `FrozenInference` defines no `__eq__` of its own (plain identity
+  comparison) and starts a fresh, empty, mutable cache on every
+  construction, so two separate resolutions' `frozen_inference` values are
+  never `==` even when they wrap the identical `release_root`. A caller that
+  wants to confirm two resolutions saw the same release compares
+  `.model_release` directly — a plain frozen dataclass, equal by value.
+  Resolving again after a promotion or rollback reflects the new pointer in
+  every other field, never a stale one, because nothing about them is cached
   between calls.
 
 ## Invariants
@@ -315,8 +371,8 @@ flowchart LR
 
     DP["deployment.current_pointer(\nrelease_root/deployment)"] -->|None| NCR["NoCurrentRelease"]
     DP -->|corrupt DEPLOYED| MNRD["ModelNotReady(\"DEPLOYED\")"]
-    DP -->|PointerState| RR["deployment.resolve_release\n+ _manifest_hash_matches\n+ phase5_release.json catalog"]
-    RR -->|ReleaseNotStaged/DeploymentError/\nhash mismatch/member missing| MNR["ModelNotReady(member_id)"]
+    DP -->|PointerState| RR["deployment._read_manifest (once)\n+ _manifest_hash_matches\n+ phase5_release.json catalog"]
+    RR -->|unsafe id/not staged/corrupt\nmanifest/hash mismatch/\nmember missing| MNR["ModelNotReady(member_id)"]
     RR -->|release + every member verified| RB["ScoringReleaseBinding\n(model_release, frozen_inference,\nmodel identity, artifact refs,\nanalog/payoff/recalibration artifacts)"]
     RB -.->|no caller yet;\ncutover PR-3 assigns\nbundle.model_release/\nbundle.frozen_inference directly| SB
 ```
