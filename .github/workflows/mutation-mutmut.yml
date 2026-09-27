@@ -381,7 +381,13 @@ jobs:
           restore-keys: ${{ steps.key.outputs.prefix }}
       - name: Run mutmut
         id: run
-        if: always()
+        # steps.key.outcome == 'success', never always(): key runs
+        # unconditionally above, so this already covers the PR-closed no-op
+        # (checked inside the script below via PR_OPEN) -- always() would
+        # instead start a full mutation pass even after a cancel-in-progress
+        # lands during checkout/setup-python/pip-install/key, or after any of
+        # those genuinely fails (Opus gate on 733fd56).
+        if: steps.key.outcome == 'success'
         timeout-minutes: ${{ needs.plan.outputs.mode == 'incremental' && 60 || 330 }}
         env:
           PR_OPEN: ${{ steps.pr_open.outputs.open }}

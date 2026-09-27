@@ -255,7 +255,11 @@ first step, because a queued matrix job can outlive the PR that scheduled
 it -- but (fixed 2026-09-27, issue #64) only the actual mutation pass
 reads that result now: checkout/setup-python/pip-install/the cache-key
 step always run regardless (cheap, and the export step below needs the
-checked-out module file list either way), and a PR-closed job writes a
+checked-out module file list either way), and the mutation-tool step
+itself stays gated on `steps.key.outcome == 'success'`, never `always()`
+(the 733fd56 gate: `always()` let a full mutation pass start even after a
+cancel-in-progress landed during one of those setup steps, or after any
+of them genuinely failed) -- a PR-closed job writes a
 clean `run_exit_code=0` no-op -- mutmut's own build-rows already treats a
 missing state dir as "0 mutants"; gremlins' job writes a stub raw report
 (0 of every count, an empty results list, valid against `validate_raw`'s
