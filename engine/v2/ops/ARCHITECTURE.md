@@ -197,7 +197,13 @@ nothing before this PR builds real dicts to hand them.
   indices) — for the WHOLE call, before any dict is constructed: a
   batch-level refusal, never a per-row skip or a last-write-wins
   collision, so a malformed or duplicate-keyed `score.json` is never
-  silently read as smaller, or different, than it actually is.
+  silently read as smaller, or different, than it actually is. The same
+  refusal covers the shape one level up, before `population_key` is ever
+  called on a row: `score_document["rows"]`, if present, must be a list of
+  mappings — a non-list value or any non-mapping element raises `OpsError`
+  (`VALIDATION_FAILED`) rather than letting `population_key`'s own
+  `.get(...)` calls raise a bare `TypeError`/`AttributeError` on a
+  malformed element.
   `population_key`, `_population_key`, and `_action_score`'s own
   set-based check are all unchanged by this PR.
 - **`native_parity_report.py` gains a caller-supplied "explained" bucket**,
@@ -1096,8 +1102,11 @@ into `engine.dashboard.nightly`.
   refusal code — see "Primary contracts" above) for the whole call —
   never a per-row skip, and never `population_key`'s own `.get(key, "")`
   substitution reused here — the moment any row is missing a non-empty
-  `ticker`/`strategy`/`event_date`, or two rows share one `population_key`
-  value. A `score_document` missing `"rows"` entirely still returns `{}`,
+  `ticker`/`strategy`/`event_date`, two rows share one `population_key`
+  value, or `"rows"` is present but is not a list of mappings (a non-list
+  value, or any non-mapping element, before `population_key` is ever
+  called on it — never a bare `TypeError`/`AttributeError` from that
+  call). A `score_document` missing `"rows"` entirely still returns `{}`,
   not a refusal: there is no row to be malformed or to collide. This is a
   REAL join-format risk stated explicitly, not a defensive-only note:
   `population_key` and
