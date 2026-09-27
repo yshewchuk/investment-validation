@@ -330,15 +330,15 @@ caller yet.
   `legacy_adapter.py`; the artifact store's own content-addressed backing
   store (`ArtifactStore`, `engine.v2.foundation`), never touched by a raw
   path this package computes itself except for one sibling-resource read:
-  `legacy_mapping.py`'s `ANNOTATIONS_PATH = Path(__file__).resolve().parent /
-  "legacy_annotations.json"` loads a reviewed-facts file that ships beside
-  the module in the same package directory — this is a package-resource
-  read, not a repo-root computation (the root doc's snapshot/root-isolation
-  anti-pattern is about deriving a *project* root via `parents[N]` from
-  `__file__`, which this is not: `Path(__file__).resolve().parent` always
-  resolves to wherever the currently-imported module actually lives, so it
-  is unaffected by a worktree checkout or an `INVESTING_PLAN_ROOT` override).
-  No other module in this package touches `__file__`.
+  `legacy_mapping.py` loads a bundled `legacy_annotations.json` package
+  resource, a reviewed-facts file that ships beside the module in the same
+  package directory. This is a package-resource read, not a repo-root
+  computation (the root doc's snapshot/root-isolation anti-pattern is about
+  deriving a *project* root from `__file__`, which this is not: resolving a
+  module's own directory always tracks wherever the currently-imported
+  module actually lives, so it is unaffected by a worktree checkout or an
+  `INVESTING_PLAN_ROOT` override). No other module in this package touches
+  `__file__`.
 - **`pyarrow`/`pyarrow.parquet`** — every fragment is a Parquet file;
   `objects.py`, `generic_incremental.py`, `incremental.py`, and
   `repository.py`'s scan path all stream Arrow batches rather than
