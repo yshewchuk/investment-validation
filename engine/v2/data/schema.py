@@ -751,6 +751,22 @@ _V11 = (
     *_immutable_triggers("data_table_revisions"),
 )
 
+# --------------------------------------------------------------------------
+# v12 - the computed_moves capture log (s4c): one append-only row per ticker
+# captured by a ``computed_moves_refresh`` run, terminal outcome included.
+# --------------------------------------------------------------------------
+_V12 = (
+    """CREATE TABLE data_computed_moves_captures (
+        capture_id TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        contract_id TEXT NOT NULL REFERENCES data_contracts(contract_id),
+        outcome TEXT NOT NULL
+    ) STRICT""",
+    "CREATE INDEX data_computed_moves_captures_ticker ON data_computed_moves_captures(ticker, created_at)",
+    *_immutable_triggers("data_computed_moves_captures"),
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
 #: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
@@ -759,4 +775,5 @@ MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _
              (7, "price_captures", _V7), (8, "receipt_lineage", _V8),
              (9, "price_captures_contract_scope", _V9),
              (10, "incremental_eod_controls", _V10),
-             (11, "generic_incremental_revisions", _V11))
+             (11, "generic_incremental_revisions", _V11),
+             (12, "computed_moves_captures", _V12))

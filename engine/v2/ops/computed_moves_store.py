@@ -1,0 +1,799 @@
+"""``computed_moves`` capture -- the natively-owned store for the table
+``engine/v2/data/computed_moves_table.py`` contracts (spec s4b Change 3).
+
+This replaces the legacy-adapter wrapper the HEAD commit added: the job now
+reads its two source tables out of the v2 catalog (``earnings_events`` and
+``daily_market`` through :class:`~engine.v2.data.repository.Repository`),
+fetches yfinance through the shared provider-budget admission the daily
+refresh already uses (``incremental_data.plan_refresh`` /
+``classify_response``), and stages the resulting rows into the object store
+with the same immutable-object/manifest/atomic-head primitives
+``price_history_store`` uses directly -- never ``generic_incremental``, because
+``computed_moves`` has no manifest in the parent snapshot the way an existing
+contracted table does. One fragment per ticker; the append-only capture log is
+``data_computed_moves_captures`` (schema v12).
+
+Spec s4c rewrites two things here: the yfinance edge is the injected
+``yfinance_history_fetcher`` (never ``legacy_adapter.new_fetcher``), and both
+source tables are scanned exactly ONCE per run -- selection and capture share
+the same two frames (``_scan_once``), because the old per-ticker
+``_events_for``/``_daily_for`` made 2xN full-table scans for N targets.
+
+The pure close-to-close math lives in :mod:`engine.v2.data.computed_moves`;
+this module is the impure orchestrator.
+"""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import sqlite3
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from engine.v2.contracts import DataQuery, KeyPredicate, ObjectRef, TableContractRef
+from engine.v2.data import catalog as data_catalog
+from engine.v2.data import manifests, objects
+from engine.v2.data.computed_moves import MIN_SCOREABLE, build_rows
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
+from engine.v2.data.repository import Repository
+from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.ops.errors import fail
+from engine.v2.ops.incremental_data import (
+    RefreshCallbackResult,
+    RefreshUnit,
+    plan_refresh,
+    refresh_job_kind,
+)
+from engine.v2.ops.lifecycle import verify_fence
+from engine.v2.ops.unit_receipts import (
+    NATIVE_COMPUTED_MOVES_ACCOUNT,
+    cached_unit_outcomes,
+    cached_unit_payloads,
+    provider_failure_code,
+    record_unit_receipt,
+)
+
+__all__ = [
+    "computed_moves_units",
+    "fetch_history",
+    "run_computed_moves_refresh",
+    "target_tickers_from_snapshot",
+]
+
+INPUT_PATH = "computed_moves_refresh_input.json"
+MAX_SCAN_ROWS = 2_000_000
+FRAGMENT_COLUMNS = ("ticker", "event_date", "realized_move_pct", "implied_move_pct",
+                    "quarter_ordinal", "skipped", "computed_at", "source_hash", "capture_id")
+
+_EMPTY_DAILY = pd.DataFrame(columns=["date", "implied_move"])
+
+_ARROW_SCHEMA = pa.schema([
+    ("ticker", pa.string()), ("event_date", pa.string()), ("realized_move_pct", pa.float64()),
+    ("implied_move_pct", pa.float64()), ("quarter_ordinal", pa.int64()), ("skipped", pa.bool_()),
+    ("computed_at", pa.string()), ("source_hash", pa.string()), ("capture_id", pa.string()),
+])
+
+_CONTRACT_REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id,
+                                 definition_hash=COMPUTED_MOVES_CONTRACT.definition_hash)
+
+#: Every key the staged input document may carry; an unrecognized key is
+#: refused rather than silently ignored (Opus review, PR #39).
+_ALLOWED_DOCUMENT_KEYS = frozenset({
+    "catalog_path", "objects_root", "scope", "expected_head_generation",
+    "expected_head_snapshot_id", "attempt_id", "fence", "all_scoreable",
+    "since", "as_of",
+})
+
+#: The namespaces this store's document may commit into. This store has no
+#: ``JobKind`` of its own yet (see ARCHITECTURE.md "not yet wired"), so there
+#: is no allowlist of its own to diverge from -- it reuses the sibling
+#: ``incremental_refresh`` job kind's, the same ``{"shadow", "smoke"}`` every
+#: other v2 ops entry point is scoped to.
+_ALLOWED_SCOPES = refresh_job_kind().namespaces
+
+
+def _as_of_day(as_of) -> str:
+    """The job's as_of date as ``YYYY-MM-DD``.
+
+    Spec R4/R5: the as_of is part of every unit id and the only date selection
+    may use, so it is required, never defaulted to the wall clock, and every
+    bad shape is refused (``INVALID_REQUEST``) rather than silently coerced:
+    ``None``, a bool, a raw number (pandas reads an int/float as a UNIX
+    timestamp, not a calendar date -- a defect class distinct from what it
+    looks like), NaT, a tz-aware value (silently normalizing one would drop
+    the timezone rather than refuse it), or a string pandas cannot parse.
+    """
+    if as_of is None or isinstance(as_of, bool) or isinstance(as_of, (int, float)):
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh as_of must be a date-like value, not a number")
+    try:
+        day = pd.Timestamp(as_of)
+    except (ValueError, TypeError):
+        raise fail("INVALID_REQUEST", "computed moves refresh as_of could not be parsed as a date")
+    if pd.isna(day):
+        raise fail("INVALID_REQUEST", "computed moves refresh needs an as_of date")
+    if day.tzinfo is not None:
+        raise fail("INVALID_REQUEST", "computed moves refresh as_of must be tz-naive")
+    return str(day.normalize().date())
+
+
+# --------------------------------------------------------------------------
+# snapshot reads (the v2 read path, never engine.data.store)
+# --------------------------------------------------------------------------
+
+
+def _scan_rows(repository: Repository, snapshot, table_name: str, columns) -> list[dict]:
+    contract_ref = snapshot.table_versions[table_name].table_contract_ref
+    contract = repository.table_contract(snapshot, table_name)
+    years = tuple(sorted({int(record.partition_key)
+                          for record in repository.fragment_records(snapshot, table_name)}))
+    if not years:
+        return []
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
+        columns=tuple(columns),
+        key_filter=(KeyPredicate(column="year", operator="in", values=years),),
+        order_by=tuple(contract.primary_key),
+        max_batch_rows=min(contract.maximum_batch_rows, 50_000),
+        max_result_rows=min(contract.maximum_result_rows, MAX_SCAN_ROWS))
+    rows: list[dict] = []
+    for batch in repository.scan(query, table_name=table_name):
+        rows.extend(batch.to_pylist())
+    return rows
+
+
+def _scan_once(repository: Repository, snapshot) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One scan of each source table, shared by target selection and capture.
+
+    Returns the ORATS-confirmed ``earnings_events`` frame (``event_date``
+    parsed) and the ``daily_market`` frame, both sorted by key. Every consumer
+    in this run indexes these frames; nothing scans per ticker again.
+    """
+    events = pd.DataFrame(_scan_rows(repository, snapshot, "earnings_events",
+                                     ("ticker", "event_date", "session", "src_orats")))
+    if not events.empty:
+        events = events[events["src_orats"] & events["session"].notna()].copy()
+        events["event_date"] = pd.to_datetime(events["event_date"])
+        events = events.sort_values("event_date").reset_index(drop=True)
+    daily = pd.DataFrame(_scan_rows(repository, snapshot, "daily_market",
+                                    ("ticker", "date", "implied_move")))
+    if not daily.empty:
+        daily = daily.sort_values("date").reset_index(drop=True)
+    return events, daily
+
+
+def _group_by_ticker(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if frame.empty:
+        return {}
+    return {str(ticker): group for ticker, group in frame.groupby("ticker")}
+
+
+def target_tickers_from_snapshot(repository: Repository, parent_snapshot_id: str, *,
+                                 all_scoreable: bool = True, since=None,
+                                 oquants_tickers=(), events: pd.DataFrame | None = None,
+                                 daily: pd.DataFrame | None = None,
+                                 as_of) -> tuple[list[str], dict]:
+    """The legacy ``target_tickers`` rule, read through the v2 snapshot.
+
+    Same selection as ``engine.data.pulls.computed_moves.target_tickers``:
+    tickers with at least ``MIN_SCOREABLE`` past ORATS-confirmed sessioned
+    events AND at least one ``daily_market`` row. ``oquants_tickers`` is the
+    caller's optional replacement for the legacy extension-only oquants glob
+    (the v2 catalog carries no oquants moves table); it only matters for
+    ``all_scoreable=False``. ``events``/``daily`` are the caller's already
+    scanned frames (spec s4c Rewrite 3); omitted, this scans once itself.
+    ``as_of`` is the job's own session date (spec R5): selection NEVER reads
+    the wall clock, so the store's plan hash equals the nightly's.
+    """
+    if events is None or daily is None:
+        snapshot = repository.resolve(parent_snapshot_id)
+        scanned_events, scanned_daily = _scan_once(repository, snapshot)
+        events = scanned_events if events is None else events
+        daily = scanned_daily if daily is None else daily
+    day = _as_of_day(as_of)
+    if events.empty:
+        scoreable: set[str] = set()
+    else:
+        hist = events[pd.to_datetime(events["event_date"]) < day]
+        counts = hist.groupby("ticker")["event_date"].size()
+        scoreable = set(counts[counts >= MIN_SCOREABLE].index)
+    dm_tickers = set(daily["ticker"].astype(str)) if not daily.empty else set()
+
+    oq_tickers = {str(ticker) for ticker in oquants_tickers}
+    pool = scoreable if all_scoreable else (scoreable - oq_tickers)
+    targets = sorted(pool & dm_tickers)
+    report = {
+        "mode": "all_scoreable" if all_scoreable else "extension_only",
+        "scoreable_on_orats_calendar": len(scoreable),
+        "also_in_oquants": len(scoreable & oq_tickers),
+        "no_daily_market_rows": len(pool - dm_tickers),
+    }
+    if since is not None:
+        since = pd.Timestamp(_as_of_day(since))  # same validation as_of gets (Opus review)
+        if events.empty:
+            printed: set[str] = set()
+        else:
+            recent = events[pd.to_datetime(events["event_date"]) >= since]
+            printed = set(recent["ticker"].astype(str))
+        targets = [ticker for ticker in targets if ticker in printed]
+        report["since"] = str(since.date())
+        report["printed_since"] = len(printed)
+    report["targets"] = len(targets)
+    return targets, report
+
+
+def computed_moves_units(targets, *, as_of) -> tuple[RefreshUnit, ...]:
+    """One cacheable unit per target ticker -- the job's coverage denominator.
+
+    The as_of date is part of the request id (spec R4): each session refetches
+    its own units, so a later as_of never reuses a previous session's receipt.
+    """
+    day = _as_of_day(as_of)
+    return tuple(RefreshUnit(
+        request_id="computed_moves:" + str(ticker) + ":" + day,
+        table_name=COMPUTED_MOVES_TABLE_NAME,
+        partition_key=str(ticker), expected_keys=(str(ticker),)) for ticker in targets)
+
+
+# --------------------------------------------------------------------------
+# yfinance retrieval -- moved from the legacy pull's ``fetch_history``
+# --------------------------------------------------------------------------
+
+
+def fetch_history(fetcher, ticker: str) -> tuple[np.ndarray, np.ndarray] | None:
+    """yfinance Close series (split-adjusted, not dividend-adjusted).
+
+    ``fetcher(ticker)`` is the injected provider edge (the ops layer binds
+    ``yfinance_history_fetcher()``); it returns
+    ``(raw_bytes, response_kind, response_meta, rows)`` and classifies its own
+    failures (spec R1). Only a ``complete`` response with parseable bytes is a
+    history; a ``legitimate_empty`` name, a transient outage and unparseable
+    bytes all yield ``None`` here, and the caller owns failing the job (R3).
+    """
+    raw, kind = _history_result(fetcher, ticker)
+    if kind != "complete":
+        return None
+    return _parse_history(raw)
+
+
+def _history_result(fetcher, ticker: str) -> tuple[bytes, str]:
+    """Call the provider edge once and return ``(raw, response_kind)``.
+
+    The edge classifies its own HTTP/library failures (R1); only a network
+    exception out of a raising edge is classified ``transient`` here -- a
+    programming error or an ``OpsError`` propagates rather than being silently
+    treated as "no history" (R3). The caller aggregates kinds and fails the
+    job when any unit ends non-complete.
+    """
+    try:
+        raw, kind, _meta, _rows = fetcher(str(ticker))
+    except (OSError, TimeoutError):
+        return b"", "transient"
+    if not isinstance(kind, str):
+        return b"", "refused"
+    return (raw or b""), kind
+
+
+def _parse_history(raw: bytes) -> tuple[np.ndarray, np.ndarray] | None:
+    try:
+        frame = pd.read_csv(io.BytesIO(raw))
+    except (ValueError, OSError):
+        return None
+    if frame.empty or "Close" not in frame.columns:
+        return None
+    date_col = frame.columns[0]
+    dates = pd.to_datetime(frame[date_col], errors="coerce", utc=True)
+    dates = dates.dt.tz_localize(None).dt.normalize()
+    closes = pd.to_numeric(frame["Close"], errors="coerce").to_numpy(dtype=float)
+    ok = dates.notna() & np.isfinite(closes) & (closes > 0)
+    dates = dates[ok].to_numpy(dtype="datetime64[ns]")
+    closes = closes[ok]
+    if closes.size == 0:
+        return None
+    order = np.argsort(dates, kind="stable")
+    return dates[order], closes[order]
+
+
+# --------------------------------------------------------------------------
+# staging one ticker's fragment and committing the generation
+# --------------------------------------------------------------------------
+
+
+def _write_ticker_fragment(store: ArtifactStore, ticker: str, rows: list[dict], *,
+                           request_hash: str):
+    frame = pd.DataFrame(rows)
+    frame = frame.sort_values(["event_date"]).reset_index(drop=True).copy()
+    table = pa.Table.from_pandas(frame[list(FRAGMENT_COLUMNS)], schema=_ARROW_SCHEMA,
+                                 preserve_index=False)
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)
+    raw = sink.getvalue().to_pybytes()
+    ref = store.publish_bytes(raw, schema_ref=objects.PARQUET_FRAGMENT_SCHEMA_REF)
+    object_ref = ObjectRef(kind="parquet_fragment", object_id=ref.artifact_id,
+                           content_hash=ref.content_hash, byte_size=ref.byte_size)
+    inspection = objects.inspect_fragment(store, object_ref, COMPUTED_MOVES_CONTRACT,
+                                          _CONTRACT_REF, ticker)
+    return manifests.fragment_record(inspection, _CONTRACT_REF, input_receipt_refs=(),
+                                     import_request_hash=request_hash)
+
+
+def _insert_captures(conn: sqlite3.Connection, attempts: list[dict]) -> None:
+    """Record this run's captures once; a capture already logged is not re-logged.
+
+    ``capture_id`` (``_capture_id_for``) folds in the unit's own ``request_id``
+    (ticker + as_of day), the table contract's ``definition_hash``, and -- when
+    a series was actually obtained -- the fetched source bytes' hash. Never
+    the run's wall-clock time. Two attempts for the SAME unit with the SAME
+    underlying content resolve to the SAME id (a retry never double-logs);
+    different underlying content (a same-day upstream data change) or a
+    different contract version gets a genuinely different id, never silently
+    reused.
+    """
+    for attempt in attempts:
+        existing = conn.execute(
+            "SELECT 1 FROM data_computed_moves_captures WHERE capture_id = ?",
+            (attempt["capture_id"],)).fetchone()
+        if existing is not None:
+            continue
+        conn.execute(
+            "INSERT INTO data_computed_moves_captures "
+            "(capture_id, ticker, created_at, contract_id, outcome) VALUES (?, ?, ?, ?, ?)",
+            (attempt["capture_id"], attempt["ticker"], attempt["created_at"],
+             COMPUTED_MOVES_CONTRACT.contract_id, attempt["outcome"]))
+
+
+def _fence_check_for(staged_attempt_id, staged_fence, clock):
+    """The commit's own fence check against ``engine.v2.ops.lifecycle.verify_fence``'s
+    REAL signature (``conn, attempt_id, fence, now`` -- it has no
+    ``check_lease_time`` parameter to disable the wall-clock lease-expiry
+    check with). Never disables that check: the production lease-expiry gate
+    stays active here, same as every other fenced commit in this package.
+    ``None`` staged_attempt_id (no live job behind this call, e.g. a manual or
+    test invocation) is a no-op fence check.
+    """
+    if staged_attempt_id is None:
+        return lambda connection: None
+    return lambda connection: verify_fence(connection, staged_attempt_id, staged_fence,
+                                           clock.now())
+
+
+def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempts, clock,
+                       expected_head, generation, request_hash,
+                       staged_attempt_id=None, staged_fence=None):
+    prior_manifest = parent.table_manifests.get(COMPUTED_MOVES_TABLE_NAME)
+    prior_records = tuple(record for record in parent.records
+                          if record.table_contract_ref.contract_id
+                          == COMPUTED_MOVES_CONTRACT.contract_id)
+    rewritten = set(records_by_ticker)
+    kept = tuple(record for record in prior_records if record.partition_key not in rewritten)
+    new_records = tuple(sorted((*kept, *records_by_ticker.values()),
+                               key=lambda item: (item.partition_key, item.primary_key_min)))
+    parent_version = (prior_manifest.dataset_version_ref.dataset_version_id
+                      if prior_manifest else None)
+    manifest = manifests.dataset_manifest(
+        _CONTRACT_REF, new_records, knowledge_mode="reconstructed",
+        coverage_receipt_refs=(), availability_evidence_refs=(),
+        parent_dataset_version_id=parent_version)
+
+    table_manifests = {name: manifest_ for name, manifest_ in parent.table_manifests.items()
+                       if name != COMPUTED_MOVES_TABLE_NAME}
+    table_manifests[COMPUTED_MOVES_TABLE_NAME] = manifest
+    snapshot = manifests.snapshot_ref(
+        table_manifests, calendar_version=parent.snapshot.calendar_version,
+        source_priority_version=parent.snapshot.source_priority_version,
+        finality_receipt_refs=parent.snapshot.finality_receipt_refs,
+        parent_snapshot_id=parent.snapshot.snapshot_id)
+
+    other_records = tuple(record for record in parent.records
+                          if record.table_contract_ref.contract_id
+                          != COMPUTED_MOVES_CONTRACT.contract_id)
+    all_records = other_records + new_records
+    contracts = {item.contract_id: item for item in parent.contracts}
+    contracts[COMPUTED_MOVES_CONTRACT.contract_id] = COMPUTED_MOVES_CONTRACT
+    all_objects = tuple({record.object_ref.object_id: record.object_ref
+                         for record in all_records}.values())
+    receipt_id = "receipt_cm_" + request_hash.removeprefix("sha256:")[:32]
+    attempt_id = "attempt_cm_" + request_hash.removeprefix("sha256:")[:32]
+    return data_catalog.commit_snapshot(
+        conn, scope=scope, request_hash=request_hash, contracts=tuple(contracts.values()),
+        objects=all_objects, records=all_records, manifests=tuple(table_manifests.values()),
+        snapshot=snapshot, expected_head_snapshot_id=expected_head,
+        expected_head_generation=generation, receipt_id=receipt_id, attempt_id=attempt_id,
+        fence=1,
+        fence_check=_fence_check_for(staged_attempt_id, staged_fence, clock),
+        clock=clock, store=store,
+        record_references=lambda connection, rid: _insert_captures(connection, attempts),
+        audit_partitions=False)
+
+
+# --------------------------------------------------------------------------
+# the standalone runner (Part 3 adapts this to RefreshCallback)
+# --------------------------------------------------------------------------
+
+
+def _committed_targets(parent, targets) -> tuple[str, ...]:
+    """The wanted tickers whose rows the pinned snapshot already committed.
+
+    Only the empty-rebuild edge needs this: when no fragment could be built at
+    all there is no commit to ask, so the parent's own rows are the honest
+    completed ids. Every other run's ids come from the committed fragments.
+    """
+    committed = {record.partition_key for record in parent.records
+                 if record.table_contract_ref.contract_id
+                 == COMPUTED_MOVES_CONTRACT.contract_id}
+    return tuple(ticker for ticker in targets if ticker in committed)
+
+
+def _noop_result(parameters, completed_ids) -> RefreshCallbackResult:
+    """A truthful rerun result: nothing committed, nothing advanced.
+
+    The plan hash is the job's own binding (``parameters.refresh_plan_hash``),
+    never a recomputed plan: a retry sees its units already cached, so its
+    recomputed plan is not the plan the job reserved budget for.
+    """
+    return RefreshCallbackResult(
+        status="noop", completed_ids=completed_ids, coverage_advanced=False,
+        parent_snapshot_id=parameters.parent_snapshot_id,
+        refresh_plan_hash=parameters.refresh_plan_hash)
+
+
+def _input_document(root: Path) -> dict | None:
+    path = root / INPUT_PATH
+    if not path.is_file():
+        return None
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return document
+
+
+def _validate_document_identity(document: dict) -> None:
+    """Unknown keys, and the three bounded non-empty string fields every
+    input document must carry."""
+    unknown = set(document) - _ALLOWED_DOCUMENT_KEYS
+    if unknown:
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh input document has unknown keys",
+                   details={"unknown_keys": sorted(unknown)})
+    for name in ("catalog_path", "objects_root", "scope"):
+        value = document.get(name)
+        if not isinstance(value, str) or not value:
+            raise fail("INVALID_REQUEST",
+                       f"computed moves refresh input document needs a non-empty string {name}")
+    if not Path(document["catalog_path"]).is_file():
+        # ``sqlite3.connect`` is never allowed to silently create a fresh,
+        # empty database at a path that does not already hold the real
+        # catalog -- the same rule sibling PR #40 applies in
+        # forward_calendar_store.py.
+        raise fail("INVALID_REQUEST",
+                   f"catalog_path does not exist as a file: {document['catalog_path']!r}")
+    if not Path(document["objects_root"]).is_dir():
+        raise fail("INVALID_REQUEST",
+                   f"objects_root does not exist as a directory: {document['objects_root']!r}")
+    if document["scope"] not in _ALLOWED_SCOPES:
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh scope is not an allowed namespace",
+                   details={"scope": document["scope"], "allowed": sorted(_ALLOWED_SCOPES)})
+
+
+def _validate_document_head(document: dict) -> None:
+    """The commit-target fields: generation and the optional expected head."""
+    generation = document.get("expected_head_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document needs a "
+                                       "non-negative integer expected_head_generation")
+    head = document.get("expected_head_snapshot_id")
+    if head is not None and (not isinstance(head, str) or not head or len(head) > 128):
+        raise fail("INVALID_REQUEST",
+                   "expected_head_snapshot_id must be a bounded non-empty string when present")
+
+
+def _validate_document_attempt(document: dict) -> None:
+    """The optional staged-job identity fields: attempt id and fence. Never
+    checked against the catalog here -- a head mismatch is caught at commit
+    time (``SNAPSHOT_CONFLICT``), after any fetches; this is format-only,
+    before any I/O."""
+    attempt_id = document.get("attempt_id")
+    if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id):
+        raise fail("INVALID_REQUEST", "attempt_id must be a non-empty string when present")
+    fence = document.get("fence")
+    if fence is not None and (isinstance(fence, bool) or not isinstance(fence, int)
+                              or fence < 1):
+        raise fail("INVALID_REQUEST", "fence must be an int >= 1 when present")
+
+
+def _validate_document_selection(document: dict) -> None:
+    """``all_scoreable``/``since``, the two fields that steer target selection."""
+    if "all_scoreable" in document and not isinstance(document["all_scoreable"], bool):
+        # The old call site did ``bool(document.get("all_scoreable", True))``:
+        # ``bool("false")`` is ``True`` in Python, so a string value was
+        # silently inverted rather than refused. A real JSON boolean decodes
+        # as a Python ``bool`` already; anything else is refused.
+        raise fail("INVALID_REQUEST", "all_scoreable must be a real boolean, not a coerced value")
+    if document.get("since") is not None:
+        _as_of_day(document["since"])  # same validation as_of gets; raises on a bad value
+
+
+def _validate_document_matches_job(document: dict, parameters, *, as_of: str) -> None:
+    """The document's own identity must agree with ``parameters`` and the
+    validated ``as_of`` keyword -- never silently diverge."""
+    if "as_of" in document:
+        # The document's own as_of was staged but never read -- dead data a
+        # caller could set to anything without effect (the same defect class
+        # as sibling PR #40's RefreshParameters.as_of/tickers mismatch).
+        # Rather than refuse its presence outright (every staged input
+        # already writes it), this store requires it to agree with the
+        # validated ``as_of`` keyword: a documented choice, not a silent one.
+        if _as_of_day(document["as_of"]) != _as_of_day(as_of):
+            raise fail("INVALID_REQUEST",
+                       "computed moves refresh input document's as_of disagrees with the "
+                       "job's as_of")
+    if document["catalog_path"] != parameters.catalog_path:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's catalog_path "
+                                       "disagrees with the job's RefreshParameters")
+    if document["objects_root"] != parameters.objects_root:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's objects_root "
+                                       "disagrees with the job's RefreshParameters")
+    if document["scope"] != parameters.scope:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's scope disagrees "
+                                       "with the job's RefreshParameters")
+    if document.get("expected_head_generation") != parameters.expected_head_generation:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's "
+                                       "expected_head_generation disagrees with the job's "
+                                       "RefreshParameters")
+
+
+def _validate_input_document(document: dict, parameters, *, as_of: str) -> None:
+    """Every field the staged input document carries, validated before any
+    I/O (sqlite connect, snapshot resolve, fetch, or receipt write) -- the
+    same discipline ``_as_of_day`` already applies to the ``as_of`` keyword
+    (Opus review, PR #39). An unknown key, a wrong type, or a value that
+    disagrees with the job's own ``RefreshParameters`` is refused, never
+    coerced or silently ignored.
+    """
+    _validate_document_identity(document)
+    _validate_document_head(document)
+    _validate_document_attempt(document)
+    _validate_document_selection(document)
+    _validate_document_matches_job(document, parameters, as_of=as_of)
+
+
+def _validated_parent_snapshot_id(parent_snapshot_id) -> str:
+    """Matches ``incremental_data``'s own ``RefreshParameters`` rule for this
+    same field: a bounded nonempty string. Mirrors sibling PR #40's
+    ``_validated_parent_snapshot_id`` (not imported: unmerged sibling)."""
+    if (not isinstance(parent_snapshot_id, str) or not parent_snapshot_id
+            or len(parent_snapshot_id) > 128):
+        raise fail("INVALID_REQUEST",
+                   f"parent_snapshot_id must be a bounded nonempty str, "
+                   f"got {parent_snapshot_id!r}")
+    return parent_snapshot_id
+
+
+def _validated_refresh_plan_hash(refresh_plan_hash) -> str:
+    """Matches ``incremental_data._is_hash``'s own sha256-hex check for this
+    same field (mirrored rather than imported: that name is private, and #40's
+    copy of it is an unmerged sibling)."""
+    valid = (isinstance(refresh_plan_hash, str)
+             and refresh_plan_hash.startswith("sha256:") and len(refresh_plan_hash) == 71
+             and all(char in "0123456789abcdef" for char in refresh_plan_hash[7:]))
+    if not valid:
+        raise fail("INVALID_REQUEST",
+                   f"refresh_plan_hash must be a sha256 content hash, "
+                   f"got {refresh_plan_hash!r}")
+    return refresh_plan_hash
+
+
+def _validate_job_identity(parameters) -> None:
+    """``parameters``' own identity fields, validated before any I/O: this
+    runner is called directly, not through the job-submission pipeline that
+    would otherwise have validated them via ``refresh_parameter_problems``."""
+    _validated_parent_snapshot_id(parameters.parent_snapshot_id)
+    _validated_refresh_plan_hash(parameters.refresh_plan_hash)
+
+
+def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> RefreshCallbackResult:
+    """This job's own callback (spec s4b Change 3), called directly -- NOT
+    bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
+    ``RefreshParameters`` has no ``as_of`` field, so ``as_of`` is an explicit,
+    validated, required keyword. Validates the staged input document up front,
+    selects targets from the pinned parent snapshot with ONE scan per source
+    table, and commits one new snapshot. A cached unit is never re-fetched,
+    and a same-``as_of`` rerun genuinely no-ops: every committed row's
+    ``computed_at`` derives from ``as_of``, so identical inputs commit
+    identical bytes.
+    """
+    _as_of_day(as_of)  # validated before any I/O; raises INVALID_REQUEST on a bad value
+    _validate_job_identity(parameters)
+    root = Path(root)
+    document = _input_document(root)
+    if document is None:
+        raise fail("INVALID_REQUEST",
+                   "computed moves refresh input document is missing or malformed")
+    _validate_input_document(document, parameters, as_of=as_of)
+    if fetcher is None:
+        raise fail("RESOURCE_UNAVAILABLE", "no computed_moves history fetcher is configured")
+    # mode=rw: never let sqlite3 silently create a fresh, empty database if
+    # the file was removed between _validate_document_identity's is_file()
+    # check and this connect (TOCTOU) -- it raises instead.
+    conn = sqlite3.connect(f"file:{document['catalog_path']}?mode=rw", uri=True)
+    conn.row_factory = sqlite3.Row
+    clock = SystemClock()
+    try:
+        store = ArtifactStore(document["objects_root"])
+        repository = Repository(conn, store)
+        parent = repository.resolve_full(parameters.parent_snapshot_id)
+        events, daily = _scan_once(repository, parent.snapshot)
+        targets, _selection = target_tickers_from_snapshot(
+            repository, parameters.parent_snapshot_id,
+            all_scoreable=document.get("all_scoreable", True),
+            since=document.get("since"), events=events, daily=daily, as_of=as_of)
+        units = computed_moves_units(targets, as_of=as_of)
+        plan = plan_refresh(
+            parent.snapshot, units,
+            cached_outcomes=cached_unit_outcomes(
+                conn, units, source=COMPUTED_MOVES_TABLE_NAME,
+                endpoint=COMPUTED_MOVES_TABLE_NAME),
+            provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
+            expected_head_generation=int(document["expected_head_generation"]))
+        fragment_records, attempts = _capture_targets(
+            conn, store, plan, fetcher, clock,
+            events_by_ticker=_group_by_ticker(events),
+            daily_by_ticker=_group_by_ticker(daily), as_of_day=_as_of_day(as_of))
+        if not fragment_records:
+            # Nothing could be rebuilt at all: the committed generation is the
+            # parent's own, so its rows are the only honest completed ids.
+            return _noop_result(parameters, _committed_targets(parent, targets))
+
+        request_hash = content_hash({
+            "kind": "computed_moves_generation", "scope": document["scope"],
+            "base_snapshot_id": parent.snapshot.snapshot_id,
+            "fragments": {ticker: record.fragment_id
+                          for ticker, record in sorted(fragment_records.items())}})
+        receipt = _commit_generation(
+            conn, store, str(document["scope"]), parent=parent,
+            records_by_ticker=fragment_records, attempts=attempts, clock=clock,
+            expected_head=document.get("expected_head_snapshot_id",
+                                       parameters.parent_snapshot_id),
+            generation=int(document["expected_head_generation"]), request_hash=request_hash,
+            staged_attempt_id=document.get("attempt_id"), staged_fence=document.get("fence"))
+        if receipt.resulting_head_snapshot_id == parent.snapshot.snapshot_id:
+            # The commit layer's own result decides: the candidate resolved
+            # back to the parent snapshot, so the head did not move and
+            # nothing was committed. Key presence in the parent is never
+            # consulted -- yesterday's partition or a cached receipt is not
+            # today's committed content.
+            return _noop_result(parameters, tuple(sorted(fragment_records)))
+        return RefreshCallbackResult(
+            status="complete", completed_ids=tuple(sorted(fragment_records)),
+            coverage_advanced=True, parent_snapshot_id=parameters.parent_snapshot_id,
+            refresh_plan_hash=parameters.refresh_plan_hash,
+            candidate_snapshot_id=receipt.resulting_head_snapshot_id)
+    finally:
+        conn.close()
+
+
+def _unit_history(conn, store, unit, fetcher, cached, *, created_at):
+    """One unit's parsed Close series, from the edge or a cached receipt.
+
+    A unit in the plan's cache set is never re-fetched (spec R2): its verified
+    receipt bytes are re-parsed instead, so a same-session retry rebuilds the
+    series a clean run had. Only a fresh unit's bytes are cached, and only
+    after they parse (R2). Returns ``(series, kind, fresh)``.
+    """
+    fresh = unit.request_id not in cached
+    if fresh:
+        raw, kind = _history_result(fetcher, unit.expected_keys[0])
+    else:
+        raw, kind = cached[unit.request_id], "complete"
+    series = (_parse_history(raw) if raw and kind in ("complete", "legitimate_empty")
+              else None)
+    if kind == "complete" and series is None:
+        kind = "refused"
+    if series is not None and fresh:
+        record_unit_receipt(conn, store, unit, raw, source=COMPUTED_MOVES_TABLE_NAME,
+                            endpoint=COMPUTED_MOVES_TABLE_NAME, received_at=created_at,
+                            response_kind=kind)
+    return series, kind, fresh
+
+
+def _capture_id_for(unit, *, source_hash: str | None = None,
+                    definition_hash: str = COMPUTED_MOVES_CONTRACT.definition_hash) -> str:
+    """The stable capture identity for one refresh unit's ACTUAL content.
+
+    Same (ticker, as_of) always yields the same id, regardless of when this
+    run's wall clock reads: derived from the unit's own ``request_id``
+    (``computed_moves:<ticker>:<day>``, spec R4/R5's per-session request id),
+    never from the run's ``created_at``. request_id ALONE is not enough,
+    though: two attempts for the same unit can carry genuinely different
+    content -- a same-day yfinance correction/backfill changes the fetched
+    bytes, or a code change moves the table's ``definition_hash`` -- and a
+    request_id-only id would collide those into one row, silently keeping
+    only the first attempt's outcome. ``source_hash`` (the fetched series'
+    hash, when a series was actually obtained) and ``definition_hash`` (the
+    contract's own schema identity) are folded in too, so a same-request-id
+    attempt with different real content gets a genuinely different id.
+    ``source_hash=None`` (no series obtained -- a failed/too-few outcome) omits
+    it: there is no immutable source content to distinguish by, so two failed
+    attempts for the same unit under the same code are correctly the same
+    capture. A rerun of the same unit with the SAME content -- a crash-retry,
+    or a same-session no-op replay -- must still resolve to the identity
+    ``_insert_captures`` already logged, or its dedup-by-``capture_id`` check
+    never dedups anything.
+    """
+    payload = {"request_id": unit.request_id, "contract_definition_hash": definition_hash}
+    if source_hash is not None:
+        payload["source_hash"] = source_hash
+    return "capture_" + content_hash(payload).removeprefix("sha256:")[:32]
+
+
+def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
+                     daily_by_ticker, as_of_day: str):
+    """Acquire and stage one fragment per unit, fresh or cached, exactly once.
+
+    The caller reaches this only when the plan has at least one fresh fetch, and
+    EVERY wanted unit is rebuilt here -- the fresh fetches plus the cached
+    ``complete`` receipts re-read and re-parsed by receipt -- so a same-session
+    retry commits exactly what a clean single run would. Any unit that ends
+    transient/refused/not_final fails the whole job (R3) after every unit has
+    been attempted, with the good receipts already cached.
+
+    ``created_at`` (this run's wall clock) tags the audit-only capture log and
+    raw-receipt rows -- when this attempt happened, never content identity.
+    Every COMMITTED row's ``computed_at`` uses ``as_of_day`` instead (Opus
+    review, PR #39; was tracked as #41): the fragment's bytes, and so its
+    content-addressed identity, must be a pure function of ``as_of`` and the
+    fetched source, or a same-``as_of`` rerun with identical inputs commits a
+    new generation instead of resolving to a true no-op.
+    """
+    created_at = clock.now().isoformat()
+    cached = cached_unit_payloads(conn, store, plan)
+    fragment_records, attempts, kinds = {}, [], []
+    for unit in plan.units:
+        ticker = unit.expected_keys[0]
+        series, kind, fresh = _unit_history(conn, store, unit, fetcher, cached,
+                                            created_at=created_at)
+        kinds.append(kind)
+        if series is None:
+            capture_id = _capture_id_for(unit)
+            attempts.append({"capture_id": capture_id, "ticker": ticker,
+                             "created_at": created_at,
+                             "outcome": ("no_history" if kind == "legitimate_empty"
+                                         else kind)})
+            continue
+        events = events_by_ticker.get(ticker)
+        if events is None:
+            capture_id = _capture_id_for(unit)
+            attempts.append({"capture_id": capture_id, "ticker": ticker,
+                             "created_at": created_at, "outcome": "too_few"})
+            continue
+        sd, sc = series
+        source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
+        capture_id = _capture_id_for(unit, source_hash=source_hash)
+        events = events[events["event_date"] >= pd.Timestamp(sd[0])]
+        rows = build_rows(
+            ticker, events, sd, sc, daily_by_ticker.get(ticker, _EMPTY_DAILY),
+            computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)
+        if not rows:
+            attempts.append({"capture_id": capture_id, "ticker": ticker,
+                             "created_at": created_at, "outcome": "too_few"})
+            continue
+        request_hash = content_hash({"kind": "computed_moves_fragment", "ticker": ticker,
+                                     "capture_id": capture_id})
+        fragment_records[ticker] = _write_ticker_fragment(store, ticker, rows,
+                                                          request_hash=request_hash)
+        attempts.append({"capture_id": capture_id, "ticker": ticker,
+                         "created_at": created_at,
+                         "outcome": "added" if fresh else "cached"})
+    code = provider_failure_code(kinds)
+    if code:
+        raise fail(code, "computed moves provider response was not complete")
+    return fragment_records, attempts

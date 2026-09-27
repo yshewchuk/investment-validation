@@ -94,6 +94,15 @@ production caller, only its own test module.
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture` and `price-refresh`.
+- `computed_moves_store.py`'s `run_computed_moves_refresh` (a standalone
+  runner, not itself a `RefreshCallback` — a future nightly-wiring change
+  adapts it to one with a per-dispatch closure; see "Not yet wired" below):
+  reads `earnings_events`/`daily_market` off the pinned parent snapshot
+  through `Repository`, exactly once each per run (`_scan_once`), and calls
+  an injected yfinance history fetcher (never `legacy_adapter.new_fetcher`)
+  per target ticker. Target tickers are the ORATS-confirmed-session rule
+  `target_tickers_from_snapshot` re-implements from the legacy pull, read
+  through the v2 snapshot instead of the legacy store.
 - `forward_calendar_store.py`'s own inputs: the pinned parent snapshot's
   `daily_market` sessions (one scan, grouped by ticker, fed to
   `engine.v2.data.computed_moves.native_trading_calendar` for the horizon
@@ -127,6 +136,17 @@ production caller, only its own test module.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
+- `computed_moves_store.py` commits one new snapshot generation per run,
+  carrying every other table forward unchanged alongside a fresh
+  `computed_moves` table version (`engine/v2/data/computed_moves_table.py`;
+  one fragment per ticker, via the same immutable-object/manifest/atomic-head
+  commit primitives `price_history_store` uses, never `generic_incremental` —
+  `computed_moves` has no manifest in the parent snapshot the way an
+  existing contracted table does). Alongside the snapshot commit it inserts
+  one append-only row per attempted ticker into `data_computed_moves_captures`
+  (schema v12, `engine/v2/data/schema.py`) — a capture already logged (same
+  content-derived `capture_id`) is never re-logged, so a rerun that rebuilds
+  a generation from durable receipts does not duplicate the log.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (14 kinds, cited by name rather
   than copied here since the list can drift: `legacy_decisions`,
@@ -179,6 +199,58 @@ production caller, only its own test module.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
+
+**`computed_moves_store.py` is not yet wired to production.** No CLI
+subcommand, no `nightly.py` `GRAPH`/`OPTIONAL` entry, no `supervisor` job
+kind calls `run_computed_moves_refresh` yet. It is also not itself a bare
+`engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
+`parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
+varies per job dispatch (a session date) so it cannot be pre-bound the way
+the fetcher is — it is an explicit, validated, required keyword instead. A
+later change adds the nightly stage, the per-dispatch closure that DOES
+satisfy the protocol, and the job-kind dispatch this doc's "Diagrams" section
+would then need to reflect. Every field of the staged input document, and
+`parameters`' own `parent_snapshot_id`/`refresh_plan_hash`, are validated up
+front (`_validate_input_document`, split into `_validate_document_identity`/
+`_validate_document_head`/`_validate_document_attempt`/
+`_validate_document_selection`/`_validate_document_matches_job`, plus
+`_validate_job_identity`, to stay under the complexity budget) before the
+sqlite connection even opens: unknown document keys; wrong types;
+`catalog_path` not already an existing file (the connection then opens on a
+`mode=rw` URI too, so a TOCTOU removal between the check and the connect
+raises instead of silently creating an empty database); `objects_root` not an
+existing directory; `parent_snapshot_id`/`refresh_plan_hash` not matching the
+same bounded-string/sha256-hex shapes `incremental_data.RefreshParameters`
+already enforces for these fields (mirrored, not imported — sibling PR #40's
+`forward_calendar_store.py` carries the same mirrored copies, since the two
+PRs are unmerged); `expected_head_snapshot_id`/`fence` failing their own
+format checks (a bounded string; an int >= 1); and any document value that
+disagrees with the job's own `RefreshParameters`
+(`catalog_path`/`objects_root`/`scope`/`expected_head_generation`) — all
+refused, never coerced. `scope` is checked against
+`refresh_job_kind().namespaces` — the sibling `incremental_refresh` job
+kind's own `{"shadow", "smoke"}` — since this store has no `JobKind` of its
+own yet to carry that allowlist. A STALE `expected_head_snapshot_id`/
+`expected_head_generation` (one that no longer matches the catalog's actual
+head) is deliberately NOT checked before fetching: it is only caught at
+commit time, inside `_commit_generation`/`data_catalog.commit_snapshot`, as
+`SNAPSHOT_CONFLICT` — an optimistic design, matching #40. A stale head costs
+only the fetches this run already made; their complete receipts are staged
+durably and reused as cache on the next attempt, not repeated.
+`tests/test_v2_ops_computed_moves_store.py` covers `_capture_id_for`'s
+stable, non-wall-clock, non-colliding capture identity, `_fence_check_for`'s
+real-`verify_fence` signature and its still-active production lease-expiry
+check, `as_of`'s pre-I/O validation, the input document's own field-by-field
+validation, and `run_computed_moves_refresh` end to end (one complete unit, a
+same-`as_of` rerun that re-fetches nothing AND now genuinely no-ops even at a
+different wall-clock time, and a provider failure mapped to its typed code).
+Fixed (was tracked as
+[#41](https://github.com/yshewchuk/investment-validation/issues/41)): every
+committed row's `computed_at` is now derived from `as_of`, not the run's own
+wall clock, so a same-`as_of` rerun over identical inputs produces
+byte-identical fragment content (same `fragment_id`, same object content
+hash) and the commit resolves back to the parent snapshot instead of a fresh
+generation.
 
 ## Dependencies
 
@@ -421,6 +493,12 @@ network, or database access.
   and other catalog rows): `unit_receipts.py`'s `cached_unit_outcomes`/
   `cached_unit_payloads` and `nightly.py`'s `_native_cached_outcome` each
   look up the newest receipt for a `(source, endpoint, request_hash)` key
+  (`computed_moves_store.py` is one such caller — its per-ticker
+  `RefreshUnit`s key off `computed_moves:<ticker>:<as_of>`, and a unit
+  already backed by a durable `complete` receipt is re-parsed from that
+  receipt rather than re-fetched, so a same-session retry rebuilds every
+  unit's fragment from the fresh fetches plus the cached receipts, never a
+  live-and-cached mix that a clean single run could not also produce)
   and reuse it only when its recorded `response_kind` is `complete` — a
   `legitimate_empty` payload is always re-verified against the live source
   on the next run, and a `not_final`/`transient`/`refused` response is
