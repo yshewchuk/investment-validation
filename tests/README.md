@@ -237,8 +237,22 @@ Mutation CI runs on GitHub Actions with TWO INDEPENDENT backends side by side:
 `.github/workflows/mutation-mutmut.yml` (mutmut, added back alongside it, not
 in place of it). Both run one matrix job per enabled module of
 `tools/mutation_pilot.toml`, on pushes to main (incremental), on a weekly full
-schedule, and on manual dispatch; neither queues behind, cancels, caches over
-or merges into the other -- every shared resource is namespaced per backend:
+schedule, on manual dispatch, and -- since 2026-09-27 -- on a pull request,
+gated behind that PR's own `Tests` run: neither workflow has a `pull_request`
+trigger any more; both listen for `workflow_run: workflows: [Tests], types:
+[completed]` instead, and each plan job's own `if:` only lets the run through
+when that Tests run succeeded and was itself triggered by a pull request in
+this repository (never for a fork PR, whose linked pull request cannot be
+recovered safely -- see the workflows' own "PR context: workflow_run"
+comments for the full mechanics and why mutation used to starve `Tests` for
+the account's shared pool of Actions runners by starting its 30+-job matrix
+alongside it on every PR). `.github/workflows/cancel-stale-runs.yml` cancels
+any in-progress/queued `Tests`, `mutation` or `mutation-mutmut` run still
+tied to a PR once that PR closes. Neither mutation workflow queues behind,
+cancels, caches over or merges into the other -- every shared resource is
+namespaced per backend; each backend's concurrency group now also cancels an
+older still-running push-to-main run of itself, on top of the pre-existing
+per-PR cancellation:
 
 | workflow | backend | concurrency group | cache namespace | module artifacts | aggregate artifact |
 |---|---|---|---|---|---|
@@ -299,7 +313,7 @@ its 330-minute step timeout.
 | trigger | mode | state |
 |---|---|---|
 | push to main | incremental | restores the module's newest cached mutmut state |
-| pull_request | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects every ENABLED module that owns a changed path OR transitively depends on it (a static `ast` import-graph closure over every tracked `.py` file, ALLOWLIST-classified (`build_import_graph`/`_is_dynamic_file`): a plain import, the one literal `importlib.import_module("x.y")` call, or a conftest.py's plain `pytest_plugins` list resolve to specific edges (including `conftest.py` closure roots); anything else the file references at all -- `sys.path`, `subprocess`, a loader construct, `__import__` in any form, or a short list of other dangerous names/modules -- fails the WHOLE FILE safe, depending on every other tracked file (`module_dependency_closure`), else nothing for a path on the small docs-only `[pr_selection] inert` allowlist minus `inert_skip` (`tools/mutation_pilot.toml`), else EVERY enabled module for anything else -- an unrecognized path, or one the import graph itself cannot be built for (a syntax error or any other failure), is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix |
+| pull_request, via `workflow_run` once its `Tests` run succeeds | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects every ENABLED module that owns a changed path OR transitively depends on it (a static `ast` import-graph closure over every tracked `.py` file, ALLOWLIST-classified (`build_import_graph`/`_is_dynamic_file`): a plain import, the one literal `importlib.import_module("x.y")` call, or a conftest.py's plain `pytest_plugins` list resolve to specific edges (including `conftest.py` closure roots); anything else the file references at all -- `sys.path`, `subprocess`, a loader construct, `__import__` in any form, or a short list of other dangerous names/modules -- fails the WHOLE FILE safe, depending on every other tracked file (`module_dependency_closure`), else nothing for a path on the small docs-only `[pr_selection] inert` allowlist minus `inert_skip` (`tools/mutation_pilot.toml`), else EVERY enabled module for anything else -- an unrecognized path, or one the import graph itself cannot be built for (a syntax error or any other failure), is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix. Never saves back to the cache: a PR run must not overwrite main's incremental state. |
 | weekly (gremlins Sun 05:23 UTC, mutmut Sun 22:23 UTC — staggered) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
 

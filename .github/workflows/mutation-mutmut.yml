@@ -9,16 +9,31 @@
 # `mutation-mutmut` prefix, so a run of one backend never blocks, overwrites or
 # is merged into the other's results.
 #
+# PR runs never start on their own: like the gremlins workflow, this file has
+# no `pull_request` trigger. It listens for `workflow_run: workflows: [Tests]`
+# instead, gated (in the plan job's `if:`) on that Tests run having succeeded
+# and having itself been a pull_request run for a PR in this same repository.
+# See mutation.yml's own header comment ("PR context: workflow_run") for the
+# full rationale (why mutation used to starve Tests for account-wide runners,
+# how the PR's branch/base sha/number are recovered from the workflow_run
+# payload without indexing its possibly-empty pull_requests array, and why
+# this only takes effect for PRs opened after this file's change reaches
+# main). `.github/workflows/cancel-stale-runs.yml` cancels a leftover run of
+# this workflow (or Tests, or mutation.yml) when its PR closes first.
+#
 # Behavior (same shape as the gremlins workflow, mutmut's own state model):
 # - push to main: incremental. Each module restores its newest cached mutmut
 #   state (*.meta verdicts, mutmut-stats.json, the driver's test digest) and
 #   re-tests only functions whose source changed (plus survived/no-tests
 #   verdicts, when the module's tests changed). mutmut 3 keeps verdicts whose
-#   function hash is unchanged, so a cache hit skips finished mutants.
+#   function hash is unchanged, so a cache hit skips finished mutants. A
+#   push's own run also cancels an older still-running push run on main (see
+#   concurrency below), so a rapid string of merges cannot queue behind itself.
 # - weekly schedule (staggered after the gremlins full run), and
 #   workflow_dispatch by default: full, from scratch (no restore: the runner
 #   starts without state, so every mutant is re-decided). Dispatch with
-#   fresh=false for an incremental run, and `modules` for a subset.
+#   fresh=false for an incremental run, and `modules` for a subset. Neither
+#   cancels a same-kind run in progress (see concurrency below).
 # - Scores never fail a job. A job fails ONLY when the tool does: a nonzero
 #   mutmut exit code (clean-run or worker failure), a step timeout, or an
 #   export that cannot read the module's state. Survivors/score are
@@ -49,8 +64,9 @@ name: mutation-mutmut
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
   schedule:
     - cron: "23 22 * * 0"  # Sundays 22:23 UTC: full run, staggered after the gremlins one
   workflow_dispatch:
@@ -70,11 +86,14 @@ permissions:
 # Separate from the gremlins group (mutation-gremlins-...), so a mutmut run
 # never queues behind -- or cancels -- a gremlins run on the same ref.
 concurrency:
-  # pull_request only: a per-PR group with cancel-in-progress true, mirroring
-  # the gremlins workflow's own group above. push, schedule and
+  # workflow_run (a PR's Tests run completing) gets a per-branch group with
+  # cancel-in-progress true, mirroring the gremlins workflow's own group
+  # above -- see there for why head_branch, not the PR number (unsafe to
+  # index at this top level; see mutation.yml's "PR context" comment). push
+  # also cancels an in-progress older push run on main. schedule and
   # workflow_dispatch keep the exact old group and stay non-cancelling.
-  group: mutation-mutmut-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: mutation-mutmut-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_run' || github.event_name == 'push' }}
 
 env:
   # The phase-0 environment lock (requirements.txt header: "python 3.14.4").
@@ -84,6 +103,17 @@ env:
 
 jobs:
   plan:
+    # See mutation.yml's plan job for the identical rationale: push/schedule/
+    # dispatch are unaffected; a workflow_run event only proceeds when the
+    # Tests run it followed succeeded, was itself a pull_request run, and
+    # that PR is in this repository (pull_requests non-empty, read via the
+    # `.*`/join projection so a fork PR's empty array degrades to skipped
+    # rather than throwing).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      join(github.event.workflow_run.pull_requests.*.number, ',') != '')
     runs-on: ubuntu-latest
     outputs:
       modules: ${{ steps.plan.outputs.modules }}
@@ -92,19 +122,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # pull_request only: full history for the changed-file diff below;
-          # push/schedule/dispatch keep the default shallow checkout (depth
-          # 1) -- byte-identical to before.
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || 1 }}
+          # workflow_run: the PR's own head commit, never the default branch
+          # a plain checkout would give this event. push/schedule/dispatch:
+          # '' means "use the default for this event", byte-identical to the
+          # old unpinned checkout.
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+          # workflow_run (a PR run): full history for the changed-file diff
+          # below; push/schedule/dispatch keep the default shallow checkout
+          # (depth 1) -- byte-identical to before.
+          fetch-depth: ${{ github.event_name == 'workflow_run' && '0' || 1 }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - id: plan
         env:
-          EVENT: ${{ github.event_name }}
+          # Remapped so every check below ("$EVENT" = "pull_request") keeps
+          # meaning "this is a PR run" unchanged: a workflow_run event that
+          # reached this step (the job `if:` above already required it to be
+          # a successful PR Tests run) reads here as "pull_request", exactly
+          # as a direct pull_request-triggered run used to.
+          EVENT: ${{ github.event_name == 'workflow_run' && 'pull_request' || github.event_name }}
           FRESH: ${{ inputs.fresh }}
           ONLY: ${{ inputs.modules }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # workflow_run: the PR's base sha lives on the linked pull request,
+          # read via the `.*`/join projection (never `pull_requests[0]`,
+          # unsafe on the empty array a fork PR would produce).
+          BASE_SHA: ${{ github.event_name == 'workflow_run' && join(github.event.workflow_run.pull_requests.*.base.sha, ',') || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = "push" ] || [ "$EVENT" = "pull_request" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$FRESH" = "false" ]; }; then
@@ -142,7 +185,12 @@ jobs:
 
   mutate:
     needs: plan
-    if: needs.plan.outputs.modules != '[]'
+    # plan.result == 'success' first: plan's own `if:` above can SKIP it
+    # (fork PR, unsuccessful/non-PR workflow_run), and a skipped job's
+    # outputs are unset, not '[]' -- checking outputs.modules alone would
+    # then read '' != '[]' as true and start the matrix with no plan behind
+    # it.
+    if: needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -159,6 +207,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # the push's base commit, to find the functions it changed
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
       - id: py
         uses: actions/setup-python@v5
         with:
@@ -215,7 +264,7 @@ jobs:
         env:
           # PRs use the PR base SHA as the change window base (github.event.before
           # only exists on push).
-          BEFORE: ${{ github.event_name == 'push' && github.event.before || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || '') }}
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || (github.event_name == 'workflow_run' && join(github.event.workflow_run.pull_requests.*.base.sha, ',') || '') }}
         run: |
           set -euo pipefail
           rc=$(cat "$RUNNER_TEMP/mutation-rc" 2>/dev/null || echo -1)  # -1: killed by the step timeout
@@ -235,11 +284,11 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
       # Saved even after a timeout, so the next run resumes the partial state.
-      # Never on pull_request: a PR run must not overwrite main's incremental
-      # state cache (the key carries no PR number), so saving is skipped
-      # entirely for PRs and main's cache stays untouched.
+      # Never on a PR's gated workflow_run: a PR run must not overwrite main's
+      # incremental state cache (the key carries no PR number), so saving is
+      # skipped entirely for PRs and main's cache stays untouched.
       - name: Save mutmut state
-        if: always() && steps.key.outcome == 'success' && github.event_name != 'pull_request'
+        if: always() && steps.key.outcome == 'success' && github.event_name != 'workflow_run'
         uses: actions/cache/save@v4
         with:
           path: |
