@@ -700,10 +700,19 @@ def test_matrix_is_built_from_the_toml(capsys):
 def test_workflow_triggers_and_concurrency():
     on = WORKFLOW.get("on", WORKFLOW.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
+    assert on["pull_request"]["branches"] == ["main"]
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
-    # a NEW group, so an in-flight old mutmut run cannot block the first gremlins run
-    assert WORKFLOW["concurrency"]["group"] == "mutation-gremlins-${{ github.ref }}"
+    # PR runs get their own per-PR group and cancel their predecessor; push/
+    # schedule/dispatch keep the exact old group value and stay non-cancelling
+    # (github.event_name == 'pull_request' is false for all three, so the
+    # ternary's false branch -- the unchanged literal -- is what they get).
+    assert WORKFLOW["concurrency"]["group"] == (
+        "mutation-gremlins-${{ github.event_name == 'pull_request' "
+        "&& github.event.pull_request.number || github.ref }}"
+    )
+    assert WORKFLOW["concurrency"]["cancel-in-progress"] == \
+        "${{ github.event_name == 'pull_request' }}"
     assert WORKFLOW["permissions"] == {"contents": "read"}
     plan = JOBS["plan"]["steps"][-1]["run"]
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
@@ -800,9 +809,15 @@ MUT_JOBS = MUTMUT["jobs"]
 def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
     on = MUTMUT.get("on", MUTMUT.get(True))  # PyYAML reads a bare `on` as True
     assert on["push"]["branches"] == ["main"]
+    assert on["pull_request"]["branches"] == ["main"]
     assert on["schedule"] and "cron" in on["schedule"][0]
     assert set(on["workflow_dispatch"]["inputs"]) == {"fresh", "modules"}
-    assert MUTMUT["concurrency"]["group"] == "mutation-mutmut-${{ github.ref }}"
+    assert MUTMUT["concurrency"]["group"] == (
+        "mutation-mutmut-${{ github.event_name == 'pull_request' "
+        "&& github.event.pull_request.number || github.ref }}"
+    )
+    assert MUTMUT["concurrency"]["cancel-in-progress"] == \
+        "${{ github.event_name == 'pull_request' }}"
     gremlin_on = WORKFLOW.get("on", WORKFLOW.get(True))
     assert MUTMUT["concurrency"]["group"] != WORKFLOW["concurrency"]["group"]
     assert MUTMUT["permissions"] == {"contents": "read"}

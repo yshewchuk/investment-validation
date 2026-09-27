@@ -1,5 +1,9 @@
 # Earnings-Vol Trading Program — Engine
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the system's components, layer
+map, production entrypoints and invariants — read it, and the touched
+component's own `ARCHITECTURE.md`, before changing a component.
+
 Implementation of `EARNINGS_VOL_PROGRAM_PLAN.md`. This repository holds the
 **code**: the shared engine, the three-tier data architecture, and the checks
 that decide whether a phase is done. Market data, research findings, reports and

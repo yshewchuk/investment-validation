@@ -64,8 +64,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: mutation-gremlins-${{ github.ref }}
-  cancel-in-progress: false
+  # pull_request only: a per-PR group with cancel-in-progress true, so a new
+  # push to the PR supersedes the last one instead of queuing behind it (the
+  # PR's token cannot cancel a run directly). push, schedule and
+  # workflow_dispatch keep the exact old group and stay non-cancelling:
+  # github.event_name == 'pull_request' is false for all three, so the
+  # ternary's false branch -- the unchanged literal -- is what they get.
+  group: mutation-gremlins-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The phase-0 environment lock (requirements.txt header: "python 3.14.4").
