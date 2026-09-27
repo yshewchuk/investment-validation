@@ -138,7 +138,7 @@ def _generic_problem(exc: BaseException):
 
 def dispatch(worker, parameters, root, *, envelope=None):
     envelope = envelope or {}
-    if worker in ("incremental_refresh", "computed_moves_refresh", "forward_calendar_refresh"):
+    if worker in ("incremental_refresh", "computed_moves_refresh"):
         return _dispatch_refresh(worker, parameters, root)
     if worker == "legacy_materialize":
         from engine.v2.ops.materialization_worker import run_materialize
@@ -195,9 +195,7 @@ def _dispatch_refresh(worker, parameters, root):
         from engine.v2.ops.incremental_data import run_refresh_worker
         return run_refresh_worker(parameters, root)
     from engine.v2.ops import calendar_moves_jobs
-    if worker == "computed_moves_refresh":
-        return calendar_moves_jobs.run_computed_moves_worker(parameters, root)
-    return calendar_moves_jobs.run_forward_calendar_worker(parameters, root)
+    return calendar_moves_jobs.run_computed_moves_worker(parameters, root)
 
 
 def _dispatch_decision_evidence(parameters, root):

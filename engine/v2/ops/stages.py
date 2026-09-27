@@ -5,10 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
-from engine.v2.ops.calendar_moves_jobs import (
-    computed_moves_job_kind,
-    forward_calendar_job_kind,
-)
+from engine.v2.ops.calendar_moves_jobs import computed_moves_job_kind
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
@@ -240,11 +237,14 @@ def _decisions_supersede_kind():
 
 
 def _calendar_moves_kinds() -> list:
-    """S4C Part 3: the two natively-owned calendar/moves refresh kinds. They
-    read only the immutable object store and a read-only catalog connection,
-    so neither carries a legacy-store lease. Neither has a nightly.py
-    GRAPH/OPTIONAL entry yet (Part 4) -- see ARCHITECTURE.md "Outputs"."""
-    return [computed_moves_job_kind(), forward_calendar_job_kind()]
+    """S4C Part 3: the natively-owned computed_moves refresh job kind. It
+    reads only the immutable object store and a read-only catalog connection,
+    so it carries no legacy-store lease. It has no nightly.py GRAPH/OPTIONAL
+    entry yet (Part 4) -- see ARCHITECTURE.md "Outputs". forward_calendar_refresh
+    is not registered here: see ARCHITECTURE.md and issue #52 (no attempt-fence
+    check in forward_calendar_store's commit path -- the fence is a
+    prerequisite for registering that kind as a job)."""
+    return [computed_moves_job_kind()]
 
 
 def _core_kinds():

@@ -117,13 +117,12 @@ def _extra_params(name):
 
 
 def test_core_kinds_are_exactly_the_expected_static_set():
-    # incremental_refresh (refresh_job_kind()) and the two S4C Part 3 kinds
-    # (computed_moves_refresh/forward_calendar_refresh, from
-    # calendar_moves_jobs.py) are only call sites here; their own field
-    # values live in their own modules, not this file, so only their
-    # presence in the list is checked.
-    _refresh_kinds = {"incremental_refresh", "computed_moves_refresh",
-                      "forward_calendar_refresh"}
+    # incremental_refresh (refresh_job_kind()) and the S4C Part 3 kind
+    # (computed_moves_refresh, from calendar_moves_jobs.py) are only call
+    # sites here; their own field values live in their own modules, not this
+    # file, so only their presence in the list is checked. forward_calendar_refresh
+    # is not registered (see stages.py::_calendar_moves_kinds and issue #52).
+    _refresh_kinds = {"incremental_refresh", "computed_moves_refresh"}
     assert set(_ACTUAL) == set(_CASES) | _refresh_kinds
     assert len(stages._core_kinds()) == len(_CASES) + len(_refresh_kinds)
 

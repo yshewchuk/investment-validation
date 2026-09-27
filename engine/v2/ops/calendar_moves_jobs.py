@@ -1,20 +1,19 @@
-"""S4C Part 3: the two natively-owned calendar/moves refresh job kinds.
+"""S4C Part 3: the natively-owned calendar/moves refresh job kind.
 
-``computed_moves_refresh`` and ``forward_calendar_refresh`` are ordinary
-``JobKind`` entries (``stages.py::_core_kinds``), dispatched by ``worker.py``
-to ``run_computed_moves_worker``/``run_forward_calendar_worker`` below. Each
-one decodes the job's own ``CalendarMovesParameters`` document and adapts
-Parts 1/2's standalone runners (``computed_moves_store.run_computed_moves_refresh``,
-``forward_calendar_store.run_forward_calendar_refresh`` -- neither of which is
-itself ``RefreshCallback``-shaped, since ``main``'s ``RefreshParameters`` has
-no ``as_of``/``tickers`` field) into a closure that IS. The shared
-provider-receipt cache and failure classification these two stores (and this
-module) import live in ``engine.v2.ops.unit_receipts`` (P6 slice-4c split,
+``computed_moves_refresh`` is an ordinary ``JobKind`` entry
+(``stages.py::_core_kinds``), dispatched by ``worker.py`` to
+``run_computed_moves_worker`` below. It decodes the job's own
+``CalendarMovesParameters`` document and adapts Part 1's standalone runner
+(``computed_moves_store.run_computed_moves_refresh`` -- which is not itself
+``RefreshCallback``-shaped, since ``main``'s ``RefreshParameters`` has no
+``as_of``/``tickers`` field) into a closure that IS. The shared
+provider-receipt cache and failure classification this store (and this
+module) imports live in ``engine.v2.ops.unit_receipts`` (P6 slice-4c split,
 Part 0); this module re-exports them under their original names for anything
 that still imports them from here.
 
-Neither job kind has a ``nightly.py`` ``GRAPH``/``OPTIONAL`` entry yet -- see
-``ARCHITECTURE.md`` "Outputs" -- so today each is reachable only through the
+This job kind has no ``nightly.py`` ``GRAPH``/``OPTIONAL`` entry yet -- see
+``ARCHITECTURE.md`` "Outputs" -- so today it is reachable only through the
 general job-submission pipeline, not an ordinary nightly.
 """
 from __future__ import annotations
@@ -44,26 +43,15 @@ from engine.v2.ops.unit_receipts import (
 )
 
 COMPUTED_MOVES_REFRESH_ACTION = "computed_moves_refresh"
-FORWARD_CALENDAR_REFRESH_ACTION = "forward_calendar_refresh"
 COMPUTED_MOVES_RESULT_PATH = "computed_moves_refresh_result.json"
-FORWARD_CALENDAR_RESULT_PATH = "forward_calendar_refresh_result.json"
-#: Both kinds return the shared refresh-evidence document; the checkpoint
-#: contract names the same schema.
+#: This kind returns the shared refresh-evidence document; the checkpoint
+#: contract names the same schema `incremental_refresh` uses.
 COMPUTED_MOVES_RESULT_SCHEMA = REFRESH_RESULT_SCHEMA
-FORWARD_CALENDAR_RESULT_SCHEMA = REFRESH_RESULT_SCHEMA
-DEFAULT_HORIZON_DAYS = 21
-MAX_CALENDAR_MOVES_IDS = 4096
-MAX_IDENTITY_LENGTH = 128
-MAX_PROVIDER_CALLS = 1_000_000
 
 __all__ = [
     "COMPUTED_MOVES_REFRESH_ACTION",
     "COMPUTED_MOVES_RESULT_PATH",
     "COMPUTED_MOVES_RESULT_SCHEMA",
-    "DEFAULT_HORIZON_DAYS",
-    "FORWARD_CALENDAR_REFRESH_ACTION",
-    "FORWARD_CALENDAR_RESULT_PATH",
-    "FORWARD_CALENDAR_RESULT_SCHEMA",
     "NATIVE_COMPUTED_MOVES_ACCOUNT",
     "NATIVE_NASDAQ_ACCOUNT",
     "NATIVE_YFINANCE_ACCOUNT",
@@ -74,11 +62,9 @@ __all__ = [
     "calendar_moves_job_spec",
     "calendar_moves_parameter_problems",
     "computed_moves_job_kind",
-    "forward_calendar_job_kind",
     "provider_failure_code",
     "record_unit_receipt",
     "run_computed_moves_worker",
-    "run_forward_calendar_worker",
 ]
 
 
@@ -86,13 +72,15 @@ __all__ = [
 class CalendarMovesParameters:
     """Strict parameters for one natively-owned calendar/moves refresh job.
 
-    ``main``'s ``incremental_data.RefreshParameters`` has no
-    ``as_of``/``tickers``/``horizon_days`` field, so this job family carries
-    its own parameters dataclass with them, plus every field
-    ``RefreshParameters`` already has (the plan-binding fields mirror it
-    exactly). ``expected_ids`` is the worker coverage denominator the
-    supervisor checks the result against: one id per computed_moves target
-    ticker, or per wanted forward-calendar ticker.
+    ``main``'s ``incremental_data.RefreshParameters`` has no ``as_of`` field,
+    so this job family carries its own parameters dataclass with it, plus
+    every field ``RefreshParameters`` already has (the plan-binding fields
+    mirror it exactly). ``tickers``/``horizon_days`` were removed once
+    ``forward_calendar_refresh``'s job-kind wiring was pulled from this PR
+    (they had no remaining reader); ``table_name`` was never read -- see
+    ``ARCHITECTURE.md``. ``expected_ids`` is the worker coverage denominator
+    the supervisor checks the result against: one id per computed_moves
+    target ticker, or per wanted forward-calendar ticker.
     """
 
     expected_ids: tuple[str, ...]
@@ -106,10 +94,7 @@ class CalendarMovesParameters:
     expected_head_snapshot_id: str | None = None
     provider_account: str | None = None
     input_bindings: dict[str, str] | None = None
-    table_name: str = ""
     as_of: str | None = None
-    horizon_days: int = DEFAULT_HORIZON_DAYS
-    tickers: tuple[str, ...] = ()
     all_scoreable: bool = True
     since: str | None = None
 
@@ -136,39 +121,37 @@ def _is_iso_date(value: object) -> bool:
 def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> tuple[str, ...]:
     """Semantic checks layered on the strict dataclass document decoder.
 
-    The plan binding is validated only when supplied, so a caller that pins a
-    plan gets all-or-nothing checks while an absent binding never invents a
-    failure; ``expected_ids`` and a supplied ``as_of`` are always validated.
-    Neither ``tickers``/``horizon_days``/``scope``/``catalog_path``/
-    ``objects_root`` is re-checked here: those are the two stores' own
-    responsibility, enforced again -- before any I/O -- by
-    ``run_forward_calendar_refresh``'s own argument checks and
-    ``computed_moves_store._validate_input_document``, the same layering
-    ``incremental_data.RefreshParameters``/``refresh_parameter_problems``
-    already has relative to ``run_refresh_worker``.
+    Reuses ``incremental_data``'s own submit-time checks directly (Opus
+    review, PR #50 round 3, finding 1): the plan binding
+    (``parent_snapshot_id``/``refresh_plan_hash``/``provider_calls``) is now
+    ALWAYS validated, never only when a binding field happens to be
+    supplied -- an unbound job used to be admitted only to fail inside the
+    worker. ``catalog_path``/``objects_root``/``scope`` and
+    ``expected_head_generation``/``expected_head_snapshot_id`` are validated
+    here too, exactly like ``incremental_data.refresh_parameter_problems``
+    validates them for ``incremental_refresh`` -- this really is now "the
+    same layering", not merely described as one: `computed_moves_store`'s own
+    revalidation of these same fields (`_validate_input_document`) is a
+    second, defense-in-depth layer, the same relationship
+    `run_refresh_worker` has to `refresh_parameter_problems`, not the only
+    place they are ever checked. ``job.provider_budget_ref`` is read (was
+    previously ignored) to enforce provider-budget/call-count consistency,
+    and ``COMPUTED_MOVES_RESULT_PATH`` may never be bound as this job's own
+    input (the worker writes it itself).
     """
-    problems = []
-    if not params.expected_ids or len(params.expected_ids) > MAX_CALENDAR_MOVES_IDS:
-        problems.append("expected_ids must contain 1..4096 request ids")
-    elif (len(set(params.expected_ids)) != len(params.expected_ids)
-          or any(not item or len(item) > MAX_IDENTITY_LENGTH for item in params.expected_ids)):
-        problems.append("expected_ids must be unique bounded nonempty strings")
+    from engine.v2.ops import incremental_data
+    problems = (incremental_data._expected_ids_problems(params)
+               + incremental_data._plan_binding_problems(params)
+               + incremental_data._bounded_nonempty_problems((
+                   ("catalog_path", params.catalog_path, 4096),
+                   ("objects_root", params.objects_root, 4096),
+                   ("scope", params.scope, 128)))
+               + incremental_data._head_binding_problems(params)
+               + incremental_data._refresh_budget_problems(
+                   job, params, result_path=COMPUTED_MOVES_RESULT_PATH))
     if params.as_of is not None and not _is_iso_date(params.as_of):
         problems.append("as_of must be an ISO date")
-    if params.parent_snapshot_id or params.refresh_plan_hash or params.provider_calls:
-        problems.extend(_plan_binding_problems(params))
     return tuple(problems)
-
-
-def _plan_binding_problems(params: CalendarMovesParameters) -> list[str]:
-    problems = []
-    if not params.parent_snapshot_id or len(params.parent_snapshot_id) > MAX_IDENTITY_LENGTH:
-        problems.append("parent_snapshot_id must be a bounded nonempty string")
-    if not _is_hash(params.refresh_plan_hash):
-        problems.append("refresh_plan_hash must be a sha256 content hash")
-    if not isinstance(params.provider_calls, int) or not 0 <= params.provider_calls <= MAX_PROVIDER_CALLS:
-        problems.append("provider_calls must be between zero and 1000000")
-    return problems
 
 
 def _job_kind(name: str, schema: str) -> JobKind:
@@ -182,10 +165,6 @@ def _job_kind(name: str, schema: str) -> JobKind:
 
 def computed_moves_job_kind() -> JobKind:
     return _job_kind(COMPUTED_MOVES_REFRESH_ACTION, COMPUTED_MOVES_RESULT_SCHEMA)
-
-
-def forward_calendar_job_kind() -> JobKind:
-    return _job_kind(FORWARD_CALENDAR_REFRESH_ACTION, FORWARD_CALENDAR_RESULT_SCHEMA)
 
 
 def calendar_moves_job_spec(kind: str, plan, parameters: CalendarMovesParameters, *,
@@ -213,14 +192,8 @@ def calendar_moves_job_spec(kind: str, plan, parameters: CalendarMovesParameters
         environment_ref=environment_ref, parameters=to_document(params),
         input_refs=tuple(input_refs), output_namespace=output_namespace,
         resource_class="io_fetch", provider_budget_ref=plan.provider_account,
-        retry_policy_ref="bounded", checkpoint_contract_ref=_schema_for(kind),
+        retry_policy_ref="bounded", checkpoint_contract_ref=COMPUTED_MOVES_RESULT_SCHEMA,
         dependency_job_ids=tuple(dependency_job_ids))
-
-
-def _schema_for(kind: str) -> str:
-    if kind == COMPUTED_MOVES_REFRESH_ACTION:
-        return COMPUTED_MOVES_RESULT_SCHEMA
-    return FORWARD_CALENDAR_RESULT_SCHEMA
 
 
 # --------------------------------------------------------------------------
@@ -250,26 +223,13 @@ def run_computed_moves_worker(parameters, root, *, refresh_callback=None) -> dic
         failure_message="computed moves refresh did not produce complete coverage")
 
 
-def run_forward_calendar_worker(parameters, root, *, refresh_callback=None) -> dict:
-    from engine.v2.ops import incremental_data
-
-    params = _decode(parameters)
-    callback = refresh_callback or incremental_data._load_forward_calendar_refresh_callback()
-    return _run_calendar_moves_worker(
-        params, root, kind=FORWARD_CALENDAR_REFRESH_ACTION,
-        result_path=FORWARD_CALENDAR_RESULT_PATH, schema=FORWARD_CALENDAR_RESULT_SCHEMA,
-        callback=callback,
-        failure_message="forward calendar refresh did not produce complete coverage")
-
-
 def _validate_calendar_moves_coverage(params: CalendarMovesParameters, result) -> None:
     """Same contract as ``incremental_data._validate_refresh_coverage``, but
-    set-based rather than ordered-tuple: neither calendar/moves store
+    set-based rather than ordered-tuple: ``computed_moves_store`` never
     promises to return ``completed_ids`` in the caller's ``expected_ids``
-    order (both sort internally on their "complete" paths, and
-    ``computed_moves_store``'s nothing-rebuilt noop path orders by its own
-    catalog scan) -- an ordered comparison would fail a correctly covered,
-    already-committed result on order alone.
+    order (its "complete"/"noop" paths all report ``tuple(sorted(targets))``,
+    alphabetical, not caller order) -- an ordered comparison would fail a
+    correctly covered, already-committed result on order alone.
     """
     expected = set(params.expected_ids)
     completed = result.completed_ids
@@ -287,14 +247,13 @@ def _validate_calendar_moves_coverage(params: CalendarMovesParameters, result) -
 
 def _run_calendar_moves_worker(params: CalendarMovesParameters, root, *, kind, result_path,
                                schema, callback, failure_message) -> dict:
-    """Every argument the two public worker functions above already resolved:
+    """Every argument the one public worker function above already resolved:
     a decoded ``params`` and a bound ``(parameters, root)``-shaped callback.
 
-    Unlike ``run_daily_market_refresh``, neither
-    ``computed_moves_store.run_computed_moves_refresh`` nor
-    ``forward_calendar_store.run_forward_calendar_refresh`` writes its own
-    result artifact -- both simply return a ``RefreshCallbackResult`` -- so
-    this function writes ``root / result_path`` itself, after validating,
+    Unlike ``run_daily_market_refresh``,
+    ``computed_moves_store.run_computed_moves_refresh`` writes no result
+    artifact of its own -- it simply returns a ``RefreshCallbackResult`` --
+    so this function writes ``root / result_path`` itself, after validating,
     rather than reading one back for an integrity cross-check the way
     ``incremental_data._validate_callback_result`` does for
     ``incremental_refresh``.
