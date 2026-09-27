@@ -219,6 +219,23 @@ def test_run_forward_calendar_worker_happy_path_tolerates_reordered_coverage(tmp
     assert sorted(output["completed_ids"]) == ["AAPL", "MSFT"]
 
 
+def test_run_computed_moves_worker_rejects_a_missing_completed_id(tmp_path):
+    """Same coverage comparator as the reordered-coverage tests above, but a
+    genuinely corrupt result: completed_ids is missing one of the two
+    expected ids. Proves the set-based check still rejects a real mismatch,
+    not just order."""
+    params = _params(expected_ids=("MSFT", "AAPL"))
+    result = _result(completed_ids=("AAPL",))
+
+    def _callback(parameters, root):
+        return result
+
+    with pytest.raises(OpsError) as exc_info:
+        calendar_moves_jobs.run_computed_moves_worker(
+            to_document(params), tmp_path, refresh_callback=_callback)
+    assert exc_info.value.code == "VALIDATION_FAILED"
+
+
 # --------------------------------------------------------------------------
 # a cached re-run comes back noop
 # --------------------------------------------------------------------------

@@ -233,8 +233,8 @@ with a raw `JobSpec` of kind `"forward_calendar_refresh"`), same as
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
 
-**`computed_moves_store.py` is registered as an ordinary job kind (Part 3),
-but still has no nightly caller.** `stages.py::_core_kinds` now includes
+**`computed_moves_refresh`/`forward_calendar_refresh` are registered as
+ordinary job kinds (Part 3), but still have no nightly caller.** `stages.py::_core_kinds` now includes
 `calendar_moves_jobs.computed_moves_job_kind()`/`forward_calendar_job_kind()`,
 and `worker.py::dispatch` routes workers `"computed_moves_refresh"`/
 `"forward_calendar_refresh"` to `calendar_moves_jobs.run_computed_moves_worker`/
