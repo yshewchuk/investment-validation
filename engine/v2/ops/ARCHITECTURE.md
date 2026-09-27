@@ -64,11 +64,12 @@ coordinator effect), `CalendarMovesParameters`/`calendar_moves_parameter_problem
 `worker.py` for worker `"computed_moves_refresh"`) — see "Primary contracts"
 below for what this adapts; "Outputs" below now covers its nightly caller
 (Part 4). `calendar_moves_jobs.py` registers only `computed_moves_refresh`:
-`forward_calendar_refresh` has no `JobKind` yet — its store's commit path has
-no attempt-fence check (issue #52), so registering it as a supervised job
-(leases, retries, cancellation) would make that gap newly reachable; the
-fence is a prerequisite for registering that kind, and Part 4 wires only
-`computed_moves_refresh` into the nightly graph for exactly this reason —
+`forward_calendar_refresh` still has no `JobKind` — issue #52's prerequisite
+(an attempt-fence check in the store's own commit path, so a
+cancelled/expired attempt can never commit — see below) is now in place
+(#55), but registering the kind itself (worker dispatch, loader callback,
+parameter validation) is a separate, later change, and Part 4 wires only
+`computed_moves_refresh` into the nightly graph for the same reason —
 `forward_calendar_refresh` gets neither a `JobKind` nor a `GRAPH` node.
 
 A small number of natively-fetched data stores live directly in this
@@ -81,26 +82,51 @@ never read them from it. `run_forward_calendar_refresh` is instead a
 standalone runner with an explicit, fully keyword-only signature
 (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
 `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
-`expected_head_snapshot_id`, `nasdaq_fetcher`, `earnings_fetcher`) that
-validates every one of its ten arguments before touching the catalog or a
-provider, including `scope` (must be `"shadow"` or `"smoke"`),
-`expected_head_generation` (non-negative) and `expected_head_snapshot_id`
-(Part 3: `None` or a bounded 1..128-char string, matching
-`parent_snapshot_id`'s own shape — the old code read it straight into
+`expected_head_snapshot_id`, `attempt_id`, `fence`, `nasdaq_fetcher`,
+`earnings_fetcher`) that validates every one of its twelve non-fetcher
+arguments before touching the catalog or a provider, including `scope`
+(must be `"shadow"` or `"smoke"`), `expected_head_generation`
+(non-negative), `expected_head_snapshot_id` (Part 3: `None` or a bounded
+1..128-char string, matching `parent_snapshot_id`'s own shape — the old
+code read it straight into
 `_commit_claims`/`generic_incremental.commit_generic_table_candidate`
-unchecked); `tickers=()` is valid and means the whole market (see "Failure
-semantics" below). This runner has no job-layer bridge yet: an earlier draft
-of this PR (Part 3) added one (`run_forward_calendar_worker`, a
-`calendar_moves_jobs.py` closure decoding a job's `CalendarMovesParameters`
-and wrapping this runner in a `RefreshCallback`-shaped adapter), but it was
-pulled before merge — issue #52 found that registering the kind makes an
-existing gap (no attempt-fence check in this runner's own commit path)
-newly reachable as a supervised job, and the fence must land first. Its pure
-helpers (`horizon_dates`, `date_units`, `ticker_units`,
-`plan_forward_calendar`, `resolve_session_claims`, `nasdaq_rows_from_payload`,
-`nasdaq_claims_from_rows`, `pending_tickers`) are unit-testable without a
-catalog or a network. Today this runner has no production caller, only its
-own test module.
+unchecked), and `attempt_id`/`fence` (issue #52: `None`/`None`, or a
+non-empty string paired with an `int >= 1` — the same optional-pair shape
+`computed_moves_store`'s staged `attempt_id`/`fence` document fields have);
+`tickers=()` is valid and means the whole market (see "Failure semantics"
+below). **The commit path now carries the same live-attempt-lease check
+`computed_moves_store` has (issue #52, closed by this change):**
+`_commit_claims` accepts `attempt_id`/`fence` and passes
+`generic_incremental.commit_generic_table_candidate` a `fence_check`
+built by this module's own `_fence_check_for` — byte-identical in shape to
+`computed_moves_store._fence_check_for` — which is a no-op when
+`attempt_id` is `None` (a manual/ad-hoc invocation with no live job behind
+it, same as `computed_moves_store`) and otherwise calls
+`engine.v2.ops.lifecycle.verify_fence` inside the SAME commit transaction
+the head compare-and-swap runs in, so a cancelled job (`CANCELLED`) or an
+expired lease (`LEASE_LOST`) is refused before anything commits — never
+after. `generic_incremental.commit_generic_table_candidate` gained a new
+optional `fence_check` parameter for this, COMPOSED with (never a
+replacement for) its existing `_head_fence` check: `_head_fence` always
+runs first, then the supplied `fence_check` (if any) runs after it, both
+inside the one callable `catalog.commit_snapshot` invokes — CodeRabbit
+review, PR #55 round 2 (`catalog.commit_snapshot` skips its own
+`_check_head_expectation` call on an idempotent-replay shortcut
+(`_existing_receipt`), but it always calls whatever `fence_check` it was
+given BEFORE that shortcut lookup, so composing here is what keeps
+head-conflict detection active on that shortcut path too). Omitting
+`fence_check` (the default) keeps this function's previous, unchanged
+behavior for its other two callers, `engine/v2/data/incremental.py`'s
+generic-refresh path and `engine/v2/research/_trades_publish.py`, neither
+of which is touched by this change. This runner still has no job-layer
+bridge: registering
+`forward_calendar_refresh` as a `JobKind` (worker dispatch, a loader
+callback, parameter validation) is a separate, later change — see "Primary
+contracts" above. Its pure helpers (`horizon_dates`, `date_units`,
+`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
+`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
+are unit-testable without a catalog or a network. Today this runner has no
+production caller, only its own test module.
 
 ## Inputs
 
@@ -134,9 +160,9 @@ own test module.
   weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
   (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
   `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
-  `expected_head_snapshot_id`) — there is no staged input-document file for
-  this runner: it has no `JobKind` (see "Primary contracts" above and issue
-  #52), so there is no admitted job to stage one from, and
+  `expected_head_snapshot_id`, `attempt_id`, `fence`) — there is no staged
+  input-document file for this runner: it has no `JobKind` (see "Primary
+  contracts" above), so there is no admitted job to stage one from, and
   `refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES` has no
   `"forward_calendar_refresh"` entry; and the two injected network edges,
   `providers.nasdaq_calendar.
@@ -236,7 +262,10 @@ routes worker `"computed_moves_refresh"` to
 carries a `"computed_moves_refresh": ("refresh",)` node, and `OPTIONAL`
 still includes it, but ONLY for `run_shadow_nightly`'s own whole-graph walk
 (see "Diagrams" below) — no *submission* path builds a job for it from that
-node, and `_NATIVE_ACTION_STAGES` maps only `"refresh"` now.
+node, and `_NATIVE_ACTION_STAGES` maps only `"refresh"` now. (Before Part 4
+this stage was reachable only through the general job-submission pipeline,
+`ops submit` with a raw `JobSpec`, same as `training`/`models_promote`
+above; Part 4 below is what added the real caller.)
 
 **Why it moved out of `build_legacy_job_requests` (Opus BLOCK(3) on
 `dc7f9360`).** The first cut of Part 4 built both native jobs — `"refresh"`
@@ -593,7 +622,8 @@ network, or database access.
   subtype in Python (so `True`/`False` cannot silently pass as `1`/`0`),
   and any other type or a negative value is refused the same way.
   `forward_calendar_store.py`'s `run_forward_calendar_refresh` validates
-  every one of its nine arguments before opening the catalog connection,
+  every one of its twelve non-fetcher arguments before opening the catalog
+  connection,
   constructing the artifact store, or making a provider call: each raises
   `INVALID_REQUEST` (root doc §5's typed-`Problem` shape) the moment it is
   missing or malformed, never a bare
@@ -646,6 +676,30 @@ network, or database access.
   being refused before the catalog connection even opens
   (`tests/test_v2_ops_forward_calendar_store.py::test_expected_head_snapshot_id_empty_is_refused_before_any_io`/
   `::test_expected_head_snapshot_id_too_long_is_refused_before_any_io`).
+  `attempt_id`/`fence` (issue #52) are each independently validated, the
+  same way `computed_moves_store`'s own optional document fields are:
+  `attempt_id` must be `None` or a non-empty `str`; `fence` must be `None`
+  or an `int >= 1` — each refused before any I/O the moment it is
+  malformed. `None`/`None` is a valid, meaningful request (a manual/ad-hoc
+  invocation with no live job attempt behind it), not merely an omitted
+  default, and both set is the other valid shape. The two fields ARE then
+  cross-checked against each other (`_validated_attempt_fence_pair`,
+  Opus gate finding on #55): exactly one set is refused up front, before
+  any I/O, as `INVALID_REQUEST` — a bare `fence` with no `attempt_id`
+  would otherwise make `_fence_check_for` a no-op, committing unfenced
+  (fail-open), and a bare `attempt_id` with no `fence` would otherwise
+  only be refused later, inside `verify_fence` itself, after the network
+  fetch. When both are given, the commit's own `_fence_check_for`
+  calls `engine.v2.ops.lifecycle.verify_fence(conn, attempt_id, fence, now)`
+  inside the SAME transaction `generic_incremental.commit_generic_table_candidate`
+  opens for the head compare-and-swap — a job whose fence is void
+  (`CANCELLED`: `verify_fence` sees the job's own `state == "cancelling"`)
+  or whose lease has expired (`LEASE_LOST`: the attempt's
+  `lease_expires_at` is at or before the check's clock reading) is refused
+  there, before any row is inserted and before the head moves — never
+  after a successful commit
+  (`tests/test_v2_ops_forward_calendar_store.py::test_fence_check_for_matches_the_real_verify_fence_and_keeps_the_lease_check`/
+  `::test_fence_check_for_refuses_a_cancelled_attempt`).
 - **`nightly.submit_computed_moves_refresh_if_ready`'s own failure semantics
   for `computed_moves_refresh` (Part 4, revised after Opus BLOCK(3))** —
   R1 missing input: no open catalog connection, no native `"refresh"` job

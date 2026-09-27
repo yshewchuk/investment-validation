@@ -508,10 +508,12 @@ mutate = [
     "engine/v2/scoring/financial.py",
     "engine/v2/scoring/frozen_batch.py",
     "engine/v2/scoring/frozen_inputs.py",
+    "engine/v2/scoring/nightly_source_bundle.py",
     "engine/v2/scoring/source_inputs.py",
 ]
 tests = [
     "tests/test_phase4_acceptance_independence.py",
+    "tests/test_phase4_capture_strict.py",
     "tests/test_phase4_frozen_bridge_rows.py",
     "tests/test_v2_models_p5_2_acceptance.py",
     "tests/test_v2_models_recalibration_artifact.py",
@@ -525,6 +527,7 @@ tests = [
     "tests/test_v2_scoring_frozen_recipes.py",
     "tests/test_v2_scoring_frozen_residuals.py",
     "tests/test_v2_scoring_native_payoff.py",
+    "tests/test_v2_scoring_nightly_source_bundle.py",
     "tests/test_v2_scoring_no_score_status.py",
     "tests/test_v2_scoring_planned_exit_bundle.py",
     "tests/test_v2_scoring_r4_20_frozen_parity.py",

@@ -54,6 +54,7 @@ from engine.v2.ops.incremental_data import (
     RefreshUnit,
     plan_refresh,
 )
+from engine.v2.ops.lifecycle import verify_fence
 from engine.v2.ops.unit_receipts import (
     NATIVE_NASDAQ_ACCOUNT,
     NATIVE_YFINANCE_ACCOUNT,
@@ -286,6 +287,45 @@ def _validated_expected_head_snapshot_id(value) -> str | None:
                    f"expected_head_snapshot_id must be a bounded nonempty str or None, "
                    f"got {value!r}")
     return value
+
+
+def _validated_attempt_id(value) -> str | None:
+    """Optional; when present, a non-empty ``str`` -- the staged job attempt
+    this commit is fenced to (issue #52). ``None`` is a valid, meaningful
+    request: a manual/ad-hoc invocation with no live job behind it, the same
+    contract ``computed_moves_store``'s own optional ``attempt_id``/``fence``
+    document fields have."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise fail("INVALID_REQUEST",
+                   f"attempt_id must be a non-empty str or None, got {value!r}")
+    return value
+
+
+def _validated_fence(value) -> int | None:
+    """Optional; when present, an ``int >= 1`` (never a ``bool``, which is
+    an ``int`` subclass in Python)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise fail("INVALID_REQUEST",
+                   f"fence must be an int >= 1 or None, got {value!r}")
+    return value
+
+
+def _validated_attempt_fence_pair(attempt_id: str | None, fence: int | None) -> None:
+    """Refused before any I/O (Opus gate finding on PR #55) when exactly one
+    of ``attempt_id``/``fence`` is set. A bare ``fence`` with no
+    ``attempt_id`` would make ``_fence_check_for`` a no-op -- the commit goes
+    through unfenced (fail-open). A bare ``attempt_id`` with no ``fence``
+    would only be refused later, inside ``verify_fence``, after the network
+    fetch. Both ``None`` (the legacy/no-live-job default) and both set are
+    the only valid shapes."""
+    if (attempt_id is None) != (fence is None):
+        raise fail("INVALID_REQUEST",
+                   f"attempt_id and fence must both be None or both be set, got "
+                   f"attempt_id={attempt_id!r} fence={fence!r}")
 
 
 def _validated_catalog_path(catalog_path) -> str:
@@ -621,8 +661,34 @@ def _coverage(contract, revision_ids, tickers, *, day_range, created_at: str) ->
         acquisition_receipt_refs=(), state="complete", completed_at=created_at)
 
 
+def _fence_check_for(staged_attempt_id, staged_fence, clock):
+    """The commit's own fence check against
+    ``engine.v2.ops.lifecycle.verify_fence``'s REAL signature (``conn,
+    attempt_id, fence, now`` -- it has no ``check_lease_time`` parameter to
+    disable the wall-clock lease-expiry check with). Never disables that
+    check: the production lease-expiry gate stays active here, the same
+    contract ``computed_moves_store``'s own ``_fence_check_for`` has (issue
+    #52). ``None`` staged_attempt_id (no live job behind this call, e.g. a
+    manual or test invocation) is a no-op fence check.
+    """
+    if staged_attempt_id is None:
+        return lambda connection: None
+    return lambda connection: verify_fence(connection, staged_attempt_id, staged_fence,
+                                           clock.now())
+
+
 def _commit_claims(conn, store, parent, claims: dict, existing: dict, *, scope, clock,
-                   expected_head_generation: int, expected_head_snapshot_id: str | None):
+                   expected_head_generation: int, expected_head_snapshot_id: str | None,
+                   attempt_id: str | None = None, fence: int | None = None):
+    """Merge ``claims`` into the existing ``earnings_events`` contract and
+    commit one new snapshot generation through ``generic_incremental``.
+
+    ``attempt_id``/``fence`` (issue #52), when not ``None``, fence this
+    commit to a live job attempt via ``_fence_check_for``: a cancelled job
+    or an expired lease is refused inside the same transaction the head
+    compare-and-swap runs in, before any row is inserted. Returns ``None``
+    when ``claims`` is empty (nothing to merge, nothing committed).
+    """
     contract = next(item for item in parent.contracts if item.table_name == TABLE_NAME)
     received_at = clock.now().isoformat()
     revisions = []
@@ -645,7 +711,8 @@ def _commit_claims(conn, store, parent, claims: dict, existing: dict, *, scope, 
         request_hash=content_hash({"kind": "forward_calendar_generation", "scope": scope,
                                    "base": parent.snapshot.snapshot_id,
                                    "revisions": sorted(r.candidate.revision_id
-                                                       for r in revisions)}))
+                                                       for r in revisions)}),
+        fence_check=_fence_check_for(attempt_id, fence, clock))
 
 
 # --------------------------------------------------------------------------
@@ -704,6 +771,7 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
                                  as_of=None, tickers=None, horizon_days=None,
                                  scope=None, expected_head_generation=None,
                                  expected_head_snapshot_id: str | None = None,
+                                 attempt_id: str | None = None, fence: int | None = None,
                                  nasdaq_fetcher=None, earnings_fetcher=None) \
         -> RefreshCallbackResult:
     """The forward-calendar refresh's standalone runner (spec s4b Change 5).
@@ -749,6 +817,11 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
     ``_execute_forward_calendar_refresh``): a candidate whose merged rows equal
     the parent's resolves back to the parent snapshot, and key presence in the
     parent is never mistaken for this run's content.
+
+    ``attempt_id``/``fence`` (issue #52): ``None``/``None`` is a no-op fence
+    check; otherwise the commit is fenced via
+    ``engine.v2.ops.lifecycle.verify_fence`` before anything commits. Exactly
+    one set (Opus gate finding) is refused up front, before any I/O.
     """
     catalog_path = _validated_catalog_path(catalog_path)
     objects_root = _validated_objects_root(objects_root)
@@ -760,6 +833,9 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
     scope = _validated_scope(scope)
     expected_head_generation = _validated_expected_head_generation(expected_head_generation)
     expected_head_snapshot_id = _validated_expected_head_snapshot_id(expected_head_snapshot_id)
+    attempt_id = _validated_attempt_id(attempt_id)
+    fence = _validated_fence(fence)
+    _validated_attempt_fence_pair(attempt_id, fence)
     if nasdaq_fetcher is None or earnings_fetcher is None:
         raise fail("RESOURCE_UNAVAILABLE", "no forward_calendar fetchers are configured")
     return _execute_forward_calendar_refresh(
@@ -768,6 +844,7 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
         as_of=as_of, tickers=tickers, horizon_days=horizon_days, scope=scope,
         expected_head_generation=expected_head_generation,
         expected_head_snapshot_id=expected_head_snapshot_id,
+        attempt_id=attempt_id, fence=fence,
         nasdaq_fetcher=nasdaq_fetcher, earnings_fetcher=earnings_fetcher)
 
 
@@ -776,6 +853,7 @@ def _execute_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
                                       as_of: str, tickers: tuple[str, ...], horizon_days: int,
                                       scope: str, expected_head_generation: int,
                                       expected_head_snapshot_id: str | None,
+                                      attempt_id: str | None = None, fence: int | None = None,
                                       nasdaq_fetcher, earnings_fetcher) \
         -> RefreshCallbackResult:
     """Every argument already validated -- opens the catalog and runs the
@@ -819,7 +897,8 @@ def _execute_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
         receipt = _commit_claims(conn, store, parent, claims, existing,
                                  scope=scope, clock=clock,
                                  expected_head_generation=expected_head_generation,
-                                 expected_head_snapshot_id=expected_head_snapshot_id)
+                                 expected_head_snapshot_id=expected_head_snapshot_id,
+                                 attempt_id=attempt_id, fence=fence)
         if receipt is None or receipt.resulting_head_snapshot_id == parent.snapshot.snapshot_id:
             # A candidate whose merged rows equal the parent's resolves back to
             # the parent snapshot, so the head did not move and nothing was

@@ -2526,6 +2526,24 @@ def test_probe_still_refuses_unrecorded_or_contradictory_quote_domains(
         native_inputs_from_capture(candidate, request)
 
 
+def test_probe_preserves_incomplete_quote_message(tmp_path):
+    # Regression for the capture shim's exception translation
+    # (tools/capture_tier0_corpus.py's one quote_domain_map call site):
+    # NightlySourceBundleRefusal.__str__ carries a "CODE: " prefix
+    # StrictTraceCaptureError's own messages never had, so the shim must
+    # re-raise with .detail, not str(exc). Exercises the real capture path
+    # (unlike a synthetic exception built in the test), so it would have
+    # caught the "INVALID_QUOTE_DOMAIN: " prefix the old str(exc) added.
+    candidate = _stopped_candidate(
+        tmp_path, quote_status="recorded",
+        quote_domain=[{"right": "C", "strike": 100.0}],
+    )
+    request = canonical_v2_request(candidate, "snapshot-1")
+    with pytest.raises(StrictTraceCaptureError) as exc:
+        native_inputs_from_capture(candidate, request)
+    assert str(exc.value) == "quote_domain[0] lacks a complete contract quote"
+
+
 # ---------------------------------------------------------------------------
 # Tier-0 vetting gaps 005 (CAL-P) and 009 (CND-P), 2026-09-19: a disabled
 # strategy is refused before any stage. Legacy now records a request-only
