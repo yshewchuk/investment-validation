@@ -62,6 +62,14 @@ def pytest_configure(config):
         "call and teardown, overriding --test-timeout. See the per-test "
         "timeout section below.",
     )
+    config.addinivalue_line(
+        "markers",
+        "synthetic_cfg: this test builds its own throwaway cfg (never the "
+        "real tools/mutation_pilot.toml) -- see "
+        "tests/test_mutation_ci.py's _empty_import_graph_for_synthetic_cfg "
+        "fixture, which patches build_import_graph to {} for these so they "
+        "don't build the real ~884-file repo graph.",
+    )
 
 
 # -- per-test timeout ---------------------------------------------------------

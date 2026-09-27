@@ -47,6 +47,35 @@
 # mutmut's own settings and its historical triage and baselines below are
 # unchanged: the gremlins note is additive.
 
+[pr_selection]
+# Changed paths a pull_request run treats as never affecting ANY module's
+# mutation outcome: pure documentation the mutation-tested code (engine/v2)
+# never reads at runtime, and no test loads as a fixture. Deliberately tiny
+# and docs-only -- fnmatch patterns, `*` also matches `/` (the same
+# convention `mutate`/`tests`/`skip` use above). A changed path that matches
+# NEITHER a module's own `mutate`/`tests` patterns/dependency set NOR one of
+# these selects EVERY enabled module (tools/mutation_pilot.py's
+# changed_modules), never zero: this allowlist (minus `inert_skip` below) is
+# the ONLY way a pull_request run can skip a module, so widening it
+# carelessly could hide a real defect behind a skipped run.
+inert = [
+    "README.md",
+    "EARNINGS_VOL_PROGRAM_PLAN.md",
+    "PROJECT_ASSESSMENT_2026-09-05.md",
+    "RECOVERY.md",
+    "TECH_DEBT.md",
+    "docs/*",
+    "guides/*",
+]
+# Patterns carved back OUT of `inert` above: a path matching one of these is
+# never inert even though it also matches `inert`. `engine/dashboard/static/`
+# is the dashboard's built, fingerprinted asset tree (served bytes, not
+# documentation), so a `.md` file there must never be waved through as
+# inert -- kept here as a defense-in-depth guard even though `inert`'s
+# current, explicit root-filename entries (2026-09-26) do not reach into
+# engine/dashboard/static/ either.
+inert_skip = ["engine/dashboard/static/*.md"]
+
 [defaults]
 # Per-mutant timeout. mutmut sets an RLIMIT_CPU of
 #   ceil((est_test_seconds + timeout_constant) * timeout_multiplier * 2)
@@ -826,6 +855,7 @@ mutate = [
     "engine/v2/ops/fingerprints.py",
     "engine/v2/ops/forward_calendar_store.py",
     "engine/v2/ops/incremental_data.py",
+    "engine/v2/ops/training.py",
     "engine/v2/ops/unit_receipts.py",
 ]
 tests = [
@@ -852,6 +882,7 @@ tests = [
     "tests/test_v2_ops_runtime.py",
     "tests/test_v2_ops_scope_separation.py",
     "tests/test_v2_ops_store_barrier.py",
+    "tests/test_v2_ops_training_job.py",
     "tests/test_v2_ops_worker_typed_failures.py",
     # A glob, not a literal: the spec_ns_b shadow-seam test adds itself to the
     # pool from the commit that lands it, and the two native-refresh e2e files

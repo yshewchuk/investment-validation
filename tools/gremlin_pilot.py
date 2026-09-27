@@ -350,14 +350,24 @@ def log_run_metadata(module: str, *, targets: list[str], tests: list[str], worke
 
 # -- commands ----------------------------------------------------------------
 
-def select_modules(cfg: dict, only: str = "") -> list[str]:
+def select_modules(cfg: dict, only: str = "", changed_files: str = "") -> list[str]:
     """Every enabled module (a module with an ``excluded`` reason is listed in the
     toml but never run), or the comma-separated ``--only`` subset. An unknown,
     excluded or empty name is an error, so a renamed module cannot silently drop
     out of the matrix. A value that names NOTHING (``--only ,``) is an error too,
     never an empty matrix: only an absent/blank ``--only`` means "every enabled
     module", so a mistyped subset cannot quietly reduce the run to zero modules
-    (GitHub renders a dispatched empty input as the empty string)."""
+    (GitHub renders a dispatched empty input as the empty string).
+
+    ``changed_files``, when non-blank, is a path to a NUL-delimited changed-file
+    list (``git diff -z --no-renames --name-only``, as
+    ``mutation_pilot.read_changed_files`` reads); it further restricts the
+    result via ``mutation_pilot.changed_modules`` of the already-``--only``-
+    filtered names: a path keeps every name that owns it OR transitively
+    depends on it (a static ast import-graph closure), an inert-allowlisted
+    path keeps none, and any other path keeps every name (never zero on an
+    unrecognized change, and never zero if the import graph itself cannot be
+    built). Blank/omitted: unchanged behavior."""
     names = pilot.enabled_modules(cfg)
     if only.strip():
         wanted = [n.strip() for n in only.split(",") if n.strip()]
@@ -368,11 +378,13 @@ def select_modules(cfg: dict, only: str = "") -> list[str]:
         if bad:
             sys.exit(f"not enabled modules: {bad}; enabled: {', '.join(names)}")
         names = [n for n in names if n in wanted]
+    if changed_files and changed_files.strip():
+        names = pilot.changed_modules(cfg, names, pilot.read_changed_files(changed_files))
     return names
 
 
 def cmd_matrix(cfg: dict, args) -> int:
-    print(json.dumps(select_modules(cfg, getattr(args, "only", ""))))
+    print(json.dumps(select_modules(cfg, getattr(args, "only", ""), getattr(args, "changed_files", ""))))
     return 0
 
 
@@ -436,6 +448,16 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("matrix", help="JSON list of enabled modules, for the CI matrix")
     p.add_argument("--only", default="", help="comma-separated subset")
+    p.add_argument("--changed-files", default="", metavar="PATH",
+                   help="path to a NUL-delimited changed-file list (git diff -z --no-renames "
+                        "--name-only); when given, a path selects every enabled module that "
+                        "owns it OR transitively depends on it (a static ast import-graph "
+                        "closure), a path on the inert allowlist selects nothing, and any "
+                        "other path selects every enabled module (never zero on an "
+                        "unrecognized change, and never zero if the import graph itself "
+                        "cannot be built); a path that is not an existing file is a hard "
+                        "failure, not a silent empty selection. Omitted/blank: unchanged "
+                        "behavior.")
     p = sub.add_parser("fingerprint",
                        help="outer cache-namespace digest of one module over every tracked input "
                             "(hex, via git ls-files; no tests run)")

@@ -13,6 +13,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 import types
 from pathlib import Path
@@ -186,7 +187,7 @@ def test_summary_counts_and_scores_per_module_and_file():
     assert s["files"]["a.py"]["score"] == round(2 / 3, 4)
     assert s["files"]["b.py"]["score"] == 0.0
     assert s["files"]["c.py"]["score"] is None and s["files"]["c.py"]["total"] == 0
-    assert s["run_exit_code"] == 0 and s["retested_this_run"] == 5
+    assert s["run_exit_code"] == 0 and s["retested_this_run"] == 4  # b.py/h is skipped: excluded
 
 
 def test_merge_combines_modules_and_totals(tmp_path):
@@ -759,6 +760,30 @@ def test_workflow_triggers_and_concurrency():
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
 
 
+def test_gremlins_plan_checks_out_full_history_only_for_pull_request():
+    # fetch-depth 0 is needed to diff against the PR base sha; push/schedule/
+    # dispatch keep the default shallow depth (1) -- byte-identical to before,
+    # since the ternary's false branch is a literal 1, not an omitted default.
+    checkout = JOBS["plan"]["steps"][0]
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["with"]["fetch-depth"] == \
+        "${{ github.event_name == 'pull_request' && '0' || 1 }}"
+
+
+def test_gremlins_plan_narrows_the_matrix_on_pull_request_via_changed_files():
+    plan_step = JOBS["plan"]["steps"][-1]
+    assert plan_step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    plan = plan_step["run"]
+    # push/schedule/dispatch: CHANGED_ARGS stays empty, so the matrix command is
+    # byte-identical to the pre-selection command (no --changed-files at all,
+    # since an empty unquoted expansion contributes zero argv words).
+    assert 'CHANGED_ARGS=""' in plan
+    assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
+    assert 'git diff -z --no-renames --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'CHANGED_ARGS="--changed-files' in plan
+    assert 'modules=$(python3 tools/gremlin_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
+
+
 def test_workflow_pins_python_and_mutmut():
     header = (ROOT / "requirements.txt").read_text()
     assert f"# python {WORKFLOW['env']['PYTHON_VERSION']} " in header
@@ -873,10 +898,28 @@ def test_mutmut_workflow_triggers_modes_and_a_separate_concurrency_group():
     assert '"$EVENT" = "push"' in plan and '"$FRESH" = "false"' in plan and "mode=full" in plan
 
 
+def test_mutmut_plan_checks_out_full_history_only_for_pull_request():
+    checkout = MUT_JOBS["plan"]["steps"][0]
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["with"]["fetch-depth"] == \
+        "${{ github.event_name == 'pull_request' && '0' || 1 }}"
+
+
+def test_mutmut_plan_narrows_the_matrix_on_pull_request_via_changed_files():
+    plan_step = MUT_JOBS["plan"]["steps"][-1]
+    assert plan_step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    plan = plan_step["run"]
+    assert 'CHANGED_ARGS=""' in plan
+    assert 'if [ "$EVENT" = "pull_request" ]; then' in plan
+    assert 'git diff -z --no-renames --name-only "$BASE_SHA"...HEAD' in plan
+    assert 'CHANGED_ARGS="--changed-files' in plan
+    assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
+
+
 def test_mutmut_plan_step_uses_the_mutmut_driver_and_gates_its_own_failure():
     plan = MUT_JOBS["plan"]["steps"][-1]["run"]
     assert "set -euo pipefail" in plan
-    assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY")' in plan
+    assert 'modules=$(python3 tools/mutation_pilot.py matrix --only "$ONLY" $CHANGED_ARGS)' in plan
     assert "gremlin_pilot" not in plan  # the mutmut runner, not the gremlins one
     # the list is assigned, then echoed by name: an interpolated command
     # substitution inside the echo would hide its failure behind echo's rc
@@ -995,6 +1038,23 @@ def test_the_two_workflows_own_disjoint_artifact_names():
                         MUT_JOBS)
     assert gre_pattern["with"]["pattern"] != mut_pattern["with"]["pattern"]
     assert WORKFLOW["name"] != MUTMUT["name"]
+
+
+def test_both_mutation_matrices_cap_parallelism_so_tests_never_starve():
+    """A public-repo free-plan account gets 20 concurrent Actions runners
+    total. Each backend's matrix has 30+ per-module jobs with no
+    max-parallel, so one cold run of either workflow can occupy every
+    runner and every PR's `test` job queues behind it. Both matrices cap at
+    3: with two PRs open at once (each capable of running both workflows),
+    that is at most 2 x 2 x 3 = 12 mutation runners account-wide, leaving
+    >= 8 free for Tests/plan/report."""
+    assert JOBS["mutate"]["strategy"]["max-parallel"] == 3
+    assert MUT_JOBS["mutate"]["strategy"]["max-parallel"] == 3
+    assert JOBS["mutate"]["strategy"]["fail-fast"] is False
+    assert MUT_JOBS["mutate"]["strategy"]["fail-fast"] is False
+    total = JOBS["mutate"]["strategy"]["max-parallel"] + \
+        MUT_JOBS["mutate"]["strategy"]["max-parallel"]
+    assert total <= 6
 
 
 # -- merge expected-modules contract: the aggregate can never lie about scope ----------
@@ -1313,3 +1373,1165 @@ def test_report_cli_two_backends_same_run_id_read_their_own_downloads(monkeypatc
         rep.main(["--backend", "mutmut", "--run", "123"])
     assert seen == ["mutation-report"] and calls[-1][calls[-1].index("-n") + 1] == \
         "mutation-mutmut-report"
+
+
+# -- PR module selection: module ownership, else the inert allowlist, else --
+# -- every enabled module (never zero for an unrecognized path) --------------
+#
+# The rule `changed_modules` implements (see its docstring in
+# tools/mutation_pilot.py for the full ordering): a changed path selects the
+# ENABLED module that owns it (`module_owns_changed_path`); failing that, a
+# path on the small docs-only `[pr_selection] inert` allowlist selects
+# nothing; any other path selects EVERY requested module, immediately, for
+# the whole changed-file list. An EXCLUDED module's ownership does not count
+# in the first step -- it never runs, so a path only it claims is exactly as
+# unrecognized as one no module claims.
+
+def _sel_cfg():
+    return {
+        "pr_selection": {"inert": ["*.md", "docs/*", "guides/*"]},
+        "defaults": {},
+        "modules": {
+            "alpha": {"why": "x", "mutate": ["engine/a.py"], "tests": ["tests/test_a.py"]},
+            "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def _empty_import_graph_for_synthetic_cfg(request, monkeypatch):
+    """Every test marked `synthetic_cfg` builds a throwaway cfg via
+    `_sel_cfg()`/`_defect_list_cfg()` whose `mutate`/`tests` paths
+    (engine/a.py, tests/test_b.py, ...) never exist as real tracked files --
+    so a call to `changed_modules` without an explicit `graph=` kwarg was
+    ALREADY getting an empty dependency closure for every one of those
+    modules (`module_dependency_closure`'s `_closure_roots` never matches a
+    fictional path against the real tracked set), just after silently
+    building the whole real ~884-file graph first to get there. This
+    fixture skips straight to that same empty closure by patching
+    `build_import_graph` to return `{}` -- no assertion's outcome changes,
+    only the wasted real-repo parse does. Tests against the real `CFG`
+    (test_real_toml_*, the artifacts/frozen_inputs/research-replay closure
+    tests, ...) are never marked `synthetic_cfg` and always build the real
+    graph."""
+    if request.node.get_closest_marker("synthetic_cfg"):
+        monkeypatch.setattr(pilot, "build_import_graph", lambda *a, **k: {})
+
+
+def test_read_changed_files_strips_blanks_and_refuses_a_bad_path(tmp_path):
+    assert pilot.read_changed_files("") == []
+    with pytest.raises(SystemExit):  # missing: an operator/workflow bug, not "no changes"
+        pilot.read_changed_files(str(tmp_path / "nope.txt"))
+    with pytest.raises(SystemExit):  # a directory is not a valid --changed-files path either
+        pilot.read_changed_files(str(tmp_path))
+    f = tmp_path / "changed.txt"
+    # NUL-delimited, as `git diff -z --name-only` writes it; a doubled NUL
+    # (as a trailing separator would produce) must not yield a blank entry.
+    f.write_bytes(b"engine/a.py\0\0tests/test_b.py\0")
+    assert pilot.read_changed_files(str(f)) == ["engine/a.py", "tests/test_b.py"]
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_selects_only_the_owning_module():
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_b.py"]) == ["beta"]
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_a_deleted_own_test_file_still_selects_its_module():
+    # alpha's test file, tests/test_a.py, was deleted by this PR: git diff
+    # --name-only reports it in `changed`, but module_owns_changed_path
+    # matches the bare path against alpha's OWN configured patterns, never
+    # against a tracked-file list, so the deletion changes nothing.
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["tests/test_a.py"]) == ["alpha"]
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_a_deleted_own_source_file_still_selects_its_module():
+    # The source-side mirror of the test above: engine/a.py, alpha's mutate
+    # file, deleted by this PR.
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha"]
+
+
+def test_changed_modules_a_deleted_own_source_file_selects_via_glob_ownership():
+    # gamma owns its sources through a glob pattern (engine/pkg/*.py), not an
+    # explicit path list, unlike alpha/beta above. A deleted file under that
+    # glob must still select gamma -- module_owns_changed_path's fnmatch
+    # check treats a glob and a literal path the same way.
+    cfg2 = {
+        "pr_selection": {"inert": ["*.md", "docs/*", "guides/*"]},
+        "defaults": {},
+        "modules": {
+            "gamma": {"why": "x", "mutate": ["engine/pkg/*.py"], "tests": ["tests/test_g.py"]},
+            "beta": {"why": "x", "mutate": ["engine/b.py"], "tests": ["tests/test_b.py"]},
+        },
+    }
+    assert pilot.changed_modules(cfg2, ["gamma", "beta"], ["engine/pkg/gone.py"]) == ["gamma"]
+
+
+@pytest.mark.synthetic_cfg
+def test_module_owns_changed_path_matches_tests_and_mutate_minus_skip():
+    cfg2 = _sel_cfg()
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_a.py") is True
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "engine/a.py") is True
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "engine/b.py") is False
+    assert pilot.module_owns_changed_path(cfg2, "alpha", "tests/test_b.py") is False
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_respects_the_incoming_names_subset():
+    # beta's own file changed, but beta was already excluded (e.g. by
+    # --only). beta still OWNS engine/b.py (it is an enabled module in the
+    # full cfg), so the path is "explained" and must not fall through to
+    # "select every name in names" -- it just contributes nothing to this
+    # narrower `names` list.
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha"], ["engine/b.py"]) == []
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_empty_change_selects_nothing():
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], []) == []
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_an_inert_path_selects_nothing():
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["docs/readme.md"]) == []
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_all_docs_change_selects_nothing():
+    cfg2 = _sel_cfg()
+    changed = ["README.md", "docs/design/notes.md", "guides/how_to.md"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed) == []
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_mixed_docs_and_owned_change_selects_just_that_module():
+    cfg2 = _sel_cfg()
+    changed = ["docs/design/notes.md", "engine/a.py"]
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], changed) == ["alpha"]
+
+
+@pytest.mark.synthetic_cfg
+def test_is_inert_changed_path_matches_only_the_configured_patterns():
+    cfg2 = _sel_cfg()
+    assert pilot.is_inert_changed_path(cfg2, "README.md") is True
+    assert pilot.is_inert_changed_path(cfg2, "docs/anything/nested.txt") is True
+    assert pilot.is_inert_changed_path(cfg2, "guides/exp133_structure_search.md") is True
+    assert pilot.is_inert_changed_path(cfg2, "engine/a.py") is False
+    assert pilot.is_inert_changed_path(cfg2, "tools/mutation_pilot.py") is False
+
+
+# A cfg shaped like the real tools/mutation_pilot.toml's ownership boundaries:
+# alpha/beta are ordinary enabled modules under engine/v2/, contracts is
+# EXCLUDED (mirrors the real `contracts` module, which owns
+# engine/v2/__init__.py but never runs). `names` below is what
+# `enabled_modules` returns for this cfg -- contracts is never in it.
+def _defect_list_cfg():
+    return {
+        "pr_selection": {"inert": ["*.md", "docs/*", "guides/*"]},
+        "defaults": {},
+        "modules": {
+            "alpha": {"why": "x", "mutate": ["engine/v2/alpha/*.py"],
+                      "tests": ["tests/test_v2_alpha.py"]},
+            "beta": {"why": "x", "mutate": ["engine/v2/beta/*.py"],
+                     "tests": ["tests/test_v2_beta.py"]},
+            "contracts": {"why": "x", "excluded": "no mutants",
+                          "mutate": ["engine/v2/__init__.py", "engine/v2/contracts/*.py"]},
+        },
+    }
+
+
+_DEFECT_LIST_PATHS = [
+    "tests/fixtures/v2_ui_mock_api.py",
+    "engine/v2/__init__.py",  # owned only by the EXCLUDED contracts module
+    "engine/analogs.py",  # a legacy top-level engine/*.py file no module owns
+    "experiments/EXP-169_menu_search/run.py",
+    "tools/mutation_pilot.py",
+    "tools/gremlin_pilot.py",
+    "tools/mutation_results.py",
+    "tools/mutation_pilot.toml",
+    ".github/workflows/mutation.yml",
+    ".github/workflows/mutation-mutmut.yml",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "tests/conftest.py",
+]
+
+
+@pytest.mark.synthetic_cfg
+@pytest.mark.parametrize("changed_path", _DEFECT_LIST_PATHS)
+def test_changed_modules_selects_every_enabled_module_for_an_unrecognized_path(changed_path):
+    # Each of these is a real path that the pre-2026-09-26 rule selected ZERO
+    # modules for (it owns none of them and none was on any shared-input
+    # list), silently skipping the whole mutation matrix on a PR that
+    # touched it. None is inert either (none is *.md/docs/*/guides/*), so
+    # the rule must select every enabled module -- `names` here IS every
+    # enabled module, i.e. `pilot.enabled_modules(cfg)` (contracts excluded).
+    cfg2 = _defect_list_cfg()
+    names = pilot.enabled_modules(cfg2)
+    assert names == ["alpha", "beta"]
+    assert pilot.changed_modules(cfg2, names, [changed_path]) == names
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_respects_only_even_when_selecting_everything():
+    # The "select everything" branch selects every name in the INCOMING
+    # `names` (already --only-filtered), not every module in the cfg.
+    cfg2 = _defect_list_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha"], ["tools/mutation_pilot.py"]) == ["alpha"]
+
+
+@pytest.mark.synthetic_cfg
+def test_cmd_matrix_changed_files_narrows_the_matrix(tmp_path, monkeypatch, capsys):
+    cfg2 = _sel_cfg()
+    monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
+    changed = tmp_path / "changed.txt"
+    changed.write_bytes(b"engine/a.py\0")
+    args = types.SimpleNamespace(only="", changed_files=str(changed))
+    assert pilot.cmd_matrix(cfg2, args) == 0
+    assert json.loads(capsys.readouterr().out) == ["alpha"]
+
+
+@pytest.mark.synthetic_cfg
+def test_cmd_matrix_without_changed_files_is_unaffected(monkeypatch, capsys):
+    cfg2 = _sel_cfg()
+    monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
+    args = types.SimpleNamespace(only="", changed_files="")
+    assert pilot.cmd_matrix(cfg2, args) == 0
+    assert json.loads(capsys.readouterr().out) == ["alpha", "beta"]
+
+
+@pytest.mark.synthetic_cfg
+def test_cmd_matrix_accepts_missing_changed_files_attr_for_backward_compatibility(monkeypatch, capsys):
+    # older call sites (and the pre-existing tests above) build an
+    # `args` namespace with no `changed_files` at all; that must keep working.
+    cfg2 = _sel_cfg()
+    monkeypatch.setattr(pilot, "enabled_modules", lambda c: ["alpha", "beta"])
+    args = types.SimpleNamespace(only="")
+    assert pilot.cmd_matrix(cfg2, args) == 0
+    assert json.loads(capsys.readouterr().out) == ["alpha", "beta"]
+
+
+def test_real_toml_inert_allowlist_is_the_small_docs_only_list():
+    # Locks in the intended small allowlist: widening it (even by one
+    # pattern) is a real design decision, not something that should drift
+    # silently through an unrelated toml edit. The allowlist names root-level
+    # Markdown files explicitly (2026-09-26) rather than a broad "*.md",
+    # which used to make every package-local README.md (e.g.
+    # engine/v2/foundation/README.md) inert too.
+    cfg2 = pilot.load_config()
+    assert cfg2["pr_selection"]["inert"] == [
+        "README.md",
+        "EARNINGS_VOL_PROGRAM_PLAN.md",
+        "PROJECT_ASSESSMENT_2026-09-05.md",
+        "RECOVERY.md",
+        "TECH_DEBT.md",
+        "docs/*",
+        "guides/*",
+    ]
+
+
+@pytest.mark.synthetic_cfg
+def test_is_inert_changed_path_respects_inert_skip():
+    cfg2 = _sel_cfg()
+    cfg2["pr_selection"]["inert_skip"] = ["engine/dashboard/static/*.md"]
+    assert pilot.is_inert_changed_path(cfg2, "docs/readme.md") is True
+    assert pilot.is_inert_changed_path(cfg2, "engine/dashboard/static/notes.md") is False
+
+
+def test_real_toml_inert_skip_carves_dashboard_static_out_of_the_md_pattern():
+    assert CFG["pr_selection"]["inert_skip"] == ["engine/dashboard/static/*.md"]
+    assert pilot.is_inert_changed_path(CFG, "engine/dashboard/static/notes.md") is False
+    # The root-level Markdown files named explicitly in `inert` are still
+    # inert -- but a package-local README.md (e.g. under engine/v2/) is NOT:
+    # `inert` no longer has a broad "*.md" pattern for `inert_skip` to carve
+    # anything out of, so an engine/**/README.md change now correctly
+    # selects every enabled module instead of being silently skipped.
+    assert pilot.is_inert_changed_path(CFG, "README.md") is True
+    assert pilot.is_inert_changed_path(CFG, "engine/v2/foundation/README.md") is False
+
+
+def test_a_md_file_under_dashboard_static_selects_every_enabled_module():
+    names = pilot.enabled_modules(CFG)
+    assert pilot.changed_modules(CFG, names, ["engine/dashboard/static/CHANGELOG.md"]) == names
+
+
+def test_a_package_local_readme_is_no_longer_inert_and_selects_every_module():
+    # Regression for the pre-2026-09-26 broad "*.md" inert pattern, which
+    # made a real, non-dashboard package README (e.g.
+    # engine/v2/foundation/README.md) inert and silently skipped the whole
+    # PR matrix. The allowlist now names root-level Markdown files
+    # explicitly, so this unrecognized path selects every enabled module.
+    names = pilot.enabled_modules(CFG)
+    assert pilot.changed_modules(CFG, names, ["engine/v2/foundation/README.md"]) == names
+
+
+# -- reverse import closure ---------------------------------------------------
+
+def test_build_import_graph_resolves_a_package_import_through_its_init(tmp_path, monkeypatch):
+    (tmp_path / "engine" / "pkg").mkdir(parents=True)
+    (tmp_path / "engine" / "pkg" / "__init__.py").write_text(
+        "from engine.pkg.inner import thing\n")
+    (tmp_path / "engine" / "pkg" / "inner.py").write_text("thing = 1\n")
+    (tmp_path / "engine" / "user.py").write_text("import engine.pkg\n")
+    tracked = ["engine/pkg/__init__.py", "engine/pkg/inner.py", "engine/user.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    # user.py imports the PACKAGE (engine.pkg) -> resolves to its __init__.py
+    # -> whose own `from engine.pkg.inner import thing` reaches inner.py, so
+    # the closure from user.py would reach inner.py transitively.
+    assert "engine/pkg/__init__.py" in graph["engine/user.py"]
+    assert "engine/pkg/inner.py" in graph["engine/pkg/__init__.py"]
+    assert graph["engine/pkg/inner.py"] == set()
+
+
+def test_build_import_graph_a_submodule_import_still_depends_on_the_parent_inits(tmp_path, monkeypatch):
+    # `import engine.pkg.inner` runs engine/pkg/__init__.py before inner.py,
+    # even though this statement never names engine.pkg itself and
+    # engine/pkg/__init__.py is empty (no `from .inner import ...`). The
+    # graph must still record that dependency, or a change to
+    # engine/pkg/__init__.py looks unrelated to code that only ever imports
+    # the deeper submodule.
+    (tmp_path / "engine" / "pkg").mkdir(parents=True)
+    (tmp_path / "engine" / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "engine" / "pkg" / "inner.py").write_text("thing = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_importer.py").write_text("import engine.pkg.inner\n")
+    tracked = ["engine/pkg/__init__.py", "engine/pkg/inner.py", "tests/test_importer.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "engine/pkg/__init__.py" in graph["tests/test_importer.py"]
+    assert "engine/pkg/inner.py" in graph["tests/test_importer.py"]
+
+    # End-to-end: a module ("owner") owns engine/pkg/__init__.py; a
+    # different module ("importer") owns only the test that imports the
+    # submodule. A change to engine/pkg/__init__.py must still select
+    # "importer", even though "importer" never owns that path and its own
+    # source/test never names engine.pkg directly.
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "owner": {"why": "x", "mutate": ["engine/pkg/__init__.py"], "tests": []},
+            "importer": {"why": "x", "mutate": ["engine/pkg/inner.py"],
+                         "tests": ["tests/test_importer.py"]},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["owner", "importer"],
+                                      ["engine/pkg/__init__.py"], graph=graph)
+    assert selected == ["owner", "importer"]
+
+
+def test_build_import_graph_resolves_relative_imports(tmp_path, monkeypatch):
+    (tmp_path / "engine" / "a" / "b").mkdir(parents=True)
+    (tmp_path / "engine" / "a" / "__init__.py").write_text("")
+    (tmp_path / "engine" / "a" / "sibling.py").write_text("X = 1\n")
+    (tmp_path / "engine" / "a" / "b" / "__init__.py").write_text("")
+    (tmp_path / "engine" / "a" / "b" / "mod.py").write_text(
+        "from .. import sibling\nfrom . import other\n")
+    (tmp_path / "engine" / "a" / "b" / "other.py").write_text("Y = 1\n")
+    tracked = ["engine/a/__init__.py", "engine/a/sibling.py", "engine/a/b/__init__.py",
+               "engine/a/b/mod.py", "engine/a/b/other.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    # `from ..` (level 2) reaches the sibling module one package up;
+    # `from .` (level 1) reaches the module in mod.py's own package.
+    assert {"engine/a/sibling.py", "engine/a/b/other.py"} <= graph["engine/a/b/mod.py"]
+
+
+def test_build_import_graph_ignores_imports_outside_engine_and_tests(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "user.py").write_text(
+        "import os\nimport tools.mutation_pilot\nfrom checks import layer_map\n")
+    tracked = ["engine/user.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/user.py"] == set()
+
+
+def test_build_import_graph_raises_on_a_syntax_error(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "broken.py").write_text("def broken(:\n    pass\n")
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    with pytest.raises(SyntaxError):
+        pilot.build_import_graph(["engine/broken.py"])
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_falls_back_to_selecting_all_when_the_graph_build_raises(monkeypatch):
+    cfg2 = _sel_cfg()
+
+    def boom(*_a, **_k):
+        raise SyntaxError("engine/a.py: invalid syntax")
+
+    monkeypatch.setattr(pilot, "build_import_graph", boom)
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/a.py"]) == ["alpha", "beta"]
+
+
+@pytest.mark.synthetic_cfg
+def test_module_dependency_closure_follows_edges_transitively():
+    graph = {
+        "engine/a.py": {"engine/b.py"},
+        "engine/b.py": {"engine/c.py"},
+        "engine/c.py": set(),
+        "tests/test_a.py": {"engine/a.py"},
+    }
+    cfg2 = _sel_cfg()  # alpha: mutate=[engine/a.py], tests=[tests/test_a.py]
+    closure = pilot.module_dependency_closure(cfg2, "alpha", graph)
+    assert closure == {"engine/a.py", "engine/b.py", "engine/c.py", "tests/test_a.py"}
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_selects_a_module_that_only_transitively_depends_on_the_changed_path():
+    # alpha does not OWN engine/c.py, but alpha's own test file imports
+    # alpha's source file, which imports engine/c.py transitively -- alpha
+    # must still be selected.
+    graph = {
+        "engine/a.py": {"engine/c.py"},
+        "engine/b.py": set(),
+        "engine/c.py": set(),
+        "tests/test_a.py": {"engine/a.py"},
+        "tests/test_b.py": set(),
+    }
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/c.py"], graph=graph) == ["alpha"]
+
+
+def test_artifacts_change_selects_every_module_whose_tests_transitively_import_foundation():
+    # The Opus-blocking counterexample this round fixes: the pre-fix rule
+    # selected ONLY ['foundation'] for engine/v2/foundation/artifacts.py,
+    # even though 27 other enabled modules' tests import
+    # engine.v2.foundation (whose own __init__.py re-exports names from
+    # artifacts.py, so the import graph reaches artifacts.py from any test
+    # that imports the package).
+    names = pilot.enabled_modules(CFG)
+    selected = pilot.changed_modules(CFG, names, ["engine/v2/foundation/artifacts.py"])
+    assert "foundation" in selected
+
+    tracked_tests = _tracked("tests")
+    real_dependents = set()
+    for name in names:
+        for rel in pilot.test_files(CFG, name, tracked_tests):
+            if "engine.v2.foundation" in (ROOT / rel).read_text():
+                real_dependents.add(name)
+                break
+    assert len(real_dependents) >= 10, "expected many real dependents for this assertion to mean anything"
+    assert real_dependents <= set(selected)
+    assert len(selected) > 1  # NOT just ['foundation'] -- the defect this round fixes
+
+
+def test_frozen_inputs_change_selects_chooser_via_the_checks_bridge():
+    # The Opus-blocking counterexample THIS round fixes: the pre-fix rule
+    # selected ONLY ['scoring_application'] for
+    # engine/v2/scoring/frozen_inputs.py, because chooser's own test
+    # (tests/test_phase4_capture_strict.py) reaches frozen_inputs only
+    # through checks/phase4_frozen_bridge.py -- a file the old
+    # engine/tests-only graph never parsed at all. checks/tools/experiments
+    # are now graph nodes too, so the bridge closes the chain.
+    names = pilot.enabled_modules(CFG)
+    selected = pilot.changed_modules(CFG, names, ["engine/v2/scoring/frozen_inputs.py"])
+    assert "chooser" in selected
+    assert "scoring_application" in selected  # already selected before this fix
+    assert len(selected) > 1
+
+
+def test_build_import_graph_covers_checks_tools_and_experiments_too():
+    # Not just engine/tests: any tracked top-level package is a graph node,
+    # with no hand-kept root list.
+    graph = pilot.build_import_graph()
+    assert any(rel.startswith("checks/") for rel in graph)
+    assert any(rel.startswith("tools/") for rel in graph)
+    assert any(rel.startswith("experiments/") for rel in graph)
+
+
+def test_build_import_graph_a_synthetic_test_reaches_engine_through_checks(tmp_path, monkeypatch):
+    # A test file imports a `checks.*` bridge module, which imports the real
+    # `engine.*` module -- the synthetic version of the frozen_inputs defect
+    # above, isolated from the real repo's file layout.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "x.py").write_text("from engine import y\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_bridge.py").write_text("from checks import x\n")
+    tracked = ["engine/y.py", "checks/x.py", "tests/test_bridge.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "checks/x.py" in graph["tests/test_bridge.py"]
+    assert "engine/y.py" in graph["checks/x.py"]
+
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "target": {"why": "x", "mutate": ["engine/y.py"],
+                       "tests": ["tests/test_bridge.py"]},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["target"], ["engine/y.py"], graph=graph)
+    assert selected == ["target"]
+
+
+def test_build_import_graph_resolves_an_importlib_import_module_string_literal(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dynamic.py").write_text(
+        "import importlib\n"
+        "importlib.import_module('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    # the ONE allowed shape resolves a specific edge -- unrelated.py stays
+    # out, which a fail-safe select-all would not distinguish.
+    assert graph["tests/test_dynamic.py"] == {"engine/y.py"}
+
+
+def test_build_import_graph_a_bare_dunder_import_always_fails_safe(tmp_path, monkeypatch):
+    # `__import__(...)` is unconditionally dynamic now, even with a literal
+    # argument -- the allowlist has no shape for it at all, unlike the one
+    # narrow `importlib.import_module(...)` call it used to share this
+    # resolution with.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dynamic.py").write_text("__import__('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/test_dynamic.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_non_literal_import_module_argument_fails_safe(tmp_path, monkeypatch):
+    # A computed/variable argument is dynamic and this static graph cannot
+    # see it -- sound by construction means the WHOLE FILE fails safe,
+    # never a silent no-op.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dynamic.py").write_text(
+        "import importlib\n"
+        "name = 'engine.' + 'y'\n"
+        "importlib.import_module(name)\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/test_dynamic.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_import_module_with_package_kwarg_fails_safe(tmp_path, monkeypatch):
+    # A `package=` keyword makes the name relative to the CALLING file's own
+    # package -- this graph does not attempt that resolution, even when the
+    # name itself is a literal, so the whole file fails safe.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib\n"
+        "importlib.import_module('.y', package='engine')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_with_non_literal_argv_fails_safe(tmp_path, monkeypatch):
+    # The argv itself is a variable -- this graph cannot see whether it
+    # launches Python or not, so it must fail safe rather than silently
+    # ignore the call.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess\n"
+        "def go(argv):\n"
+        "    subprocess.run(argv)\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_with_a_variable_interpreter_fails_safe(tmp_path, monkeypatch):
+    # The argv IS a literal list, but its first element is a variable this
+    # graph cannot prove is or isn't the Python interpreter.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess\n"
+        "def go(interp):\n"
+        "    subprocess.run([interp, 'engine/unrelated.py'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_dash_c_fails_safe(tmp_path, monkeypatch):
+    # `-c` runs arbitrary inline code -- never resolvable to a tracked file,
+    # always fail-safe when the interpreter is Python.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, '-c', 'print(1)'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_any_sys_path_mutation_fails_safe_including_the_file_relative_form(tmp_path, monkeypatch):
+    # The repo-root idiom, and any other sys.path mutation, is ALWAYS
+    # fail-safe again -- static __file__-relative evaluation for sys.path
+    # was removed in this round.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_conftest_pytest_plugins_literal_is_an_edge(tmp_path, monkeypatch):
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "myplugin.py").write_text("P = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "pytest_plugins = ['checks.myplugin']\n")
+    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")
+    tracked = ["checks/myplugin.py", "tests/conftest.py", "tests/test_a.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "checks/myplugin.py" in graph["tests/conftest.py"]
+
+
+def test_build_import_graph_a_conftest_pytest_plugins_non_literal_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import os\n"
+        "pytest_plugins = [os.environ.get('PLUGIN', 'x')]\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tests/conftest.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/conftest.py"] == {"engine/unrelated.py"}
+
+
+def test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert():
+    # tests/conftest.py itself does
+    # `REPO_ROOT = Path(__file__).resolve().parents[1]` then
+    # `sys.path.insert(0, str(REPO_ROOT))` -- a two-statement form this
+    # graph never resolves (no cross-statement variable tracking), so it
+    # fails safe. Every test file's dependency closure includes
+    # tests/conftest.py via `_conftest_ancestors`, so this is why a
+    # non-inert change today still selects all 33 enabled modules.
+    graph = pilot.build_import_graph()
+    tracked_set = set(graph)
+    assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}
+
+
+def test_conftest_dynamic_classification_guards_static_analysis_holes():
+    # See https://github.com/yshewchuk/investment-validation/issues/42:
+    # `_is_dynamic_file`'s allowlist has several known holes (string-target
+    # monkeypatch.setattr/mock.patch, pytest.importorskip, getattr-based
+    # imports of importlib/sys, __import__ via globals()/builtins, asyncio
+    # subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
+    # outside a conftest.py or under an `if`, and `from pkg import *`
+    # re-exports). None of them matter today, because tests/conftest.py
+    # itself always classifies DYNAMIC (its own sys.path.insert), so every
+    # test file's dependency closure already includes tests/conftest.py and
+    # mutation selection can never narrow past those holes. This is a
+    # dedicated guard, separate from
+    # test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert
+    # above, so a failure here points straight at issue #42 instead of only
+    # restating the fail-safe fact.
+    graph = pilot.build_import_graph()
+    tracked_set = set(graph)
+    assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}, (
+        "tests/conftest.py is no longer fail-safe; mutation selection "
+        "would narrow and expose the static-analysis holes in issue #42. "
+        "Close them first."
+    )
+
+
+def test_build_import_graph_a_spec_from_file_location_call_always_fails_safe(tmp_path, monkeypatch):
+    # Loader constructs get no static path evaluation any more, literal or
+    # not -- ANY reference to `spec_from_file_location` fails the whole file
+    # safe, dropped from an earlier round's literal-resolution behavior.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib.util\n"
+        "spec = importlib.util.spec_from_file_location('y', 'engine/y.py')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_runpy_run_path_call_always_fails_safe(tmp_path, monkeypatch):
+    # `runpy` is one of the always-dynamic modules now -- importing it at
+    # all fails the whole file safe, literal run_path target or not.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import runpy\n"
+        "runpy.run_path('engine/y.py', run_name='__main__')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_dynamic_loader_path_selects_every_enabled_module(tmp_path, monkeypatch):
+    # A non-literal path argument to spec_from_file_location cannot be
+    # resolved statically -- the whole file is marked as depending on
+    # everything, so a change to any tracked file makes changed_modules
+    # select every module that reaches this file (here, "target" itself,
+    # since the dynamic-loader file IS target's own mutate file).
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "dynamic.py").write_text(
+        "import importlib.util\n"
+        "def load(path):\n"
+        "    return importlib.util.spec_from_file_location('m', path)\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/dynamic.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/dynamic.py"] == {"engine/unrelated.py"}
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "target": {"why": "x", "mutate": ["engine/dynamic.py"], "tests": []},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["target"], ["engine/unrelated.py"], graph=graph)
+    assert selected == ["target"]
+
+
+def test_build_import_graph_a_sys_path_insert_selects_every_enabled_module(tmp_path, monkeypatch):
+    # sys.path.insert(...) can make a later plain `import x` resolve to a
+    # file this static graph cannot predict -- same fail-safe as a dynamic
+    # loader-call path.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "pathhack.py").write_text(
+        "import sys\n"
+        "sys.path.insert(0, 'somewhere')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/pathhack.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/pathhack.py"] == {"engine/unrelated.py"}
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "target": {"why": "x", "mutate": ["engine/pathhack.py"], "tests": []},
+        },
+    }
+    selected = pilot.changed_modules(cfg2, ["target"], ["engine/unrelated.py"], graph=graph)
+    assert selected == ["target"]
+
+
+def test_build_import_graph_an_env_var_sys_path_insert_still_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys, os\n"
+        "sys.path.insert(0, os.environ['SOME_PATH'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_python_subprocess_literal_script_always_fails_safe(tmp_path, monkeypatch):
+    # Subprocess edge inference is dropped entirely as of this round: EVERY
+    # subprocess call fails the whole file safe now, including one with a
+    # fully literal, `-u`-flagged Python script argv that an earlier round
+    # would have resolved to a specific edge.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, '-u', 'tools/worker.py'])\n")
+    (tmp_path / "tools" / "worker.py").write_text("W = 1\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "tools/worker.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"tools/worker.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_python_subprocess_dash_m_always_fails_safe(tmp_path, monkeypatch):
+    # Same as above for `-m`, an absolute interpreter path, and `-X`/`-W`
+    # flags -- none of these ever earn a specific edge any more.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "worker.py").write_text("W = 1\n")
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess\n"
+        "subprocess.run(['/usr/bin/python3', '-X', 'utf8', '-W', 'ignore',"
+        " '-m', 'checks.worker'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "checks/worker.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"checks/worker.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_dash_m_pytest_always_fails_safe(tmp_path, monkeypatch):
+    # `-m pytest` (a THIRD-PARTY module, not a tracked one): the old
+    # resolution would have tried `_resolve_dotted("pytest", ...)`, found no
+    # tracked file, and added no edge, silently missing that the module
+    # under test collects and runs the CURRENT tracked test tree -- now it
+    # fails the whole file safe instead of silently doing nothing.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, '-m', 'pytest'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_dynamic_python_subprocess_target_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "def go(script):\n"
+        "    subprocess.run([sys.executable, script])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_any_subprocess_use_fails_safe_even_a_non_python_command(tmp_path, monkeypatch):
+    # Reverses the pre-this-round behavior on purpose: subprocess edge
+    # inference is dropped entirely, so even a `git`/`gh`/non-Python
+    # command -- previously treated as provably inert -- now fails the
+    # whole file safe. The PR-owned test this replaces asserted the
+    # OPPOSITE (`graph["tools/runner.py"] == set()`) and could not be kept
+    # once every subprocess reference became unconditionally dynamic.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess\n"
+        "def go(args):\n"
+        "    subprocess.run(['git', *args])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_from_sys_import_path_always_fails_safe(tmp_path, monkeypatch):
+    # `from sys import path` binds the list directly, with no `sys.`
+    # attribute access at the use site at all -- the allowlist bans the
+    # IMPORT STATEMENT itself, not just a later attribute reference.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "from sys import path\n"
+        "path.insert(0, 'somewhere')\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_an_aliased_sys_path_reference_always_fails_safe(tmp_path, monkeypatch):
+    # `import sys as s` then `s.path` (or a bare `p = sys.path`, the same
+    # attribute-access node either way) -- aliasing `sys` does not escape
+    # the check, which tracks every name a file binds to the `sys` module.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys as s\n"
+        "p = s.path\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_site_addsitedir_always_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import site\n"
+        "site.addsitedir('somewhere')\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_monkeypatch_syspath_prepend_always_fails_safe(tmp_path, monkeypatch):
+    # A pytest fixture method, not an import at all -- `syspath_prepend` is
+    # checked as a standalone name (an attribute access on WHATEVER object),
+    # since this graph never knows a bare `monkeypatch` parameter is really
+    # pytest's own fixture.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def test_it(monkeypatch):\n"
+        "    monkeypatch.syspath_prepend('somewhere')\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tests/test_x.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/test_x.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_bare_pythonpath_string_always_fails_safe(tmp_path, monkeypatch):
+    # Not inside a subprocess call at all (subprocess already fails safe on
+    # its own) -- a bare "PYTHONPATH" string, e.g. an `os.environ` key, is
+    # checked as its own standalone trigger.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import os\n"
+        "os.environ['PYTHONPATH'] = 'somewhere'\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_import_module_with_a_positional_package_argument_fails_safe(tmp_path, monkeypatch):
+    # `package` passed POSITIONALLY (not as `package=`) is the same relative
+    # -name risk the keyword form is -- the allowed shape requires EXACTLY
+    # one positional argument and no others, however they're spelled.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib\n"
+        "importlib.import_module('.y', 'engine')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_an_aliased_import_module_always_fails_safe(tmp_path, monkeypatch):
+    # `from importlib import import_module as im` is a `from importlib
+    # import ...`, which fails safe unconditionally regardless of the
+    # aliasing -- the ONE allowed shape requires the unaliased attribute
+    # form `importlib.import_module(...)` and nothing else.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "from importlib import import_module as im\n"
+        "im('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_importlib_dunder_import_always_fails_safe(tmp_path, monkeypatch):
+    # `importlib.__import__(...)` -- an attribute access on `importlib`
+    # OTHER than `import_module` -- is dynamic even though the argument is a
+    # literal, exactly like `importlib.util`/`importlib.reload` would be.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib\n"
+        "importlib.__import__('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_an_annotated_conftest_pytest_plugins_always_fails_safe(tmp_path, monkeypatch):
+    # An ANNOTATED assignment (`ast.AnnAssign`, not `ast.Assign`) is outside
+    # the allowed shape regardless of the value being a literal list --
+    # `_pytest_plugins_targets` only ever sees `ast.Assign`/`ast.AugAssign`,
+    # so this is invisible to it and must be caught separately.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "myplugin.py").write_text("P = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "pytest_plugins: list = ['checks.myplugin']\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/myplugin.py", "tests/conftest.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/conftest.py"] == {"checks/myplugin.py", "engine/unrelated.py"}
+
+
+def test_the_real_executor_reaches_the_worker_it_launches_as_a_subprocess(tmp_path, monkeypatch):
+    # The real miss an earlier round's Opus review found: engine/v2/ops/
+    # executor.py launches engine/v2/ops/worker.py via
+    # `subprocess.Popen([sys.executable, "-u", "-m", "engine.v2.ops.worker"],
+    # ...)`, which the pre-allowlist code neither resolved as a specific
+    # edge nor marked dynamic -- a silent, unexplained gap. Under the
+    # allowlist, `executor.py`'s own `import subprocess` fails the whole
+    # file safe, so it now depends on every other tracked file, including
+    # worker.py, with no special-casing of this one call needed.
+    graph = pilot.build_import_graph()
+    assert "engine/v2/ops/worker.py" in graph["engine/v2/ops/executor.py"]
+
+
+def test_conftest_own_imports_are_a_closure_root_for_tests_under_its_directory(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text("from engine import y\n")
+    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")  # never imports engine.y itself
+    tracked = ["engine/y.py", "tests/conftest.py", "tests/test_a.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+
+    cfg2 = {
+        "pr_selection": {"inert": []},
+        "defaults": {},
+        "modules": {
+            "alpha": {"why": "x", "mutate": ["engine/other.py"], "tests": ["tests/test_a.py"]},
+        },
+    }
+    # alpha's own test (test_a.py) never imports engine/y.py, and alpha
+    # never mutates it -- but tests/conftest.py, which applies to every test
+    # under tests/, does. alpha must still be selected. Add alpha's mutate
+    # target as its own graph key (no imports of its own) so it is a valid
+    # tracked_set member for `changed_modules`.
+    graph["engine/other.py"] = set()
+    selected = pilot.changed_modules(cfg2, ["alpha"], ["engine/y.py"], graph=graph)
+    assert selected == ["alpha"]
+
+
+def test_domain_valuation_init_change_selects_its_dependents():
+    names = pilot.enabled_modules(CFG)
+    selected = set(pilot.changed_modules(CFG, names, ["engine/v2/domain/valuation/__init__.py"]))
+    assert "domain_features" in selected  # owns it directly (glob ownership)
+    # engine/v2/scoring/stages.py and engine/v2/scoring/financial.py both
+    # `from engine.v2.domain.valuation import ...` -- their owning modules
+    # must be selected too, even though neither owns the changed path.
+    assert "scoring_stages" in selected
+    assert "scoring_application" in selected
+
+
+def test_a_leaf_module_change_now_selects_every_module_via_the_sys_path_failsafe():
+    # Before 2026-09-26, engine/v2/research/*.py was imported by nothing
+    # outside the research module itself, so this changed path selected
+    # exactly ["research"]. The path-based-loader fail-safe added that day
+    # changed this: a large share of tracked checks/*.py files use the
+    # common `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))`
+    # idiom to make themselves runnable as standalone scripts, which the
+    # fail-safe (deliberately, per spec) cannot distinguish from a genuinely
+    # unpredictable sys.path mutation -- each such file is marked as
+    # depending on EVERY tracked file. Because nearly every enabled module's
+    # test suite transitively reaches at least one checks/*.py file (the
+    # same "chooser via checks bridge" path proven elsewhere in this file),
+    # this is no longer a leaf change: it now selects all 33 enabled
+    # modules, same as an unrecognized path would. This is a real, reported
+    # breadth effect of the fail-safe (see PR discussion), not a bug in this
+    # test.
+    names = pilot.enabled_modules(CFG)
+    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == names
+
+
+def test_import_graph_build_is_fast():
+    start = time.monotonic()
+    graph = pilot.build_import_graph()
+    elapsed = time.monotonic() - start
+    assert elapsed < 15.0, f"import graph build took {elapsed:.2f}s (budget: 15s)"
+    assert len(graph) > 800  # whole repo now, not just engine/+tests/
+
+
+# -- mutate job summary: mutant-level cache reuse vs re-tested this run ------
+
+def test_markdown_reports_cache_reuse_counts():
+    rows = [_row("m", "a.py", "f", "killed", retested=True, name="n1"),
+            _row("m", "a.py", "f", "survived", retested=False, name="n2"),
+            _row("m", "a.py", "g", "survived", retested=False, name="n3")]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert s["retested_this_run"] == 1
+    md = mr.markdown(s, rows, None)
+    assert "**cache reuse**: 2 of 3 mutant(s) reused from cache, 1 re-tested this run." in md
+
+
+def test_markdown_excludes_skipped_mutants_from_cache_reuse_denominator():
+    # a skipped mutant (never run, this run or any prior one) has no cached
+    # verdict to "reuse" -- it must not inflate the reused count.
+    rows = [_row("m", "a.py", "f", "killed", retested=True, name="n1"),
+            _row("m", "a.py", "f", "survived", retested=False, name="n2"),
+            _row("m", "a.py", "g", "skipped", retested=False, name="n3")]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert (s["total"], s["checked"], s["retested_this_run"]) == (3, 2, 1)
+    md = mr.markdown(s, rows, None)
+    assert "**cache reuse**: 1 of 2 mutant(s) reused from cache, 1 re-tested this run." in md
+
+
+def test_summarize_excludes_a_retested_skipped_mutant_from_the_retested_count():
+    # Unlike the test above, this skipped mutant itself has
+    # retested_this_run=True -- build_rows() sets that whenever the mutmut
+    # config fingerprint changed, even though the mutant was never actually
+    # run. It must still not count toward retested_this_run, or the count
+    # can exceed `checked` and markdown's cache-reuse line understates reuse.
+    rows = [_row("m", "a.py", "f", "killed", retested=True, name="n1"),
+            _row("m", "a.py", "f", "survived", retested=False, name="n2"),
+            _row("m", "a.py", "g", "skipped", retested=True, name="n3")]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert (s["total"], s["checked"], s["retested_this_run"]) == (3, 2, 1)
+    md = mr.markdown(s, rows, None)
+    assert "**cache reuse**: 1 of 2 mutant(s) reused from cache, 1 re-tested this run." in md
+
+
+def test_summarize_retested_this_run_is_none_when_no_snapshot_row_has_it():
+    # no before-snapshot at all (e.g. the very first run): every row's own
+    # retested_this_run is None (build_rows sets this when before is None).
+    # summarize() must report None too, not coerce it to a false "0".
+    rows = [_row("m", "a.py", "f", "killed", retested=None),
+            _row("m", "a.py", "f", "survived", retested=None)]
+    s = mr.summarize(rows, "m", INFO, ["a.py"])
+    assert s["retested_this_run"] is None
+    md = mr.markdown(s, rows, None)
+    assert "cache reuse" not in md  # unknown provenance: say nothing, not a false count
