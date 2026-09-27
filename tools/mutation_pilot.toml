@@ -299,6 +299,7 @@ mutate = [
     "engine/v2/data/incremental.py",
     "engine/v2/data/generic_incremental.py",
     "engine/v2/data/incremental_tables.py",
+    "engine/v2/data/computed_moves.py",
 ]
 tests = [
     "tests/test_v2_data_generic_incremental.py",
