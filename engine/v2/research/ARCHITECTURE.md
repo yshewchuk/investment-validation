@@ -162,14 +162,20 @@ Markdown/parquet/CSV/JSON directly under the caller-provided
 `reports_dir`/`out_dir`; and `_pricing.trading_calendar()` reads a local
 CSV (`earnings_predictions/data/raw/polygon/gspc_daily.csv`, off
 `INVESTING_PLAN_ROOT` or the worktree root). That CSV reader is kept only
-for legacy-parity tests and direct library callers — no production
-entrypoint in this package calls it. `_replay_run.run` and
-`_build_run.run` instead resolve the replay/build-trades calendar from
-the pinned snapshot's own `daily_market` table
-(`_pricing.trading_calendar_from_snapshot`), so a run's calendar is fixed
-by its `snapshot_id` like everything else it reads (see Failure
-semantics, Invariants). No third-party service. `pandas`/`numpy`/`pyarrow`
-for frame arithmetic.
+for legacy-parity tests and direct library callers — no OTHER module in
+this package imports or calls it (`_plan.py` no longer does; a guard test,
+`test_trading_calendar_csv_fallback_is_not_reachable_from_the_package`,
+statically checks every file in this package but `_pricing.py` itself for
+an import or a call of the bare name). `_replay_run.run` and
+`_build_run.run` resolve the replay/build-trades calendar from the pinned
+snapshot's own `daily_market` table (`_pricing.trading_calendar_from_snapshot`)
+before calling `replay()`; `replay()` itself also derives one this same
+way, from its own `(repository, snapshot_ref)` arguments, for any OTHER
+caller that leaves `calendar` unset — so every path to a calendar in this
+package ends at a pinned snapshot or an explicit argument, never a local
+file, and a run's calendar is fixed by its `snapshot_id` like everything
+else it reads (see Failure semantics, Invariants). No third-party service.
+`pandas`/`numpy`/`pyarrow` for frame arithmetic.
 
 ## Failure semantics
 
@@ -208,11 +214,24 @@ and message on stderr rather than a bare traceback.
     simply matches no fragment records — `CONTRACT_MISMATCH` here is only
     for a table the snapshot doesn't have, or one whose matched fragments
     lack `time_min`/`time_max`. This is also what a replay or build-trades
-    run gets when its pinned snapshot has no `daily_market` table:
+    run gets when its pinned snapshot has no `daily_market` table at all
+    (no table_version, not just an empty one):
     `_pricing.trading_calendar_from_snapshot` reads `daily_market` through
     this same `_scan.read_table` path, so a snapshot that cannot supply a
     calendar is refused here rather than falling back to
     `trading_calendar()`'s local CSV.
+  - **A `daily_market` table that IS part of the snapshot but has no valid
+    dates in it** (present, zero fragments, or every date unparseable).
+    `_pricing._calendar_from_dates` raises `CALENDAR_UNAVAILABLE`
+    (`category="validation"`, not retryable) — distinct from the
+    `CONTRACT_MISMATCH` case above, which is about the table's absence, not
+    its contents. `plan_events` (`_plan.py`) raises the same code for a
+    different reason: it has no repository/snapshot of its own, so a
+    caller that reaches it with `calendar=None` (bypassing `replay()`'s own
+    derivation, or calling `plan_events` directly) is refused rather than
+    silently reading `trading_calendar()`'s CSV — the fallback this package
+    used to have. Either way, exit 2 with a code, never an uncaught
+    `ValueError`.
   - **No declared partition column, or no partition values available at
     all** (`_snapshot.py`'s path only — `replay.py`/`_chains.py`/
     `_trades_publish.py`, not `_scan.py`). `_snapshot.read_table` raises a
@@ -296,13 +315,23 @@ and message on stderr rather than a bare traceback.
 - No production entrypoint derives its calendar from a local file or
   environment variable: `_replay_run.run` and `_build_run.run` resolve the
   planning calendar from the pinned snapshot's own `daily_market` table
-  (`_pricing.trading_calendar_from_snapshot`), and refuse
-  (`CONTRACT_MISMATCH`) rather than falling back to
-  `trading_calendar()`'s CSV read when that table is absent. Changing the
-  CSV cannot change a replay or build-trades run's output; only a
-  different pinned `snapshot_id` can. `trading_calendar()` itself stays,
-  unchanged, for legacy-parity tests and direct library callers — it is
-  never reached from a CLI in this package.
+  (`_pricing.trading_calendar_from_snapshot`) and pass it explicitly into
+  `replay()`; `replay()` itself does the same derivation, from its own
+  `(repository, snapshot_ref)`, for any caller that leaves `calendar`
+  unset, so the guarantee holds for every caller of `replay()`, not just
+  these two. Either path refuses rather than inventing one — a missing
+  `daily_market` table is `CONTRACT_MISMATCH`, one present but with no
+  valid dates is `CALENDAR_UNAVAILABLE` — and `plan_events` itself refuses
+  `CALENDAR_UNAVAILABLE` if it is ever reached with no calendar at all,
+  never falling back to `trading_calendar()`'s CSV read (that fallback has
+  been removed from `_plan.py`; `trading_calendar` is no longer imported
+  or called anywhere in this package outside `_pricing.py`'s own
+  definition, checked by
+  `test_trading_calendar_csv_fallback_is_not_reachable_from_the_package`).
+  Changing the CSV cannot change a replay or build-trades run's output;
+  only a different pinned `snapshot_id` can. `trading_calendar()` itself
+  stays, unchanged, for legacy-parity tests and direct library callers —
+  it is never reached from anywhere in this package's own code.
 - Never mutates the legacy trades ledger and never calls a network
   provider; `engine/build_trades.py` and `engine/data/pulls` (legacy,
   unchanged) keep doing both.

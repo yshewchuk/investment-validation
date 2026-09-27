@@ -42,6 +42,8 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
+import engine.v2.data.errors as errors
+
 # ==========================================================================
 # engine/fills.py
 # ==========================================================================
@@ -420,10 +422,21 @@ def _calendar_from_dates(dates, *, extend_days: int) -> TradingCalendar:
     read) and :func:`trading_calendar_from_snapshot` (the pinned-snapshot
     read) — this is the part of ``trading_calendar``'s original legacy body
     that has nothing to do with WHERE the dates came from.
+
+    Raises ``engine.v2.data.errors.DataError`` (``CALENDAR_UNAVAILABLE``),
+    never a bare ``ValueError``, when ``dates`` has no valid values — a
+    pinned snapshot whose ``daily_market`` table is present but empty (or
+    every date unparseable) refuses the same way every other empty-result
+    condition in this package does, so a CLI's ``except DataError`` at
+    ``main()`` catches it and exits 2 with the code, instead of leaking an
+    uncaught traceback.
     """
     observed = pd.to_datetime(pd.Series(list(dates)), errors="coerce").dropna()
     if observed.empty:
-        raise ValueError("no dates to build a trading calendar from")
+        raise errors.fail(
+            "CALENDAR_UNAVAILABLE",
+            "no dates to build a trading calendar from",
+        )
     last = pd.Timestamp(observed.max()).normalize()
     future = projected_trading_days(last, last + pd.Timedelta(days=extend_days))
     return TradingCalendar(
@@ -474,9 +487,9 @@ def trading_calendar_from_snapshot(repository, snapshot_ref, *,
     this package (see ``ARCHITECTURE.md``'s Failure semantics). This
     function never falls back to :func:`trading_calendar`'s CSV read.
     """
-    from engine.v2.research._scan import read_table
+    import engine.v2.research._scan as _scan
 
-    dates = read_table(repository, snapshot_ref, "daily_market", ["date"])["date"]
+    dates = _scan.read_table(repository, snapshot_ref, "daily_market", ["date"])["date"]
     return _calendar_from_dates(dates, extend_days=extend_days)
 
 

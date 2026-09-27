@@ -21,7 +21,7 @@ from engine.v2.contracts.data import DatasetManifest  # noqa: E402
 from engine.v2.data import catalog, manifests  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.research import _build_run, _snapshot, build_trades  # noqa: E402
+from engine.v2.research import _build_run, _pricing, _snapshot, build_trades  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
     contract_for,
@@ -66,12 +66,18 @@ def _publish(store, name, rows, partition_key):
 
 
 def _commit_all(conn, clock, store, *, trades_rows, receipt_id,
-                expected_head=None, generation=0, include_daily_market=True):
+                expected_head=None, generation=0, include_daily_market=True,
+                daily_market_empty=False):
     """One real snapshot over option_chains, earnings_events, trades[, daily_market].
 
-    ``include_daily_market=False`` omits the ``daily_market`` table, for the
-    typed-refusal test — every other test in this file wants it present, so
-    it defaults on.
+    ``include_daily_market=False`` omits the ``daily_market`` table entirely
+    (no table_version at all), for the missing-table refusal test.
+    ``daily_market_empty=True`` instead gives it a table_version with ZERO
+    fragments (a real fragment cannot itself be empty --
+    ``manifests.fragment_record`` refuses an empty partition -- so an empty
+    table is a manifest with no fragments, not a fragment with no rows), for
+    the empty-table refusal test. Every other test in this file wants a
+    normal, populated table, so both default off.
     """
     contracts, tables, all_records, all_objects = {}, {}, [], []
     tables_to_publish = [
@@ -79,13 +85,16 @@ def _commit_all(conn, clock, store, *, trades_rows, receipt_id,
         ("earnings_events", _event_rows(), "2024"),
         ("trades", sorted(trades_rows, key=lambda row: str(row["trade_id"])), "2024"),
     ]
-    if include_daily_market:
+    if include_daily_market and not daily_market_empty:
         tables_to_publish.append(("daily_market", _daily_market_rows(), "2024"))
     for name, rows, partition in tables_to_publish:
         contract, record = _publish(store, name, rows, partition)
         contracts[name], tables[name] = contract, [record]
         all_records.extend(tables[name])
         all_objects.append(record.object_ref)
+    if include_daily_market and daily_market_empty:
+        contracts["daily_market"] = contract_for("daily_market")
+        tables["daily_market"] = []
     table_manifests: dict[str, DatasetManifest] = {}
     for name, records in tables.items():
         table_manifests[name] = manifests.dataset_manifest(
@@ -187,11 +196,19 @@ def test_build_trades_unaffected_by_a_changed_legacy_csv(tmp_path, monkeypatch):
     Both calls use ``dry_run=True`` so neither one commits — that keeps
     both calls reading the exact same parent snapshot, isolating the CSV as
     the only thing that changes between them.
+
+    ``trading_calendar.cache_clear()`` before EACH run is required for this
+    test to mean anything: ``trading_calendar`` is ``@lru_cache``d, so
+    without clearing it a reverted (buggy) build could satisfy this
+    assertion for the wrong reason -- returning a stale cached calendar
+    from before the CSV swap, rather than genuinely never reading the CSV
+    at all.
     """
     conn, clock, store = catalog_and_store(tmp_path)
     _commit_all(conn, clock, store, trades_rows=_initial_trades(), receipt_id="r1")
     repository = Repository(conn, store)
 
+    _pricing.trading_calendar.cache_clear()
     before = _build_run.run(repository, strategies=["STR-THRU"],
                             reports_dir=None, dry_run=True)
 
@@ -208,6 +225,7 @@ def test_build_trades_unaffected_by_a_changed_legacy_csv(tmp_path, monkeypatch):
         + "\n"
     )
     monkeypatch.setenv("INVESTING_PLAN_ROOT", str(fake_root))
+    _pricing.trading_calendar.cache_clear()
 
     after = _build_run.run(repository, strategies=["STR-THRU"],
                            reports_dir=None, dry_run=True)
@@ -231,4 +249,24 @@ def test_build_trades_refuses_a_snapshot_with_no_daily_market_table(tmp_path):
                        snapshot_id=parent.snapshot_id,
                        reports_dir=tmp_path / "reports")
     assert err.value.code == "CONTRACT_MISMATCH"
+    conn.close()
+
+
+def test_build_trades_refuses_a_snapshot_with_an_empty_daily_market_table(tmp_path):
+    """A ``daily_market`` table present but with zero fragments: a typed refusal.
+
+    Distinct from the missing-table case above: here the table IS part of
+    the snapshot, it just has no rows to build a calendar from. Never an
+    invented calendar.
+    """
+    conn, clock, store = catalog_and_store(tmp_path)
+    parent = _commit_all(conn, clock, store, trades_rows=_initial_trades(),
+                         receipt_id="r1", daily_market_empty=True)
+    repository = Repository(conn, store)
+
+    with pytest.raises(DataError) as err:
+        _build_run.run(repository, strategies=["STR-THRU"],
+                       snapshot_id=parent.snapshot_id,
+                       reports_dir=tmp_path / "reports")
+    assert err.value.code == "CALENDAR_UNAVAILABLE"
     conn.close()

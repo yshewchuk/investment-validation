@@ -226,25 +226,35 @@ def _published(store, name, rows, partition_key):
 
 
 def _commit(conn, clock, store, *, chain_rows, event_rows, receipt_id,
-            expected_head=None, generation=0, include_daily_market=True):
+            expected_head=None, generation=0, include_daily_market=True,
+            daily_market_empty=False):
     """A real multi-table snapshot with an explicit expected head.
 
     ``tests/data_scan_support.commit_tables`` is hardcoded to an empty scope;
     the moved-head case needs the same commit with the prior head pinned.
-    ``include_daily_market=False`` omits the ``daily_market`` table, for the
-    typed-refusal test — every other test in this file wants it present, so
-    it defaults on.
+    ``include_daily_market=False`` omits the ``daily_market`` table entirely
+    (no table_version at all), for the missing-table refusal test.
+    ``daily_market_empty=True`` instead gives it a table_version with ZERO
+    fragments (a real, published-elsewhere-in-this-file fragment cannot
+    itself be empty -- ``manifests.fragment_record`` refuses an empty
+    partition -- so an empty table is a manifest with no fragments, not a
+    fragment with no rows), for the empty-table refusal test. Every other
+    test in this file wants a normal, populated table, so both default off.
     """
     oc_contract, oc_ref, oc_record = _published(store, "option_chains", chain_rows, "2024")
     ee_contract, ee_ref, ee_record = _published(store, "earnings_events", event_rows, "2024")
     contracts = {"option_chains": oc_contract, "earnings_events": ee_contract}
     tables = {"option_chains": [oc_record], "earnings_events": [ee_record]}
     if include_daily_market:
-        dm_contract, dm_ref, dm_record = _published(
-            store, "daily_market", _daily_market_rows(), "2024"
-        )
-        contracts["daily_market"] = dm_contract
-        tables["daily_market"] = [dm_record]
+        if daily_market_empty:
+            contracts["daily_market"] = contract_for("daily_market")
+            tables["daily_market"] = []
+        else:
+            dm_contract, dm_ref, dm_record = _published(
+                store, "daily_market", _daily_market_rows(), "2024"
+            )
+            contracts["daily_market"] = dm_contract
+            tables["daily_market"] = [dm_record]
     table_manifests: dict[str, DatasetManifest] = {}
     all_records, all_objects = [], []
     for table_name, records in tables.items():
@@ -370,6 +380,13 @@ def test_replay_run_unaffected_by_a_changed_legacy_csv(tmp_path, monkeypatch):
     pinned snapshot. If ``_replay_run.run`` read that file at all, the second
     run's calendar (and therefore its trades) would differ from the first;
     it must not.
+
+    ``trading_calendar.cache_clear()`` before EACH run is required for this
+    test to mean anything: ``trading_calendar`` is ``@lru_cache``d, so
+    without clearing it a reverted (buggy) build could satisfy this
+    assertion for the wrong reason -- returning a stale cached calendar
+    from before the CSV swap, rather than genuinely never reading the CSV
+    at all.
     """
     conn, clock, store = catalog_and_store(tmp_path)
     snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
@@ -377,6 +394,7 @@ def test_replay_run_unaffected_by_a_changed_legacy_csv(tmp_path, monkeypatch):
     repository = Repository(conn, store)
     events = _replay_run.events_frame(repository, snap)
 
+    _pricing.trading_calendar.cache_clear()
     before = _replay_run.run(
         repository, strategies=["STR-THRU"], events=events,
         reports_dir=tmp_path / "before", snapshot_id=snap.snapshot_id,
@@ -396,6 +414,7 @@ def test_replay_run_unaffected_by_a_changed_legacy_csv(tmp_path, monkeypatch):
         + "\n"
     )
     monkeypatch.setenv("INVESTING_PLAN_ROOT", str(fake_root))
+    _pricing.trading_calendar.cache_clear()
 
     after = _replay_run.run(
         repository, strategies=["STR-THRU"], events=events,
@@ -424,3 +443,57 @@ def test_replay_run_refuses_a_snapshot_with_no_daily_market_table(tmp_path):
                         reports_dir=tmp_path / "reports", snapshot_id=snap.snapshot_id)
     assert err.value.code == "CONTRACT_MISMATCH"
     conn.close()
+
+
+def test_replay_run_refuses_a_snapshot_with_an_empty_daily_market_table(tmp_path):
+    """A ``daily_market`` table present but with zero fragments: a typed refusal.
+
+    Distinct from the missing-table case above: here the table IS part of
+    the snapshot, it just has no rows to build a calendar from. Never an
+    invented calendar.
+    """
+    conn, clock, store = catalog_and_store(tmp_path)
+    snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
+                   event_rows=_event_rows(), receipt_id="r1",
+                   daily_market_empty=True)
+    repository = Repository(conn, store)
+    events = _replay_run.events_frame(repository, snap)
+
+    with pytest.raises(DataError) as err:
+        _replay_run.run(repository, strategies=["STR-THRU"], events=events,
+                        reports_dir=tmp_path / "reports", snapshot_id=snap.snapshot_id)
+    assert err.value.code == "CALENDAR_UNAVAILABLE"
+    conn.close()
+
+
+def test_trading_calendar_csv_fallback_is_not_reachable_from_the_package():
+    """No module here, except ``_pricing.py`` itself, imports or calls the
+    legacy-CSV ``trading_calendar`` -- an AST check, not a text search, so a
+    docstring that merely MENTIONS the name (as several do, describing this
+    exact fix) is not a false positive. The only way to get a
+    ``TradingCalendar`` in this package is to pass one explicitly, or let
+    ``replay()`` derive one from a pinned snapshot via
+    ``trading_calendar_from_snapshot``.
+    """
+    import ast
+
+    def references_bare_trading_calendar(source: str) -> bool:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if any(alias.name == "trading_calendar" for alias in node.names):
+                    return True
+            elif isinstance(node, ast.Name) and node.id == "trading_calendar":
+                return True
+            elif isinstance(node, ast.Attribute) and node.attr == "trading_calendar":
+                return True
+        return False
+
+    package_dir = Path(_pricing.__file__).resolve().parent
+    offenders = [
+        path.name
+        for path in sorted(package_dir.glob("*.py"))
+        if path.name != "_pricing.py"
+        and references_bare_trading_calendar(path.read_text())
+    ]
+    assert offenders == [], f"trading_calendar reachable from: {offenders}"
