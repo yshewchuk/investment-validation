@@ -21,9 +21,53 @@ from . import analog_projection, derivation_projection, release_media
 HTTPStatus = http.HTTPStatus
 
 __all__ = ["OperationsHandler", "analogs_page_document", "create_server",
-           "derivation_page_document", "model_release_page_document", "shell_document"]
+           "derivation_page_document", "model_release_page_document", "shell_document",
+           "STATIC_ROUTES", "PARAMETERIZED_ROUTES", "route_table"]
 
 _VIEWS = ("board", "explorer", "book", "models", "derivation", "analogs", "flags")
+
+#: Every route whose path resolves with no path parameter, declared once so
+#: ``route_table()`` -- not a hand list in ``tools/v2_route_probe.py`` -- is
+#: the one enumeration of what this server answers.
+STATIC_ROUTES: tuple[tuple[str, str], ...] = (
+    ("GET", "/health.json"),
+    ("GET", "/calibration-health.json"),
+    ("GET", "/"),
+    *(("GET", f"/{view}") for view in _VIEWS if view != "derivation"),
+    ("GET", "/derivation"),
+    ("GET", "/models/release.json"),
+    ("GET", "/models/release"),
+    ("GET", "/derivation.json"),
+    ("GET", "/analogs.json"),
+    ("GET", "/release/current.json"),
+    ("GET", "/release/current"),
+    ("POST", "/actions/refresh"),
+    ("POST", "/actions/whatif"),
+)
+
+#: Prefix-matched routes. The third element names how the probe obtains one
+#: real in-session suffix: ``"literal:<suffix>"`` (the route ignores it),
+#: ``"current-release-id"`` (from ``/release/current.json``'s own body), or
+#: ``"prior-whatif-job-id"`` (from this session's ``POST /actions/whatif``).
+PARAMETERIZED_ROUTES: tuple[tuple[str, str, str], ...] = (
+    ("GET", "/legacy/", "literal:index.html"),
+    ("GET", "/release/", "current-release-id"),
+    ("GET", "/actions/whatif/", "prior-whatif-job-id"),
+)
+
+#: Static GET paths answered by the shell document: ``/`` plus every view
+#: except ``/derivation`` and ``/analogs``, which have their own pages.
+_SHELL_ROUTES = frozenset({"/", *(f"/{view}" for view in _VIEWS
+                                  if view not in ("derivation", "analogs"))})
+
+
+def route_table() -> list[dict]:
+    """Every route this server answers, as the probe needs it: a list of
+    dicts {method, path, parameterized: bool}. Source of truth for
+    tools/v2_route_probe.py -- never hand-duplicate this list elsewhere."""
+    rows = [{"method": m, "path": p, "parameterized": False} for m, p in STATIC_ROUTES]
+    rows += [{"method": m, "path": p, "parameterized": True} for m, p, _ in PARAMETERIZED_ROUTES]
+    return rows
 
 MODEL_RELEASE_VIEW_V1 = "model_release_view.v1.0"
 MODEL_RELEASE_NOT_CONFIGURED = "MODEL_RELEASE_NOT_CONFIGURED"
@@ -324,18 +368,34 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         config = self.server.config
         path = unquote(urlsplit(self.path).path)
+        if path in {route for method, route in STATIC_ROUTES if method == "GET"}:
+            return self._static_get(config, path)
+        for method, prefix, _ in PARAMETERIZED_ROUTES:
+            if method == "GET" and path.startswith(prefix):
+                return self._parameterized_get(config, path)
+        return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
+
+    def do_POST(self):  # noqa: N802
+        config = self.server.config
+        path = unquote(urlsplit(self.path).path)
+        if path in {route for method, route in STATIC_ROUTES if method == "POST"}:
+            return self._static_post(config, path)
+        return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
+
+    def _static_get(self, config, path):
+        """One declared literal GET route, dispatching to the same handler
+        method the route has always used. ``path`` is guaranteed to be in
+        ``STATIC_ROUTES`` with method GET before this is reached."""
         if path == "/health.json":
             return self._artifact(config, _read_health, config.health_path, auth=True)
         if path == "/calibration-health.json":
             return self._calibration_health_route(config)
-        if path in ("/derivation", "/analogs"):
-            page = {"/derivation": derivation_page_document,
-                    "/analogs": analogs_page_document}[path]
-            return self._send(HTTPStatus.OK, page(), "text/html")
-        if path == "/" or path.lstrip("/") in _VIEWS:
+        if path in _SHELL_ROUTES:
             return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
-        if path.startswith("/legacy/"):
-            return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
+        if path == "/derivation":
+            return self._send(HTTPStatus.OK, derivation_page_document(), "text/html")
+        if path == "/analogs":
+            return self._send(HTTPStatus.OK, analogs_page_document(), "text/html")
         if path == "/models/release.json":
             return self._model_release_json_route(config)
         if path == "/models/release":
@@ -344,23 +404,28 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._derivation_json_route(config)
         if path == "/analogs.json":
             return self._analogs_json_route(config)
-        if path.startswith("/actions/whatif/"):
-            return self._whatif_result_route(config, path)
         if path == "/release/current.json":
             return self._current_json_route(config)
         if path == "/release/current":
             return self._current_route(config)
-        if path.startswith("/release/"):
-            return self._release_route(config, path)
         return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
 
-    def do_POST(self):  # noqa: N802
-        config = self.server.config
-        path = unquote(urlsplit(self.path).path)
+    def _static_post(self, config, path):
+        """One declared literal POST route, dispatching as before."""
         if path == "/actions/refresh":
             return self._refresh_route(config)
         if path == "/actions/whatif":
             return self._whatif_submit_route(config)
+        return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
+
+    def _parameterized_get(self, config, path):
+        """One declared prefix-matched GET route, dispatching as before."""
+        if path.startswith("/legacy/"):
+            return self._send(HTTPStatus.OK, shell_document(frozen_at=config.frozen_at), "text/html")
+        if path.startswith("/actions/whatif/"):
+            return self._whatif_result_route(config, path)
+        if path.startswith("/release/"):
+            return self._release_route(config, path)
         return self._send(HTTPStatus.NOT_FOUND, b"missing\n", "text/plain")
 
     def _refresh_route(self, config):
