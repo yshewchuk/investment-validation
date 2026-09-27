@@ -354,13 +354,13 @@ area = "research"
 capability = "Research data tools: real-fill pull and quality, trade table build/prune, signal screen, log diagnostics"
 old = ["cli:engine/data/pulls/polygon_fills.py", "cli:tools/fill_quality.py", "cli:engine/build_trades.py", "cli:tools/reconcile_trades.py", "cli:tools/signal_screen.py", "cli:tools/log_diagnostics.py"]
 new = ["cli:tools/v2_fill_quality.py", "cli:tools/v2_polygon_fills.py", "cli:tools/v2_signal_screen.py", "cli:tools/v2_build_trades.py", "cli:tools/v2_reconcile_trades.py"]
-producer = "legacy Tier-2 store readers/writers (engine.data.store)"
-identity = "none: read the mutable legacy store"
-tests = ["tests/test_polygon_fills.py", "tests/test_fill_quality.py", "tests/test_build_trades.py", "tests/test_log_diagnostics.py"]
+producer = "engine.v2.data.Repository.resolve_pinned/resolve over one committed v2 snapshot (engine/v2/research/_scan.py, _snapshot.py)"
+identity = "snapshot_id resolved once per run (an explicit --snapshot-id, or the scope's pinned head), threaded through every read and written into the tool's output"
+tests = ["tests/test_polygon_fills.py", "tests/test_fill_quality.py", "tests/test_build_trades.py", "tests/test_log_diagnostics.py", "tests/test_v2_research_tools.py", "tests/test_v2_research_replay.py", "tests/test_v2_research_build_trades.py", "tests/test_v2_research_reconcile_trades.py"]
 disposition = "compatibility-adapter"
 owner = "P6-2"
 decision = "UD-4"
-notes = "Needs a pinned v2 snapshot read path (or a declared frozen legacy-materialized read set) so research reads the official data. Deferred: no experiments run during the migration (user, 2026-09-19); tools stay on the legacy Tier-2 store until after cutover. v2 signal_screen, fill_quality, polygon_fills read pinned v2 snapshots (slice 6); build_trades, reconcile_trades, replay follow in slice 7; log_diagnostics reads no store."
+notes = "UD-4 resolved 2026-09-20 (user: move to v2 snapshots, since no experiments run before cutover and the legacy store must be left anyway); the rejected alternative was a frozen legacy-materialized read set. Slice 6 (v2 signal_screen, fill_quality, polygon_fills) and slice 7 (v2 replay, build_trades, reconcile_trades) both landed 2026-09-25: every research CLI now reads a pinned v2 snapshot, never the legacy mutable Tier-2 store. Stays a compatibility-adapter disposition (not native) because the legacy CLIs are left running unchanged alongside the new v2 ones -- see engine/v2/research/ARCHITECTURE.md. log_diagnostics reads only a local transactions-log CSV, never the store, so it has no v2 counterpart and needs none."
 
 # ------------------------------------------------------------------ board
 
