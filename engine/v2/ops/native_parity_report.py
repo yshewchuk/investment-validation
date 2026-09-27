@@ -48,6 +48,7 @@ from engine.v2.parity.dimensions import (
     SIMULATION_FIELDS,
     compare_dimension,
 )
+from engine.v2.parity.tolerance import SCORE_RECORD_V1, TolerancePolicy
 
 __all__ = [
     "PARITY_DIMENSIONS",
@@ -97,12 +98,14 @@ def _dimension_view(row: Mapping[str, Any], dimension: str) -> dict[str, Any]:
 
 
 def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, Any],
-                    dimensions: tuple[str, ...]) -> list[dict[str, Any]]:
+                    dimensions: tuple[str, ...], tolerance_policy: TolerancePolicy,
+                    ) -> list[dict[str, Any]]:
     """Every dimension of one shared key that does not agree, with its receipt."""
     mismatches = []
     for dimension in dimensions:
         result = compare_dimension(
-            _dimension_view(legacy, dimension), _dimension_view(native, dimension), dimension)
+            _dimension_view(legacy, dimension), _dimension_view(native, dimension), dimension,
+            tolerance_policy=tolerance_policy)
         if not result["agree"]:
             mismatches.append({
                 "row_key": key,
@@ -130,6 +133,8 @@ def compare_native_vs_legacy(
     legacy_rows: dict[str, dict],
     native_rows: dict[str, dict],
     dimensions: tuple[str, ...],
+    *,
+    tolerance_policy: TolerancePolicy = SCORE_RECORD_V1,
 ) -> dict:
     """Classify every row key against the checker's per-dimension comparator.
 
@@ -140,6 +145,17 @@ def compare_native_vs_legacy(
     ``mismatches`` carrying the checker's own finding fields and receipt.
     ``dimensions`` entries outside the checker's numeric field groups are
     refused up front with ``INVALID_REQUEST``.  Empty ``dimensions``, an empty side, or no shared key at all is refused with ``VALIDATION_FAILED``: a report that compared nothing never claims ``"compared"``.
+
+    ``tolerance_policy`` is the ONE config policy every numeric dimension's
+    comparison reads (never a per-dimension or per-field override threaded
+    in some other way): it defaults to ``engine.v2.parity.tolerance.SCORE_RECORD_V1``,
+    which declares zero rules, so the default is exact for every field and
+    this parameter's addition changes no existing caller's behavior. A
+    caller that has a user-approved, per-field ``TolerancePolicy`` for the
+    native-vs-legacy comparison specifically (never for the Phase 4
+    checker's own tier-0-style exact check, which does not pass this
+    argument) supplies it here; this module invents no field's tolerance
+    value itself.
 
     G2: this function classifies and returns; it has no path that writes a
     native value into a legacy row or the reverse, and a mismatch never raises.
@@ -158,12 +174,13 @@ def compare_native_vs_legacy(
             only_legacy.append(key)
         else:
             compared.append(key)
-            mismatches.extend(_row_mismatches(key, legacy, native, dimensions))
+            mismatches.extend(_row_mismatches(key, legacy, native, dimensions, tolerance_policy))
     if not compared:
         raise fail("VALIDATION_FAILED", "native parity report shares no row key",
                    details={"only_legacy": len(only_legacy), "only_native": len(only_native)})
     return {
         "schema_version": SCHEMA_VERSION,
+        "tolerance_policy_id": tolerance_policy.policy_id,
         "compared": compared,
         "only_legacy": only_legacy,
         "only_native": only_native,
@@ -190,6 +207,7 @@ def native_parity_handler(
     native_rows: dict[str, dict],
     report_path: Path | str,
     dimensions: tuple[str, ...] = PARITY_DIMENSIONS,
+    tolerance_policy: TolerancePolicy = SCORE_RECORD_V1,
 ) -> Callable[[dict], dict]:
     """Build the ``nightly.GRAPH`` handler for the ``native_parity`` stage.
 
@@ -199,13 +217,19 @@ def native_parity_handler(
     returns ``{"status": "not_applicable"}`` without writing.  ``compare``/
     ``write`` failures propagate: ``nightly._run_stage`` already degrades an
     OPTIONAL stage rather than blocking the board.
+
+    ``tolerance_policy`` defaults to ``SCORE_RECORD_V1`` (exact for every
+    field, unchanged from before this parameter existed) and is passed
+    straight through to :func:`compare_native_vs_legacy` -- see that
+    function's docstring for what a caller may plug in here.
     """
     path = Path(report_path)
 
     def handler(value: dict) -> dict:
         if native_shadow_serving_mode(plan) != "native":
             return {**value, "native_parity": {"status": "not_applicable"}}
-        report = compare_native_vs_legacy(legacy_rows, native_rows, dimensions)
+        report = compare_native_vs_legacy(
+            legacy_rows, native_rows, dimensions, tolerance_policy=tolerance_policy)
         write_parity_report(report, path)
         return {**value, "native_parity": {
             "status": "compared",

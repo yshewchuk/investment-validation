@@ -130,8 +130,13 @@ production caller, only its own test module.
 
 **Cutover PR-4 (this doc describes the design as this PR's Phase 2 will
 leave it, not a pre-existing fact — Phase 1 of this PR is documentation
-only, gated on cutover PR-3 (`native_score_batch.py`, `#66`) merging before
-any of the code below is written).** Three additions close the gap the
+only for `legacy_parity_rows`, the "explained" bucket and
+`tools/native_parity_run.py`, each gated on cutover PR-3
+(`native_score_batch.py`, `#66`) merging before its own code is written.
+One piece is NOT gated on `#66` and IS real code already in this push,
+independent of everything `#66` supplies: making
+`native_parity_report.py`'s tolerance policy pluggable — see "the
+tolerance policy is now pluggable" below).** Three additions close the gap the
 root doc §4 and this doc's own "Diagrams" section both name today:
 `run_shadow_nightly` "has no production caller, only tests ... call it,"
 so in production `native_parity` never actually compares anything — a
@@ -271,25 +276,43 @@ nothing before this PR builds real dicts to hand them.
   legacy board — see "Failure semantics" below for why a failure anywhere
   in this script cannot touch the legacy nightly.
 
+**The tolerance policy is now pluggable, not hardcoded — this part of the
+PR is real code, already merged into this push, independent of `#66`.**
+`engine.v2.parity.dimensions.compare_dimension` gained a keyword-only
+`tolerance_policy` parameter (default `SCORE_RECORD_V1`, so the Phase 4
+checker and every existing test are unaffected — none of them pass this
+argument, so none of them can observe a behavior change);
+`native_parity_report.compare_native_vs_legacy`/`native_parity_handler`
+each gained the identical parameter, threaded straight down to
+`compare_dimension`, and the written report now records
+`"tolerance_policy_id": tolerance_policy.policy_id` so a reader of
+`native_parity_report.json` can always see which policy compared it —
+never an implicit, undiscoverable default. **Per-field tolerances come
+from ONE config policy, the `engine.v2.parity.tolerance.TolerancePolicy`
+type** (never a second ad hoc mechanism): the default that ships in this
+PR is still `SCORE_RECORD_V1`, which declares zero per-field rules
+(`rules=()`), so every one of the five dimensions' 30 fields —
+`FORECAST_FIELDS` (12), `SIMULATION_FIELDS` (7), `FINANCIAL_FIELDS` (5),
+`GATE_FIELDS` (3), `ANALOG_FIELDS` (3) — still compares under exact
+equality until a caller explicitly plugs in a different policy. **No
+per-field tolerance VALUE is added, chosen, or implied by this PR** —
+that is a user decision, taken to the user separately, and per instruction
+none of those values belong in this doc, the PR body, or an issue; only a
+`TolerancePolicy` built and ratified elsewhere is ever passed in here.
+`tolerance.py`'s own docstring names the risk this design avoids:
+"chosen to make the first run pass" is a named failure mode, so this PR
+adds the SEAM a ratified policy plugs into, not a guess at what it should
+contain.
+
 **Out of scope for this PR** (each a real gap, named rather than silently
 left implicit): the per-night enumeration of every `BoardRequest` and the
 staging of its `events.json` inputs (cutover PR-6); flipping
 `native_parity` or anything else onto a schedule, a job kind, or the
 supervisor's tick loop (no PR before Phase 7 changes legacy authority);
-the stale-px/finality-drift classifier itself (above); and any new
-per-field tolerance value in `engine.v2.parity.tolerance.SCORE_RECORD_V1`
-— this PR reuses that policy exactly as `native_parity_report.py` already
-does today (`dimensions.compare_dimension`'s hardcoded
-`tolerance_policy=SCORE_RECORD_V1`; unchanged by this PR) and adds none.
-**`SCORE_RECORD_V1` declares zero per-field rules
-(`rules=()`), so every one of the five dimensions' 30 fields —
-`FORECAST_FIELDS` (12), `SIMULATION_FIELDS` (7), `FINANCIAL_FIELDS` (5),
-`GATE_FIELDS` (3), `ANALOG_FIELDS` (3) — compares under exact equality
-today, not a widened tolerance; there is no Phase-4-declared per-field
-tolerance beyond that for this PR to reuse.** Adding one is later,
-field-by-field work with its own stated derivation (`tolerance.py`'s own
-docstring: "chosen to make the first run pass" is a named failure mode),
-never invented here to make a real-data run look cleaner than it is.
+the stale-px/finality-drift classifier itself (above); and building the
+actual user-approved, per-field `TolerancePolicy` object itself (the
+pluggable seam above takes it as a parameter — this PR does not construct
+one).
 
 ## Inputs
 
