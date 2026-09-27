@@ -107,8 +107,12 @@ the coordinator-effect functions in `effects_graph.py`.
 standalone `RefreshCallback` implementation only: no CLI subcommand, no
 `nightly.py` `GRAPH`/`OPTIONAL` entry, no `supervisor` job kind calls it yet.
 A later change adds the nightly stage and job-kind dispatch this doc's
-"Diagrams" section would then need to reflect. It ships with no direct test
-of its own in this change either — coverage is a known, tracked gap, closed
+"Diagrams" section would then need to reflect. `tests/test_v2_ops_computed_moves_store.py`
+covers two of its extracted helpers directly (`_capture_id_for`'s stable,
+non-wall-clock capture identity; `_fence_check_for`'s real-`verify_fence`
+signature and its still-active production lease-expiry check) — the full
+`RefreshCallback` path (`run_computed_moves_refresh` end to end) has no
+direct test in this change; that coverage is a known, tracked gap, closed
 alongside the wiring.
 
 ## Dependencies

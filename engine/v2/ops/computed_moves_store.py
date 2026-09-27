@@ -296,9 +296,11 @@ def _write_ticker_fragment(store: ArtifactStore, ticker: str, rows: list[dict], 
 def _insert_captures(conn: sqlite3.Connection, attempts: list[dict]) -> None:
     """Record this run's captures once; a capture already logged is not re-logged.
 
-    ``capture_id`` is content-derived from the unit's ticker and the run's own
-    ``created_at``, so an id already in the append-only log is the same capture
-    (a rerun that rebuilt it from the durable receipt), never a new one.
+    ``capture_id`` (``_capture_id_for``) is content-derived from the unit's own
+    ``request_id`` (ticker + as_of day), never the run's wall-clock time, so a
+    retry of the same unit resolves to the SAME id: an id already in the
+    append-only log is the same capture (a rerun that rebuilt it from the
+    durable receipt), never a new one.
     """
     for attempt in attempts:
         existing = conn.execute(
@@ -311,6 +313,21 @@ def _insert_captures(conn: sqlite3.Connection, attempts: list[dict]) -> None:
             "(capture_id, ticker, created_at, contract_id, outcome) VALUES (?, ?, ?, ?, ?)",
             (attempt["capture_id"], attempt["ticker"], attempt["created_at"],
              COMPUTED_MOVES_CONTRACT.contract_id, attempt["outcome"]))
+
+
+def _fence_check_for(staged_attempt_id, staged_fence, clock):
+    """The commit's own fence check against ``engine.v2.ops.lifecycle.verify_fence``'s
+    REAL signature (``conn, attempt_id, fence, now`` -- it has no
+    ``check_lease_time`` parameter to disable the wall-clock lease-expiry
+    check with). Never disables that check: the production lease-expiry gate
+    stays active here, same as every other fenced commit in this package.
+    ``None`` staged_attempt_id (no live job behind this call, e.g. a manual or
+    test invocation) is a no-op fence check.
+    """
+    if staged_attempt_id is None:
+        return lambda connection: None
+    return lambda connection: verify_fence(connection, staged_attempt_id, staged_fence,
+                                           clock.now())
 
 
 def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempts, clock,
@@ -356,16 +373,7 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
         snapshot=snapshot, expected_head_snapshot_id=expected_head,
         expected_head_generation=generation, receipt_id=receipt_id, attempt_id=attempt_id,
         fence=1,
-        fence_check=(lambda connection: verify_fence(
-            connection, staged_attempt_id, staged_fence, clock.now(),
-            check_lease_time=False))
-        # check_lease_time=False: this runs inside the worker subprocess,
-        # whose only clock is SystemClock() (see module top). lease_expires_at
-        # was written by the supervisor's own clock (a FakeClock in tests),
-        # which the worker cannot obtain across the process boundary. The
-        # identity/CAS check alone still rejects a superseded attempt's
-        # commit once the supervisor has reassigned the job.
-        if staged_attempt_id is not None else (lambda connection: None),
+        fence_check=_fence_check_for(staged_attempt_id, staged_fence, clock),
         clock=clock, store=store,
         record_references=lambda connection, rid: _insert_captures(connection, attempts),
         audit_partitions=False)
@@ -527,6 +535,21 @@ def _unit_history(conn, store, unit, fetcher, cached, *, created_at):
     return series, kind, fresh
 
 
+def _capture_id_for(unit) -> str:
+    """The stable capture identity for one refresh unit.
+
+    Same (ticker, as_of) always yields the same id, regardless of when this
+    run's wall clock reads: derived from the unit's own ``request_id``
+    (``computed_moves:<ticker>:<day>``, spec R4/R5's per-session request id),
+    never from the run's ``created_at``. A rerun of the same unit -- a
+    crash-retry, or a same-session no-op replay -- must resolve to the
+    identity ``_insert_captures`` already logged, or its dedup-by-``capture_id``
+    check never dedups anything.
+    """
+    return "capture_" + content_hash(
+        {"request_id": unit.request_id}).removeprefix("sha256:")[:32]
+
+
 def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
                      daily_by_ticker):
     """Acquire and stage one fragment per unit, fresh or cached, exactly once.
@@ -543,8 +566,7 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
     fragment_records, attempts, kinds = {}, [], []
     for unit in plan.units:
         ticker = unit.expected_keys[0]
-        capture_id = "capture_" + content_hash(
-            {"ticker": ticker, "created_at_request": created_at}).removeprefix("sha256:")[:32]
+        capture_id = _capture_id_for(unit)
         series, kind, fresh = _unit_history(conn, store, unit, fetcher, cached,
                                             created_at=created_at)
         kinds.append(kind)
