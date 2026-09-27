@@ -866,6 +866,7 @@ mutate = [
 tests = [
     "tests/test_v2_data_incremental_persistence.py",
     "tests/test_v2_ops_capture_inputs.py",
+    "tests/test_v2_ops_computed_moves_nightly_wiring.py",
     "tests/test_v2_ops_computed_moves_store.py",
     "tests/test_v2_ops_coordinator_lease.py",
     "tests/test_v2_ops_effect_receipt_collision.py",

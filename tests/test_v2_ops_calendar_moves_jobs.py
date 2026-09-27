@@ -1,12 +1,12 @@
-"""S4C Part 3: the two natively-owned calendar/moves refresh job kinds.
+"""S4C Part 3/4: the two natively-owned calendar/moves refresh job kinds.
 
 ``test_provider_failure_code_orders_mixed_kinds`` moved to
 ``tests/test_v2_ops_unit_receipts.py`` (P6 slice-4c split, Part 0) along with
-the primitive it tests. The cross-check against ``nightly.py``'s
-``COMPUTED_MOVES_REFRESH_ACTION`` import is Part 4's own addition (nightly.py
-does not import from this module until then); this file keeps only the
-``registry()``/``checkpoint_contract`` assertions, which need nothing beyond
-``stages.py``.
+the primitive it tests. ``test_nightly_py_imports_the_same_action_constant``
+below is Part 4's own addition, carved out per this file's own prior note:
+nightly.py now imports COMPUTED_MOVES_REFRESH_ACTION from this module to
+wire the stage into its GRAPH, and this cross-check proves that import stays
+consistent (a stale, hand-copied constant in nightly.py would fail it).
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from engine.v2.ops.calendar_moves_jobs import (
 )
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import RefreshCallbackResult
+from engine.v2.ops.nightly import COMPUTED_MOVES_REFRESH_ACTION as NIGHTLY_COMPUTED_MOVES
 from engine.v2.ops.stages import registry
 
 
@@ -68,6 +69,12 @@ def test_computed_moves_kind_is_registered_with_the_shared_checkpoint():
     assert computed.checkpoint_contract == COMPUTED_MOVES_RESULT_SCHEMA
     assert computed.worker == COMPUTED_MOVES_REFRESH_ACTION
     assert computed.namespaces == frozenset({"shadow", "smoke"})
+
+
+def test_nightly_py_imports_the_same_action_constant():
+    """S4C Part 4: nightly.py's GRAPH/_NATIVE_ACTION_STAGES wiring imports
+    this exact constant, never a second hand-copied string literal."""
+    assert NIGHTLY_COMPUTED_MOVES == COMPUTED_MOVES_REFRESH_ACTION
 
 
 # --------------------------------------------------------------------------
