@@ -458,3 +458,121 @@ def test_reset_on_new_head_resets_attempts(tmp_path, monkeypatch):
 
     service._reconcile_computed_moves_refresh()
     assert len(calls) == 2
+
+
+def test_backoff_after_an_exception_prevents_an_immediate_rescan(tmp_path, monkeypatch):
+    """Opus re-gate: the ``except`` branch of ``_reconcile_computed_moves_refresh``
+    must schedule a backoff exactly like the "nothing to submit" branch does
+    -- a raising scan, not merely an empty-target ``None`` back, must also
+    stop the very next tick from rescanning with no clock advance. (Verified
+    during development: deleting the ``self._computed_moves_backoff(memo, now)``
+    call from the ``except`` branch makes this test fail with 2 calls.)"""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    calls = []
+
+    def _boom(*a, **k):
+        calls.append(1)
+        raise ValueError("planted computed-moves scan failure")
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot", _boom)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+
+    service._reconcile_computed_moves_refresh()
+    assert len(calls) == 1
+
+    service._reconcile_computed_moves_refresh()  # no clock advance -- must not rescan
+    assert len(calls) == 1
+
+
+def test_backoff_expires_after_its_window_and_retries_exactly_once(tmp_path, monkeypatch):
+    """Once the current backoff window has fully elapsed, the very next tick
+    retries -- but only once; a second tick with no further clock advance
+    must back off again under the NEXT window."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    calls = []
+
+    def _boom(*a, **k):
+        calls.append(1)
+        raise ValueError("planted computed-moves scan failure")
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot", _boom)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+
+    service._reconcile_computed_moves_refresh()
+    assert len(calls) == 1
+
+    clock.advance(Service._COMPUTED_MOVES_BACKOFF_SECONDS[0])
+    service._reconcile_computed_moves_refresh()
+    assert len(calls) == 2  # exactly one retry once the first window elapsed
+
+    service._reconcile_computed_moves_refresh()  # same clock -- backing off again
+    assert len(calls) == 2
+
+
+def test_five_failed_attempts_stop_retrying_that_session(tmp_path, monkeypatch):
+    """After ``_COMPUTED_MOVES_MAX_ATTEMPTS`` (5) failed attempts against the
+    same identity, no further attempt is made for that session even long
+    after every backoff window has elapsed."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    calls = []
+
+    def _boom(*a, **k):
+        calls.append(1)
+        raise ValueError("planted computed-moves scan failure")
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot", _boom)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+
+    for seconds in Service._COMPUTED_MOVES_BACKOFF_SECONDS:
+        service._reconcile_computed_moves_refresh()
+        clock.advance(seconds)
+    assert len(calls) == Service._COMPUTED_MOVES_MAX_ATTEMPTS == 5
+
+    clock.advance(10 * Service._COMPUTED_MOVES_BACKOFF_SECONDS[-1])
+    service._reconcile_computed_moves_refresh()
+    assert len(calls) == 5  # capped -- no 6th attempt for this identity
+
+
+def test_a_new_session_resets_the_attempt_count_even_past_the_cap(tmp_path, monkeypatch):
+    """A new session (not merely a new head, already covered by
+    ``test_reset_on_new_head_resets_attempts``) is also a new identity, and
+    must reset the memo -- even once the PRIOR session had already spent
+    every attempt."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-18", head=head)
+    calls = []
+
+    def _boom(*a, **k):
+        calls.append(1)
+        raise ValueError("planted computed-moves scan failure")
+
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot", _boom)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+
+    for seconds in Service._COMPUTED_MOVES_BACKOFF_SECONDS:
+        service._reconcile_computed_moves_refresh()
+        clock.advance(seconds)
+    assert len(calls) == Service._COMPUTED_MOVES_MAX_ATTEMPTS == 5
+
+    service._reconcile_computed_moves_refresh()  # still capped for "2026-09-18"
+    assert len(calls) == 5
+
+    _mark_refresh_succeeded(conn, clock, store, tmp_path, session="2026-09-19", head=head,
+                            scope_hash="secondsession")
+    service._reconcile_computed_moves_refresh()
+    assert len(calls) == 6

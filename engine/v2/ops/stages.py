@@ -243,9 +243,10 @@ def _calendar_moves_kinds() -> list:
     this stage (Part 4), but it is submitted only by supervisor.Service's own
     tick loop, never by build_legacy_job_requests -- see ARCHITECTURE.md
     "Outputs". forward_calendar_refresh
-    is not registered here: see ARCHITECTURE.md and issue #52 (no attempt-fence
-    check in forward_calendar_store's commit path -- the fence is a
-    prerequisite for registering that kind as a job)."""
+    is not registered here: issue #52's prerequisite (an attempt-fence check
+    in forward_calendar_store's commit path) has landed (#55) -- registering
+    the kind itself (worker dispatch, loader callback, parameter validation)
+    is a separate, pending follow-up; see ARCHITECTURE.md."""
     return [computed_moves_job_kind()]
 
 
