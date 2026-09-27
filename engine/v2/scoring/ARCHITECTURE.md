@@ -347,7 +347,16 @@ function's — see Invariants (read-only, no I/O).
     real data does not carry. Resolving this requires a deliberate,
     separate interface change (e.g. a caller-supplied decision-anchor
     parameter this signature does not accept today) and is left for a
-    future PR, not silently patched over here.
+    future PR, not silently patched over here. **Consequence:** a
+    persisted `panel.parquet` row is anchored at its own event date
+    (`engine/data/features/panel.py:912-918`), so if a caller stages one
+    for an event whose date is after `as_of`, its market-state features
+    (`spy_*`, `ret*`, `or_*`, `pre_iv*`, `dist_*`) are values observed
+    after `as_of`, and this function accepts them. Only a
+    `live_features(as_of=...)` row is causal for an upcoming event. This
+    per-row anchor gap is tracked in
+    [issue #53](https://github.com/yshewchuk/investment-validation/issues/53),
+    not fixed here.
   - **Other input validation.** `calendar_row["spot"]` not coercible to
     `float`, non-finite, or `<= 0.0` → `INVALID_SPOT`, naming the value
     found. `feature_names` a bare `str`/`bytes`, not a `Sequence`,
