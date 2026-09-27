@@ -429,11 +429,10 @@ def test_payoff_member_bad_value_raises_model_not_ready(tmp_path):
 
 def test_recalibration_member_bad_value_raises_model_not_ready(tmp_path):
     _stage_and_promote(tmp_path)
-    junk = json.dumps({
-        "schema_version": "recalibration_map.v1.0",
-        "strategy": "STR-THRU", "alpha": 0.55, "min_pairs": 2,
-        "n": 3, "base_rate": 0.4, "x_thresholds": "abc", "y_thresholds": [0.35, 0.65],
-    }).encode()
+    artifact, artifact_bytes = _recalibration()
+    document = json.loads(artifact_bytes)
+    document["x_thresholds"] = "abc"
+    junk = json.dumps(document, sort_keys=True).encode()
     path = _write_object(_dep_root(tmp_path), junk)
     _write_catalog(tmp_path, rows=[_row("recalibration_map:STR-THRU", [_obj(path, _sha(junk))])])
     with pytest.raises(ModelNotReady) as error:
