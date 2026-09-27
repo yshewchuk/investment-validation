@@ -131,6 +131,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
         module: ${{ fromJSON(needs.plan.outputs.modules) }}
     env:
