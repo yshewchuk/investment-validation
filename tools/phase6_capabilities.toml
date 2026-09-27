@@ -44,14 +44,27 @@ notes = "build_nightly_plan refuses any mode but shadow; the graph's stages stil
 id = "nightly-scheduling"
 area = "nightly"
 capability = "Native shadow nightly scheduling: ORATS-finality-gated trigger, retry window, missed-deadline handling"
-old = ["cron:dashboard/README.md legacy nightly line (unchanged)"]
-new = ["cli:engine/v2/ops/nightly_trigger.py", "systemd:ops/systemd/native-nightly-trigger.timer"]
+old = ["doc:dashboard/README.md"]
+new = ["cli:engine/v2/ops/nightly_trigger.py"]
 producer = "systemd timer -> nightly_trigger.run_trigger -> ops plan/submit nightly (shadow)"
 identity = "as_of date; state file reports/phase6/nightly_trigger/<as_of>.json"
 tests = ["tests/test_v2_ops_nightly_trigger.py"]
 disposition = "native"
 owner = "P6-6"
 notes = "Legacy nightly's own cron schedule is untouched; this only schedules the parallel shadow-mode qualification run."
+
+[[row]]
+id = "nightly-native-parity"
+area = "nightly"
+capability = "Native-vs-legacy parity comparison as a shadow nightly DAG stage (test/rehearsal tooling, no production job kind)"
+old = []
+new = ["nightly:v2 native_parity", "py:engine/v2/ops/native_parity_report.py::native_parity_handler"]
+producer = "run_shadow_nightly walks the full GRAPH including native_parity; NO_JOB_STAGES excludes it from production job submission (no legacy_native_parity job kind exists)"
+identity = "<private>/native_parity_report.json"
+tests = ["tests/test_v2_ops_native_shadow_render.py"]
+disposition = "native"
+owner = "P6-6"
+notes = "Not in _DAG_STAGES/production submission; only run_shadow_nightly (exercised by tests) and the include_prerequisites=True planning path reach it. See engine/v2/ops/ARCHITECTURE.md's native_parity discussion."
 
 [[row]]
 id = "nightly-refresh"
@@ -757,6 +770,10 @@ reason = "Supervisor merge/gate/push wrapper (hygiene + bounded tests before pus
 [[excluded]]
 ids = ["cli:tools/phase4_targeted_replay.py", "cli:tools/phase5_calibration_keys.py", "cli:tools/phase5_inventory.py", "cli:tools/phase5_prepare_release.py", "cli:tools/prepare_phase4_tier4_caches.py", "cli:tools/phase6_inventory.py"]
 reason = "Phase 4/5/6 migration preparation, inventory and targeted replay diagnostic tooling; evidence producers, not production consumers."
+
+[[excluded]]
+ids = ["cli:tools/verify_incremental_rebuild.py"]
+reason = "Incremental-vs-full rebuild byte-identity proof tool (compares full vs cold/warm-cache incremental rebuilds); evidence producer, not a production consumer."
 
 [[excluded]]
 ids = ["cli:tools/bounded_run.py"]
