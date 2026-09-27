@@ -275,6 +275,19 @@ def _validated_expected_head_generation(value) -> int:
     return value
 
 
+def _validated_expected_head_snapshot_id(value) -> str | None:
+    """Optional; when present, the same bounded nonempty string shape as
+    ``parent_snapshot_id`` (1..128 chars) -- refused before any I/O, never
+    read straight into ``_commit_claims``/``generic_incremental`` unchecked."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise fail("INVALID_REQUEST",
+                   f"expected_head_snapshot_id must be a bounded nonempty str or None, "
+                   f"got {value!r}")
+    return value
+
+
 def _validated_catalog_path(catalog_path) -> str:
     """``catalog_path`` must already exist as a file -- ``sqlite3.connect``
     is never allowed to silently create one that does not."""
@@ -746,6 +759,7 @@ def run_forward_calendar_refresh(*, catalog_path: str, objects_root: str,
     horizon_days = _validated_horizon_days(horizon_days)
     scope = _validated_scope(scope)
     expected_head_generation = _validated_expected_head_generation(expected_head_generation)
+    expected_head_snapshot_id = _validated_expected_head_snapshot_id(expected_head_snapshot_id)
     if nasdaq_fetcher is None or earnings_fetcher is None:
         raise fail("RESOURCE_UNAVAILABLE", "no forward_calendar fetchers are configured")
     return _execute_forward_calendar_refresh(

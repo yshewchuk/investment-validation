@@ -56,33 +56,50 @@ alongside the nightly stage kinds, not in
 `board_requests(as_of, horizon_days, tickers, events_table)`
 (`native_board_universe.py`) — a pure key `(ticker, strategy, event_date,
 session)` and the function that enumerates one per event × native-covered
-strategy, plus one `DYN-SV` meta-request per event.
+strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
+`computed_moves_job_kind` (registered in `stages.py::_core_kinds`, the same
+ordinary-job-kind pattern as `training`/`promote_job_kind` above, not a
+coordinator effect), `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
+`calendar_moves_job_spec`, and `run_computed_moves_worker` (dispatched by
+`worker.py` for worker `"computed_moves_refresh"`) — see "Primary contracts"
+below for what this adapts and "Outputs" for what is still missing before
+this job kind has a real caller. `calendar_moves_jobs.py` registers only
+`computed_moves_refresh`: `forward_calendar_refresh` has no `JobKind` yet —
+its store's commit path has no attempt-fence check (issue #52), so
+registering it as a supervised job (leases, retries, cancellation) would make
+that gap newly reachable; the fence is now a prerequisite for registering
+that kind.
 
 A small number of natively-fetched data stores live directly in this
 package rather than delegating computation to another v2 layer — like
 `price-history capture` above, `forward_calendar_store.py` (spec s4c) is
-one of these. It does NOT claim `RefreshCallback` compatibility: `main`'s
-`RefreshParameters` (`incremental_data.py`) has no `as_of`/`tickers` field,
-only Part 3's job-kind-specific parameters dataclass will, so a function
-shaped `(parameters, root)` cannot actually run on `main` today.
-`run_forward_calendar_refresh` is instead a standalone runner with an
-explicit, fully keyword-only signature (`catalog_path`, `objects_root`,
-`parent_snapshot_id`, `refresh_plan_hash`, `as_of`, `tickers`,
-`horizon_days`, `scope`, `expected_head_generation`,
+one of these. It does NOT claim `RefreshCallback` compatibility itself:
+`main`'s `RefreshParameters` (`incremental_data.py`) has no
+`as_of`/`tickers` field, so a function shaped `(parameters, root)` could
+never read them from it. `run_forward_calendar_refresh` is instead a
+standalone runner with an explicit, fully keyword-only signature
+(`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
+`as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
 `expected_head_snapshot_id`, `nasdaq_fetcher`, `earnings_fetcher`) that
-validates every one of its nine arguments before touching the catalog or a
-provider, including `scope` (must be `"shadow"` or `"smoke"`) and
-`expected_head_generation` (non-negative); `tickers=()` is valid and means
-the whole market (see "Failure semantics" below); Part 3 wires it into a
-`RefreshCallback`-shaped
-adapter that reads the job's staged parameters/input document and calls
-this runner with explicit keyword arguments — that adaptation, and this
-runner's own dispatch into `nightly.py`'s `GRAPH`/job kinds, does not exist
-yet (spec s4c Parts 3-4). Its pure helpers (`horizon_dates`, `date_units`,
-`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
-`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
-are unit-testable without a catalog or a network. Today this runner has no
-production caller, only its own test module.
+validates every one of its ten arguments before touching the catalog or a
+provider, including `scope` (must be `"shadow"` or `"smoke"`),
+`expected_head_generation` (non-negative) and `expected_head_snapshot_id`
+(Part 3: `None` or a bounded 1..128-char string, matching
+`parent_snapshot_id`'s own shape — the old code read it straight into
+`_commit_claims`/`generic_incremental.commit_generic_table_candidate`
+unchecked); `tickers=()` is valid and means the whole market (see "Failure
+semantics" below). This runner has no job-layer bridge yet: an earlier draft
+of this PR (Part 3) added one (`run_forward_calendar_worker`, a
+`calendar_moves_jobs.py` closure decoding a job's `CalendarMovesParameters`
+and wrapping this runner in a `RefreshCallback`-shaped adapter), but it was
+pulled before merge — issue #52 found that registering the kind makes an
+existing gap (no attempt-fence check in this runner's own commit path)
+newly reachable as a supervised job, and the fence must land first. Its pure
+helpers (`horizon_dates`, `date_units`, `ticker_units`,
+`plan_forward_calendar`, `resolve_session_claims`, `nasdaq_rows_from_payload`,
+`nasdaq_claims_from_rows`, `pending_tickers`) are unit-testable without a
+catalog or a network. Today this runner has no production caller, only its
+own test module.
 
 ## Inputs
 
@@ -94,10 +111,16 @@ production caller, only its own test module.
   and other bound inputs.
 - Legacy filesystem reads (px CSV tree, yfinance fetch cache) through the
   declared adapter, for `price-history capture` and `price-refresh`.
-- `computed_moves_store.py`'s `run_computed_moves_refresh` (a standalone
-  runner, not itself a `RefreshCallback` — a future nightly-wiring change
-  adapts it to one with a per-dispatch closure; see "Not yet wired" below):
-  reads `earnings_events`/`daily_market` off the pinned parent snapshot
+- `computed_moves_store.py`'s `run_computed_moves_refresh` (`parameters,
+  root, *, as_of, fetcher=None`; not itself a bare `RefreshCallback` since
+  `as_of` cannot be pre-bound at module-import time — it varies per
+  dispatch. `calendar_moves_jobs.run_computed_moves_worker` (Part 3) adapts
+  it: it decodes the job's `CalendarMovesParameters`, then calls
+  `incremental_data._load_computed_moves_refresh_callback(params.as_of)` to
+  get a closure with `as_of` and the injected `yfinance_history_fetcher`
+  pre-bound — THAT closure is the `(parameters, root)`-shaped
+  `RefreshCallback`; see "Outputs" below for what still has no nightly
+  caller): reads `earnings_events`/`daily_market` off the pinned parent snapshot
   through `Repository`, exactly once each per run (`_scan_once`), and calls
   an injected yfinance history fetcher (never `legacy_adapter.new_fetcher`)
   per target ticker. Target tickers are the ORATS-confirmed-session rule
@@ -111,9 +134,11 @@ production caller, only its own test module.
   (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
   `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
   `expected_head_snapshot_id`) — there is no staged input-document file for
-  this runner (see "Primary contracts" above: it is not `RefreshCallback`-
-  shaped, so it reads nothing from a job's private working directory); and
-  the two injected network edges, `providers.nasdaq_calendar.
+  this runner: it has no `JobKind` (see "Primary contracts" above and issue
+  #52), so there is no admitted job to stage one from, and
+  `refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES` has no
+  `"forward_calendar_refresh"` entry; and the two injected network edges,
+  `providers.nasdaq_calendar.
   nasdaq_calendar_fetcher` (one call per discovery date) and
   `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
   still missing a session after the Nasdaq pass).
@@ -200,16 +225,61 @@ production caller, only its own test module.
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
 
-**`computed_moves_store.py` is not yet wired to production.** No CLI
-subcommand, no `nightly.py` `GRAPH`/`OPTIONAL` entry, no `supervisor` job
-kind calls `run_computed_moves_refresh` yet. It is also not itself a bare
+**`computed_moves_refresh` is registered as an ordinary job kind (Part 3),
+but still has no nightly caller; `forward_calendar_refresh` has no `JobKind`
+at all.** `stages.py::_core_kinds` now includes
+`calendar_moves_jobs.computed_moves_job_kind()`, and `worker.py::dispatch`
+routes worker `"computed_moves_refresh"` to
+`calendar_moves_jobs.run_computed_moves_worker`. Neither `nightly.py`'s
+`GRAPH`/`OPTIONAL` nor any coordinator effect calls this job kind yet — that
+DAG wiring is a later change (spec s4c Part 4), which this doc's "Diagrams"
+section would then need to reflect; today it is reachable only through the
+general job-submission pipeline (`ops submit` with a raw `JobSpec`), same as
+`training`/`models_promote` above. `forward_calendar_refresh` was registered
+in an earlier draft of this PR too, but that registration (and its
+`run_forward_calendar_worker` job-layer adapter) was pulled before merge:
+see "Primary contracts" above and issue #52 (no attempt-fence check in
+`forward_calendar_store`'s commit path — a gap the job registration would
+have made newly reachable as a supervised, leased, retried, cancellable
+attempt). `run_computed_moves_refresh` is also still not itself a bare
 `engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
 `parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
 varies per job dispatch (a session date) so it cannot be pre-bound the way
-the fetcher is — it is an explicit, validated, required keyword instead. A
-later change adds the nightly stage, the per-dispatch closure that DOES
-satisfy the protocol, and the job-kind dispatch this doc's "Diagrams" section
-would then need to reflect. Every field of the staged input document, and
+the fetcher is — it is an explicit, validated, required keyword instead.
+`run_computed_moves_worker` bridges this: it decodes the job's own
+`CalendarMovesParameters` (which DOES carry `as_of`) and calls
+`incremental_data._load_computed_moves_refresh_callback(as_of)` to build the
+closure that actually satisfies the protocol, then validates the closure's
+`RefreshCallbackResult` the same way `incremental_data.run_refresh_worker`
+does for `incremental_refresh` (`validate_refresh_result_document`,
+`_validate_refresh_binding`, `_validate_refresh_status` — reused directly,
+not reimplemented — plus `calendar_moves_jobs._validate_calendar_moves_coverage`,
+a set-based variant of `incremental_data._validate_refresh_coverage` written
+for this job kind specifically: `computed_moves_store` never promises
+`completed_ids` in the caller's `expected_ids` order, so the shared
+ordered-tuple comparison would fail an already-committed, fully-covered
+result on order alone) before writing `computed_moves_refresh_result.json`
+into the attempt's staging root itself: unlike `run_daily_market_refresh`,
+`run_computed_moves_refresh` writes no result artifact of its own, so the
+ops-layer worker writes it after validating, rather than writing it first
+and reading it back for an integrity cross-check the way
+`incremental_data._validate_callback_result` does. **The coverage
+denominator (Round 3 fix, Opus finding 2):** `completed_ids` on a
+`"complete"`/`"noop"` result is `tuple(sorted(targets))` — the FULL
+whole-market universe `target_tickers_from_snapshot` derives for the pinned
+`(parent_snapshot_id, as_of, all_scoreable, since)` — never only the
+tickers that happened to get a written fragment. A target ticker this run
+legitimately finds has no committable rows (`_capture_targets`'s "too_few"
+outcome — a real business finding, not a failure) still counts as covered:
+the run genuinely finished considering it. A caller building `expected_ids`
+before submission must derive it the same way, from
+`target_tickers_from_snapshot` against the same pinned inputs — there is no
+`tickers` field on `CalendarMovesParameters` to disagree with (removed, see
+"Primary contracts" above and "Failure semantics" below): `computed_moves_refresh`
+has never read one, unlike the now-removed `forward_calendar_refresh` job
+wrapper, whose own now-moot `tickers=()` "whole market" denominator this
+fix's design deliberately does not reuse.
+Every field of the staged input document, and
 `parameters`' own `parent_snapshot_id`/`refresh_plan_hash`, are validated up
 front (`_validate_input_document`, split into `_validate_document_identity`/
 `_validate_document_head`/`_validate_document_attempt`/
@@ -221,9 +291,10 @@ sqlite connection even opens: unknown document keys; wrong types;
 raises instead of silently creating an empty database); `objects_root` not an
 existing directory; `parent_snapshot_id`/`refresh_plan_hash` not matching the
 same bounded-string/sha256-hex shapes `incremental_data.RefreshParameters`
-already enforces for these fields (mirrored, not imported — sibling PR #40's
-`forward_calendar_store.py` carries the same mirrored copies, since the two
-PRs are unmerged); `expected_head_snapshot_id`/`fence` failing their own
+already enforces for these fields (mirrored, not imported — `forward_calendar_store.py`
+(#40, merged) carries the same mirrored copies: the two stores were built as
+independent, parallel PRs, so neither imports the other's private checks);
+`expected_head_snapshot_id`/`fence` failing their own
 format checks (a bounded string; an int >= 1); and any document value that
 disagrees with the job's own `RefreshParameters`
 (`catalog_path`/`objects_root`/`scope`/`expected_head_generation`) — all
@@ -461,6 +532,54 @@ network, or database access.
   `except ValueError`, which now wraps only the one call
   (`native_trading_calendar`) whose `ValueError` that fallback is
   documented to catch, not the calendar-scan/arithmetic around it).
+  `expected_head_snapshot_id` (Part 3) must be `None` or a bounded
+  1..128-char string, the same shape `parent_snapshot_id` already has —
+  previously unchecked, so a malformed value reached
+  `generic_incremental.commit_generic_table_candidate` unexamined instead of
+  being refused before the catalog connection even opens
+  (`tests/test_v2_ops_forward_calendar_store.py::test_expected_head_snapshot_id_empty_is_refused_before_any_io`/
+  `::test_expected_head_snapshot_id_too_long_is_refused_before_any_io`).
+- **`calendar_moves_jobs.py`'s own job-layer validation (Part 3, hardened
+  Round 3 — Opus finding 1)** — `CalendarMovesParameters` is a strict
+  dataclass (`engine.v2.foundation.from_document`): an unknown field, a
+  wrong type, or `bool` where an `int` is declared (so `bool("false")`-style
+  coercion bugs cannot occur — see root doc's typed-document contract) is
+  refused as `DocumentError` before `_decode` ever returns, which
+  `calendar_moves_jobs._decode` maps to `INVALID_REQUEST` (mirroring
+  `incremental_data.run_refresh_worker`'s own `RefreshParameters` decode).
+  `calendar_moves_parameter_problems` (the `JobKind.validate` callback, run
+  at submission time before a job is admitted) now reuses
+  `incremental_data`'s own submit-time checks directly, through four shared
+  helpers (`_expected_ids_problems`, `_plan_binding_problems`,
+  `_bounded_nonempty_problems`, `_head_binding_problems` — refactored out of
+  `incremental_data.refresh_parameter_problems`'s own pieces, with no
+  behaviour change for `incremental_refresh`) rather than a hand-copied,
+  narrower check: `expected_ids` (1..4096 entries, unique, bounded); the
+  plan binding (`parent_snapshot_id`/`refresh_plan_hash`/`provider_calls`)
+  is now ALWAYS validated, never only when a binding field happens to be
+  supplied — a round-2 job with no binding at all used to be admitted only
+  to fail inside the worker; `catalog_path`/`objects_root`/`scope` bounded
+  nonempty; `expected_head_generation`/`expected_head_snapshot_id` shape;
+  provider-budget/call-count consistency, reading `job.provider_budget_ref`
+  (previously accepted but never read); and `COMPUTED_MOVES_RESULT_PATH` may
+  never be bound as this job's own input (the worker writes it itself; the
+  shared helper takes the result path as a parameter precisely so each
+  refresh-family kind checks against its OWN output file, not
+  `incremental_refresh`'s). This really is now "the same layering"
+  `incremental_data.RefreshParameters`/`refresh_parameter_problems` has
+  relative to `run_refresh_worker` — a previous draft of this doc claimed
+  this while the code still deferred `catalog_path`/`objects_root`/`scope`
+  entirely to the stores, which was false: `refresh_parameter_problems`
+  has always validated those fields at submission time too (`_refresh_staging_identity_problems`).
+  `computed_moves_store._validate_input_document`'s own revalidation of the
+  same fields (below) is a second, defense-in-depth layer, not the only
+  place they are checked — again, the same relationship
+  `run_refresh_worker` has to its own sibling check. `tickers`/`horizon_days`/
+  `table_name` are no longer fields on `CalendarMovesParameters` at all
+  (Round 3): the first two were read only by the now-removed
+  `forward_calendar_refresh` job wrapper, and `table_name` was never read by
+  either store — there is nothing left to validate-or-refuse for them, so
+  they were deleted rather than defended.
 - **Training/promote refusal** — `run_training_worker` maps every refusal
   the underlying tool can raise to a typed `OpsError` rather than an
   untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,

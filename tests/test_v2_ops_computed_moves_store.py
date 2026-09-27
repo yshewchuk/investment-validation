@@ -223,6 +223,39 @@ def test_run_computed_moves_refresh_captures_one_complete_unit(tmp_path, monkeyp
     assert row["outcome"] == "added"
 
 
+def test_run_computed_moves_refresh_completed_ids_cover_every_target_even_when_one_has_no_committable_rows(
+        tmp_path, monkeypatch):
+    """Round 3 fix (Opus finding 2): completed_ids must report the full
+    whole-market universe target_tickers_from_snapshot derives, not only the
+    tickers that happened to get a written fragment. BBBB has no earnings
+    events committed at all, so _capture_targets logs its outcome as
+    "too_few" and writes it no fragment -- a legitimate business finding, not
+    a failure -- yet it is still part of the run's coverage."""
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA", "BBBB"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = [_event_row("AAAA", d) for d in _EVENT_DAYS]  # BBBB gets none
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    fetcher = _CountingFetcher(_closes_csv())
+    parameters = _parameters(head, expected_ids=("AAAA", "BBBB"),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)
+
+    assert result.status == "complete"
+    assert result.completed_ids == ("AAAA", "BBBB")
+    assert fetcher.calls == ["AAAA", "BBBB"]
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("BBBB",)).fetchone()
+    assert row["outcome"] == "too_few"
+
+
 def test_run_computed_moves_refresh_cached_rerun_refetches_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
                         lambda *a, **k: (["AAAA"], {}))

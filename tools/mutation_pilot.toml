@@ -861,6 +861,7 @@ mutate = [
     "engine/v2/ops/training.py",
     "engine/v2/ops/unit_receipts.py",
     "engine/v2/ops/computed_moves_store.py",
+    "engine/v2/ops/calendar_moves_jobs.py",
 ]
 tests = [
     "tests/test_v2_data_incremental_persistence.py",
@@ -877,6 +878,7 @@ tests = [
     "tests/test_v2_ops_incremental_registration.py",
     "tests/test_v2_ops_ledger_history_import.py",
     "tests/test_v2_ops_unit_receipts.py",
+    "tests/test_v2_ops_calendar_moves_jobs.py",
     "tests/test_v2_ops_legacy_defects.py",
     "tests/test_v2_ops_legacy_workflows.py",
     # tests/test_v2_ops_nightly_trigger.py (phase 6 slice 12): same untracked
