@@ -171,12 +171,16 @@ def _refused_fetcher(_ticker):
     return b"not-a-real-response", "refused", {}, None
 
 
-def _parameters(head, *, expected_ids, catalog_path, objects_root) -> RefreshParameters:
-    return RefreshParameters(
+def _parameters(head, *, expected_ids, catalog_path, objects_root,
+                overrides=None) -> RefreshParameters:
+    kwargs = dict(
         expected_ids=expected_ids, parent_snapshot_id=head["snapshot_id"],
         refresh_plan_hash="sha256:" + "d" * 64, provider_calls=1,
         catalog_path=str(catalog_path), objects_root=str(objects_root), scope="shadow",
         expected_head_generation=head["generation"], expected_head_snapshot_id=head["snapshot_id"])
+    if overrides:
+        kwargs.update(overrides)
+    return RefreshParameters(**kwargs)
 
 
 def _write_input(root, *, catalog_path, objects_root, head, as_of=_AS_OF, overrides=None):
@@ -528,3 +532,158 @@ def test_run_computed_moves_refresh_rerun_at_a_different_clock_time_is_a_true_no
     fragment2 = _fragment(new_head["snapshot_id"])
     assert fragment1.fragment_id == fragment2.fragment_id
     assert fragment1.object_ref.content_hash == fragment2.object_ref.content_hash
+
+
+# --------------------------------------------------------------------------
+# round 5 (Opus re-gate BLOCK on 05fd8f7): catalog_path/objects_root
+# existence, parameters' own parent_snapshot_id/refresh_plan_hash, and
+# expected_head_snapshot_id/fence format -- all validated before the sqlite
+# connection opens or any fetch/receipt happens. No pre-fetch head check: a
+# stale head is still only caught at commit time as SNAPSHOT_CONFLICT.
+# --------------------------------------------------------------------------
+
+
+def _connect_spy(monkeypatch):
+    """Proves ``sqlite3.connect`` is never reached by a before-any-I/O
+    refusal: a real connect, wrapped to also record every call."""
+    calls = []
+    real_connect = computed_moves_store.sqlite3.connect
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(computed_moves_store.sqlite3, "connect", spy)
+    return calls
+
+
+def test_run_computed_moves_refresh_refuses_a_catalog_path_that_is_not_a_file(
+        tmp_path, monkeypatch):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    missing_catalog = tmp_path / "missing.sqlite"
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=missing_catalog, objects_root=tmp_path, head=head,
+                overrides={"catalog_path": str(missing_catalog)})
+    parameters = _parameters(head, expected_ids=("CCCC",), catalog_path=missing_catalog,
+                             objects_root=tmp_path)
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
+def test_run_computed_moves_refresh_refuses_an_objects_root_that_is_not_a_directory(
+        tmp_path, monkeypatch):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    not_a_dir = tmp_path / "ops.sqlite"  # a real file, not a directory
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"objects_root": str(not_a_dir)})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
+def test_run_computed_moves_refresh_refuses_an_objects_root_disagreeing_with_parameters(
+        tmp_path, monkeypatch):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    other_dir = tmp_path / "other_objects"
+    other_dir.mkdir()
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"objects_root": str(other_dir)})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
+@pytest.mark.parametrize("bad_head", ["", "x" * 129, 7, True])
+def test_run_computed_moves_refresh_refuses_a_bad_expected_head_snapshot_id(
+        tmp_path, monkeypatch, bad_head):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"expected_head_snapshot_id": bad_head})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
+@pytest.mark.parametrize("bad_fence", [True, 0, -1, 1.5, "1"])
+def test_run_computed_moves_refresh_refuses_a_bad_fence(tmp_path, monkeypatch, bad_fence):
+    conn, head, parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head,
+                overrides={"fence": bad_fence})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
+@pytest.mark.parametrize("bad_parent_snapshot_id", ["", "x" * 129, 7, None])
+def test_run_computed_moves_refresh_refuses_a_bad_parent_snapshot_id(
+        tmp_path, monkeypatch, bad_parent_snapshot_id):
+    """``parameters.parent_snapshot_id`` is validated before ANY I/O -- even
+    though a REAL, otherwise-valid input document exists here (proving the
+    check fires before ``sqlite3.connect``, not because the document was
+    missing: on 05fd8f7, this same setup let a bad parent_snapshot_id reach
+    ``repository.resolve_full`` and raise an unrelated ``DataError``
+    (``SNAPSHOT_NOT_FOUND``), not this typed ``OpsError``)."""
+    conn, head, _base_parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(
+        head, expected_ids=("CCCC",), catalog_path=tmp_path / "ops.sqlite",
+        objects_root=tmp_path, overrides={"parent_snapshot_id": bad_parent_snapshot_id})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []
+
+
+@pytest.mark.parametrize("bad_refresh_plan_hash", [
+    "", "not-a-hash", "sha256:" + "g" * 64, "sha256:" + "d" * 63, 7,
+])
+def test_run_computed_moves_refresh_refuses_a_bad_refresh_plan_hash(
+        tmp_path, monkeypatch, bad_refresh_plan_hash):
+    """``parameters.refresh_plan_hash`` is validated before ANY I/O -- even
+    though a REAL, otherwise-valid input document exists here (proving the
+    check fires before ``sqlite3.connect``, not because the document was
+    missing: on 05fd8f7, this same setup did not raise at all -- the run
+    completed with ``status="noop"`` and the garbage hash baked straight
+    into the ``RefreshCallbackResult``)."""
+    conn, head, _base_parameters, fetcher = _refusal_fixture(tmp_path)
+    connect_calls = _connect_spy(monkeypatch)
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(
+        head, expected_ids=("CCCC",), catalog_path=tmp_path / "ops.sqlite",
+        objects_root=tmp_path, overrides={"refresh_plan_hash": bad_refresh_plan_hash})
+
+    with pytest.raises(OpsError) as err:
+        computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=fetcher)
+    _assert_refused_before_any_io(conn, fetcher, err=err)
+    assert connect_calls == []

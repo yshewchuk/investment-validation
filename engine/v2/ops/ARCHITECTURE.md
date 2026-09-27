@@ -113,17 +113,34 @@ varies per job dispatch (a session date) so it cannot be pre-bound the way
 the fetcher is — it is an explicit, validated, required keyword instead. A
 later change adds the nightly stage, the per-dispatch closure that DOES
 satisfy the protocol, and the job-kind dispatch this doc's "Diagrams" section
-would then need to reflect. Every field of the staged input document is
-validated up front (`_validate_input_document`, split into
-`_validate_document_identity`/`_validate_document_head`/
-`_validate_document_selection`/`_validate_document_matches_job` to stay under
-the complexity budget) before any sqlite connect, snapshot resolve, fetch, or
-receipt write: unknown keys, wrong types, and any value that disagrees with
-the job's own `RefreshParameters` (`catalog_path`/`scope`/
-`expected_head_generation`) are all refused, never coerced. `scope` is
-checked against `refresh_job_kind().namespaces` — the sibling
-`incremental_refresh` job kind's own `{"shadow", "smoke"}` — since this store
-has no `JobKind` of its own yet to carry that allowlist.
+would then need to reflect. Every field of the staged input document, and
+`parameters`' own `parent_snapshot_id`/`refresh_plan_hash`, are validated up
+front (`_validate_input_document`, split into `_validate_document_identity`/
+`_validate_document_head`/`_validate_document_attempt`/
+`_validate_document_selection`/`_validate_document_matches_job`, plus
+`_validate_job_identity`, to stay under the complexity budget) before the
+sqlite connection even opens: unknown document keys; wrong types;
+`catalog_path` not already an existing file (the connection then opens on a
+`mode=rw` URI too, so a TOCTOU removal between the check and the connect
+raises instead of silently creating an empty database); `objects_root` not an
+existing directory; `parent_snapshot_id`/`refresh_plan_hash` not matching the
+same bounded-string/sha256-hex shapes `incremental_data.RefreshParameters`
+already enforces for these fields (mirrored, not imported — sibling PR #40's
+`forward_calendar_store.py` carries the same mirrored copies, since the two
+PRs are unmerged); `expected_head_snapshot_id`/`fence` failing their own
+format checks (a bounded string; an int >= 1); and any document value that
+disagrees with the job's own `RefreshParameters`
+(`catalog_path`/`objects_root`/`scope`/`expected_head_generation`) — all
+refused, never coerced. `scope` is checked against
+`refresh_job_kind().namespaces` — the sibling `incremental_refresh` job
+kind's own `{"shadow", "smoke"}` — since this store has no `JobKind` of its
+own yet to carry that allowlist. A STALE `expected_head_snapshot_id`/
+`expected_head_generation` (one that no longer matches the catalog's actual
+head) is deliberately NOT checked before fetching: it is only caught at
+commit time, inside `_commit_generation`/`data_catalog.commit_snapshot`, as
+`SNAPSHOT_CONFLICT` — an optimistic design, matching #40. A stale head costs
+only the fetches this run already made; their complete receipts are staged
+durably and reused as cache on the next attempt, not repeated.
 `tests/test_v2_ops_computed_moves_store.py` covers `_capture_id_for`'s
 stable, non-wall-clock, non-colliding capture identity, `_fence_check_for`'s
 real-`verify_fence` signature and its still-active production lease-expiry

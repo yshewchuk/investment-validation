@@ -468,6 +468,16 @@ def _validate_document_identity(document: dict) -> None:
         if not isinstance(value, str) or not value:
             raise fail("INVALID_REQUEST",
                        f"computed moves refresh input document needs a non-empty string {name}")
+    if not Path(document["catalog_path"]).is_file():
+        # ``sqlite3.connect`` is never allowed to silently create a fresh,
+        # empty database at a path that does not already hold the real
+        # catalog -- the same rule sibling PR #40 applies in
+        # forward_calendar_store.py.
+        raise fail("INVALID_REQUEST",
+                   f"catalog_path does not exist as a file: {document['catalog_path']!r}")
+    if not Path(document["objects_root"]).is_dir():
+        raise fail("INVALID_REQUEST",
+                   f"objects_root does not exist as a directory: {document['objects_root']!r}")
     if document["scope"] not in _ALLOWED_SCOPES:
         raise fail("INVALID_REQUEST",
                    "computed moves refresh scope is not an allowed namespace",
@@ -475,19 +485,29 @@ def _validate_document_identity(document: dict) -> None:
 
 
 def _validate_document_head(document: dict) -> None:
-    """The commit-target fields: generation, the optional expected head, and
-    the optional staged attempt id."""
+    """The commit-target fields: generation and the optional expected head."""
     generation = document.get("expected_head_generation")
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
         raise fail("INVALID_REQUEST", "computed moves refresh input document needs a "
                                        "non-negative integer expected_head_generation")
     head = document.get("expected_head_snapshot_id")
-    if head is not None and (not isinstance(head, str) or not head):
+    if head is not None and (not isinstance(head, str) or not head or len(head) > 128):
         raise fail("INVALID_REQUEST",
-                   "expected_head_snapshot_id must be a non-empty string when present")
+                   "expected_head_snapshot_id must be a bounded non-empty string when present")
+
+
+def _validate_document_attempt(document: dict) -> None:
+    """The optional staged-job identity fields: attempt id and fence. Never
+    checked against the catalog here -- a head mismatch is caught at commit
+    time (``SNAPSHOT_CONFLICT``), after any fetches; this is format-only,
+    before any I/O."""
     attempt_id = document.get("attempt_id")
     if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id):
         raise fail("INVALID_REQUEST", "attempt_id must be a non-empty string when present")
+    fence = document.get("fence")
+    if fence is not None and (isinstance(fence, bool) or not isinstance(fence, int)
+                              or fence < 1):
+        raise fail("INVALID_REQUEST", "fence must be an int >= 1 when present")
 
 
 def _validate_document_selection(document: dict) -> None:
@@ -519,6 +539,9 @@ def _validate_document_matches_job(document: dict, parameters, *, as_of: str) ->
     if document["catalog_path"] != parameters.catalog_path:
         raise fail("INVALID_REQUEST", "computed moves refresh input document's catalog_path "
                                        "disagrees with the job's RefreshParameters")
+    if document["objects_root"] != parameters.objects_root:
+        raise fail("INVALID_REQUEST", "computed moves refresh input document's objects_root "
+                                       "disagrees with the job's RefreshParameters")
     if document["scope"] != parameters.scope:
         raise fail("INVALID_REQUEST", "computed moves refresh input document's scope disagrees "
                                        "with the job's RefreshParameters")
@@ -538,27 +561,58 @@ def _validate_input_document(document: dict, parameters, *, as_of: str) -> None:
     """
     _validate_document_identity(document)
     _validate_document_head(document)
+    _validate_document_attempt(document)
     _validate_document_selection(document)
     _validate_document_matches_job(document, parameters, as_of=as_of)
+
+
+def _validated_parent_snapshot_id(parent_snapshot_id) -> str:
+    """Matches ``incremental_data``'s own ``RefreshParameters`` rule for this
+    same field: a bounded nonempty string. Mirrors sibling PR #40's
+    ``_validated_parent_snapshot_id`` (not imported: unmerged sibling)."""
+    if (not isinstance(parent_snapshot_id, str) or not parent_snapshot_id
+            or len(parent_snapshot_id) > 128):
+        raise fail("INVALID_REQUEST",
+                   f"parent_snapshot_id must be a bounded nonempty str, "
+                   f"got {parent_snapshot_id!r}")
+    return parent_snapshot_id
+
+
+def _validated_refresh_plan_hash(refresh_plan_hash) -> str:
+    """Matches ``incremental_data._is_hash``'s own sha256-hex check for this
+    same field (mirrored rather than imported: that name is private, and #40's
+    copy of it is an unmerged sibling)."""
+    valid = (isinstance(refresh_plan_hash, str)
+             and refresh_plan_hash.startswith("sha256:") and len(refresh_plan_hash) == 71
+             and all(char in "0123456789abcdef" for char in refresh_plan_hash[7:]))
+    if not valid:
+        raise fail("INVALID_REQUEST",
+                   f"refresh_plan_hash must be a sha256 content hash, "
+                   f"got {refresh_plan_hash!r}")
+    return refresh_plan_hash
+
+
+def _validate_job_identity(parameters) -> None:
+    """``parameters``' own identity fields, validated before any I/O: this
+    runner is called directly, not through the job-submission pipeline that
+    would otherwise have validated them via ``refresh_parameter_problems``."""
+    _validated_parent_snapshot_id(parameters.parent_snapshot_id)
+    _validated_refresh_plan_hash(parameters.refresh_plan_hash)
 
 
 def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> RefreshCallbackResult:
     """This job's own callback (spec s4b Change 3), called directly -- NOT
     bound to ``RefreshCallback`` via a bare ``functools.partial``: ``main``'s
-    ``RefreshParameters`` has no ``as_of`` field, and ``as_of`` varies per
-    dispatch, so it is an explicit, validated, required keyword instead; a
-    later nightly-wiring change builds the per-dispatch closure that
-    satisfies the protocol.
-
-    Validates the staged input document up front (``_validate_input_document``
-    refuses any unknown or mismatched field before any I/O), selects targets
-    from the pinned parent snapshot with ONE scan per source table, and
-    commits one new snapshot alongside a fresh ``computed_moves`` version. A
-    cached unit is never re-fetched, and a same-``as_of`` rerun now genuinely
-    no-ops: every committed row's ``computed_at`` derives from ``as_of``, not
-    the wall clock, so identical inputs commit identical bytes.
+    ``RefreshParameters`` has no ``as_of`` field, so ``as_of`` is an explicit,
+    validated, required keyword. Validates the staged input document up front,
+    selects targets from the pinned parent snapshot with ONE scan per source
+    table, and commits one new snapshot. A cached unit is never re-fetched,
+    and a same-``as_of`` rerun genuinely no-ops: every committed row's
+    ``computed_at`` derives from ``as_of``, so identical inputs commit
+    identical bytes.
     """
     _as_of_day(as_of)  # validated before any I/O; raises INVALID_REQUEST on a bad value
+    _validate_job_identity(parameters)
     root = Path(root)
     document = _input_document(root)
     if document is None:
@@ -567,7 +621,10 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
     _validate_input_document(document, parameters, as_of=as_of)
     if fetcher is None:
         raise fail("RESOURCE_UNAVAILABLE", "no computed_moves history fetcher is configured")
-    conn = sqlite3.connect(document["catalog_path"])
+    # mode=rw: never let sqlite3 silently create a fresh, empty database if
+    # the file was removed between _validate_document_identity's is_file()
+    # check and this connect (TOCTOU) -- it raises instead.
+    conn = sqlite3.connect(f"file:{document['catalog_path']}?mode=rw", uri=True)
     conn.row_factory = sqlite3.Row
     clock = SystemClock()
     try:
