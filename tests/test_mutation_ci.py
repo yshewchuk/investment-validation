@@ -1822,12 +1822,30 @@ def test_build_import_graph_resolves_an_importlib_import_module_string_literal(t
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_dynamic.py").write_text(
         "import importlib\n"
-        "importlib.import_module('engine.y')\n"
-        "__import__('engine.y')\n")
-    tracked = ["engine/y.py", "tests/test_dynamic.py"]
+        "importlib.import_module('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert "engine/y.py" in graph["tests/test_dynamic.py"]
+    # the ONE allowed shape resolves a specific edge -- unrelated.py stays
+    # out, which a fail-safe select-all would not distinguish.
+    assert graph["tests/test_dynamic.py"] == {"engine/y.py"}
+
+
+def test_build_import_graph_a_bare_dunder_import_always_fails_safe(tmp_path, monkeypatch):
+    # `__import__(...)` is unconditionally dynamic now, even with a literal
+    # argument -- the allowlist has no shape for it at all, unlike the one
+    # narrow `importlib.import_module(...)` call it used to share this
+    # resolution with.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dynamic.py").write_text("__import__('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tests/test_dynamic.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/test_dynamic.py"] == {"engine/y.py", "engine/unrelated.py"}
 
 
 def test_build_import_graph_a_non_literal_import_module_argument_fails_safe(tmp_path, monkeypatch):
@@ -1969,30 +1987,37 @@ def test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert():
     assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}
 
 
-def test_build_import_graph_resolves_a_literal_spec_from_file_location_path(tmp_path, monkeypatch):
+def test_build_import_graph_a_spec_from_file_location_call_always_fails_safe(tmp_path, monkeypatch):
+    # Loader constructs get no static path evaluation any more, literal or
+    # not -- ANY reference to `spec_from_file_location` fails the whole file
+    # safe, dropped from an earlier round's literal-resolution behavior.
     (tmp_path / "engine").mkdir()
     (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "loader.py").write_text(
         "import importlib.util\n"
         "spec = importlib.util.spec_from_file_location('y', 'engine/y.py')\n")
-    tracked = ["engine/y.py", "tools/loader.py"]
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert "engine/y.py" in graph["tools/loader.py"]
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
 
 
-def test_build_import_graph_resolves_a_literal_run_path_target(tmp_path, monkeypatch):
+def test_build_import_graph_a_runpy_run_path_call_always_fails_safe(tmp_path, monkeypatch):
+    # `runpy` is one of the always-dynamic modules now -- importing it at
+    # all fails the whole file safe, literal run_path target or not.
     (tmp_path / "engine").mkdir()
     (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "runner.py").write_text(
         "import runpy\n"
         "runpy.run_path('engine/y.py', run_name='__main__')\n")
-    tracked = ["engine/y.py", "tools/runner.py"]
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/runner.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert "engine/y.py" in graph["tools/runner.py"]
+    assert graph["tools/runner.py"] == {"engine/y.py", "engine/unrelated.py"}
 
 
 def test_build_import_graph_a_dynamic_loader_path_selects_every_enabled_module(tmp_path, monkeypatch):
@@ -2059,29 +2084,58 @@ def test_build_import_graph_an_env_var_sys_path_insert_still_fails_safe(tmp_path
     assert graph["checks/script.py"] == {"engine/unrelated.py"}
 
 
-def test_build_import_graph_a_python_subprocess_literal_script_is_an_edge(tmp_path, monkeypatch):
+def test_build_import_graph_a_python_subprocess_literal_script_always_fails_safe(tmp_path, monkeypatch):
+    # Subprocess edge inference is dropped entirely as of this round: EVERY
+    # subprocess call fails the whole file safe now, including one with a
+    # fully literal, `-u`-flagged Python script argv that an earlier round
+    # would have resolved to a specific edge.
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "runner.py").write_text(
         "import subprocess, sys\n"
-        "subprocess.run([sys.executable, 'tools/worker.py'])\n")
+        "subprocess.run([sys.executable, '-u', 'tools/worker.py'])\n")
     (tmp_path / "tools" / "worker.py").write_text("W = 1\n")
-    tracked = ["tools/runner.py", "tools/worker.py"]
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "tools/worker.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["tools/runner.py"] == {"tools/worker.py"}
+    assert graph["tools/runner.py"] == {"tools/worker.py", "engine/unrelated.py"}
 
 
-def test_build_import_graph_a_python_subprocess_dash_m_literal_is_an_edge(tmp_path, monkeypatch):
+def test_build_import_graph_a_python_subprocess_dash_m_always_fails_safe(tmp_path, monkeypatch):
+    # Same as above for `-m`, an absolute interpreter path, and `-X`/`-W`
+    # flags -- none of these ever earn a specific edge any more.
     (tmp_path / "tools").mkdir()
     (tmp_path / "checks").mkdir()
     (tmp_path / "checks" / "worker.py").write_text("W = 1\n")
     (tmp_path / "tools" / "runner.py").write_text(
-        "import subprocess, sys\n"
-        "subprocess.run([sys.executable, '-m', 'checks.worker'])\n")
-    tracked = ["tools/runner.py", "checks/worker.py"]
+        "import subprocess\n"
+        "subprocess.run(['/usr/bin/python3', '-X', 'utf8', '-W', 'ignore',"
+        " '-m', 'checks.worker'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "checks/worker.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert "checks/worker.py" in graph["tools/runner.py"]
+    assert graph["tools/runner.py"] == {"checks/worker.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_a_subprocess_dash_m_pytest_always_fails_safe(tmp_path, monkeypatch):
+    # `-m pytest` (a THIRD-PARTY module, not a tracked one): the old
+    # resolution would have tried `_resolve_dotted("pytest", ...)`, found no
+    # tracked file, and added no edge, silently missing that the module
+    # under test collects and runs the CURRENT tracked test tree -- now it
+    # fails the whole file safe instead of silently doing nothing.
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "runner.py").write_text(
+        "import subprocess, sys\n"
+        "subprocess.run([sys.executable, '-m', 'pytest'])\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tools/runner.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
 
 
 def test_build_import_graph_a_dynamic_python_subprocess_target_fails_safe(tmp_path, monkeypatch):
@@ -2098,10 +2152,13 @@ def test_build_import_graph_a_dynamic_python_subprocess_target_fails_safe(tmp_pa
     assert graph["tools/runner.py"] == {"engine/unrelated.py"}
 
 
-def test_build_import_graph_a_non_python_subprocess_adds_no_edges_and_does_not_fail_safe(tmp_path, monkeypatch):
-    # `git`/`gh`/any non-Python program: not this graph's concern, and
-    # critically NOT a fail-safe trigger even though its own argv is fully
-    # dynamic -- only a PYTHON-interpreter subprocess can run tracked code.
+def test_build_import_graph_any_subprocess_use_fails_safe_even_a_non_python_command(tmp_path, monkeypatch):
+    # Reverses the pre-this-round behavior on purpose: subprocess edge
+    # inference is dropped entirely, so even a `git`/`gh`/non-Python
+    # command -- previously treated as provably inert -- now fails the
+    # whole file safe. The PR-owned test this replaces asserted the
+    # OPPOSITE (`graph["tools/runner.py"] == set()`) and could not be kept
+    # once every subprocess reference became unconditionally dynamic.
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "runner.py").write_text(
         "import subprocess\n"
@@ -2112,7 +2169,168 @@ def test_build_import_graph_a_non_python_subprocess_adds_no_edges_and_does_not_f
     tracked = ["tools/runner.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["tools/runner.py"] == set()
+    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_from_sys_import_path_always_fails_safe(tmp_path, monkeypatch):
+    # `from sys import path` binds the list directly, with no `sys.`
+    # attribute access at the use site at all -- the allowlist bans the
+    # IMPORT STATEMENT itself, not just a later attribute reference.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "from sys import path\n"
+        "path.insert(0, 'somewhere')\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_an_aliased_sys_path_reference_always_fails_safe(tmp_path, monkeypatch):
+    # `import sys as s` then `s.path` (or a bare `p = sys.path`, the same
+    # attribute-access node either way) -- aliasing `sys` does not escape
+    # the check, which tracks every name a file binds to the `sys` module.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys as s\n"
+        "p = s.path\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_site_addsitedir_always_fails_safe(tmp_path, monkeypatch):
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import site\n"
+        "site.addsitedir('somewhere')\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_monkeypatch_syspath_prepend_always_fails_safe(tmp_path, monkeypatch):
+    # A pytest fixture method, not an import at all -- `syspath_prepend` is
+    # checked as a standalone name (an attribute access on WHATEVER object),
+    # since this graph never knows a bare `monkeypatch` parameter is really
+    # pytest's own fixture.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def test_it(monkeypatch):\n"
+        "    monkeypatch.syspath_prepend('somewhere')\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["tests/test_x.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/test_x.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_a_bare_pythonpath_string_always_fails_safe(tmp_path, monkeypatch):
+    # Not inside a subprocess call at all (subprocess already fails safe on
+    # its own) -- a bare "PYTHONPATH" string, e.g. an `os.environ` key, is
+    # checked as its own standalone trigger.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import os\n"
+        "os.environ['PYTHONPATH'] = 'somewhere'\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+
+
+def test_build_import_graph_import_module_with_a_positional_package_argument_fails_safe(tmp_path, monkeypatch):
+    # `package` passed POSITIONALLY (not as `package=`) is the same relative
+    # -name risk the keyword form is -- the allowed shape requires EXACTLY
+    # one positional argument and no others, however they're spelled.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib\n"
+        "importlib.import_module('.y', 'engine')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_an_aliased_import_module_always_fails_safe(tmp_path, monkeypatch):
+    # `from importlib import import_module as im` is a `from importlib
+    # import ...`, which fails safe unconditionally regardless of the
+    # aliasing -- the ONE allowed shape requires the unaliased attribute
+    # form `importlib.import_module(...)` and nothing else.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "from importlib import import_module as im\n"
+        "im('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_importlib_dunder_import_always_fails_safe(tmp_path, monkeypatch):
+    # `importlib.__import__(...)` -- an attribute access on `importlib`
+    # OTHER than `import_module` -- is dynamic even though the argument is a
+    # literal, exactly like `importlib.util`/`importlib.reload` would be.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "y.py").write_text("Y = 1\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "loader.py").write_text(
+        "import importlib\n"
+        "importlib.__import__('engine.y')\n")
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["engine/y.py", "tools/loader.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tools/loader.py"] == {"engine/y.py", "engine/unrelated.py"}
+
+
+def test_build_import_graph_an_annotated_conftest_pytest_plugins_always_fails_safe(tmp_path, monkeypatch):
+    # An ANNOTATED assignment (`ast.AnnAssign`, not `ast.Assign`) is outside
+    # the allowed shape regardless of the value being a literal list --
+    # `_pytest_plugins_targets` only ever sees `ast.Assign`/`ast.AugAssign`,
+    # so this is invisible to it and must be caught separately.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "myplugin.py").write_text("P = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "pytest_plugins: list = ['checks.myplugin']\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/myplugin.py", "tests/conftest.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/conftest.py"] == {"checks/myplugin.py", "engine/unrelated.py"}
+
+
+def test_the_real_executor_reaches_the_worker_it_launches_as_a_subprocess(tmp_path, monkeypatch):
+    # The real miss an earlier round's Opus review found: engine/v2/ops/
+    # executor.py launches engine/v2/ops/worker.py via
+    # `subprocess.Popen([sys.executable, "-u", "-m", "engine.v2.ops.worker"],
+    # ...)`, which the pre-allowlist code neither resolved as a specific
+    # edge nor marked dynamic -- a silent, unexplained gap. Under the
+    # allowlist, `executor.py`'s own `import subprocess` fails the whole
+    # file safe, so it now depends on every other tracked file, including
+    # worker.py, with no special-casing of this one call needed.
+    graph = pilot.build_import_graph()
+    assert "engine/v2/ops/worker.py" in graph["engine/v2/ops/executor.py"]
 
 
 def test_conftest_own_imports_are_a_closure_root_for_tests_under_its_directory(tmp_path, monkeypatch):

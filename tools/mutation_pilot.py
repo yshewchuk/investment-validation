@@ -170,8 +170,9 @@ def test_files(cfg: dict, name: str, tracked: list[str] | None = None) -> list[s
 #      a deleted/renamed-away owned file still matches), OR the path is in
 #      that module's DEPENDENCY SET (`module_dependency_closure`: the
 #      transitive closure, over a static `ast` import graph of every tracked
-#      `.py` file (including `conftest.py` closure roots and literal
-#      `importlib.import_module`/`__import__` strings), of the imports
+#      `.py` file (including `conftest.py` closure roots and the one literal
+#      `importlib.import_module("x.y")` shape -- `__import__`, in any form,
+#      is always dynamic now), of the imports
 #      reachable from the module's own `mutate` files plus its `tests` files) -> that
 #      module is selected. A module that OWNS a changed path is not
 #      necessarily the only one whose DEPENDENCY SET contains it: e.g.
@@ -274,19 +275,33 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 # -- reverse import closure: what could a changed file affect? ---------------
 #
 # `build_import_graph` parses (never executes) EVERY git-tracked `.py` file
-# in the repo with `ast` and resolves each `import`/`from ... import`
-# statement, and each `importlib.import_module("x.y")`/`__import__("x.y")`
-# call whose argument is a string literal, to a repo file: `import x.y` and
+# in the repo with `ast`, and classifies each one STATIC or DYNAMIC by an
+# ALLOWLIST, not a denylist (`_is_dynamic_file`): a file is STATIC only if
+# every import-affecting construct in it is one of exactly three shapes --
+# a plain `import x.y [as z]`/`from x.y import z` (including a relative
+# import), resolved to a repo file the same way as before (`import x.y`/
 # `from x.y import z` resolve the dotted name `x.y` to `x/y.py`, or, if that
-# is a package, to `x/y/__init__.py`; a relative import (`from . import z` /
-# `from ..pkg import z`) resolves against the importing file's own package
-# first. A dotted name only resolves to a graph node when its own top-level
-# component is a tracked top-level package (`_tracked_roots`, computed fresh
-# from the tracked file list every run -- `engine`, `tests`, `checks`,
-# `tools`, `experiments`, `dashboard` today, and any future top-level
-# directory automatically, with no hand-kept allowlist to fall out of date).
-# A stdlib or third-party import's top-level name is never a tracked
-# directory, so it is simply never a candidate.
+# is a package, to `x/y/__init__.py`; a relative import resolves against the
+# importing file's own package first; a dotted name only resolves to a graph
+# node when its own top-level component is a tracked top-level package --
+# `_tracked_roots`, computed fresh from the tracked file list every run,
+# with no hand-kept allowlist to fall out of date -- so a stdlib or
+# third-party import's top-level name is simply never a candidate); the
+# single literal call `importlib.import_module("<absolute.name>")`
+# (`_allowed_import_module_call`); or a plain, unannotated
+# `pytest_plugins = [...]` assignment of string literals, at a conftest.py's
+# top level only (`_pytest_plugins_targets`). A file is DYNAMIC -- and,
+# sound by construction, depends on EVERY OTHER TRACKED FILE, no narrower
+# edge attempted -- the moment its AST references, in ANY form (an import,
+# an alias, an attribute access, or a bare name), `sys.path`, `site`,
+# `runpy`, `subprocess`, `multiprocessing`, `pkgutil`, a dynamic-exec `os`
+# function, `importlib` used any way other than the one literal shape, or
+# one of a short list of standalone dangerous names -- see `_is_dynamic_file`
+# for the exact list. `subprocess` and every loader construct
+# (`spec_from_file_location`, `SourceFileLoader`, `runpy.run_path`) are
+# dropped ENTIRELY as of this round: no static resolution of a subprocess
+# target or a loader's file-path argument is attempted any more, literal or
+# not -- any reference fails the whole file safe outright.
 def _tracked_roots(tracked_set: set[str]) -> set[str]:
     """Every top-level package/module name present in `tracked_set` -- the
     first path segment of each tracked `.py` file (or, for a tracked file
@@ -364,315 +379,181 @@ def _ancestor_package_inits(dotted: str, tracked_set: set[str]) -> set[str]:
     return out
 
 
-def _is_import_module_call(node: ast.Call) -> bool:
-    """True if `node`'s callee is `importlib.import_module` (attribute or a
-    bare name after `from importlib import import_module`) or a bare
-    `__import__(...)`, however imported. `build_import_graph` uses this
-    SEPARATELY from `_string_import_target` to tell "this call has the
-    import-module SHAPE but its argument doesn't resolve" (a fail-safe
-    case) apart from "this call isn't shaped like this at all" (ignore and
-    keep checking other call shapes)."""
+_DYNAMIC_MODULES = {"site", "runpy", "subprocess", "multiprocessing", "pkgutil"}
+# "importlib" and "sys" are handled separately below: importing them plainly
+# is fine (needed for the one allowed import_module shape, and `import sys`
+# by itself is inert on its own) -- only specific attributes/names of theirs
+# are banned.
+
+_OS_DYNAMIC_ATTRS = {
+    "system", "popen",
+    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+    "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+}
+
+_DYNAMIC_NAMES = {
+    "__import__", "syspath_prepend", "addsitedir", "PYTHONPATH",
+    "exec", "eval", "compile", "spec_from_file_location", "SourceFileLoader",
+}
+
+
+def _bound_aliases(tree: ast.Module, module: str) -> set[str]:
+    """Every name this file binds to the top-level module `module` via a
+    plain `import module` or `import module as X`, wherever it appears (not
+    just at the top level) -- so `import sys as s` is recognized as binding
+    `sys` to `s`, and a later `s.path` reference is caught exactly like
+    `sys.path` would be. Does not follow `from module import x`; callers
+    check those `ast.ImportFrom` nodes directly instead."""
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == module:
+                    aliases.add(alias.asname or alias.name)
+    return aliases
+
+
+def _looks_like_import_module_call(func: ast.expr) -> bool:
+    """True if `func` (a `Call.func`) is an attribute access named
+    `import_module` (`importlib.import_module`, an aliased base, ...) or a
+    bare name `import_module` (after any `from ... import import_module`).
+    `_is_dynamic_file` uses this to recognize "this call is an ATTEMPT at
+    the one allowed shape" so it can fail the whole file safe on every
+    attempt that isn't EXACTLY that shape, rather than silently treating it
+    like an unrelated function call."""
+    return (isinstance(func, ast.Attribute) and func.attr == "import_module") \
+        or (isinstance(func, ast.Name) and func.id == "import_module")
+
+
+def _allowed_import_module_call(node: ast.Call) -> str | None:
+    """The literal absolute dotted target of `node`, if `node` is EXACTLY
+    `importlib.import_module("<literal>")`: an unaliased attribute access on
+    a bare `importlib` name, a single positional string-literal argument
+    with no leading dot (an absolute name), and no other positional or
+    keyword argument at all -- a `package=` keyword, or a second positional
+    argument however spelled, means the literal could be package-relative,
+    which this never attempts to resolve. None for every other shape,
+    including one that merely LOOKS like this call (an aliased `importlib`,
+    a bare `import_module` after a `from` import, `importlib.__import__`,
+    ...) -- `_is_dynamic_file` is what turns a None here into a whole-file
+    fail-safe, not this function."""
     func = node.func
-    return (
-        (isinstance(func, ast.Attribute) and func.attr == "import_module")
-        or (isinstance(func, ast.Name) and func.id in ("import_module", "__import__"))
-    )
-
-
-def _string_import_target(node: ast.Call) -> str | None:
-    """The dotted module name of an `importlib.import_module("x.y")` or
-    `__import__("x.y")` call (`_is_import_module_call`), when the first
-    positional argument is a string literal. None for every other call,
-    including one whose argument is a variable, an f-string, or any other
-    computed expression, or one that also passes a `package=` keyword (a
-    relative name, which needs the calling file's own package to resolve
-    and this function does not attempt) -- `build_import_graph` marks the
-    WHOLE FILE dynamic for any of these (it checks `_is_import_module_call`
-    and this function together), never silently drops the edge the way an
-    unrelated function call is silently ignored."""
-    if not _is_import_module_call(node) or not node.args:
+    if not (isinstance(func, ast.Attribute) and func.attr == "import_module"
+            and isinstance(func.value, ast.Name) and func.value.id == "importlib"):
+        return None
+    if len(node.args) != 1 or node.keywords:
         return None
     arg = node.args[0]
-    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+            and not arg.value.startswith("."):
         return arg.value
     return None
 
 
-_FILE_PATH_LOADERS = {
-    # call name -> (positional arg index, keyword arg name) of the file path
-    "spec_from_file_location": (1, "location"),
-    "SourceFileLoader": (1, "path"),
-    "run_path": (0, "path_name"),
-}
+def _is_dynamic_file(tree: ast.Module) -> bool:
+    """True if `tree` contains ANY construct outside the narrow allowlist
+    `build_import_graph` resolves exactly (a plain import, the one literal
+    `import_module` shape, or a conftest.py's plain `pytest_plugins`
+    assignment -- checked separately). This tests AST node types and names
+    DIRECTLY, never a call-shape pattern match, so it trips the moment the
+    file references, in ANY form -- an import, an alias, an attribute
+    access, or a bare name -- any of:
+      - `sys.path`, however `sys` got bound (`_bound_aliases`), including
+        `from sys import path`;
+      - the modules `site`, `runpy`, `subprocess`, `multiprocessing`,
+        `pkgutil` (importing one AT ALL is enough, used or not);
+      - a dynamic-exec `os` function (`os.system`, `os.exec*`, `os.spawn*`,
+        `os.popen`), however `os` got bound;
+      - `importlib` used any way OTHER than the one literal `import_module`
+        shape (`_allowed_import_module_call`) -- including an aliased
+        `importlib` import, any `from importlib import ...`, and any other
+        `importlib.*` attribute (`importlib.util`, `importlib.reload`,
+        `importlib.__import__`, ...);
+      - the standalone names `__import__`, `syspath_prepend`, `addsitedir`,
+        `PYTHONPATH`, `exec`, `eval`, `compile`, `spec_from_file_location`,
+        `SourceFileLoader` -- as an import, an attribute, or a bare name.
+    Also true for an ANNOTATED `pytest_plugins` assignment ANYWHERE
+    (`ast.AnnAssign`) -- only a plain, unannotated one, at a conftest.py's
+    top level, is the allowed shape (checked by `_pytest_plugins_targets`,
+    called only for conftest.py).
 
-
-def _call_name(func: ast.expr) -> str | None:
-    """The bare called name of a `Call.func` node: `f.attr` for `x.y.f(...)`,
-    `f.id` for a bare `f(...)`, else None (e.g. the callee is itself a call
-    result or subscript). Used to recognize a loader call regardless of how
-    its module was imported (`importlib.util.spec_from_file_location(...)`
-    or a bare `spec_from_file_location(...)` after a `from` import)."""
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    if isinstance(func, ast.Name):
-        return func.id
-    return None
-
-
-def _eval_file_relative_path(expr: ast.expr, rel: str) -> list[str] | None:
-    """Best-effort static evaluation of a directory/file-path expression
-    built ONLY from `__file__` combined with an optional outer `str(...)`,
-    `pathlib.Path(...)`'s
-    `.resolve()`/`.parent`/`.parents[N]`, or `os.path.dirname`/`.abspath`/
-    `.join` calls whose extra arguments are string literals -- returns the
-    result's REPO-RELATIVE path components (`[]` for the repo root itself,
-    a list ending in a filename for a file path), or None if `expr` is not
-    one of these forms (a bare variable, an environment lookup, a function
-    call whose result isn't one of the above, ...) or if it climbs above
-    the repo root -- deliberately narrow: no cross-statement variable
-    tracking, no `Path(...) / "x"` operator, no other transforms. `rel` is
-    the CURRENT file's own tracked path (e.g. "checks/phase0_audit.py"),
-    what a bare `__file__` in it resolves to."""
-    if isinstance(expr, ast.Name) and expr.id == "__file__":
-        return rel.split("/")
-    if isinstance(expr, ast.Attribute) and expr.attr == "parent":
-        base = _eval_file_relative_path(expr.value, rel)
-        return base[:-1] if base else None
-    if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Attribute) \
-            and expr.value.attr == "parents":
-        base = _eval_file_relative_path(expr.value.value, rel)
-        if base is None:
-            return None
-        idx = expr.slice
-        if not (isinstance(idx, ast.Constant) and isinstance(idx.value, int)):
-            return None
-        climb = idx.value + 1
-        return base[:-climb] if climb <= len(base) else None
-    if isinstance(expr, ast.Call):
-        name = _call_name(expr.func)
-        if name == "str" and len(expr.args) == 1 and not expr.keywords:
-            return _eval_file_relative_path(expr.args[0], rel)
-        if name == "Path" and len(expr.args) == 1 and not expr.keywords:
-            return _eval_file_relative_path(expr.args[0], rel)
-        if name == "resolve" and isinstance(expr.func, ast.Attribute) and not expr.args:
-            return _eval_file_relative_path(expr.func.value, rel)
-        if name == "abspath" and len(expr.args) == 1:
-            return _eval_file_relative_path(expr.args[0], rel)
-        if name == "dirname" and len(expr.args) == 1:
-            base = _eval_file_relative_path(expr.args[0], rel)
-            return base[:-1] if base else None
-        if name == "join" and expr.args:
-            base = _eval_file_relative_path(expr.args[0], rel)
-            if base is None:
-                return None
-            parts = list(base)
-            for arg in expr.args[1:]:
-                if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
-                    return None
-                for seg in arg.value.split("/"):
-                    if seg in ("", "."):
-                        continue
-                    if seg == "..":
-                        if not parts:
-                            return None
-                        parts.pop()
-                    else:
-                        parts.append(seg)
-            return parts
-        return None
-    return None
-
-
-_SUBPROCESS_FUNCS = {"run", "call", "check_call", "check_output", "Popen"}
-
-
-def _is_python_interpreter_arg(arg: ast.expr) -> bool:
-    """True if `arg` is `sys.executable`, or a literal string starting with
-    "python" (covers "python", "python3", "python3.11", "pythonw", ...) --
-    the forms `_subprocess_call_effect` recognizes as "this subprocess call
-    launches a Python interpreter". Anything else (a variable, an
-    f-string, `sys.argv[0]`, ...) falls through to `_subprocess_call_effect`'s
-    own fail-safe, since this graph cannot rule out that an unresolvable
-    first argv element is ALSO a Python interpreter."""
-    if isinstance(arg, ast.Attribute) and arg.attr == "executable" \
-            and isinstance(arg.value, ast.Name) and arg.value.id == "sys":
-        return True
-    return isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
-        and arg.value.startswith("python")
-
-
-def _subprocess_call_effect(node: ast.Call, rel: str, tracked_set: set[str],
-                             roots: set[str]) -> tuple[bool, str | None, bool]:
-    """(matched, resolved_edge, fail_safe) for a call to a `subprocess.*`
-    runner (`run`/`call`/`check_call`/`check_output`/`Popen`, however
-    imported). `matched` is False ONLY when `node` calls none of these at
-    all -- once it IS one of these calls, sound by construction means this
-    graph must account for it one way or another: an argv that isn't a
-    literal list/tuple, a first argv element that is neither a literal
-    string nor recognized as the Python interpreter
-    (`_is_python_interpreter_arg`), a Python interpreter invoked with `-c`
-    (arbitrary inline code, never resolvable to a tracked file), a `-m`
-    followed by a non-literal module, or a script-path argument that
-    resolves via neither a literal string nor `_eval_file_relative_path`,
-    are ALL `fail_safe=True` -- an unresolvable case might be launching the
-    CURRENT interpreter on arbitrary tracked code, so it is never silently
-    ignored the way a call to some unrelated function is. Only a fully
-    literal argv whose first element resolves to a NON-Python program (any
-    OTHER literal string) is safe to treat as inert (`fail_safe=False`,
-    `resolved_edge=None`) -- this graph has no way to reach tracked code
-    through git/gh/a shell tool/etc."""
-    name = _call_name(node.func)
-    if name not in _SUBPROCESS_FUNCS:
-        return (False, None, False)
-    if not node.args:
-        return (True, None, True)
-    argv = node.args[0]
-    if not isinstance(argv, (ast.List, ast.Tuple)) or not argv.elts:
-        return (True, None, True)
-    first = argv.elts[0]
-    if _is_python_interpreter_arg(first):
-        pass
-    elif isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return (True, None, False)  # a literal, non-Python command: inert
-    else:
-        return (True, None, True)  # can't tell what program this launches
-    rest = argv.elts[1:]
-    if not rest:
-        return (True, None, False)
-    first_rest = rest[0]
-    if isinstance(first_rest, ast.Constant) and first_rest.value == "-c":
-        return (True, None, True)
-    if isinstance(first_rest, ast.Constant) and first_rest.value == "-m":
-        if len(rest) > 1 and isinstance(rest[1], ast.Constant) and isinstance(rest[1].value, str):
-            return (True, _resolve_dotted(rest[1].value, tracked_set, roots), False)
-        return (True, None, True)
-    if isinstance(first_rest, ast.Constant) and isinstance(first_rest.value, str):
-        return (True, _resolve_literal_path(first_rest.value, tracked_set), False)
-    components = _eval_file_relative_path(first_rest, rel)
-    if components is not None:
-        return (True, _resolve_literal_path("/".join(components), tracked_set), False)
-    return (True, None, True)
-
-
-def _run_module_target(node: ast.Call) -> tuple[bool, str | None]:
-    """(True, dotted_name) if `node` calls `runpy.run_module(...)` (however
-    imported) with a literal string module-name argument (positional or
-    `mod_name=`); (True, None) if it calls run_module with a non-literal
-    argument -- ALWAYS fail-safe (run_module executes in the CURRENT
-    interpreter, so an unresolvable target genuinely could be anything
-    tracked -- there is no "other program" escape hatch the way there is
-    for `_subprocess_python_target`); (False, None) if `node` does not call
-    run_module at all."""
-    if _call_name(node.func) != "run_module":
-        return (False, None)
-    arg = node.args[0] if node.args else None
-    if arg is None:
-        for keyword in node.keywords:
-            if keyword.arg == "mod_name":
-                arg = keyword.value
-                break
-    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-        return (True, arg.value)
-    return (True, None)
-
-
-def _loader_call_path(node: ast.Call, rel: str) -> tuple[bool, str | None]:
-    """(True, resolved_path) if `node` calls one of `_FILE_PATH_LOADERS`
-    (`importlib.util.spec_from_file_location`, `importlib.machinery.
-    SourceFileLoader`, or `runpy.run_path`, however imported) and its file
-    path argument is a string literal OR a `__file__`-relative expression
-    `_eval_file_relative_path` can statically evaluate (`resolved_path` is
-    the resulting repo-relative path string -- NOT necessarily a tracked
-    file, the caller still checks that); (True, None) if it calls one of
-    them with an argument neither form resolves -- the caller must treat
-    that as the file-path-loader fail-safe; (False, None) if `node` calls
-    none of them at all. `rel` is the calling file's own tracked path,
-    passed through to `_eval_file_relative_path`."""
-    name = _call_name(node.func)
-    if name not in _FILE_PATH_LOADERS:
-        return (False, None)
-    idx, kw = _FILE_PATH_LOADERS[name]
-    arg = node.args[idx] if len(node.args) > idx else None
-    if arg is None:
-        for keyword in node.keywords:
-            if keyword.arg == kw:
-                arg = keyword.value
-                break
-    if arg is None:
-        return (True, None)
-    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-        return (True, arg.value)
-    components = _eval_file_relative_path(arg, rel)
-    if components is not None:
-        return (True, "/".join(components))
-    return (True, None)
-
-
-def _resolve_literal_path(lit: str, tracked_set: set[str]) -> str | None:
-    """A literal file-path string (from a loader call's path argument)
-    resolved to a tracked file, or None. Only an exact, already-repo-relative
-    literal resolves (an optional leading "./" is stripped first) -- this
-    does not walk the filesystem or evaluate a computed expression like
-    `os.path.join(...)` or `Path(__file__).parent / "x.py"` (those are not
-    string literals and never reach this function; `_loader_call_path`
-    returns `None` for them, which the fail-safe handles)."""
-    norm = lit[2:] if lit.startswith("./") else lit
-    return norm if norm in tracked_set else None
-
-
-def _mutates_sys_path(node: ast.AST) -> bool:
-    """True if `node` is a call to `sys.path.insert(...)`,
-    `sys.path.append(...)`, or `sys.path.extend(...)`, or an assignment
-    (`Assign`/`AugAssign`) whose target is `sys.path` itself or a subscript
-    of it (`sys.path = [...]`, `sys.path[0] = ...`, `sys.path[:0] = [...]`,
-    `sys.path += [...]`). ALWAYS a fail-safe case, UNCONDITIONALLY -- no
-    static evaluation (not even the exact-value `_eval_file_relative_path`
-    this graph trusts for a loader/subprocess path argument) is attempted
-    for a sys.path mutation, because widening sys.path changes how EVERY
-    OTHER bare import in the file (and files parsed after it, and any
-    ancestor `__init__.py` under the widened path) resolves -- getting
-    that right needs its own careful design, not a narrow value
-    computation. Until then, the whole file is marked as depending on
-    everything."""
-    def is_sys_path(expr: ast.expr) -> bool:
-        return (isinstance(expr, ast.Attribute) and expr.attr == "path"
-                and isinstance(expr.value, ast.Name) and expr.value.id == "sys")
-
-    if isinstance(node, ast.Call):
-        func = node.func
-        return (isinstance(func, ast.Attribute)
-                and func.attr in ("insert", "append", "extend")
-                and is_sys_path(func.value))
-    if isinstance(node, ast.Assign):
-        targets = node.targets
-    elif isinstance(node, ast.AugAssign):
-        targets = [node.target]
-    else:
-        return False
-    for target in targets:
-        if is_sys_path(target):
+    `subprocess` is dropped ENTIRELY as of this round: earlier rounds tried
+    to tell a Python-launching subprocess call from any other one, and a
+    launched script's own path from an unresolvable one. That added
+    complexity for no real gain -- every module that reaches a `subprocess`
+    call already reaches `tests/conftest.py`'s own `sys.path.insert`, which
+    already fails safe -- so any reference to the module now fails the
+    whole file safe outright, with no attempt at a narrower edge. Loader
+    constructs (`spec_from_file_location`, `SourceFileLoader`, `runpy`) get
+    the same treatment: no static path evaluation is attempted for any of
+    them any more, literal or not."""
+    sys_aliases = _bound_aliases(tree, "sys") | {"sys"}
+    os_aliases = _bound_aliases(tree, "os") | {"os"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in _DYNAMIC_MODULES:
+                    return True
+                if top == "importlib" and alias.asname is not None:
+                    return True  # an aliased `importlib` can't reach the one allowed shape
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            top = module.split(".")[0] if module else ""
+            if top in _DYNAMIC_MODULES or top == "importlib":
+                return True  # every from-importlib import, no exceptions
+            if top == "sys" and any(a.name == "path" for a in node.names):
+                return True
+            if top == "os" and any(a.name in _OS_DYNAMIC_ATTRS for a in node.names):
+                return True
+            if any(a.name in _DYNAMIC_NAMES for a in node.names):
+                return True
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _DYNAMIC_NAMES or node.attr in _DYNAMIC_MODULES:
+                return True
+            if node.attr == "path" and isinstance(node.value, ast.Name) \
+                    and node.value.id in sys_aliases:
+                return True
+            if node.attr in _OS_DYNAMIC_ATTRS and isinstance(node.value, ast.Name) \
+                    and node.value.id in os_aliases:
+                return True
+            if isinstance(node.value, ast.Name) and node.value.id == "importlib" \
+                    and node.attr != "import_module":
+                return True
+        elif isinstance(node, ast.Name):
+            if node.id in _DYNAMIC_NAMES or node.id in _DYNAMIC_MODULES:
+                return True
+        elif isinstance(node, ast.Constant) and node.value == "PYTHONPATH":
             return True
-        if isinstance(target, ast.Subscript) and is_sys_path(target.value):
-            return True
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id == "pytest_plugins":
+                return True
+        elif isinstance(node, ast.Call) and _looks_like_import_module_call(node.func):
+            if _allowed_import_module_call(node) is None:
+                return True
     return False
 
 
 def _pytest_plugins_targets(tree: ast.Module) -> tuple[bool, list[str] | None]:
-    """(found, literal_dotted_names) for a module-level `pytest_plugins = ...`
-    assignment -- pytest imports every name in this list as a plugin BEFORE
-    collecting or running any test, an execution path `build_import_graph`'s
-    ordinary import/call walk never sees on its own. `found` is False if
-    `tree`'s top level has no such assignment (including only an augmented
-    one, `pytest_plugins += [...]`, which this never resolves -- see below).
-    When found, `literal_dotted_names` is the assigned names IF the value
-    is a literal string or a literal list/tuple of literal strings; None if
-    it is anything else (a variable, a list containing anything
-    non-literal, a computed expression, an `AugAssign`, ...) --
-    `build_import_graph` marks the WHOLE FILE dynamic for a None here, the
-    same as an unresolvable loader/subprocess target. Only `tree`'s
-    TOP-LEVEL statements are scanned -- a `pytest_plugins` assigned inside
-    a function or an `if` block is not pytest's own collection hook
-    either."""
+    """(found, literal_dotted_names) for a module-level, UNANNOTATED
+    `pytest_plugins = ...` assignment -- pytest imports every name in this
+    list as a plugin BEFORE collecting or running any test, an execution
+    path `build_import_graph`'s ordinary import/call walk never sees on its
+    own. `found` is False if `tree`'s top level has no such assignment
+    (including only an augmented one, `pytest_plugins += [...]`, which this
+    never resolves -- see below). When found, `literal_dotted_names` is the
+    assigned names IF the value is a literal string or a literal list/tuple
+    of literal strings; None if it is anything else (a variable, a list
+    containing anything non-literal, a computed expression, an `AugAssign`,
+    ...) -- `build_import_graph` marks the WHOLE FILE dynamic for a None
+    here, the same as any other unresolvable construct. Only `tree`'s
+    TOP-LEVEL statements are scanned -- a `pytest_plugins` assigned inside a
+    function or an `if` block is not pytest's own collection hook either.
+    An ANNOTATED assignment (`pytest_plugins: list[str] = [...]`) is not
+    handled here at all -- it is an `ast.AnnAssign`, not an `ast.Assign`,
+    and `_is_dynamic_file` catches it separately, unconditionally, since it
+    is outside the allowlist's exact shape regardless of literal-ness."""
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == "pytest_plugins" for t in node.targets):
@@ -698,20 +579,25 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     """Static import graph over EVERY git-tracked `.py` file in the repo (no
     hand-kept root allowlist -- see `_tracked_roots`): maps each file to the
     set of tracked files it imports, via `import`/`from ... import`
-    (resolved by `_resolve_dotted`) AND via a string literal passed to
-    `importlib.import_module(...)` or `__import__(...)` (resolved by
-    `_string_import_target` then `_resolve_dotted`), PLUS the tracked
-    `__init__.py` of every strict ancestor package of each resolved import
-    (`_ancestor_package_inits`) -- Python always runs a package's `__init__.py`
-    before any of its submodules, so `import engine.pkg.inner` depends on
+    (resolved by `_resolve_dotted`) AND via the one allowed
+    `importlib.import_module("x.y")` shape (`_allowed_import_module_call`
+    then `_resolve_dotted`), PLUS the tracked `__init__.py` of every strict
+    ancestor package of each resolved import (`_ancestor_package_inits`) --
+    Python always runs a package's `__init__.py` before any of its
+    submodules, so `import engine.pkg.inner` depends on
     `engine/pkg/__init__.py` even when neither the import statement nor
-    `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`. Every
-    tracked file is a key, even one with no resolvable imports (an empty
-    set), so `module_dependency_closure` can always look it up. Raises
-    `SyntaxError` (via `ast.parse`) on the first file that fails to parse --
-    a real syntax error in the current tree, never swallowed into a
-    silently partial graph; `changed_modules` treats that as "select every
-    module"."""
+    `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`.
+
+    A file that is DYNAMIC by `_is_dynamic_file`'s allowlist (or has a
+    non-literal/annotated conftest.py `pytest_plugins`) skips this precise
+    resolution entirely and instead depends on EVERY OTHER TRACKED FILE
+    (`edges |= tracked_set - {rel}`) -- sound by construction, never a
+    narrower guess. Every tracked file is a key, even one with no
+    resolvable imports (an empty set), so `module_dependency_closure` can
+    always look it up. Raises `SyntaxError` (via `ast.parse`) on the first
+    file that fails to parse -- a real syntax error in the current tree,
+    never swallowed into a silently partial graph; `changed_modules` treats
+    that as "select every module"."""
     tracked = tracked if tracked is not None else [
         p for p in _tracked(["."]) if p.endswith(".py")]
     tracked_set = set(tracked)
@@ -724,7 +610,7 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
         except SyntaxError as exc:
             raise SyntaxError(f"{rel}: {exc}") from exc
         edges = graph[rel]
-        dynamic = False
+        dynamic = _is_dynamic_file(tree)
         if rel.rsplit("/", 1)[-1] == "conftest.py":
             found, dotted_names = _pytest_plugins_targets(tree)
             if found:
@@ -736,71 +622,36 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                         if target:
                             edges.add(target)
                         edges |= _ancestor_package_inits(dotted, tracked_set)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    target = _resolve_dotted(alias.name, tracked_set, roots)
-                    if target:
-                        edges.add(target)
-                    edges |= _ancestor_package_inits(alias.name, tracked_set)
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:
-                    base = _relative_base(rel, node.level)
-                    dotted = _join_dotted(base, node.module) if base is not None else None
-                else:
-                    dotted = node.module or ""
-                if dotted:
-                    target = _resolve_dotted(dotted, tracked_set, roots)
-                    if target:
-                        edges.add(target)
-                    edges |= _ancestor_package_inits(dotted, tracked_set)
+        if not dynamic:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
                     for alias in node.names:
-                        sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set, roots)
-                        if sub:
-                            edges.add(sub)
-            elif isinstance(node, ast.Call):
-                if _is_import_module_call(node):
-                    has_package_kw = any(kw.arg == "package" for kw in node.keywords)
-                    dotted_str = None if has_package_kw else _string_import_target(node)
-                    if dotted_str:
-                        target = _resolve_dotted(dotted_str, tracked_set, roots)
+                        target = _resolve_dotted(alias.name, tracked_set, roots)
                         if target:
                             edges.add(target)
-                        edges |= _ancestor_package_inits(dotted_str, tracked_set)
+                        edges |= _ancestor_package_inits(alias.name, tracked_set)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level:
+                        base = _relative_base(rel, node.level)
+                        dotted = _join_dotted(base, node.module) if base is not None else None
                     else:
-                        dynamic = True
-                    continue
-                subproc_matched, subproc_edge, subproc_fail = \
-                    _subprocess_call_effect(node, rel, tracked_set, roots)
-                if subproc_matched:
-                    if subproc_fail:
-                        dynamic = True
-                    elif subproc_edge:
-                        edges.add(subproc_edge)
-                    continue
-                is_run_module, run_module_dotted = _run_module_target(node)
-                if is_run_module:
-                    if run_module_dotted is None:
-                        dynamic = True
-                    else:
-                        target = _resolve_dotted(run_module_dotted, tracked_set, roots)
+                        dotted = node.module or ""
+                    if dotted:
+                        target = _resolve_dotted(dotted, tracked_set, roots)
                         if target:
                             edges.add(target)
-                        edges |= _ancestor_package_inits(run_module_dotted, tracked_set)
-                    continue
-                is_loader, resolved_path = _loader_call_path(node, rel)
-                if is_loader:
-                    if resolved_path is None:
-                        dynamic = True
-                    else:
-                        resolved = _resolve_literal_path(resolved_path, tracked_set)
+                        edges |= _ancestor_package_inits(dotted, tracked_set)
+                        for alias in node.names:
+                            sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set, roots)
+                            if sub:
+                                edges.add(sub)
+                elif isinstance(node, ast.Call):
+                    target = _allowed_import_module_call(node)
+                    if target:
+                        resolved = _resolve_dotted(target, tracked_set, roots)
                         if resolved:
                             edges.add(resolved)
-                elif _mutates_sys_path(node):
-                    dynamic = True
-            elif isinstance(node, (ast.Assign, ast.AugAssign)):
-                if _mutates_sys_path(node):
-                    dynamic = True
+                        edges |= _ancestor_package_inits(target, tracked_set)
         if dynamic:
             edges |= tracked_set - {rel}
     return graph
