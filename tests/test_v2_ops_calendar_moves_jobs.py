@@ -506,12 +506,15 @@ def test_staged_forward_calendar_attempt_reads_a_real_document(tmp_path):
     '{"attempt_id": "att-1", "fence": null}',
     '{"fence": 3}',
     '{"attempt_id": null, "fence": 3}',
-    '{"attempt_id": ""}',
-    '{"fence": 0}',
-    '{"fence": true}',
+    '{"attempt_id": "", "fence": 1}',
+    '{"attempt_id": "att-1", "fence": 0}',
+    '{"attempt_id": "att-1", "fence": true}',
+    '{"attempt_id": 5, "fence": 1}',
+    '{"attempt_id": "att-1", "fence": "3"}',
 ], ids=["missing", "invalid-json", "non-object", "empty-object", "both-null",
         "fence-absent", "fence-null", "attempt-id-absent", "attempt-id-null",
-        "blank-attempt-id", "zero-fence", "bool-fence"])
+        "blank-attempt-id", "zero-fence", "bool-fence", "non-string-attempt-id",
+        "non-integer-fence"])
 def test_staged_forward_calendar_attempt_refuses_a_malformed_document(tmp_path, raw):
     name = REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]
     if raw is not None:
