@@ -152,14 +152,31 @@ def commit_generic_table_candidate(
     that ALSO wants an attempt-lease check
     (``engine.v2.ops.lifecycle.verify_fence``) passes
     ``fence_check=lambda c: verify_fence(c, attempt_id, fence, now)`` -- see
-    ``forward_calendar_store.py``'s and ``computed_moves_store.py``'s own
-    ``_fence_check_for`` for the pattern (this module, in
-    ``engine/v2/data/``, cannot import ``engine.v2.ops.lifecycle`` itself --
-    see the layering note in ``engine/v2/data/catalog.py``). Omitting it
-    (the default) keeps this function's previous, unchanged behavior for
-    its other two callers (``engine/v2/data/incremental.py``'s
+    ``forward_calendar_store.py``'s own ``_fence_check_for`` for the pattern
+    (this module, in ``engine/v2/data/``, cannot import
+    ``engine.v2.ops.lifecycle`` itself -- see the layering note in
+    ``engine/v2/data/catalog.py``); it is the only caller of THIS function
+    that supplies a ``fence_check``. ``engine/v2/ops/computed_moves_store.py``
+    has its own, differently-wired ``_fence_check_for`` but never calls this
+    function at all -- its own module docstring says so ("never
+    ``generic_incremental``"): it passes that fence_check straight into
+    ``catalog.commit_snapshot`` directly, so none of this function's
+    ``_head_fence`` composition applies to it. Omitting ``fence_check`` here
+    (the default) keeps this function's previous, unchanged behavior for its
+    other two callers (``engine/v2/data/incremental.py``'s
     ``_run_generic_refresh`` and ``engine/v2/research/_trades_publish.py``'s
     ``publish``): ``_head_fence`` alone, exactly as before.
+
+    Because ``_head_fence`` always runs before ``catalog.commit_snapshot``'s
+    idempotent-replay shortcut lookup (``_existing_receipt``), replaying an
+    IDENTICAL call through this function after a successful commit is NOT
+    idempotent: the head has already moved to the new snapshot/generation, so
+    ``_head_fence`` now sees a mismatch against the caller's original
+    ``expected_head_snapshot_id``/``expected_head_generation`` and raises
+    ``SNAPSHOT_CONFLICT`` before the shortcut is ever looked up, instead of
+    returning the prior receipt. A caller retrying this exact call must pass
+    the NEW head expectation, or treat a ``SNAPSHOT_CONFLICT`` on retry as
+    "already applied" rather than as a real conflict.
     """
     clock = clock or SystemClock()
     request_hash = request_hash or content_hash({"changeset": candidate.changeset_hash})
