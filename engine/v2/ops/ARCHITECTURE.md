@@ -681,11 +681,16 @@ for this job too).**
    as `expected_shadow_snapshot_id` (point 1's code snippet, above), and
    `_default_plan` threads it straight through as a new CLI arg,
    `args.expected_snapshot_id`, to a small extension of `snapshot_planning
-   .pin_snapshot_inputs`: after `resolve_snapshot_head`/`Repository.
-   resolve` resolve the (still separately, necessarily re-read — a plan
-   needs the artifact, not just the id) `SnapshotRef`, if `expected_
-   snapshot_id` is given and differs from the resolved `snapshot.
-   snapshot_id`, `pin_snapshot_inputs` raises `fail("INPUT_CHANGED",
+   .pin_snapshot_inputs`: matching the function's ACTUAL resolution path
+   (round-3 CodeRabbit finding, real — an earlier draft of this paragraph
+   named a `Repository.resolve` call that does not exist here), after
+   `resolve_snapshot_head` returns `head` and `store.read_verified(head)`
+   is deserialized into the (still separately, necessarily re-read — a
+   plan needs the artifact, not just the id) `SnapshotRef` (`snapshot_
+   planning.py:143-144`), if `expected_snapshot_id` is given and differs
+   from that ALREADY-LOADED `snapshot.snapshot_id` — no second resolve
+   call, just a comparison against the ref this call just deserialized —
+   `pin_snapshot_inputs` raises `fail("INPUT_CHANGED",
    "the shadow snapshot head moved since it was verified for this
    session")` — the SAME `INPUT_CHANGED` code this whole design already
    uses for every other "a precondition this call needed did not hold"
@@ -829,18 +834,27 @@ note to the Opus gate, per the standard flow.
 subsection below, in this doc's "Failure semantics" chapter, for the full
 4c R1–R6 account. Restated here, briefly, per the brief's own framing: a
 missing or not-yet-fresh `shadow` snapshot makes `_ensure_shadow_snapshot`
-report `"not_yet"` (retried next tick, exactly like a `probe_finality`
-miss) or raise the SAME typed, non-retryable failure `nightly_trigger`
-already raises for any other missing precondition (issue #104/PR #117's
-own `INPUT_CHANGED` for a session mismatch is the direct precedent) — in
-either case `_submit_plan` returns (or routes into `_failure`) before
-`plan_fn` — and therefore before `cli._plan_command` — is ever called, the
-run for `as_of` is recorded exactly like any other today (an
-`"error"`/terminal-after-`MAX_CONSECUTIVE_ERRORS` receipt, no new receipt
-status), and — because this whole module has no code path into the real
-legacy nightly, changed or not — legacy scoring for that session proceeds
-completely independently, on its own separate crontab line, oblivious to
-whether the shadow snapshot import happened at all.
+either report `"not_yet"` or raise — these are NOT the same outcome and
+are not recorded the same way (round-3 CodeRabbit finding, real: an
+earlier draft of this paragraph conflated them). `"not_yet"` (a session
+mismatch — the legacy store has not caught up to `as_of` yet) is `_submit_
+plan` returning its existing `"not_yet"` receipt DIRECTLY, before ever
+writing `"submitting"` — it consumes no attempt and does not touch
+`MAX_CONSECUTIVE_ERRORS`, exactly like a `probe_finality` miss in
+`_decide` already does not today; a later tick simply re-enters `_decide`
+and tries again, with no error budget spent. Raising is different: only a
+raised `_HANDLED_FAILURES` (a terminal `snapshot_import` failure, or the
+`INPUT_CHANGED` head-moved-since-verification case, point 6 above; issue
+#104/PR #117's own `INPUT_CHANGED` for a session mismatch is the direct
+precedent for the EXCEPTION shape, not for `"not_yet"`) enters `_failure`
+and produces the existing `"error"`/terminal-after-`MAX_CONSECUTIVE_ERRORS`
+receipt — no new receipt status either way, but only the raised path
+spends error budget. In both cases `plan_fn` — and therefore `cli.
+_plan_command` — is never called for that tick, and — because this whole
+module has no code path into the real legacy nightly, changed or not —
+legacy scoring for that session proceeds completely independently, on its
+own separate crontab line, oblivious to whether the shadow snapshot import
+happened at all.
 
 **6. Split into small code PRs.** This design PR adds no code. The
 implementing sequence, each independently mergeable and each with its own
@@ -2856,6 +2870,121 @@ status and its existing consecutive-timeout counter, per point 4 above).
   it is never subject to `_insert_or_match`'s same-key/different-digest
   `IDEMPOTENCY_CONFLICT` check at all — a different key is not a
   conflicting use of the SAME key, it is a distinct submission.
+- **Coordination with #104/#117 (merged, `d080b0d`).** That PR's own
+  `_default_plan` change (below) derives `input_manifest`/`year_start`/
+  `year_end` and is unrelated in mechanism to this design's `_submit_plan`
+  step — `_ensure_shadow_snapshot` never touches `_default_plan`'s body,
+  precisely so the two land without one PR's code needing to know the
+  other exists. The only shared surface is the literal `argparse.
+  Namespace(...)` call both PRs' follow-up code edits construct kwargs
+  for (this design adds `input_mode="snapshot"`, `snapshot_scope=
+  "shadow"`; #117 added `input_manifest`, `year_start`, `year_end`) — an
+  ordinary textual merge, not a behavioral one, since neither PR's kwargs
+  read or depend on the other's.
+
+### `nightly_trigger.py` (issue #104: a per-`as_of` input manifest, not one static file; years derived like legacy) — the 4c R1–R6 template
+
+- **R1, missing input.** `_qualification_path(root, QUALIFICATION_INPUT_MANIFEST)`
+  used to point at exactly one file,
+  `reports/phase6/nightly_trigger/input_manifest.json`, regenerated by
+  nothing: whatever `capture_inputs.capture` produced (by hand, once, via
+  `ops capture-inputs`) for whichever `as_of` was current at that moment
+  stayed the plan's `--input-manifest` for every subsequent night, forever,
+  until an operator re-ran the capture by hand — a legacy store rewritten
+  since then makes the first barrier launch refuse `INPUT_CHANGED`
+  (non-retryable, every descendant blocked); an unchanged store silently
+  proceeds with a manifest pinned to the WRONG session. `_default_plan` now
+  calls `capture_inputs.capture` itself, in-process, for THIS call's own
+  `as_of`, `universe` and derived years (below), and writes the result to a
+  per-`as_of` path (`reports/phase6/nightly_trigger/<as_of>.input_manifest.json`)
+  rather than the one shared name — a stale prior night's manifest is never
+  read for a different night, because there is no shared name left to
+  collide on. This only runs when the resolved `universe` is nonempty
+  (explicit `tickers`, when given, take precedence over the population
+  document — `tuple(tickers) or _population_tickers(population)` — so
+  either source alone is enough to trigger capture); with neither source
+  providing tickers, `input_manifest` stays `None`, unchanged from before —
+  a plan with no tickers has nothing for `capture` to enumerate against. Separately,
+  `cli._read_input_manifest_ref` (unchanged by this PR) already refuses
+  `INPUT_CHANGED` at plan time if the path this PR hands it is missing or a
+  symlink, before publishing its bytes.
+- **R1 (defensive), a manifest for the wrong session.** `capture_inputs.capture(...,
+  as_of=as_of, ...)`'s own `selected_session` field is derived from this
+  same `as_of` (`str(scope.as_of.date())`), so an in-process capture can
+  only ever disagree with the plan's own `as_of` if `capture`'s own scope
+  construction changes underneath this code in some way nothing here would
+  otherwise notice. The trigger checks `manifest.selected_session == as_of`
+  before writing the manifest, and raises the same typed, non-retryable
+  `INPUT_CHANGED` `OpsError` `store_barrier.py` already uses for this family
+  of failure on a mismatch — cheap insurance against exactly the
+  silent-wrong-session failure mode issue #104 opened over ("the run
+  proceeds with a manifest captured for a different session"), now
+  impossible to reach silently even if the assumption above ever stops
+  holding.
+- **R2, cache.** A new plan build always captures inputs again — there is no
+  check for an existing `<as_of>.input_manifest.json` to reuse. This is
+  deliberate, not a missed optimization: a fresh capture is what makes the
+  manifest actually reflect the CURRENT legacy store, which is the entire
+  point of this PR. What IS cached, downstream of this, is the plan itself:
+  once `cli._read_input_manifest_ref` has read the file and published its
+  bytes, the resulting plan document's `input_manifest_ref` points at that
+  immutable, content-addressed artifact — never back at the mutable
+  per-`as_of` file path.
+- **R3, retry.** If no `plan_ref` was ever saved for this `as_of` (a prior
+  attempt only reached `"error"` before a plan was built — `"timed_out"` is
+  never a pre-plan status: `_submit_plan` only records it after a plan was
+  already submitted and served, always with `plan_ref` set), a later
+  eligible attempt calls `_default_plan` again and captures
+  inputs fresh, same as the first attempt. Once a `plan_ref` IS saved,
+  `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
+  RESUME_STATUSES`) calls `_submit_plan` directly with that existing
+  `plan_ref` and never reaches `_default_plan`/`_capture_input_manifest`
+  again — a resumed retry submits and serves the SAME already-pinned plan,
+  it does not recapture or replan.
+- **R4, transaction.** The manifest file write (`write_manifest`, inside
+  `_capture_input_manifest`) happens before `cli._plan_command` opens any
+  catalog transaction, and is not itself part of one: it is a plain
+  filesystem write under `reports/`, unrelated to the operations catalog.
+  If `_plan_command` then fails for an unrelated reason (a validation
+  refusal, a resource problem) AFTER the manifest was already written, that
+  file is simply left on disk, referenced by no persisted plan — an orphan,
+  not a torn write; the NEXT attempt for the same `as_of` (per R2/R6)
+  overwrites it with a fresh capture regardless.
+- **R5, partial write.** `capture_inputs.write_manifest` is a plain
+  `Path.write_text`, not a tmp-file-plus-rename: a process killed mid-write
+  can leave a truncated, invalid-JSON file at the per-`as_of` path — that
+  SAME call never reaches `cli._read_input_manifest_ref` either, since it
+  died before returning from `_capture_input_manifest`. `_read_input_manifest_ref`
+  only ever reads the file after a successful write in the same
+  plan-building call that produced it; a process killed mid-write leaves
+  nothing for that call to read at all. A later eligible attempt (per R3)
+  captures fresh and overwrites the per-`as_of` path — including a
+  truncated one left by a killed prior attempt — before that later call's
+  own `_read_input_manifest_ref` ever reads it, so a partial file is
+  overwritten, not read, by whatever comes next.
+- **R6, idempotency.** A second capture for the same `as_of` (e.g. a
+  same-day re-plan after a first attempt never reached `_plan_command`, or
+  an operator re-running `ops plan` by hand) overwrites the same per-`as_of`
+  path. That new capture can legitimately differ from the first (the legacy
+  store may have moved between the two calls) — this is not a bug, since
+  nothing downstream depends on repeated captures being byte-identical.
+  Critically, it also cannot retroactively change any EXISTING plan: a plan
+  already built pins its own `input_manifest_ref` to the immutable artifact
+  `cli._read_input_manifest_ref` published from whatever bytes existed at
+  THAT call's own read — overwriting the file afterward has no effect on
+  that already-persisted plan.
+- **Years, derived per `as_of`, not fixed.** `year_start=2024, year_end=2026`
+  were a hardcoded pair everywhere `_default_plan` built a plan, silently
+  excluding any scoring year outside that fixed window once the calendar
+  moved past it (issue #104's dated example: once the 35-day scoring
+  horizon first crosses into 2027, in late November 2026, 2027 data drops
+  out of the native context with no error at all). The years are now
+  derived fresh every call from `as_of`, mirroring legacy's own formula
+  (`engine/dashboard/nightly.py`'s `context_years = range(as_of.year - 1,
+  horizon.year + 1)`, `horizon = as_of + 35 days`) exactly: `year_start =
+  as_of.year - 1`, `year_end = horizon.year` — so the plan's context window
+  always tracks the calendar the same way legacy's does, with no fixed end
+  date to eventually age past.
 
 ## Invariants
 
