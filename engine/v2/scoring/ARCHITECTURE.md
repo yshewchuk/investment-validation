@@ -485,9 +485,7 @@ compares a binding's `strategy_id`/`decision_clock_id` against the request
 being scored before submitting it. This is exactly the shape the
 `outputs`/`gate_result` scoping above protects against (capture is the
 real-production path that makes an out-of-scope inference request
-routine, not just a synthetic test scenario), subject to the residual
-limitation noted above when the release has zero matching bindings for
-this request's strategy at all. `native_score_batch` goes through
+routine, not just a synthetic test scenario). `native_score_batch` goes through
 `score_one`, never `score_frozen`, and is unaffected.
 
 ### `release_bindings.py` (the 4c R1–R6 template)
