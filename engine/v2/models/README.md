@@ -99,7 +99,7 @@ See `ARCHITECTURE.md` §7.2–§7.5.
 
 This PR (closes #101) closes three deployment-gate gaps: `stage_release`
 refuses `StagingRefused` (`DUPLICATE_BINDING`) for two inference bindings
-declaring the same `(role, strategy_id, decision_clock_id)`;
+declaring the same `(role, strategy_id)`;
 `promote`/`rollback` refuse the new `CorruptManifest` when a staged
 manifest's content hash no longer matches its declared `release_hash`,
 recomputed at swap time rather than only checking the hash-version tag;

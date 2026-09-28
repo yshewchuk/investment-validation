@@ -432,6 +432,26 @@ def test_rollback_refuses_when_the_target_manifest_is_corrupted(tmp_path):
     assert current_pointer(tmp_path).release_id == "r2"
 
 
+def test_rollback_refuses_when_a_history_entry_is_corrupted(tmp_path):
+    """A history/*.json that fails to parse refuses
+    StagingRefused(HISTORY_UNREADABLE) instead of raising a bare decode
+    error out of _rollback_target."""
+    r1, inv1, pay1 = _fixture("r1")
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    promote(tmp_path, "r1")
+    promote(tmp_path, "r2")
+    assert len(list((tmp_path / "history").glob("*.json"))) == 2
+
+    (tmp_path / "history" / "000000.json").write_text("not json")
+
+    with pytest.raises(StagingRefused) as error:
+        rollback(tmp_path)
+    assert "HISTORY_UNREADABLE" in [item.code for item in error.value.issues]
+    assert current_pointer(tmp_path).release_id == "r2"
+
+
 def test_stage_release_refuses_two_bindings_for_the_same_role_strategy_clock(tmp_path):
     release, inventory, payloads = _fixture("r1")
     first = release.bindings[0]

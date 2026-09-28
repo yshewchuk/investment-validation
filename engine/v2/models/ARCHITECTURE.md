@@ -200,9 +200,10 @@ third-party service. `hashlib.sha256` for every content hash;
   is about in the first place, just for binding uniqueness instead of the
   manifest hash. Previously the `seen` set recorded each key but nothing
   ever read it back, so a duplicate bound silently — the release still
-  staged, and whichever binding
-  `scoring.release_bindings` happened to resolve for that key at read time
-  was unspecified.
+  staged, and `scoring.release_bindings._resolve_model_bindings` raised
+  `ModelNotReady("ambiguous binding: 2 declared")` for every score of that
+  role/strategy at read time (it does not pick one of the two; it refuses
+  outright, the same way `StagingRefused` now does at stage/promote time).
 - **R2, cache.** None: every call re-derives the release hash and re-checks
   every member from the caller's arguments; nothing is memoized.
 - **R3, retry.** None needed: staging the same `release_id` with identical

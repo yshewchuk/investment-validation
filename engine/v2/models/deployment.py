@@ -667,10 +667,19 @@ def _rollback_target(root: Path) -> str:
     immediately before the most recent forward move -- so N chained
     ``rollback()`` calls undo N chained promotions and never revisit a
     release a prior rollback already left. Refuses :class:`NoPriorRelease`
-    when fewer than two ids remain on the replayed stack.
+    when fewer than two ids remain on the replayed stack, and
+    :class:`StagingRefused` (``HISTORY_UNREADABLE``) when a recorded
+    history entry can't be read.
     """
+    try:
+        history = pointer_history(root)
+    except (OSError, ValueError) as exc:
+        raise StagingRefused((ReleaseIssue(
+            path="$.history", code="HISTORY_UNREADABLE",
+            detail="a recorded pointer-history entry could not be read",
+        ),)) from exc
     stack: list[str] = []
-    for state in pointer_history(root):
+    for state in history:
         if state.action == "rollback":
             if stack:
                 stack.pop()
