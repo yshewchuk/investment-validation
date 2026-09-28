@@ -377,10 +377,14 @@ byte-for-byte in shape:
   (`nightly.py:858`).
 - `nightly._native_score_batch_identity` — a cheap catalog-only identity
   check mirroring `nightly._computed_moves_identity` (`nightly.py:830`):
-  finds the latest session with a succeeded legacy `"score"` job (parsing
-  that job's own idempotency key, the same way `_computed_moves_identity`
-  parses a succeeded `"refresh"` job's), and returns `None` when none
-  exists yet.
+  finds the latest session with a succeeded legacy `"score"` job, parsing
+  that job's own idempotency key — the standard `_DAG_STAGES` 4-part shape
+  (`"nightly:<session>:<scope_hash>:score"`, `nightly.py:996`), not
+  `_computed_moves_identity`'s own 3-part `"refresh"` format — to recover
+  BOTH the session and the exact `scope_hash` that `"score"` job was pinned
+  to (see "Failure semantics" below, R6, for why `scope_hash` matters here
+  and did not for `computed_moves_refresh`), and returns `None` when no
+  succeeded `"score"` job exists yet.
 
 `nightly.GRAPH` gains a `"native_score_batch": ("score",)` node
 (topological documentation only, exactly like
@@ -516,6 +520,23 @@ ever builds a `JobSpec`:
   PR-3 section names as still missing ("a later cutover PR (PR-4/PR-6)...
   enumerates `BoardRequest`s, stages their per-event inputs"): PR-7a is that
   later PR.
+  This enumeration/staging step runs synchronously inside `Service.tick()`,
+  exactly where `computed_moves_refresh`'s own `target_tickers_from_snapshot`
+  scan already runs (`_build_native_computed_moves_plan`, `nightly.py:614`)
+  — the same tick-blocking trade-off that precedent already accepts, not a
+  new one (CodeRabbit round 1: flagged as a real risk if left unbounded).
+  Two bounds keep it from being worse: (1) the R2 memo below runs this
+  build AT MOST ONCE per newly-selected `(as_of, scope_hash)` identity,
+  never every ~1s tick; (2) its I/O is bounded by the SAME committed rows
+  the legacy `"score"` job it reads from ALREADY read this session — never
+  a fresh scan of history or of the whole universe — so one native-batch
+  build adds, at most, one more read of a row set `"score"` already paid
+  for once. If a later PR's implementation measures this as not bounded in
+  practice, it must move the build off `tick()`'s synchronous path (e.g., a
+  two-tick handoff: one tick marks a pending build, an out-of-process step
+  performs it, a later tick submits once its output is ready) before it
+  ships — this design accepts the one-tick synchronous build only because
+  of bound (2), not because blocking `tick()` is free.
 - **`SourceBundle` (`#48`/PR-2, `#67`) is never built at submission time.**
   `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479`) and
   `source_inputs.build_native_score_inputs` (`source_inputs.py:1034`) both
@@ -858,33 +879,42 @@ addressed as `job_<id>#score` via `_job_output`, `nightly.py:180-188`).
   `dependency_job_ids` can bind `{"records.json": "job_<id>#records"}`, the
   identical shape `_decision_bindings`/`_render_bindings` already build for
   `score.json` (`nightly.py:216`, `:225`).
-- **Per-night identity.** The job's idempotency key is session-only —
-  `"nightly:<as_of>:native_score_batch"`, no `scope_hash` — mirroring
-  `computed_moves_refresh`'s own key (`nightly.py:765-768`) for the identical
-  reason: its target set is always every `BoardRequest` `board_requests`
-  enumerates for that session's pinned snapshot, never a caller-specific
-  watchlist. A later job finds that night's attempt the same way
-  `_native_score_batch_identity` does: `SELECT ... FROM jobs WHERE
-  state='succeeded' AND idempotency_key LIKE
-  'nightly:<as_of>:native_score_batch'`, then the latest succeeded
+- **Per-night identity.** The job's idempotency key is
+  `"nightly:<as_of>:<scope_hash>:native_score_batch"` — keyed to the
+  SPECIFIC succeeded `"score"` job `_native_score_batch_identity` selected
+  (see "Failure semantics" below, R6), never session alone: a later
+  `"score"` job for the same session under a different `scope_hash` is a
+  genuinely different native batch and gets a distinct key, so a real
+  re-run is never silently treated as already covered (CodeRabbit round 1,
+  real finding — a prior draft of this design keyed session-only,
+  mirroring `computed_moves_refresh` for the wrong reason: ITS target set
+  is watchlist-independent, this one's is not). A later job finds that
+  night's attempt the same way `_native_score_batch_identity` does:
+  `SELECT ... FROM jobs WHERE state='succeeded' AND idempotency_key LIKE
+  'nightly:<as_of>:%:native_score_batch'`, then the latest succeeded
   `attempts` row for it (`input_bindings.py:43-45`'s own query is the same
   shape).
-- **Row keys.** Each `records.json` entry is a `ScoreRecord` document
-  (`to_document`-serialized) in `ScoreBatch.requests` order
-  (`native_score_batch.py:463-478`, unchanged from PR-3); the `BoardRequest`
-  (ticker, strategy, ISO `event_date`, `session`) it answers for is that
-  position's own key in `events.json`'s `NightlyEventInputs` array
-  (`native_score_batch.py:56`, `:84-92`), in the same order
-  `assemble_score_batch_inputs` iterated `events` — the `ScoreRecord`
-  document itself carries no ticker/strategy/event_date/session field of its
-  own. **Left for the parity job's own re-plan, not designed here**: pairing
-  a `records.json` row against the matching legacy row needs that
-  `BoardRequest` key; the natural way to give it one without re-deriving
-  order-sensitive logic is for this same builder to ALSO bind `events.json`
-  itself (`input_bindings.py`'s direct-artifact-id path, same as above) as
-  one of `native_score_batch`'s own recorded outputs, so a later job can zip
-  the two same-order arrays — that wiring belongs to the parity job's own
-  PR, not this one.
+- **Row keys.** Each successful row's own `BoardRequest` (ticker, strategy,
+  ISO `event_date`, `session`) is exactly what `assemble_score_batch_inputs`
+  already keys its `dict[BoardRequest, tuple[ScoreRequest,
+  NativeScoreInputs]]` by — but that key is NOT carried through to
+  `records.json` today: `ScoreBatch.requests` (and so the `records` array,
+  `native_score_batch.py:463-478`) is only the SUCCESSFUL subset, in
+  `assembled`'s own iteration order, with every refused row already
+  dropped. So a `records.json` row can NEVER be paired against
+  `events.json` by POSITION once any row has refused — the two arrays are
+  then different lengths with no fixed offset between them (CodeRabbit
+  round 1, real finding — a prior draft of this design recommended exactly
+  that positional zip; it is wrong and is corrected here). **Left for the
+  parity job's own re-plan, not designed here, but a real correctness gap,
+  not an optional nicety**: `run_native_score_batch_worker` must carry each
+  row's `BoardRequest` key through to its own output — either a keyed
+  mapping (`{"<board request key>": <ScoreRecord document>}`) in place of
+  `records.json`'s current bare list, or the key folded directly into each
+  `ScoreRecord` document — never a positional zip against `events.json`.
+  That is a change to `native_score_batch.py`'s own output contract
+  (`native_score_batch_records.v1.0`) and belongs to the PR that builds the
+  parity job, not this one.
 - **Namespace/authority.** Every one of these jobs is submitted under a
   `NamespacePolicy` scoped to `{"shadow"}` only, mirroring
   `_reconcile_computed_moves_refresh`'s own inline policy
@@ -1753,11 +1783,20 @@ function is never part of.
 - **R5 partial write.** None: `events.json` is built and staged as one
   immutable content-addressed artifact before `submit` is ever called;
   nothing is written to the catalog before that single insert.
-- **R6 idempotency.** Session-only key
-  (`"nightly:<as_of>:native_score_batch"`, no `scope_hash`), for the same
-  reason `computed_moves_refresh`'s own key is session-only — the target set
-  is always every `BoardRequest` `board_requests` enumerates for that
-  session's pinned snapshot, never a caller-specific watchlist.
+- **R6 idempotency.** The idempotency key is
+  `"nightly:<as_of>:<scope_hash>:native_score_batch"` — the SAME 4-part
+  `_DAG_STAGES` shape `build_legacy_job_requests` already uses for every
+  other stage (`nightly.py:996`), keyed to the SPECIFIC succeeded `"score"`
+  job `_native_score_batch_identity` selected, never session alone
+  (CodeRabbit round 1, real finding). A newer succeeded `"score"` job for
+  the same session under a DIFFERENT `scope_hash` (a wider re-run, a
+  corrected watchlist) is a genuinely different native batch and gets a
+  distinct key; a retry that reproduces the identical `scope_hash` still
+  dedupes. `computed_moves_refresh`'s own key is deliberately session-only
+  instead, because ITS target set is always every scoreable ticker on the
+  head, independent of which watchlist's `"score"` job triggered the tick —
+  that reasoning does not carry over here, where the batch's inputs ARE the
+  specific `"score"` job's specific pinned rows.
 
 `Service._reconcile_native_score_batch_shadow` wraps the whole call in the
 identical try/except `_reconcile_publication_status`/
