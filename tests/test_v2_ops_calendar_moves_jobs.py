@@ -227,6 +227,31 @@ def test_empty_tickers_never_requires_matching_expected_ids():
         _job(), _params(expected_ids=("AAPL", "MSFT"), tickers=())) == ()
 
 
+def test_empty_tickers_is_a_problem_for_a_forward_calendar_refresh_job():
+    """forward_calendar_store treats an empty tickers tuple as "the whole
+    market", so a forward_calendar_refresh job submitted with tickers=() and
+    a non-empty expected_ids would commit a whole-market refresh before its
+    coverage mismatch was discovered. The previous round's matching check was
+    guarded by `elif tickers`, silently skipping exactly this case."""
+    problems = calendar_moves_parameter_problems(
+        _job(kind=FORWARD_CALENDAR_REFRESH_ACTION),
+        _params(expected_ids=("AAPL",), tickers=()))
+    assert any("tickers" in problem for problem in problems)
+
+
+def test_empty_tickers_is_no_problem_without_the_forward_calendar_kind():
+    """The empty-tickers rule is kind-specific: computed_moves_refresh never
+    reads the field and every real submission leaves it at its empty default,
+    so a blanket rule would break every such job. A bare _job() with no kind
+    set (like test_empty_tickers_never_requires_matching_expected_ids above)
+    must behave the same way."""
+    assert calendar_moves_parameter_problems(
+        _job(kind=COMPUTED_MOVES_REFRESH_ACTION),
+        _params(expected_ids=("AAPL", "MSFT"), tickers=())) == ()
+    assert calendar_moves_parameter_problems(
+        _job(), _params(expected_ids=("AAPL", "MSFT"), tickers=())) == ()
+
+
 def test_valid_forward_calendar_fields_have_no_problems():
     assert calendar_moves_parameter_problems(
         _job(), _params(tickers=("AAPL",), horizon_days=30)) == ()

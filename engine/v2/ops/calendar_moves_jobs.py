@@ -188,7 +188,10 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
     (the worker writes it itself). The final two checks --
     ``horizon_days`` (a real ``int`` inside ``[1, MAX_HORIZON_DAYS]``) and
     ``tickers`` (a tuple/list of unique bounded non-empty strings that,
-    whenever non-empty, must also match ``expected_ids`` as a set) -- apply
+    whenever non-empty, must also match ``expected_ids`` as a set, and which
+    is additionally refused when EMPTY for a ``forward_calendar_refresh`` job
+    specifically -- never for ``computed_moves_refresh``, which never reads
+    the field and always leaves it at its empty default) -- apply
     to BOTH job kinds: they are harmless for ``computed_moves_refresh``,
     which never reads either field, since their defaults
     (``DEFAULT_HORIZON_DAYS`` and an empty tuple) both already pass.
@@ -217,6 +220,8 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
     elif (any(not isinstance(item, str) or not item or len(item) > 128 for item in tickers)
           or len(set(tickers)) != len(tickers)):
         problems.append("tickers must be unique bounded nonempty strings")
+    elif not tickers and getattr(job, "kind", None) == FORWARD_CALENDAR_REFRESH_ACTION:
+        problems.append("tickers must be a non-empty ticker selection for a forward_calendar_refresh job")
     elif tickers and set(tickers) != set(params.expected_ids):
         problems.append("tickers must match expected_ids for a ticker-scoped forward calendar refresh")
     return tuple(problems)

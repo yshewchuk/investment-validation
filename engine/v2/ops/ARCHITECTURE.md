@@ -952,7 +952,12 @@ network, or database access.
   unique bounded non-empty strings, and whenever it is non-empty it must also
   match `expected_ids` as a set (a ticker-scoped forward calendar refresh
   cannot commit a different ticker set than the coverage denominator its job
-  reports). `table_name`, by contrast, is still not a field on
+  reports); an EMPTY `tickers` is additionally refused for a
+  `forward_calendar_refresh` job specifically (the standalone runner's
+  "empty means the whole market" behavior is intentional for direct callers,
+  but a whole-market run must never be submitted as this job kind) — never
+  for `computed_moves_refresh`, which never reads the field and always leaves
+  it at its empty default. `table_name`, by contrast, is still not a field on
   `CalendarMovesParameters` at all: it was never read by either store, so
   there is nothing to validate-or-refuse for it.
 - **Training/promote refusal** — `run_training_worker` maps every refusal
