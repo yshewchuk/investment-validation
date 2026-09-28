@@ -425,29 +425,40 @@ implemented)
 
 - **R1, missing input.** Refuses `ReleaseNotStaged(prior_release_id)` if the
   prior release is not staged (same refusal `resolve_release` already uses).
-  Refuses a typed error if any key in `changed_members` does not name a
-  binding the prior release's `ModelReleaseInventory` (or this package's
-  completeness contract) recognizes — a nightly append can replace an
-  existing binding's target, never invent a new one. Refuses if any carried-
-  over binding's declared `content_hash` cannot be found in `<root>/objects/`
-  — a prior release is content-addressed and immutable (§4), so this can
-  only mean the store was tampered with or corrupted, never a normal state.
+  Refuses `UnknownReleaseMember` (a new `DeploymentError` subclass) if any
+  key in `changed_members` does not name a binding the prior release's
+  `ModelReleaseInventory` (or this package's completeness contract)
+  recognizes — a nightly append can replace an existing binding's target,
+  never invent a new one. Refuses `MissingCarriedOverObject` (a new
+  `DeploymentError` subclass, naming the binding and its `content_hash`) if
+  any carried-over binding's declared object cannot be found in
+  `<root>/objects/` — a prior release is content-addressed and immutable
+  (§4), so this can only mean the store was tampered with or corrupted,
+  never a normal state.
 - **R2, cache.** None: reads the prior manifest fresh, same as every other
   read in this module.
 - **R3, retry.** Calling this twice with the same `(prior_release_id,
   changed_members)` produces two DIFFERENT `release_id`s (each call is a new
   release, not idempotent by design — unlike `restage_semantic_hash`, this
-  function's job is to mint a new release, not repair an existing one); the
-  caller (the nightly reconcile, §"Native model refresh cycle" in the ops
-  doc) is responsible for not calling it twice for the same `as_of` — see
-  that section's own R3.
+  function's job is to mint a new release, not repair an existing one). This
+  function does not itself guard against being called twice for the same
+  `as_of`; that durable guard lives one layer up, at the caller — see the
+  ops doc's "Native model refresh cycle" failure semantics (R3/R6), which
+  uses a deterministic, catalog-checked job id (mirroring
+  `computed_moves_refresh`'s own dedup key) rather than this function's
+  return value to detect a repeat.
 - **R4, transaction.** Delegates the actual write entirely to
-  `stage_release`'s existing atomic staging; `derive_release` itself performs
-  no I/O beyond reading the prior manifest and the new members' bytes.
+  `stage_release`'s existing atomic staging. `derive_release` performs no
+  WRITE of its own beyond that delegation, but it DOES read: the prior
+  manifest, the bytes of every NEW member in `changed_members`, and —
+  because `stage_release`'s payload map must supply bytes for every member
+  across every binding (§3) — the already-staged bytes of every CARRIED-OVER
+  binding too, so it can pass them through unchanged.
 - **R5, partial write.** Inherits `stage_release`'s existing guarantee: a
   crash mid-stage leaves no partially-written manifest, and any object
   already durably written (including a carried-over one, since its bytes are
-  unchanged and already exist) is never rewritten.
+  unchanged and already exist — write-once dedup means no new WRITE for it,
+  even though its bytes are read and re-supplied) is never rewritten.
 - **R6, idempotency.** Not idempotent by identity (R3), but every carried-
   over member's `content_hash` is byte-identical to the prior release's —
   `derive_release` never re-hashes, re-serializes, or otherwise perturbs a
@@ -483,13 +494,20 @@ implemented)
   score actually used").
 - **Causality: no event settled after `as_of` enters a pool, residual set,
   cutoff, or calibration member used to score `as_of`.** (proposed, cutover
-  PR-13 design) Every frozen-state builder that a nightly append calls
-  inherits the same strictly-before bound `engine.pnl_sim.trailing_cutoff`
-  already enforces at construction (`[as_of - window, as_of)`, never
-  inclusive of `as_of` itself); `derive_release` does not itself check this
-  — it trusts the members it is given — so the nightly gate (ops doc) checks
-  it independently against each new member's own recorded bound before an
-  automatic promote.
+  PR-13 design) This is a requirement on the FINISHED member, not a claim
+  that every builder enforces it identically today: `PairedResidualPoolArtifact`
+  and `TrailingCutoffArtifact` take their own explicit cutoff and construct
+  under a documented exclusive bound (the same shape
+  `engine.pnl_sim.trailing_cutoff` uses, `[as_of - window, as_of)`, never
+  inclusive of `as_of`); `BoardAnalogPoolArtifact` derives its population
+  edges from the frame it is given, and `DriverResidualPoolArtifact` accepts
+  already-bucketed pools with no cutoff argument of its own — for both, the
+  CALLER (the nightly append's row-selection step) is what must have already
+  scoped rows to before `as_of`, not the builder. `derive_release` does not
+  itself check any of this — it trusts the members it is given — so the
+  nightly gate (ops doc) is what independently verifies each new member's
+  own recorded bound against `as_of` before an automatic promote, regardless
+  of which builder enforced what.
 - **A carried-over member's bytes and hash are never recomputed.**
   (proposed, cutover PR-13 design) `derive_release` only ever mints new
   objects for the bindings named in `changed_members`; every other binding

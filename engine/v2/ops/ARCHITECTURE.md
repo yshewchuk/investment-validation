@@ -795,19 +795,25 @@ more graph nodes:
   `training_plan(mode="recipe", recipe=<champion recipe id>, ...)`
   (`training.py`'s existing `training_plan`/`training_job_kind` — no new job
   kind) for each `FEATURE_ROLES`/`"gate"` champion, submits it, and — only
-  once every one lands staged AND the nightly gate (below) passes — submits
-  a `models_promote` (`promote_job_kind()`, existing `PromoteParameters`).
+  once every one lands staged AND a `phase5_acceptance` run against the new
+  release SUCCEEDS (the heavy bar, below — never the lightweight nightly
+  gate) — submits a `models_promote` (`promote_job_kind()`, existing
+  `PromoteParameters`).
 - `Service._reconcile_pool_nightly_refresh` — the same shape, keyed by the
   current trading day's `as_of` (mirroring `_computed_moves_identity`'s
-  session+head key), delegates to a new
-  `nightly.submit_pool_nightly_refresh_if_ready`, which builds
-  `training_plan(mode="board_analog", ...)` and
+  session+head key). If there is no currently-DEPLOYED release yet (the
+  monthly path above has never completed a first promote), this reconcile
+  has no base to derive from: it is a no-op every tick, not a refusal, until
+  a first release is live — see "Failure semantics" below. Once a base
+  exists, it delegates to a new `nightly.submit_pool_nightly_refresh_if_ready`,
+  which builds `training_plan(mode="board_analog", ...)` and
   `training_plan(mode="trailing_cutoff", ...)` against the currently-
   DEPLOYED release's already-staged members, then calls
   `engine.v2.models.deployment.derive_release` (new, see the models doc
   §2/§7.6) with the freshly-built pool/cutoff members as `changed_members`
   and every other binding carried over unchanged, stages it, gates it
-  (below), and — on a pass — submits `models_promote` for the new release.
+  (the LIGHTWEIGHT nightly gate below), and — on a pass — submits
+  `models_promote` for the new release.
 
 Both reconciles are wrapped in the same try/except
 `_reconcile_publication_status`/`_reconcile_computed_moves_refresh` already
@@ -828,10 +834,13 @@ the existing one generalized to two more identities.
 cutoff members (and, if the calibration decision below lands nightly, the
 payoff/recalibration members); `derive_release` copies every other binding
 — including every `FEATURE_ROLES`/`"gate"` champion — from the prior release
-UNCHANGED, by `content_hash`, into the new manifest. Because
-`stage_release`'s object store is content-addressed and write-once
-(`<root>/objects/<hash>`, models doc §4), a carried-over binding costs no
-new I/O: only the changed members' bytes are written as new objects. The
+UNCHANGED, by `content_hash`, into the new manifest — `derive_release`
+still reads a carried-over binding's already-staged bytes (`stage_release`'s
+payload map needs bytes for every binding, models doc §7.6 R4), it just
+never WRITES a new object for one. Because `stage_release`'s object store is
+content-addressed and write-once (`<root>/objects/<hash>`, models doc §4), a
+carried-over binding costs no new WRITE: only the changed members' bytes are
+written as new objects. The
 release still gets a brand-new `release_id` every night (releases are
 immutable once staged — a nightly append is never a mutation of the prior
 release), and `release_hash`/`release_hash_version`
@@ -842,11 +851,13 @@ object store is shared with the previous release, exactly the same
 "recompute the hash, not the bytes" shape `restage_semantic_hash` (models
 doc §7.5) already uses for a different reason.
 
-**Gate before an automatic promote (lighter than `phase5_acceptance`).**
-`checks/phase5_acceptance.py` shadow-scores a population — a heavy job, and
-the right bar for the monthly champion retrain (or an operator-triggered
-run), because refitting the champions can change scoring outcomes. The
-nightly append changes no model, so the nightly gate never re-scores
+**The nightly gate before an automatic promote (lighter than
+`phase5_acceptance`; the MONTHLY path uses `phase5_acceptance` itself, not
+this gate).** `checks/phase5_acceptance.py` shadow-scores a population — a
+heavy job, and the right bar for the monthly champion retrain (or an
+operator-triggered run), because refitting the champions can change scoring
+outcomes; the monthly reconcile above requires it to succeed before
+promoting. The nightly append changes no model, so ITS gate never re-scores
 anything; it verifies the STAGED ARTIFACTS are internally consistent and
 causally sound:
 
@@ -892,14 +903,27 @@ name which cadence it picked and why.
 - **R1, missing input.** No settled event since the last nightly append, or
   no calendar-month rollover since the last monthly retrain, is a no-op —
   not a failure — exactly like `_reconcile_computed_moves_refresh`'s own
-  "nothing to (re)build" path. A gate failure is a typed refusal, not an
-  exception: the newly-staged release is left staged, unpromoted.
+  "nothing to (re)build" path. So is the nightly reconcile finding no
+  currently-DEPLOYED release yet (no monthly promote has ever succeeded): it
+  is a no-op every tick, never a refusal, until the monthly path establishes
+  a first release. A gate failure is a typed refusal, not an exception: the
+  newly-staged release is left staged, unpromoted.
 - **R2, cache.** None: both reconciles re-derive their identity (current
   month; current `as_of`) fresh on every tick, the same as
   `_computed_moves_identity_or_none`.
-- **R3, retry.** Memoized with backoff per identity (above); a repeated tick
-  before a build/gate/promote sequence completes never double-submits the
-  same month's or day's job. A `models_promote` retry against an
+- **R3, retry.** Two SEPARATE mechanisms, not one, mirroring
+  `computed_moves_refresh` exactly: (a) a durable, catalog-checked
+  deterministic job id — `job_id_for("shadow", f"tier4_monthly_refresh:
+  {month}")` / `job_id_for("shadow", f"pool_nightly_refresh:{as_of}")`,
+  mirroring `job_id_for("shadow", _computed_moves_refresh_key(...))` — that
+  each submit function checks BEFORE building a training/promote plan; if a
+  job already exists under that key, in any state, the submit function
+  returns without rebuilding or resubmitting anything, and this check
+  survives a `Service` restart because it is backed by the catalog, not
+  memory. (b) the in-memory `_computed_moves_memo`-shaped backoff (above),
+  which only throttles repeated EMPTY/FAILING attempts against the same
+  identity between successes — it is not itself a correctness guard and
+  does not survive a restart. A `models_promote` retry against an
   already-live release is the existing no-op (models doc §7.2 R3).
 - **R4, transaction.** Build → gate → promote are three separate steps, each
   its own attempt. A crash between staging and gating leaves a staged-but-
@@ -910,9 +934,12 @@ name which cadence it picked and why.
 - **R5, partial write.** Inherits `deployment.py`'s existing atomic-write
   primitives (temp + fsync + rename) for staging and for the pointer swap;
   this design introduces no new I/O primitive.
-- **R6, idempotency.** The same month's/day's identity always resolves to
-  the same target release; promoting an already-live release twice is the
-  existing single no-op.
+- **R6, idempotency.** `derive_release` itself is not idempotent (models doc
+  §7.6 R3 — each call mints a new `release_id`), so idempotency for "the
+  same month/day never gets two submitted jobs" is carried entirely by R3's
+  durable job-id dedup above, not by `derive_release`'s own return value.
+  Promoting an already-live release twice is the existing single no-op
+  (models doc §7.2 R6).
 
 **Rollback story.** A refusal at ANY stage — build, gate, or promote — leaves
 the previously-DEPLOYED release's pointer untouched, and scoring is

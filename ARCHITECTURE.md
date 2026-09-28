@@ -246,6 +246,18 @@ or a new consumer must update that package's README in the same change.
   actually calls it." An architecture-doc update's production call path
   must trace the real chain — entrypoint → stage → module → new code — not
   cite a passing inventory row as proof.
+- **Native model refresh cycle (design, cutover PR-13 — proposed, not yet
+  implemented).** A frozen release (`engine/v2/models/deployment.py`) is
+  staged and promoted only by an operator today; this design adds two more
+  `Service.tick()`-time reconciles — the same shape as
+  `_reconcile_computed_moves_refresh` above, never a `nightly.py`
+  `GRAPH`/`_DAG_STAGES` node — that retrain and repromote the champion/gate
+  models monthly, on a schedule, and append newly-settled events into the
+  analog/residual pools plus advance the trailing cutoff nightly, gating
+  each nightly release before an automatic promote. The calibration
+  (payoff/recalibration) cadence is undecided. See `engine/v2/ops/
+  ARCHITECTURE.md`'s "Native model refresh cycle" and `engine/v2/models/
+  ARCHITECTURE.md` §§2, 7.6, 8 for the full design.
 
 ### 4.1 Production flow
 
