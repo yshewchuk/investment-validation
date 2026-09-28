@@ -575,3 +575,46 @@ def test_retry_of_the_same_generic_effect_after_a_crash_before_attempt_commit_su
             receipt_id="generic-receipt-2", attempt_id="generic-attempt-2",
             fence=2)
     assert err.value.code == "SNAPSHOT_CONFLICT"
+
+    # The real discriminator for the WIDENED _head_fence branch: a THIRD,
+    # genuinely different snapshot becomes head first (a successful commit
+    # whose parent is table_candidate's snapshot, advancing head to
+    # generation 3), so head matches NEITHER the replay's stale
+    # (parent, gen1) NOR the already-at-head (table_candidate, gen2)
+    # position. Replaying the ORIGINAL commit now — same receipt_id, same
+    # candidate, same stale expectation — must be refused by the fence with
+    # SNAPSHOT_CONFLICT: the idempotent replay shortcut can only ever ride a
+    # head that still sits at this candidate's own snapshot one generation
+    # past the expectation.
+    third_resolved = Repository(conn).resolve_full(table_candidate.snapshot.snapshot_id)
+    third_candidate = generic_incremental.build_generic_table_candidate(
+        third_resolved, store, table_name,
+        (incremental_tables.GenericRevision(
+            candidate=other_revision_candidate, row=other_row),),
+        coverage=other_coverage,
+        parent_snapshot_id=table_candidate.snapshot.snapshot_id)
+    assert (third_candidate.snapshot.snapshot_id
+            != table_candidate.snapshot.snapshot_id)
+    third = generic_incremental.commit_generic_table_candidate(
+        conn, store, third_candidate, scope="generic-worker",
+        expected_head_snapshot_id=table_candidate.snapshot.snapshot_id,
+        expected_head_generation=2,
+        clock=clock, request_hash="sha256:" + "3" * 64,
+        receipt_id="generic-receipt-3", attempt_id="generic-attempt-3",
+        fence=3)
+    assert third.resulting_head_snapshot_id == third_candidate.snapshot.snapshot_id
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = 'generic-worker'"
+    ).fetchone()
+    assert (head["snapshot_id"], head["generation"]) == (
+        third_candidate.snapshot.snapshot_id, 3)
+
+    with pytest.raises(DataError) as replay_after_third:
+        generic_incremental.commit_generic_table_candidate(
+            conn, store, table_candidate, scope="generic-worker",
+            expected_head_snapshot_id=parent.snapshot_id,
+            expected_head_generation=1,
+            clock=clock, request_hash=request_hash,
+            receipt_id="generic-receipt-1", attempt_id="generic-attempt-1",
+            fence=1)
+    assert replay_after_third.value.code == "SNAPSHOT_CONFLICT"
