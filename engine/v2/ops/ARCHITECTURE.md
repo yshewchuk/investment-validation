@@ -2324,7 +2324,13 @@ byte-identical fragment content (same `fragment_id`, same object content
 hash) and the commit resolves back to the parent snapshot instead of a fresh
 generation.
 
-**Cutover PR-7a: where the native `ScoreRecord`s land.** Once a
+**Cutover PR-7a: where the native `ScoreRecord`s will land (deferred).**
+Today's production path never reaches a successful `native_score_batch`
+attempt (see "Failure semantics" below: the unpinned-snapshot branch
+returns before any job is built, and the pinned-snapshot branch raises
+because cutover PR-6's raw-row producer does not exist yet), so nothing
+below actually happens in production today. This section describes the
+destination once PR-6 lands. Once a
 `native_score_batch` attempt succeeds, `records.json`/`refusals.json`
 (already documented above) are recorded as ordinary `attempt_outputs` rows
 keyed `(attempt_id, name)` — `name="records"` / `name="refusals"` — the
@@ -3507,7 +3513,10 @@ function is never part of.
      call runs ONLY when the cheap `current_pointer(root / "deployment")` read (one file
      stat, one small JSON decode — genuinely cheap, unlike the earlier
      draft's claim that the hash-verifying call itself was cheap) reports a
-     DIFFERENT `release_id` than this memo holds. This memo is checked, and
+     DIFFERENT `root` OR a DIFFERENT `release_id` than this memo holds (the
+     reuse check is `memo["root"] == str(root) and memo["release_id"] ==
+     pointer.release_id` — either one changing invalidates the memo, not
+     `release_id` alone). This memo is checked, and
      can update, on EVERY tick regardless of the build-attempt memo below —
      a release change is never delayed by the other memo's backoff.
   2. **The build-attempt memo/backoff** (mirroring `computed_moves_refresh`'s
