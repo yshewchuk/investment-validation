@@ -773,6 +773,39 @@ needs a native forecasts-table producer (a monthly fit plus a nightly
 current-month refit), which is a different and larger design than this
 refresh cycle and is called out as its own follow-up, not solved here.
 
+**A release is really two artifacts, sharing one `release_id` (verified
+against the code — see the correction in `engine/v2/models/ARCHITECTURE.md`
+§1).** `deployment.py`'s `ModelRelease` (`bindings: tuple[ModelBinding,
+...]`, one per `role` ∈ `releases.ModelRole` — `"size"`/`"implied_t1"`/
+`"runup_move"`/`"iv_crush"`/`"gate"`/`"chooser"`) is the MODEL half. The
+pool/residual/cutoff/calibration frozen-state artifacts are a SEPARATE file,
+`<release_root>/phase5_release.json` (the "state catalog"), read by
+`engine/v2/scoring/release_bindings.py`'s `_read_state_catalog`
+(`release_bindings.py:293-316`), which requires the catalog's own recorded
+`release_id` to equal the live `DEPLOYED` pointer's — `deployment.py` never
+reads or writes this file at all. Today only the operator tool
+`tools/phase5_prepare_release.py` writes both together
+(`phase5_prepare_release.py:326-346`: it calls `deployment.stage_release`,
+then writes fresh state objects, then writes the catalog) — nothing else
+assembles a release from training-job outputs.
+
+**Prerequisite code fix, before anything else in this design is safe: version
+the state catalog per `release_id`.** `phase5_release.json` sits at ONE path
+per release ROOT today, not one per `release_id` — unlike the model
+manifest, it is not immutable-per-id, and `deployment.rollback` never
+touches it. Rolling back the model pointer to an older `release_id` already
+leaves the catalog's `release_id` field disagreeing with the rolled-back
+pointer, and `release_bindings.py`'s equality check then refuses EVERY
+scoring resolution — a pre-existing gap in the current, entirely manual
+workflow, not one this design introduces, but one this design's automation
+would hit constantly. **PR-13's first code PR (see the split below) moves
+the catalog to a per-`release_id`, immutable path** (alongside the model
+manifest, e.g. `deployment/releases/<id>/phase5_release.json`), after which
+`promote`/`rollback` need no new logic: whichever `release_id` becomes live,
+its own catalog already sits at its own immutable path, and the "scoring
+unaffected by a refusal" story in "Rollback story" below is actually true
+for both halves of a release, not only the model half.
+
 **Entry point — follow the computed_moves_refresh shape (#54), never
 `run_shadow_nightly`.** `run_shadow_nightly` (`nightly.py`) has no
 production caller (only `tests/test_v2_ops_legacy_workflows.py` and
@@ -791,14 +824,35 @@ more graph nodes:
   current calendar month, plus whether a monthly release already exists for
   it — two indexed lookups, no pandas scan, mirroring
   `_computed_moves_identity_or_none`'s shape) delegates to a new
-  `nightly.submit_tier4_monthly_refresh_if_ready`, which builds a
-  `training_plan(mode="recipe", recipe=<champion recipe id>, ...)`
-  (`training.py`'s existing `training_plan`/`training_job_kind` — no new job
-  kind) for each `FEATURE_ROLES`/`"gate"` champion, submits it, and — only
-  once every one lands staged AND a `phase5_acceptance` run against the new
-  release SUCCEEDS (the heavy bar, below — never the lightweight nightly
-  gate) — submits a `models_promote` (`promote_job_kind()`, existing
-  `PromoteParameters`).
+  `nightly.submit_tier4_monthly_refresh_if_ready`, which:
+  1. builds a `training_plan(mode="recipe", recipe=<champion recipe id>,
+     ...)` (`training.py`'s existing `training_plan`/`training_job_kind` —
+     no new job kind) for each `FEATURE_ROLES`/`"gate"` champion and submits
+     it (each its own durable key — "Failure semantics" below);
+  2. once every one is staged (the job's own `folds/<fold_id>/
+     estimator.joblib`, `job.py` — a `full_refit=True` champion recipe
+     degenerates to one fold), **assembles** a candidate `ModelRelease`: a
+     NEW small function, proposed as `deployment.derive_release`'s sibling
+     `training.assemble_champion_release` (or a refactor of
+     `tools/phase5_prepare_release.py`'s existing assembly logic into an
+     importable function this path calls — same logic, not reinvented),
+     reads each completed job's `estimator.joblib` into a `ModelBinding`/
+     `ArtifactMember`, and calls `deployment.derive_release` with those as
+     `changed_bindings` against the CURRENTLY-DEPLOYED release (so
+     `"chooser"` and anything else untouched carries over) — this is the
+     step "lands staged" was eliding in an earlier draft of this design: a
+     completed TRAINING JOB is not a staged RELEASE, and nothing assembles
+     one today outside the manual tool;
+  3. for the STATE half, calls `checks.phase5_release.derive_catalog`
+     (models doc §7.7) against the CURRENTLY-DEPLOYED release's catalog
+     with an EMPTY `changed_rows` — the monthly path changes no pool/
+     cutoff/calibration row itself, it only needs the candidate release's
+     catalog re-read fresh, immediately before staging, so it reflects
+     whatever the nightly path has most recently promoted (see "Pool state
+     across a monthly cycle" below for why this matters);
+  4. only once a `phase5_acceptance` run against that candidate SUCCEEDS
+     (the heavy bar, below — never the lightweight nightly gate) — submits
+     a `models_promote` (`promote_job_kind()`, existing `PromoteParameters`).
 - `Service._reconcile_pool_nightly_refresh` — the same shape, keyed by the
   current trading day's `as_of` (mirroring `_computed_moves_identity`'s
   session+head key). If there is no currently-DEPLOYED release yet (the
@@ -808,12 +862,19 @@ more graph nodes:
   exists, it delegates to a new `nightly.submit_pool_nightly_refresh_if_ready`,
   which builds `training_plan(mode="board_analog", ...)` and
   `training_plan(mode="trailing_cutoff", ...)` against the currently-
-  DEPLOYED release's already-staged members, then calls
-  `engine.v2.models.deployment.derive_release` (new, see the models doc
-  §2/§7.6) with the freshly-built pool/cutoff members as `changed_members`
-  and every other binding carried over unchanged, stages it, gates it
-  (the LIGHTWEIGHT nightly gate below), and — on a pass — submits
-  `models_promote` for the new release.
+  DEPLOYED release's already-staged state, then:
+  1. calls `checks.phase5_release.derive_catalog` (models doc §7.7) with the
+     freshly-built pool/cutoff rows as `changed_rows` and every other row
+     (payoff/recalibration/chooser, per the calibration decision below)
+     carried over unchanged;
+  2. calls `deployment.derive_release` with an EMPTY `changed_bindings` —
+     the nightly path changes no `ModelBinding` at all, it only needs the
+     candidate's model manifest re-staged under the new shared `release_id`
+     (still required: `promote` needs a staged model manifest under the id
+     it is given, even when every binding is byte-identical to the prior
+     release);
+  3. gates the pair (the LIGHTWEIGHT nightly gate below), and — on a
+     pass — submits `models_promote` for the new `release_id`.
 
 Both reconciles are wrapped in the same try/except
 `_reconcile_publication_status`/`_reconcile_computed_moves_refresh` already
@@ -824,32 +885,46 @@ with-backoff shape as `_computed_moves_memo`/`_COMPUTED_MOVES_BACKOFF_SECONDS`
 identity, cleared on a successful submission) — no new backoff mechanism,
 the existing one generalized to two more identities.
 
-**Which members change, which are carried over, and the manifest (#71).** A
-`ModelRelease`'s bindings are each independently content-hashed
-(`BoardAnalogPoolArtifact`, `DriverResidualPoolArtifact`/
-`PairedResidualPoolArtifact`, `TrailingCutoffArtifact`, `PayoffArtifact`,
-`RecalibrationArtifact` each compute their own `content_hash` over their own
-`payload()` — `analog_artifact.py`/`residual_artifact.py`/
-`trailing_cutoff_artifact.py`). A nightly append rebuilds ONLY the pool and
-cutoff members (and, if the calibration decision below lands nightly, the
-payoff/recalibration members); `derive_release` copies every other binding
-— including every `FEATURE_ROLES`/`"gate"` champion — from the prior release
-UNCHANGED, by `content_hash`, into the new manifest — `derive_release`
-still reads a carried-over binding's already-staged bytes (`stage_release`'s
-payload map needs bytes for every binding, models doc §7.6 R4), it just
-never WRITES a new object for one. Because `stage_release`'s object store is
-content-addressed and write-once (`<root>/objects/<hash>`, models doc §4), a
-carried-over binding costs no new WRITE: only the changed members' bytes are
-written as new objects. The
-release still gets a brand-new `release_id` every night (releases are
-immutable once staged — a nightly append is never a mutation of the prior
-release), and `release_hash`/`release_hash_version`
-(`RELEASE_HASH_SEMANTIC_V2`) is recomputed over the FULL new
-`ModelReleaseInventory` — the mix of newly-written and carried-over
-bindings — so the manifest hash changes every night even though most of the
-object store is shared with the previous release, exactly the same
-"recompute the hash, not the bytes" shape `restage_semantic_hash` (models
-doc §7.5) already uses for a different reason.
+**Pool state across a monthly cycle (the gate's acceptance run is long).**
+`phase5_acceptance` can run for hours; nightly ticks continue during it and
+may promote one or more fresh nightly releases in the meantime. If the
+monthly candidate's state catalog were fixed at TRAINING-START time, its
+eventual promotion would silently REVERT the pool/cutoff to that older
+snapshot, discarding whatever the nightly path added while the monthly
+retrain was running. This design resolves it by re-deriving the monthly
+candidate's catalog immediately before staging (step 3 above) rather than
+at training-start, and by accepting a bounded, self-healing residual case:
+if a nightly promote lands AFTER the monthly candidate is assembled but
+BEFORE it is promoted, that one night's pool growth is momentarily
+superseded when the monthly release goes live — but `_reconcile_pool_nightly_refresh`
+always diffs "newly settled since whatever is CURRENTLY deployed," never
+against an accumulated log, so the very next nightly tick re-derives the
+same rows against the new monthly release and restores them in one cycle.
+At most one night of pool growth is ever transiently superseded, and it is
+self-correcting, not lost.
+
+**Which members change, which are carried over, and the manifest (#71).**
+Content-addressing applies independently to both artifacts. Model side:
+each `ModelBinding`'s `members: tuple[ArtifactMember, ...]` carries its own
+`content_hash` (`contracts.py`); `derive_release` copies every binding NOT
+in `changed_bindings` over unchanged. State side: each catalog row names an
+object by `content_hash`/`path` (`checks/phase5_release.py`'s row shape);
+`derive_catalog` copies every row NOT in `changed_rows` over unchanged. In
+both cases the underlying object store is the SAME `deployment/objects/
+<hash>` (content-addressed, write-once, models doc §4) — a carried-over
+member or row costs no new WRITE, only the changed ones' bytes are written
+as new objects, even though both `derive_release` and `derive_catalog` read
+a carried-over item's bytes to pass them through (models doc §7.6/§7.7 R4).
+Both artifacts get a brand-new, SHARED `release_id` every cycle (both are
+immutable once staged — neither a nightly nor a monthly cycle mutates a
+prior release), and the model manifest's `release_hash`/`release_hash_version`
+(`RELEASE_HASH_SEMANTIC_V2`) is recomputed over the FULL new `bindings`
+tuple — the mix of newly-written and carried-over bindings — so the
+manifest hash changes every cycle even though most of the object store is
+shared with the previous release, exactly the same "recompute the hash, not
+the bytes" shape `restage_semantic_hash` (models doc §7.5) already uses for
+a different reason. The catalog's own `manifest_hash` is recomputed the same
+way over its full row set.
 
 **The nightly gate before an automatic promote (lighter than
 `phase5_acceptance`; the MONTHLY path uses `phase5_acceptance` itself, not
@@ -857,22 +932,24 @@ this gate).** `checks/phase5_acceptance.py` shadow-scores a population — a
 heavy job, and the right bar for the monthly champion retrain (or an
 operator-triggered run), because refitting the champions can change scoring
 outcomes; the monthly reconcile above requires it to succeed before
-promoting. The nightly append changes no model, so ITS gate never re-scores
-anything; it verifies the STAGED ARTIFACTS are internally consistent and
-causally sound:
+promoting. The nightly append changes no `ModelBinding`, so ITS gate never
+re-scores anything; it verifies the STAGED ARTIFACTS — both the model
+manifest and the state catalog — are internally consistent and causally
+sound:
 
 - **Structural completeness and hash verification** — reuse, not new logic:
-  the same completeness check `stage_release` already runs, and the same
-  member-by-member `content_hash` verification `resolve_release`/
-  `_manifest_hash_matches` already perform, run once against the new
-  manifest before it is eligible for promote.
-- **Causality** — every newly-appended pool/residual/cutoff member's own
+  the same completeness check `stage_release` already runs on the model
+  manifest, and `_read_state_catalog`'s existing self-checks
+  (`manifest_hash`, `release_id` agreement) on the catalog, run once against
+  the new candidate before it is eligible for promote.
+- **Causality** — every newly-appended pool/residual/cutoff row's own
   recorded bound is strictly before the run's `as_of` (models doc §8's new
   causality invariant), checked against the frozen artifact's own recorded
   value, never recomputed from raw data.
-- **Carried-over-member check** — every binding `derive_release` did NOT
-  touch still names the identical `content_hash` the currently-DEPLOYED
-  release has staged — the append changed only what it meant to change.
+- **Carried-over check** — every `ModelBinding` `derive_release` did NOT
+  touch, and every catalog row `derive_catalog` did NOT touch, still names
+  the identical `content_hash` the currently-DEPLOYED release has staged —
+  the append changed only what it meant to change, on either side.
 - **A consistency check, not a magnitude cutoff** — a qualitative shape
   check (e.g. the pool only grew; the cutoff moved in the causally
   consistent direction), never a numeric threshold: this doc carries no
@@ -939,39 +1016,50 @@ name which cadence it picked and why.
   same identity between successes — it is not itself a correctness guard and
   does not survive a restart. A `models_promote` retry against an
   already-live release is the existing no-op (models doc §7.2 R3).
-- **R4, transaction.** Build → gate → promote are three separate steps, each
-  its own attempt, each its own durable key (R3). A crash between staging
-  and gating leaves a staged-but-unpromoted release — harmless, since
-  `stage_release` never touches `DEPLOYED` (models doc §4); the next tick's
-  reconcile re-runs the gate (not durably keyed — cheap and side-effect-free
-  to repeat) and, on a pass, proceeds straight to the promote phase's own
-  key. A crash between a gate pass and the promote submission leaves
-  `DEPLOYED` unchanged until the next tick's reconcile retries the promote
-  step under that same promote key.
+- **R4, transaction.** Build → gate → promote are three separate steps. Each
+  TRAINING job and the final PROMOTE each have their own durable key (R3);
+  the GATE step in between has none — it is cheap, side-effect-free, and
+  reads only already-staged artifacts, so repeating it on every tick until
+  it passes (or forever, if it never does) costs nothing and needs no dedup.
+  A crash between staging and gating leaves a staged-but-unpromoted
+  candidate — harmless, since `stage_release` never touches `DEPLOYED`
+  (models doc §4); the next tick's reconcile re-runs the (unkeyed) gate and,
+  on a pass, proceeds straight to the promote step's own key. A crash
+  between a gate pass and the promote submission leaves `DEPLOYED` unchanged
+  until the next tick's reconcile retries the promote step under that same
+  key.
 - **R5, partial write.** Inherits `deployment.py`'s existing atomic-write
   primitives (temp + fsync + rename) for staging and for the pointer swap;
   this design introduces no new I/O primitive.
-- **R6, idempotency.** `derive_release` itself is not idempotent (models doc
-  §7.6 R3 — each call mints a new `release_id`), so idempotency for "the
-  same month/day never gets two submitted training jobs, and the release it
+- **R6, idempotency.** Neither `derive_release` nor `derive_catalog` is
+  idempotent by identity on its own (models doc §7.6 R3, §7.7 R3 — each
+  mints or is given a new `release_id`), so idempotency for "the same
+  month/day never gets two submitted training jobs, and the release it
   produces never gets two submitted promotes" is carried entirely by R3's
-  two PER-PHASE durable job-id dedups above, not by `derive_release`'s own
-  return value — a distinct, durable submission is expected and correct for
-  each phase (train, then promote), never a single key spanning both.
+  durable, PER-JOB job-id dedups above, not by either function's own return
+  value — a distinct, durable submission is expected and correct for each
+  job and for the promote step, never a single key spanning all of them.
   Promoting an already-live release twice is the existing single no-op
   (models doc §7.2 R6).
 
 **Rollback story.** A refusal at ANY stage — build, gate, or promote — leaves
 the previously-DEPLOYED release's pointer untouched, and scoring is
 unaffected: `current_release`/`resolve_release` only ever follow the live
-pointer (models doc §7.3, unaffected by this design). **First deploy has no
-prior release**: `deployment.rollback` already refuses `NoPriorRelease`
-(models doc §7.2 R3) when there is nothing earlier to return to, so a
-gate-failed FIRST release cannot "roll back" — it simply stays undeployed,
-and scoring continues in whatever state it was in before this cycle ran
-(nothing, for a true first deploy). This design adds no new rollback
-mechanism; it only adds more callers that can fail before ever reaching
-`promote`.
+pointer for the model half (models doc §7.3, unaffected by this design), and
+— ONLY once the catalog-versioning prerequisite above lands — the state
+catalog for the SAME `release_id` is equally unaffected, since it now sits
+at its own immutable, per-id path rather than the one mutable file
+`release_bindings.py` reads today. Until that prerequisite lands, a rollback
+of the model pointer without also restoring the matching OLD catalog body
+would break `release_bindings.py:314-315`'s check — which is exactly why
+it is this design's first code PR, not an optional cleanup. **First deploy
+has no prior release**: `deployment.rollback` already refuses
+`NoPriorRelease` (models doc §7.2 R3) when there is nothing earlier to
+return to, so a gate-failed FIRST release cannot "roll back" — it simply
+stays undeployed, and scoring continues in whatever state it was in before
+this cycle ran (nothing, for a true first deploy). This design adds no new
+rollback mechanism beyond the catalog-versioning prerequisite; it only adds
+more callers that can fail before ever reaching `promote`.
 
 **Memory: one heavy job, hard cap.** Both reconciles themselves are cheap
 identity checks inside the existing ~1s tick loop — not heavy jobs. The
@@ -985,23 +1073,39 @@ box floor) — this PR introduces no new heavy-job runner and no new caps.
 
 **Proposed split into small code PRs.**
 
-1. `nightly.submit_tier4_monthly_refresh_if_ready` /
+0. **Prerequisite, first, and useful on its own even without the rest of
+   this design**: move `phase5_release.json` to a per-`release_id`,
+   immutable path (alongside the model manifest), and update
+   `release_bindings.py`/`checks/phase5_release.py`/
+   `tools/phase5_prepare_release.py` to read/write it there. This fixes the
+   existing rollback gap for TODAY's manual workflow, before any automation
+   exists.
+1. `deployment.derive_release` in `engine/v2/models` (models doc §2/§7.6)
+   and `checks.phase5_release.derive_catalog` (models doc §7.7), each with
+   tests for the carried-over-by-hash behavior.
+2. The release-assembly step for the monthly path (reads completed
+   `training` job outputs into `ModelBinding`/`ArtifactMember`s) — a
+   refactor of `tools/phase5_prepare_release.py`'s existing assembly logic
+   into an importable function, not a reinvention, with tests.
+3. `nightly.submit_tier4_monthly_refresh_if_ready` /
    `nightly.submit_pool_nightly_refresh_if_ready` as pure functions (no
    `Service` wiring), with tests — reuses `training_plan`/`training_job_kind`
-   /`promote_job_kind` unchanged.
-2. `deployment.derive_release` in `engine/v2/models` (models doc §2/§7.6),
-   with tests for the carried-over-by-hash behavior.
-3. The nightly gate (a new, small checker module) implementing the four
-   checks above, consumed by (1)'s submit function before it ever builds a
+   /`promote_job_kind` unchanged, and (1)/(2) above.
+4. The nightly gate (a new, small checker module) implementing the checks
+   above, consumed by (3)'s nightly submit function before it ever builds a
    `models_promote` plan.
-4. `Service._reconcile_tier4_monthly_refresh` /
-   `Service._reconcile_pool_nightly_refresh` wired into `tick()`, shipped
-   default-OFF behind the same kind of policy/config flag
-   `_reconcile_computed_moves_refresh` uses, so it can be enabled once (1)-(3)
-   are independently reviewed.
-5. Flip the flag on, once the calibration-cadence decision above is made —
-   kept as its own PR so that undecided piece never blocks (1)-(4).
-6. (Tracked separately, not part of this split) the native tier-4 forecasts
+5. `Service._reconcile_tier4_monthly_refresh` /
+   `Service._reconcile_pool_nightly_refresh` wired into `tick()`. There is
+   no existing flag precedent to reuse — `_reconcile_computed_moves_refresh`
+   runs unconditionally once wired (`tick()` calls it directly,
+   `supervisor.py:241`), and it never promotes anything, unlike these two.
+   This design adds a NEW, minimal on/off switch (e.g. a `DEFAULT_POLICY`
+   field or an environment variable the reconcile checks before acting),
+   shipped default-OFF, so it can be enabled once (0)-(4) are independently
+   reviewed.
+6. Flip the switch on, once the calibration-cadence decision above is made —
+   kept as its own PR so that undecided piece never blocks (0)-(5).
+7. (Tracked separately, not part of this split) the native tier-4 forecasts
    producer — see "Not in scope: tier-4 forecasts" above.
 
 ## Dependencies
