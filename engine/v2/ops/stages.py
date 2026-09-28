@@ -33,6 +33,24 @@ class RescoreParameters:
 
 
 @dataclass(frozen=True)
+class NativeScoreBatchParameters:
+    """Cutover PR-3: a batch of already-staged per-event inputs plus a
+    release pointer -- see engine/v2/ops/native_score_batch.py and
+    ARCHITECTURE.md. ``events.json`` (the per-event input array) is
+    resolved into staging via ``input_bindings`` exactly like
+    ``RescoreParameters``'s request pair."""
+
+    expected_ids: tuple[str, ...]
+    release_root: str
+    as_of: str
+    snapshot_id: str
+    calendar_revision: str
+    feature_names: tuple[str, ...]
+    gate_policy: dict[str, Any] | None = None
+    input_bindings: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class ExperimentParameters:
     """A supervised smoke-mode experiment run (P6 slice 10). ``spec.json`` —
     the ExperimentSpec document — is resolved into staging via
@@ -250,6 +268,23 @@ def _calendar_moves_kinds() -> list:
     return [computed_moves_job_kind()]
 
 
+def _native_score_batch_kind() -> JobKind:
+    """Cutover PR-3: a batch-shaped sibling of adhoc_rescore -- assembles
+    {BoardRequest: (ScoreRequest, NativeScoreInputs)} from a release binding
+    and already-staged per-event inputs, then scores the whole batch under
+    the same no-fit guard. No production caller submits this kind yet (see
+    engine/v2/ops/native_score_batch.py, ARCHITECTURE.md). Pulled out of
+    _core_kinds' own list literal, like _calendar_moves_kinds above, to keep
+    that function under its line budget."""
+    return JobKind(
+        name="native_score_batch", worker="native_score_batch",
+        parameters=NativeScoreBatchParameters,
+        resource_classes=frozenset({"io_fetch"}), effects=("staged",),
+        retry=RetryPolicy("bounded", 2, (5, 30)),
+        checkpoint_contract="native_score_batch_records.v1.0",
+        namespaces=frozenset({"shadow", "smoke"}))
+
+
 def _core_kinds():
     """The one-off ``JobKind`` entries with no generated sibling — every
     "loop over a small family" kind (the outbox effects, the legacy action
@@ -292,6 +327,7 @@ def _core_kinds():
             retry=RetryPolicy("bounded", 2, (5, 30)),
             checkpoint_contract="adhoc_rescore_record.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
+        _native_score_batch_kind(),
         # P2-7/Task7b (§7): streams the pinned legacy read set into per-file
         # fragment inspections. Coordinator-validated, like decision_evidence
         # above — see engine.v2.ops.snapshot_promotion.snapshot_import_effect.
