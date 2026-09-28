@@ -17,6 +17,7 @@ from engine.v2.contracts import (
 from engine.v2.data import generic_incremental, incremental_tables
 from engine.v2.data import incremental as daily_incremental
 from engine.v2.data.catalog import commit_snapshot
+from engine.v2.data.errors import DataError
 from engine.v2.data.legacy_mapping import build_legacy_mapping
 from engine.v2.data.manifests import dataset_manifest, snapshot_ref
 from engine.v2.data.objects import inspect_fragment
@@ -417,3 +418,203 @@ def test_generic_refresh_worker_commits_json_timestamp_rows(tmp_path, table_name
         assert {item.partition_key for item in result_records} == {"2025"}
     else:
         assert matches[0]["bid"] == 2.1
+
+
+def test_retry_of_the_same_generic_effect_after_a_crash_before_attempt_commit_succeeds(
+        tmp_path):
+    """#98: a retry of the SAME generic candidate/receipt/attempt (simulating a
+    crash between commit_generic_table_candidate's own commit and the caller's
+    later attempt-commit step) must succeed as an idempotent replay, not fail
+    permanently with SNAPSHOT_CONFLICT because the head has since moved past
+    the retry's stale expected_head_snapshot_id."""
+    table_name = "earnings_events"
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    contract = from_document(
+        TableContract, build_legacy_mapping()["tables"][table_name])
+    contract_ref = TableContractRef(
+        contract_id=contract.contract_id,
+        definition_hash=contract.definition_hash,
+    )
+    base_row = _worker_row(table_name, 2024)
+    base_bytes = generic_incremental._parquet_bytes(contract, (base_row,))
+    published = store.publish_bytes(
+        base_bytes, schema_ref="parquet_fragment.v1.0")
+    obj = generic_incremental.ObjectRef(
+        kind="parquet_fragment",
+        object_id=published.artifact_id,
+        content_hash=published.content_hash,
+        byte_size=published.byte_size,
+    )
+    inspection = inspect_fragment(store, obj, contract, contract_ref, "2024")
+    receipt_ref = content_hash({"fixture": table_name})
+    record = generic_incremental.manifests.fragment_record(
+        inspection, contract_ref, input_receipt_refs=(receipt_ref,),
+        import_request_hash=receipt_ref)
+    manifest = dataset_manifest(
+        contract_ref, (record,), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent = snapshot_ref(
+        {table_name: manifest}, calendar_version="cal.v1",
+        source_priority_version="fixture", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="generic-worker",
+        request_hash=content_hash({"base": table_name}),
+        contracts=(contract,), objects=(obj,), records=(record,),
+        manifests=(manifest,), snapshot=parent,
+        expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="base-" + table_name, attempt_id="base-attempt-" + table_name,
+        fence=1, fence_check=lambda _conn: None, clock=clock, store=store,
+    )
+
+    incoming = dict(base_row)
+    incoming["event_date"] = datetime(2025, 1, 15)
+    incoming["year"] = 2025
+    incoming["session"] = "BMO"
+    logical_key = incremental_tables.logical_key_for_row(contract, incoming)
+    revision_candidate = RevisionCandidate(
+        revision_id="worker-" + table_name,
+        logical_key=logical_key,
+        source="fixture",
+        source_priority=0,
+        finality="final",
+        revision_ordinal=2,
+        received_at="2026-09-17T00:00:00Z",
+        content_hash=incremental_tables.revision_hash(
+            logical_key=logical_key, row=incoming, deleted=False),
+    )
+    coverage_key = CoverageKey(
+        item_key=logical_key, session_date="2025-01-15", ticker="AAA")
+    coverage = daily_incremental.build_completed_coverage(
+        contract_ref, source="fixture", endpoint="fixture",
+        interval=TimeInterval(
+            column="event_date", start_inclusive="2025-01-15",
+            end_exclusive="2025-01-15T23:59:59"),
+        expected=(coverage_key,),
+        outcomes=(CoverageOutcome(
+            key=coverage_key, status="present", receipt_id=receipt_ref,
+            revision_id=revision_candidate.revision_id, finality="final"),),
+        acquisition_receipt_refs=(receipt_ref,),
+        completed_at="2026-09-17T00:00:00Z",
+    )
+    resolved = Repository(conn).resolve_full(parent.snapshot_id)
+    table_candidate = generic_incremental.build_generic_table_candidate(
+        resolved, store, table_name,
+        (incremental_tables.GenericRevision(
+            candidate=revision_candidate, row=incoming),),
+        coverage=coverage, parent_snapshot_id=parent.snapshot_id)
+
+    request_hash = "sha256:" + "1" * 64
+    first = generic_incremental.commit_generic_table_candidate(
+        conn, store, table_candidate, scope="generic-worker",
+        expected_head_snapshot_id=parent.snapshot_id, expected_head_generation=1,
+        clock=clock, request_hash=request_hash, receipt_id="generic-receipt-1",
+        attempt_id="generic-attempt-1", fence=1)
+    assert first.resulting_head_snapshot_id == table_candidate.snapshot.snapshot_id
+
+    second = generic_incremental.commit_generic_table_candidate(
+        conn, store, table_candidate, scope="generic-worker",
+        expected_head_snapshot_id=parent.snapshot_id, expected_head_generation=1,
+        clock=clock, request_hash=request_hash, receipt_id="generic-receipt-1",
+        attempt_id="generic-attempt-1", fence=1)
+    assert second.receipt_id == first.receipt_id
+    assert second.resulting_head_snapshot_id == first.resulting_head_snapshot_id
+    assert second.resulting_head_snapshot_id == table_candidate.snapshot.snapshot_id
+
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = 'generic-worker'"
+    ).fetchone()
+    assert (head["snapshot_id"], head["generation"]) == (
+        table_candidate.snapshot.snapshot_id, 2)
+
+    # A genuinely DIFFERENT candidate from the SAME parent must NOT ride the
+    # #98 retry fence: head has moved to table_candidate's snapshot at
+    # generation 2, so this writer lost its parent and must be refused.
+    other_row = dict(incoming)
+    other_row["session"] = "AMC" if incoming["session"] != "AMC" else "BMO"
+    other_logical_key = incremental_tables.logical_key_for_row(contract, other_row)
+    other_revision_candidate = RevisionCandidate(
+        revision_id="worker-other-" + table_name,
+        logical_key=other_logical_key,
+        source="fixture",
+        source_priority=0,
+        finality="final",
+        revision_ordinal=3,
+        received_at="2026-09-17T00:00:00Z",
+        content_hash=incremental_tables.revision_hash(
+            logical_key=other_logical_key, row=other_row, deleted=False),
+    )
+    other_coverage_key = CoverageKey(
+        item_key=other_logical_key, session_date="2025-01-15", ticker="AAA")
+    other_coverage = daily_incremental.build_completed_coverage(
+        contract_ref, source="fixture", endpoint="fixture",
+        interval=TimeInterval(
+            column="event_date", start_inclusive="2025-01-15",
+            end_exclusive="2025-01-15T23:59:59"),
+        expected=(other_coverage_key,),
+        outcomes=(CoverageOutcome(
+            key=other_coverage_key, status="present", receipt_id=receipt_ref,
+            revision_id=other_revision_candidate.revision_id,
+            finality="final"),),
+        acquisition_receipt_refs=(receipt_ref,),
+        completed_at="2026-09-17T00:00:00Z",
+    )
+    other_candidate = generic_incremental.build_generic_table_candidate(
+        resolved, store, table_name,
+        (incremental_tables.GenericRevision(
+            candidate=other_revision_candidate, row=other_row),),
+        coverage=other_coverage, parent_snapshot_id=parent.snapshot_id)
+    assert (other_candidate.snapshot.snapshot_id
+            != table_candidate.snapshot.snapshot_id)
+    with pytest.raises(DataError) as err:
+        generic_incremental.commit_generic_table_candidate(
+            conn, store, other_candidate, scope="generic-worker",
+            expected_head_snapshot_id=parent.snapshot_id,
+            expected_head_generation=1,
+            clock=clock, request_hash="sha256:" + "2" * 64,
+            receipt_id="generic-receipt-2", attempt_id="generic-attempt-2",
+            fence=2)
+    assert err.value.code == "SNAPSHOT_CONFLICT"
+
+    # The real discriminator for the WIDENED _head_fence branch: a THIRD,
+    # genuinely different snapshot becomes head first (a successful commit
+    # whose parent is table_candidate's snapshot, advancing head to
+    # generation 3), so head matches NEITHER the replay's stale
+    # (parent, gen1) NOR the already-at-head (table_candidate, gen2)
+    # position. Replaying the ORIGINAL commit now — same receipt_id, same
+    # candidate, same stale expectation — must be refused by the fence with
+    # SNAPSHOT_CONFLICT: the idempotent replay shortcut can only ever ride a
+    # head that still sits at this candidate's own snapshot one generation
+    # past the expectation.
+    third_resolved = Repository(conn).resolve_full(table_candidate.snapshot.snapshot_id)
+    third_candidate = generic_incremental.build_generic_table_candidate(
+        third_resolved, store, table_name,
+        (incremental_tables.GenericRevision(
+            candidate=other_revision_candidate, row=other_row),),
+        coverage=other_coverage,
+        parent_snapshot_id=table_candidate.snapshot.snapshot_id)
+    assert (third_candidate.snapshot.snapshot_id
+            != table_candidate.snapshot.snapshot_id)
+    third = generic_incremental.commit_generic_table_candidate(
+        conn, store, third_candidate, scope="generic-worker",
+        expected_head_snapshot_id=table_candidate.snapshot.snapshot_id,
+        expected_head_generation=2,
+        clock=clock, request_hash="sha256:" + "3" * 64,
+        receipt_id="generic-receipt-3", attempt_id="generic-attempt-3",
+        fence=3)
+    assert third.resulting_head_snapshot_id == third_candidate.snapshot.snapshot_id
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = 'generic-worker'"
+    ).fetchone()
+    assert (head["snapshot_id"], head["generation"]) == (
+        third_candidate.snapshot.snapshot_id, 3)
+
+    with pytest.raises(DataError) as replay_after_third:
+        generic_incremental.commit_generic_table_candidate(
+            conn, store, table_candidate, scope="generic-worker",
+            expected_head_snapshot_id=parent.snapshot_id,
+            expected_head_generation=1,
+            clock=clock, request_hash=request_hash,
+            receipt_id="generic-receipt-1", attempt_id="generic-attempt-1",
+            fence=1)
+    assert replay_after_third.value.code == "SNAPSHOT_CONFLICT"

@@ -46,10 +46,33 @@ def _no_keepalive():
     return None
 
 
+def _delivered_receipt(conn, kind, logical_key):
+    """The stored receipt for an already-``delivered`` outbox row under
+    ``(kind, logical_key)``, or ``None`` if no such row is delivered yet.
+
+    #98: lets a retry after a crash between the effect's own commit and the
+    caller's attempt commit treat an already-completed effect as success,
+    instead of failing permanently with STALE_EXPECTATION because
+    ``claim()`` no longer matches a delivered row.
+    """
+    row = conn.execute(
+        "SELECT receipt_json FROM outbox WHERE kind=? AND logical_key=? AND state='delivered'",
+        (kind, logical_key)).fetchone()
+    return None if row is None else json.loads(row["receipt_json"])
+
+
+def _delivered_or_stale(conn, kind, logical_key):
+    """``_delivered_receipt`` or STALE_EXPECTATION: the claim-failure branch."""
+    delivered = _delivered_receipt(conn, kind, logical_key)
+    if delivered is None:
+        raise fail("STALE_EXPECTATION", "backup effect is not pending")
+    return delivered
+
+
 def run_backup(conn, *, key, owner, target, clock, store, fault=None, keepalive=_no_keepalive):
     effect = claim(conn, "backup", owner=owner, clock=clock, logical_key=key)
     if effect is None:
-        raise fail("STALE_EXPECTATION", "backup effect is not pending")
+        return _delivered_or_stale(conn, "backup", key)
     payload = json.loads(effect["payload_json"])
     target = Path(target)
     if target.exists() and target.is_symlink():

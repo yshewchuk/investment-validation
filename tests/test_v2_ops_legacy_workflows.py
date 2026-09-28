@@ -1,6 +1,13 @@
-"""Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28)."""
+"""Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28).
+
+Issue #106 additions at the bottom: the optional ``keepalive`` seams of
+``manifest_files``/``copy_read_set``/``run_engineering_gate`` renew other live
+attempts' leases mid-stretch, and must not change any returned result.
+"""
 import json
 import os
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +30,7 @@ from engine.v2.ops.legacy_adapter import (
     legacy_action,
     manifest_files,
     overlay_read_set,
+    run_engineering_gate,
 )
 from engine.v2.ops.nightly import (
     GRAPH,
@@ -318,3 +326,180 @@ def test_o16_whole_legacy_nightly_is_not_an_adapter_entry(tmp_path):
             os.environ.pop("INVESTING_PLAN_ROOT", None)
         else:
             os.environ["INVESTING_PLAN_ROOT"] = original_root_env
+
+
+# --------------------------------------------------------------------------
+# issue #106: the optional ``keepalive`` seams (pre-fix these calls did not
+# exist at all, so the keyword-argument tests below fail against the old code)
+# --------------------------------------------------------------------------
+
+
+def _small_source(source):
+    """Two tiny (single-chunk) read-set members, one of them nested."""
+    (source / "nested").mkdir(parents=True)
+    (source / "a.txt").write_bytes(b"alpha")
+    (source / "nested" / "b.txt").write_bytes(b"bravo")
+    return ("a.txt", "nested/b.txt")
+
+
+#: 2.5MB of repeated bytes -- three 1MB chunks (1MB, 1MB, 512KB), so the
+#: per-chunk ``keepalive`` seam is provably size-scaling, not a fixed +1.
+_MULTI_CHUNK_BYTES = b"issue-106-" * 262_140          # 2,621,400 bytes
+_MULTI_CHUNK_CALLS = -(-len(_MULTI_CHUNK_BYTES) // (1 << 20))  # == 3
+
+
+def test_manifest_files_and_copy_read_set_keepalive_hooks(tmp_path):
+    """``keepalive`` never removes a call it had before round 3 (the old exact
+    per-file counts are still reached as a LOWER bound) and now fires once per
+    1MB chunk on top of them -- which a single-chunk file proves only weakly,
+    so a multi-chunk file is asserted separately. No result changes: the
+    manifest dict, the copied manifest and the copied bytes are byte-for-byte
+    the no-keepalive baseline at every file size."""
+    source = tmp_path / "source"
+    source.mkdir()
+    paths = _small_source(source)
+    small_manifest_baseline = len(paths)       # once per path, before processing it
+    small_copy_baseline = 2 * len(paths)       # forwarded manifest pass + copy pass
+
+    manifest_calls = []
+    baseline_manifest = manifest_files(source, paths)
+    hooked_manifest = manifest_files(source, paths, keepalive=lambda: manifest_calls.append(1))
+    assert hooked_manifest == baseline_manifest
+    # Round 3 only ADDED the per-chunk calls: the once-per-path call each file
+    # already had is still there (>= the old exact count), and at least one
+    # extra call actually fired (every file has one chunk to hash).
+    assert len(manifest_calls) >= small_manifest_baseline
+    assert len(manifest_calls) > small_manifest_baseline
+
+    copy_calls = []
+    baseline_copy = copy_read_set(source, tmp_path / "private", paths)
+    hooked_copy = copy_read_set(source, tmp_path / "private2", paths,
+                                keepalive=lambda: copy_calls.append(1))
+    assert hooked_copy == baseline_copy
+    assert len(copy_calls) >= small_copy_baseline
+    assert len(copy_calls) > small_copy_baseline
+    for relative in paths:
+        assert (tmp_path / "private2" / relative).read_bytes() == (source / relative).read_bytes()
+
+    # -- a single huge file: the per-chunk calls scale with its size ---------
+    (source / "big.bin").write_bytes(_MULTI_CHUNK_BYTES)
+    assert _MULTI_CHUNK_CALLS > 2  # the whole point of this case: >2 chunks
+
+    big_manifest = manifest_files(source, ("big.bin",))
+    big_manifest_calls = []
+    assert manifest_files(source, ("big.bin",),
+                          keepalive=lambda: big_manifest_calls.append(1)) == big_manifest
+    # More than twice for ONE file's hash pass (once for the file, once per
+    # chunk) -- the spec's floor -- and at least the once-per-file-plus-
+    # once-per-chunk count a 3-chunk file must produce.
+    assert len(big_manifest_calls) > 2
+    assert len(big_manifest_calls) >= _MULTI_CHUNK_CALLS + 1
+
+    small_manifest_calls = []
+    manifest_files(source, ("a.txt",), keepalive=lambda: small_manifest_calls.append(1))
+    assert len(small_manifest_calls) == 2
+    assert len(big_manifest_calls) > len(small_manifest_calls)
+
+    baseline_big_copy = copy_read_set(source, tmp_path / "private3", ("big.bin",))
+    big_copy_calls = []
+    hooked_big_copy = copy_read_set(source, tmp_path / "private4", ("big.bin",),
+                                    keepalive=lambda: big_copy_calls.append(1))
+    assert hooked_big_copy == baseline_big_copy
+    # Forwarded manifest pass (1 + chunks) + copy loop (1 once-per-file +
+    # chunks) + post-copy verification hash (chunks).
+    assert len(big_copy_calls) >= 2 + 3 * _MULTI_CHUNK_CALLS
+    assert len(big_copy_calls) > 8
+    assert (tmp_path / "private4" / "big.bin").read_bytes() == _MULTI_CHUNK_BYTES
+
+
+def _gate_repo(tmp_path, script_source):
+    repo = tmp_path / "gate-repo"
+    (repo / "checks").mkdir(parents=True)
+    (repo / "checks" / "rearchitecture_phase1_gate.py").write_text(script_source)
+    return repo
+
+
+def test_run_engineering_gate_result_is_keepalive_independent(tmp_path):
+    """The fast-gate contract is unchanged: same JSON out, with or without a
+    ``keepalive`` -- and the no-keepalive call is the pre-#106 baseline."""
+    source = "import json\nprint(json.dumps({'ok': True, 'rows': {}}))\n"
+    repo = _gate_repo(tmp_path, source)
+    expected = {"ok": True, "rows": {}}
+    assert run_engineering_gate(repo) == expected
+    calls = []
+    assert run_engineering_gate(repo, keepalive=lambda: calls.append(1)) == expected
+
+
+def test_run_engineering_gate_calls_keepalive_while_the_gate_runs(tmp_path):
+    """A gate longer than one ``poll_interval`` renews instead of blocking:
+    the old single blocking ``subprocess.run(timeout=600)`` never called
+    anything until the subprocess exited."""
+    repo = _gate_repo(tmp_path, "import json, time\ntime.sleep(1.5)\n"
+                                "print(json.dumps({'ok': True, 'marker': 'slow'}))\n")
+    calls = []
+    result = run_engineering_gate(repo, timeout=30, keepalive=lambda: calls.append(1),
+                                  poll_interval=0.05)
+    assert calls  # at least one renewal happened during the wait
+    assert result == {"ok": True, "marker": "slow"}  # and the result is still returned
+
+
+def test_run_engineering_gate_timeout_still_raises_timeout_expired(tmp_path):
+    """A genuine timeout keeps the exact exception type the old blocking
+    ``subprocess.run(timeout=...)`` raised (both it and ``Popen`` +
+    ``communicate(timeout=...)`` raise ``subprocess.TimeoutExpired``)."""
+    repo = _gate_repo(tmp_path, "import time\ntime.sleep(30)\n")
+    calls = []
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_engineering_gate(repo, timeout=0.4, keepalive=lambda: calls.append(1),
+                             poll_interval=0.05)
+    assert calls  # renewals happened during the wait before the kill
+
+
+def test_run_engineering_gate_poll_is_capped_to_the_remaining_deadline(tmp_path):
+    """Round-3 fix 2: a ``poll_interval`` LARGER than the ``timeout`` must not
+    stretch the wall-clock deadline. Each poll waits only what is left, so the
+    refusal lands at ~``timeout`` (0.3 s here) -- never at the first
+    ``poll_interval`` boundary (5 s) and never at the gate's own sleep (10 s).
+    The margin is deliberately huge in both directions: far above 0.3 s of
+    real work, far below the 5 s poll it must not wait."""
+    repo = _gate_repo(tmp_path, "import time\ntime.sleep(10)\n")
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_engineering_gate(repo, timeout=0.3, poll_interval=5.0)
+    assert time.monotonic() - started < 2.0
+
+
+def test_run_engineering_gate_keepalive_failure_kills_and_reaps_the_gate(tmp_path):
+    """Round-3 fix 3: an exception escaping the poll loop (here ``keepalive``
+    raising) must not orphan the child. The gate marks a file once per 50 ms
+    while it is alive, so a still-running background process would keep
+    growing it; a killed-and-reaped one stops dead.
+
+    The wait on the marker appearing (bounded, generous) before raising keeps
+    this deterministic on a loaded host: the raise only ever happens once the
+    child is provably alive and writing, so "no further growth" is real proof
+    it was stopped rather than a test that raced past process startup."""
+    marker = tmp_path / "gate-markers.txt"
+    repo = _gate_repo(tmp_path, (
+        "import time\n"
+        f"marker = {str(marker)!r}\n"
+        "for _ in range(400):\n"
+        "    with open(marker, 'a') as stream:\n"
+        "        stream.write('alive\\n')\n"
+        "    time.sleep(0.05)\n"
+    ))
+
+    def mark_count():
+        return 0 if not marker.is_file() else len(marker.read_text().splitlines())
+
+    def keepalive():
+        if mark_count() >= 2:  # the child is definitely running by now
+            raise RuntimeError("keepalive lease renewal failed")
+
+    with pytest.raises(RuntimeError, match="keepalive lease renewal failed"):
+        run_engineering_gate(repo, timeout=10, keepalive=keepalive, poll_interval=0.1)
+
+    after_raise = mark_count()
+    assert after_raise >= 2  # it ran, and the raise happened while it was alive
+    time.sleep(0.3)  # >5 of the child's own 50 ms marking intervals
+    assert mark_count() == after_raise  # it never grew again: killed and reaped
