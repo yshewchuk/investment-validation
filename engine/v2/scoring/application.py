@@ -88,7 +88,10 @@ def _runup_executor_spec(names, days):
     source = source or (names[0] if len(names) == 1 else None)
     if source is None or days is None or days < 0.0:
         return ()
-    return (("runup_move_prediction", source, days / _RUNUP_BASE_DAYS, True),)
+    return (
+        ("runup_move_raw_d14", source, 1.0, False),
+        ("runup_move_prediction", source, days / _RUNUP_BASE_DAYS, True),
+    )
 
 
 def _ordinary_executor_specs(names, targets):
@@ -455,7 +458,11 @@ def _runup_frozen_output(result, binding, inference_request,
         return {}, {}, ("INVALID_RUNUP_HORIZON",)
     scale = days / _RUNUP_BASE_DAYS
     state = _runup_state(result, binding, inference_request, raw, named, days, scale)
-    return {"runup_move_prediction": state["runup_move_prediction"]}, state, ()
+    outputs = {
+        "runup_move_raw_d14": state["runup_move_raw_d14"],
+        "runup_move_prediction": state["runup_move_prediction"],
+    }
+    return outputs, state, ()
 
 
 def _frozen_role_outputs(binding) -> frozenset[str]:

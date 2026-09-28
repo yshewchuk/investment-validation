@@ -333,3 +333,23 @@ def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path)
             clock=clock, request_hash=request_hash, receipt_id="receipt-1",
             attempt_id="attempt-1", fence=1, fence_check=lambda _c: None)
     assert err.value.code == "SNAPSHOT_CONFLICT"
+
+
+def test_normalizer_id_bump_changes_cache_identity(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    data_incremental.catalog._insert_contract(
+        conn, _DAILY_MARKET_CONTRACT, clock.now().isoformat())
+    contract_id = _DAILY_MARKET_CONTRACT.contract_id
+    payload = data_incremental.RawPayload(
+        payload=b"{}", response_kind="complete", response_meta={})
+    raw = data_incremental.cache_raw_receipt(
+        conn, store, payload, source="orats", endpoint="daily_market",
+        request={"keys": ["AAA"]}, received_at=clock.now().isoformat())
+    record_v1 = data_incremental.cache_normalization(
+        conn, store, raw, (), normalizer_id="daily_market.v1", contract_id=contract_id,
+        created_at=clock.now().isoformat())
+    record_v2 = data_incremental.cache_normalization(
+        conn, store, raw, (), normalizer_id="daily_market.v2", contract_id=contract_id,
+        created_at=clock.now().isoformat())
+    assert record_v1.normalization_id != record_v2.normalization_id

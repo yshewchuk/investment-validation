@@ -107,8 +107,10 @@ GRAPH = {
     # ARCHITECTURE.md "Outputs"/"Failure semantics" for
     # supervisor.Service._reconcile_computed_moves_refresh, the ONLY
     # place a computed_moves_refresh job is ever submitted.
-    # forward_calendar_refresh gets no GRAPH node at all -- see
-    # calendar_moves_jobs.py's own module docstring (issue #52).
+    # forward_calendar_refresh now has a JobKind (calendar_moves_jobs.py;
+    # issue #52's prerequisite landed in #55) but still gets no GRAPH node --
+    # nightly wiring and a supervisor.Service submitter are a separate, later
+    # PR, mirroring this stage's own Part 3/Part 4 split.
     "computed_moves_refresh": ("refresh",),
     # spec_ns_c: the per-night native-vs-legacy parity report, parented on
     # "score" because that is the last stage whose rows both sides can read.

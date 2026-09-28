@@ -51,7 +51,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/features/` | [`engine/v2/features/ARCHITECTURE.md`](engine/v2/features/ARCHITECTURE.md) |
 | `engine/v2/models/` | [`engine/v2/models/ARCHITECTURE.md`](engine/v2/models/ARCHITECTURE.md) |
 | `engine/v2/registry/` | (pending) |
-| `engine/v2/domain/generation/` | (pending) |
+| `engine/v2/domain/generation/` | [`engine/v2/domain/generation/ARCHITECTURE.md`](engine/v2/domain/generation/ARCHITECTURE.md) |
 | `engine/v2/domain/scenarios/` | (pending) |
 | `engine/v2/domain/valuation/` | (pending) |
 | `engine/v2/domain/simulation/` | (pending) |

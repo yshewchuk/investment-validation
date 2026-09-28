@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from math import isfinite
 from typing import Any, Mapping
 
@@ -112,7 +113,8 @@ def _quote_contracts(inputs: Mapping[str, Any]) -> tuple[tuple[str, float, str],
     return tuple(sorted(set(contracts), key=lambda row: (row[2], row[1], row[0])))
 
 
-def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> str:
+def _resolve_straddle_expiry(strategy: str, inputs: Mapping[str, Any],
+                             expiries: list[str]) -> str:
     """Resolve the expiry to trade, mirroring legacy ``ExpirySelector``.
 
     Despite the name (kept to avoid touching call sites unnecessarily), this
@@ -123,17 +125,26 @@ def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> 
     non-straddle branch), which supplies put-only ``expiries`` from
     :func:`_listed_put_expiries` -- every enabled put-ladder strategy
     (TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7, CTR5) uses legacy's
-    ``first_post_event`` kind, the same one this implements.
+    ``first_post_event`` kind, the same one this implements (``strategy``
+    for those callers is never ``"STR-RUNUP"``, so the branch below never
+    fires for them).
 
     - A caller-supplied ``expiry`` is legacy's ``fixed`` rule: it must match
       a listed expiry exactly (by calendar date), or this refuses via
       ``GeometryRefusal`` rather than silently substituting another expiry.
-    - Otherwise, when an ``event_date`` is known, this mirrors
-      legacy's ``first_post_event``: the earliest listed expiry on/after that
-      date, with the AMC/BMO distinction applied when ``session`` is known
-      (AMC excludes an expiry landing exactly on the event date, since it
-      dies at the close before an after-close announcement). Session unknown
-      falls back to legacy's permissive ``>=`` rule. No survivor is also a
+      This bypasses every DTE rule below for every ``strategy`` -- legacy's
+      ``fixed`` kind is likewise unconditional.
+    - ``strategy == "STR-RUNUP"`` otherwise uses legacy's own
+      ``straddle_runup`` rule (issue #95): ``ExpirySelector`` kind
+      ``first_dte_at_least``, ``target_dte=30`` (``engine/structures.py``
+      ``straddle_runup``, ~line 934) -- see :func:`_resolve_first_dte_at_least`.
+    - Otherwise (STR-THRU, and every put-ladder strategy via the shared call
+      below), when an ``event_date`` is known, this mirrors legacy's
+      ``first_post_event``: the earliest listed expiry on/after that date,
+      with the AMC/BMO distinction applied when ``session`` is known (AMC
+      excludes an expiry landing exactly on the event date, since it dies at
+      the close before an after-close announcement). Session unknown falls
+      back to legacy's permissive ``>=`` rule. No survivor is also a
       refusal, not a silent substitution.
     - With no date signal at all, the earliest listed expiry is used as a
       deterministic default.
@@ -145,6 +156,9 @@ def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> 
         if not matches:
             raise GeometryRefusal(f"EXPIRY_NOT_LISTED:{target}")
         return matches[0]
+
+    if strategy == "STR-RUNUP":
+        return _resolve_first_dte_at_least(inputs, expiries)
 
     target_source = inputs.get("event_date")
     if target_source is None:
@@ -161,7 +175,59 @@ def _resolve_straddle_expiry(inputs: Mapping[str, Any], expiries: list[str]) -> 
     return survivors[0]
 
 
-def _select_listed_straddle(inputs: Mapping[str, Any], spot: float) -> tuple[float, str] | None:
+_RUNUP_TARGET_DTE = 30
+
+
+def _resolve_first_dte_at_least(inputs: Mapping[str, Any], expiries: list[str]) -> str:
+    """STR-RUNUP's own expiry rule (issue #95).
+
+    Legacy's ``straddle_runup`` factory (``engine/structures.py``, ~line 934)
+    uses ``ExpirySelector(kind="first_dte_at_least", target_dte=30)``, not
+    ``first_post_event``: the earliest listed expiry whose DTE is >= 30.
+    Legacy's chain carries this as a ``dte`` column, ``expiry - obs_date``
+    (``engine/data/normalize/n_chains.py``), and legacy sets
+    ``obs_date=result.quote_date`` (``engine/score.py``). ``quote_date``
+    defaults to ``entry_date`` (``result.quote_date = result.quote_date or
+    result.entry_date``) but a stale-quote fallback can set it EARLIER than
+    ``entry_date`` (``engine/score.py``'s ``_fresh_quote_date``). Native
+    carries no ``dte`` column, so this anchors on ``quote_date`` when
+    captured, falling back to ``entry_date`` -- both raw facts, never
+    calculated answers (``engine/v2/scoring/stages.py``
+    ``_check_stale_quote``'s docstring) -- and each candidate expiry.
+
+    ``expiries`` is sorted ascending (both of :func:`_resolve_straddle_expiry`'s
+    callers sort it before calling), so the first survivor is the earliest
+    one, matching legacy's ``ok.iloc[0]``.
+
+    A missing or unparseable anchor date, or no expiry reaching 30 DTE from
+    it, is a refusal -- never a silent substitution of a shorter-dated
+    expiry, which is exactly the defect this closes: before this fix, native
+    fell through to ``first_post_event`` and silently priced whatever
+    earliest post-event expiry was listed, even when it was far short of the
+    30 DTE legacy requires.
+    """
+    quote_date = inputs.get("quote_date")
+    entry_source = quote_date if quote_date is not None else inputs.get("entry_date")
+    if entry_source is None:
+        raise GeometryRefusal("MISSING_ENTRY_DATE")
+    try:
+        entry_date = date.fromisoformat(str(entry_source)[:10])
+    except ValueError:
+        raise GeometryRefusal(f"INVALID_ENTRY_DATE:{entry_source}")
+    survivors = []
+    for candidate in expiries:
+        try:
+            expiry_date = date.fromisoformat(candidate[:10])
+        except ValueError:
+            continue
+        if (expiry_date - entry_date).days >= _RUNUP_TARGET_DTE:
+            survivors.append(candidate)
+    if not survivors:
+        raise GeometryRefusal(f"NO_EXPIRY_DTE_AT_LEAST:{_RUNUP_TARGET_DTE}")
+    return survivors[0]
+
+
+def _select_listed_straddle(strategy: str, inputs: Mapping[str, Any], spot: float) -> tuple[float, str] | None:
     """Select a common listed strike and expiry from raw quote keys.
 
     This is deliberately a geometry operation. It sees the available contract
@@ -188,7 +254,7 @@ def _select_listed_straddle(inputs: Mapping[str, Any], spot: float) -> tuple[flo
     if not common:
         return None
     expiries = sorted({expiry for _, expiry in common})
-    resolved_expiry = _resolve_straddle_expiry(inputs, expiries)
+    resolved_expiry = _resolve_straddle_expiry(strategy, inputs, expiries)
     pool = [(strike, expiry) for strike, expiry in common if expiry == resolved_expiry]
     strike, expiry = min(pool, key=lambda row: (abs(row[0] - spot), row[0]))
     return strike, expiry
@@ -215,8 +281,9 @@ def has_resolvable_expiry(strategy: str, inputs: Mapping[str, Any], spot: float)
     True when ``inputs`` carries an explicit ``expiry``/``post_event_expiry``
     field, or -- when neither is captured -- a native selection off listed
     ``quotes`` finds a candidate (mirrors legacy ``ExpirySelector``'s
-    ``first_post_event``/``fixed`` kinds via :func:`_resolve_straddle_expiry`,
-    the only kinds any enabled strategy here uses).
+    ``first_post_event``, ``first_dte_at_least`` (STR-RUNUP only, issue #95)
+    and ``fixed`` kinds via :func:`_resolve_straddle_expiry`, the only kinds
+    any enabled strategy here uses).
 
     Used by the geometry gate (``engine/v2/scoring/stages.py``
     ``_resolve_geometry``) to decide whether ``MISSING_EXPIRY`` is a genuine
@@ -503,7 +570,7 @@ def _resolve_generate_expiry(strategy: str, inputs: Mapping[str, Any]) -> str:
             and inputs.get("post_event_expiry") is None):
         put_expiries = _listed_put_expiries(inputs)
         if put_expiries:
-            return _resolve_straddle_expiry(inputs, put_expiries)
+            return _resolve_straddle_expiry(strategy, inputs, put_expiries)
     return _expiry(inputs)
 
 
@@ -521,7 +588,7 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
     width = _finite_float(inputs.get("width", forecast / divisor / 100.0 * spot), "width")
     if width <= 0 and strategy not in {"STR-THRU", "STR-RUNUP"}:
         raise GeometryRefusal("ZERO_WIDTH")
-    selected = (_select_listed_straddle(inputs, spot)
+    selected = (_select_listed_straddle(strategy, inputs, spot)
                 if strategy in {"STR-THRU", "STR-RUNUP"}
                 and (inputs.get("strike") is None or inputs.get("expiry") is None)
                 else None)

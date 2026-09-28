@@ -57,20 +57,23 @@ alongside the nightly stage kinds, not in
 (`native_board_universe.py`) — a pure key `(ticker, strategy, event_date,
 session)` and the function that enumerates one per event × native-covered
 strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
-`computed_moves_job_kind` (registered in `stages.py::_core_kinds`, the same
-ordinary-job-kind pattern as `training`/`promote_job_kind` above, not a
-coordinator effect), `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
-`calendar_moves_job_spec`, and `run_computed_moves_worker` (dispatched by
-`worker.py` for worker `"computed_moves_refresh"`) — see "Primary contracts"
-below for what this adapts; "Outputs" below now covers its nightly caller
-(Part 4). `calendar_moves_jobs.py` registers only `computed_moves_refresh`:
-`forward_calendar_refresh` still has no `JobKind` — issue #52's prerequisite
-(an attempt-fence check in the store's own commit path, so a
-cancelled/expired attempt can never commit — see below) is now in place
-(#55), but registering the kind itself (worker dispatch, loader callback,
-parameter validation) is a separate, later change, and Part 4 wires only
-`computed_moves_refresh` into the nightly graph for the same reason —
-`forward_calendar_refresh` gets neither a `JobKind` nor a `GRAPH` node.
+`computed_moves_job_kind`/`forward_calendar_job_kind` (both registered in
+`stages.py::_core_kinds`, the same ordinary-job-kind pattern as
+`training`/`promote_job_kind` above, not a coordinator effect),
+`CalendarMovesParameters`/`calendar_moves_parameter_problems`/
+`calendar_moves_job_spec`, and `run_computed_moves_worker`/
+`run_forward_calendar_worker` (dispatched by `worker.py` for worker
+`"computed_moves_refresh"`/`"forward_calendar_refresh"` respectively) — see
+"Primary contracts" below for what each adapts; "Outputs" below now covers
+`computed_moves_refresh`'s nightly caller (Part 4). Issue #52's prerequisite
+(an attempt-fence check in `forward_calendar_store`'s own commit path, so a
+cancelled/expired attempt can never commit — see below) landed in #55;
+`forward_calendar_refresh` now has a `JobKind` too (worker dispatch, a
+loader callback, parameter validation — a separate, later change from #55
+itself), but it still has neither a `nightly.py` `GRAPH`/`OPTIONAL` node nor
+a `supervisor.Service` submitter: that wiring is a separate, later PR,
+mirroring how `computed_moves_refresh`'s own Part 4 nightly wiring (#54)
+followed its Part 3 registration (#50).
 
 A small number of natively-fetched data stores live directly in this
 package rather than delegating computation to another v2 layer — like
@@ -118,15 +121,38 @@ head-conflict detection active on that shortcut path too). Omitting
 `fence_check` (the default) keeps this function's previous, unchanged
 behavior for its other two callers, `engine/v2/data/incremental.py`'s
 generic-refresh path and `engine/v2/research/_trades_publish.py`, neither
-of which is touched by this change. This runner still has no job-layer
-bridge: registering
-`forward_calendar_refresh` as a `JobKind` (worker dispatch, a loader
-callback, parameter validation) is a separate, later change — see "Primary
-contracts" above. Its pure helpers (`horizon_dates`, `date_units`,
-`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
-`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
-are unit-testable without a catalog or a network. Today this runner has no
-production caller, only its own test module.
+of which is touched by this change. `calendar_moves_jobs.run_forward_calendar_worker` (dispatched by `worker.py`
+for worker `"forward_calendar_refresh"`) is this runner's job-layer bridge:
+it decodes the job's own `CalendarMovesParameters` (which now carries
+`tickers`/`horizon_days` again — see "Primary contracts" above) and calls
+`incremental_data._load_forward_calendar_refresh_callback()` to get a
+`(parameters, root)`-shaped closure with the two injected network edges
+pre-bound, the same lazy-construction shape
+`_load_computed_moves_refresh_callback` already has. Unlike
+`computed_moves_refresh`, whose staged document restates several fields
+`computed_moves_store` reads back from it, `forward_calendar_refresh`'s own
+staged document (`refresh_staging.py`,
+`REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]`) carries ONLY
+`attempt_id`/`fence` — every other value this runner needs already lives on
+the job's own immutable `CalendarMovesParameters`, so restating it could
+only drift. `attempt_id`/`fence` vary per attempt (a retried attempt gets a
+new fence), so they cannot be pre-bound the way the fetchers are: the
+closure reads the staged document at call time, from the attempt's own
+`root`, after first format-checking `parameters.expected_head_snapshot_id`
+(the same bounded-1..128-char-or-`None` one-line shape check
+`computed_moves_store._validate_document_head` uses, mirrored not imported)
+— before that file read or any other I/O — then passes
+`attempt_id`/`fence` straight through to `run_forward_calendar_refresh`,
+which is what actually makes the #55 fence check live for a supervised,
+leased, retried, cancellable attempt rather than the permanent `None`/`None`
+no-op it would otherwise stay. Its pure helpers (`horizon_dates`,
+`date_units`, `ticker_units`, `plan_forward_calendar`,
+`resolve_session_claims`, `nasdaq_rows_from_payload`,
+`nasdaq_claims_from_rows`, `pending_tickers`) are unit-testable without a
+catalog or a network. This runner's only production-shaped caller today is
+`run_forward_calendar_worker`; nothing yet submits a
+`forward_calendar_refresh` job (no nightly `GRAPH` node, no
+`supervisor.Service` submitter — a separate, later PR).
 
 `native_score_batch.py` (this PR adds this module, its `stages.py` job kind
 and its `worker.py` dispatch branch together — this doc describes the
@@ -675,11 +701,15 @@ this doc's own Diagrams section already names (see below).
   weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
   (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
   `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
-  `expected_head_snapshot_id`, `attempt_id`, `fence`) — there is no staged
-  input-document file for this runner: it has no `JobKind` (see "Primary
-  contracts" above), so there is no admitted job to stage one from, and
-  `refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES` has no
-  `"forward_calendar_refresh"` entry; and the two injected network edges,
+  `expected_head_snapshot_id`, `attempt_id`, `fence`) — most of these now
+  come straight off the job's own `CalendarMovesParameters` (see "Primary
+  contracts" above); `attempt_id`/`fence` come from
+  `forward_calendar_refresh`'s own small staged document
+  (`refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]`
+  → `forward_calendar_refresh_input.json`, `{"attempt_id": claim.attempt_id,
+  "fence": claim.fence}` only — every other field would only drift from the
+  immutable job parameters, so this document is deliberately smaller than
+  `computed_moves_refresh`'s own); and the two injected network edges,
   `providers.nasdaq_calendar.
   nasdaq_calendar_fetcher` (one call per discovery date) and
   `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
@@ -1184,6 +1214,25 @@ starts working with no change of its own.
 
 ## Outputs
 
+- **`orats_daily_market_fetcher`'s rows (`providers/orats_daily_market.py`,
+  #96).** `fetcher(unit)`'s fourth return value, `ticker_rows`, are plain
+  dicts keyed by the `daily_market` contract's columns. A value this
+  provider maps from ORATS is `None` (never a raw sentinel, never silently
+  dropped) in two cases: the field, once scaled, falls outside its column's
+  entry in this module's `PLAUSIBLE_RANGES` (a local, test-verified mirror
+  of `engine.data.normalize.common.PLAUSIBLE_RANGES` — a value outside
+  range is not a real quote); or the column is `implied_move` and the
+  scaled, in-range value is `<= 0` (ORATS's own "no quote" sentinel for
+  that field, distinct from a genuine implausible value). `mcap_usd` is
+  `None` whenever the day's `cores` payload has no `mktCap` for that ticker
+  — this module never looks back at other sessions to fill it; the
+  backward-looking as-of carry is `engine.v2.data.incremental.merge_daily_market`'s
+  job, documented in that package's own `ARCHITECTURE.md` (bounded to the
+  partitions a refresh already loaded, not an unbounded historical scan).
+  None of this raises: masking a value is normal-path behavior for this
+  provider, not a failure (see "Failure semantics" for what does raise:
+  `SOURCE_NOT_FINAL`/`TRANSIENT_SOURCE`/etc. for a genuinely bad response,
+  never for a masked field).
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
@@ -1328,11 +1377,16 @@ starts working with no change of its own.
 
 **`computed_moves_refresh` is registered as an ordinary job kind (Part 3) and
 now has a nightly `GRAPH`/`OPTIONAL` node and a SUPERVISED submitter (Part 4,
-revised after Opus BLOCK(3)); `forward_calendar_refresh` still has no
-`JobKind` at all.** `stages.py::_core_kinds` includes
-`calendar_moves_jobs.computed_moves_job_kind()`, and `worker.py::dispatch`
+revised after Opus BLOCK(3)); `forward_calendar_refresh` now has a `JobKind`
+too (issue #52's prerequisite landed in #55; this is a separate, later
+change from #55 itself), but still has neither a `GRAPH`/`OPTIONAL` node nor
+a submitter — that wiring is a separate, later PR.** `stages.py::_core_kinds`
+includes `calendar_moves_jobs.computed_moves_job_kind()` and
+`calendar_moves_jobs.forward_calendar_job_kind()`; `worker.py::dispatch`
 routes worker `"computed_moves_refresh"` to
-`calendar_moves_jobs.run_computed_moves_worker`. `nightly.py`'s `GRAPH` still
+`calendar_moves_jobs.run_computed_moves_worker` and worker
+`"forward_calendar_refresh"` to
+`calendar_moves_jobs.run_forward_calendar_worker`. `nightly.py`'s `GRAPH` still
 carries a `"computed_moves_refresh": ("refresh",)` node, and `OPTIONAL`
 still includes it, but ONLY for `run_shadow_nightly`'s own whole-graph walk
 (see "Diagrams" below) — no *submission* path builds a job for it from that
@@ -1439,13 +1493,17 @@ note below) — so a caller's coverage denominator never disagrees with what
 the worker independently recomputes; it now takes `as_of` directly rather
 than a nightly `plan`/`context_tickers` (neither was ever read by its body).
 `forward_calendar_refresh` was registered, and briefly wired into a draft of
-this same nightly stage, in an earlier draft of this PR too, but that
+this same nightly stage, in an earlier draft of PR #50 too, but that
 registration (and its `run_forward_calendar_worker` job-layer adapter) was
 pulled before merge: see "Primary contracts" above and issue #52 (no
 attempt-fence check in `forward_calendar_store`'s commit path — a gap the
 job registration would have made newly reachable as a supervised, leased,
-retried, cancellable attempt) — Part 4 wires only `computed_moves_refresh`
-for the same reason; `forward_calendar_refresh` gets no `GRAPH` node either.
+retried, cancellable attempt) — Part 4 wired only `computed_moves_refresh`
+for the same reason. Issue #52's prerequisite landed in #55, and
+`forward_calendar_refresh` was re-registered as a `JobKind` in a later PR
+(worker dispatch, loader callback, parameter validation, and a small staged
+`attempt_id`/`fence` document — see "Primary contracts"/"Inputs" above) —
+but it still has no `GRAPH`/`OPTIONAL` node and no submitter of its own.
 `run_computed_moves_refresh` is also still not itself a bare
 `engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
 `parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
@@ -1478,12 +1536,19 @@ legitimately finds has no committable rows (`_capture_targets`'s "too_few"
 outcome — a real business finding, not a failure) still counts as covered:
 the run genuinely finished considering it. A caller building `expected_ids`
 before submission must derive it the same way, from
-`target_tickers_from_snapshot` against the same pinned inputs — there is no
-`tickers` field on `CalendarMovesParameters` to disagree with (removed, see
-"Primary contracts" above and "Failure semantics" below): `computed_moves_refresh`
-has never read one, unlike the now-removed `forward_calendar_refresh` job
-wrapper, whose own now-moot `tickers=()` "whole market" denominator this
-fix's design deliberately does not reuse.
+`target_tickers_from_snapshot` against the same pinned inputs — `CalendarMovesParameters.tickers` (restored, see "Primary contracts" above)
+is `forward_calendar_refresh`'s own field, never read by
+`computed_moves_refresh`: this fix's `target_tickers_from_snapshot`-derived
+denominator design is specific to `computed_moves_refresh` and is not reused
+by `forward_calendar_refresh`, whose own `expected_ids` must instead equal
+`set(tickers)` — `run_forward_calendar_refresh` always reports
+`completed_ids=tuple(sorted(set(tickers)))` (see its own module docstring),
+so a `tickers=()` ("whole market") submission can never satisfy this job
+kind's own coverage check, which requires a non-empty `expected_ids`
+(`_expected_ids_problems`): submitting a whole-market forward-calendar
+refresh as a job is not yet supported end-to-end (only a ticker-scoped
+request is); the standalone runner itself still accepts `tickers=()` for a
+direct, non-job invocation.
 Every field of the staged input document, and
 `parameters`' own `parent_snapshot_id`/`refresh_plan_hash`, are validated up
 front (`_validate_input_document`, split into `_validate_document_identity`/
@@ -1877,7 +1942,11 @@ network, or database access.
   or an `int >= 1` — each refused before any I/O the moment it is
   malformed. `None`/`None` is a valid, meaningful request (a manual/ad-hoc
   invocation with no live job attempt behind it), not merely an omitted
-  default, and both set is the other valid shape. The two fields ARE then
+  default — but only for a DIRECT, standalone, non-job call into
+  `run_forward_calendar_refresh` that is never reached through the job
+  scheduler; the job-dispatched path refuses that same pair instead (see
+  the staged-document paragraph at the end of this item). Both set is the
+  other valid shape. The two fields ARE then
   cross-checked against each other
   (`engine.v2.ops.lifecycle.validated_attempt_fence_pair`,
   Opus gate finding on #55): exactly one set is refused up front, before
@@ -1913,6 +1982,21 @@ network, or database access.
   function (its own call site and tests are unchanged)
   (`tests/test_v2_ops_computed_moves_store.py::test_run_computed_moves_refresh_refuses_fence_set_without_attempt_id`/
   `::test_run_computed_moves_refresh_refuses_attempt_id_set_without_fence`).
+
+  The job-dispatched path — `incremental_data._staged_forward_calendar_attempt`,
+  the staged-document reader called only from the `forward_calendar_refresh`
+  loader callback (never by a direct, standalone caller) — always fails
+  closed instead: a missing or unreadable staged document, malformed JSON, a
+  document that is not a JSON object, a missing or explicitly null
+  `attempt_id` or `fence`, a blank or non-string `attempt_id`, or an invalid
+  `fence` (a `bool`, a non-`int`, or an `int` less than 1) is each refused
+  as `INVALID_REQUEST` before the store is ever called.
+  `Claim.attempt_id`/`Claim.fence` are always real values for a real
+  scheduled job, so a staged document lacking either one indicates a broken
+  or tampered staging step, not a legitimate manual request — which is why
+  only the DIRECT, non-job call described above may pass
+  `attempt_id=None, fence=None` as its deliberate, meaningful "skip the
+  fence check" request.
 - **`nightly.submit_computed_moves_refresh_if_ready`'s own failure semantics
   for `computed_moves_refresh` (Part 4, revised after Opus BLOCK(3))** —
   R1 missing input: no open catalog connection, no native `"refresh"` job
@@ -1995,12 +2079,24 @@ network, or database access.
   `computed_moves_store._validate_input_document`'s own revalidation of the
   same fields (below) is a second, defense-in-depth layer, not the only
   place they are checked — again, the same relationship
-  `run_refresh_worker` has to its own sibling check. `tickers`/`horizon_days`/
-  `table_name` are no longer fields on `CalendarMovesParameters` at all
-  (Round 3): the first two were read only by the now-removed
-  `forward_calendar_refresh` job wrapper, and `table_name` was never read by
-  either store — there is nothing left to validate-or-refuse for them, so
-  they were deleted rather than defended.
+  `run_refresh_worker` has to its own sibling check. `horizon_days`/`tickers`
+  are fields on `CalendarMovesParameters` again (restored by this PR): both
+  are read only by `forward_calendar_refresh` (`computed_moves_refresh` never
+  reads either), and `calendar_moves_parameter_problems` validates both for
+  BOTH job kinds — harmless for `computed_moves_refresh`, whose defaults for
+  both fields already pass. `horizon_days` must be an `int` inside
+  `[1, MAX_HORIZON_DAYS]`, inclusive; `tickers` must be a tuple/list of
+  unique bounded non-empty strings, and whenever it is non-empty it must also
+  match `expected_ids` as a set (a ticker-scoped forward calendar refresh
+  cannot commit a different ticker set than the coverage denominator its job
+  reports); an EMPTY `tickers` is additionally refused for a
+  `forward_calendar_refresh` job specifically (the standalone runner's
+  "empty means the whole market" behavior is intentional for direct callers,
+  but a whole-market run must never be submitted as this job kind) — never
+  for `computed_moves_refresh`, which never reads the field and always leaves
+  it at its empty default. `table_name`, by contrast, is still not a field on
+  `CalendarMovesParameters` at all: it was never read by either store, so
+  there is nothing to validate-or-refuse for it.
 - **Training/promote refusal** — `run_training_worker` maps every refusal
   the underlying tool can raise to a typed `OpsError` rather than an
   untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
@@ -2894,6 +2990,147 @@ retry, transaction, partial write, idempotency).
   normally; it does not itself write a receipt, which is exactly why the
   in-process deadline above is the primary mechanism and this is only the
   backstop for its own failure.
+
+### `nightly_trigger.py` (issue #104: a per-`as_of` input manifest, not one static file; years derived like legacy) — the 4c R1–R6 template
+
+- **R1, missing input.** `_qualification_path(root, QUALIFICATION_INPUT_MANIFEST)`
+  used to point at exactly one file,
+  `reports/phase6/nightly_trigger/input_manifest.json`, regenerated by
+  nothing: whatever `capture_inputs.capture` produced (by hand, once, via
+  `ops capture-inputs`) for whichever `as_of` was current at that moment
+  stayed the plan's `--input-manifest` for every subsequent night, forever,
+  until an operator re-ran the capture by hand — a legacy store rewritten
+  since then makes the first barrier launch refuse `INPUT_CHANGED`
+  (non-retryable, every descendant blocked); an unchanged store silently
+  proceeds with a manifest pinned to the WRONG session. `_default_plan` now
+  calls `capture_inputs.capture` itself, in-process, for THIS call's own
+  `as_of`, `universe` and derived years (below), and writes the result to a
+  per-`as_of` path (`reports/phase6/nightly_trigger/<as_of>.input_manifest.json`)
+  rather than the one shared name — a stale prior night's manifest is never
+  read for a different night, because there is no shared name left to
+  collide on. This only runs when the resolved `universe` is nonempty
+  (explicit `tickers`, when given, take precedence over the population
+  document — `tuple(tickers) or _population_tickers(population)` — so
+  either source alone is enough to trigger capture); with neither source
+  providing tickers, `input_manifest` stays `None`, unchanged from before —
+  a plan with no tickers has nothing for `capture` to enumerate against. Separately,
+  `cli._read_input_manifest_ref` (unchanged by this PR) already refuses
+  `INPUT_CHANGED` at plan time if the path this PR hands it is missing or a
+  symlink, before publishing its bytes.
+- **R1 (defensive), a manifest for the wrong session.** `capture_inputs.capture(...,
+  as_of=as_of, ...)`'s own `selected_session` field is derived from this
+  same `as_of` (`str(scope.as_of.date())`), so an in-process capture can
+  only ever disagree with the plan's own `as_of` if `capture`'s own scope
+  construction changes underneath this code in some way nothing here would
+  otherwise notice. The trigger checks `manifest.selected_session == as_of`
+  before writing the manifest, and raises the same typed, non-retryable
+  `INPUT_CHANGED` `OpsError` `store_barrier.py` already uses for this family
+  of failure on a mismatch — cheap insurance against exactly the
+  silent-wrong-session failure mode issue #104 opened over ("the run
+  proceeds with a manifest captured for a different session"), now
+  impossible to reach silently even if the assumption above ever stops
+  holding.
+- **R2, cache.** A new plan build always captures inputs again — there is no
+  check for an existing `<as_of>.input_manifest.json` to reuse. This is
+  deliberate, not a missed optimization: a fresh capture is what makes the
+  manifest actually reflect the CURRENT legacy store, which is the entire
+  point of this PR. What IS cached, downstream of this, is the plan itself:
+  once `cli._read_input_manifest_ref` has read the file and published its
+  bytes, the resulting plan document's `input_manifest_ref` points at that
+  immutable, content-addressed artifact — never back at the mutable
+  per-`as_of` file path.
+- **R3, retry.** If no `plan_ref` was ever saved for this `as_of` (a prior
+  attempt only reached `"error"` before a plan was built — `"timed_out"` is
+  never a pre-plan status: `_submit_plan` only records it after a plan was
+  already submitted and served, always with `plan_ref` set), a later
+  eligible attempt calls `_default_plan` again and captures
+  inputs fresh, same as the first attempt. Once a `plan_ref` IS saved,
+  `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
+  RESUME_STATUSES`) calls `_submit_plan` directly with that existing
+  `plan_ref` and never reaches `_default_plan`/`_capture_input_manifest`
+  again — a resumed retry submits and serves the SAME already-pinned plan,
+  it does not recapture or replan.
+- **R4, transaction.** The manifest file write (`write_manifest`, inside
+  `_capture_input_manifest`) happens before `cli._plan_command` opens any
+  catalog transaction, and is not itself part of one: it is a plain
+  filesystem write under `reports/`, unrelated to the operations catalog.
+  If `_plan_command` then fails for an unrelated reason (a validation
+  refusal, a resource problem) AFTER the manifest was already written, that
+  file is simply left on disk, referenced by no persisted plan — an orphan,
+  not a torn write; the NEXT attempt for the same `as_of` (per R2/R6)
+  overwrites it with a fresh capture regardless.
+- **R5, partial write.** `capture_inputs.write_manifest` is a plain
+  `Path.write_text`, not a tmp-file-plus-rename: a process killed mid-write
+  can leave a truncated, invalid-JSON file at the per-`as_of` path — that
+  SAME call never reaches `cli._read_input_manifest_ref` either, since it
+  died before returning from `_capture_input_manifest`. `_read_input_manifest_ref`
+  only ever reads the file after a successful write in the same
+  plan-building call that produced it; a process killed mid-write leaves
+  nothing for that call to read at all. A later eligible attempt (per R3)
+  captures fresh and overwrites the per-`as_of` path — including a
+  truncated one left by a killed prior attempt — before that later call's
+  own `_read_input_manifest_ref` ever reads it, so a partial file is
+  overwritten, not read, by whatever comes next.
+- **R6, idempotency.** A second capture for the same `as_of` (e.g. a
+  same-day re-plan after a first attempt never reached `_plan_command`, or
+  an operator re-running `ops plan` by hand) overwrites the same per-`as_of`
+  path. That new capture can legitimately differ from the first (the legacy
+  store may have moved between the two calls) — this is not a bug, since
+  nothing downstream depends on repeated captures being byte-identical.
+  Critically, it also cannot retroactively change any EXISTING plan: a plan
+  already built pins its own `input_manifest_ref` to the immutable artifact
+  `cli._read_input_manifest_ref` published from whatever bytes existed at
+  THAT call's own read — overwriting the file afterward has no effect on
+  that already-persisted plan.
+- **Years, derived per `as_of`, not fixed.** `year_start=2024, year_end=2026`
+  were a hardcoded pair everywhere `_default_plan` built a plan, silently
+  excluding any scoring year outside that fixed window once the calendar
+  moved past it (issue #104's dated example: once the 35-day scoring
+  horizon first crosses into 2027, in late November 2026, 2027 data drops
+  out of the native context with no error at all). The years are now
+  derived fresh every call from `as_of`, mirroring legacy's own formula
+  (`engine/dashboard/nightly.py`'s `context_years = range(as_of.year - 1,
+  horizon.year + 1)`, `horizon = as_of + 35 days`) exactly: `year_start =
+  as_of.year - 1`, `year_end = horizon.year` — so the plan's context window
+  always tracks the calendar the same way legacy's does, with no fixed end
+  date to eventually age past.
+
+### `nightly_trigger.py` (issue #102: `busy_legacy` must never overwrite a resumable state)
+
+- **R1/R6, a busy legacy lock must not erase a resumable state.**
+  `run_trigger` used to check `busy_legacy` (the legacy `.nightly.lock` is
+  held by another run) BEFORE the resume check, and unconditionally
+  persisted `busy_legacy` with `plan_ref=None, error_count=0` — overwriting
+  any `submitted`/`submitting`/`error`/`timed_out` state a prior tick had
+  already saved, WITH a `plan_ref`. A trigger process killed right after
+  reaching `submitted` (issue #102's own example: a `bounded_run` RSS
+  kill), followed by a tick that finds the lock busy, lost that `plan_ref`
+  for good: the NEXT tick after that had no prior state to resume from, so
+  `_decide` built an entirely new plan — a new `decision_clock`, a new
+  `scope_hash`, all-new job ids — and the ORIGINAL plan's already-queued
+  jobs, never cancelled, were claimed by whichever `serve` ran next (claim
+  order has no plan filter), running ahead of the new plan's own jobs. Two
+  full DAGs for the same session, the three-strike error counter silently
+  reset, and — worst case — a second same-session decision generation that
+  disagrees with the ledger's already-authoritative first generation
+  (`decision_commit._advance_decisions_watermark`,
+  `effects_graph._decision_gate`).
+  `run_trigger` now computes whether this tick is a resume (`prior is not
+  None and prior.plan_ref and prior.status in RESUME_STATUSES`) from the
+  ALREADY-LOADED `prior` state BEFORE attempting the legacy lock at all —
+  the resume decision never depended on the lock outcome to begin with, only
+  on the state file. A resuming tick that then finds the lock busy returns
+  an EPHEMERAL `busy_legacy` receipt (built with `_receipt`, the same way
+  `_idle` already returns one without persisting it) carrying the PRIOR
+  `plan_ref`/`error_count` forward for this tick's own visibility only —
+  `write_state` is never called for this case, so the durable on-disk state
+  is untouched and the next tick loads the SAME resumable prior state again,
+  exactly as if this busy tick had never happened. A tick that is NOT
+  resuming (no prior state, or a prior state whose status is not resumable)
+  keeps the original behavior exactly: `busy_legacy` with `plan_ref=None` IS
+  persisted, because there is no `plan_ref` to protect in that case — this
+  is the ordinary, correct path for every as-of's first few ticks before any
+  plan exists.
 
 ## Invariants
 

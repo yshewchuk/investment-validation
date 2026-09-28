@@ -1,5 +1,8 @@
 # `engine/v2/domain/generation`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and invariants.
+
 ## Ownership
 
 Implements the **Structure generator — template resolution, finite placement search, completeness receipts** row of the §4 owner table of
