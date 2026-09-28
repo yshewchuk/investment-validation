@@ -4289,23 +4289,40 @@ this design adds no new auto-retry-past-a-failure logic).
   `deployment.current_pointer`'s own `release_id` starts with the literal
   prefix `"nightly-<as_of>-"`, AND the job catalog holds a `succeeded`
   `phase5_state_stage` job whose OWN `new_release_id` parameter equals that
-  exact `release_id` (a catalog query by parameter value, not by dedup
-  key — this job's dedup key names a `prior_release_id` the terminal check
-  does not otherwise need to know). **Neither the prefix alone, nor the
-  prefix plus a merely-present, self-verifying catalog, is enough
-  (CodeRabbit findings, both confirmed):** a manually staged,
-  prefix-matching release_id like `"nightly-<as_of>-manual"` would satisfy
-  a prefix-only check without ever going through `phase5_state_stage` at
-  all; and a light-check FAILURE (step 4 below) leaves `new_release_id`
-  fully staged with a perfectly self-verifying catalog (R5) but a
-  `phase5_state_stage` job that reports failed/refused, never `succeeded`
-  — so a catalog-existence check alone would also wrongly treat a manually
-  `models_promote`-d, light-check-failed candidate (the `#149` scenario) as
-  this cycle's genuine completion. Requiring the JOB's own `succeeded`
-  checkpoint, not merely an artifact's presence, closes both gaps with no
-  new marker or mechanism: `phase5_state_stage` already reports
-  failed/refused on any light-check failure (step 4's own text), so a
-  `succeeded` checkpoint already means every light check passed.
+  exact `release_id` AND whose own `input_refs` are EXACTLY the six job ids
+  `submit_pool_nightly_training_if_ready` derives for this SAME `as_of` (the
+  canonical `"nightly:<as_of>:pool_train:<state>"`-keyed jobs, looked up by
+  those dedup keys — not merely present in the catalog, but matching, and
+  looked up by parameter value for `new_release_id`, not by that job's own
+  dedup key, which names a `prior_release_id` the terminal check does not
+  otherwise need to know). **Neither the prefix alone, nor the prefix plus a
+  merely-present, self-verifying catalog, nor the prefix plus a matching
+  `new_release_id` alone, is enough (CodeRabbit findings, all confirmed):**
+  a manually staged, prefix-matching release_id like
+  `"nightly-<as_of>-manual"` would satisfy a prefix-only check without ever
+  going through `phase5_state_stage` at all; a light-check FAILURE (step 4
+  below) leaves `new_release_id` fully staged with a perfectly
+  self-verifying catalog (R5) but a `phase5_state_stage` job that reports
+  failed/refused, never `succeeded` — so a catalog-existence check alone
+  would also wrongly treat a manually `models_promote`-d, light-check-failed
+  candidate (the `#149` scenario) as this cycle's genuine completion; and
+  because `new_release_id` is a function of `as_of` and `prior_release_id`
+  ALONE, never of `training_job_ids` (see `new_release_id`'s own definition
+  below), a manually submitted `phase5_state_stage` job that reused stale or
+  substituted `input_refs` — training outputs from a DIFFERENT cycle, never
+  this `as_of`'s own six jobs — could still mint the identical
+  `new_release_id` and succeed, so a `new_release_id`-match alone would
+  wrongly treat THAT as this cycle's genuine completion too, even though the
+  automatic sidecar's own six `training` jobs for this `as_of` were never
+  the ones actually used. Requiring the JOB's own `succeeded` checkpoint
+  AND its own recorded `input_refs` to equal this `as_of`'s canonical six,
+  not merely an artifact's presence or an id string match, closes all three
+  gaps with no new marker or mechanism: `phase5_state_stage` already reports
+  failed/refused on any light-check failure (step 4's own text) and already
+  records its `input_refs` (this step's own text, next paragraph), so a
+  `succeeded` checkpoint with matching `input_refs` already means every
+  light check passed against THIS `as_of`'s own training outputs, not
+  someone else's.
 
   Otherwise, does nothing until all six `training` jobs
   keyed to this `as_of` have `succeeded`; then submits ONE new job kind,
