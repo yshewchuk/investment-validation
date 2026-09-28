@@ -119,6 +119,16 @@ def persist_members(conn, attempt_id, identities):
 
 
 def poll(conn, running, *, boot_id, clock, grace_seconds=2):
+    # Sample the worker's own exit code before scanning the process family, and
+    # never call a clean exit a failure: a worker that exits 0 can briefly leave
+    # a child/grandchild process (a straggler) alive past its own exit, and a
+    # liveness read can momentarily overlap the exit itself. Either way, `alive`
+    # staying true after a zero exit is not a failure -- `done` below already
+    # waits for the whole family to drain before this attempt is treated as
+    # finished, so a straggler is waited out, not killed and not misreported as
+    # WORKER_FAILED (issue #105: this used to discard a successful worker's
+    # already-buffered result).
+    exit_code = running.process.poll()
     running.identities, alive, memory = observe(running.identities, boot_id)
     persist_members(conn, running.claim.attempt_id, running.identities)
     running.peak = max(running.peak, memory)
@@ -127,8 +137,7 @@ def poll(conn, running, *, boot_id, clock, grace_seconds=2):
         running.failure = "RESOURCE_LIMIT_EXCEEDED"
     if running.failure and alive:
         stop(running, boot_id=boot_id, clock=clock, grace_seconds=grace_seconds)
-    exit_code = running.process.poll()
-    if exit_code is not None and alive:
+    if exit_code is not None and exit_code != 0 and alive:
         running.failure = running.failure or "WORKER_FAILED"
         stop(running, boot_id=boot_id, clock=clock, grace_seconds=grace_seconds)
     return dict(done=exit_code is not None and not alive, memory=memory, exit_code=exit_code)

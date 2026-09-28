@@ -16,6 +16,8 @@ from engine.v2.contracts import ProcessIdentity
 from engine.v2.foundation import SystemClock
 from engine.v2.ops import worker as worker_module
 from engine.v2.ops.discovery import sample_capacity
+from engine.v2.ops import executor
+from engine.v2.ops.executor import Running
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.executor_cgroup import probe
 from engine.v2.ops.executor_watchdog import find_owners, observe, process_info, process_table, signal_owned
@@ -258,7 +260,7 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     details = json.loads((tmp_path / "diagnostics" / "failure_details.json").read_text())
     assert details == {"exception_type": "RuntimeError",
                        "location": details["location"]}
-    assert details["location"].endswith("test_v2_ops_executor_faults.py:236")
+    assert details["location"].endswith("test_v2_ops_executor_faults.py:238")
     assert "S3CRET-VALUE" not in json.dumps(details)
 
 
@@ -425,3 +427,50 @@ def test_find_owners_ignores_an_unrelated_same_uid_process_outside_both_subtrees
     assert unrelated_pid not in blockers, (
         "a same-uid pid outside both the checker's and the launch's subtree "
         "cannot be this attempt's escaper and must not block forever")
+
+
+def test_poll_does_not_fail_a_clean_exit_with_a_live_straggler(tmp_path, monkeypatch):
+    """Regression for issue #105: ``poll()`` used to mark ``WORKER_FAILED`` and
+    discard the worker's result whenever ANY exit code was observed while
+    ``observe()`` still reported a family member alive -- including a clean
+    ``exit_code == 0`` racing a still-alive straggler descendant. This injects
+    that exact race deterministically: a real, already-exited (code 0)
+    subprocess, with ``executor.observe`` scripted to still report the family
+    alive on the first poll (as a genuine straggler would) and drained on the
+    second."""
+    conn, clock, supervisor = catalog(tmp_path)
+    job = submit(conn, registry(), POLICY,
+                 request(kind="artifact_check", checkpoint_contract_ref="receipt.v1.0",
+                         parameters={"expected_ids": []}),
+                 clock=clock)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock)
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    identity = process_info(child.pid, "boot")[0]
+    child.wait()
+    assert child.poll() == 0
+
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.write(write_fd, b'{"ok": 1}')
+    os.close(write_fd)
+
+    running = Running(claim=claim, process=child, result_fd=read_fd,
+                      identities=(identity,), started=clock.monotonic())
+
+    scripted = iter([
+        ((identity,), (identity,), 0),  # tick 1: family still reports alive (straggler)
+        ((), (), 0),                    # tick 2: family fully drained
+    ])
+    monkeypatch.setattr(executor, "observe", lambda identities, boot_id: next(scripted))
+
+    status1 = executor.poll(conn, running, boot_id="boot", clock=clock)
+    assert status1["exit_code"] == 0
+    assert status1["done"] is False
+    assert running.failure is None
+
+    status2 = executor.poll(conn, running, boot_id="boot", clock=clock)
+    assert status2["exit_code"] == 0
+    assert status2["done"] is True
+    assert running.failure is None
+    assert json.loads(bytes(running.data)) == {"ok": 1}
