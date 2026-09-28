@@ -303,6 +303,23 @@ def _window(as_of: str, window_start_et: str, deadline_et: str) -> tuple[datetim
             datetime.combine(opened_on, _boundary(deadline_et), tzinfo=ET))
 
 
+#: Mirrors ``engine/dashboard/nightly.py``'s own scoring horizon exactly (``HORIZON_DAYS = 35``,
+#: ``context_years = range(as_of.year - 1, horizon.year + 1)``) so the native plan's context
+#: window tracks the same calendar legacy's does, with no fixed end date to age past.
+_LEGACY_HORIZON_DAYS = 35
+
+
+def _derive_years(as_of: str) -> tuple[int, int]:
+    """``(year_start, year_end)`` for ``as_of``, matching legacy's own
+    ``context_years = range(as_of.year - 1, horizon.year + 1)`` formula
+    (``engine/dashboard/nightly.py``) -- computed fresh from ``as_of`` every
+    call, never a fixed pair.
+    """
+    session = date.fromisoformat(as_of)
+    horizon = session + timedelta(days=_LEGACY_HORIZON_DAYS)
+    return session.year - 1, horizon.year
+
+
 def _serve_deadline(clock) -> datetime:
     """Today's ET calendar-day cutoff (``DEFAULT_SERVE_DEADLINE_ET``), from ``clock.now()``'s
     OWN date -- never the plan's ``as_of`` and never a duration from when this call started.
@@ -497,6 +514,36 @@ def _ops_root(root: Path) -> Path:
     return Path(root) / "data" / "operations"
 
 
+def _capture_input_manifest(root: Path, as_of: str, tickers: tuple[str, ...],
+                            context_tickers: tuple[str, ...], year_start: int, year_end: int,
+                            *, capture_fn=None) -> Path:
+    """Capture THIS call's own legacy input manifest for ``as_of`` (issue #104)
+    and write it to a per-``as_of`` path -- never the one static, shared
+    filename every prior night also wrote (or read stale). ``capture_fn``
+    defaults to ``capture_inputs.capture`` and exists only so a test can
+    substitute a stub without touching the real legacy store.
+
+    Raises the typed, non-retryable ``INPUT_CHANGED`` (the same code
+    ``store_barrier.py`` already uses for this family of failure) if the
+    captured manifest's own ``selected_session`` does not match ``as_of`` --
+    defensive insurance against a manifest silently pinned to the wrong
+    session (issue #104's second failure scenario), even though
+    ``capture_inputs.capture`` derives ``selected_session`` from this same
+    ``as_of`` today and so cannot currently disagree with it on its own.
+    """
+    from engine.v2.ops.capture_inputs import capture, write_manifest
+
+    capture_fn = capture_fn or capture
+    manifest = capture_fn(root, as_of=as_of, tickers=tickers, context_tickers=context_tickers,
+                          year_start=year_start, year_end=year_end)
+    if manifest.selected_session != as_of:
+        raise fail("INPUT_CHANGED",
+                   "captured input manifest is pinned to a different session than the plan",
+                   details={"as_of": as_of, "selected_session": manifest.selected_session})
+    output = Path(root).joinpath(*STATE_DIR, f"{as_of}.input_manifest.json")
+    return write_manifest(manifest, output)
+
+
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
                   full_run: bool = True) -> str:
     """The production plan: the real ``cli._plan_command``, in-process.
@@ -507,6 +554,10 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     operator's population document when present (``full_population`` derived
     the universe from the same file); absent, the plan still carries the
     full-run declaration and the refusal is ``ops submit``'s to make.
+    ``input_manifest`` and ``year_start``/``year_end`` are derived fresh from
+    ``as_of`` on every call (the manifest is captured and written per-``as_of``
+    rather than read from one fixed filename, and the year span mirrors
+    legacy's own scoring horizon) rather than being fixed constants.
     """
     from engine.v2.foundation import ensure_directory
     from engine.v2.ops import cli
@@ -518,13 +569,19 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     population = _qualification_path(root, QUALIFICATION_POPULATION)
     universe = tuple(tickers) or _population_tickers(population)
     context = tuple(context_tickers) or universe
+    year_start, year_end = _derive_years(as_of)
+    # issue #104: capture this call's own manifest only when there is a universe to capture
+    # against -- with none, there is nothing for capture_inputs.capture to enumerate, and the
+    # plan carries input_manifest=None exactly as it did before this change in that case.
+    manifest_path = (_capture_input_manifest(root, as_of, universe, context, year_start, year_end)
+                     if universe else None)
     plan_args = argparse.Namespace(
         command="plan", kind="nightly", as_of=as_of, mode="shadow", spec=None,
         no_ledger=False,
-        input_manifest=_qualification_path(root, QUALIFICATION_INPUT_MANIFEST),
+        input_manifest=manifest_path,
         expected_population=population,
         tickers=",".join(universe), context_tickers=",".join(context),
-        full_run=bool(full_run), year_start=2024, year_end=2026, input_mode="legacy",
+        full_run=bool(full_run), year_start=year_start, year_end=year_end, input_mode="legacy",
         snapshot_scope=None, refresh_mode="legacy", refresh_plan=None)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:

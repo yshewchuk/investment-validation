@@ -463,8 +463,12 @@ nothing — only the first transition to `missed`/`failed`/`failed_setup` exits
 1. The receipt and `reports/phase6/nightly_trigger/<as-of>.json` are the P6-6
 evidence; one JSON `TriggerReceipt` line is printed per run. `--as-of
 YYYY-MM-DD` (default: the most recent completed trading session) and `--root .`
-are the only CLI options. To make a scheduled run submittable, place
-`reports/phase6/nightly_trigger/input_manifest.json` (from `ops
-capture-inputs`) beside the population document; without them `ops submit`
-refuses the plan and the receipt records that refusal as `error`; the trigger
-never bypasses the planned-population gate.
+are the only CLI options. To make a scheduled run submittable, place the
+population document, `reports/phase6/nightly_trigger/expected_population.json`;
+the input manifest is no longer a hand-placed file — when the resolved ticker
+universe is non-empty, the trigger captures its own manifest for the plan's
+own `as-of` automatically
+(`reports/phase6/nightly_trigger/<as-of>.input_manifest.json`) and never reads
+a static one. Without a population document (so no universe to capture
+against) `ops submit` refuses the plan and the receipt records that refusal
+as `error`; the trigger never bypasses the planned-population gate.
