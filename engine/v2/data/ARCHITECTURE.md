@@ -567,6 +567,25 @@ idempotent-replay shortcut too.
   behavior for its other production callers today — `incremental.py`'s own
   `_run_generic_refresh` and `engine.v2.research._trades_publish.publish` —
   which get `_head_fence` alone, exactly as before #55/#73.
+  `engine.v2.data.incremental.commit_daily_market_candidate` follows the
+  identical compose pattern one layer up in this same package, not through
+  `generic_incremental` at all (`daily_market` has its own merge/candidate
+  machinery -- see "Primary contracts"): it builds a `_combined_fence_check(c)`
+  closure that always calls this module's own `_candidate_head_fence(c, scope,
+  expected_head_snapshot_id, expected_head_generation)` first, then, only if
+  the caller supplied one, the caller's own `fence_check(c)`
+  (`incremental.py`, mirroring `generic_incremental.py:169-172`'s own
+  `_combined_fence_check`). Fixed for #81: the previous code passed
+  `fence_check or (lambda c: _candidate_head_fence(...))` to
+  `catalog.commit_snapshot`, so a supplied `fence_check` replaced
+  `_candidate_head_fence` outright instead of composing with it -- a
+  same-receipt replay after the head had already moved could return the
+  prior receipt instead of refusing `SNAPSHOT_CONFLICT` (see R3/R6 below for
+  why that composition matters on the replay-shortcut path). Its sole
+  production caller today, `run_incremental_refresh`'s call
+  (`incremental.py:1297`), never supplies `fence_check`, so this remains a
+  `_head_fence`-only path in production; the fix only matters for a future
+  caller (e.g. an attempt-lease check) that supplies one.
   `engine.v2.ops.computed_moves_store.py` has its own `_fence_check_for`
   (`computed_moves_store.py:350-362`), but it is never composed through
   `commit_generic_table_candidate`: that module's own docstring says it
