@@ -394,8 +394,9 @@ class Service:
             return None
         try:
             pointer = deployment.current_pointer(root / "deployment")
-        except (OSError, ValueError) as exc:
-            self._report_native_release_problem("MODEL_NOT_READY", str(exc))
+        except (OSError, ValueError):
+            self._report_native_release_problem(
+                "MODEL_NOT_READY", "the deployment pointer could not be read")
             return None
         if pointer is None:
             self._report_native_release_problem(
@@ -412,6 +413,12 @@ class Service:
             self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                          "ok": False}
             self._report_native_release_problem(getattr(exc, "code", "MODEL_NOT_READY"), str(exc))
+            return None
+        except Exception:
+            self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
+                                         "ok": False}
+            self._report_native_release_problem(
+                "MODEL_NOT_READY", "release verification failed")
             return None
         self._native_release_memo = {"root": str(root), "release_id": pointer.release_id,
                                      "ok": True}
