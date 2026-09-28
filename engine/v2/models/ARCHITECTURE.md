@@ -163,19 +163,27 @@ this PR:
   **(new, this PR)** — rewrite an already-staged manifest's hash to the
   current semantic version, in place, with no retraining; see §7.5.
 - `deployment.derive_release(root, prior_release_id, changed_bindings, *,
-  clock) -> ModelRelease` **(proposed, cutover PR-13 design, not yet
-  implemented)** — MODEL side only. Build a new `ModelRelease` whose
+  clock) -> tuple[ModelRelease, ModelReleaseInventory]` **(proposed, cutover
+  PR-13 design, not yet implemented)** — MODEL side only. `stage_release`
+  refuses unless `inventory.release_id == release.release_id`
+  (`deployment.py:287`, `:386-405`) — a `ModelRelease` alone is not
+  stageable — so this function builds BOTH: a new `ModelRelease` whose
   `bindings` tuple carries over every `ModelBinding` from the already-staged
   `prior_release_id` UNCHANGED except the ones named in `changed_bindings`
-  (keyed by `(role, strategy_id, decision_clock_id)`), assigns a new
-  `release_id`, and stages the result through the existing `stage_release`.
-  Used by the monthly reconcile (a `FEATURE_ROLES`/`"gate"` retrain touches
-  those bindings; `"chooser"` and any other untouched role carries over). No
+  (keyed by `(role, strategy_id, decision_clock_id)`), AND a matching new
+  `ModelReleaseInventory` whose `artifacts` (`ModelArtifactInventory` per
+  role, `releases.py`) carry over the SAME way, both assigned the SAME new
+  `release_id`, then stages the pair through the existing `stage_release`.
+  Used by the monthly reconcile (a `FEATURE_ROLES`/`"gate"` retrain supplies
+  `changed_bindings` built from a completed `training` job's own output —
+  see the ops doc's "the monthly path's real prerequisite"; `"chooser"` and
+  any other untouched role carries over) AND by the nightly reconcile, called
+  FIRST with an EMPTY `changed_bindings` — the nightly path changes no
+  `ModelBinding`, but still needs a freshly-minted `release_id` to hand to
+  `checks/phase5_release.derive_catalog` (below) as ITS new id, since
+  `promote` needs a staged model manifest under whatever id it is given. No
   binding's members/content hash are ever recomputed by this function; it
-  only decides which bindings a new manifest points at. The nightly
-  pool/cutoff append does not call this function at all — no `ModelBinding`
-  changes on a nightly append — see `checks/phase5_release.derive_catalog`
-  below for the STATE side, which is what a nightly append actually touches.
+  only decides which bindings a new manifest points at.
 - `checks.phase5_release.derive_catalog(prior_release_root, prior_release_id,
   new_release_id, changed_rows) -> dict` **(proposed, cutover PR-13 design,
   not yet implemented; lives beside the existing `write_manifest`/
@@ -486,14 +494,15 @@ implemented; MODEL side only — see the correction in §1)
   prior release is not staged (same refusal `resolve_release` already uses).
   Refuses `UnknownReleaseMember` (a new `DeploymentError` subclass) if any
   key in `changed_bindings` does not name a `(role, strategy_id,
-  decision_clock_id)` the prior release's `bindings` tuple actually has — a
-  retrain can replace an existing binding's target, never invent a new
-  role/strategy/clock combination. Refuses `MissingCarriedOverObject` (a new
-  `DeploymentError` subclass, naming the binding and its `content_hash`) if
-  any carried-over binding's declared object cannot be found in
-  `<root>/objects/` — a prior release is content-addressed and immutable
-  (§4), so this can only mean the store was tampered with or corrupted,
-  never a normal state.
+  decision_clock_id)` the prior release's `bindings` tuple AND its matching
+  `ModelReleaseInventory.artifacts` (both carried together, never one
+  without the other) actually have — a retrain can replace an existing
+  binding's target, never invent a new role/strategy/clock combination.
+  Refuses `MissingCarriedOverObject` (a new `DeploymentError` subclass,
+  naming the binding and its `content_hash`) if any carried-over binding's
+  declared object cannot be found in `<root>/objects/` — a prior release is
+  content-addressed and immutable (§4), so this can only mean the store was
+  tampered with or corrupted, never a normal state.
 - **R2, cache.** None: reads the prior manifest fresh, same as every other
   read in this module.
 - **R3, retry.** Calling this twice with the same `(prior_release_id,
