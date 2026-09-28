@@ -2321,11 +2321,13 @@ champion/gate retrain and a nightly pool/residual append; it drew 3 Opus
 BLOCKs, the recurring one being that nothing bridges a training job's
 output to the `ModelReleaseInventory`/state-catalog representation
 `stage_release`/`derive_catalog` need without the legacy registry. The user
-split the cadence. **This design (PR-13a) covers only the nightly append**:
-newly-settled events into `board_analog_matcher`, `chooser_analog_pool`, the
-three `driver_residual_pool` roles and `paired_residual_pool`, plus
-advancing `trailing_pnl_cutoff` — producing a new, auto-promoted release
-that carries every model binding over unchanged (`engine/v2/models/
+split the cadence. **This design (PR-13a) covers only the nightly cycle**:
+appending newly-settled events into `board_analog_matcher` and
+`paired_residual_pool`, advancing `trailing_pnl_cutoff`, re-verifying
+`chooser_analog_pool` and the three `driver_residual_pool` roles (which do
+NOT themselves grow with new events — see "the driver pools are not
+event-scoped" below), and producing a new, auto-promoted release that
+carries every model binding over unchanged (`engine/v2/models/
 ARCHITECTURE.md` §1/§2/§7.6/§7.7). Retraining the champion/gate/chooser
 models monthly, and a `phase5_acceptance` job kind for the heavy pre-promote
 check that retrain needs (`checks/phase5_acceptance.py` is not a `JobKind`
@@ -2430,14 +2432,16 @@ already computed), worker `"phase5_state_stage"`, checkpoint contract
 2. Builds the chooser pool's row inline, the same way
    `tools/phase5_prepare_release.py`'s `chooser_pool_payloads` does today
    — from whatever `data/features/chooser_analog_pool.parquet` currently
-   holds, with no training job of its own. **Open dependency, flagged, not
-   solved here:** this design does not name what refreshes that parquet
-   file itself on any cadence; if nothing does, "chooser pool refreshed
-   nightly" only ever republishes the SAME rows under a new release_id.
-   Confirming or fixing that producer is in scope for whichever of
-   PR-13a's code PRs implements this step, but is not a design blocker for
-   THIS document, since the artifact/interface shape does not change
-   either way.
+   holds, with no training job of its own. **Open dependency, named
+   precisely, not solved here (CodeRabbit finding, confirmed):** this
+   design does NOT name what refreshes that parquet file itself on any
+   cadence, and does not claim to. Until that producer is identified and
+   confirmed (a separate, later change — the artifact/interface shape here
+   does not depend on it), THIS step's chooser-pool row must be treated the
+   SAME way the driver pools already are: a re-verify against whatever the
+   input currently holds, not a confirmed append of newly-settled events.
+   The scope language above and the root doc reflect this — neither claims
+   the chooser pool grows nightly, only that this step re-derives its row.
 3. Calls `checks.phase5_release.derive_catalog` (models doc §7.7) with
    `changed_rows` built from steps 1–2, then `deployment.
    carry_forward_release` (models doc §7.6) — **refusing, before either
@@ -2458,24 +2462,40 @@ already computed), worker `"phase5_state_stage"`, checkpoint contract
    every row `derive_catalog` did NOT name in `changed_rows`, and every
    binding `carry_forward_release` copied, is byte-identical to the prior
    release's — a defense against a bug in either function, not a
-   duplicate of their own R6. Any light-check failure refuses the whole
+   duplicate of their own R6; (d) **each freshly-built
+   `driver_residual_pool:*` row's own `(role, model_id, fold)` key and
+   champion `artifact_sha256` matches the CARRIED-FORWARD model binding for
+   that role** (CodeRabbit finding, confirmed against
+   `engine/v2/scoring/native_residuals.py`'s `_mismatch`/`MODEL_NOT_READY`
+   check, which the scoring loader already runs at read time — refusing
+   here is catching the SAME condition before publishing a candidate,
+   rather than after promoting one whose driver pool this design's own
+   nightly job silently re-derived against a DIFFERENT champion than the
+   one still bound). This closes a real gap: `champion_driver_pool` (§8's
+   finding) reads whatever the legacy registry currently calls champion for
+   that role, with no tie to `prior_release_id`'s own carried-forward
+   binding — if legacy's own separate nightly retrain moved the champion
+   between cycles, this check is what catches the resulting drift, not
+   `carry_forward_release` (which only ever copies bindings, never
+   compares them to anything). Any light-check failure refuses the whole
    job (`CHECKPOINT_INCOMPATIBLE` or `VALIDATION_FAILED`, matching the
-   existing `_tool_failure` mapping idiom in this file); nothing is staged
-   under `new_release_id` on a light-check failure that a partial write
-   would leave half-visible — see R5 below.
+   existing `_tool_failure` mapping idiom in this file). A light-check
+   failure does NOT mean nothing is staged: steps 1–3 already wrote both
+   manifests under `new_release_id` by the time checks run (R4 below is
+   explicit about this ordering, deliberately — checks run against what
+   was actually written); a failed light check leaves a fully staged but
+   never-promoted, and therefore never-read, candidate — see R5.
 
 **One-heavy-job rule: no new mechanism, the existing admission control
-already serializes this.** `profiles.py`'s `"experiment_heavy"` profile
-reserves 5.5 GiB (`memory_bytes=11 * GIB // 2`) per job; this policy's own
-measured `capacity_bytes` ceiling is `host_total - base_reserve`, ~6.60 GiB
-on this host (`profiles.py`'s own documented sample: host_total 7.60 GiB,
-base_reserve 1 GiB). A second concurrent `"experiment_heavy"` job would need
-11 GiB, well over that ceiling, so `claim_next`'s existing capacity check
-already admits at most one at a time — the six `training` submissions above
-queue and run one after another without any new capacity logic in this
-design. `phase5_state_stage` and `models_promote` are `"delivery"`-class,
-sized far below that ceiling, so they never compete with a concurrently-
-running heavy job or with each other for the same budget.
+already serializes this.** `claim_next`'s existing capacity check, driven
+by `profiles.py`'s `"experiment_heavy"` resource profile, does not admit a
+second concurrent `"experiment_heavy"` job while one is already running —
+this design relies on that existing behavior, not on any new capacity
+logic — so the six `training` submissions above queue and run one after
+another automatically.
+`phase5_state_stage` and `models_promote` are `"delivery"`-class, a
+separate, much lighter resource pool, so they never compete with a
+concurrently-running heavy job or with each other for the same budget.
 
 **Causality (restated at this layer; the artifact-level invariant is
 models doc §8).** `as_of` is derived once, from the latest succeeded native
@@ -2490,21 +2510,44 @@ event-dated in the first place (see "the driver pools are not event-scoped"
 above).
 
 **Concurrent promote (a cross-cutting hazard between PR-13a and PR-13b,
-flagged and designed around, not deferred).** `prior_release_id` is pinned
-once, at `phase5_state_stage`'s submission. If a monthly retrain (PR-13b)
-promotes a DIFFERENT release between that instant and this job's write, a
-`new_release_id` that still carries forward the OLDER `prior_release_id`'s
-bindings would, if promoted, silently roll the model bindings back to the
-older set while still advancing the pools forward. `phase5_state_stage`'s
-worker re-checks `current_pointer` immediately before its first write
-(step 3 above) and refuses `ConcurrentPromote(prior_release_id,
-actual_release_id)` rather than stage over a moved pointer — the reconcile
-then re-submits the SAME cycle's stage job under a NEW `prior_release_id`
-on its next tick (a fresh dedup key, since the parameters changed).
-PR-13b's own monthly promote path needs the symmetric guard for the reverse
-race (a monthly promote must not silently discard a nightly pool advance
-that landed after ITS `prior_release_id` was pinned); this document names
-the hazard for both sides but only specifies PR-13a's half.
+flagged and designed around, not deferred — extended per a CodeRabbit
+finding: the staging-time check alone leaves a window open).**
+`prior_release_id` is pinned once, at `phase5_state_stage`'s submission. If
+a monthly retrain (PR-13b) promotes a DIFFERENT release between that
+instant and this job's write, a `new_release_id` that still carries forward
+the OLDER `prior_release_id`'s bindings would, if promoted, silently roll
+the model bindings back to the older set while still advancing the pools
+forward. `phase5_state_stage`'s worker re-checks `current_pointer`
+immediately before its first write (step 3 above) and refuses
+`ConcurrentPromote(prior_release_id, actual_release_id)` rather than stage
+over a moved pointer — the reconcile then re-submits the SAME cycle's stage
+job under a NEW `prior_release_id` on its next tick (a fresh dedup key,
+since the parameters changed). **That check alone is not enough**: a
+`models_promote` job can sit queued for a while (`claim_next`'s admission
+order, or simply the box being busy) between `submit_pool_nightly_
+promote_if_ready` submitting it and the worker actually calling
+`deployment.promote` — during that window the SAME race can recur, one
+layer later, and today's `deployment.promote(root, release_id, *, clock)`
+(`engine/v2/models/deployment.py`) and `run_promote_worker`
+(`engine/v2/ops/training.py:420-441`) have no way to refuse it: `promote`
+takes no "expected prior" argument at all. This design's first code PR (see
+the split, updated below) adds one: `deployment.promote` gains an optional,
+keyword-only `expected_previous_release_id: str | None = None` (`None`
+preserves every existing caller's behavior unchanged, including the manual
+operator workflow), checked INSIDE `_swap_pointer` — atomically, in the
+SAME read-current-pointer-then-write step that already exists, never a
+separate read-then-write — refusing `StaleExpectedRelease(expected, actual)`
+(a new `DeploymentError` subclass) if the live pointer disagrees, BEFORE the
+pointer write happens. `submit_pool_nightly_promote_if_ready` passes the
+SAME `prior_release_id` `phase5_state_stage` pinned, so the promote worker's
+own atomic check is what actually closes this race, not the sidecar's
+earlier, best-effort one (which stays, since it fails a doomed attempt
+cheaply, before the box does the write at all). PR-13b's own monthly
+promote path needs the SAME parameter for the reverse race (a monthly
+promote must not silently discard a nightly pool advance that landed after
+ITS `prior_release_id` was pinned); since this design's own code PR already
+extends `promote`'s signature, PR-13b's promote calls reuse it rather than
+inventing a second mechanism.
 
 **R1–R6, `phase5_state_stage`.**
 
@@ -2536,13 +2579,18 @@ the hazard for both sides but only specifies PR-13a's half.
   `models_promote` from inside this job; promotion is the next phase's own
   submission, only after this job's checkpoint reports `succeeded`.
 - **R5, partial write.** A crash or refusal after some objects are written
-  but before both manifests exist leaves `new_release_id` PARTIALLY staged
-  — harmless, because `models_promote` (next phase) is never submitted for
-  a `release_id` this job did not report `succeeded` for, and
-  `deployment.resolve_release`/`_read_state_catalog` are never called
-  against an unpromoted, uncommitted-to id by any production reader. A
-  retry (R3) completes or overwrites-with-identical-content the partial
-  state; nothing under `DEPLOYED` is ever touched by this job.
+  but before both manifests exist leaves `new_release_id` PARTIALLY staged;
+  a light-check failure (step 4d above, CodeRabbit finding) leaves it FULLY
+  staged instead, since both manifests are already written by the time
+  checks run (R4). Either way is harmless for the SAME reason:
+  `models_promote` (next phase) is never submitted for a `release_id` this
+  job did not report `succeeded` for, and `deployment.resolve_release`/
+  `_read_state_catalog` are never called against an unpromoted,
+  uncommitted-to id by any production reader — a staged-but-never-promoted
+  candidate is inert, not a partial-write hazard in the sense R5 usually
+  means. A retry (R3) completes, or verifies and no-ops over, identical
+  content already written (models doc §7.7 R3, corrected below); nothing
+  under `DEPLOYED` is ever touched by this job.
 - **R6, idempotency.** Same six job ids, same `prior_release_id`, same
   `as_of` always produce the same `new_release_id` content (R3/R4 above);
   the job id itself is one dedup key per cycle, not a fresh one per retry.
@@ -2581,16 +2629,22 @@ separate PRs, above).**
    valuable even without the rest of this design; updates `checks/
    phase5_release.py`, `release_bindings.py` and `tools/
    phase5_prepare_release.py` to match.
-2. Extract `frozen_state_payloads`/`chooser_pool_payloads`/`write_object`-
+2. Add `deployment.promote`'s `expected_previous_release_id` parameter
+   (models doc §7.2's "Further extension") — a standalone, backward-
+   compatible safety fix, independently valuable to the existing manual
+   operator workflow, not only to this design's automation.
+3. Extract `frozen_state_payloads`/`chooser_pool_payloads`/`write_object`-
    based assembly out of `tools/phase5_prepare_release.py` into a library
    module both it and the new worker call; add `carry_forward_release`
-   (models doc §7.6) and `derive_catalog` (§7.7) with their R1–R6 tests. No
-   wiring yet.
-3. Add the `phase5_state_stage` `JobKind` (worker, parameters, validator,
+   (models doc §7.6, including its driver-pool-vs-binding check) and
+   `derive_catalog` (§7.7) with their R1–R6 tests. No wiring yet.
+4. Add the `phase5_state_stage` `JobKind` (worker, parameters, validator,
    registered in `stages.py::_core_kinds`) — submittable via `ops submit`
    like `training`/`models_promote` today, but not yet auto-triggered.
-4. Add `Service._reconcile_pool_nightly_refresh` and the three
-   `submit_pool_nightly_*_if_ready` functions, wired into `tick()`.
+5. Add `Service._reconcile_pool_nightly_refresh` and the three
+   `submit_pool_nightly_*_if_ready` functions, wired into `tick()`, with
+   `submit_pool_nightly_promote_if_ready` passing `expected_previous_
+   release_id=prior_release_id` to `promote_plan`.
 
 ## Invariants
 

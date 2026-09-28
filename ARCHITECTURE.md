@@ -257,9 +257,11 @@ or a new consumer must update that package's README in the same change.
   one more `Service.tick()`-time reconcile, the same shape as
   `_reconcile_computed_moves_refresh` above (per #54) — never a `nightly.py`
   `GRAPH`/`_DAG_STAGES` node — that nightly appends newly-settled events
-  into the board-analog, chooser-analog and (driver + paired) residual
-  pools, advances the trailing cutoff, and produces a new, gated,
-  auto-promoted release that carries every model binding over unchanged.
+  into the board-analog and paired residual pools, advances the trailing
+  cutoff, re-verifies the chooser-analog pool and the three driver residual
+  pools (which do not themselves grow with new events — see the models doc
+  finding), and produces a new, gated, auto-promoted release that carries
+  every model binding over unchanged.
   Retraining the champion/gate/chooser models themselves, monthly, is
   cutover PR-13b; a native producer for the Tier-4 forecasts table native
   currently only imports from a legacy snapshot is cutover PR-13c; neither

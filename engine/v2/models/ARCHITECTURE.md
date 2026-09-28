@@ -112,9 +112,13 @@ this PR:
 
 - `deployment.stage_release(root, release, inventory, payloads, *, clock) -> StagedManifest`
   — validate, then durably stage. Never touches `DEPLOYED`.
-- `deployment.promote(root, release_id, *, clock) -> PointerState` /
+- `deployment.promote(root, release_id, *, expected_previous_release_id=None,
+  clock) -> PointerState` /
   `deployment.rollback(root, *, clock) -> PointerState` — the one atomic
-  pointer swap, in either direction.
+  pointer swap, in either direction. `expected_previous_release_id`
+  **(proposed, cutover PR-13a design, not yet implemented; optional,
+  defaults to `None` — every existing caller unchanged)** — see §7.2's
+  "Further extension" note.
 - `deployment.resolve_release(root, release_id) -> ModelRelease` /
   `deployment.current_release(root) -> ModelRelease | None` — read a staged
   release by id, or by the live pointer.
@@ -372,6 +376,25 @@ third-party service. `hashlib.sha256` for every content hash;
 - **R6, idempotency.** Promoting the same already-live `release_id` twice
   is exactly one no-op, not two history entries.
 
+**Further extension, proposed cutover PR-13a (CodeRabbit finding on this
+design, confirmed — closes a race the staging-time `ConcurrentPromote`
+check alone leaves open; see the ops doc's "Concurrent promote").**
+`promote` gains one new optional, keyword-only parameter,
+`expected_previous_release_id: str | None = None` — `None` preserves every
+existing caller's behavior byte-for-byte, including the manual operator
+workflow and every test that calls `promote` today. When given a non-`None`
+value, `_swap_pointer` checks it against the CURRENT `current_pointer`
+read — in the same read this function already does, not a second one —
+and refuses `StaleExpectedRelease(expected_previous_release_id, actual)` (a
+new `DeploymentError` subclass) BEFORE the atomic pointer write, if they
+disagree. This is what makes `phase5_state_stage`'s own `ConcurrentPromote`
+check (a best-effort, early refusal at staging time) actually safe: without
+this, a `models_promote` job that queues for a while between submission and
+execution could still promote a stale, carried-forward release over a
+newer one that landed in between. `rollback` takes no such parameter — it
+has no "prior release" the caller names; it already resolves its target
+from the live pointer's own recorded history.
+
 ### 7.3 `resolve_release` / `current_release` (read path, unchanged by this PR)
 
 - **R1.** `resolve_release` refuses `ReleaseNotStaged` for an unstaged id.
@@ -545,10 +568,21 @@ subclass)
   function of its inputs, unlike `carry_forward_release`, which reads
   content that could in principle differ across calls only if the store
   itself changed underneath it (never true for immutable, already-staged
-  content). The caller (the new `phase5_state_stage` worker, ops doc) is
-  responsible for writing it at most once to `new_release_id`'s own
-  immutable path; a second write to an existing path there refuses,
-  mirroring `RELEASE_ID_REUSED`.
+  content). Writing it, though, follows the SAME same-content-no-op,
+  different-content-refuse pattern `stage_release` (§7.1 R3) and
+  `carry_forward_release` (§7.6 R3) already use, not a bare "write once or
+  refuse" (CodeRabbit finding, confirmed — an unqualified refusal on any
+  existing path would make a legitimate identical-content retry after a
+  crash between this write and `carry_forward_release`'s own write, ops
+  doc R3/R5, fail instead of complete): if `new_release_id`'s catalog path
+  already exists, the caller reads it back and compares it, byte-for-byte,
+  to the body this call would otherwise write — identical content is a
+  no-op (the existing file is left alone, untouched, never rewritten);
+  different content refuses `ReleaseLayoutError` — `checks/
+  phase5_release.py`'s own plain `ValueError` subclass, with no typed
+  `.code` field the way `DeploymentError` subclasses have one — naming the
+  same "this release id is already taken by different content" condition
+  `stage_release`'s `RELEASE_ID_REUSED` names.
 - **R4, transaction.** One atomic write (temp + fsync + rename, matching
   every other write in this programme) of the new catalog body to
   `new_release_id`'s own path. No object is rewritten: every carried-over
@@ -627,7 +661,16 @@ subclass)
   new object is ever actually written, and `derive_catalog` records these
   three rows as unchanged from the prior release. The "causality" question
   simply does not apply to them: there is no event date in their content to
-  check against `as_of` in the first place.
+  check against `as_of` in the first place. What DOES apply, and is not
+  this package's own check (neither `carry_forward_release` nor
+  `derive_catalog` compares a state row against a model binding — each
+  only ever looks at its own side): a freshly re-derived driver pool's
+  `(role, model_id, fold)` key and champion hash must still match the
+  binding `carry_forward_release` is about to carry forward for that role
+  — the ops doc's `phase5_state_stage` light checks are where this
+  cross-check actually runs (CodeRabbit finding), because only the
+  orchestrating worker sees both this package's state-catalog output and
+  its model-manifest output together.
 - **A carried-over binding's or row's bytes and hash are never
   recomputed.** (proposed, cutover PR-13a) `carry_forward_release` only
   ever copies a prior release's bindings verbatim — it never mints an
