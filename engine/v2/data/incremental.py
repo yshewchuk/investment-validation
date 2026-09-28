@@ -47,6 +47,7 @@ from engine.v2.foundation import (
     content_hash,
     format_timestamp,
     from_document,
+    parse_timestamp,
     to_document,
 )
 
@@ -1217,6 +1218,11 @@ def _fetched_unit_rows(contract, unit, ticker_rows, record):
     revisions = tuple(
         _fetched_revision(contract, unit, row, record.raw_receipt_id, record.received_at)
         for row in ticker_rows)
+    session_date = _session_date(unit["partition_key"])
+    expected = tuple(
+        CoverageKey(item_key=daily_market_logical_key(str(key), session_date),
+                   session_date=session_date, ticker=str(key))
+        for key in unit.get("expected_keys", ()))
     return _FetchedUnit(
         raw_payload={"receipt_id": record.raw_receipt_id,
                      "response_kind": record.response_kind,
@@ -1224,9 +1230,17 @@ def _fetched_unit_rows(contract, unit, ticker_rows, record):
                      "source": record.source, "endpoint": record.endpoint,
                      "request": dict(record.request), "received_at": record.received_at},
         revisions=tuple(_revision_document(item) for item in revisions),
-        expected=tuple(_coverage_key(item) for item in revisions),
+        expected=expected,
         outcomes=tuple(_coverage_outcome(item, record.raw_receipt_id) for item in revisions),
         receipt_id=record.raw_receipt_id, received_at=record.received_at)
+
+
+def _received_at_ordinal(received_at: str) -> int:
+    """Microsecond-resolution ordinal from a received_at wire timestamp, so a
+    later fetch of the same logical key outranks an earlier one even within
+    the same second. Matches engine.v2.ops.forward_calendar_store._revision's
+    revision_ordinal=int(pd.Timestamp(received_at).timestamp() * 1_000_000)."""
+    return int(parse_timestamp(received_at).timestamp() * 1_000_000)
 
 
 def _fetched_revision(contract, unit, row, raw_receipt_id, received_at):
@@ -1235,14 +1249,13 @@ def _fetched_revision(contract, unit, row, raw_receipt_id, received_at):
     session_date = _session_date(canonical["date"])
     content = revision_content_hash(ticker=ticker, session_date=session_date,
                                     row=canonical, deleted=False)
-    revision_id = "rev_" + content_hash({
-        "unit": str(unit["request_id"]), "ticker": ticker,
-        "session_date": session_date}).removeprefix(CONTENT_HASH_PREFIX)[:32]
+    revision_id = "rev_" + content.removeprefix(CONTENT_HASH_PREFIX)[:32]
     candidate = RevisionCandidate(
         revision_id=revision_id,
         logical_key=daily_market_logical_key(ticker, session_date),
         source=FETCH_SOURCE, source_priority=0, finality="final",
-        revision_ordinal=1, received_at=received_at, content_hash=content)
+        revision_ordinal=_received_at_ordinal(received_at),
+        received_at=received_at, content_hash=content)
     return DailyMarketRevision(
         candidate=candidate, ticker=ticker, session_date=session_date, row=canonical,
         deleted=False, raw_receipt_id=raw_receipt_id, normalization_id="pending")

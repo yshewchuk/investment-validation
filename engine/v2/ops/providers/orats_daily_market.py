@@ -200,9 +200,8 @@ def _classify(unit: dict, status: int, body: Any):
         # _response_kind checks 404 before final, so pass 200 to force not_final.
         return classify_response(200, expected, final=False, request_id=request_id)
     returned = tuple(key for key in expected if key in present)
-    empty = tuple(key for key in expected if key not in present)
     return classify_response(status, expected, returned_keys=returned,
-                             empty_keys=empty, final=True, request_id=request_id)
+                             final=True, request_id=request_id)
 
 
 def _overall_kind(summaries_kind: str, cores_kind: str, trade_date: str) -> str:

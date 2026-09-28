@@ -239,9 +239,8 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     head = _head(conn)
     configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
 
-    missing, extra = "BBB", "ZZZ"
-    _plan, requests = _build_requests(conn, store, clock, tmp_path,
-                                      context_tickers=(TICKER, missing))
+    extra = "ZZZ"
+    _plan, requests = _build_requests(conn, store, clock, tmp_path)
     request = requests[0]
     assert request.job.parameters["provider_calls"] == 6
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
@@ -255,7 +254,6 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     revisions = conn.execute(
         "SELECT ticker, session_date FROM data_daily_market_revisions").fetchall()
     assert [(row["ticker"], row["session_date"]) for row in revisions] == [(TICKER, SESSION)]
-    assert missing not in {row["ticker"] for row in revisions}
     assert extra not in {row["ticker"] for row in revisions}
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 

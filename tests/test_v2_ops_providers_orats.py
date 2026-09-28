@@ -143,14 +143,26 @@ def test_unauthorized_is_credential_invalid_and_never_echoes_the_key():
     assert secret not in str(exc.value)
 
 
-def test_missing_expected_ticker_is_legitimate_empty_and_extra_rows_are_ignored():
+def test_missing_expected_ticker_is_partial_and_refuses():
     unit = dict(UNIT, expected_keys=["AAA", "BBB"])
     extra = dict(SUMMARIES_ROW, ticker="ZZZ")
     fake = _FakeHttp({"hist/summaries": (200, {}, _body([SUMMARIES_ROW, extra])),
                       "hist/cores": (200, {}, _body([CORES_ROW]))})
     fetcher = orats_daily_market_fetcher(http_get=fake, api_key="test-key")
 
-    _, kind, _, rows = fetcher(unit)
+    with pytest.raises(OpsError) as exc:
+        fetcher(unit)
+
+    assert exc.value.code == "TRANSIENT_SOURCE"
+
+
+def test_extra_unrequested_rows_are_ignored_when_all_expected_present():
+    extra = dict(SUMMARIES_ROW, ticker="ZZZ")
+    fake = _FakeHttp({"hist/summaries": (200, {}, _body([SUMMARIES_ROW, extra])),
+                      "hist/cores": (200, {}, _body([CORES_ROW]))})
+    fetcher = orats_daily_market_fetcher(http_get=fake, api_key="test-key")
+
+    _, kind, _, rows = fetcher(dict(UNIT))
 
     assert kind == "complete"
     assert [row["ticker"] for row in rows] == ["AAA"]
@@ -237,6 +249,60 @@ def test_run_daily_market_refresh_commits_the_orats_fetch_end_to_end(tmp_path):
     rows = data_incremental.load_daily_market_rows(store, records, contract)
     assert [row["ticker"] for row in rows] == ["AAA"]
     assert rows[0]["spot"] == 100.0
+    assert rows[0]["mcap_usd"] == pytest.approx(1e9)
+
+
+def test_run_daily_market_refresh_reingests_a_committed_session_with_a_correction(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+
+    def attempt(name, head_row, plan_hash, fetcher):
+        root = tmp_path / name
+        root.mkdir()
+        document = {
+            "catalog_path": str(tmp_path / "ops.sqlite"),
+            "objects_root": str(tmp_path),
+            "scope": "shadow",
+            "expected_head_generation": head_row["generation"],
+            "expected_head_snapshot_id": head_row["snapshot_id"],
+            "table_name": "daily_market",
+        }
+        (root / "incremental_refresh_input.json").write_text(canonical_json(document))
+        (root / "refresh_plan.json").write_text(canonical_json({"fetch_units": [dict(UNIT)]}))
+        parameters = RefreshParameters(
+            expected_ids=(REQUEST_ID,), parent_snapshot_id=head_row["snapshot_id"],
+            refresh_plan_hash=plan_hash, provider_calls=1,
+            catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
+            scope="shadow", expected_head_generation=head_row["generation"],
+            expected_head_snapshot_id=head_row["snapshot_id"])
+        return data_incremental.run_daily_market_refresh(parameters, root, fetcher=fetcher)
+
+    first = attempt("attempt-1", head, "sha256:" + "b" * 64,
+                    orats_daily_market_fetcher(http_get=_ok_fake(), api_key="test-key"))
+    assert first["status"] == "complete"
+
+    head_after_first = _head(conn)
+    assert head_after_first["snapshot_id"] == first["candidate_snapshot_id"]
+
+    corrected_summaries = dict(SUMMARIES_ROW, stockPrice=105.0)
+    corrected_fetcher = orats_daily_market_fetcher(http_get=_FakeHttp({
+        "hist/summaries": (200, {}, _body([corrected_summaries])),
+        "hist/cores": (200, {}, _body([CORES_ROW])),
+    }), api_key="test-key")
+    second = attempt("attempt-2", head_after_first, "sha256:" + "c" * 64,
+                     corrected_fetcher)
+
+    assert second["status"] == "complete"
+    committed = Repository(conn).resolve_full(second["candidate_snapshot_id"])
+    contract = next(item for item in committed.contracts if item.table_name == "daily_market")
+    fragment_ids = {ref.fragment_id
+                    for ref in committed.table_manifests["daily_market"].fragment_refs}
+    records = [record for record in committed.records if record.fragment_id in fragment_ids]
+    rows = data_incremental.load_daily_market_rows(store, records, contract)
+    assert [row["ticker"] for row in rows] == ["AAA"]
+    assert rows[0]["spot"] == 105.0
     assert rows[0]["mcap_usd"] == pytest.approx(1e9)
 
 
