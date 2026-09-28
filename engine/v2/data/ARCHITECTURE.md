@@ -577,8 +577,12 @@ Before this fix, any second fetch of an already-committed `daily_market`
 session refused permanently with `IDENTITY_CONFLICT` (a changed
 context-ticker universe, a smoke or shadow run of the same session, or a
 provider correction all hit it), and a genuinely partial provider response
-could be committed as if it were complete. Three independent identity/
-completeness fixes, all in `incremental.py` unless noted:
+could be committed as if it were complete. This PR closes the provider
+correction and completeness cases below; the changed-ticker-universe case
+(normalization identity) needs a shared migration-framework change and is
+tracked separately (issue #133) rather than folded into this PR — see that
+bullet for exactly what still blocks it. Two independent identity/
+completeness fixes ship here, both in `incremental.py` unless noted:
 
 - **Revision identity now distinguishes content, so a corrected payload
   supersedes the old one instead of conflicting.** `_fetched_revision`
@@ -611,34 +615,42 @@ completeness fixes, all in `incremental.py` unless noted:
   and reuses the ORIGINAL `received_at` on a cache hit
   (`cache_raw_receipt`'s `existing` branch), so a pure replay reproduces the
   exact same `revision_id`/`revision_ordinal` every time.
-- **Normalization identity now includes the expected-key set.**
-  `cache_normalization`'s `normalization_id` keyed only on `(raw_hash,
-  normalizer_id, contract_id)`. ORATS's `hist/summaries`/`hist/cores`
-  responses are market-wide per-`tradeDate` dumps (see
+- **Normalization identity still does not include the expected-key set —
+  tracked at #133, not fixed here.** `cache_normalization`'s
+  `normalization_id` keys only on `(raw_hash, normalizer_id, contract_id)`.
+  ORATS's `hist/summaries`/`hist/cores` responses are market-wide
+  per-`tradeDate` dumps (see
   `engine.v2.ops.providers.orats_daily_market`'s own module docstring), so
   the SAME raw payload bytes — and thus the same `raw_hash` — can be
   normalized against two DIFFERENT `expected_keys` sets from two separate
   fetch units of the same session (e.g. a context-ticker universe that grew
   between an earlier and a later run), each producing a different filtered
-  `revisions` list from the identical raw receipt under what was the same
-  `normalization_id` — refusing the second as `IDENTITY_CONFLICT:
-  normalization identity has conflicting content`. `normalization_id` now
-  additionally folds in a canonical (sorted, deduplicated) hash of the
-  unit's `expected_keys`, so two different requested-key sets over the same
-  raw payload get distinct normalization identities and never collide; a
-  replay with the identical `expected_keys` still hits the same id and its
-  existing cache-hit/conflicting-content check, unchanged. This alone is not
-  enough: `data_normalizations` also carries a DB-level `UNIQUE (raw_hash,
+  `revisions` list from the identical raw receipt under what is still the
+  same `normalization_id` — refusing the second as `IDENTITY_CONFLICT:
+  normalization identity has conflicting content`. The Python-level fix is
+  simple (fold a canonical, sorted hash of the unit's `expected_keys` into
+  `normalization_id`, alongside `raw_hash`/`normalizer_id`/`contract_id`)
+  and was implemented and verified during this PR's work, but it cannot ship
+  alone: `data_normalizations` also carries a DB-level `UNIQUE (raw_hash,
   normalizer_id, contract_id)` from schema migration v10, predating
   `normalization_id` varying with `expected_keys`, which still refuses the
-  second row outright (a raw `sqlite3.IntegrityError`, not the application's
-  own `IDENTITY_CONFLICT`) even once its `normalization_id` correctly
-  differs. Migration v13 drops that stale constraint: `normalization_id`
-  (the primary key) is already the sole identity `cache_normalization`'s own
-  conflicting-content check uses, so the coarser triple no longer needs to
-  be unique on its own. Migrations are checksummed and immutable once
-  applied (`engine/v2/ops/migrations.py`), so this is a new migration, never
-  an edit to v10's own statements.
+  second row outright (a raw `sqlite3.IntegrityError`, not the
+  application's own `IDENTITY_CONFLICT`) regardless of what
+  `normalization_id`'s value would be. Dropping that stale constraint needs
+  a new migration (migrations are checksummed and immutable once applied,
+  `engine/v2/ops/migrations.py`, so v10 itself cannot be edited) that
+  recreates the table without it — and that recreate's `DROP TABLE
+  data_normalizations` fails with `FOREIGN KEY constraint failed` on any
+  catalog with existing `data_daily_market_revisions` rows, because
+  `engine/v2/ops/catalog.py` turns foreign-key enforcement on for every
+  connection, `PRAGMA foreign_keys = OFF` is a documented no-op inside an
+  active transaction, and `migrations.py`'s `migrate()` runs every
+  migration inside one `BEGIN IMMEDIATE` — so a migration's own statement
+  list has no way to disable foreign-key enforcement for its own recreate.
+  Fixing this needs a change to the shared, checksummed migration framework
+  itself (used by all three schema owners, not just this one), which is a
+  decision with its own blast radius and is tracked at #133 rather than
+  decided inside this PR.
 - **Coverage `expected` comes from the unit's requested keys, never from
   the rows that happened to come back.** `_fetched_unit_rows` built
   `_FetchedUnit.expected` from `_coverage_key(item) for item in
