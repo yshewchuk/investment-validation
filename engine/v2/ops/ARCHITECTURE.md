@@ -2331,6 +2331,43 @@ retry, transaction, partial write, idempotency).
   always tracks the calendar the same way legacy's does, with no fixed end
   date to eventually age past.
 
+### `nightly_trigger.py` (issue #102: `busy_legacy` must never overwrite a resumable state)
+
+- **R1/R6, a busy legacy lock must not erase a resumable state.**
+  `run_trigger` used to check `busy_legacy` (the legacy `.nightly.lock` is
+  held by another run) BEFORE the resume check, and unconditionally
+  persisted `busy_legacy` with `plan_ref=None, error_count=0` — overwriting
+  any `submitted`/`submitting`/`error`/`timed_out` state a prior tick had
+  already saved, WITH a `plan_ref`. A trigger process killed right after
+  reaching `submitted` (issue #102's own example: a `bounded_run` RSS
+  kill), followed by a tick that finds the lock busy, lost that `plan_ref`
+  for good: the NEXT tick after that had no prior state to resume from, so
+  `_decide` built an entirely new plan — a new `decision_clock`, a new
+  `scope_hash`, all-new job ids — and the ORIGINAL plan's already-queued
+  jobs, never cancelled, were claimed by whichever `serve` ran next (claim
+  order has no plan filter), running ahead of the new plan's own jobs. Two
+  full DAGs for the same session, the three-strike error counter silently
+  reset, and — worst case — a second same-session decision generation that
+  disagrees with the ledger's already-authoritative first generation
+  (`decision_commit._advance_decisions_watermark`,
+  `effects_graph._decision_gate`).
+  `run_trigger` now computes whether this tick is a resume (`prior is not
+  None and prior.plan_ref and prior.status in RESUME_STATUSES`) from the
+  ALREADY-LOADED `prior` state BEFORE attempting the legacy lock at all —
+  the resume decision never depended on the lock outcome to begin with, only
+  on the state file. A resuming tick that then finds the lock busy returns
+  an EPHEMERAL `busy_legacy` receipt (built with `_receipt`, the same way
+  `_idle` already returns one without persisting it) carrying the PRIOR
+  `plan_ref`/`error_count` forward for this tick's own visibility only —
+  `write_state` is never called for this case, so the durable on-disk state
+  is untouched and the next tick loads the SAME resumable prior state again,
+  exactly as if this busy tick had never happened. A tick that is NOT
+  resuming (no prior state, or a prior state whose status is not resumable)
+  keeps the original behavior exactly: `busy_legacy` with `plan_ref=None` IS
+  persisted, because there is no `plan_ref` to protect in that case — this
+  is the ordinary, correct path for every as-of's first few ticks before any
+  plan exists.
+
 ## Invariants
 
 Enforces or is bound by, from the root doc §5: missing-input typed
