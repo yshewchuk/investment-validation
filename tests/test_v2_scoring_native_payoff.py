@@ -1601,6 +1601,46 @@ def test_str_runup_days_before_print_7_scales_once_and_agrees_across_paths():
     assert record.resolved_request["runup_move_p90"] == pytest.approx(4.0)
 
 
+def test_str_runup_days_before_print_from_feature_vector_scales_once():
+    """The local (non-frozen) STR-RUNUP path must source
+    ``days_before_print`` through the facts merge, not from ``values``
+    alone: this reproduces the Opus gate round-3 finding that the real
+    nightly builder supplies ``days_before_print`` only via a SourceBundle's
+    ``feature_vector`` (landing in ``inputs.features["model_inputs"]``),
+    never in ``context``, so the guard's own lookup must see it there.
+
+    Identical to ``test_str_runup_days_before_print_7_scales_once_and_agrees_across_paths``
+    except the day count is supplied ONLY through the feature vector, with a
+    context override that explicitly deletes ``days_before_print`` so the
+    guard cannot pass via ``inputs.context`` and defeat the regression.
+    """
+    bundle = _runup_bundle(
+        context={
+            "ticker": "AAA", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+            "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0,
+            "strike": 100.0,
+        },
+        feature_vector={"days_before_print": 7.0},
+        forecast_recipes={
+            "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+            "runup_move_prediction": {"intercept": 8.0, "coefficients": {}},
+        },
+        runup_move_residual_rows=[{"prediction": 8.0, "residual": 0.0}],
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    # The raw D14 companion is published under its own name, unscaled.
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    # The published move is 8.0 * (7 / 14) == 4.0: scaled exactly once.
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
+    # The model-stage bands come from the zero-variance runup-move draws:
+    # the raw D14 point (8.0) plus a zero residual draw, horizon-scaled once
+    # by days/14 == 0.5 -> 4.0. The double-scale defect would yield 2.0.
+    assert record.resolved_request["runup_move_p10"] == pytest.approx(4.0)
+    assert record.resolved_request["runup_move_p90"] == pytest.approx(4.0)
+
+
 def test_str_runup_live_executor_produces_raw_d14_and_scaled_move_once():
     """The live Tier-4/frozen-model executor path
     (``application._frozen_stage_executors``) backing the ``runup_move``

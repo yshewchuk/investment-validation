@@ -1030,7 +1030,7 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     if (strategy == "STR-RUNUP" and "runup_move_raw_d14" not in values
             and "runup_move_raw_d14" not in output):
         raw = output.get("runup_move_prediction")
-        days = _finite(values.get("days_before_print"))
+        days = _finite(_facts(inputs, values).get("days_before_print"))
         if isinstance(raw, (int, float)) and days is not None and days >= 0.0:
             # The forecast stage's OWN raw D14 model output, not yet scaled
             # by any upstream mechanism (issue #94): publish the scaled
