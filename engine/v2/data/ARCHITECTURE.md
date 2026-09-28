@@ -708,12 +708,22 @@ idempotent-replay shortcut too.
   OWN `candidate.snapshot.snapshot_id` also doesn't match what's actually
   at head, `_head_fence` itself raises `SNAPSHOT_CONFLICT`, exactly as
   before. A different candidate that happens to share the SAME resulting
-  snapshot id (identical content) can pass `_head_fence`'s widened branch,
-  but is still refused downstream — by the receipt-identity check (its
-  `receipt_id`/`attempt_id`/`fence` won't match the row already committed
-  under that snapshot) or, failing that, the head compare-and-swap itself
-  (only one write can ever land at a given generation) — never silently
-  treated as a duplicate of an effect it didn't perform. This composition still keeps a
+  snapshot id (identical content, content-addressed) can pass the domain
+  fence's widened branch the same way, but under a NEW `receipt_id` it is
+  still refused downstream, before any row is written: `_existing_receipt`
+  finds no row for that `receipt_id` and returns `None` (the receipt-identity
+  check only fires when the caller reuses an ALREADY-committed `receipt_id`,
+  comparing `attempt_id`/`fence`/`request_hash`/scope/resulting snapshot
+  against that stored row — it never applies here), so `commit_snapshot`
+  falls through to its own internal `_check_head_expectation`, which compares
+  the current head against the caller's ORIGINAL `expected_head_snapshot_id`/
+  `expected_head_generation` — unwidened, exactly as before this PR — and
+  raises `SNAPSHOT_CONFLICT` because the head has already moved past that
+  stale expectation. The head compare-and-swap in `_update_head` is never
+  reached in this case; it is not a fallback for it, only the mechanism that
+  still guards a genuine race between two callers who pass the check above.
+  Neither path ever silently treats it as a duplicate of an effect it didn't
+  perform. This composition still keeps a
   caller's own attempt-lease check active on the replay-shortcut path too
   (`commit_generic_table_candidate`'s own docstring, `generic_incremental.py
   :141-181`): `_head_fence` (now with its widened acceptance) still runs
