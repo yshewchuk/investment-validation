@@ -1255,9 +1255,11 @@ network, or database access.
   row's stored `receipt_json` (the manifest `complete` recorded) as-is —
   no re-copy, no re-claim, no second backup — so `backup_effect` proceeds to
   write the watermark normally, exactly as if this call had just completed
-  the work itself. A row that is `pending` or `running`-but-not-expired
-  still refuses `STALE_EXPECTATION` exactly as before; only an ALREADY-
-  `delivered` row for the identical key short-circuits.
+  the work itself. A `pending` row is unaffected by this fix: `claim()`
+  already accepts it normally, so it is claimed and backed up as before.
+  Only a row that is `running` with an unexpired lease (or one lost to a
+  concurrent claim) still refuses `STALE_EXPECTATION` exactly as before;
+  an ALREADY-`delivered` row for the identical key short-circuits instead.
 - **Worker exit vs. process-family aliveness (`executor.poll`)** — `poll()`
   samples `running.process.poll()` for the worker's own exit code, then
   scans the watched process family (`executor_watchdog.observe`, the

@@ -704,10 +704,16 @@ idempotent-replay shortcut too.
   matches on `receipt_id`/`request_hash`/`attempt_id`/`fence`/`scope`/
   resulting `snapshot_id` and returns the prior receipt. A GENUINELY
   different or conflicting retry (a different candidate, a different
-  attempt racing against the same stale parent) still fails: its OWN
-  `candidate.snapshot.snapshot_id` does not match what is actually at head,
-  so neither branch of `_head_fence` accepts it, and it raises
-  `SNAPSHOT_CONFLICT` exactly as before. This composition still keeps a
+  attempt racing against the same stale parent) is still refused: if its
+  OWN `candidate.snapshot.snapshot_id` also doesn't match what's actually
+  at head, `_head_fence` itself raises `SNAPSHOT_CONFLICT`, exactly as
+  before. A different candidate that happens to share the SAME resulting
+  snapshot id (identical content) can pass `_head_fence`'s widened branch,
+  but is still refused downstream — by the receipt-identity check (its
+  `receipt_id`/`attempt_id`/`fence` won't match the row already committed
+  under that snapshot) or, failing that, the head compare-and-swap itself
+  (only one write can ever land at a given generation) — never silently
+  treated as a duplicate of an effect it didn't perform. This composition still keeps a
   caller's own attempt-lease check active on the replay-shortcut path too
   (`commit_generic_table_candidate`'s own docstring, `generic_incremental.py
   :141-181`): `_head_fence` (now with its widened acceptance) still runs
