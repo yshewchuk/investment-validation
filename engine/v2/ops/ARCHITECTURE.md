@@ -912,32 +912,47 @@ name which cadence it picked and why.
   month; current `as_of`) fresh on every tick, the same as
   `_computed_moves_identity_or_none`.
 - **R3, retry.** Two SEPARATE mechanisms, not one, mirroring
-  `computed_moves_refresh` exactly: (a) a durable, catalog-checked
-  deterministic job id — `job_id_for("shadow", f"tier4_monthly_refresh:
-  {month}")` / `job_id_for("shadow", f"pool_nightly_refresh:{as_of}")`,
-  mirroring `job_id_for("shadow", _computed_moves_refresh_key(...))` — that
-  each submit function checks BEFORE building a training/promote plan; if a
-  job already exists under that key, in any state, the submit function
-  returns without rebuilding or resubmitting anything, and this check
-  survives a `Service` restart because it is backed by the catalog, not
-  memory. (b) the in-memory `_computed_moves_memo`-shaped backoff (above),
-  which only throttles repeated EMPTY/FAILING attempts against the same
-  identity between successes — it is not itself a correctness guard and
-  does not survive a restart. A `models_promote` retry against an
-  already-live release is the existing no-op (models doc §7.2 R3).
+  `computed_moves_refresh` exactly. (a) A durable, catalog-checked
+  deterministic job id, but ONE PER PHASE, not one for the whole build →
+  gate → promote sequence — a single cycle-wide key would make a completed
+  training/gate phase block its own promote retry: `job_id_for("shadow",
+  f"tier4_monthly_train:{month}")` / `job_id_for("shadow",
+  f"pool_nightly_train:{as_of}")` dedups the TRAINING submission, and a
+  separate `job_id_for("shadow", f"models_promote:{release_id}")` (keyed by
+  the release the build phase actually produced, known only once staging
+  completes) dedups the PROMOTE submission — mirroring `job_id_for("shadow",
+  _computed_moves_refresh_key(...))`'s shape, generalized to two keys per
+  cadence instead of one. Each submit function checks its OWN phase's key
+  before acting; a phase whose key already has a job, in any state, is
+  skipped without rebuilding, while a later, not-yet-keyed phase (e.g.
+  promote, once the release is staged and gated) still proceeds — this
+  durable state survives a `Service` restart because it is backed by the
+  catalog, not memory, so an incomplete phase always stays retryable and a
+  completed one is never resubmitted. (b) the in-memory
+  `_computed_moves_memo`-shaped backoff (above), which only throttles
+  repeated EMPTY/FAILING attempts against the same identity between
+  successes — it is not itself a correctness guard and does not survive a
+  restart. A `models_promote` retry against an already-live release is the
+  existing no-op (models doc §7.2 R3).
 - **R4, transaction.** Build → gate → promote are three separate steps, each
-  its own attempt. A crash between staging and gating leaves a staged-but-
-  unpromoted release — harmless, since `stage_release` never touches
-  `DEPLOYED` (models doc §4). A crash between a gate pass and the promote
-  submission leaves `DEPLOYED` unchanged until the next tick's reconcile
-  retries the promote step.
+  its own attempt, each its own durable key (R3). A crash between staging
+  and gating leaves a staged-but-unpromoted release — harmless, since
+  `stage_release` never touches `DEPLOYED` (models doc §4); the next tick's
+  reconcile re-runs the gate (not durably keyed — cheap and side-effect-free
+  to repeat) and, on a pass, proceeds straight to the promote phase's own
+  key. A crash between a gate pass and the promote submission leaves
+  `DEPLOYED` unchanged until the next tick's reconcile retries the promote
+  step under that same promote key.
 - **R5, partial write.** Inherits `deployment.py`'s existing atomic-write
   primitives (temp + fsync + rename) for staging and for the pointer swap;
   this design introduces no new I/O primitive.
 - **R6, idempotency.** `derive_release` itself is not idempotent (models doc
   §7.6 R3 — each call mints a new `release_id`), so idempotency for "the
-  same month/day never gets two submitted jobs" is carried entirely by R3's
-  durable job-id dedup above, not by `derive_release`'s own return value.
+  same month/day never gets two submitted training jobs, and the release it
+  produces never gets two submitted promotes" is carried entirely by R3's
+  two PER-PHASE durable job-id dedups above, not by `derive_release`'s own
+  return value — a distinct, durable submission is expected and correct for
+  each phase (train, then promote), never a single key spanning both.
   Promoting an already-live release twice is the existing single no-op
   (models doc §7.2 R6).
 
