@@ -728,3 +728,21 @@ def test_str_runup_refuses_without_a_captured_entry_date():
 
     with pytest.raises(GeometryRefusal, match="MISSING_ENTRY_DATE"):
         generate("STR-RUNUP", inputs)
+
+
+def test_str_runup_refuses_with_an_invalid_captured_entry_date():
+    """A captured entry_date that is not a parseable ISO date must refuse
+    with INVALID_ENTRY_DATE, not MISSING_ENTRY_DATE and not a silent
+    fallback to some other expiry rule."""
+    quotes = _runup_chain()
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "entry_date": "not-a-date",
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    with pytest.raises(GeometryRefusal, match="INVALID_ENTRY_DATE:not-a-date"):
+        generate("STR-RUNUP", inputs)
