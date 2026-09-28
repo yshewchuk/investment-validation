@@ -66,11 +66,13 @@ computed by this package:
   domain native selects from whenever `strike`/`expiry` is missing.
 - `event_date`, `session` — the print date/session, read by the
   `first_post_event` expiry rule (STR-THRU and every put-ladder strategy).
-- `entry_date` — the row's captured entry-session date (a raw fact, not a
-  calculated answer — see `engine/v2/scoring/stages.py`'s
-  `_check_stale_quote` docstring for the same characterization of this
-  field). Read ONLY by STR-RUNUP's `first_dte_at_least` expiry rule (issue
-  #95; see "Failure semantics").
+- `entry_date`, `quote_date` — both raw facts, not calculated answers (see
+  `engine/v2/scoring/stages.py`'s `_check_stale_quote` docstring for the
+  same characterization). Read ONLY by STR-RUNUP's `first_dte_at_least`
+  expiry rule (issue #95; see "Failure semantics"), which anchors its DTE
+  count on `quote_date` when captured, falling back to `entry_date` — legacy
+  anchors the same count on the chain's `obs_date`, which is `quote_date`
+  (defaulting to `entry_date` when no stale-quote substitution happened).
 - `resolved_legs` — an explicit leg list meant to bypass geometry resolution
   entirely (the pinned/replay case). **Known gap (issue #115, not fixed
   here):** `generate()` currently resolves expiry/strike BEFORE it checks
@@ -164,11 +166,17 @@ Raised exceptions:
   rule unconditionally for every strategy (matching legacy's `fixed` kind).
   Otherwise, `strategy == "STR-RUNUP"` uses legacy's own `straddle_runup`
   rule (`engine/structures.py`, `ExpirySelector(kind="first_dte_at_least",
-  ...)`): the earliest listed expiry whose DTE, counted from `entry_date`
-  (not `event_date`), reaches STR-RUNUP's own minimum-DTE threshold. Every
-  other strategy (STR-THRU, and every put-ladder strategy) is unaffected and
-  keeps `first_post_event`: the earliest listed expiry on/after `event_date`,
-  with the AMC/BMO distinction applied when `session` is known.
+  ...)`): the earliest listed expiry whose DTE reaches STR-RUNUP's own
+  minimum-DTE threshold, counted from `quote_date` when captured (legacy's
+  chain `obs_date`, which a stale-quote fallback can set EARLIER than
+  `entry_date` — `engine/score.py`'s `_fresh_quote_date`/`obs_date=
+  result.quote_date`), falling back to `entry_date` only when `quote_date`
+  is not captured (not `event_date` either way). Every other strategy
+  (STR-THRU, and every put-ladder strategy) is unaffected and keeps
+  `first_post_event`: the earliest listed expiry on/after `event_date`, with
+  the AMC/BMO distinction applied when `session` is known — or, when
+  `event_date` itself is not captured, the earliest listed expiry
+  unconditionally (a deterministic default, not a refusal).
 - **Known gaps, not fixed here** (see "Inputs" for detail, filed as
   issues #114 and #115): `_resolve_straddle_expiry` does not honor a
   captured `post_event_expiry` the way `_expiry()` does; `generate()`
@@ -178,9 +186,11 @@ Raised exceptions:
 
 - `generate`/`price` never mutate `inputs`/`quotes`; every result is a fresh
   dataclass.
-- A captured `expiry`/`strike`/`resolved_legs` field, when present, is used
-  exactly as given — native selection only runs when the caller has nothing
-  more specific to offer for that field.
+- A captured `expiry`/`strike` field, when present, is used exactly as
+  given — native selection only runs when the caller has nothing more
+  specific to offer for that field. `resolved_legs` is MEANT to be the same
+  kind of bypass but currently is not always one in practice — see the
+  known gap in "Inputs"/"Failure semantics" (issue #115).
 - For STR-THRU/STR-RUNUP, expiry resolution happens strictly before strike
   selection (`_select_listed_straddle`): choosing by strike distance first
   could silently pick a strike from the wrong expiry, whenever a later
@@ -200,10 +210,13 @@ flowchart TD
     A["caller-supplied expiry present?"] -->|yes, listed| B["use it\n(legacy fixed)"]
     A -->|yes, not listed| C["raise EXPIRY_NOT_LISTED"]
     A -->|no| D{"strategy == STR-RUNUP?"}
-    D -->|yes| E["earliest listed expiry with\nDTE from entry_date >= threshold"]
+    D -->|yes| E["earliest listed expiry with\nDTE from quote_date\n(or entry_date) >= threshold"]
     E -->|none qualifies| F["raise NO_EXPIRY_DTE_AT_LEAST"]
     E -->|found| G["use it"]
-    D -->|no\n(STR-THRU / put-ladder)| H["earliest listed expiry\non/after event_date"]
+    D -->|no\n(STR-THRU / put-ladder)| J{"event_date known?"}
+    J -->|no| K["earliest listed expiry\n(deterministic default)"]
+    K --> G
+    J -->|yes| H["earliest listed expiry\non/after event_date"]
     H -->|none survives| I["raise NO_EXPIRY_ON_OR_AFTER"]
     H -->|found| G
 ```

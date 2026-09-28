@@ -183,28 +183,30 @@ def _resolve_first_dte_at_least(inputs: Mapping[str, Any], expiries: list[str]) 
 
     Legacy's ``straddle_runup`` factory (``engine/structures.py``, ~line 934)
     uses ``ExpirySelector(kind="first_dte_at_least", target_dte=30)``, not
-    ``first_post_event``: the earliest listed expiry whose DTE is >= 30,
-    counted from the ENTRY session, not the event date. Legacy's own chain is
-    captured AS OF that entry session (``ChainSnapshot.obs_date``), so its
-    ``dte`` column is already entry-relative (``engine/structures.py``
-    ``ExpirySelector.select``); native carries no such column, so this
-    computes the same quantity from ``entry_date`` -- the row's captured,
-    raw entry-session date (``engine/v2/scoring/stages.py``
-    ``_check_stale_quote``'s docstring: "a raw fact, never a calculated
-    answer") -- and each candidate expiry.
+    ``first_post_event``: the earliest listed expiry whose DTE is >= 30.
+    Legacy's chain carries this as a ``dte`` column, ``expiry - obs_date``
+    (``engine/data/normalize/n_chains.py``), and legacy sets
+    ``obs_date=result.quote_date`` (``engine/score.py``). ``quote_date``
+    defaults to ``entry_date`` (``result.quote_date = result.quote_date or
+    result.entry_date``) but a stale-quote fallback can set it EARLIER than
+    ``entry_date`` (``engine/score.py``'s ``_fresh_quote_date``). Native
+    carries no ``dte`` column, so this anchors on ``quote_date`` when
+    captured, falling back to ``entry_date`` -- both raw facts, never
+    calculated answers (``engine/v2/scoring/stages.py``
+    ``_check_stale_quote``'s docstring) -- and each candidate expiry.
 
     ``expiries`` is sorted ascending (both of :func:`_resolve_straddle_expiry`'s
     callers sort it before calling), so the first survivor is the earliest
     one, matching legacy's ``ok.iloc[0]``.
 
-    A missing or unparseable ``entry_date``, or no expiry reaching 30 DTE
-    from it, is a refusal -- never a silent substitution of a shorter-dated
+    A missing or unparseable anchor date, or no expiry reaching 30 DTE from
+    it, is a refusal -- never a silent substitution of a shorter-dated
     expiry, which is exactly the defect this closes: before this fix, native
     fell through to ``first_post_event`` and silently priced whatever
     earliest post-event expiry was listed, even when it was far short of the
     30 DTE legacy requires.
     """
-    entry_source = inputs.get("entry_date")
+    entry_source = inputs.get("quote_date") or inputs.get("entry_date")
     if entry_source is None:
         raise GeometryRefusal("MISSING_ENTRY_DATE")
     try:

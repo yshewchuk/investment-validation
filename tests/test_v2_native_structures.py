@@ -746,3 +746,29 @@ def test_str_runup_refuses_with_an_invalid_captured_entry_date():
 
     with pytest.raises(GeometryRefusal, match="INVALID_ENTRY_DATE:not-a-date"):
         generate("STR-RUNUP", inputs)
+
+
+def test_str_runup_dte_anchor_prefers_quote_date_over_entry_date():
+    """A stale-quote fallback can set quote_date EARLIER than entry_date
+    (engine/score.py's _fresh_quote_date). The DTE count must anchor on
+    quote_date in that case, matching legacy's obs_date=quote_date -- not
+    entry_date, which would count too few days and could reject an expiry
+    legacy actually accepted."""
+    quotes = _runup_chain()
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        # entry_date alone is only 24 DTE from 2025-05-09 (too short), but
+        # quote_date is 7 days earlier, making 2025-05-09 exactly 31 DTE --
+        # long enough. If the code wrongly anchored on entry_date, this
+        # would refuse NO_EXPIRY_DTE_AT_LEAST instead of resolving.
+        "entry_date": "2025-04-15",
+        "quote_date": "2025-04-08",
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    geometry = generate("STR-RUNUP", inputs)
+
+    assert geometry.legs[0].expiry == "2025-05-09"
