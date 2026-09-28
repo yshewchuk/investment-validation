@@ -218,13 +218,20 @@ uncaught traceback instead.
     `Repository.resolve`/`resolve_full`/`scan` raises `MANIFEST_CORRUPT`
     (`category="integrity"`, not retryable) — a tampered snapshot is
     refused rather than read.
-  - **A table absent from the resolved snapshot, or whose fragments carry
-    no recorded time bounds** (`_scan.py`'s path). `CONTRACT_MISMATCH`
-    (`category="validation"`, not retryable). `_scan.read_table` itself
-    returns an *empty* frame, not a refusal, when a partition filter
-    simply matches no fragment records — `CONTRACT_MISMATCH` here is only
-    for a table the snapshot doesn't have, or one whose matched fragments
-    lack `time_min`/`time_max`. This is also what a replay or build-trades
+  - **A table absent from the resolved snapshot, or one whose fragments
+    must split by calendar and carry no recorded time bounds** (`_scan.py`'s
+    path). `CONTRACT_MISMATCH` (`category="validation"`, not retryable).
+    `_scan.read_table` itself returns an *empty* frame, not a refusal, when
+    a partition filter simply matches no fragment records. Missing
+    `time_min`/`time_max` is only reached — and only then raised — when a
+    partition actually needs a calendar split: `_scan_partition` tries one
+    full-partition scan first (needing no time bounds at all), so a
+    partition small enough to read in that one scan never touches this
+    refusal even if its fragments carry no recorded bounds; the refusal
+    fires once splitting is required, whether because that whole-partition
+    scan overflowed or because an unfiltered, non-nullable partition's own
+    manifest row count already exceeds the cap. This is also what a replay
+    or build-trades
     run gets when its pinned snapshot has no `daily_market` table at all
     (no table_version, not just an empty one):
     `_pricing.trading_calendar_from_snapshot` reads `daily_market` through
@@ -326,11 +333,16 @@ partition, bounded only by `contract.maximum_result_rows` — for
 a production-size snapshot; unit tests only passed because their fixtures
 were tiny. `_snapshot.read_table` now reads each requested partition (or,
 with no `partition_keys` given, every partition the snapshot has) through
-`_scan.read_table`, which already scans a partition as its calendar months
-and, on overflow, a month as its days. A whole partition with a nullable
-observation-time column raises `RESULT_LIMIT_EXCEEDED` instead of splitting;
-otherwise the delegated scan propagates `RESULT_LIMIT_EXCEEDED` only when a
-single day still exceeds the cap. This is a delegation, not a
+`_scan.read_table`, which now attempts ONE full-partition scan first (scoped
+by the partition's own key, no time interval) and only falls back to
+splitting — first into calendar months, then, on overflow, a month into
+days — when that whole-partition scan exceeds the cap (or, for an
+unfiltered, non-nullable partition whose manifest row count already exceeds
+the cap, skips straight to the calendar split instead of attempting a
+doomed full scan). A whole partition with a nullable observation-time
+column raises `RESULT_LIMIT_EXCEEDED` instead of splitting when that full
+scan overflows; otherwise the delegated scan propagates `RESULT_LIMIT_EXCEEDED`
+only when a single day still exceeds the cap. This is a delegation, not a
 merge of the two modules (issue #69 tracks that): `_snapshot.read_table`
 keeps its own signature (`partition_keys` only, no `key_filter`), its own
 pre-`_scan` guard for "no declared partition column, or no partition values
