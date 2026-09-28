@@ -332,30 +332,18 @@ a submission source" rule Part 4 already established for
   job-bound inputs (`score.json` from the paired `"score"` job;
   `records.json`/`refusals.json` from the paired `native_score_batch` job
   — see "Inputs" below for exactly how `_native_parity_identity` finds
-  both). **Checks BOTH documents' `schema_version` BEFORE parsing either
-  one's row content (Opus gate finding, real gap): `records_document[
-  "schema_version"] == "native_score_batch_records.v2.0"` AND
-  `refusals_document["schema_version"] == "native_score_batch_refusals.v2.0"`.**
-  `_native_parity_identity` (above) is a cheap CATALOG-only lookup — it
-  finds the latest succeeded `native_score_batch` job by idempotency key
-  alone, never opening that job's own output files — so it cannot itself
-  tell a job that ran on this redo's OLD `v1.0` schema (bare-array
-  `records`, no `unkeyable_refusals`) from one that ran on the NEW `v2.0`
-  schema this redo defines; a shadow deployment window where the "latest
-  succeeded" `native_score_batch` job predates this redo's own worker
-  change is a real, if transient, rollout state, not a defect. Rather than
-  feed a `v1.0`-shaped array into the `v2.0`-shaped reader below (which
-  expects `records`/`refusals` to be `dict`s, not arrays, and would either
-  crash or silently misread), `run_native_parity_worker` treats a
-  `schema_version` mismatch on EITHER document EXACTLY like
-  `_native_parity_identity` returning `None` (below, "R1, missing input"):
-  no submission this tick, tried again next tick, once a fresh
-  `native_score_batch` run under the CURRENT worker produces a `v2.0`
-  artifact. This is a wait state, never a refusal and never a job
-  failure. Only once BOTH tags match does it build
+  both). By the time this worker runs, `submit_native_parity_if_ready`
+  has ALREADY confirmed both documents carry the CURRENT `v2.0`
+  `schema_version` tags before ever submitting the job (a deliberate,
+  documented exception to `_native_parity_identity`'s own catalog-only
+  lookup — see "Cutover PR-4 (redo)'s own input sourcing" above for
+  exactly where that check runs and why it belongs there, not here, and
+  "R1, missing input" below for the wait-state outcome on a mismatch), so
+  this worker trusts the schema without re-checking it: an already-submitted `native_parity` job's
+  `records.json`/`refusals.json` are guaranteed `v2.0`-shaped by
+  construction, never a retained `v1.0` artifact. It builds
   `legacy_rows`/`native_rows`/`native_refusals`/`unkeyable_refusals` (via
-  `_native_rows_and_refusals`, below, which then trusts the schema without
-  re-checking it), and branches on whether `legacy_rows` and
+  `_native_rows_and_refusals`, below), and branches on whether `legacy_rows` and
   `native_rows` share any key (below, `_empty_native_report`) before
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
@@ -404,7 +392,7 @@ a submission source" rule Part 4 already established for
     genuinely `only_native`) that share no key with `legacy_rows`. Because
     `native_rows` is non-empty, `_refuse_empty_inputs` would not fire, but
     `shared` is still empty, so the pre-existing "no shared key" check
-    (line 179 above) would — even though every legacy row's absence IS
+    (`native_parity_report.py:178`, above) would — even though every legacy row's absence IS
     explained by a refusal, exactly `native_refused`/`native_refused_unmatched`'s
     (below) reportable outcome, not a missing-input failure.
   - **All refused, keyable.** The ORIGINAL narrower case (`native_rows`
@@ -531,11 +519,12 @@ a submission source" rule Part 4 already established for
   table actually carries); this guard exists because the projection makes
   a collision POSSIBLE, not because one has occurred. **This function
   REQUIRES the key — `refusals_document["unkeyable_refusals"]`, never
-  `.get("unkeyable_refusals", ())` (Opus gate finding, real gap).** Its only
-  caller (`run_native_parity_worker`, below) has already confirmed
-  `refusals_document["schema_version"] == "native_score_batch_refusals.v2.0"`
-  (below) before calling this function at all, and the v2.0 writer ALWAYS
-  emits this key, even as `[]` for a batch with no unkeyable refusals (the
+  `.get("unkeyable_refusals", ())` (CodeRabbit round 6, real finding).**
+  This function's only caller, `run_native_parity_worker` (below), is only
+  ever reached for a job `submit_native_parity_if_ready` ("R2, cache",
+  below) already confirmed carries `refusals_document["schema_version"]
+  == "native_score_batch_refusals.v2.0"` before submission, and the v2.0
+  writer ALWAYS emits this key, even as `[]` for a batch with no unkeyable refusals (the
   "refusals.json" bullet, above) — so its absence on a document already
   confirmed v2.0 means the file is malformed (truncated, hand-edited, or
   written by a defective producer), never a legitimate "this batch has
@@ -941,10 +930,43 @@ reference (`input_bindings.py:70-73`), since no prior job produces it.
 
 **Cutover PR-4 (redo)'s own input sourcing (design).**
 `submit_native_parity_if_ready` gathers nothing beyond what
-`_native_parity_identity` already found — unlike `native_score_batch`'s
-own sidecar, this job's body has no board-universe enumeration or release
-resolution of its own, since every value it needs is already a committed
-job output:
+`_native_parity_identity` already found, WITH ONE DELIBERATE EXCEPTION
+(CodeRabbit round 6; refined by an Opus gate finding on where it belongs,
+both real) — unlike `native_score_batch`'s own sidecar, this job's body
+has no board-universe enumeration or release resolution of its own, since
+every value it needs is already a committed job output:
+
+- **The one exception: a `schema_version` pre-submission check, not a
+  content read.** `_native_parity_identity` (above) is a cheap
+  CATALOG-only lookup — it finds the latest succeeded `native_score_batch`
+  job by idempotency key alone, never opening that job's own staged
+  `records.json`/`refusals.json`. But `native_score_batch`'s own worker
+  changing schema (`v1.0` → `v2.0`, this redo, above) means a shadow
+  deployment window where the "latest succeeded" `native_score_batch` job
+  `_native_parity_identity` finds predates this redo's rollout and is
+  still `v1.0`-shaped is a real, transient state, not a defect — and once
+  `submit_native_parity_if_ready` submits a `native_parity` job for THAT
+  identity, "R2, cache" (below) means that `(as_of, scope_hash)` key is
+  NEVER retried: the existence check alone gates every future tick, so a
+  job that would only ever fail (or worse, misread a `v1.0` array as
+  `v2.0`) can never be corrected by a LATER `native_score_batch` re-run.
+  `submit_native_parity_if_ready` therefore reads just the two documents'
+  `"schema_version"` field (`records_document["schema_version"] ==
+  "native_score_batch_records.v2.0"` AND `refusals_document[
+  "schema_version"] == "native_score_batch_refusals.v2.0"`) — the SAME
+  `job_<native_score_batch_job_id>#records`/`#refusals` artifacts the
+  worker later reads in full, opened here ONLY far enough to check one
+  field, never parsed for rows — BEFORE calling `stages.submit_job` at
+  all. A mismatch on EITHER tag is treated EXACTLY like
+  `_native_parity_identity` returning `None`: `submit_native_parity_if_ready`
+  submits NOTHING this tick, so no job — and no `(as_of, scope_hash)` key
+  — is ever created for this identity, and the SAME identity is
+  re-checked, fresh, on the very next tick once a `native_score_batch` run
+  under the CURRENT worker produces a `v2.0` artifact for that session.
+  This is a wait state exactly like the missing-job case, never a refusal
+  and never a job failure — because, unlike every other input this
+  sidecar reads, `native_parity`'s own worker has no way to retry a
+  session whose job already exists.
 
 - **Legacy source.** `job_<score_job_id>#score` — the SAME `score.json`
   `attempt_outputs` binding every other legacy-dependent job already reads
@@ -2318,18 +2340,19 @@ hold, extended here rather than re-argued from scratch.
   submits nothing and tries again next tick, exactly like
   `computed_moves_refresh`/`native_score_batch` waiting on their own
   prerequisites. **A `schema_version` mismatch on either `records.json` or
-  `refusals.json` (Opus gate finding, real gap) is treated the SAME way,
-  not as a job failure:** `run_native_parity_worker` checks both tags
-  (its own "Checks BOTH documents' `schema_version`" step, above) BEFORE
-  parsing either document's row content, and the "latest succeeded"
-  `native_score_batch` job `_native_parity_identity` found being one that
-  ran on this redo's OLD `v1.0` schema (a real, transient rollout-window
-  state — `_native_parity_identity`'s own catalog-only lookup cannot tell
-  the two schema versions apart without opening files, which it
-  deliberately does not do) skips submission this tick exactly like `None`
-  would, rather than crashing on a `v1.0` array where the `v2.0` reader
-  expects a `dict`. Inside the worker (once both tags match): an
-  unparseable `BoardRequest` key (not
+  `refusals.json` (CodeRabbit round 6; refined by an Opus gate finding,
+  both real) is treated the SAME way, not as a job failure — but the check
+  runs in `submit_native_parity_if_ready` BEFORE submission ("Cutover
+  PR-4 (redo)'s own input sourcing", above), never inside this worker:**
+  a job that already exists under `(as_of, scope_hash)` is never
+  resubmitted ("R2, cache", below), so if the WORKER were the one
+  detecting a stale `v1.0` artifact, that session's `native_parity` could
+  never be retried once a fresh, correctly-shaped `native_score_batch` run
+  landed — the sidecar catches it first instead, submitting nothing so no
+  job (and no blocking `(as_of, scope_hash)` key) is ever created for that
+  identity, and the same identity is checked fresh next tick. By the time
+  this worker actually runs, both tags are ALREADY confirmed `v2.0`. Inside
+  the worker: an unparseable `BoardRequest` key (not
   exactly 4 `"|"`-separated fields), two distinct `records.json`/
   `refusals.json` keys colliding on the same projected `population_key`
   (`_native_rows_and_refusals`, above), a `records.json`/`refusals.json`
@@ -2383,7 +2406,13 @@ hold, extended here rather than re-argued from scratch.
 - **R2, cache — one memo, not two, reusing the SAME shared constants.**
   Once a job exists under today's `(as_of, scope_hash)` key, in any state,
   `submit_native_parity_if_ready` never rebuilds or resubmits it — the
-  existence check runs before any input is read. Unlike `native_score_batch`
+  existence check runs FIRST, before any input is read, including the
+  `schema_version` pre-submission check ("Cutover PR-4 (redo)'s own input
+  sourcing", above): that check only ever runs for an identity with NO
+  existing job yet, exactly where reading `schema_version` is safe to gate
+  submission on, never after a job already exists (an existing job's own
+  artifacts are fixed by whatever was true when IT was submitted; the
+  schema check cannot and does not retroactively affect it). Unlike `native_score_batch`
   (`#88`'s own R2: a SEPARATE release-identity memo plus a build-attempt
   memo, because it gates an expensive release re-verification independently
   of an expensive board-enumeration build), `native_parity` needs only ONE
