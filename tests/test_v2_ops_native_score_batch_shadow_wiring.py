@@ -19,9 +19,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from engine.v2.foundation import ArtifactStore
 from engine.v2.models import deployment
 from engine.v2.ops import nightly
+from engine.v2.ops.errors import OpsError
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit_graph
 from engine.v2.ops.supervisor import Service
@@ -165,6 +168,25 @@ def test_submit_dedupes_an_existing_job_under_the_key(tmp_path, monkeypatch):
         catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
         code_source=ROOT, clock=clock) is None
     assert _native_score_batch_job_count(conn) == before
+
+
+def test_submit_raises_when_snapshot_pinned_and_producer_missing(tmp_path, monkeypatch):
+    """B2: with a snapshot-pinned "score" job and NO existing job under the
+    batch key, the unbuilt PR-6 raw-row producer must raise so
+    ``Service._reconcile_native_score_batch_shadow``'s problem-reporting and
+    backoff machinery surfaces it -- never silently return ``None``."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
+    session, scope_hash = nightly._session_scope_from_score_key(score_key)
+    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+                        lambda conn: (session, scope_hash, True))
+
+    with pytest.raises(OpsError):
+        nightly.submit_native_score_batch_shadow_if_ready(
+            conn, registry(), _POLICY, store, "irrelevant-root",
+            catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
+            code_source=ROOT, clock=clock)
 
 
 # --------------------------------------------------------------------------

@@ -929,12 +929,15 @@ _LEGACY_SCORE_KIND = "legacy_score"
 
 
 def _native_score_batch_key(session, scope_hash):
-    """Cutover PR-7a: the standard 4-part ``_DAG_STAGES`` idempotency-key
-    shape (``nightly.py:996``), keyed to the SPECIFIC succeeded "score" job's
-    own ``scope_hash`` -- never session alone, unlike
-    ``_computed_moves_refresh_key`` (see ARCHITECTURE.md's R6 account for
-    why the two stages' keying differs: this stage's inputs ARE the
-    specific "score" job's specific pinned rows)."""
+    """Cutover PR-7a: builds the same key shape a legacy "score" job's own
+    idempotency key uses (``"nightly:<session>:<scope_hash>:score"``,
+    ``nightly.py:996``), with the trailing stage name replaced -- never a
+    fixed 4-part shape, since ``scope_hash`` itself is a content-hash
+    string (``"sha256:<hex>"``) that already contains a colon. Keyed to the
+    SPECIFIC succeeded "score" job's own ``scope_hash`` -- never session
+    alone, unlike ``_computed_moves_refresh_key`` (see ARCHITECTURE.md's R6
+    account for why the two stages' keying differs: this stage's inputs
+    ARE the specific "score" job's specific pinned rows)."""
     return "nightly:" + session + ":" + scope_hash + ":native_score_batch"
 
 
@@ -1047,11 +1050,16 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
     # The still-missing raw-row producer (cutover PR-6) would enumerate
     # native_board_universe.board_requests against this session's pinned
     # snapshot and stage per-event events.json rows here. Not built by this
-    # PR (explicitly out of scope; see ARCHITECTURE.md) -- unreachable
-    # under today's production default, since snapshot_pinned is always
-    # False above. Left as a documented gap, never a guess at PR-6's own
-    # design.
-    return None
+    # PR (explicitly out of scope; see ARCHITECTURE.md). REACHABLE today --
+    # an operator's `--input-mode snapshot` plan pins a snapshot on "score"
+    # -- so this raises rather than silently doing nothing, letting the
+    # caller's existing problem-reporting/backoff machinery surface it
+    # instead of burning attempts with no visible cause.
+    raise fail(
+        "VALIDATION_FAILED",
+        "native_score_batch's raw-row producer (cutover PR-6) is not built "
+        "yet; cannot enumerate BoardRequests for a session whose \"score\" "
+        "job pinned a snapshot")
 
 
 def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, year_end,

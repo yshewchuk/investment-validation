@@ -356,11 +356,20 @@ actual user-approved, per-field `TolerancePolicy` object itself (the
 pluggable seam above takes it as a parameter — this PR does not construct
 one).
 
-**Cutover PR-7a (implemented).** `native_score_batch`
+**Cutover PR-7a (implemented — wiring and refusal gate only; no job is
+actually submitted yet).** `native_score_batch`
 (`#66`) is registered as a job kind (`stages.py::_native_score_batch_kind`)
-and this PR gives it its first production caller: the REAL production
-nightly submits it in shadow,
-alongside legacy scoring, with no authority change — never through
+and this PR gives it its first production caller in the sense that a real
+call path now exists — `supervisor.Service`'s own tick sidecar, alongside
+legacy scoring, with no authority change — but no `JobSpec` is ever built
+or handed to `submission.submit` yet: under today's production default
+(`"legacy"` input mode) the selected `"score"` job always pins no
+snapshot, so `submit_native_score_batch_shadow_if_ready` refuses (R1)
+before it would ever build one, and the pinned-snapshot case (reachable
+via `--input-mode snapshot`) raises instead of building one too, since the
+raw-row producer that would (cutover PR-6) is not built by this PR — see
+"Cutover PR-7a's input sourcing" and "Failure semantics" below for both
+cases. Never through
 `run_shadow_nightly` (no production caller, needs 14 caller-supplied stage
 handlers nothing builds) and never through `tools/native_parity_run.py`
 (operator-invoked, not wired to any schedule). Three new symbols, all
@@ -1974,10 +1983,28 @@ function is never part of.
   needing step 3 at all); or, only once step 3 actually runs,
   `ModelNotReady("release_root", ...)` (step 3's own internal
   re-raise of a `MissingReleaseRoot` it independently hits) or
-  `NoCurrentRelease` (a configured root naming nothing `DEPLOYED`) — or
-  `board_requests` returning empty for that session's pinned snapshot (once
-  one exists) — each case returns without submitting anything; there is no
-  partial or synthetic-empty job.
+  `NoCurrentRelease` (a configured root naming nothing `DEPLOYED`) — each
+  case returns without submitting anything, silently (no report — these are
+  ordinary "nothing to do yet" outcomes); there is no partial or
+  synthetic-empty job.
+
+  **One R1 case is DIFFERENT and is reported, not silent: the selected
+  `"score"` job pinning a snapshot with no matching job yet
+  (`snapshot_pinned` is `True`).** This is reachable TODAY, not a future
+  concern — an operator's `--input-mode snapshot` plan pins a snapshot on
+  `"score"` regardless of anything this PR builds (Opus gate finding: an
+  earlier draft's own code comment wrongly called this branch
+  "unreachable under today's production default"). The still-missing
+  raw-row producer (cutover PR-6) that would enumerate `board_requests`
+  and stage `events.json` for it does not exist, so
+  `submit_native_score_batch_shadow_if_ready` `raise`s `VALIDATION_FAILED`
+  instead of silently returning `None` — the caller
+  (`Service._reconcile_native_score_batch_shadow`) already catches and
+  reports every exception this function raises (the identical
+  `_report_native_score_batch_problem` dedup path a genuine build failure
+  uses), so an operator who switches production to snapshot mode before
+  PR-6 lands sees a deduplicated, reported problem instead of the sidecar
+  silently spending its backoff schedule with nothing to show for it.
 - **R2 cache — two separate memos, not one.** Once a job exists under
   today's session's idempotency key, in any state, it is never rebuilt or
   resubmitted — the existence check runs before any raw row is read or
@@ -2343,20 +2370,28 @@ including `native_parity` — it has no production caller, only
 (Part 4) is a real submittable job kind, unlike `native_parity` — see below
 for how production submission reaches it.
 
-`native_score_batch` (Cutover PR-7a) is now a real submittable job kind
-reached through the tick sidecar, the same way `computed_moves_refresh` is,
-unlike `native_parity` — see "Outputs"/"Failure semantics" above for
-`submit_native_score_batch_shadow_if_ready` and the identical race/
-all-or-nothing rationale `computed_moves_refresh` already establishes for
-why it is never folded into this graph's submission path. **This diagram
-is `nightly.py::GRAPH`/`OPTIONAL` as they exist today**, exactly like `#54`
-added `computed_moves_refresh`'s own edge/node to this same diagram when
-IT shipped code: the `score -.-> native_score_batch` edge/node above is
-real, matching `GRAPH`/`OPTIONAL`, not aspirational. `_stage_sequence`
-filters `native_score_batch` out of every job-submission stage list by
-name, the identical treatment `computed_moves_refresh` already gets, since
-`supervisor.Service`'s own tick loop — never `build_legacy_job_requests`/
-`run_shadow_nightly` — is its only submitter (see "Outputs" above).
+`native_score_batch` (Cutover PR-7a) has a real call path reached through
+the tick sidecar, the same sidecar mechanism `computed_moves_refresh` uses
+— but, unlike `computed_moves_refresh`, that path never actually reaches
+`submission.submit` today: `submit_native_score_batch_shadow_if_ready`
+refuses (R1) before building a `JobSpec` whenever the selected `"score"`
+job pinned no snapshot (production's own default), and raises instead of
+building one in the reachable pinned-snapshot case, since the raw-row
+producer that would build `events.json` (cutover PR-6) is not built by
+this PR — see "Outputs"/"Failure semantics" above for both cases and the
+identical race/all-or-nothing rationale `computed_moves_refresh` already
+establishes for why this is never folded into this graph's submission
+path. **This diagram is `nightly.py::GRAPH`/`OPTIONAL` as they exist
+today**, exactly like `#54` added `computed_moves_refresh`'s own edge/node
+to this same diagram when IT shipped code: the
+`score -.-> native_score_batch` edge/node above is real, matching
+`GRAPH`/`OPTIONAL`, not aspirational — a real GRAPH node existing, and a
+real call path to it existing, is not the same claim as a job actually
+being submitted through it. `_stage_sequence` filters `native_score_batch`
+out of every job-submission stage list by name, the identical treatment
+`computed_moves_refresh` already gets, since `supervisor.Service`'s own
+tick loop — never `build_legacy_job_requests`/`run_shadow_nightly` — is
+its only (so far always-refusing) submitter (see "Outputs" above).
 
 Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
 only production caller, `cli.py`, always passes `include_prerequisites=False`,
