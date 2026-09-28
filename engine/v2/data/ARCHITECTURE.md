@@ -644,6 +644,51 @@ completeness fixes ship here, both in `incremental.py` unless noted:
   provenance on a match; `commit_snapshot` reconciles any dataset manifest
   whose `fragment_refs` would otherwise cite provenance the catalog does not
   store, so every committed `manifest_hash` stays rebuildable.
+- **A reused fragment's `manifest_hash` is reconciled into the changeset
+  audit row too, for both `daily_market` and the generic-table path.** The
+  fragment-reuse fix above changes a table's `manifest_hash` without
+  changing its `dataset_version_id` (`commit_snapshot`'s own fragment/
+  dataset-version reconciliation), but each `record_references` callback
+  (`incremental.py`'s `_record_candidate_references` for `daily_market`,
+  `generic_incremental.py`'s `_record_references` for every other table)
+  builds its `changeset` before that reconciliation runs, from the
+  caller's own (possibly stale) `candidate.table_manifest`. Left alone,
+  the committed `data_changesets` row could cite a
+  `result_dataset_version_ref.manifest_hash` inconsistent with what
+  `commit_snapshot` actually stored in `data_dataset_versions`. Both
+  callbacks now read back the truly-stored row for that
+  `dataset_version_id` (already inserted-or-reconciled by the time
+  `record_references` runs, same transaction) and rebuild the changeset's
+  `result_dataset_version_ref`/`changeset_hash` from it when they diverge —
+  `_reconciled_changeset` in each module (two copies, not shared: importing
+  `incremental.py` from `generic_incremental.py` would be circular, since
+  `incremental.py` already imports `generic_incremental`). `changeset_id`
+  itself never changes (it is derived from `snapshot_id`/`changes`, not
+  `manifest_hash`), so this only ever changes a changeset row's content on
+  the rare path where reconciliation actually swapped in different stored
+  provenance, never which row is targeted.
+- **A retried commit's revision ordinal is authoritative from the database
+  row, not required to match the cached normalization artifact.** A retry
+  after a failed commit (the outer `commit_snapshot` transaction rolled
+  back after `cache_normalization` had already durably cached its own row
+  in a separate mini-transaction) gets a fresh `observed_at`-derived
+  `revision_ordinal` on its next attempt — correctly, so it can still
+  outrank a stale correction in that attempt's own ranking — and commits
+  that fresh ordinal into `data_daily_market_revisions.revision_number`.
+  The earlier failed attempt's cached normalization artifact still holds
+  the older ordinal, though, since nothing had reason to update it.
+  `_load_retained_revisions` already treats `raw_receipt_id` and
+  `normalization_id` as attempt-specific bookkeeping the database row is
+  authoritative for (overridden onto the reloaded revision, never compared
+  against the artifact); `revision_ordinal` is exactly the same kind of
+  field — already excluded from `_revision_identity_document`'s identity
+  comparison — so it now gets the same treatment: sourced from
+  `revision_number`, not checked for agreement with the artifact. (An
+  earlier attempt at this fix tried to keep the cached artifact itself in
+  sync via `INSERT OR REPLACE` into `data_normalizations`, bypassing its
+  immutable-row trigger; reverted before merge, since it silently defeats
+  an intentional invariant this repo explicitly disallows working around —
+  see `guides/rearchitecture_phase1_operations.md`.)
 - **Normalization identity still does not include the expected-key set —
   tracked at #133, not fixed here.** `cache_normalization`'s
   `normalization_id` keys only on `(raw_hash, normalizer_id, contract_id)`.
