@@ -1647,10 +1647,18 @@ retry, transaction, partial write, idempotency).
   `"error"` already gets: `main`'s exit code is 1 (so a monitor sees a
   problem) even though the state is not terminal and the trigger keeps
   retrying it. It is deliberately NOT added to `TERMINAL_STATUSES` — unlike
-  `"failed"`, a bare timeout must stay resumable, since a legitimately slow
-  (not wedged) run should not be given up on after reaching the day's own
-  cutoff if it is still making progress (it resumes again the FOLLOWING
-  calendar day's own retry window, a fresh `_serve_deadline`).
+  `"failed"`, a bare timeout must stay resumable rather than given up on
+  immediately, since the resume path (this bullet's own first paragraph)
+  never re-checks the retry window before serving again. Concretely, on
+  the SAME calendar day: the timer's next tick (it fires every 30 minutes,
+  all day) resumes the same `plan_ref` and calls `_default_serve` again;
+  `_serve_deadline` recomputes the identical, already-past cutoff for that
+  same day, so this resumed serve also stops on its own first tick and is
+  again recorded `"timed_out"`. This repeats, one timer tick apart, until
+  R3's consecutive-timeout counter below reaches its terminal `"failed"`
+  state — ordinarily within an hour or two of the original timeout, the
+  same evening, never "the next day": there is no calendar-day check
+  anywhere in this path, only the counter.
 - **R3, retry — bounded, like every other consecutive-failure case in this
   module.** Even with `_serve_deadline`'s same-day cutoff closing the
   cross-into-legacy-window hole above, an unbounded same-day resume-forever

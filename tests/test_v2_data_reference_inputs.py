@@ -33,6 +33,7 @@ from engine.v2.data.reference_catalog import (
     reference_inputs_for_snapshot,
 )
 from engine.v2.foundation import SystemClock, to_document
+from engine.v2.ops import cli
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.cli import dispatch, parser
 from engine.v2.ops.errors import OpsError
@@ -563,12 +564,13 @@ def _plan_argv(tmp_path, store_root):
             "--year-start", "2024", "--year-end", "2024"]
 
 
-def test_import_plan_submit_materializes_reference_files_byte_identical(imported):
+def test_import_plan_submit_materializes_reference_files_byte_identical(imported, monkeypatch):
     tmp_path, store_root, conn, clock = imported
     ops_root = tmp_path / "ops"
     _import(tmp_path, store_root, conn, clock, "e2e-import")
     planned = dispatch(parser().parse_args(_plan_argv(tmp_path, store_root)), ops_root, conn, clock)
     request_hash = planned["plan"]["snapshot_inputs"]["materialization_request_hash"]
+    monkeypatch.setattr(cli, "DEFAULT_POLICY", TEST_POLICY)
     submitted = dispatch(parser().parse_args(["submit", "--plan", planned["plan_ref"],
                                               "--idempotency-key", "e2e"]), ops_root, conn, clock)
     kinds = {job["job_id"]: json.loads(conn.execute("SELECT spec_json FROM jobs WHERE job_id=?",
