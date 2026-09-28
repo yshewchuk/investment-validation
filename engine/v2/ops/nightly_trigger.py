@@ -73,12 +73,11 @@ DEFAULT_DEADLINE_ET = "06:00"
 DEFAULT_DEADLINE_GRACE = timedelta(minutes=5)
 #: ``error`` turns into the terminal ``failed_setup`` after this many in a row.
 MAX_CONSECUTIVE_ERRORS = 3
-#: How long one ``serve`` call may run before giving up and marking ``timed_out`` for the
-#: next tick to resume -- OUR OWN judgment call (not measured or externally specified): the
-#: retry window's latest possible start is DEFAULT_DEADLINE_ET + DEFAULT_DEADLINE_GRACE (06:05
-#: ET), so this finishes by 18:05 ET even from the latest possible start -- hours before the
-#: legacy cron's 21:30 ET window, regardless of when inside the window ``serve`` began.
-DEFAULT_SERVE_DEADLINE = timedelta(hours=12)
+#: An ABSOLUTE ET cutoff, on whatever calendar day ``serve`` is called (never a duration from
+#: when this particular call started, which a resumed ``timed_out`` serve would otherwise get
+#: fresh, reaching arbitrarily late into the day) -- OUR OWN judgment call (not measured or
+#: externally specified): 1.5 hours of margin before the legacy cron's 21:30 ET window.
+DEFAULT_SERVE_DEADLINE_ET = "20:00"
 STATE_DIR = ("reports", "phase6", "nightly_trigger")
 #: Where the operator drops the native nightly's own qualification documents.
 QUALIFICATION_INPUT_MANIFEST = "input_manifest.json"
@@ -302,6 +301,18 @@ def _window(as_of: str, window_start_et: str, deadline_et: str) -> tuple[datetim
     opened_on = date.fromisoformat(as_of) + timedelta(days=1)
     return (datetime.combine(opened_on, _boundary(window_start_et), tzinfo=ET),
             datetime.combine(opened_on, _boundary(deadline_et), tzinfo=ET))
+
+
+def _serve_deadline(clock) -> datetime:
+    """Today's ET calendar-day cutoff (``DEFAULT_SERVE_DEADLINE_ET``), from ``clock.now()``'s
+    OWN date -- never the plan's ``as_of`` and never a duration from when this call started.
+    Every call on the same calendar day (the first serve and every resumed one) therefore
+    computes the IDENTICAL absolute cutoff, so no number of same-day resumes can push serving
+    past it; a call made after the cutoff has already passed returns a ``deadline_at`` already
+    in the past, so ``serve`` stops on its very first tick rather than running another cycle.
+    """
+    today_et = clock.now().astimezone(ET).date()
+    return datetime.combine(today_et, _boundary(DEFAULT_SERVE_DEADLINE_ET), tzinfo=ET)
 
 
 def _receipt(clock, as_of: str, status: str, detail: str,
@@ -555,9 +566,10 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
     native DAG runs in-process here instead of needing a second supervisor.
     The job set is resolved through the idempotent ``cli._submit_command`` (a
     no-op resubmission), then polled until every job is terminal. ``serve`` is
-    bounded by ``DEFAULT_SERVE_DEADLINE`` and this returns ``"timed_out"`` if
-    that deadline fires before every job is terminal, so a wedged job never
-    blocks indefinitely. The final status is ``completed`` only when every job
+    bounded by ``_serve_deadline``/``DEFAULT_SERVE_DEADLINE_ET`` (an absolute
+    same-day ET cutoff, not a duration) and this returns ``"timed_out"`` if that
+    deadline fires before every job is terminal, so a wedged job never blocks
+    indefinitely. The final status is ``completed`` only when every job
     succeeded, else ``failed``.
     """
     from engine.v2.ops import cli
@@ -579,7 +591,7 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
             raise fail("INVALID_REQUEST", "the submitted plan produced no jobs")
         service = Service(conn, ops_root, registry(), DEFAULT_POLICY, clock=clock,
                           code_source=repo_root())
-        deadline_at = clock.now() + DEFAULT_SERVE_DEADLINE
+        deadline_at = _serve_deadline(clock)
         outcome = serve(service, until=lambda: _jobs_terminal(conn, job_ids),
                         deadline_at=deadline_at)
         if outcome == "deadline_exceeded":

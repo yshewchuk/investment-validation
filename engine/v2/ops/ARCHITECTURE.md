@@ -1580,22 +1580,42 @@ retry, transaction, partial write, idempotency).
   design — this parameter exists for `nightly_trigger.py`'s own bounded
   `serve` call alone.
   `nightly_trigger._default_serve` now computes
-  `deadline_at = clock.now() + DEFAULT_SERVE_DEADLINE`
-  (`DEFAULT_SERVE_DEADLINE = timedelta(hours=12)`, a new module-level
-  constant next to `DEFAULT_DEADLINE_GRACE`/`MAX_CONSECUTIVE_ERRORS` —
+  `deadline_at = _serve_deadline(clock)`, a new helper returning an
+  ABSOLUTE ET wall-clock cutoff on TODAY's calendar date (`clock.now()`'s
+  own ET date, not the as-of or a duration from when this particular call
+  started): `datetime.combine(clock.now(ET).date(),
+  DEFAULT_SERVE_DEADLINE_ET, tzinfo=ET)` (`DEFAULT_SERVE_DEADLINE_ET =
+  "20:00"`, a new module-level constant next to `DEFAULT_DEADLINE_ET` —
   **this repo's own judgment call, not a measured or externally specified
   bound**, the same kind of call `_COMPUTED_MOVES_BACKOFF_SECONDS` already
-  documents this way: the retry window's own latest possible start is
-  06:05 ET (`DEFAULT_DEADLINE_ET` plus `DEFAULT_DEADLINE_GRACE`), so 12
-  hours from ANY start inside the 00:00-06:05 window finishes by 18:05 ET
-  at the latest, hours before the legacy cron's 21:30 ET start regardless
-  of when inside the window `serve` began) and passes it into `serve`
-  alongside the existing `until=lambda: _jobs_terminal(...)`. A
-  `"deadline_exceeded"` outcome makes `_default_serve` return the new
-  sentinel `"timed_out"` instead of `"completed"`/`"failed"` — the
-  in-process jobs are left exactly where the supervisor's own recovery
-  already leaves an interrupted attempt (`recovery.py`, unchanged by this
-  PR); nothing here cancels or force-fails them.
+  documents this way: 1.5 hours of margin before the legacy cron's 21:30
+  ET start). Deliberately an ABSOLUTE same-day cutoff, not a duration from
+  when `serve` happened to start: a duration-based deadline (this PR's
+  first draft used `clock.now() + timedelta(hours=12)`) still let a
+  RESUMED `"timed_out"` serve starting late in the day (say, an
+  18:30 ET timer tick after an earlier timeout) claim a fresh 12-hour
+  budget of its own, reaching past 21:30 ET — the exact hole a CodeRabbit
+  review on this PR found. Because `_serve_deadline` reads `clock.now()`'s
+  OWN date every time it is called, not the plan's `as_of`, every same-day
+  call to `_default_serve` — the first one and every resumed one — computes
+  the IDENTICAL 20:00 ET cutoff, so no number of same-day resumes can ever
+  push the lock-holding past that cutoff (a resume ticking at 20:30, after
+  the cutoff has already passed, computes a `deadline_at` already in the
+  past, so `serve` returns `"deadline_exceeded"` after its very first tick
+  rather than doing another cycle of real work — still resumable, never a
+  wedge). This still assumes the resumed call happens on the SAME calendar
+  day the retry window opened on, which is the only day `main`'s own
+  `default_as_of` will ever ask about this `as_of` again (§ the
+  `run_trigger` docstring's own window description) — a manually-invoked
+  `run_trigger` call for a stale `as_of` on a LATER calendar day is outside
+  the trigger's own normal (`main`-driven) call path and is not covered by
+  this same-day reasoning. `serve`'s own `until=lambda:
+  _jobs_terminal(...)` argument is unchanged. A `"deadline_exceeded"`
+  outcome makes `_default_serve` return the new sentinel `"timed_out"`
+  instead of `"completed"`/`"failed"` — the in-process jobs are left
+  exactly where the supervisor's own recovery already leaves an
+  interrupted attempt (`recovery.py`, unchanged by this PR); nothing here
+  cancels or force-fails them.
 - **R6, idempotency — a timeout resumes the SAME plan, it never re-plans.**
   `"timed_out"` is a new member of `STATUSES` and of `RESUME_STATUSES`
   (alongside `"submitting"`/`"submitted"`/`"error"`): a receipt recorded
@@ -1614,13 +1634,16 @@ retry, transaction, partial write, idempotency).
   problem) even though the state is not terminal and the trigger keeps
   retrying it. It is deliberately NOT added to `TERMINAL_STATUSES` — unlike
   `"failed"`, a bare timeout must stay resumable, since a legitimately slow
-  (not wedged) run should not be given up on after twelve hours if it is
-  still making progress.
+  (not wedged) run should not be given up on after reaching the day's own
+  cutoff if it is still making progress (it resumes again the FOLLOWING
+  calendar day's own retry window, a fresh `_serve_deadline`).
 - **R3, retry — bounded, like every other consecutive-failure case in this
-  module.** An unbounded resume-forever would let a genuinely wedged run
-  hold the legacy lock for another `DEFAULT_SERVE_DEADLINE` on every tick
-  indefinitely, one full lock-hold at a time — the exact production risk
-  this issue opened over. `_submit_plan` now counts consecutive
+  module.** Even with `_serve_deadline`'s same-day cutoff closing the
+  cross-into-legacy-window hole above, an unbounded same-day resume-forever
+  would still let a genuinely wedged run reacquire the lock every 30
+  minutes right up against that cutoff, over and over, for the rest of the
+  day — the exact production risk this issue opened over, just bounded to
+  one calendar day instead of unbounded. `_submit_plan` now counts consecutive
   `"timed_out"` outcomes for this as-of the same way `_failure` already
   counts consecutive `"error"` outcomes (a separate counter namespace:
   a `"timed_out"` streak and an `"error"` streak never accumulate into
@@ -1682,10 +1705,13 @@ retry, transaction, partial write, idempotency).
   forever.
 - **Backstop, outside this process.** `ops/systemd/native-nightly-trigger.service`
   (not installed or enabled by this PR — this unit has no production
-  caller yet) gains `TimeoutStartSec`, set comfortably above
-  `DEFAULT_SERVE_DEADLINE` plus probe/plan/submit overhead, as a backstop
-  for the case the in-process deadline itself never gets checked at all
-  (the process wedged somewhere `serve`'s own tick loop never resumes,
+  caller yet) gains `TimeoutStartSec=21h`, set comfortably above the worst
+  case a single `Type=oneshot` invocation can ever legitimately run: the
+  retry window's earliest possible open (00:00 ET) through
+  `DEFAULT_SERVE_DEADLINE_ET` (20:00 ET) is 20 hours, plus room for
+  probe/plan/submit overhead, as a backstop for the case the in-process
+  deadline itself never gets checked at all (the process wedged somewhere
+  `serve`'s own tick loop never resumes,
   e.g. inside a blocking call the deadline check never regains control
   from) — systemd killing the unit still leaves the legacy lock file
   present but unlocked (the flock is process-held, released automatically

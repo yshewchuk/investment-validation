@@ -450,7 +450,7 @@ def test_three_consecutive_timeouts_become_failed(tmp_path):
     assert len(submit.calls) == 3
 
 
-def test_default_serve_passes_a_twelve_hour_deadline(tmp_path, monkeypatch):
+def test_default_serve_passes_todays_et_cutoff(tmp_path, monkeypatch):
     from engine.v2.ops import bootstrap, cli, supervisor
 
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
@@ -466,8 +466,33 @@ def test_default_serve_passes_a_twelve_hour_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly_trigger, "serve", fake_serve, raising=False)
     monkeypatch.setattr(supervisor, "serve", fake_serve)
     clock = FakeClock(IN_WINDOW)
-    assert nightly_trigger._default_serve(tmp_path, "plan_12h", clock) == "timed_out"
-    assert captured["deadline_at"] == IN_WINDOW + nightly_trigger.DEFAULT_SERVE_DEADLINE
+    assert nightly_trigger._default_serve(tmp_path, "plan_cutoff", clock) == "timed_out"
+    assert captured["deadline_at"] == nightly_trigger._serve_deadline(FakeClock(IN_WINDOW))
+
+
+def test_serve_deadline_is_the_same_absolute_cutoff_for_a_morning_or_evening_start():
+    morning = FakeClock(datetime(2026, 9, 26, 6, 5, tzinfo=ET))
+    evening = FakeClock(datetime(2026, 9, 26, 20, 30, tzinfo=ET))
+    expected = datetime(2026, 9, 26, 20, 0, tzinfo=ET)
+    assert nightly_trigger._serve_deadline(morning) == expected
+    assert nightly_trigger._serve_deadline(evening) == expected
+    assert nightly_trigger._serve_deadline(morning) == nightly_trigger._serve_deadline(evening)
+
+
+def test_a_late_evening_resume_times_out_on_its_first_tick_not_after_a_fresh_budget(tmp_path):
+    first_plan = FakePlan("plan_late")
+    first = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), first_plan,
+                 FakeSubmit(), FakeServe("timed_out"))
+    assert first.status == "timed_out" and first.plan_ref == "plan_late"
+    late = FakeClock(datetime(2026, 9, 26, 20, 30, tzinfo=ET))
+    second_plan = FakePlan("plan_OTHER")
+    second = _run(tmp_path, late, FakeProvider(True), second_plan,
+                  FakeSubmit(), FakeServe("completed"))
+    assert second.plan_ref == "plan_late"  # resumes, no re-plan
+    assert second_plan.calls == []
+    # The production `_default_serve`/`serve()` stop on the first tick because
+    # this cutoff is already in the past when the resumed tick starts.
+    assert nightly_trigger._serve_deadline(late) <= late.now()
 
 
 # --------------------------------------------------------------------------
