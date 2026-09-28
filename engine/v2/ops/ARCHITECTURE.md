@@ -2686,7 +2686,7 @@ separate PRs, above).**
    `submit_pool_nightly_promote_if_ready` passing `expected_previous_
    release_id=prior_release_id` to `promote_plan`.
 
-**Filed, not fixed here (Strict scope):** a GitHub issue for
+**Filed, not fixed here (Strict scope): #137.** A GitHub issue for
 `_swap_pointer`'s missing cross-process lock against a direct,
 non-job caller of `deployment.promote`/`rollback` ("concurrent promote"
 above) — real, pre-existing, unrelated to this design's own job-driven
