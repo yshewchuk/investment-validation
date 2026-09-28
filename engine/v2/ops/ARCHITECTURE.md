@@ -169,30 +169,104 @@ PR-6, per `scratchpad/cutover_wiring_plan.md`) builds the caller that
 enumerates `BoardRequest`s, stages their per-event inputs, and submits this
 job kind from the nightly graph. `nightly.py` is not touched by this PR.
 
-**Cutover PR-4 (this doc describes the design as this PR's Phase 2 will
-leave it, not a pre-existing fact — Phase 1 of this PR is documentation
-only for `legacy_parity_rows`, the "explained" bucket and
-`tools/native_parity_run.py`, each gated on cutover PR-3
-(`native_score_batch.py`, `#66`) merging before its own code is written.
-One piece is NOT gated on `#66` and IS real code already in this push,
-independent of everything `#66` supplies: making
-`native_parity_report.py`'s tolerance policy pluggable — see "the
-tolerance policy is now pluggable" below).** Three additions close the gap the
-root doc §4 and this doc's own "Diagrams" section both name today:
-`run_shadow_nightly` "has no production caller, only tests ... call it,"
-so in production `native_parity` never actually compares anything — a
-production run supplies no `parity_rows`, `_registered_handlers` defaults
-both sides to `{}`, and `compare_native_vs_legacy`'s own
-`_refuse_empty_inputs` raises `VALIDATION_FAILED` before any comparison
-runs, which `_run_stage` turns into a `"degraded"` receipt for this
-`OPTIONAL` stage (see "Outputs" below for why this is NOT the same claim
-as "writes an empty-input report" — no report is ever written either).
-None of the three
-changes `run_shadow_nightly`'s own stage-walk or `native_parity_handler`'s
-signature contract (both already correctly consume real
+**Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
+REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
+a manual/operator-invoked script, as `native_parity`'s production caller.
+The previous owner proved that script can never be more than manual: it
+calls `run_shadow_nightly`, which "has no production caller [and] needs
+14 caller-supplied stage handlers nothing builds" — a manual script
+outside any schedule is not what "the REAL nightly" means. This doc
+describes the design Phase 2 of this redo will leave it, not a
+pre-existing fact: Phase 1 (this push) is documentation only, for
+`legacy_parity_rows` and the new `native_parity` job kind together, both
+gated on cutover PR-7a (`#88`) merging first — `native_parity`'s native-side
+input is the `native_score_batch` job's staged `records.json`/`refusals.json`
+output PR-7a's design places there, so this redo cannot be implemented
+before that one lands. Cutover PR-3 (`native_score_batch.py`, `#66`) is
+already merged, unlike when the original PR-4 was written. One piece is
+untouched by this redo, real code already on `main`, independent of
+everything `#66`/`#88` supply: `native_parity_report.py`'s tolerance
+policy is already pluggable — see "the tolerance policy is now pluggable"
+below, unchanged.**
+
+`native_parity` closes the gap the root doc §4 and this doc's own
+"Diagrams" section both name: `run_shadow_nightly` "has no production
+caller, only tests ... call it," so in production `native_parity` today
+never actually compares anything — a production run supplies no
+`parity_rows`, `_registered_handlers` defaults both sides to `{}`, and
+`compare_native_vs_legacy`'s own `_refuse_empty_inputs` raises
+`VALIDATION_FAILED` before any comparison runs, which `_run_stage` turns
+into a `"degraded"` receipt for this `OPTIONAL` stage (see "Outputs"
+below for why this is NOT the same claim as "writes an empty-input
+report" — no report is ever written either). **This redo does not close
+that gap through `run_shadow_nightly` at all.** That function keeps its
+existing stage-walk and `native_parity_handler`'s existing signature
+contract completely unchanged (both already correctly consume real
 `legacy_rows`/`native_rows` dicts today — proven by
-`tests/test_v2_ops_native_shadow_render.py`); the gap is purely that
-nothing before this PR builds real dicts to hand them.
+`tests/test_v2_ops_native_shadow_render.py` — and stay exactly the
+test-only path they always were; nothing before this redo, or in it,
+builds real dicts to hand `run_shadow_nightly` in production). The gap
+closes through a SEPARATE production path: a new `native_parity` job
+kind, submitted by `supervisor.Service`'s own tick-loop sidecar —
+mirroring `computed_moves_refresh` (Part 4, `#54`) and `native_score_batch`'s
+own shadow submission (`#88`) byte-for-byte in shape — never through
+`build_legacy_job_requests`, so a broken parity submission can never
+abort a required legacy stage. That job's worker calls the exact same
+`compare_native_vs_legacy`/`native_parity_handler` functions
+`run_shadow_nightly` already calls, so the two paths — one test-only, one
+production — can never silently diverge in comparison logic: root doc
+§5's "one shared parity comparator" invariant, restated one level up as
+one shared CALLER of that comparator, reached two ways.
+
+Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
+
+- `supervisor.Service._reconcile_native_parity` — a new tick-loop sidecar
+  method, called from `Service.tick` (`supervisor.py:227`) right after
+  `self._reconcile_native_score_batch_shadow()` (`#88`, itself called
+  right after `self._reconcile_computed_moves_refresh()`,
+  `supervisor.py:241`) — so the tick's native-shadow sidecar chain reads
+  computed_moves_refresh → native_score_batch (shadow) → native_parity,
+  each stage's identity check a strict superset of what the one before it
+  already confirmed.
+- `nightly.submit_native_parity_if_ready` — the builder the sidecar calls,
+  mirroring `submit_computed_moves_refresh_if_ready` (`nightly.py:858`)/
+  `submit_native_score_batch_shadow_if_ready` (`#88`) in signature shape.
+- `nightly._native_parity_identity` — a cheap catalog-only identity check
+  mirroring `_computed_moves_identity` (`nightly.py:830`): finds the
+  latest succeeded `native_score_batch` job by its own idempotency key
+  (`"nightly:<as_of>:<scope_hash>:native_score_batch"`, `#88`'s own R6),
+  parses `(as_of, scope_hash)` out of it, and recovers the paired
+  succeeded `"score"` job's id with the SAME query `#88`'s own
+  `_native_score_batch_identity` already runs to find a session's
+  `"score"` job (`"nightly:<as_of>:<scope_hash>:score"`) — reused here
+  with `(as_of, scope_hash)` already known rather than searched for,
+  never a second, independently written lookup. Returns `(as_of,
+  scope_hash, score_job_id, native_score_batch_job_id)`, or `None` when
+  no succeeded `native_score_batch` job exists yet.
+- `stages.py::_native_parity_kind()` — a new `JobKind`, mirroring
+  `_native_score_batch_kind()` (`stages.py:271`) in shape:
+  `name="native_parity"`, `worker="native_parity"`,
+  `parameters=NativeParityParameters` (new, `RescoreParameters`-shaped —
+  only `expected_ids` and `input_bindings`; this job carries no scalar
+  data of its own, since every input it reads is job-bound),
+  `resource_classes=frozenset({"validation"})` (a pure comparison, no
+  provider fetch — the same classification `decision_evidence` already
+  has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
+  `checkpoint_contract="native_parity_report.v1.1"` (a minor version bump
+  from today's `native_parity_report.v1.0` — see "Outputs" below for the
+  one additive field), `namespaces=frozenset({"shadow", "smoke"})`.
+  `worker.py::dispatch` gains a `"native_parity"` branch routing to
+  `native_parity_report.run_native_parity_worker` (below), the same
+  lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
+  already uses (`worker.py:167-168`, `:198-200`).
+
+`nightly.GRAPH` gains a `"native_score_batch": ("score",)` node (`#88`),
+and `"native_parity"`'s own existing node (`nightly.py:58`) widens from
+`("score",)` to `("score", "native_score_batch")` — topological
+documentation only, for `run_shadow_nightly`'s whole-graph test-only
+walk; no submission path reads either edge (the same "documentation, not
+a submission source" rule Part 4 already established for
+`computed_moves_refresh`'s own node).
 
 - **`nightly.legacy_parity_rows(score_document: Mapping[str, Any]) ->
   dict[str, dict]`** (new, this package). Keys the legacy `score.json`
@@ -252,71 +326,72 @@ nothing before this PR builds real dicts to hand them.
   malformed element.
   `population_key`, `_population_key`, and `_action_score`'s own
   set-based check are all unchanged by this PR.
-- **`native_parity_report.py` gains a caller-supplied "explained" bucket**,
-  the mechanism for classifying a known structural difference (legacy's
-  stale-px rule; legacy finality drift — a prior D14 Phase 2 gate
-  investigation measured 212 stale-archive rows and 124 finality-drift
-  rows) as accepted rather than a defect, without
-  hiding the finding or touching `engine/v2/parity`'s comparator. New
-  `ROW_EXPLANATION_CODES = frozenset({"LEGACY_STALE_PX",
-  "LEGACY_FINALITY_DRIFT"})` and a new keyword-only parameter on both
-  `compare_native_vs_legacy` and `native_parity_handler`:
-  `row_explanations: Mapping[tuple[str, str], str] = {}`, keyed by
-  `(row_key, dimension)` — never by `row_key` alone, so explaining one
-  dimension of a row (say, `financial_diagnostics`, because legacy priced
-  it off a stale quote) can never silently swallow a genuine, unrelated
-  mismatch the SAME row has on another dimension (say, `verdicts`). A
-  `(row_key, dimension)` pair whose `dimension` was not itself compared,
-  whose `row_key` is not in `compared`, or whose pair did not actually
-  produce a mismatch (agreement needs no explaining, and accepting one
-  would hide a caller classifier that is itself wrong) is refused
-  `INVALID_REQUEST` — never a silent no-op annotation. A reason code
-  outside `ROW_EXPLANATION_CODES` is refused the same way: this is a
-  closed, named vocabulary, not a free-text field a caller can widen
-  without a doc change. The returned document gains `"explained": [...]`,
-  each entry the same shape as a `mismatches` entry
-  (`row_key`/`dimension`/`finding_fields`/`receipt`) plus `"reason"`; an
-  explained `(row_key, dimension)` is removed from `mismatches` and moved
-  to `explained`, never counted in both. `native_parity_handler`'s summary
-  gains `"explained": len(report["explained"])` alongside its existing
-  `"mismatches"` count. **The classifier itself — deciding which rows are
-  actually stale-px vs. finality-drift — is explicitly out of scope for
-  this PR, and not invented here**: no reusable stale-px/finality-drift
-  detector exists in production code today (`engine/v2/data/price_history.py`
-  has finality/staleness primitives but no per-row classifier over a scored
-  record; the D14 corpus's 212/124 counts were a one-off manual
-  classification during a Phase 2 gate investigation, never a callable
-  function). Until a follow-up PR builds one, `row_explanations` defaults
-  to `{}` and every real mismatch reports as a mismatch — this PR adds the
-  plumbing so a future classifier has somewhere correct to plug in, not a
-  guess at what that classifier should decide today. Tracked as a
-  follow-up issue, filed alongside this PR's Phase 2 push.
-- **`tools/native_parity_run.py`** (new, tools-composing layer — the one
-  place allowed to import both `engine.v2.ops` and `engine.v2.serving` in
-  one process, per `engine/v2/ops/native_shadow_render.py`'s own docstring
-  and the working precedent `tools/v2_dashboard_project.py` already sets
-  for composing `engine.v2.ops.bootstrap` with `engine.v2.serving`). This
-  is the real (manual, operator-invoked; not yet wired into any job graph
-  or the supervisor's tick loop — see "out of scope" below) production
-  caller that finally builds a non-empty `parity_rows` and calls
-  `run_shadow_nightly` with it: reads a session's already-written legacy
-  `score.json` (`nightly.legacy_parity_rows`, above); resolves the current
-  release (`engine.v2.scoring.release_bindings.resolve_release_binding`,
-  PR-1, already on `main`); reads one already-staged `events.json` of
-  `native_score_batch.NightlyEventInputs` (PR-3/`#66`'s own shape — this
-  PR does not build the per-night enumeration/staging of those events; it
-  accepts them as an explicit input file, exactly as
-  `run_native_score_batch_worker` itself does, and leaves "who stages
-  `events.json` for every `BoardRequest`" to cutover PR-6, a later PR in
-  this same cutover sequence); calls
-  `native_score_batch.assemble_score_batch_inputs` (PR-3) to get
-  `requests_by_key`; calls
-  `engine.v2.serving.native_shadow_render.build_native_bundle_rows`
-  (already on `main`) to get `native_rows`; and calls
-  `nightly.run_shadow_nightly(..., plan=..., parity_rows=(legacy_rows,
-  native_rows))`. It writes nothing to `source_root` and nothing to the
-  legacy board — see "Failure semantics" below for why a failure anywhere
-  in this script cannot touch the legacy nightly.
+- **`native_parity_report.run_native_parity_worker(parameters, root)`**
+  (new) — the `native_parity` job kind's worker entrypoint (dispatched
+  from `worker.py`, registered in `stages.py::_core_kinds`). Reads its two
+  job-bound inputs (`score.json` from the paired `"score"` job;
+  `records.json`/`refusals.json` from the paired `native_score_batch` job
+  — see "Inputs" below for exactly how `_native_parity_identity` finds
+  both), builds `legacy_rows`/`native_rows`/`native_refusals`, and calls
+  the SAME `compare_native_vs_legacy` (unchanged) and the new
+  `apply_native_refusals` (below) — see "Outputs" for what it writes.
+  This is the real (only) production caller `tools/native_parity_run.py`
+  was originally designed to be. **That script is dropped from this redo
+  entirely — no code for it was ever written** (confirmed against `main`:
+  neither the file nor `legacy_parity_rows`/`row_explanations` exist
+  today, so nothing needs migrating away from it), never built as a
+  parallel manual path alongside the job. There is exactly one way a real
+  `native_parity_report.json` gets produced in this codebase once Phase 2
+  lands, not two.
+- **`native_parity_report.apply_native_refusals(report, native_refusals) ->
+  dict`** (new) — the mechanism for "missing or refused native rows are
+  counted separately" (user decision, option (c)). `compare_native_vs_legacy`
+  itself is UNCHANGED — pure, refusal-blind, unaware `native_score_batch`
+  can refuse a row at all — so `run_shadow_nightly`'s own test-only path
+  (which has no refusals to give it) sees no behavior change.
+  `run_native_parity_worker` calls this AFTER `compare_native_vs_legacy`
+  returns: any key in the report's own `only_legacy` list that is ALSO a
+  key of `native_refusals` (population-key → refusal code, built from
+  `records.json`'s paired `refusals.json`) moves from `only_legacy` into a
+  NEW `"native_refused"` list (each entry `{"row_key": ..., "refusal_code":
+  ...}`), and is removed from `only_legacy` — never counted in both. A
+  `native_refusals` key that is NOT in `only_legacy` (the row was actually
+  compared, or was `only_native`) is left untouched:
+  `assemble_score_batch_inputs`'s own per-row either/or contract (PR-3)
+  already makes one row both scored and refused impossible within one
+  `records.json`/`refusals.json` pair, so this function trusts that
+  pairing rather than re-validating it, exactly as `legacy_parity_rows`
+  trusts `score.json`'s own shape once its own up-front validation
+  passes. `only_legacy` therefore narrows to its real meaning under this
+  redo: a legacy row `native_board_universe.board_requests` never even
+  enumerated as a `BoardRequest` (an unsupported strategy, the `DYN-SV`
+  wildcard) — never a row native attempted and explicitly refused, which
+  `native_refused` names instead.
+- **`native_parity_report._population_key_from_board_request_key(key) ->
+  str`** (new, private) — projects one `records.json`/`refusals.json` key
+  (the 4-field canonical `BoardRequest` string `#88` specifies,
+  `f"{ticker}|{strategy}|{event_date.isoformat()}|{session}"`) down to the
+  3-field `population_key` format `legacy_parity_rows` already uses, by
+  splitting on `"|"` into exactly 4 parts and calling
+  `engine.v2.ops.decision_validation.population_key({"ticker": ticker,
+  "strategy": strategy, "event_date": event_date})` — REUSING
+  `population_key`'s own join format rather than string-concatenating a
+  fourth time, so the two sides can never silently drift onto two
+  different separators or field orders. `session` is validated as present
+  (exactly 4 parts) but never folded into the key: legacy rows carry no
+  `session` field to join against. A key that does not split into exactly
+  4 parts is a batch-level `OpsError` (`VALIDATION_FAILED`) — matching
+  `legacy_parity_rows`'s own all-or-nothing malformed-input discipline —
+  raised before `run_native_parity_worker` builds `native_rows`/
+  `native_refusals` at all, never a per-row skip.
+
+**The original PR-4 design's "explained" bucket (`ROW_EXPLANATION_CODES`,
+`row_explanations`) is dropped from this redo, not carried forward** —
+see "Out of scope" below: no reusable stale-px/finality-drift classifier
+exists today, so there is nothing for it to plug into yet, and this redo
+does not invent one. A future PR can add it exactly as originally
+specified, against `compare_native_vs_legacy`'s unchanged signature,
+whenever a real classifier exists.
 
 **The tolerance policy is now pluggable, not hardcoded — this part of the
 PR is real code, already merged into this push, independent of `#66`.**
@@ -346,15 +421,34 @@ none of those values belong in this doc, the PR body, or an issue; only a
 adds the SEAM a ratified policy plugs into, not a guess at what it should
 contain.
 
-**Out of scope for this PR** (each a real gap, named rather than silently
-left implicit): the per-night enumeration of every `BoardRequest` and the
-staging of its `events.json` inputs (cutover PR-6); flipping
-`native_parity` or anything else onto a schedule, a job kind, or the
-supervisor's tick loop (no PR before Phase 7 changes legacy authority);
-the stale-px/finality-drift classifier itself (above); and building the
-actual user-approved, per-field `TolerancePolicy` object itself (the
-pluggable seam above takes it as a parameter — this PR does not construct
-one).
+**Out of scope for this redo** (each a real gap, named rather than
+silently left implicit): the stale-px/finality-drift classifier and the
+"explained" bucket mechanism the original PR-4 design specified (above —
+still no reusable classifier exists; a future PR adds it once one does,
+against `compare_native_vs_legacy`'s unchanged signature); a
+dashboard-facing "latest report" pointer path (this design's only durable
+location is the catalog-addressed `job_<id>#report` binding — see
+"Outputs" below); and building the actual user-approved, per-field
+`TolerancePolicy` object itself (the pluggable seam already in place
+takes it as a parameter — this redo does not construct one, and no
+tolerance value appears in this doc, a PR body, or an issue).
+
+**Corrected, not merely superseded: the original PR-4 design's own
+out-of-scope line said flipping `native_parity` "onto a schedule, a job
+kind, or the supervisor's tick loop" needed to wait for "Phase 7
+[to change] legacy authority" first.** That reasoning was wrong even at
+the time it was written, and two precedents that shipped since prove it:
+`computed_moves_refresh` (Part 4, `#54`) and `native_score_batch`'s own
+shadow submission (`#88`) both flip an OPTIONAL, shadow-only stage onto
+the supervisor's tick loop without touching legacy authority, because
+neither carries `store_domains` or any effect beyond `"staged"` — the
+same is true of `native_parity` here (`effects=("staged",)`, no
+`store_domains`, no scheduler edge from any required legacy stage to it).
+A job kind reaching the tick loop is not itself a legacy-authority
+change; only a `store_domains` write against a legacy-owned table, or a
+`GRAPH`/`_DAG_STAGES` edge a REQUIRED legacy stage depends on, would be —
+neither is true of `native_parity`, which is exactly why this redo can
+schedule it now, well before Phase 7.
 
 ## Inputs
 
@@ -432,6 +526,52 @@ one).
   `input_bindings={"events.json": <artifact ref>}` for the one staged
   events array.
 
+**Cutover PR-4 (redo)'s own input sourcing (design).**
+`submit_native_parity_if_ready` gathers nothing beyond what
+`_native_parity_identity` already found — unlike `native_score_batch`'s
+own sidecar, this job's body has no expensive board-universe enumeration
+or release resolution of its own, since every value it needs is already a
+committed job output:
+
+- **Legacy source.** `job_<score_job_id>#score` — the SAME `score.json`
+  `attempt_outputs` binding every other legacy-dependent job already reads
+  (`_job_output("score", keys)`, `nightly.py:180`), decoded into
+  `legacy_rows` via `nightly.legacy_parity_rows` (above), unchanged from
+  the original PR-4 design.
+- **Native source, per `#88`.** `job_<native_score_batch_job_id>#records`
+  and `job_<native_score_batch_job_id>#refusals` — the `native_score_batch`
+  job's own staged outputs, keyed by the canonical `BoardRequest` string
+  (`#88`'s own note: "left for the parity job's own PR to implement, but
+  specified here precisely enough to build against without a second
+  design pass" — this redo is that PR). Both bindings resolve through the
+  same `input_bindings.resolve_bindings`/`_resolve_job_binding` mechanism
+  `score.json` uses — no new binding mechanism. The `native_parity`
+  `JobSpec`'s `dependency_job_ids` carries BOTH `score_job_id` and
+  `native_score_batch_job_id`, since `_resolve_job_binding` refuses any
+  binding whose dependency is not declared (`input_bindings.py:34-36`) —
+  each binding is checked against `spec.dependency_job_ids` independently,
+  so a spec that named only one of the two jobs would fail to resolve the
+  other's binding.
+- **`tolerance_policy`.** Unchanged pluggable seam from `#72`: defaults to
+  `SCORE_RECORD_V1` (exact for every field). `NativeParityParameters`
+  carries no tolerance data of its own — a future, user-ratified
+  `TolerancePolicy` is instantiated in code wherever that ratification
+  lives and passed to `compare_native_vs_legacy` directly, never
+  round-tripped through a job parameter (matching `#72`'s own stance that
+  no tolerance value belongs in a doc, a PR body, an issue, or — this
+  redo adds — a job's persisted parameters row).
+
+`native_score_batch.py`'s own output schema changes as part of THIS PR,
+not `#88`'s: `records.json`'s `"records"` field becomes an object keyed
+by the canonical `BoardRequest` string instead of a bare array (new
+schema version `native_score_batch_records.v2.0`), and `refusals.json`
+gains the identical keying — exactly the change `#88`'s own design
+specifies and explicitly defers to "the parity job's own PR." See
+`native_score_batch.py`'s own module docs (updated in the same push as
+this doc, Phase 2 of this redo) for the schema-version bump.
+`run_native_score_batch_worker`'s other behavior (assembly, the no-fit
+guard, per-row refusal codes) is unchanged by this redo.
+
 ## Outputs
 
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
@@ -492,25 +632,43 @@ one).
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
-- Cutover PR-4 (design; see "Primary contracts" above): `native_parity_report.json`
-  is NOT written in production today, and this correction matters, not
-  only the file it is written to — `compare_native_vs_legacy`'s own
+- Cutover PR-4 (redo; see "Primary contracts" above): `native_parity_report.json`
+  is NOT written in production today — `run_shadow_nightly`'s own
   `_refuse_empty_inputs` raises `VALIDATION_FAILED` on an empty
-  `legacy_rows`/`native_rows`/no shared key, `native_parity_handler`
-  propagates that raise, and `_run_stage` catches it for the `OPTIONAL`
-  `native_parity` stage as a `"degraded"` receipt — `write_parity_report`
-  is never reached, so no file lands on disk. That is consistent with,
-  not in tension with, "`run_shadow_nightly` has no production caller,
-  only tests ... call it": today's only callers hand it real dicts (the
-  tests) or nothing at all (nobody in production), never an empty
-  `parity_rows` that reaches `compare_native_vs_legacy` and then writes a
-  report anyway. Once `tools/native_parity_run.py` supplies real rows,
-  `native_parity_report.json` will, for the first time in production,
-  carry a real `"compared"`/`"only_legacy"`/`"only_native"`/`"mismatches"`
-  split, plus the new `"explained"` list (each entry `mismatches`-shaped
-  plus `"reason"`) for a caller-classified known structural difference.
-  Still private-shadow-only, same as every other artifact in this bullet
-  list; nothing here writes to the legacy board.
+  `legacy_rows`/`native_rows`/no shared key, and nothing in production
+  ever calls `run_shadow_nightly` at all ("`run_shadow_nightly` has no
+  production caller, only tests ... call it" — still true, unchanged by
+  this redo). Once the `native_parity` job kind lands (Phase 2 of this
+  redo), its worker (`run_native_parity_worker`) writes the report as an
+  ORDINARY staged attempt output, `name="report"`, durably addressed
+  `job_<native_parity job id>#report` — resolvable through
+  `input_bindings.resolve_bindings` exactly like `score.json`'s own
+  `job_<id>#score` binding, and reusable by a future caller the same way
+  (`dependency_job_ids` plus `input_bindings={"native_parity_report.json":
+  "job_<id>#report"}`). This CLOSES the non-atomic-write risk the original
+  PR-4 design named for `write_parity_report`'s bare `Path.write_text`
+  call: the new report is written through the same executor-owned
+  staged-attempt-output mechanism `records.json`/`score.json` already
+  use, which stages privately and only becomes visible as a committed
+  output once the attempt is recorded `succeeded` — a killed worker
+  leaves no output row at all, never a half-written file a caller could
+  read. `write_parity_report` itself is unchanged and still used only by
+  `run_shadow_nightly`'s own test-only path (its non-atomic-write shape is
+  immaterial there: nothing in production reads a file that function
+  writes). No dashboard-facing "latest" pointer path is added by this
+  redo (out of scope, above) — a reader finds the report by job id (`ops
+  get`/`ops logs`/`ops explain <job_id>`), the same way every other
+  shadow-only artifact in this package is read today. The report's own
+  schema gains one additive field, `"native_refused": [...]`
+  (`apply_native_refusals`, above) — `SCHEMA_VERSION` bumps
+  `native_parity_report.v1.0` → `v1.1` for this reason; every existing
+  field (`compared`/`only_legacy`/`only_native`/`mismatches`/
+  `tolerance_policy_id`) keeps its exact prior meaning, except that
+  `only_legacy` now excludes rows `native_refused` claims instead of
+  including them — a meaning NARROWING, not a breaking removal: no
+  production caller has ever populated `only_legacy` with real refusal
+  data before this redo. Still private-shadow-only, same as every other
+  artifact in this bullet list; nothing here writes to the legacy board.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the EXISTING `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never
@@ -1454,108 +1612,91 @@ network, or database access.
   the correct, by-design outcome, not a violation of this idempotency
   guarantee.
 
-### Cutover PR-4: real `parity_rows` (the 4c R1–R6 template)
+### `run_native_parity_worker`'s own failure semantics (Cutover PR-4 redo, the 4c R1–R6 template)
 
-**A `native_parity` failure never fails or alters the legacy nightly, at
-any layer this PR touches.** This restates and extends an existing
-invariant (`native_parity` is `OPTIONAL` in `GRAPH`; `_run_stage` degrades
-rather than raises for an `OPTIONAL` stage), not a new one: `nightly.py`'s
-own stage-walk is unchanged by this PR. What is new is the composing
-script sitting entirely outside that walk — `tools/native_parity_run.py`
-reads the legacy `score.json` (never writes to `source_root`), and
-everything it writes lands under `private_root`, exactly like
-`run_shadow_nightly`'s existing shadow-only contract. A crash anywhere in
-this script — a bad release, a malformed `events.json`, a `score_one`
-exception `build_native_bundle_rows` deliberately lets propagate — stops
-before `run_shadow_nightly` is even called, or stops `run_shadow_nightly`
-partway through a `NightlyReceipt` that is itself private and never
-consumed by the legacy board. There is no code path from this script back
-into `engine.dashboard.nightly`.
+**A `native_parity` failure never fails, blocks, or slows the legacy
+board, at any layer this redo touches — stronger even than `OPTIONAL`'s
+usual `run_shadow_nightly`-report-walk meaning, which this job is never
+part of.** Reached only through the tick sidecar, `native_parity` carries
+no `store_domains` and no scheduler edge FROM any required legacy stage TO
+it (`dependency_job_ids` runs the other direction: `native_parity` depends
+on `score`/`native_score_batch`, never the reverse), so a failed or wedged
+`native_parity` attempt can never block, degrade, or delay `"score"`,
+`"decision_commit"`, or publication — the SAME invariant
+`computed_moves_refresh` (Part 4) and `native_score_batch` (`#88`) already
+hold, extended here rather than re-argued from scratch.
 
-- **R1, missing input.** `legacy_parity_rows` raises `OpsError`
-  (`VALIDATION_FAILED`, matching `decision_population`'s own sibling
-  refusal code — see "Primary contracts" above) for the whole call —
-  never a per-row skip, and never `population_key`'s own `.get(key, "")`
-  substitution reused here — the moment any row is missing a non-empty
-  `ticker`/`strategy`/`event_date`, two rows share one `population_key`
-  value, or `"rows"` is present but is not a list of mappings (a non-list
-  value, or any non-mapping element, before `population_key` is ever
-  called on it — never a bare `TypeError`/`AttributeError` from that
-  call). A `score_document` missing `"rows"` entirely still returns `{}`,
-  not a refusal: there is no row to be malformed or to collide. This is a
-  REAL join-format risk stated explicitly, not a defensive-only note:
-  `population_key` and
-  `native_row_key` must format `event_date` identically (e.g. both an ISO
-  date string, never one side a `pandas.Timestamp.__str__()` and the other
-  a plain date string) or a legitimately-shared event silently lands in
-  `only_legacy`/`only_native` instead of `compared` — the acceptance test
-  for this PR asserts the two functions produce the SAME key string for
-  one real event's row pair, not merely that each behaves consistently on
-  its own side. `compare_native_vs_legacy`'s own existing
-  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty side or no shared
-  key at all) is unchanged and still the backstop when the join produces
-  nothing. `row_explanations` validation (above) is itself a missing/
-  invalid-input refusal, raised before any row is reclassified: an unknown
-  reason code, an unmatched `(row_key, dimension)`, or a pair that never
-  mismatched is `INVALID_REQUEST`, exactly the same typed shape
-  `native_parity_report.py` already raises elsewhere in this module.
-  `tools/native_parity_run.py` raises (never refuses per-row) on a missing
-  `score.json`/`events.json`/unresolvable release — the whole run has
-  nothing to compare without them; a per-row `assemble_score_batch_inputs`
-  refusal (PR-3) is logged and excluded from `requests_by_key`, never
-  raised, matching that function's own per-row-refusal contract.
-- **R2, cache.** None of this PR's own. `legacy_parity_rows` and
-  `compare_native_vs_legacy`'s `row_explanations` handling are both pure,
-  no I/O. `tools/native_parity_run.py` resolves the release binding once
-  per run (PR-1's own cached member resolution inside that one call, not
-  re-cached here) and reads `score.json`/`events.json` once each; a rerun
-  re-reads both from disk rather than reusing a prior in-process result.
-- **R3, retry.** This script has no retry of its own and is not a job
-  kind (`native_parity` stays in `NO_JOB_STAGES`, unchanged): a failed
-  manual run is simply re-invoked by the operator, exactly like
-  `forward_calendar_store.run_forward_calendar_refresh`'s own "no
-  production caller, only its own test module" runners before they gained
-  a `JobKind`.
-- **R4, transaction.** Not applicable: no catalog writes. `write_parity_report`
-  (unchanged by this PR) writes one JSON file after
-  `compare_native_vs_legacy` fully returns; there is no multi-step commit
-  to make atomic.
-- **R5, partial write.** `write_parity_report` calls `comparison` fully
-  before writing, and calls `Path.write_text` exactly once — but that call
-  is a plain, non-atomic write (no temp-file-plus-rename, unlike
-  `ArtifactStore`'s atomic publication elsewhere in this package), and
-  this PR does not change that. A process killed mid-`write_text` can
-  leave a truncated or invalid-JSON `native_parity_report.json` on disk;
-  this PR names that risk rather than silently inheriting it, and does
-  not widen it — `write_parity_report`'s call site and body are both
-  unchanged by this PR. Recovery is by rerun, not atomicity: a truncated
-  report has no attempt/lease state of its own to reconcile (this is a
-  manual, operator-invoked script, not a supervised job — see "R3, retry"
-  above), so the operator re-invokes `tools/native_parity_run.py`, which
-  overwrites the file with a fresh, complete write. `run_shadow_nightly`'s
-  own `receipt_path` write (if given) has the identical non-atomic shape
-  and the identical rerun-to-recover story, both pre-existing and both
-  unchanged by this PR.
-- **R6, idempotency.** Same `score.json` + same `events.json` + same
-  resolved release + same `row_explanations` + same `tolerance_policy` →
-  the same `native_parity_report.json`, byte-for-byte: `legacy_parity_rows`
-  is a pure function of `score_document`, `assemble_score_batch_inputs`/
-  `build_native_bundle_rows` are pure functions of their inputs (PR-3's
-  own R6; `build_native_bundle_rows`'s `score_one` calls are
-  content-addressed), and `compare_native_vs_legacy` is a pure function of
-  `(legacy_rows, native_rows, dimensions, row_explanations, tolerance_policy)`.
-  `tolerance_policy` defaults to `SCORE_RECORD_V1` and the report records
-  only `tolerance_policy_id`, never the policy's own rules, so a change
-  is guaranteed a different report only when it changes the resulting
-  comparison outcome or changes `policy_id` itself; a policy object
-  swapped for a different one that happens to keep the same `policy_id`
-  and produce the same comparison result yields the same report. A
-  deliberate policy change producing a different comparison is the
-  correct, by-design outcome, not a violation of this invariant.
-  Promoting a new release between two runs changes the resolved bindings
-  and therefore the native side's values — a different release genuinely
-  producing a different report is the correct, by-design outcome,
-  matching PR-3's own R6 note for the identical reason.
+- **R1, missing input.** `_native_parity_identity` returning `None` (no
+  succeeded `native_score_batch` job yet) is not a refusal — the sidecar
+  submits nothing and tries again next tick, exactly like
+  `computed_moves_refresh`/`native_score_batch` waiting on their own
+  prerequisites. Inside the worker: an unparseable `BoardRequest` key (not
+  exactly 4 `"|"`-separated fields), a `records.json`/`refusals.json` that
+  fails to decode, or `compare_native_vs_legacy`'s own existing
+  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty
+  `legacy_rows`/`native_rows`/no shared key) each fail the job's OWN
+  attempt — never a partial or synthetic-empty report. This is a REAL
+  join-format risk stated explicitly, not a defensive-only note:
+  `population_key` and `_population_key_from_board_request_key` must
+  format `event_date` identically (e.g. both an ISO date string, never one
+  side a `pandas.Timestamp.__str__()` and the other a plain date string)
+  or a legitimately-shared event silently lands in `only_legacy`/
+  `only_native` instead of `compared` — the acceptance test for this
+  redo's implementation PR asserts the two functions produce the SAME key
+  string for one real event's row pair, not merely that each behaves
+  consistently on its own side. A failed `native_parity` attempt has no
+  descendant job (nothing declares it in `dependency_job_ids`), so
+  `block_descendants` never reaches anything the legacy board needs.
+- **R2, cache.** Once a job exists under today's `(as_of, scope_hash)` key,
+  in any state, `submit_native_parity_if_ready` never rebuilds or
+  resubmits it — the existence check runs before any input is read. A new
+  `self._native_parity_memo` (the same `_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped
+  schedule and attempt cap `computed_moves_refresh`/`native_score_batch`
+  already use) throttles repeated no-op ticks the same way theirs do —
+  cheap here too: `_native_parity_identity` is two indexed `SELECT`s, no
+  pandas, no provider call, so a `None` identity costs nothing the memo
+  needs to protect against; the memo only matters once a
+  `native_score_batch` job HAS succeeded and a submission attempt (not the
+  comparison itself, which only ever runs inside one attempt) needs
+  throttling against repeat failure.
+- **R3, retry.** The job's own `RetryPolicy("bounded", 2, (5, 30))` covers
+  a transient worker crash (a disk error reading a bound input, for
+  example); a session whose key already exists — succeeded OR failed — is
+  never resubmitted by the sidecar again (R2).
+- **R4, transaction.** Submitted alone through `submission.submit` (never
+  `submit_graph`), exactly like `computed_moves_refresh`/`native_score_batch`,
+  so a broken parity submission can never make a REQUIRED job's admission
+  all-or-nothing with it. No head-commit race applies either
+  (`effects=("staged",)`, no `store_domains` — `native_parity` commits no
+  snapshot head and cannot race `"score"`'s own commit or anyone else's).
+- **R5, partial write.** None, by construction: the report is written
+  through the job executor's own staged-attempt-output mechanism (see
+  "Outputs" above) — a killed worker leaves an attempt with no recorded
+  `"report"` output at all, never a truncated file. This CLOSES the
+  specific risk the original PR-4 design named for `write_parity_report`'s
+  bare, non-atomic `Path.write_text` call; that function is unchanged and
+  still used only by `run_shadow_nightly`'s own test-only path, where the
+  risk was always immaterial (nothing in production reads its output).
+- **R6, idempotency.** Same `score.json` + same `records.json`/
+  `refusals.json` + same `tolerance_policy` (code-selected, not job data —
+  see "Inputs" above) → the same `native_parity_report.json`, byte for
+  byte: `legacy_parity_rows`, `_population_key_from_board_request_key`,
+  `compare_native_vs_legacy`, and `apply_native_refusals` are all pure
+  functions of their arguments (no wall-clock read, no random draw). The
+  idempotency key, `"nightly:<as_of>:<scope_hash>:native_parity"`, ties a
+  re-run to the SPECIFIC `native_score_batch` identity
+  `_native_parity_identity` selected, never session alone — the same
+  reasoning `#88`'s own R6 gives for `native_score_batch`'s key: a newer
+  succeeded `native_score_batch` job for the same session under a
+  DIFFERENT `scope_hash` is a genuinely different comparison and gets a
+  distinct key; a retry that reproduces the identical `scope_hash` still
+  dedupes. Promoting a new release between two `native_score_batch` runs
+  changes the resolved bindings and therefore the native side's values —
+  a different release genuinely producing a different report is the
+  correct, by-design outcome, matching PR-3's own R6 note for the
+  identical reason; because that changes `native_score_batch`'s own
+  `scope_hash`-keyed identity, it also changes which `native_score_batch`
+  job `native_parity` reads, not merely what it reads there.
 
 ## Invariants
 
@@ -1628,6 +1769,8 @@ flowchart TD
     features --> model_evidence
     score --> decision_validation
     score -.-> native_parity
+    score -.-> native_score_batch
+    native_score_batch -.-> native_parity
     decision_validation --> decision_commit
     decision_commit --> export
     decision_commit --> backup
@@ -1639,18 +1782,22 @@ flowchart TD
     publication --> delivery
 
     classDef optional stroke-dasharray: 4 3
-    class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh optional
+    class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh,native_score_batch optional
 ```
 
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
 blocks the graph. This diagram is the *shadow* graph: `build_nightly_plan`
 stamps `graph_order()`'s output into every plan's `"order"` field, and
-`run_shadow_nightly` is the only function that walks it whole, inline,
-including `native_parity` — it has no production caller, only
-`tests/test_v2_ops_legacy_workflows.py` and
-`tests/test_v2_ops_native_shadow_render.py` call it. `computed_moves_refresh`
-(Part 4) is a real submittable job kind, unlike `native_parity` — see below
-for how production submission reaches it.
+`run_shadow_nightly` is the only function that walks it whole, inline — it
+has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and
+`tests/test_v2_ops_native_shadow_render.py` call it, for every stage
+including `native_parity`. `computed_moves_refresh` (Part 4),
+`native_score_batch` (`#88`), and — as of this redo — `native_parity` are
+all real submittable job kinds reached a DIFFERENT way: each through its
+own tick-loop sidecar (`Service._reconcile_computed_moves_refresh`/
+`_reconcile_native_score_batch_shadow`/`_reconcile_native_parity`), never
+through this graph's own walk — see "Outputs"/"Failure semantics" above
+for how production submission reaches each one.
 
 Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
 only production caller, `cli.py`, always passes `include_prerequisites=False`,
@@ -1660,23 +1807,30 @@ so `_stage_sequence` returns a second, separately hand-maintained tuple,
 has `decision_validation`/`decision_commit`; `ledger_export` for `export`;
 `engineering_gate` for `engineering`) — and which never contains
 `native_parity` at all: in production `native_parity` is simply absent
-from the submitted stage list, not removed by a filter. `NO_JOB_STAGES`
-(currently `{"native_parity"}`) only does work on the other branch,
-`include_prerequisites=True` (test-only), where `_stage_sequence` instead
-returns `plan["order"]` (this diagram's order) and strips `NO_JOB_STAGES`
-from it before returning. `computed_moves_refresh` is not in `_DAG_STAGES`
+from the submitted stage list, not removed by a filter. **Corrected by
+this redo:** `NO_JOB_STAGES` used to read `frozenset({"native_parity"})` —
+true only while `native_parity` had no job kind at all. Now that it does
+(Cutover PR-4 redo, above), `NO_JOB_STAGES` is empty, and `_stage_sequence`'s
+own by-name filter (the one already excluding `computed_moves_refresh`
+from a prerequisite-inclusive, test-only `plan["order"]` walk, below)
+gains `"native_parity"` alongside it, for the identical reason: a real job
+kind that is nonetheless never submitted through
+`_DAG_STAGES`/`build_legacy_job_requests` must still be excluded from the
+test-only walk's OUTPUT by name, since it is no longer excluded for free
+by having "no job" at all. `computed_moves_refresh` is not in `_DAG_STAGES`
 either, and — unlike in the first cut of Part 4 — `_stage_sequence` never
 prepends it in native mode any more: `refresh_mode="native"` prepends only
 `("refresh",)` now, exactly as before this stage existed, and
 `_NATIVE_ACTION_STAGES` maps only `"refresh"`. In legacy mode,
-`_stage_sequence` still filters `"computed_moves_refresh"` out of a
-prerequisite-inclusive `plan["order"]` walk explicitly, by name, since it is
-no longer a member of `_NATIVE_ACTION_STAGES` to fall out of that check for
-free. The stage reaches production submission through a FOURTH path
-entirely, outside `_stage_sequence`/`build_legacy_job_requests` altogether:
+`_stage_sequence` filters both `"computed_moves_refresh"` and, from this
+redo on, `"native_parity"` out of a prerequisite-inclusive `plan["order"]`
+walk explicitly, by name, since neither is a member of
+`_NATIVE_ACTION_STAGES` to fall out of that check for free. Both stages
+reach production submission through a FOURTH path entirely, outside
+`_stage_sequence`/`build_legacy_job_requests` altogether:
 `supervisor.Service`'s own tick loop. See "Outputs"/"Failure semantics"
-above for `submit_computed_moves_refresh_if_ready` and why it was pulled out
-of the graph-submission path (Opus BLOCK(3)).
+above for `submit_computed_moves_refresh_if_ready`/`submit_native_parity_if_ready`
+and why each was pulled out of the graph-submission path.
 
 ### CLI → catalog → coordinator effect
 
