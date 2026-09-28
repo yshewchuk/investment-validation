@@ -57,8 +57,10 @@ def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:
     ``OpsError``) when:
     - ``score_document["rows"]`` is present but is not a list;
     - any element of that list is not a mapping;
-    - any row is missing, or has an empty/falsy, ``ticker``, ``strategy``,
-      or ``event_date``;
+    - any row is missing, or has a non-string or empty/falsy, ``ticker``,
+      ``strategy``, or ``event_date``;
+    - any row's ``ticker`` or ``strategy`` contains the ``"|"``
+      ``population_key`` delimiter;
     - two rows produce the same ``population_key`` value.
     """
     if "rows" not in score_document:

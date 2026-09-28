@@ -341,11 +341,14 @@ a submission source" rule Part 4 already established for
   agree — a plain `{key: row for row in rows}` comprehension in
   `legacy_parity_rows` would then silently keep whichever row iterated
   last and drop the other with no trace. `legacy_parity_rows` therefore
-  validates every row before keying any of them: a missing/empty
-  `ticker`/`strategy`/`event_date`, OR two rows sharing one
-  `population_key` value, each raises `OpsError` — matching
+  validates every row before keying any of them: a missing, non-string,
+  or empty `ticker`/`strategy`/`event_date`; a `ticker` or `strategy`
+  containing the `"|"` `population_key` delimiter (CodeRabbit round 3 —
+  `population_key` joins on `"|"`, so an unescaped delimiter inside a
+  field would let two distinct rows collide under one key); OR two rows
+  sharing one `population_key` value — each raises `OpsError` — matching
   `decision_population`'s own code, `VALIDATION_FAILED` (detail naming
-  the row index/missing field, or the repeated key and both rows'
+  the row index/offending field, or the repeated key and both rows'
   indices) — for the WHOLE call, before any dict is constructed: a
   batch-level refusal, never a per-row skip or a last-write-wins
   collision, so a malformed or duplicate-keyed `score.json` is never
