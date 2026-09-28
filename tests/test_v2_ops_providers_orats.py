@@ -448,6 +448,15 @@ def test_run_daily_market_refresh_a_reverted_ticker_with_new_provenance_is_recom
     assert reverted["status"] == "complete"
     assert _committed_rows(conn, store, reverted["candidate_snapshot_id"])["AAA"]["spot"] == 100.0
 
+    audit = json.loads(conn.execute(
+        "SELECT changeset_json FROM data_changesets ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()["changeset_json"])
+    ref = audit["result_dataset_version_ref"]
+    stored_version = conn.execute(
+        "SELECT manifest_hash FROM data_dataset_versions WHERE dataset_version_id = ?",
+        (ref["dataset_version_id"],)).fetchone()
+    assert stored_version["manifest_hash"] == ref["manifest_hash"]
+
 
 def test_refresh_plan_table_name_mismatch_is_contract_mismatch(tmp_path):
     document = {"catalog_path": str(tmp_path / "ops.sqlite"),

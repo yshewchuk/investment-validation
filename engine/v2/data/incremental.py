@@ -987,6 +987,30 @@ def build_daily_market_candidate(parent: manifests.ResolvedSnapshot, store: Arti
         rewritten_partitions=len(merge.changed_partitions))
 
 
+def _reconciled_changeset(c: Any, changeset: ChangeSet,
+                          changeset_hash: str) -> tuple[ChangeSet, str]:
+    stored_version = c.execute(
+        "SELECT manifest_hash FROM data_dataset_versions WHERE dataset_version_id = ?",
+        (changeset.result_dataset_version_ref.dataset_version_id,)).fetchone()
+    if (stored_version is not None
+            and stored_version["manifest_hash"] != changeset.result_dataset_version_ref.manifest_hash):
+        # issue #97 review fix: a fragment reused with different (stored)
+        # provenance changes that table's manifest_hash without changing its
+        # dataset_version_id (commit_snapshot's own fragment/dataset-version
+        # reconciliation, engine/v2/data/catalog.py). candidate.changeset was
+        # built before that reconciliation ran, so it can still carry the
+        # stale, unreconciled manifest_hash here -- rebuild it from the row
+        # commit_snapshot actually just stored, so this audit row can never
+        # cite a manifest_hash inconsistent with data_dataset_versions.
+        changeset = dataclasses.replace(
+            changeset,
+            result_dataset_version_ref=dataclasses.replace(
+                changeset.result_dataset_version_ref,
+                manifest_hash=stored_version["manifest_hash"]))
+        changeset_hash = content_hash(to_document(changeset))
+    return changeset, changeset_hash
+
+
 def _record_candidate_references(c: Any, committed_receipt_id: str,
                                  candidate: DailyMarketCandidate, clock) -> None:
     coverage = candidate.coverage
@@ -1005,21 +1029,23 @@ def _record_candidate_references(c: Any, committed_receipt_id: str,
     elif tuple(existing_coverage) != (coverage_hash, coverage_json):
         raise errors.fail("IDENTITY_CONFLICT", "coverage identity has conflicting content")
 
-    changeset_json = canonical_json(to_document(candidate.changeset))
+    changeset, changeset_hash = _reconciled_changeset(
+        c, candidate.changeset, candidate.changeset_hash)
+    changeset_json = canonical_json(to_document(changeset))
     existing_changeset = c.execute(
         "SELECT changeset_hash, changeset_json FROM data_changesets "
-        "WHERE changeset_id = ?", (candidate.changeset.changeset_id,)).fetchone()
+        "WHERE changeset_id = ?", (changeset.changeset_id,)).fetchone()
     if existing_changeset is None:
         c.execute(
             "INSERT INTO data_changesets (changeset_id, snapshot_id, import_receipt_id, "
             "table_name, old_dataset_version_id, new_dataset_version_id, changeset_hash, "
             "changeset_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (candidate.changeset.changeset_id, candidate.snapshot.snapshot_id,
+            (changeset.changeset_id, candidate.snapshot.snapshot_id,
              committed_receipt_id, TABLE_NAME,
-             candidate.changeset.base_dataset_version_ref.dataset_version_id,
-             candidate.changeset.result_dataset_version_ref.dataset_version_id,
-             candidate.changeset_hash, changeset_json, format_timestamp(clock.now())))
-    elif tuple(existing_changeset) != (candidate.changeset_hash, changeset_json):
+             changeset.base_dataset_version_ref.dataset_version_id,
+             changeset.result_dataset_version_ref.dataset_version_id,
+             changeset_hash, changeset_json, format_timestamp(clock.now())))
+    elif tuple(existing_changeset) != (changeset_hash, changeset_json):
         raise errors.fail("IDENTITY_CONFLICT", "changeset identity has conflicting content")
 
     for revision in candidate.merge.incoming_revisions:
