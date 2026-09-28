@@ -451,6 +451,29 @@ def test_stage_release_refuses_two_bindings_for_the_same_role_strategy_clock(tmp
     assert not (tmp_path / "releases" / "r1" / "manifest.json").exists()
 
 
+def test_stage_release_refuses_bindings_sharing_role_and_strategy_across_different_clocks(tmp_path):
+    """Two bindings for the same (role, strategy_id) but different decision_clock_id are
+    not distinguishable by scoring.release_bindings._resolve_model_bindings (keyed only by
+    "{role}:{strategy_id}"), so they must be refused as DUPLICATE_BINDING too, not just an
+    exact (role, strategy_id, decision_clock_id) repeat."""
+    release, inventory, payloads = _fixture("r1")
+    first = release.bindings[0]
+    second = ModelBinding(
+        binding_id="b2", model_id=first.model_id, role=first.role,
+        strategy_id=first.strategy_id, decision_clock_id="entry-open",
+        adapter=first.adapter, feature_order=first.feature_order,
+        output_names=first.output_names, members=first.members,
+    )
+    release = ModelRelease(
+        release_id=release.release_id, deployment_id=release.deployment_id,
+        bindings=(first, second),
+    )
+    with pytest.raises(StagingRefused) as error:
+        stage_release(tmp_path, release, inventory, payloads)
+    assert "DUPLICATE_BINDING" in [item.code for item in error.value.issues]
+    assert not (tmp_path / "releases" / "r1" / "manifest.json").exists()
+
+
 def test_promote_refuses_a_staged_manifest_with_duplicate_bindings(tmp_path):
     """Simulates a release staged by a version of stage_release that predates the
     duplicate-binding gate (or any staging path that forgot to call it): write a

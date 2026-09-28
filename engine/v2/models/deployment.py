@@ -289,18 +289,27 @@ def _read_manifest(root: Path, release_id: str) -> StagedManifest | None:
 
 
 def _duplicate_binding_issues(release: ModelRelease) -> tuple[ReleaseIssue, ...]:
-    """Every ``(role, strategy_id, decision_clock_id)`` key bound at most once.
+    """Every ``(role, strategy_id)`` pair bound at most once.
 
-    Self-contained on ``release`` alone -- no ``inventory`` needed -- so both
+    Deliberately NOT clock-qualified: ``scoring.release_bindings.
+    _resolve_model_bindings`` resolves its runtime catalog by
+    ``f"{role}:{strategy_id}"`` alone, and nothing anywhere filters
+    candidate bindings by ``decision_clock_id`` before that lookup runs. A
+    release with two bindings sharing a ``(role, strategy_id)`` but
+    different ``decision_clock_id`` values would stage/promote cleanly
+    under a clock-qualified check, then make every score for that role/
+    strategy fail with ``ModelNotReady("ambiguous binding")`` at read time
+    -- so this check uses the SAME coarser key scoring does. Self-contained
+    on ``release`` alone -- no ``inventory`` needed -- so both
     ``_compatibility_issues`` (staging, cross-checked against the inventory
     too) and ``_swap_pointer`` (promote/rollback, re-verified independent of
-    whatever staged the manifest) share this ONE definition of "no duplicate
-    inference binding".
+    whatever staged the manifest) share this ONE definition of "no
+    ambiguous inference binding".
     """
     issues: list[ReleaseIssue] = []
     seen = set()
     for binding in release.bindings:
-        key = (binding.role, binding.strategy_id, binding.decision_clock_id)
+        key = (binding.role, binding.strategy_id)
         path = f"$.bindings[{binding.binding_id}]"
         if key in seen:
             issues.append(ReleaseIssue(path=path, code="DUPLICATE_BINDING", detail=repr(key)))
@@ -327,18 +336,12 @@ def _compatibility_issues(
             detail=f"{release.release_id} != {inventory.release_id}",
         ))
     issues.extend(_duplicate_binding_issues(release))
-    duplicate_keys = {issue.detail for issue in issues if issue.code == "DUPLICATE_BINDING"}
     by_key = {binding.key: binding for binding in inventory.bindings}
     seen = set()
     for binding in release.bindings:
         key = (binding.role, binding.strategy_id, binding.decision_clock_id)
+        seen.add(key)
         path = f"$.bindings[{binding.binding_id}]"
-        if repr(key) in duplicate_keys:
-            if key in seen:
-                continue
-            seen.add(key)
-        else:
-            seen.add(key)
         counterpart = by_key.get(key)
         if counterpart is None:
             issues.append(ReleaseIssue(path=path, code="UNBOUND_IN_INVENTORY", detail=repr(key)))
