@@ -1151,21 +1151,28 @@ class Service:
         self.lock.release()
 
 
-def serve(service, *, once=False, until=None):
-    """Tick until stopped: ``once`` for a single idle pass, or ``until`` when
-    the caller owns a completion predicate (the nightly trigger's own
-    "every job of the submitted plan is terminal"). ``until`` is checked
-    after each tick, never before ``service.start()``, so the recovery pass a
-    start performs always runs.
+def serve(service, *, once=False, until=None, deadline_at=None):
+    """Tick until stopped: ``once`` for a single idle pass, ``until`` when the
+    caller owns a completion predicate, or ``deadline_at`` (an absolute,
+    ``service.clock``-comparable datetime) as a hard wall-clock stop checked
+    every tick alongside ``until`` -- never before ``service.start()``, so the
+    recovery pass a start performs always runs. Returns ``"deadline_exceeded"``
+    if the deadline fired before ``until``/``once`` did, else ``"until"`` (an
+    ``until`` predicate fired), ``"once_idle"`` (an idle ``once`` pass), or
+    ``None`` (the bare forever-loop shape ``once=False, until=None,
+    deadline_at=None`` never returns by construction, unchanged from before
+    this change).
     """
     service.start()
     try:
         while True:
             active = service.tick()
             if once and not active:
-                break
+                return "once_idle"
             if until is not None and until():
-                break
+                return "until"
+            if deadline_at is not None and service.clock.now() >= deadline_at:
+                return "deadline_exceeded"
             time.sleep(0.1 if once else 1)
     finally:
         service.close()

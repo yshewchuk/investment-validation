@@ -1636,25 +1636,50 @@ retry, transaction, partial write, idempotency).
   `refuse_unfittable_cpu_plan`, the CPU-count twin of the existing
   `plan_memory_problems`/`refuse_unfittable_memory_plan` (§8.1): a static,
   host-structural check (`resources.worker_cpu_ids(policy, sample)`'s
-  length — the allowed-affinity CPU count after `reserved_cpu_count`, not
-  a live, fluctuating reading) that asks whether a named resource profile's
-  `cpu_count` could EVER be admitted on this host, independent of what else
-  is running. `cli.py`'s `_submit_command` calls
-  `refuse_unfittable_cpu_plan(requests, policy=DEFAULT_POLICY,
-  sample=sample_capacity(store.root, clock=clock))` immediately after its
-  existing `refuse_unfittable_memory_plan` call, same requests, same
-  sample, same typed refusal shape: `RESOURCE_PROFILE_UNSATISFIABLE`
-  (never a distinct code — an unfittable-CPU plan and an
-  unfittable-memory plan are the same class of finding, "this plan can
-  never be admitted on this host," at the same call site, before any job
-  row is inserted). This closes the specific gap issue #103 named: a job
-  whose profile needs more CPUs than `--cores`/taskset ever allows
-  previously stayed queued forever under the claim-time-only
-  `PROFILE_EXCEEDS_CAPACITY` reason (`resources._fits_at_all`, unchanged
-  by this PR — it remains the claim-time backstop for a plan built by a
-  caller other than `ops plan`/`ops submit`, e.g. a raw `JobSpec`); now
-  such a plan is refused at submit time instead, before the trigger's
-  `serve` ever starts waiting on it.
+  length, after `reserved_cpu_count`) that asks whether a named resource
+  profile's `cpu_count` could EVER be admitted, independent of what else is
+  running. Unlike the memory check, `sample`'s `allowed_cpu_ids` is NOT
+  `sample_capacity`'s own live reading (`os.sched_getaffinity(0)` of the
+  calling process) passed straight through: `cli.py`'s `_submit_command`
+  first replaces that sample's `allowed_cpu_ids` with `range(os.cpu_count())`
+  before passing it to `refuse_unfittable_cpu_plan`. This is a deliberate,
+  measured deviation from `sample_capacity`'s live affinity reading, for the
+  same reason `plan_memory_problems` reads `sample.host_total_bytes` rather
+  than a live, per-process figure: `allowed_cpu_ids` (unlike
+  `host_total_bytes`) IS exactly the calling process's own
+  `sched_setaffinity`/taskset restriction, so passing it straight through
+  made this check fail two ordinary, previously-passing tests that submit a
+  real `DEFAULT_POLICY` nightly plan under `oc_check.py`'s own narrower
+  `bounded_run --cores 4` test wrapper (a profile whose declared `cpu_count`
+  fits production's `bounded_run --cores 8` failed this check purely because
+  the TEST harness's own core allowance is narrower) — a false positive of
+  exactly the shape the memory check's own docstring already warns against
+  ("never trips on another process's transient memory use"). `os.cpu_count()`
+  (the host's logical CPU count, unaffected by this process's own affinity
+  mask) is the closest available analogue to `host_total_bytes` on today's
+  `CapacitySample`, which has no separate host-total CPU field of its own.
+  `cli.py`'s `_submit_command` calls this immediately after its existing
+  `refuse_unfittable_memory_plan` call, same requests, same typed refusal
+  shape: `RESOURCE_PROFILE_UNSATISFIABLE` (never a distinct code — an
+  unfittable-CPU plan and an unfittable-memory plan are the same class of
+  finding, "this plan can never be admitted on this host," at the same call
+  site, before any job row is inserted). This closes the specific gap issue
+  #103 named: a job whose profile needs more CPUs than this host's logical
+  CPU count ever offers previously stayed queued forever under the
+  claim-time-only `PROFILE_EXCEEDS_CAPACITY` reason (`resources._fits_at_all`,
+  unchanged by this PR — it remains the claim-time backstop for a plan built
+  by a caller other than `ops plan`/`ops submit`, e.g. a raw `JobSpec`, and
+  the one that still catches a profile that fits the host but not THIS
+  process's own narrower `--cores`/taskset restriction); now a
+  host-impossible plan is refused at submit time instead, before the
+  trigger's `serve` ever starts waiting on it. **Known residual gap, not
+  closed by this PR:** a profile that fits the raw host CPU count but not
+  the specific `--cores`/taskset allowance the nightly trigger's own
+  `bounded_run` wrapper runs under (e.g. production's `--cores 8` on a
+  larger host) is NOT caught at plan time by this check — only by
+  `serve`'s own bounded deadline above, which still guarantees the legacy
+  lock is released and the run becomes resumable rather than wedging
+  forever.
 - **Backstop, outside this process.** `ops/systemd/native-nightly-trigger.service`
   (not installed or enabled by this PR — this unit has no production
   caller yet) gains `TimeoutStartSec`, set comfortably above

@@ -493,6 +493,68 @@ def test_refuse_unfittable_memory_plan_blocks_submission_with_details():
         [request(resource_class="validation")], policy=DEFAULT_POLICY, sample=sample) is None
 
 
+def test_plan_cpu_problems_reports_a_profile_above_the_worker_cpu_count():
+    """A profile whose ``cpu_count`` exceeds ``worker_cpu_ids``' length
+    (allowed affinity minus ``reserved_cpu_count``, issue #103) is reported
+    with its kind/profile/needed/max_possible; every fitting profile is not."""
+    from dataclasses import replace as dc_replace
+
+    from engine.v2.contracts import CapacitySample
+    from engine.v2.ops.nightly import plan_cpu_problems
+    from engine.v2.ops.resources import worker_cpu_ids
+    from tests.ops_support import request
+
+    sample = CapacitySample(sampled_at="2026-09-15T00:00:00.000000Z",
+                            allowed_cpu_ids=tuple(range(12)), host_total_bytes=8 * GIB,
+                            host_available_bytes=1 * GIB, container_limit_bytes=None,
+                            container_current_bytes=None, swap_total_bytes=0, swap_free_bytes=0,
+                            disk_free_bytes=100 * GIB, executor_mode="watchdog",
+                            containment="best_effort")
+    available = len(worker_cpu_ids(DEFAULT_POLICY, sample))
+    assert plan_cpu_problems([request(resource_class="validation")],
+                             policy=DEFAULT_POLICY, sample=sample) == []
+    oversized = dc_replace(profile_named(DEFAULT_POLICY, "legacy_score"),
+                           cpu_count=available + 1)
+    policy = dc_replace(DEFAULT_POLICY, profiles=tuple(
+        oversized if p.name == "legacy_score" else p for p in DEFAULT_POLICY.profiles))
+    assert plan_cpu_problems([request(resource_class="legacy_score")],
+                             policy=policy, sample=sample) == [
+        {"kind": "tiny", "profile": "legacy_score", "needed_cpus": available + 1,
+         "max_possible_cpus": available}]
+
+
+def test_refuse_unfittable_cpu_plan_blocks_submission_with_details():
+    """A profile needing more CPUs than this host could ever offer is refused
+    at plan time with the typed refusal and the offending job's own numbers."""
+    from dataclasses import replace as dc_replace
+
+    from engine.v2.contracts import CapacitySample
+    from engine.v2.ops.nightly import refuse_unfittable_cpu_plan
+    from engine.v2.ops.resources import worker_cpu_ids
+    from tests.ops_support import request
+
+    sample = CapacitySample(sampled_at="2026-09-15T00:00:00.000000Z",
+                            allowed_cpu_ids=tuple(range(12)), host_total_bytes=8 * GIB,
+                            host_available_bytes=1 * GIB, container_limit_bytes=None,
+                            container_current_bytes=None, swap_total_bytes=0, swap_free_bytes=0,
+                            disk_free_bytes=100 * GIB, executor_mode="watchdog",
+                            containment="best_effort")
+    available = len(worker_cpu_ids(DEFAULT_POLICY, sample))
+    oversized = dc_replace(profile_named(DEFAULT_POLICY, "legacy_score"),
+                           cpu_count=available + 1)
+    policy = dc_replace(DEFAULT_POLICY, profiles=tuple(
+        oversized if p.name == "legacy_score" else p for p in DEFAULT_POLICY.profiles))
+    requests = [request(resource_class="legacy_score")]
+    with pytest.raises(OpsError) as err:
+        refuse_unfittable_cpu_plan(requests, policy=policy, sample=sample)
+    assert err.value.code == "RESOURCE_PROFILE_UNSATISFIABLE"
+    jobs = {job["kind"]: job for job in err.value.problem.details["jobs"]}
+    assert jobs["tiny"] == {"kind": "tiny", "profile": "legacy_score",
+                            "needed_cpus": available + 1, "max_possible_cpus": available}
+    assert refuse_unfittable_cpu_plan(
+        [request(resource_class="validation")], policy=DEFAULT_POLICY, sample=sample) is None
+
+
 def test_populate_legacy_staging_still_refuses_an_oversize_read_set_at_claim_time():
     """Deliverable 3 (part 3, defence in depth): even with the plan-time
     check above, the original claim-time guard in
