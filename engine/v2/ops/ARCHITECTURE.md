@@ -1501,13 +1501,14 @@ ALREADY-resolved root, or is not called at all this tick.
      the earlier draft's unconditional expensive call.
   3. `engine.v2.scoring.release_bindings.resolve_production_release_binding()`
      (`release_bindings.py:195`) — the expensive, hash-verifying call —
-     runs ONLY when step 2's `release_id` differs from a one-slot,
-     root-keyed memo of the last `release_id` this sidecar itself already
-     fully verified (success OR failure; a release that fails hash
-     verification is memoized too, so a persistently-broken release isn't
-     re-hashed every tick either — only a CHANGED `release_id` forces a
-     fresh check, on the very next tick after the change, matching R2's
-     existing "promoted mid-session, next tick" guarantee below). On
+     runs ONLY when step 2's `root` or `release_id` differs from a
+     one-slot, root-keyed memo of the last root/`release_id` pair this
+     sidecar itself already fully verified (success OR failure; a release
+     that fails hash verification is memoized too, so a persistently-broken
+     release isn't re-hashed every tick either — only a CHANGED `root` OR
+     `release_id` forces a fresh check, on the very next tick after the
+     change, matching R2's existing "promoted mid-session, next tick"
+     guarantee below). On
      success the sidecar keeps only the path string,
      `str(production_release_root())`, returning it as
      `_native_release_root_or_none`'s own result — the `release_root`

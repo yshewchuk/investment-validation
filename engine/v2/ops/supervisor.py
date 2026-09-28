@@ -379,8 +379,9 @@ class Service:
         release_bindings._DEPLOYMENT_DIR is private to that module) are both
         genuinely cheap and run every call; resolve_production_release_binding()
         (hash-verifies every model file) runs ONLY when the cheap
-        current_pointer() read reports a release_id this sidecar has not
-        already fully verified (self._native_release_memo).
+        current_pointer() read reports a root or release_id this sidecar
+        has not already fully verified together (self._native_release_memo
+        compares both fields; either one changing invalidates it).
 
         Returns the verified release root as a plain path string, or None
         when unavailable for any reason."""
@@ -582,6 +583,52 @@ class Service:
         else:
             self._computed_moves_backoff(memo, now)
 
+    def _native_score_batch_identity_or_none(self, now):
+        """The two CHEAP checks (plain indexed SELECTs, no pandas scan)
+        _reconcile_native_score_batch_shadow needs every tick --
+        nightly._native_score_batch_identity (the specific succeeded
+        "score" job to key off, and whether it pinned a snapshot) and
+        whether a job already exists under that identity's key -- split
+        out to mirror _computed_moves_identity_or_none's own shape and
+        failure semantics exactly (CodeRabbit round 6, real finding: an
+        earlier draft ran both checks with no not_before gate at all, so a
+        persistently-raising lookup -- a locked database, a malformed
+        spec_json -- ran on EVERY tick forever, and its failure was folded
+        into whatever real identity's build-attempt memo happened to be
+        cached, silently spending that identity's own attempt budget on an
+        unrelated lookup failure).
+
+        Returns the real identity tuple when the caller should proceed, or
+        None when it should return immediately -- covering a throttled
+        prior lookup failure (still inside its own not_before), a caught
+        exception (reported and backed off here, in a DEDICATED
+        identity: None memo bucket, never a real identity's), "no identity
+        yet", and "already submitted" (a job exists under that key); the
+        last two clear self._native_score_batch_memo themselves."""
+        from engine.v2.ops.nightly import _native_score_batch_identity, _native_score_batch_key
+        from engine.v2.ops.submission import job_id_for
+
+        memo = self._native_score_batch_memo
+        if memo is not None and memo["identity"] is None and now < memo["not_before"]:
+            return None
+        try:
+            identity = _native_score_batch_identity(self.conn)
+            exists = identity is not None and self.conn.execute(
+                "SELECT 1 FROM jobs WHERE job_id = ?",
+                (job_id_for("shadow", _native_score_batch_key(identity[0], identity[1])),)
+            ).fetchone() is not None
+        except Exception as exc:
+            error_memo = memo if (memo is not None and memo["identity"] is None) else {
+                "identity": None, "attempts": 0, "not_before": 0.0}
+            self._native_score_batch_backoff(error_memo, now)
+            self._report_native_score_batch_problem(exc)
+            return None
+        self._last_native_score_batch_problem = None
+        if identity is None or exists:
+            self._native_score_batch_memo = None
+            return None
+        return identity
+
     def _reconcile_native_score_batch_shadow(self):
         """Cutover PR-7a: the ONLY place native_score_batch is ever
         submitted -- called every tick(), right alongside
@@ -593,40 +640,27 @@ class Service:
         R2 (two independent memos): _native_release_root_or_none runs
         FIRST, every tick, unconditionally; a release-unavailable outcome
         returns immediately and NEVER touches self._native_score_batch_memo's
-        own attempt count. Only once a usable release_root is in hand does
-        this method reach the SAME bounded backoff schedule
-        _reconcile_computed_moves_refresh uses
-        (_COMPUTED_MOVES_MAX_ATTEMPTS/_COMPUTED_MOVES_BACKOFF_SECONDS) to
-        decide whether to attempt a build+submit this tick. Every exception
-        past the release gate is caught and reported the same redacted way
-        _reconcile_publication_status reports its own, never left to crash
-        the tick or block dispatch of any other job."""
-        from engine.v2.ops.nightly import (
-            _native_score_batch_identity,
-            _native_score_batch_key,
-            submit_native_score_batch_shadow_if_ready,
-        )
+        own attempt count. _native_score_batch_identity_or_none runs next,
+        with its OWN dedicated identity: None memo bucket for a lookup
+        failure (CodeRabbit round 6: never conflated with a real identity's
+        build-attempt count). Only past both does this method reach the
+        SAME bounded backoff schedule _reconcile_computed_moves_refresh
+        uses (_COMPUTED_MOVES_MAX_ATTEMPTS/_COMPUTED_MOVES_BACKOFF_SECONDS)
+        to decide whether to attempt a build+submit this tick. Every
+        exception past the release gate and the identity lookup is caught
+        and reported the same redacted way _reconcile_publication_status
+        reports its own, never left to crash the tick or block dispatch of
+        any other job."""
+        from engine.v2.ops.nightly import submit_native_score_batch_shadow_if_ready
         from engine.v2.ops.snapshot_stages import _catalog_path
-        from engine.v2.ops.submission import NamespacePolicy, job_id_for
+        from engine.v2.ops.submission import NamespacePolicy
 
         now = self.clock.monotonic()
         release_root = self._native_release_root_or_none()
         if release_root is None:
             return
-        try:
-            identity = _native_score_batch_identity(self.conn)
-            exists = identity is not None and self.conn.execute(
-                "SELECT 1 FROM jobs WHERE job_id = ?",
-                (job_id_for("shadow", _native_score_batch_key(identity[0], identity[1])),)
-            ).fetchone() is not None
-        except Exception as exc:
-            self._native_score_batch_backoff(
-                self._native_score_batch_memo or {"identity": None, "attempts": 0, "not_before": 0.0},
-                now)
-            self._report_native_score_batch_problem(exc)
-            return
-        if identity is None or exists:
-            self._native_score_batch_memo = None
+        identity = self._native_score_batch_identity_or_none(now)
+        if identity is None:
             return
         memo = self._native_score_batch_memo
         if memo is None or memo["identity"] != identity:

@@ -151,13 +151,35 @@ def test_identity_orders_by_created_at_not_scope_hash(tmp_path):
     never a hand-written hash) until the SECOND, later-created job has the
     LOWER scope_hash -- guaranteeing hash order and creation order
     disagree -- then asserts the later-created job wins.
+
+    Every candidate (including the first job) is built from the SAME
+    ``plan`` object, never a fresh ``build_nightly_plan`` call per job:
+    ``build_nightly_plan`` stamps ``decision_clock`` from a real
+    ``SystemClock`` when no ``clock=`` is passed, so two separate calls
+    fold two different wall-clock instants into ``scope_hash`` via
+    ``plan_identity`` -- making hashes from different calls incomparable
+    and the ``<`` comparison below flaky by chance (~50%). Reusing one
+    ``plan`` keeps ``decision_clock`` fixed, so only ``tickers`` varies
+    each candidate's hash.
     """
     conn, clock, _ = catalog(tmp_path)
     session = "2026-01-01"
-    first_key = _mark_score_succeeded(conn, clock, session=session, tickers=("FIRST",))
+    plan = nightly.build_nightly_plan(ROOT, session)
+
+    def _mark(tickers):
+        requests = nightly.build_legacy_job_requests(plan, tickers=tickers,
+                                                       year_start=2025, year_end=2026)
+        submit_graph(conn, registry(), _POLICY, requests, clock=clock)
+        score = next(r for r in requests if r.idempotency_key.endswith(":score"))
+        job_id = job_id_for("shadow", score.idempotency_key)
+        conn.execute("UPDATE jobs SET state = 'succeeded', updated_at = ? WHERE job_id = ?",
+                     (clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"), job_id))
+        conn.commit()
+        return score.idempotency_key
+
+    first_key = _mark(("FIRST",))
     _, first_hash = nightly._session_scope_from_score_key(first_key)
 
-    plan = nightly.build_nightly_plan(ROOT, session)
     later_key = None
     for candidate in range(200):
         tickers = (f"CAND{candidate}",)
@@ -167,7 +189,7 @@ def test_identity_orders_by_created_at_not_scope_hash(tmp_path):
         _, candidate_hash = nightly._session_scope_from_score_key(score_request.idempotency_key)
         if candidate_hash < first_hash:
             clock.advance(60)
-            later_key = _mark_score_succeeded(conn, clock, session=session, tickers=tickers)
+            later_key = _mark(tickers)
             break
     assert later_key is not None, "no candidate ticker found a lower scope_hash within 200 tries"
     _, later_hash = nightly._session_scope_from_score_key(later_key)
@@ -296,3 +318,63 @@ def test_service_tick_never_submits_with_release_root_but_no_promoted_release(tm
     assert _native_score_batch_job_count(conn) == 0
     # current_pointer returned None on the cheap check alone -- nothing to memoize.
     assert service._native_release_memo is None
+
+
+def test_identity_lookup_failure_is_throttled_not_retried_every_tick(tmp_path, monkeypatch):
+    """CodeRabbit round 6, real finding: before the fix, a persistently
+    raising _native_score_batch_identity ran again on EVERY tick -- the
+    not_before it wrote into the memo was never read back. This bypasses
+    the release-root gate (irrelevant to the bug) by monkeypatching
+    _native_release_root_or_none directly."""
+    conn, clock, _ = catalog(tmp_path)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-root")
+    calls = []
+
+    def _boom(conn):
+        calls.append(1)
+        raise ValueError("planted identity lookup failure")
+
+    monkeypatch.setattr(nightly, "_native_score_batch_identity", _boom)
+
+    service._reconcile_native_score_batch_shadow()  # 1st failure: attempts -> 1, backed off
+    assert len(calls) == 1
+    assert service._native_score_batch_memo == {"identity": None, "attempts": 1,
+                                                 "not_before": service._native_score_batch_memo["not_before"]}
+    assert service._native_score_batch_memo["not_before"] > 0
+
+    service._reconcile_native_score_batch_shadow()  # still inside backoff: must NOT call again
+    assert len(calls) == 1
+
+    clock.advance(10_000)  # well past the backoff window
+    service._reconcile_native_score_batch_shadow()
+    assert len(calls) == 2
+    assert service._native_score_batch_memo["attempts"] == 2
+
+
+def test_identity_lookup_failure_never_spends_a_real_identitys_attempt_budget(tmp_path, monkeypatch):
+    """CodeRabbit round 6, real finding: before the fix, a lookup failure
+    backed off `self._native_score_batch_memo or {...}` -- when a real
+    identity's memo already existed, the failure incremented THAT memo's
+    attempts instead of a dedicated identity: None bucket."""
+    conn, clock, _ = catalog(tmp_path)
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-root")
+    real_identity = ("2026-01-01", "sha256:realhash", False)
+    service._native_score_batch_memo = {"identity": real_identity, "attempts": 3,
+                                        "not_before": 0.0}
+
+    def _boom(conn):
+        raise ValueError("planted identity lookup failure")
+
+    monkeypatch.setattr(nightly, "_native_score_batch_identity", _boom)
+
+    service._reconcile_native_score_batch_shadow()
+
+    # A NEW, separate identity: None bucket absorbed the failure...
+    assert service._native_score_batch_memo == {"identity": None, "attempts": 1,
+                                                 "not_before": service._native_score_batch_memo["not_before"]}
+    # ...the real identity's own attempt count (3) was never touched or
+    # visible here any more -- proving the failure did not increment it.
