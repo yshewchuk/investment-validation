@@ -123,12 +123,16 @@ def _revision(row: dict, *, deleted: bool) -> incremental_tables.GenericRevision
 
 
 def revisions_for_rebuild(existing: pd.DataFrame, engine_rows: pd.DataFrame,
-                          rebuilt_strategies) -> list[incremental_tables.GenericRevision]:
+                          rebuilt_strategies, *,
+                          years=None) -> list[incremental_tables.GenericRevision]:
     """The tombstones and appends one rebuild of ``rebuilt_strategies`` needs.
 
     A row is tombstoned only when it is a replay-produced row for a strategy
-    being rebuilt AND the rebuild no longer produces its ``trade_id``. Every
-    engine row is appended (or corrected in place, when its id already exists).
+    being rebuilt, the rebuild no longer produces its ``trade_id``, AND (when
+    ``years`` is given) the row's own ``year`` column is inside the rebuilt
+    scope -- a ``--years``-scoped rebuild never tombstones another year's
+    already-published rows for the same strategy (issue #108). Every engine
+    row is appended (or corrected in place, when its id already exists).
     """
     rebuilt = {str(s) for s in rebuilt_strategies}
     new_ids = set(engine_rows["trade_id"].astype(str)) if len(engine_rows) else set()
@@ -138,11 +142,15 @@ def revisions_for_rebuild(existing: pd.DataFrame, engine_rows: pd.DataFrame,
         is_replay = provenance.str.startswith(PROVENANCE) | provenance.str.startswith(
             LEGACY_PROVENANCE
         )
-        doomed = existing[
+        mask = (
             is_replay
             & existing["strategy"].astype(str).isin(rebuilt)
             & ~existing["trade_id"].astype(str).isin(new_ids)
-        ]
+        )
+        if years is not None:
+            wanted_years = {int(y) for y in years}
+            mask = mask & existing["year"].astype(int).isin(wanted_years)
+        doomed = existing[mask]
         for row in doomed.to_dict("records"):
             revisions.append(_revision(row, deleted=True))
     for row in engine_rows.to_dict("records"):
