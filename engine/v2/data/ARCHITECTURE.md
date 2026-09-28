@@ -166,6 +166,48 @@ X`):
   incremental_tables`, then `incremental_tables.revision_hash`/
   `.GenericRevision`) and `engine.v2.ops.forward_calendar_store.py`
   (`forward_calendar_store.py:47,615-627`, its own `_revision` helper).
+
+### `daily_market` normalizer versioning and mcap carry-forward (#96)
+
+The `daily_market` row-level field mapping (ORATS decimal → vol-point
+scaling, the implied-move zero sentinel, `clip_implausible`) lives in the
+ops-layer provider (`engine.v2.ops.providers.orats_daily_market`, documented
+in that component's own doc), not in this package. This package is
+responsible for two things that follow from a change to that mapping:
+
+- **`normalizer_id` is a version tag, bumped on any behavior change.**
+  `cache_normalization` (`incremental.py`) keys a cached normalized document
+  on `(raw_hash, normalizer_id, contract_id)` and returns the cached
+  document unchanged on a hit — it never re-derives it from the current
+  code. If the row-level mapping changes but `normalizer_id` does not, a
+  session already normalized under the old mapping is served back verbatim
+  on any later replay that reuses its `raw_hash`, silently mixing pre- and
+  post-fix rows under one identity. `_stage_normalizations` therefore pins
+  the literal string (`"daily_market.v2"` as of #96, was `"daily_market.v1"`)
+  and this string is bumped in the same PR as any change to the provider's
+  row mapping; a session cached under the old id is never read back into a
+  `v2`-normalized candidate; it is only revisited by a fresh fetch, which
+  gets a new raw receipt and a `v2` normalization id.
+- **mcap backward carry is bounded to the partitions this build already
+  loaded, never a fresh historical scan.** One ORATS `tradeDate` fetch unit
+  sees only that day's `cores` rows, so a ticker with no `mktCap` published
+  that day cannot be backward-filled from inside the provider — the
+  provider always reports its `mcap_usd`/`mcap_asof`/`mcap_age_days` for
+  that one day only (`None` when the day has no `mktCap`). `merge_daily_market`
+  closes that gap for a freshly fetched (`incoming`) revision that wins its
+  logical key and carries a `None` `mcap_usd`: it looks up the same ticker's
+  most recent row with a non-null `mcap_usd` at an earlier date in `prior`
+  — the rows `build_daily_market_candidate` already loaded for this
+  refresh's *affected* (year) partitions via `load_daily_market_rows`, never
+  a partition this refresh did not otherwise touch — and copies
+  `mcap_usd`/`mcap_log` forward, setting `mcap_asof` to that earlier date and
+  `mcap_age_days` to the day gap. A ticker whose last known cap falls outside
+  the partitions this refresh loaded (typically: nothing published for it
+  yet this year) is left with `mcap_usd = None`, same as before #96 — this
+  is a deliberate scope limit (matching the "stored head" the refresh has in
+  hand, not an unbounded scan of the whole table), not a defect; a cross-year
+  carry needs a follow-up that loads a wider partition set on demand.
+
 - **Snapshot resolution and bounded reads** — `repository.Repository`,
   `.ResolvedSnapshot` (directive-declared; not package-root).
   `Repository(conn, store=None)` exposes: `resolve`/`resolve_pinned` (exact
