@@ -1238,6 +1238,26 @@ network, or database access.
 
 ## Failure semantics
 
+- **Backup retry after the effect already delivered (`backup.run_backup`, fixed for #98)** —
+  `run_backup` claims the `backup` outbox row for its `key`
+  (`outbox.claim`, only `pending` or an expired `running` row matches) then
+  copies artifacts and calls `outbox.complete`, which sets the row
+  `delivered`. `effects_graph.backup_effect` writes this stage's `watermark`
+  in a SEPARATE transaction right after `run_backup` returns, and the job's
+  attempt commit follows that. A crash between the `delivered` write and the
+  watermark/attempt commit means a retry re-invokes `run_backup` with the
+  SAME `key` while the row is already `delivered` — `claim`'s predicate
+  matches neither `pending` nor an expired `running` row, so it returned
+  `None` and `run_backup` raised `STALE_EXPECTATION` permanently (the job,
+  and every stage depending on it, could never succeed). **Fixed:**
+  `run_backup` now checks, before raising, whether an outbox row for this
+  exact `(kind="backup", key)` is already `delivered`; if so it returns that
+  row's stored `receipt_json` (the manifest `complete` recorded) as-is —
+  no re-copy, no re-claim, no second backup — so `backup_effect` proceeds to
+  write the watermark normally, exactly as if this call had just completed
+  the work itself. A row that is `pending` or `running`-but-not-expired
+  still refuses `STALE_EXPECTATION` exactly as before; only an ALREADY-
+  `delivered` row for the identical key short-circuits.
 - **Worker exit vs. process-family aliveness (`executor.poll`)** — `poll()`
   samples `running.process.poll()` for the worker's own exit code, then
   scans the watched process family (`executor_watchdog.observe`, the

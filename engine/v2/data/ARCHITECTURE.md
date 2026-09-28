@@ -681,25 +681,48 @@ idempotent-replay shortcut too.
   `scope`/resulting snapshot is not a retry in this sense — it is the
   idempotent-replay shortcut (R6, below). Through
   `commit_generic_table_candidate`'s *composed* fence, that shortcut is
-  reachable on retry only when the original commit was a no-op
-  (`already_at_head=True`, so the head never moved): the caller's
+  reachable on retry when the original commit was a no-op
+  (`already_at_head=True`, so the head never moved) OR (fixed for #98) when
+  the original commit genuinely advanced the head and this retry is the
+  SAME candidate's own effect being replayed: the caller's
   `expected_head_snapshot_id`/`expected_head_generation` are the static
   values it computed before the first call, and `_head_fence` re-checks them
-  against the *current* head on every retry, including the replay one. If
-  the original call actually advanced the head, a same-attempt retry's
-  `_head_fence` check now disagrees with the (moved) current head and raises
-  `SNAPSHOT_CONFLICT` immediately — before `_existing_receipt` is ever
-  looked up, so the shortcut is refused, not returned. This is the
-  documented purpose of composing `_head_fence` in front of a caller's own
-  `fence_check` (`commit_generic_table_candidate`'s own docstring,
-  `generic_incremental.py:141-181`): it is what keeps head-conflict
-  detection active on the replay-shortcut path too, for every caller, not
-  only when no custom `fence_check` is supplied — a stale, already-
-  superseded attempt cannot silently replay a commit that has since moved
-  on. (That docstring used to also name `computed_moves_store.py` as
-  following this pattern; #76 corrected it, so it now says what the
-  "Dependencies" section above already did — `computed_moves_store.py`
-  never calls this function at all.)
+  against the *current* head on every retry, including the replay one — but
+  it now ALSO accepts the current head being exactly
+  `(candidate.snapshot.snapshot_id, expected_head_generation + 1)`, the
+  state this exact candidate's own commit would leave behind, alongside the
+  original exact-match check. **Before #98:** a same-attempt retry after a
+  crash between the effect's own commit (which had already advanced the
+  head) and the caller's `lifecycle.commit_attempt` failed with
+  `SNAPSHOT_CONFLICT` PERMANENTLY — `_head_fence` disagreed with the moved
+  head and raised before `_existing_receipt` was ever looked up, so no
+  retry could ever succeed, and the job (and everything depending on it)
+  failed with it. **After #98:** that exact scenario's `_head_fence` call
+  now agrees (the head is precisely where this candidate's own effect left
+  it), falls through to the caller's own `fence_check` (still runs,
+  unchanged — see below), and reaches `_existing_receipt`'s shortcut, which
+  matches on `receipt_id`/`request_hash`/`attempt_id`/`fence`/`scope`/
+  resulting `snapshot_id` and returns the prior receipt. A GENUINELY
+  different or conflicting retry (a different candidate, a different
+  attempt racing against the same stale parent) still fails: its OWN
+  `candidate.snapshot.snapshot_id` does not match what is actually at head,
+  so neither branch of `_head_fence` accepts it, and it raises
+  `SNAPSHOT_CONFLICT` exactly as before. This composition still keeps a
+  caller's own attempt-lease check active on the replay-shortcut path too
+  (`commit_generic_table_candidate`'s own docstring, `generic_incremental.py
+  :141-181`): `_head_fence` (now with its widened acceptance) still runs
+  FIRST, and the caller's `fence_check` (e.g. `verify_fence`) still runs
+  right after it, for every caller, not only when no custom `fence_check`
+  is supplied — a CANCELLED or lease-expired attempt's replay is still
+  refused at the fence step even though `_head_fence` itself now agrees;
+  only a live attempt's replay of its own already-applied effect gets
+  through. (`generic_incremental.py`'s docstring used to also name
+  `computed_moves_store.py` as following this pattern; #76 corrected it, so
+  it now says what the "Dependencies" section above already did —
+  `computed_moves_store.py` never calls this function at all.)
+  `engine.v2.data.incremental.commit_daily_market_candidate`'s own
+  `_candidate_head_fence` (see "Primary contracts") is widened the exact
+  same way, with `candidate.snapshot.snapshot_id` as its own resulting id.
   `engine.v2.ops.snapshots.commit_snapshot_for_attempt` is a third caller of
   the *plain* `catalog.commit_snapshot` path described above (alongside
   `computed_moves_store.py`/`price_history_store.py`): it too calls
@@ -754,11 +777,15 @@ idempotent-replay shortcut too.
   caller's own `fence_check` actually checks, since `commit_snapshot` skips
   its own `_check_head_expectation` on a matching replay for every caller
   alike (`catalog.py:500-504`), not only the composed one. Through
-  `commit_generic_table_candidate`'s composed `_head_fence`, a same-attempt
-  replay of a commit that *did* move the head cannot reach this shortcut at
-  all — it is refused with `SNAPSHOT_CONFLICT` first, so the shortcut is
-  reachable through that path only when the original commit was already a
-  no-op — and a cancelled or lease-expired attempt cannot ride a
+  `commit_generic_table_candidate`'s composed `_head_fence`, a DIFFERENT
+  call's replay of a commit that *did* move the head cannot reach this
+  shortcut at all — it is refused with `SNAPSHOT_CONFLICT` first. A
+  same-attempt replay of its OWN effect (fixed for #98: `_head_fence` now
+  also accepts the head already being exactly this candidate's own
+  resulting snapshot, one generation ahead) does reach the shortcut, so the
+  shortcut is reachable through that path when the original commit was
+  already a no-op OR when this retry is provably the same effect —
+  and a cancelled or lease-expired attempt still cannot ride a
   same-`receipt_id` replay past the composed `verify_fence` check either.
   Neither guarantee holds for `computed_moves_store.py`/
   `price_history_store.py`'s direct `catalog.commit_snapshot` calls, whose
