@@ -706,9 +706,11 @@ status transition:
      after a `"timed_out"` outcome waits on the SAME row instead of
      risking a second one.
    - **Terminal but not `succeeded`** (`failed`, `cancelled`, or `blocked`
-     — `TERMINAL_JOB_STATES` minus `succeeded`). Raises the SAME typed,
-     non-retryable `INPUT_CHANGED` `OpsError` step 4's own terminal-failure
-     case raises, immediately, WITHOUT calling `plan_import`/`submit_
+     — `TERMINAL_JOB_STATES` minus `succeeded`). Raises the SAME typed
+     `INPUT_CHANGED` `OpsError` step 4's own terminal-failure case raises
+     (non-retryable under THIS key only — a later `_submit_plan` entry
+     still retries under a NEW key, per below), immediately, WITHOUT
+     calling `plan_import`/`submit_
      import` first: resubmitting under this SAME key could only ever
      re-match this SAME dead row (`_insert_or_match`'s existing-row-wins-
      regardless-of-state semantics, above), so a resubmission attempt
@@ -780,8 +782,9 @@ status transition:
    wait, exactly as `_default_serve`'s own `"timed_out"` already leaves an
    in-flight job alone (issue #103 section above, R5, unchanged, reused
    as-is here). A terminal `failed`/`conflict` outcome for this job raises
-   the typed, non-retryable `INPUT_CHANGED` `OpsError` `_submit_plan`'s
-   existing `except _HANDLED_FAILURES` catches, routing into `_failure`
+   the typed `INPUT_CHANGED` `OpsError` (non-retryable under THIS key only)
+   `_submit_plan`'s existing `except _HANDLED_FAILURES` catches, routing
+   into `_failure`
    with `snapshot_attempt=snapshot_attempt + 1` (the `TriggerReceipt` fix
    above) — which bumps `error_count` too (the ordinary give-up count, for
    `MAX_CONSECUTIVE_ERRORS`) AND the dedicated `snapshot_attempt`, so the
@@ -2932,9 +2935,15 @@ was needed where a separate status was not.
   terminal `failed`/`conflict` state (a legacy read error, a `CAS`
   mismatch from a concurrent writer to `scope='shadow'` this design does
   not otherwise expect but does not assume impossible either) — raised as
-  the same typed, non-retryable `OpsError` (`INPUT_CHANGED`, mirroring
-  issue #104/PR #117's own `_capture_input_manifest` precedent for "a
-  precondition this call needed did not hold") that `_submit_plan`'s
+  the same typed `OpsError` (`INPUT_CHANGED`, mirroring issue #104/PR
+  #117's own `_capture_input_manifest` precedent for "a precondition this
+  call needed did not hold"), non-retryable ONLY against the SAME
+  idempotency key (CodeRabbit finding on `f4abc4b`, real — "non-retryable"
+  unqualified reads as "never retried again", which conflicts with R3's
+  own per-`snapshot_attempt` retry: a terminal failure under THIS key is
+  never retried under THIS key, but R3 above still retries the underlying
+  import as a later `snapshot_attempt` under a genuinely NEW key) that
+  `_submit_plan`'s
   existing `except _HANDLED_FAILURES` (now wrapping the new `ensure_
   snapshot_fn(...)` call too, alongside its existing `plan_fn(...)` call)
   already catches — no new exception-handling MECHANISM in `_submit_plan`,
