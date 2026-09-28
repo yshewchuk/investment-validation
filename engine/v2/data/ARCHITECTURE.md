@@ -617,6 +617,24 @@ idempotent-replay shortcut too.
   following this pattern; per the corrected "Dependencies" section above,
   it does not — that is the pre-existing, unchanged-code inaccuracy tracked
   as #76.)
+  `engine.v2.ops.snapshots.commit_snapshot_for_attempt` is a third caller of
+  the *plain* `catalog.commit_snapshot` path described above (alongside
+  `computed_moves_store.py`/`price_history_store.py`): it too calls
+  `catalog.commit_snapshot` directly, never through
+  `commit_generic_table_candidate`, so it also gets no `_head_fence`
+  composition (`snapshots.py:82-90`). It differs from those two callers in
+  one way: it always supplies
+  `fence_check=lambda c: verify_fence(c, attempt_id, fence, clock.now())`
+  (`snapshots.py:88`) — `attempt_id` and `fence` are required parameters of
+  `commit_snapshot_for_attempt`, not optional ones, so this path's fence
+  check is never a no-op, unlike `computed_moves_store.py` with no attempt
+  staged or `price_history_store.py`'s hard-coded no-op. Its guarantee is
+  therefore lease-only, not head-aware: `verify_fence` still refuses a
+  cancelled or lease-expired attempt's replay at the fence step, but
+  nothing in this path checks whether the data head moved, so a live
+  attempt's matching replay (same `request_hash`/`attempt_id`/`fence`/
+  `scope`/resulting `snapshot_id`) returns the prior receipt even after the
+  head has moved since the original call (see R6, below).
 - **R4, transaction.** One `BEGIN IMMEDIATE` transaction
   (`catalog._immediate_transaction`) covers the fence check, the shortcut
   lookup, every idempotent insert, the receipt insert, `record_references`
@@ -669,6 +687,16 @@ idempotent-replay shortcut too.
   lease-expired attempt's replay either; the shortcut's own exact-match
   requirement on `request_hash`/`attempt_id`/`fence`/`scope`/`snapshot_id`
   is these two callers' only protection against an unwanted replay.
+  `engine.v2.ops.snapshots.commit_snapshot_for_attempt` (R3, above) sits
+  between these two cases: it also composes no `_head_fence`, so a matching
+  replay after the data head has moved returns the prior receipt exactly
+  like the two callers above — but because it always supplies
+  `verify_fence` as its `fence_check` (never a no-op), a cancelled or
+  lease-expired attempt's replay is refused at the fence step, the same
+  protection `computed_moves_store.py` gets only when an attempt is staged.
+  Its replay guarantee is lease-only: a still-live attempt can replay a
+  commit past a data head that has since moved, but a dead one cannot ride
+  the same-`receipt_id` shortcut through.
 
 ### `repository.py` — read paths (R1–R6 summary)
 
