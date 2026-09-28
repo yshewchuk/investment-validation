@@ -164,6 +164,8 @@ def dispatch(worker, parameters, root, *, envelope=None):
         return _dispatch_decision_evidence(parameters, root)
     if worker == "adhoc_rescore":
         return _dispatch_adhoc_rescore(parameters, root)
+    if worker == "native_score_batch":
+        return _dispatch_native_score_batch(parameters, root)
     if worker in ("snapshot_import", "legacy_rebuild_candidate"):
         return _dispatch_snapshot_import(worker, parameters, root)
     if worker in ("ledger_export", "engineering_gate", "publication", "backup",
@@ -181,13 +183,21 @@ def dispatch(worker, parameters, root, *, envelope=None):
                              "threads": os.environ["OMP_NUM_THREADS"]}}
     if worker == "experiment":
         return _dispatch_experiment(parameters, root)
-    if worker == "training":
-        from engine.v2.ops.training import run_training_worker
-        return run_training_worker(parameters, root)
-    if worker == "models_promote":
-        from engine.v2.ops.training import run_promote_worker
-        return run_promote_worker(parameters, root)
+    if worker in ("training", "models_promote"):
+        return _dispatch_model_worker(worker, parameters, root)
     raise ValueError("unsupported worker")
+
+
+def _dispatch_model_worker(worker, parameters, root):
+    from engine.v2.ops.training import run_promote_worker, run_training_worker
+
+    runner = run_training_worker if worker == "training" else run_promote_worker
+    return runner(parameters, root)
+
+
+def _dispatch_native_score_batch(parameters, root):
+    from engine.v2.ops.native_score_batch import run_native_score_batch_worker
+    return run_native_score_batch_worker(parameters, root)
 
 
 def _dispatch_refresh(worker, parameters, root):

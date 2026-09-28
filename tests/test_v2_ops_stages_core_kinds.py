@@ -75,6 +75,20 @@ _CASES = {
     "adhoc_rescore": dict(
         resource_class="io_fetch", checkpoint_contract="adhoc_rescore_record.v1.0",
         max_attempts=2, backoff=(5, 30), extra_field=None),
+    "native_score_batch": dict(
+        resource_class="io_fetch",
+        checkpoint_contract="native_score_batch_records.v1.0",
+        max_attempts=2, backoff=(5, 30),
+        extra_field=("calendar_revision", "cal-rev-1"),
+        # CodeRabbit round 1 (PR #66): gate_policy is exercised here as a
+        # non-empty dict so the parametrized submit() path decodes it
+        # through the real strict decoder (proves `dict[str, Any]`, not
+        # `dict`, is accepted -- a bare `dict` annotation raises TypeError
+        # in from_document for any non-empty value).
+        required={"release_root": "root", "as_of": "2026-09-01",
+                  "snapshot_id": "snap1", "calendar_revision": "cal-rev-1",
+                  "feature_names": ["f1"],
+                  "gate_policy": {"STR-THRU": {"threshold": 0.0}}}),
     "snapshot_import": dict(
         resource_class="legacy_rebuild",
         checkpoint_contract="snapshot_import_inspections.v1.0",
@@ -105,8 +119,12 @@ _CASES = {
 }
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
-                      "legacy_rebuild_candidate", "legacy_materialize",
-                      "decisions_supersede")
+                      "native_score_batch", "legacy_rebuild_candidate",
+                      "legacy_materialize", "decisions_supersede")
+
+#: Pairs of core kinds whose parameters classes genuinely share a field
+#: name -- see test_submission_reads_resource_class_checkpoint_retry_and_max_refs.
+_SHARED_FIELDS = {frozenset({"models_promote", "native_score_batch"}): {"release_root"}}
 
 
 def _extra_params(name):
@@ -197,9 +215,13 @@ def test_submission_reads_resource_class_checkpoint_retry_and_max_refs(tmp_path,
     field, value = case["extra_field"]
     # every OTHER core kind's parameters class rejects this kind's
     # distinguishing field -- proves the specific dataclass (not just "some
-    # dataclass with an expected_ids field") gates the schema
+    # dataclass with an expected_ids field") gates the schema. models_promote
+    # and native_score_batch both genuinely carry a ``release_root`` field
+    # (cutover PR-3: NativeScoreBatchParameters), so that one pair is not a
+    # distinguishing field for either direction and is skipped rather than
+    # asserted -- not a schema-bleed bug, just two kinds sharing a name.
     for other in _CASES:
-        if other == name:
+        if other == name or field in _SHARED_FIELDS.get(frozenset({name, other}), ()):
             continue
         other_case = _CASES[other]
         with pytest.raises(OpsError) as excinfo:

@@ -128,6 +128,47 @@ contracts" above. Its pure helpers (`horizon_dates`, `date_units`,
 are unit-testable without a catalog or a network. Today this runner has no
 production caller, only its own test module.
 
+`native_score_batch.py` (this PR adds this module, its `stages.py` job kind
+and its `worker.py` dispatch branch together — this doc describes the
+module as this PR leaves it, not a pre-existing fact): the batch-shaped
+seam between the board universe (`native_board_universe.BoardRequest`) and
+`engine.v2.scoring.application.score_batch`. `assemble_score_batch_inputs`
+turns one release binding (`engine.v2.scoring.release_bindings.
+ScoringReleaseBinding`, PR-1) plus a sequence of one already-staged
+`NightlyEventInputs` per event (calendar/panel/Tier-4/quote rows, the
+same shape `engine.v2.scoring.nightly_source_bundle.
+assemble_nightly_source_bundle`, PR-2, already accepts) into
+`dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple of
+typed per-row `NativeScoreBatchRowRefusal`s — never a raised exception for a
+bad row (see "Failure semantics" below). It is a pure function: no catalog,
+no filesystem, no network. An empty `events` sequence is a legitimate no-op,
+never a refusal or an error: the returned map and refusal tuple are both
+empty. `run_native_score_batch_worker(parameters, root)`
+is the `native_score_batch` job kind's worker entrypoint (dispatched from
+`worker.py`, registered in `stages.py::_core_kinds`): it resolves the
+release once via `resolve_release_binding(parameters["release_root"])`,
+reads the one staged `events.json` document (an array of per-event inputs,
+materialized into `root` by `executor._materialize_inputs` from the job's
+own `input_bindings` exactly like `adhoc_rescore`'s `request.json`/
+`native_inputs.json`), calls `assemble_score_batch_inputs`, then
+`engine.v2.scoring.application.score_batch` under `engine.v2.models.no_fit.
+no_fit_guard()` (the same guard `_dispatch_adhoc_rescore` already uses), and
+writes `records.json`/`refusals.json`. An `events.json` decoding to an empty
+list produces empty `records.json`/`refusals.json` and
+`completed_ids=list(parameters["expected_ids"])`/`no_work=not
+parameters["expected_ids"]` — the same "no work" shape `artifact_check`
+already reports for an empty `expected_ids`, never a distinct code of its
+own. **This bounded batch assembler
+supports `STR-THRU` only** (the same strategy `nightly_source_bundle.py`'s
+own bounded builder documents as its scope) — any other `BoardRequest.strategy`
+in the input sequence refuses per-row (`UNSUPPORTED_STRATEGY`), never raises
+out of the batch. **No production caller submits this job kind yet**: like
+`computed_moves_job_kind()` before Part 4 wired it into `nightly.py`, this PR
+registers the kind and its worker dispatch only — a later cutover PR (PR-4/
+PR-6, per `scratchpad/cutover_wiring_plan.md`) builds the caller that
+enumerates `BoardRequest`s, stages their per-event inputs, and submits this
+job kind from the nightly graph. `nightly.py` is not touched by this PR.
+
 **Cutover PR-4 (this doc describes the design as this PR's Phase 2 will
 leave it, not a pre-existing fact — Phase 1 of this PR is documentation
 only for `legacy_parity_rows`, the "explained" bucket and
@@ -369,12 +410,50 @@ one).
   `pandas.Timestamp` (`None`, `NaT`, and a timezone-aware value are
   refused); `horizon_days` must be a non-negative `int` (`bool` is refused
   despite being an `int` subtype in Python) — see "Failure semantics".
+- `assemble_score_batch_inputs`'s own arguments: `as_of` (the night's
+  cutoff), `snapshot_id` and `calendar_revision` (caller-supplied identity
+  strings — this module resolves neither; a later caller derives them from
+  the pinned plan/read set, per "Primary contracts" above), one
+  `ScoringReleaseBinding` (PR-1, resolved once by the caller — never
+  re-resolved per row), a sequence of `NightlyEventInputs` (one
+  `BoardRequest` key plus its `calendar_row`/`panel_row`/required
+  `panel_anchor` (issue #53, fixed by #67 — threaded straight through to
+  `assemble_nightly_source_bundle`'s own required parameter of the same
+  name, unmodified)/`tier4_row`/`quote_rows`/optional `quote_status` — the
+  calendar row here additionally
+  carries the real `earnings_events` table's own `event_id` column, which
+  `nightly_source_bundle._CALENDAR_REQUIRED_FIELDS` does not itself
+  require), the batch's `feature_names`, and an optional `gate_policy:
+  Mapping[str, Mapping[str, Any]]` keyed by strategy (see "Failure
+  semantics" for why this is caller-supplied and optional). The worker's own
+  `NativeScoreBatchParameters` additionally carries `release_root` as a
+  plain string field (never through `input_bindings`, matching
+  `PromoteParameters.release_root`'s precedent in `training.py`) and
+  `input_bindings={"events.json": <artifact ref>}` for the one staged
+  events array.
 
 ## Outputs
 
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
+- `assemble_score_batch_inputs` returns `(dict[BoardRequest, tuple[
+  ScoreRequest, NativeScoreInputs]], tuple[NativeScoreBatchRowRefusal, ...])`
+  — the assembled map (never partial per row: a key is present only with a
+  complete, buildable pair) plus every row that could not be assembled, each
+  a typed `.code`/`.detail`/`.key` refusal object. `run_native_score_batch_worker`
+  writes this as two staged files: `records.json` (an envelope document,
+  `{"schema_version": "native_score_batch_records.v1.0", "authoritative":
+  false, "known_gaps": [], "records": [...]}` — see "Failure semantics" for
+  `authoritative`/`known_gaps` — whose `records` array is the `tuple[
+  ScoreRecord, ...]` `score_batch` returns, each `to_document`-serialized,
+  in `ScoreBatch.requests` order, never reordered to match `events.json`)
+  and `refusals.json` (one document per row refusal, `{"key": ..., "code":
+  ..., "detail": ...}`, in the order `events.json` declared them). A batch
+  whose every row refuses still completes the job successfully with an
+  empty `records` array and a full `refusals.json` — refusing every row is
+  a valid, reportable outcome, not a worker failure (see "Failure
+  semantics").
 - `computed_moves_store.py` commits one new snapshot generation per run,
   carrying every other table forward unchanged alongside a fresh
   `computed_moves` table version (`engine/v2/data/computed_moves_table.py`;
@@ -682,6 +761,23 @@ including inside function bodies):
   layer 1.0) and reuses this same package's `computed_moves_store`/
   `incremental_data`/`repository.Repository` — no new cross-package edge,
   since `engine.v2.data` was already a top-level dependency here.
+  `native_score_batch.py` (new) imports `engine.v2.scoring.release_bindings`
+  (`ScoringReleaseBinding`, `resolve_release_binding`),
+  `engine.v2.scoring.nightly_source_bundle`
+  (`assemble_nightly_source_bundle`, `NightlySourceBundleRefusal`),
+  `engine.v2.scoring.source_inputs` (`build_native_score_inputs`),
+  `engine.v2.scoring.stages` (`NativeScoreInputs`, the type only),
+  `engine.v2.scoring.identity` (`request_hash`), and
+  `engine.v2.scoring.application` (`score_batch`) — all layer 5.0, already
+  this package's top-level dependency via `native_board_universe.py`, so no
+  new cross-package edge — plus `engine.v2.ops.native_board_universe`
+  (`BoardRequest`, reused unchanged as this module's batch-map key; a
+  same-layer, intra-package import) and `engine.v2.contracts`
+  (`ScoreRequest`, `ScoreBatch`, layer 0.0, already top-level here).
+  `engine.v2.models.no_fit` (`no_fit_guard`) is imported lazily, inside
+  `run_native_score_batch_worker` only — the same lazy pattern
+  `worker.py::_dispatch_adhoc_rescore` already uses for the same symbol, so
+  `engine.v2.models` stays lazy-only for this package.
 - Lazy, function-local: `engine.v2.contracts` also appears lazily
   (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
   `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
@@ -1130,6 +1226,234 @@ network, or database access.
   own commit key, once `native_score` exists) is that later stage's
   concern.
 
+### `native_score_batch.py` (the 4c R1–R6 template)
+
+- **R1, missing input — batch-level (raises).** `assemble_score_batch_inputs`
+  raises a plain `TypeError`/`ValueError` (never a `NativeScoreBatchRowRefusal`)
+  for a caller programming error that makes the WHOLE call meaningless: a
+  `binding` that is not a `ScoringReleaseBinding`, an `events` argument that
+  is not a sequence of `NightlyEventInputs`, or two events sharing the same
+  `BoardRequest` key (an ambiguous batch, exactly the ambiguity
+  `application.score_batch` itself already refuses at the request-hash
+  level). `run_native_score_batch_worker` raises the same way for a missing
+  or malformed `events.json`, or a `release_root` `resolve_release_binding`
+  cannot resolve at all (`NoCurrentRelease`/`ModelNotReady` — the WHOLE batch
+  has no release to score against, so there is no per-row map to attempt).
+  These are attempt failures (`WORKER_FAILED`/a typed `OpsError`), the same
+  as every other worker in this package. A colliding `request_hash` across
+  two DIFFERENT `BoardRequest` keys (CodeRabbit round 2, PR #66) is also a
+  batch-level `ValueError`, not a per-row refusal: `ScoreRequest` carries no
+  `ticker`/`event_date` of its own, so two distinct rows whose
+  `ScoreRequest` fields happen to coincide (most plausibly a duplicated
+  `calendar_row["event_id"]`) would otherwise silently collide in
+  `run_native_score_batch_worker`'s `fields_by_request` map, one row
+  clobbering the other's inputs with no refusal for either — nothing in
+  this module can say which of the two rows is "the bad one", so the whole
+  attempt fails instead of guessing. `as_of`, `snapshot_id` and
+  `calendar_revision` (Opus gate, PR #66) are likewise validated once,
+  batch-level, before any row is attempted: a `None`, unparseable, or
+  timezone-aware `as_of` raises `ValueError` (via `nightly_source_bundle
+  .validated_as_of`) instead of only surfacing once
+  `assemble_nightly_source_bundle` re-validates it inside every single row
+  — which would otherwise refuse every row individually while the attempt
+  still reported success — and a non-string or empty `snapshot_id`/
+  `calendar_revision` raises `ValueError` instead of flowing straight into
+  every row's `ScoreRequest` as the literal string `"None"` or `""` via
+  `str()`.
+- **R1, missing input — per row (never raises; one bad row does not sink the
+  batch).** Once a release is in hand, every OTHER failure is scoped to one
+  `BoardRequest` and collected as a `NativeScoreBatchRowRefusal` in the
+  returned tuple, not raised:
+  - `CALENDAR_ROW_INVALID` — the staged `calendar_row` itself is malformed:
+    not a mapping at all (CodeRabbit round 5, PR #66 — a null/wrong-typed
+    `calendar_row` in `events.json` would otherwise raise `AttributeError`
+    out of the mismatch check below and abort the whole batch before
+    `assemble_nightly_source_bundle` ever got a chance to refuse it), or its
+    own `event_date`/`expiry` field does not parse as a date (CodeRabbit
+    round 3 covered `event_date`; round 5 closed the same gap for `expiry`,
+    which `_identity_context` also parses later in the same row's assembly
+    and which was previously unchecked before that point).
+  - `CALENDAR_ROW_KEY_MISMATCH` — `calendar_row["ticker"]`/`calendar_row[
+    "event_date"]` does not match the row's own `NightlyEventInputs.key`.
+    Both checks live in one helper (`_calendar_row_problem`) run first,
+    before every other per-row check: nothing else in this module or in
+    `assemble_nightly_source_bundle` (which only checks `panel_row` against
+    `calendar_row`, never against the caller's `BoardRequest`) verifies
+    that a staged `calendar_row` actually belongs to the key it was paired
+    with, and by the time this check runs, `calendar_row` is already known
+    to be a mapping with parseable dates (`CALENDAR_ROW_INVALID` above
+    already caught anything less). Its `detail` is a fixed string, same as
+    `CALENDAR_ROW_INVALID`'s (CodeRabbit round 4, CWE-209) — never the raw
+    staged ticker/date values — see the fixed-detail note below.
+  - `UNSUPPORTED_STRATEGY` — `key.strategy != "STR-THRU"` (this bounded
+    assembler's one supported strategy, matching `nightly_source_bundle.py`'s
+    own documented scope).
+  - `RELEASE_MISSING_ROLE` — the release binding has no `model_identity`
+    entry for `"driver:STR-THRU"` or `"gate:STR-THRU"` (naming which). A
+    release that stages only a `gate` binding (every real release staged as
+    of this PR) refuses every row this way until a `driver` binding is also
+    staged — this is the expected, correctly-marked shadow state, not a
+    defect in this module.
+  - `AMBIGUOUS_DECISION_CLOCK` — the resolved `driver`/`gate` identities for
+    one strategy disagree on `decision_clock_id` (this assembler assumes one
+    decision clock per strategy across roles; a release that violates that
+    refuses rather than silently picking one).
+  - `GATE_POLICY_NOT_STAGED` — `gate_policy` (the caller-supplied, per-
+    strategy `{"threshold": ..., ...}` mapping) has no entry for the row's
+    strategy. **Known, escalated gap, not invented here**: a gate's
+    threshold is not part of `ScoringReleaseBinding` (PR-1 resolves model
+    bindings and frozen-state artifacts, never a scoring policy constant)
+    and not part of `assemble_nightly_source_bundle` either — nothing in
+    production stages one today (every real `gate_recipe` in this codebase
+    before this PR is a test's own synthetic `{"model": {...}, "threshold":
+    ...}`). `gate_policy` is deliberately an optional, caller-supplied
+    argument rather than a value this module invents, so a future PR that
+    does resolve one production threshold source can pass it straight
+    through without changing this module. Tracked as a follow-up issue
+    (filed alongside this PR).
+  - Every other `NightlySourceBundleRefusal` `assemble_nightly_source_bundle`
+    raises (missing staged input, leaked feature name, invalid spot,
+    post-`as_of` row, wrong-event panel row — see `engine/v2/scoring/
+    ARCHITECTURE.md`) is caught and re-wrapped as a
+    `NativeScoreBatchRowRefusal` carrying that refusal's own `code` plus the
+    row's `key`, but a FIXED `detail` string (`"nightly_source_bundle
+    refused: {code}"`) rather than that refusal's own `detail` (CodeRabbit
+    round 5, CWE-209: some `nightly_source_bundle.py` refusals embed staged
+    input, such as an invalid `quote_status`, directly into their own
+    `detail`, and `refusals.json` is a published output of a successful
+    attempt — the `code` alone is a closed, module-controlled vocabulary and
+    safe to keep, so callers can still distinguish refusal reasons by code).
+  - A `ValueError` from `build_native_score_inputs` itself (an
+    unresolvable `forecast_recipes`/`gate_recipe` shape, an answer-field
+    leak `_reject_answers` catches, an unsupported strategy) is likewise
+    caught and wrapped, code `NATIVE_INPUT_BUILD_FAILED`, but — unlike the
+    `NightlySourceBundleRefusal` re-wrap immediately above — with a FIXED
+    `detail` string, never `str(exc)` (CodeRabbit round 4, CWE-209:
+    `build_native_score_inputs`'s own message can name staged recipe/field
+    shapes, and `refusals.json` is a published output of a successful
+    attempt, not a log only this worker's own operator reads).
+  **Fixed-detail contract.** `CALENDAR_ROW_INVALID`, `CALENDAR_ROW_KEY_
+  MISMATCH`, `NATIVE_INPUT_BUILD_FAILED`, and the re-wrapped
+  `NightlySourceBundleRefusal` never carry an input-derived or
+  exception-derived `detail` — all four are fixed strings (or, for the
+  re-wrap, a fixed template around the closed-vocabulary `code` only),
+  precisely because their underlying failure (a malformed/mismatched
+  staged value, an arbitrary `ValueError` message from a nested builder,
+  or another module's own free-text refusal detail) could otherwise echo
+  staged content into a file this module cannot guarantee stays private.
+  Every OTHER refusal code's `detail` names only a small, module-controlled
+  identifier such as a role key like `"driver:STR-THRU"` or a
+  `decision_clock_id` — CodeRabbit's review did not flag those, and this PR
+  does not change them. `UNSUPPORTED_STRATEGY` is the one exception: its
+  `detail` does echo the row's own (caller-supplied) strategy string via
+  `{strategy!r}`, so it is not strictly closed-vocabulary the way a role
+  key is — it was left as-is because a strategy name is not the kind of
+  value CWE-209 is about (it identifies which option set membership check
+  failed, not staged market/model content), but it is not the same
+  guarantee as the four fixed-detail codes above.
+  This module never suppresses a batch-level exception from a row: only
+  `ValueError`/`TypeError`/`NightlySourceBundleRefusal` (a `ValueError`
+  subclass) are caught per row — `_calendar_row_problem` and the
+  `_iso`/date-parsing helpers it wraps can raise either `TypeError` or
+  `ValueError` on a malformed staged value, and both are converted to a
+  `CALENDAR_ROW_INVALID` refusal, not just `ValueError` alone. Anything
+  else (e.g. a programming bug raising some other exception type inside a
+  helper) propagates and fails the whole attempt, on the reasoning that a
+  defect the row-level contract did not anticipate should not be silently
+  absorbed into "one more
+  refusal."
+- **The post-`as_of` panel-feature anchor gap ([issue #53](
+  https://github.com/yshewchuk/investment-validation/issues/53)) is fixed
+  upstream (#67) and closed for this module too.** `assemble_nightly_
+  source_bundle` now takes a required, no-default `panel_anchor` keyword
+  argument and refuses `POST_AS_OF_ROW` itself when it is staged after
+  `as_of` — this module threads it straight through: `NightlyEventInputs`
+  carries a required `panel_anchor` field (mirroring `assemble_nightly_
+  source_bundle`'s own new parameter — this module derives nothing about it
+  itself; the caller who builds `events.json` is the one who owns "was
+  this the real FeatureVector.as_of/panel_row['date'] anchor"), and a
+  planted post-`as_of` `panel_anchor` on one row is a `POST_AS_OF_ROW`
+  `NativeScoreBatchRowRefusal` for that row exactly like every other
+  re-wrapped `NightlySourceBundleRefusal`, never a batch-level failure.
+  `records.json`'s envelope still carries `known_gaps` (now empty for a
+  normal batch: `{"schema_version": "native_score_batch_records.v1.0",
+  "authoritative": false, "known_gaps": [], "records": [...]}`) — the key
+  stays in the schema for a future gap this module might need to flag, but
+  nothing populates it today. `authoritative` stays `false` regardless:
+  that flag is this PR's own shadow-only design decision (per the user's
+  cutover-wiring decision), independent of the panel-anchor gap, and no
+  caller may treat `authoritative: false` output as a board-serving input.
+- **The MC-seed identity fields (user decision, 2026-09-23: native MC seed
+  = `sha256(snapshot|request.key())`).** `assemble_nightly_source_bundle`'s
+  own `context` carries only the calendar-required fields (no `snapshot`,
+  no legacy-shaped request-identity fields), so `stages._model_seed` cannot
+  compute a seed from it alone. This module merges the missing fields into
+  `context` via `dataclasses.replace` before calling
+  `build_native_score_inputs`: `snapshot=snapshot_id`,
+  `requested_as_of`/`requested_event_date`/`requested_expiry`/`chain_as_of`
+  from `as_of`/`calendar_row["event_date"]`/`calendar_row["expiry"]`/`as_of`
+  respectively (ISO date strings), and, since this is a fresh shadow score
+  with no legacy request driving it (not a replay), the shadow-mode
+  defaults `requested_strike=None`, `fill_alpha=0.5` (`engine.fills.MID`,
+  the same default `engine.score.score_calendar` uses), `variant=None`,
+  `decision_offset=None`, `quote_max_age_sessions=None` — **this default
+  set is this PR's own judgment call**, matching `score_calendar`'s own
+  defaults for a request built with no explicit override, not a value
+  recovered from any staged input. A later PR that wires real
+  per-request overrides (alt strikes, decision-offset variants) replaces
+  these defaults without changing the merge mechanism.
+- **Residual/analog/payoff artifacts are out of scope for this PR.**
+  `ScoringReleaseBinding.payoff_artifacts`/`.recalibration_artifacts`/
+  `.analog_artifacts` are resolved by PR-1 but never read by this module:
+  `residual_recipe`/`analog_recipe` are left at `assemble_nightly_source_bundle`'s
+  own `{}` default, which `source_inputs.py` already treats as a legitimate
+  "not declared" state (`_analog_block` returns `{"recipe": None}`; the
+  model/payoff block returns `{}` when no residual input is declared at
+  all) — never an error. A record this module produces therefore carries no
+  simulated P&L, analog, or payoff-calibrated field; it is a driver-forecast-
+  and-gate-only record. Wiring the artifact-keyed recipes is explicitly
+  named as "a later cutover PR" in `engine/v2/scoring/ARCHITECTURE.md`'s own
+  `release_bindings.py` section, not this one.
+- **R2, cache.** None of this module's own: `assemble_score_batch_inputs`
+  performs no I/O and caches nothing across rows or calls.
+  `run_native_score_batch_worker` calls `resolve_release_binding` exactly
+  ONCE per attempt (never once per row) and reuses the one returned
+  `ScoringReleaseBinding` — including its `frozen_inference`'s own member
+  cache (`engine/v2/scoring/ARCHITECTURE.md`'s R2) — across every row in the
+  batch, so repeated model/artifact hash verification happens once per
+  attempt, not once per event.
+- **R3, retry.** `native_score_batch`'s `RetryPolicy("bounded", 2, (5, 30))`
+  (matching `adhoc_rescore`'s own policy): a retried attempt re-reads
+  `events.json` and re-resolves the release from scratch — nothing is
+  reused across attempts.
+- **R4, transaction.** Not applicable: read-only, single-pass, no catalog
+  writes of its own. `records.json` and `refusals.json` are two separate,
+  non-atomic `write_text` calls (CodeRabbit round 1, PR #66) — an
+  interruption between them can leave only one of the two in the worker's
+  private staging directory. This module does not make that pair atomic
+  itself (no temp-file-then-rename dance); what makes an interrupted
+  attempt safe is one level up: the supervisor publishes an attempt's
+  staged outputs only after the worker subprocess exits successfully (its
+  own atomic attempt-publication contract, common to every job kind, not
+  reimplemented here), so a partial pair sitting in an interrupted
+  attempt's discarded staging directory is never published as a
+  committed `records.json`/`refusals.json`.
+- **R5, partial write.** Staging itself is not partial-write-safe in the
+  above sense (see R4): a killed attempt can leave one file written and the
+  other missing in private staging. No consumer ever sees that state,
+  because nothing publishes an incomplete attempt's staging.
+- **R6, idempotency.** Same `events.json`, same `release_root` pointer
+  state, same `as_of`/`snapshot_id`/`calendar_revision`, same `gate_policy`
+  → the same `records.json`/`refusals.json`, byte-for-byte: assembly is a
+  pure function of its arguments (no wall-clock read, no random draw), and
+  `score_one`'s own identity (`score_id`) is content-addressed
+  (`engine/v2/scoring/ARCHITECTURE.md`'s package-wide idempotency
+  invariant). Promoting a new release before a retry changes
+  `deployment_id`/`decision_clock_id`/artifact hashes on the next
+  resolution — a different release genuinely producing different records is
+  the correct, by-design outcome, not a violation of this idempotency
+  guarantee.
+
 ### Cutover PR-4: real `parity_rows` (the 4c R1–R6 template)
 
 **A `native_parity` failure never fails or alters the legacy nightly, at
@@ -1261,6 +1585,16 @@ local path, raw exception text, or an unsanitised free-text field —
 `worker.py`'s convention (a caught traceback goes to a private per-attempt
 file, never the result pipe) is the model other stages in this package
 follow.
+
+`native_score_batch.py` touches the same missing-input typed-refusal
+invariant (above, split into batch-level raises vs. per-row refusals — see
+"Failure semantics") and adds one of its own: **no runtime fitting**
+(root doc §2's layer-6.0 rule, "never runs inside a score request") —
+`run_native_score_batch_worker` runs `score_batch` inside
+`engine.v2.models.no_fit.no_fit_guard()`, the same guard
+`worker.py::_dispatch_adhoc_rescore` already wraps `score_one` in, so this
+job kind can never silently fit a model even if a future change to
+`assemble_score_batch_inputs` accidentally fed it a fitting path.
 
 `native_board_universe.py` touches the same missing-input typed-refusal
 invariant (above) and adds two of its own, scoped to that module:
