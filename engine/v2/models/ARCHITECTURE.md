@@ -184,12 +184,23 @@ third-party service. `hashlib.sha256` for every content hash;
   `content_hash`, is `StagingRefused` too (`MISSING_MEMBER_PAYLOAD` /
   `PAYLOAD_HASH_MISMATCH`). **New in this PR:** `_compatibility_issues`
   also refuses two inference bindings that declare the same
-  `(role, strategy_id, decision_clock_id)` key (`DUPLICATE_BINDING`), via
+  `(role, strategy_id)` pair (`DUPLICATE_BINDING`), via
   `_duplicate_binding_issues(release)` — a check that needs only `release`,
   no `inventory`, so §7.2's `_swap_pointer` shares the exact same function
-  to re-verify it at promote/rollback time too. Previously the `seen` set
-  recorded each key but nothing ever read it back, so a duplicate bound
-  silently — the release still staged, and whichever binding
+  to re-verify it at promote/rollback time too. **The key is
+  `(role, strategy_id)`, deliberately NOT including `decision_clock_id`**,
+  to match `scoring.release_bindings._resolve_model_bindings`'s own
+  ambiguity key (`"{role}:{strategy_id}"`, clock-independent — CodeRabbit
+  review, round 2): scoring's runtime catalog can never distinguish two
+  bindings that share a `(role, strategy_id)` but differ only in clock, so
+  a release with two such bindings would stage/promote cleanly under a
+  clock-qualified check yet make EVERY score for that role/strategy fail
+  with `ModelNotReady("ambiguous binding")` at read time — the same
+  "gate says fine, read path refuses everything" failure shape issue #101
+  is about in the first place, just for binding uniqueness instead of the
+  manifest hash. Previously the `seen` set recorded each key but nothing
+  ever read it back, so a duplicate bound silently — the release still
+  staged, and whichever binding
   `scoring.release_bindings` happened to resolve for that key at read time
   was unspecified.
 - **R2, cache.** None: every call re-derives the release hash and re-checks
@@ -240,7 +251,7 @@ third-party service. `hashlib.sha256` for every content hash;
   share one definition of "no duplicate inference binding") and refuses
   `StagingRefused(DUPLICATE_BINDING)` if the manifest's OWN bindings — the
   ones a valid hash proves were exactly what got staged — still declare two
-  bindings for the same `(role, strategy_id, decision_clock_id)`. This
+  bindings for the same `(role, strategy_id)`. This
   covers a release staged by a version of `stage_release` that predates the
   duplicate-binding gate (or by any future staging path that forgets to
   call it): the hash check alone proves the manifest matches what was
@@ -409,8 +420,10 @@ below; `production_deployment_root` is `production_release_root() /
   a release they just left.
 - **A staged release covers every inventory binding exactly once.** (new,
   this PR) `_compatibility_issues` refuses a second inference binding for
-  a `(role, strategy_id, decision_clock_id)` key already seen in the same
-  release, so `stage_release` never accepts an ambiguous binding set.
+  a `(role, strategy_id)` pair already seen in the same release — the same
+  key `scoring.release_bindings` resolves by, clock-independent — so
+  `stage_release` never accepts a binding set scoring itself would call
+  ambiguous.
 - **Never fits anything.** `RuntimeFitForbidden`/`ReadOnlyArtifact`
   (adapters/loader) and `no_fit.py`'s guard (reused by
   `engine.v2.scoring.native_payoff`) are this package's enforcement of the
