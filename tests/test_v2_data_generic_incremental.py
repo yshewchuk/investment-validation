@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -417,3 +418,110 @@ def test_generic_refresh_worker_commits_json_timestamp_rows(tmp_path, table_name
         assert {item.partition_key for item in result_records} == {"2025"}
     else:
         assert matches[0]["bid"] == 2.1
+
+
+def _provenance_coverage(contract, row, *, receipt_ref, revision_id):
+    logical_key = incremental_tables.logical_key_for_row(contract, row)
+    column = "obs_date" if contract.table_name == "option_chains" else "event_date"
+    session_date = str(row[column])[:10]
+    key = CoverageKey(
+        item_key=logical_key, session_date=session_date, ticker=row["ticker"])
+    return daily_incremental.build_completed_coverage(
+        TableContractRef(
+            contract_id=contract.contract_id,
+            definition_hash=contract.definition_hash),
+        source="fixture",
+        endpoint="fixture",
+        interval=TimeInterval(
+            column=column, start_inclusive=session_date,
+            end_exclusive=session_date + "T23:59:59"),
+        expected=(key,),
+        outcomes=(CoverageOutcome(
+            key=key, status="present", receipt_id=receipt_ref,
+            revision_id=revision_id, finality="final"),),
+        acquisition_receipt_refs=(receipt_ref,),
+        completed_at="2026-09-17T00:00:00Z",
+    )
+
+
+def _provenance_attempt(conn, store, clock, *, scope, contract, row, revision_id,
+                        ordinal, receipt_tag, parent, generation):
+    logical_key = incremental_tables.logical_key_for_row(contract, row)
+    receipt_ref = content_hash(
+        {"fixture": contract.table_name, "attempt": receipt_tag})
+    revision = incremental_tables.GenericRevision(
+        candidate=RevisionCandidate(
+            revision_id=revision_id, logical_key=logical_key, source="fixture",
+            source_priority=0, finality="final", revision_ordinal=ordinal,
+            received_at="2026-09-17T00:00:00Z",
+            content_hash=incremental_tables.revision_hash(
+                logical_key=logical_key, row=row, deleted=False)),
+        row=row)
+    resolved = Repository(conn).resolve_full(parent.snapshot_id)
+    candidate = generic_incremental.build_generic_table_candidate(
+        resolved, store, contract.table_name, (revision,),
+        coverage=_provenance_coverage(
+            contract, row, receipt_ref=receipt_ref, revision_id=revision_id),
+        parent_snapshot_id=parent.snapshot_id)
+    receipt = generic_incremental.commit_generic_table_candidate(
+        conn, store, candidate, scope=scope,
+        expected_head_snapshot_id=parent.snapshot_id,
+        expected_head_generation=generation, clock=clock,
+        request_hash=content_hash({"attempt": receipt_tag}),
+        receipt_id="receipt-" + receipt_tag, attempt_id="attempt-" + receipt_tag,
+        fence=generation + 1)
+    return candidate, receipt
+
+
+def test_generic_reused_fragment_with_new_provenance_keeps_changeset_manifest_hash(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    table_name = "option_chains"
+    contract = from_document(
+        TableContract, build_legacy_mapping()["tables"][table_name])
+    contract_ref = TableContractRef(
+        contract_id=contract.contract_id,
+        definition_hash=contract.definition_hash)
+    empty = dataset_manifest(
+        contract_ref, (), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(), availability_evidence_refs=())
+    base = snapshot_ref(
+        {table_name: empty}, calendar_version="cal.v1",
+        source_priority_version="fixture", finality_receipt_refs=())
+    commit_snapshot(
+        conn, scope="generic-provenance",
+        request_hash=content_hash({"base": table_name}), contracts=(contract,),
+        objects=(), records=(), manifests=(empty,), snapshot=base,
+        expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="provenance-base", attempt_id="provenance-base-attempt", fence=1,
+        fence_check=lambda _conn: None, clock=clock, store=store)
+
+    original = _worker_row(table_name, 2024)
+    corrected = dict(original, bid=2.1)
+    first, _ = _provenance_attempt(
+        conn, store, clock, scope="generic-provenance", contract=contract,
+        row=original, revision_id="provenance-1", ordinal=1, receipt_tag="one",
+        parent=base, generation=1)
+    second, _ = _provenance_attempt(
+        conn, store, clock, scope="generic-provenance", contract=contract,
+        row=corrected, revision_id="provenance-2", ordinal=2, receipt_tag="two",
+        parent=first.snapshot, generation=2)
+    reverted, _ = _provenance_attempt(
+        conn, store, clock, scope="generic-provenance", contract=contract,
+        row=original, revision_id="provenance-3", ordinal=3, receipt_tag="three",
+        parent=second.snapshot, generation=3)
+
+    first_ref = first.table_manifest.fragment_refs[0]
+    reverted_ref = reverted.table_manifest.fragment_refs[0]
+    assert reverted_ref.fragment_id == first_ref.fragment_id
+    assert reverted_ref.manifest_hash != first_ref.manifest_hash
+
+    audit = json.loads(conn.execute(
+        "SELECT changeset_json FROM data_changesets WHERE changeset_id = ?",
+        (reverted.changeset.changeset_id,)).fetchone()["changeset_json"])
+    result_ref = audit["result_dataset_version_ref"]
+    stored_version = conn.execute(
+        "SELECT manifest_hash FROM data_dataset_versions WHERE dataset_version_id = ?",
+        (result_ref["dataset_version_id"],)).fetchone()
+    assert stored_version is not None
+    assert stored_version["manifest_hash"] == result_ref["manifest_hash"]
