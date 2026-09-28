@@ -488,15 +488,15 @@ Concretely, `_submit_plan`'s own body gains, right before its existing
 
 ```python
 if plan_ref is None:
+    snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
     try:
-        readiness, snapshot_id = ensure_snapshot_fn(
-            root, as_of, clock,
-            prior.error_count if prior is not None and prior.status == "error" else 0)
+        readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
     except _HANDLED_FAILURES as exc:
-        return _failure(root, clock, as_of, None, exc, prior)
+        return _failure(root, clock, as_of, None, exc, prior, snapshot_attempt=snapshot_attempt + 1)
     if readiness == "not_yet":
         return _record(root, _receipt(
-            clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet"))
+            clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet",
+            snapshot_attempt=snapshot_attempt))
     if readiness == "timed_out":
         previous = prior.error_count if prior is not None and prior.status == "timed_out" else 0
         count = previous + 1
@@ -504,11 +504,11 @@ if plan_ref is None:
             return _record(root, _receipt(
                 clock, as_of, "failed",
                 f"the shadow snapshot import exceeded its deadline {count} consecutive "
-                "times; giving up", error_count=count))
+                "times; giving up", error_count=count, snapshot_attempt=snapshot_attempt))
         return _record(root, _receipt(
             clock, as_of, "timed_out",
             "the shadow snapshot import has not finished; the legacy lock is released, "
-            "resuming next tick", error_count=count))
+            "resuming next tick", error_count=count, snapshot_attempt=snapshot_attempt))
     try:
         plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
                            full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
@@ -524,28 +524,74 @@ keyword, `expected_shadow_snapshot_id=None` (round-2 fix, below) — so
 #117's own edits to `_default_plan`'s body (manifest capture, year
 derivation) are untouched by this design at the call-site level; only
 `_default_plan`'s two trailing literal kwargs and this one new keyword
-change (point 4 below). **A `"timed_out"` readiness deliberately reuses
-the SAME status string, the SAME `MAX_CONSECUTIVE_ERRORS`-bounded counter
-convention, and the SAME `error_count`-selection expression `_submit_
-plan`'s existing POST-plan `serve_fn`-timeout handling already uses
-further down in this same function (round-2 CodeRabbit finding, real —
-"specify the snapshot-import deadline outcome": an earlier draft bounded
-`_ensure_shadow_snapshot`'s own drive-to-terminal by `_serve_deadline` but
-never said what happens if that deadline fires). The two `"timed_out"`
-causes (this PRE-plan snapshot-import wait, and the EXISTING POST-plan
-`serve_fn` wait) are told apart by whether `plan_ref` is set on the
-receipt (`None` here, always set there) and by the receipt's own `detail`
-text — never by a fourth status string, which would only fragment one
-"this run for `as_of` is taking too long" concept into two. Because this
-receipt carries no `plan_ref`, `run_trigger`'s resume branch (`prior.
-plan_ref and prior.status in RESUME_STATUSES`) does NOT engage on the next
-tick — it falls through to the ordinary `_decide` path instead, which
-re-enters `_submit_plan` with `plan_ref=None` and calls `ensure_snapshot_
-fn` again with the SAME `attempt` (a `"timed_out"` outcome is not a
-`_failure`, so `attempt` is not bumped): the SAME idempotency key's R2
-catalog lookup then finds the `snapshot_import` job either `succeeded` by
-now (`"ready"`, immediately, no re-submission) or still running
-(`"timed_out"` again, consuming one more tick of the SAME counter) —
+change (point 4 below).
+
+**`TriggerReceipt` gains a new field, `snapshot_attempt: int = 0`,
+additive and separate from `error_count` (Opus-gate finding on `e900074`,
+real, Major: "the retry key's `attempt` expression resets to 0 after any
+`timed_out`/`not_yet` receipt, contradicting the design's own claim that
+the next tick retries with the SAME attempt").** An earlier draft of this
+design reused `error_count` for two different things at once — the
+job-identity number this phase's own retry key needs (must stay FIXED
+across any tick that does not represent a genuine terminal `snapshot_
+import` failure) and the CONSECUTIVE-timeout give-up count the
+`"timed_out"`-handling block above independently needs (which legitimately
+DOES need to reset once the underlying cause changes). Those two counters
+collide the moment `prior.status` alternates between `"error"` and
+`"timed_out"` for the SAME `as_of`: e.g. attempt 0 fails terminally
+(`"error"`, `error_count=1`), the fresh attempt 1 submission then hits
+`_ensure_shadow_snapshot`'s own deadline before finishing (`"timed_out"`,
+a SEPARATE `error_count=1` under the timeout-counting branch), and the
+next tick's OLD expression (`prior.error_count if prior.status == "error"
+else 0`) computed `0` again — re-deriving attempt 1's own still-running (or
+by-now-succeeded) job under attempt 0's key instead, exactly the spurious
+resubmission/`IDEMPOTENCY_CONFLICT` the gate's finding walked through.
+`snapshot_attempt` fixes this by tracking ONLY the job-identity number,
+untouched by anything else: it is read once, above, as `prior.
+snapshot_attempt if prior is not None else 0` (defaulting to `0` for any
+receipt written before this field existed, since it is purely additive —
+the same "absent key means 0/None" convention `pin_snapshot_inputs`'s own
+`calendar_version` addition already uses), passed straight into `ensure_
+snapshot_fn`, and carried forward UNCHANGED onto every receipt this block
+writes EXCEPT the one case that must bump it: the `except _HANDLED_
+FAILURES` branch above, which is `_ensure_shadow_snapshot`'s own raised
+terminal failure (R1(b)/R1(c)) and passes `_failure` an explicit `snapshot_
+attempt=snapshot_attempt + 1` — a NEW keyword-only parameter on `_failure`
+(`=None`, and every OTHER existing call site of `_failure` in this module —
+the generic `plan_fn`/`submit_fn`/`serve_fn` exception handling —
+passes `prior.snapshot_attempt if prior is not None else 0`, i.e.
+unchanged, since a `plan_fn`/`submit_fn` failure says nothing about
+whether the shadow snapshot import job itself needs a new identity). The
+existing `error_count` field's own meaning is completely unchanged by this
+fix — it still counts "how many consecutive `"error"`-status ticks in a
+row" and, separately, "how many consecutive `"timed_out"`-status ticks in
+a row" (two different call sites already select which count they mean by
+checking `prior.status` first, exactly as before) for the
+`MAX_CONSECUTIVE_ERRORS` give-up thresholds; only the RETRY-KEY's own
+job-identity number moved to the new, dedicated field. **A `"timed_out"`
+readiness deliberately reuses the SAME status string, the SAME
+`MAX_CONSECUTIVE_ERRORS`-bounded counter convention, and the SAME
+`error_count`-selection expression `_submit_plan`'s existing POST-plan
+`serve_fn`-timeout handling already uses further down in this same
+function (round-2 CodeRabbit finding, real — "specify the snapshot-import
+deadline outcome": an earlier draft bounded `_ensure_shadow_snapshot`'s
+own drive-to-terminal by `_serve_deadline` but never said what happens if
+that deadline fires). The two `"timed_out"` causes (this PRE-plan
+snapshot-import wait, and the EXISTING POST-plan `serve_fn` wait) are told
+apart by whether `plan_ref` is set on the receipt (`None` here, always set
+there) and by the receipt's own `detail` text — never by a fourth status
+string, which would only fragment one "this run for `as_of` is taking too
+long" concept into two. Because this receipt carries no `plan_ref`, `run_
+trigger`'s resume branch (`prior.plan_ref and prior.status in RESUME_
+STATUSES`) does NOT engage on the next tick — it falls through to the
+ordinary `_decide` path instead, which re-enters `_submit_plan` with
+`plan_ref=None` and calls `ensure_snapshot_fn` again with the SAME `snap
+shot_attempt` (a `"timed_out"` outcome is not a `_failure`, so `snapshot_
+attempt` is not bumped, per the fix above — this is now actually true,
+not merely asserted): the SAME idempotency key's R2 catalog lookup then
+finds the `snapshot_import` job either `succeeded` by now (`"ready"`,
+immediately, no re-submission) or still running (`"timed_out"` again,
+consuming one more tick of the SEPARATE consecutive-timeout counter) —
 self-healing across ticks with no new state needed, exactly the shape
 `_ensure_shadow_snapshot`'s own `supervisor.serve`/`_drive_jobs_to_
 terminal` call already reports (`"deadline_exceeded"`, mapped here to
@@ -574,10 +620,12 @@ for this job too).**
    `max_attempts`), not a caller minting a fresh submission after that
    row goes terminal. A bare `as_of`-only key would therefore make a
    terminally failed import PERMANENT for the rest of that `as_of`'s
-   retry window with no way to try again — reusing the SAME counter
-   `_failure` already threads for this `as_of` (`prior.error_count`) as
-   the key's own attempt suffix means a NEW `_submit_plan` entry after a
-   prior `_failure` call mints a genuinely NEW idempotency key, so
+   retry window with no way to try again — using the DEDICATED
+   `snapshot_attempt` counter (above; NOT `error_count`, which a
+   `"timed_out"` tick in between would otherwise reset the wrong value
+   against) as the key's own attempt suffix means a NEW `_submit_plan`
+   entry after a prior TERMINAL failure of this specific job mints a
+   genuinely NEW idempotency key, so
    `_insert_or_match` inserts a fresh row rather than matching the old
    terminal one — while a same-attempt-number resubmission (the
    crash-immediately-after-submit case) still dedupes exactly as
@@ -613,12 +661,13 @@ for this job too).**
    `earnings_events`, `feature_panel`, `tier4_forecasts` — a wider read set
    than the single ORATS probe `probe_finality` itself makes) have
    ALSO caught up. On a mismatch, this phase submits nothing and returns
-   `("not_yet", None)` (never raises) — `attempt` is NOT bumped for this
-   outcome (only `_failure`, via a raised `_HANDLED_FAILURES`, ever
-   increments `error_count`/`attempt`), so a `"not_yet"` tick costs
-   nothing against the attempt budget; the next tick calls `_ensure_
-   shadow_snapshot` again with the SAME `attempt` value and retries
-   `plan_import` fresh.
+   `("not_yet", None)` (never raises) — the caller's `snapshot_attempt` is
+   NOT bumped for this outcome (only the except-branch around THIS call,
+   on a raised `_HANDLED_FAILURES`, ever increments it — see the `Trigger
+   Receipt` fix above), so a `"not_yet"` tick costs nothing against
+   either the `snapshot_attempt` identity or the `error_count` give-up
+   budget; the next tick calls `_ensure_shadow_snapshot` again with the
+   SAME `attempt` value and retries `plan_import` fresh.
 4. On a match, submits the plan through the REAL path —
    `snapshot_import.save_import_plan` then
    `snapshot_import.submit_import(..., idempotency_key=
@@ -646,10 +695,13 @@ for this job too).**
    in-flight job alone (issue #103 section above, R5, unchanged, reused
    as-is here). A terminal `failed`/`conflict` outcome for this job raises
    the typed, non-retryable `INPUT_CHANGED` `OpsError` `_submit_plan`'s
-   existing `except _HANDLED_FAILURES` catches, routing into `_failure` —
-   which bumps `error_count`, so the NEXT `_submit_plan` entry for this
-   `as_of` (if any, before `MAX_CONSECUTIVE_ERRORS` is reached) calls this
-   function again with a genuinely NEW `attempt` value, per point 1 above.
+   existing `except _HANDLED_FAILURES` catches, routing into `_failure`
+   with `snapshot_attempt=snapshot_attempt + 1` (the `TriggerReceipt` fix
+   above) — which bumps `error_count` too (the ordinary give-up count, for
+   `MAX_CONSECUTIVE_ERRORS`) AND the dedicated `snapshot_attempt`, so the
+   NEXT `_submit_plan` entry for this `as_of` (if any, before `MAX_
+   CONSECUTIVE_ERRORS` is reached) calls this function again with a
+   genuinely NEW `attempt` value, per point 1 above.
 5. Directly committing into scope `"shadow"` (via `commit_snapshot_for_
    attempt(..., scope=request.scope, ...)`, `snapshot_promotion.py:208`)
    rather than importing into a candidate scope and calling `ops snapshot
@@ -880,24 +932,33 @@ tests:
   re-resolving the mutable head), each isolated with injected `plan_
   import_fn`/`submit_import_fn`/`serve_fn` seams, matching this module's
   existing testing style throughout.
-- **PR-7b-2 (wire it in and flip the literals, together).** `_submit_
-  plan`'s new `ensure_snapshot_fn` parameter and call site (see point 1
-  above), plus `_default_plan`'s `input_mode="snapshot"`/`snapshot_scope=
-  "shadow"` literals and its new pass-through `expected_shadow_snapshot_id`
-  keyword — shipped in the SAME slice, since calling `_ensure_shadow_
-  snapshot` while `_default_plan` still requests `"legacy"` would gate on
-  a snapshot the resulting plan would not even use, an incoherent halfway
-  state worth avoiding rather than a real second increment. Test plan:
-  `test_default_plan_passes_full_run_and_the_full_population` and its
-  siblings updated for the new `input_mode`/`snapshot_scope` values, plus
-  new `_submit_plan` tests proving a `"not_yet"` readiness returns the
-  `"not_yet"` receipt WITHOUT calling `plan_fn` or writing `"submitting"`,
-  a `"timed_out"` readiness returns the `"timed_out"`/`"failed"` receipts
-  per the SAME consecutive-timeout counter `serve_fn`'s own timeout
-  already uses, and a `"ready"` readiness calls `plan_fn` with the
-  verified `snapshot_id` exactly as before. Branches from `main` after
-  PR-7b-1 (and after #117, if that has not merged first) merges, per the
-  no-stacked-bases rule.
+- **PR-7b-2 (wire it in and flip the literals, together).** `TriggerReceipt`
+  gains `snapshot_attempt: int = 0` (additive), `_failure` gains the
+  matching optional `snapshot_attempt=None` keyword (every EXISTING call
+  site passes `prior.snapshot_attempt if prior is not None else 0`,
+  unchanged), and `_submit_plan`'s new `ensure_snapshot_fn` parameter and
+  call site (see point 1 above) reads/threads `snapshot_attempt` rather
+  than `error_count` — plus `_default_plan`'s `input_mode="snapshot"`/
+  `snapshot_scope="shadow"` literals and its new pass-through `expected_
+  shadow_snapshot_id` keyword — shipped in the SAME slice, since calling
+  `_ensure_shadow_snapshot` while `_default_plan` still requests `"legacy"`
+  would gate on a snapshot the resulting plan would not even use, an
+  incoherent halfway state worth avoiding rather than a real second
+  increment. Test plan: `test_default_plan_passes_full_run_and_the_full_
+  population` and its siblings updated for the new `input_mode`/`snapshot_
+  scope` values, plus new `_submit_plan` tests proving a `"not_yet"`
+  readiness returns the `"not_yet"` receipt WITHOUT calling `plan_fn` or
+  writing `"submitting"`, a `"timed_out"` readiness returns the `"timed_
+  out"`/`"failed"` receipts per the SAME consecutive-timeout counter
+  `serve_fn`'s own timeout already uses while leaving `snapshot_attempt`
+  unchanged, a `"ready"` readiness calls `plan_fn` with the verified
+  `snapshot_id` exactly as before, and — the regression test for the
+  Opus-gate finding on `e900074` — a fail-then-timeout-then-retry sequence
+  (a raised terminal failure bumps `snapshot_attempt` to 1, a subsequent
+  `"timed_out"` tick leaves it at 1, and the NEXT tick's `ensure_snapshot_
+  fn` call is asserted to receive `1`, not a reset `0`). Branches from
+  `main` after PR-7b-1 (and after #117, if that has not merged first)
+  merges, per the no-stacked-bases rule.
 - **PR-7b-3 (`pin_snapshot_inputs` gains `calendar_version` and the
   `expected_snapshot_id` CAS check).** Both are small, additive changes to
   the SAME function's return value and signature (point 3's `calendar_
@@ -2806,35 +2867,53 @@ status and its existing consecutive-timeout counter, per point 4 above).
   and as PR-7a's own `native_score_batch` sidecar's "existence check runs
   before any raw row is read" (R2 above) — a third instance of the same
   pattern in this same doc, not a new one.
-- **R3, retry — bounded, and each retry gets a FRESH idempotency key
-  (round-1 CodeRabbit finding, real).** A non-`succeeded` prior attempt
-  under the CURRENT `attempt` key is not itself resubmitted — `submission
-  ._insert_or_match` (`submission.py:296-322`) matches an EXISTING row
-  under an unchanged namespace+key pair regardless of that row's own
-  state, so a bare `as_of`-only key would make a terminally `failed`
-  import PERMANENT for the rest of that `as_of`'s retry window, with no
-  way for a later tick to try again. Retrying instead means minting a
-  GENUINELY NEW key: `attempt` is `prior.error_count if prior is not None
-  and prior.status == "error" else 0` — the SAME counter `_failure`
-  already increments each time this `as_of`'s run fails for any reason
-  (this phase's own R1(b) included), reused rather than a second,
-  independent counter. A `_submit_plan` entry that follows a prior
-  `_failure` call therefore computes a NEW `attempt` value and a NEW key,
-  so `_insert_or_match` inserts a fresh `snapshot_import` row rather than
-  matching the dead one — bounded by the SAME `MAX_CONSECUTIVE_ERRORS`-
-  shaped budget `nightly_trigger` already applies to the whole run for a
-  given `as_of` (this phase consumes from that SAME budget, not a second
-  one); once exhausted, the run for `as_of` is `"failed"` exactly as it
-  already would be today for any other exhausted precondition, not a new
-  terminal state. The submitted `snapshot_import` job's OWN retry policy
-  (`stages.py:336`'s existing `RetryPolicy("bounded", 2, (5, 30))`,
-  unchanged by this PR) covers a single ATTEMPT's own worker-level
-  lease/relaunch retries WITHIN one job row; this budget covers
-  `_ensure_shadow_snapshot` deciding whether to submit a NEW row at all on
-  a later tick — the same two-layer distinction PR-7a's own "R3, retry"
-  bullet above already draws for `native_score_batch`, now made to
-  actually work against `submission.py`'s real matching semantics rather
-  than assuming a bare key would let a retry through.
+- **R3, retry — bounded, and each retry gets a FRESH idempotency key,
+  from a counter dedicated to THIS phase (round-1 CodeRabbit finding,
+  real; the counter itself fixed by the Opus-gate finding on `e900074`,
+  real, Major — see "`TriggerReceipt` gains a new field" above for the
+  full account).** A non-`succeeded` prior attempt under the CURRENT
+  `attempt` key is not itself resubmitted — `submission._insert_or_match`
+  (`submission.py:296-322`) matches an EXISTING row under an unchanged
+  namespace+key pair regardless of that row's own state, so a bare
+  `as_of`-only key would make a terminally `failed` import PERMANENT for
+  the rest of that `as_of`'s retry window, with no way for a later tick to
+  try again. Retrying instead means minting a GENUINELY NEW key: `attempt`
+  is `TriggerReceipt.snapshot_attempt`, a counter DEDICATED to this phase
+  and touched ONLY by a raised `_HANDLED_FAILURES` out of THIS call (never
+  by `error_count`, which a `"timed_out"` tick from THIS SAME phase's own
+  drive-to-terminal wait — R1's point 4 above — would otherwise reset the
+  wrong value against, since `error_count` is shared with that unrelated
+  consecutive-timeout give-up count; an earlier draft of this design used
+  `prior.error_count if prior.status == "error" else 0` directly and broke
+  exactly there: a fail-then-timeout sequence for the SAME `as_of` made the
+  next tick recompute `attempt=0`, re-deriving a live or since-succeeded
+  job under the WRONG, already-superseded key). A `_submit_plan` entry
+  that follows a prior TERMINAL failure of this specific job therefore
+  computes a NEW `snapshot_attempt` value and a NEW key, so `_insert_or_
+  match` inserts a fresh `snapshot_import` row rather than matching the
+  dead one; a `_submit_plan` entry that follows a `"not_yet"` or a
+  `"timed_out"` FROM THIS PHASE instead reuses the SAME `snapshot_attempt`
+  value and the SAME key, correctly finding that job's own current state
+  (still running, or by now `succeeded`) rather than minting a spurious
+  duplicate. Bounded by the SAME `MAX_CONSECUTIVE_ERRORS`-shaped budget
+  `nightly_trigger` already applies to the whole run for a given `as_of`
+  (this phase consumes from that SAME `error_count`-tracked budget for its
+  OWN terminal failures, not a second one; its `"timed_out"` give-up count
+  is separately bounded by the SAME constant against the unrelated
+  consecutive-timeout counter already described in R1's point 4 above);
+  once either is exhausted, the run for `as_of` is `"failed"`/`"failed_
+  setup"` exactly as it already would be today for any other exhausted
+  precondition, not a new terminal state. The submitted `snapshot_import`
+  job's OWN retry policy (`stages.py:336`'s existing `RetryPolicy
+  ("bounded", 2, (5, 30))`, unchanged by this PR) covers a single
+  ATTEMPT's own worker-level lease/relaunch retries WITHIN one job row;
+  this budget covers `_ensure_shadow_snapshot` deciding whether to submit
+  a NEW row at all on a later tick — the same two-layer distinction PR-7a's
+  own "R3, retry" bullet above already draws for `native_score_batch`, now
+  made to actually work against `submission.py`'s real matching semantics
+  AND against a retry counter that survives an interleaved timeout,
+  rather than assuming a bare key (or a shared, resettable counter) would
+  let a retry through.
 - **R4, transaction.** `commit_snapshot_for_attempt` (unchanged by this
   PR) already opens its own short transaction inside the coordinator
   effect that runs when the submitted `snapshot_import` job's attempt
