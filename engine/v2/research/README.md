@@ -1,5 +1,8 @@
 # `engine/v2/research`
 
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for this component's contracts,
+inputs/outputs, dependencies and invariants.
+
 ## Ownership
 
 Implements **research tooling — offline analysis CLIs reading a pinned v2

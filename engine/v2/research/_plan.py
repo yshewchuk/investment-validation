@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from engine.v2.research._pricing import Structure, TradingCalendar, trading_calendar
+from engine.v2.data import errors
+from engine.v2.research._pricing import Structure, TradingCalendar
 
 __all__ = ["SKIP_REASONS", "ReplayPlan", "plan_events"]
 
@@ -61,8 +62,27 @@ def plan_events(
     events: pd.DataFrame,
     calendar: TradingCalendar | None = None,
 ) -> ReplayPlan:
-    """Resolve every event's entry and exit dates for ``structure``."""
-    cal = calendar or trading_calendar()
+    """Resolve every event's entry and exit dates for ``structure``.
+
+    ``calendar`` is required in every real sense: this function has no
+    repository/snapshot to derive one from, so a caller that reaches here
+    with ``calendar=None`` gets a typed refusal
+    (``engine.v2.data.errors.DataError``, ``CALENDAR_UNAVAILABLE``), never
+    the legacy-CSV ``trading_calendar()`` this package used to fall back
+    to. ``replay()`` (in ``replay.py``) is the caller that can actually
+    derive one, from the pinned snapshot, when its own caller left
+    ``calendar`` unset; this function only ever sees the calendar
+    ``replay()`` decided on.
+    """
+    if calendar is None:
+        raise errors.fail(
+            "CALENDAR_UNAVAILABLE",
+            "plan_events requires an explicit calendar; the legacy CSV "
+            "fallback has been removed. Pass calendar=, or call replay() "
+            "with a resolvable repository/snapshot_ref so it can derive "
+            "one from the pinned snapshot's daily_market table.",
+        )
+    cal = calendar
     rows: list[dict] = []
     skipped = {reason: 0 for reason in SKIP_REASONS}
 
