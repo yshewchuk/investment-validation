@@ -363,13 +363,16 @@ that produces this strategy's forecast — `score_frozen()`'s own
 backing the `"runup_move"` role (`application._runup_executor_spec` /
 `_frozen_stage_executors`), or a live local/champion model
 (`stages._execute_forecast`) — populates TWO fields, never one conflated
-name: `runup_move_raw_d14` (the model's own D14-horizon magnitude, read
-ONLY by the model stage, `stages._runup_model_inputs`/
-`_runup_residual_bands`) and `runup_move_prediction` (`runup_move_raw_d14`
-scaled by `days_before_print / 14`, exactly once, the row's PUBLISHED
-value — the one `financial.py`'s `_runup_fair_premium` and every external
-consumer reads). Before this fix, a frozen-sourced value was scaled once at
-capture and a second time by the model stage's own
+name: `runup_move_raw_d14` (the model's own D14-horizon magnitude) and
+`runup_move_prediction` (`runup_move_raw_d14` scaled by
+`days_before_print / 14`, exactly once, the row's PUBLISHED value — the one
+`financial.py`'s `_runup_fair_premium` and every external consumer reads).
+The model stage (`stages._runup_model_inputs`/`_runup_residual_bands`)
+prefers `runup_move_raw_d14`, falling back to `runup_move_prediction` only
+when no raw field was produced (never true after this fix, kept as a
+defensive default); it refuses (`MISSING_MODEL_INPUT:runup_move_prediction`)
+when neither value is a finite number. Before this fix, a frozen-sourced
+value was scaled once at capture and a second time by the model stage's own
 `native_payoff.scale_runup_move`; a live-local value was never scaled for
 publication at all.
 
