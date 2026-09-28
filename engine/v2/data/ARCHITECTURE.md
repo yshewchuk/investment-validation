@@ -48,11 +48,19 @@ the root doc's Layer 1 row. It owns:
   imports `reference_inputs`, so `catalog.commit_snapshot` never loads a
   legacy module inside its transaction;
 - legacy-tree materialization for a nightly's barrier-only legacy stages
-  (`legacy_materialization.py`, `legacy_nightly_read_plan.py`) — also
-  legacy-free itself (no `engine.*` legacy import); the dependency here runs
-  the other way, `legacy_adapter.py`'s own `materialize` and row-comparison
-  accessors are built on top of `legacy_materialization.py`, not the
-  reverse;
+  (`legacy_materialization.py`, `legacy_nightly_read_plan.py`) — neither
+  imports legacy `engine.*` code directly. At module level, `legacy_adapter.
+  py`'s own `materialize` and row-comparison accessors are built on top of
+  `legacy_materialization.py`, not the reverse. But the two also depend on
+  each other at call time, in both directions, specifically to break that
+  module-level cycle (`reference_inputs.py` imports `legacy_adapter.py`,
+  which imports `legacy_materialization.py`, so neither of the two can
+  import the other back at module level without one): `legacy_materialization
+  .materialize_tree`/`_tier4_cache_dir` import `reference_inputs` lazily
+  (`legacy_materialization.py:835,1055` — `:1051-1053`'s own comment names
+  the cycle), and `reference_inputs.manifest_pins` imports
+  `legacy_materialization.format_pinned_ref` lazily right back
+  (`reference_inputs.py:288`);
 - two natively-computed, legacy-free table families that have no legacy
   Tier-2 backing of their own: `computed_moves`/`computed_moves_table.py`
   (pure close-to-close move math, moved verbatim from the untouched legacy
@@ -153,10 +161,11 @@ X`):
   layer down — `incremental_tables.merge_table_rows`, `.logical_key_for_row`,
   `.revision_hash`, and the `GenericRevision`/`GenericMerge` dataclasses —
   are the same: neither package-root nor directive-declared. `.revision_hash`
-  and `GenericRevision` have a real cross-package caller today:
+  and `GenericRevision` have two real cross-package callers today:
   `engine.v2.research._trades_revisions.py` (`from engine.v2.data import
   incremental_tables`, then `incremental_tables.revision_hash`/
-  `.GenericRevision`).
+  `.GenericRevision`) and `engine.v2.ops.forward_calendar_store.py`
+  (`forward_calendar_store.py:47,615-627`, its own `_revision` helper).
 - **Snapshot resolution and bounded reads** — `repository.Repository`,
   `.ResolvedSnapshot` (directive-declared; not package-root).
   `Repository(conn, store=None)` exposes: `resolve`/`resolve_pinned` (exact
@@ -220,12 +229,22 @@ X`):
   `.insert_reference_inputs`, `.reference_inputs_for_snapshot`,
   `.pinned_materialization_refs` — none of these three modules' names are
   in the directive (point 2 above); all are reached by real cross-package
-  callers only via submodule-qualified imports: `legacy_materialization` by
-  `engine.v2.ops.capture_inputs`/`.snapshot_stages`/`.snapshot_planning` and
-  `engine.v2.research._scan`; `reference_inputs` by `engine.v2.ops.
-  snapshot_promotion`/`.snapshot_stages`/`.fingerprints`; `reference_catalog`
-  by `engine.v2.ops.snapshot_promotion`/`.snapshots`/`.snapshot_planning`/
-  `.price_history_store` (see "Dependencies").
+  callers only via submodule-qualified imports (verified as actual
+  `import`/`from ... import` statements, not a docstring or comment mention
+  naming the module): `legacy_materialization` by `engine.v2.ops.
+  capture_inputs`/`.snapshot_stages`/`.snapshot_planning`/
+  `.materialization_worker` (the last a call-time import,
+  `materialization_worker.py:89`); `reference_inputs` by `engine.v2.ops.
+  capture_inputs`/`.snapshot_promotion`/`.snapshot_stages`/`.fingerprints`
+  (the last a call-time import, `fingerprints.py:311`); `reference_catalog`
+  by `engine.v2.ops.snapshot_promotion`/`.snapshot_planning`/
+  `.price_history_store` (see "Dependencies"). `engine.v2.research._scan`
+  mentions `legacy_materialization` in a docstring but only actually
+  imports `errors`/`time_formats`; `engine.v2.ops.ledger_history_import`
+  mentions `legacy_nightly_read_plan` in a docstring but imports neither it
+  nor `legacy_materialization`/`reference_catalog`; `engine.v2.ops.snapshots`
+  mentions `reference_catalog` in a docstring but only actually imports
+  `catalog`/`errors`/`repository`.
 - **Snapshot import planning** — `import_snapshot.plan_import`, `.ImportPlan`,
   `.request_hash`, `.PENDING_CALENDAR_VERSION` (neither package-root nor
   directive-declared; called by `engine.v2.ops.snapshot_import`/
@@ -234,7 +253,10 @@ X`):
   LEGACY_NIGHTLY_READ_PLAN_V1`, `.BARRIER_KINDS`, `.FAMILIES`,
   `.NIGHTLY_CAPTURE_IMPLEMENTATION_REF`, `.required_families`,
   `.manifest_problems` (neither package-root nor directive-declared; called
-  by `engine.v2.ops.capture_inputs`/`.ledger_history_import`/`.cli`).
+  by `engine.v2.ops.capture_inputs`/`.cli` (`cli.py:387`, a call-time
+  import). `engine.v2.ops.ledger_history_import` only names this module in
+  a docstring (its `ledger_glob` families comment) and does not import it —
+  see the "Legacy mapping, materialization, reference inputs" bullet above.
 - **Tier-4 coverage** — `tier4_coverage.champion_producer_models`,
   `.required_serving_triples`, `.missing_triples` (neither package-root nor
   directive-declared; all three called by `engine.v2.ops.snapshot_stages.py`
@@ -378,12 +400,16 @@ the root doc §3's "legacy never imports v2" rule.
 `schema.OWNER`/`.MIGRATIONS`; `snapshots.py` calls `catalog.commit_snapshot`/
 `repository.Repository` to supply the real Phase 1 fence and publish a
 resolved head; `snapshot_import.py`/`snapshot_promotion.py`/`cli.py` call
-`import_snapshot.plan_import`/`.request_hash`; `capture_inputs.py`/
-`ledger_history_import.py`/`cli.py` call `legacy_nightly_read_plan.*`;
+`import_snapshot.plan_import`/`.request_hash`; `capture_inputs.py`/`cli.py`
+call `legacy_nightly_read_plan.*` (`ledger_history_import.py` only names
+this module in a comment; see "Primary contracts");
 `forward_calendar_store.py`/`computed_moves_store.py` call
 `computed_moves.native_trading_calendar`/`.build_rows` and
 `computed_moves_table.*`, but only `forward_calendar_store.py` passes a
 `fence_check` into `generic_incremental.commit_generic_table_candidate`;
+`forward_calendar_store.py` also calls `incremental_tables.revision_hash`/
+`.logical_key_for_row`/`.GenericRevision` directly (`:615-627`, its own
+`_revision` helper);
 `computed_moves_store.py` calls `catalog.commit_snapshot` directly with its
 own `_fence_check_for` (`verify_fence` when an attempt is staged, otherwise
 a no-op; no head-fence composition either way — see "Failure semantics");
@@ -774,10 +800,12 @@ flowchart TB
     end
 
     subgraph legacy["Legacy-touching seam, its own foundation, and what is built on it"]
-        legacy_materialization["legacy_materialization.py (legacy-free)"]
+        legacy_materialization["legacy_materialization.py (no direct legacy import)"]
         legacy_adapter["legacy_adapter.py"] --> legacy_materialization
         legacy_mapping["legacy_mapping.py"] --> legacy_adapter
         reference_inputs["reference_inputs.py"] --> legacy_adapter
+        legacy_materialization -.->|"call-time only, breaks the\nlegacy_adapter/reference_inputs cycle"| reference_inputs
+        reference_inputs -.->|"call-time only (manifest_pins)"| legacy_materialization
         reference_catalog["reference_catalog.py (legacy-free)"] --> legacy_materialization
         import_snapshot["import_snapshot.py"] --> legacy_mapping
         import_snapshot --> reference_inputs
