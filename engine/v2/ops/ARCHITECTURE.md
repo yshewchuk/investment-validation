@@ -1778,8 +1778,13 @@ retry, transaction, partial write, idempotency).
   per-`as_of` path (`reports/phase6/nightly_trigger/<as_of>.input_manifest.json`)
   rather than the one shared name — a stale prior night's manifest is never
   read for a different night, because there is no shared name left to
-  collide on. This only runs when a `universe` is actually declared (the
-  population document resolves to at least one ticker); with none,
+  collide on. The write itself is direct and non-atomic
+  (`capture_inputs.write_manifest` is a plain `Path.write_text`, no
+  tmp-file-plus-rename): an interrupted write can leave a partial manifest
+  at that path, and a later capture for the SAME `as_of` simply overwrites
+  whatever was there. This only runs when a
+  `universe` is actually declared (the population document resolves to at
+  least one ticker); with none,
   `input_manifest` stays `None`, unchanged from before — a plan with no
   tickers has nothing for `capture` to enumerate against.
 - **R1 (defensive), a manifest for the wrong session.** `capture_inputs.capture(...,
