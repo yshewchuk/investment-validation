@@ -88,7 +88,10 @@ def _runup_executor_spec(names, days):
     source = source or (names[0] if len(names) == 1 else None)
     if source is None or days is None or days < 0.0:
         return ()
-    return (("runup_move_prediction", source, days / _RUNUP_BASE_DAYS, True),)
+    return (
+        ("runup_move_raw_d14", source, 1.0, True),
+        ("runup_move_prediction", source, days / _RUNUP_BASE_DAYS, True),
+    )
 
 
 def _ordinary_executor_specs(names, targets):

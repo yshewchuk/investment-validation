@@ -1027,6 +1027,21 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
     )
     if undetermined:
         output[_UNDETERMINED_FIELD] = tuple(sorted(undetermined))
+    if (strategy == "STR-RUNUP" and "runup_move_raw_d14" not in values
+            and "runup_move_raw_d14" not in output):
+        raw = output.get("runup_move_prediction")
+        days = _finite(values.get("days_before_print"))
+        if isinstance(raw, (int, float)) and days is not None and days >= 0.0:
+            # The forecast stage's OWN raw D14 model output, not yet scaled
+            # by any upstream mechanism (issue #94): publish the scaled
+            # value legacy always publishes, exactly once, and keep the raw
+            # D14 value under its own name for the model stage
+            # (`_runup_model_inputs`/`_runup_residual_bands`) to consume.
+            from engine.v2.scoring import native_payoff
+            output["runup_move_raw_d14"] = float(raw)
+            output["runup_move_prediction"] = float(
+                native_payoff.scale_runup_move(max(float(raw), 0.0), days)
+            )
     values.update(output)
     if sizing_declined:
         values[_SIZING_DECLINED_FIELD] = True
@@ -1799,7 +1814,7 @@ def _runup_model_inputs(
     two-driver case (engine/score.py:2358-2413).
     """
     point_implied = _finite(values.get("driver_prediction"))
-    point_move_d14 = _finite(values.get("runup_move_prediction"))
+    point_move_d14 = _finite(values.get("runup_move_raw_d14", values.get("runup_move_prediction")))
     days = _finite(facts.get("days_before_print"))
     if point_implied is None:
         _add_flag(flags, "MISSING_MODEL_INPUT:driver_prediction")
@@ -1892,13 +1907,14 @@ def _execute_runup_model(
     ``native_payoff``'s pure re-derivation of ``engine/payoff.py``'s
     ``fit_runup_payoff``/``RunupPayoffSurface``/``simulate_runup_returns``.
     ``driver_prediction`` (legacy's ``point_implied``) and
-    ``runup_move_prediction`` are read exactly as the forecast stage left
-    them -- i.e. at the model's own D14 scale, since nothing upstream of
-    this stage applies ``scale_runup_move`` in the native/local path
-    (unlike the frozen-inference path's own ``application._runup_frozen_output``,
-    which produces the row's PUBLISHED, already-scaled forecast field of the
-    same name for a different purpose). This stage applies the scale itself,
-    exactly once, when building the Monte Carlo move draws.
+    ``runup_move_raw_d14`` are read at the model's own D14 scale (issue
+    #94): every forecast mechanism -- frozen (``application._runup_frozen_output``),
+    live-frozen-executor (``application._runup_executor_spec``), and local
+    (this stage's own ``_execute_forecast``) -- now populates
+    ``runup_move_raw_d14`` with the unscaled D14 value, separately from the
+    PUBLISHED ``runup_move_prediction`` field this stage never reads. This
+    stage applies the scale itself, exactly once, when building the Monte
+    Carlo move draws.
     """
     from engine.v2.scoring import native_payoff
 
@@ -2092,7 +2108,7 @@ def _runup_residual_bands(
     from engine.v2.scoring import native_payoff
 
     point_implied = _finite(values.get("driver_prediction"))
-    point_move_d14 = _finite(values.get("runup_move_prediction"))
+    point_move_d14 = _finite(values.get("runup_move_raw_d14", values.get("runup_move_prediction")))
     days = _finite(_facts(inputs, values).get("days_before_print"))
     if point_implied is None:
         _add_flag(flags, "MISSING_MODEL_INPUT:driver_prediction")

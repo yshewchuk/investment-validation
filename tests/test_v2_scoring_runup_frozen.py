@@ -250,7 +250,12 @@ def test_invalid_runup_artifact_refuses_without_local_or_supplied_fallback():
     assert record.readiness == "refused"
 
 
-def test_default_native_runup_numbers_and_record_shape_are_unchanged():
+def test_default_native_runup_publishes_the_scaled_move_and_raw_d14():
+    """2026-09-28 fix (issue #94): the local/live-model forecast path's raw
+    D14 model output (8.0) must be published scaled by days_before_print/14
+    (7/14 = 0.5 -> 4.0), matching legacy, with the raw D14 value published
+    separately under its own name -- not the raw 8.0 published unscaled,
+    which was the defect this closes."""
     inputs = _inputs()
     ordinary = replace(
         inputs,
@@ -279,8 +284,8 @@ def test_default_native_runup_numbers_and_record_shape_are_unchanged():
     record = application.score_one(_request(), ordinary)
 
     assert record.forecasts["driver_prediction"] == pytest.approx(6.0)
-    assert record.forecasts["runup_move_prediction"] == pytest.approx(8.0)
-    assert "runup_move_raw_d14" not in record.forecasts
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
     assert "runup_move_provenance" not in record.forecasts
     # No held-out forecast pool was declared, so the serialized interval
     # contract is explicit: forecast_sd is present as None, never fabricated.

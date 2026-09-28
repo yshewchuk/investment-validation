@@ -1554,3 +1554,45 @@ def test_surface_payoff_document_rounds_coefficients_to_8dp():
         name: round(value, 8)
         for name, value in zip(native_payoff.RUNUP_TERMS, raw)
     }
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-28 issue #94: the forecast and model stages must use the RAW D14
+# move, and the published move must carry exactly one days/14 scale.
+# ---------------------------------------------------------------------------
+
+
+def test_str_runup_days_before_print_7_scales_once_and_agrees_across_paths():
+    """The local (non-frozen) STR-RUNUP path must publish the forecast
+    model's raw D14 move scaled by days_before_print/14 exactly once, while
+    the model stage consumes the unscaled raw D14 value -- never a value
+    that was already scaled (the issue #94 double-scale defect).
+
+    ``_runup_bundle``'s default runup-move point is 0.0, which cannot tell a
+    single scale from a double scale (0.0 * 0.5 == 0.0 * 0.5 * 0.5), so this
+    test overrides ONLY that point to 8.0 -- the same raw D14 the frozen-path
+    fixture carries in tests/test_v2_scoring_runup_frozen.py -- and supplies
+    the runup-move slot's zero-residual rows in the same shape as
+    ``_ZERO_MODEL_RESIDUAL_ROWS``, with ``"prediction"`` matching that 8.0
+    point estimate (no sibling runup-move zero-residual constant exists in
+    this file; the driver slot's own constant keeps its 7.0 prediction).
+    """
+    bundle = _runup_bundle(
+        forecast_recipes={
+            "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+            "runup_move_prediction": {"intercept": 8.0, "coefficients": {}},
+        },
+        runup_move_residual_rows=[{"prediction": 8.0, "residual": 0.0}],
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    # The raw D14 companion is published under its own name, unscaled.
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    # The published move is 8.0 * (7 / 14) == 4.0: scaled exactly once.
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
+    # The model-stage bands come from the zero-variance runup-move draws:
+    # the raw D14 point (8.0) plus a zero residual draw, horizon-scaled once
+    # by days/14 == 0.5 -> 4.0. The double-scale defect would yield 2.0.
+    assert record.resolved_request["runup_move_p10"] == pytest.approx(4.0)
+    assert record.resolved_request["runup_move_p90"] == pytest.approx(4.0)
