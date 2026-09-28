@@ -57,6 +57,7 @@ __all__ = [
     "MODEL_RELEASE_ROOT_ENV",
     "POINTER_STATE_V1",
     "STAGED_MANIFEST_V1",
+    "CorruptManifest",
     "DeploymentError",
     "MissingReleaseRoot",
     "NoPriorRelease",
@@ -132,6 +133,21 @@ class StaleReleaseHash(DeploymentError):
         self.hash_version = hash_version
         super().__init__(f"{self.code}: {release_id} is staged under hash version "
                           f"{hash_version}, not {RELEASE_HASH_SEMANTIC_V2}")
+
+
+class CorruptManifest(DeploymentError):
+    """A staged manifest's declared release_hash no longer matches its own
+    recomputed content hash -- the manifest was tampered or corrupted on
+    disk after staging. Refused before promote/rollback ever move the
+    pointer."""
+
+    code = "CORRUPT_MANIFEST"
+
+    def __init__(self, release_id: str) -> None:
+        """Build the CORRUPT_MANIFEST refusal message, naming the release."""
+        self.release_id = release_id
+        super().__init__(f"{self.code}: {release_id}'s staged manifest content "
+                          f"hash does not match its declared release_hash")
 
 
 # --------------------------------------------------------------------------
@@ -293,8 +309,11 @@ def _compatibility_issues(
     seen = set()
     for binding in release.bindings:
         key = (binding.role, binding.strategy_id, binding.decision_clock_id)
-        seen.add(key)
         path = f"$.bindings[{binding.binding_id}]"
+        if key in seen:
+            issues.append(ReleaseIssue(path=path, code="DUPLICATE_BINDING", detail=repr(key)))
+            continue
+        seen.add(key)
         counterpart = by_key.get(key)
         if counterpart is None:
             issues.append(ReleaseIssue(path=path, code="UNBOUND_IN_INVENTORY", detail=repr(key)))
@@ -568,6 +587,8 @@ def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> Poi
         raise ReleaseNotStaged(release_id)
     if manifest.release_hash_version != RELEASE_HASH_SEMANTIC_V2:
         raise StaleReleaseHash(release_id, manifest.release_hash_version)
+    if not _manifest_hash_matches(manifest):
+        raise CorruptManifest(release_id)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:
@@ -597,18 +618,40 @@ def promote(root: Path, release_id: str, *, clock: Clock = SystemClock()) -> Poi
     return _swap_pointer(Path(root), release_id, "promote", clock)
 
 
+def _rollback_target(root: Path) -> str:
+    """The release id a rollback should land on.
+
+    Replays ``pointer_history`` as an undo stack: push the release id on
+    every ``"promote"`` action (including a promote back to an older
+    release id), pop on every ``"rollback"`` action. The target is the
+    second-from-top id after the replay -- the release that was live
+    immediately before the most recent forward move -- so N chained
+    ``rollback()`` calls undo N chained promotions and never revisit a
+    release a prior rollback already left. Refuses :class:`NoPriorRelease`
+    when fewer than two ids remain on the replayed stack.
+    """
+    stack: list[str] = []
+    for state in pointer_history(root):
+        if state.action == "rollback":
+            if stack:
+                stack.pop()
+        else:
+            stack.append(state.release_id)
+    if len(stack) < 2:
+        raise NoPriorRelease("no prior release to roll back to")
+    return stack[-2]
+
+
 def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:
     """Point ``DEPLOYED`` back at the release the current one was promoted
     from. Refuses :class:`NoPriorRelease` with nothing to roll back to, or
-    :class:`StaleReleaseHash` if THAT prior release is itself staged under
-    a superseded hash version.
+    :class:`StaleReleaseHash`/:class:`CorruptManifest` if THAT prior release
+    is itself staged under a superseded hash version or a tampered manifest.
     """
     root = Path(root)
-    current = current_pointer(root)
-    if (current is None or current.previous_release_id is None
-            or current.previous_release_id == current.release_id):
-        raise NoPriorRelease("no prior release to roll back to")
-    return _swap_pointer(root, current.previous_release_id, "rollback", clock)
+    _repair_history(root)
+    target = _rollback_target(root)
+    return _swap_pointer(root, target, "rollback", clock)
 
 
 def current_release(root: Path) -> ModelRelease | None:

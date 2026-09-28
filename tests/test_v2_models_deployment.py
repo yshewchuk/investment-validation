@@ -31,6 +31,7 @@ from engine.v2.models import (
 )
 from engine.v2.models import deployment as deployment_module
 from engine.v2.models.deployment import (
+    CorruptManifest,
     MissingReleaseRoot,
     StaleReleaseHash,
     production_release_root,
@@ -398,6 +399,106 @@ def test_rollback_refuses_a_pointer_that_is_its_own_predecessor(tmp_path):
 
     with pytest.raises(NoPriorRelease):
         rollback(tmp_path)
+
+
+def test_promote_refuses_a_manifest_whose_content_hash_no_longer_matches(tmp_path):
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    manifest_path = tmp_path / "releases" / "r1" / "manifest.json"
+    document = json.loads(manifest_path.read_text())
+    document["release_hash"] = "sha256:" + "0" * 64
+    manifest_path.write_text(json.dumps(document))
+
+    with pytest.raises(deployment_module.CorruptManifest):
+        promote(tmp_path, "r1")
+    assert current_pointer(tmp_path) is None
+
+
+def test_rollback_refuses_when_the_target_manifest_is_corrupted(tmp_path):
+    r1, inv1, pay1 = _fixture("r1")
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    promote(tmp_path, "r1")
+    promote(tmp_path, "r2")
+
+    manifest_path = tmp_path / "releases" / "r1" / "manifest.json"
+    document = json.loads(manifest_path.read_text())
+    document["release_hash"] = "sha256:" + "0" * 64
+    manifest_path.write_text(json.dumps(document))
+
+    with pytest.raises(deployment_module.CorruptManifest):
+        rollback(tmp_path)
+    assert current_pointer(tmp_path).release_id == "r2"
+
+
+def test_stage_release_refuses_two_bindings_for_the_same_role_strategy_clock(tmp_path):
+    release, inventory, payloads = _fixture("r1")
+    first = release.bindings[0]
+    second = ModelBinding(
+        binding_id="b2", model_id=first.model_id, role=first.role,
+        strategy_id=first.strategy_id, decision_clock_id=first.decision_clock_id,
+        adapter=first.adapter, feature_order=first.feature_order,
+        output_names=first.output_names, members=first.members,
+    )
+    release = ModelRelease(
+        release_id=release.release_id, deployment_id=release.deployment_id,
+        bindings=(first, second),
+    )
+    with pytest.raises(StagingRefused) as error:
+        stage_release(tmp_path, release, inventory, payloads)
+    assert "DUPLICATE_BINDING" in [item.code for item in error.value.issues]
+    assert not (tmp_path / "releases" / "r1" / "manifest.json").exists()
+
+
+def test_chained_rollback_undoes_chained_promotions_not_the_release_just_left(tmp_path):
+    r1, inv1, pay1 = _fixture("r1")
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    r3, inv3, pay3 = _fixture("r3", intercept=100.0, coefficient=200.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    stage_release(tmp_path, r3, inv3, pay3)
+    promote(tmp_path, "r1")
+    promote(tmp_path, "r2")
+    promote(tmp_path, "r3")
+
+    rollback(tmp_path)
+    assert current_pointer(tmp_path).release_id == "r2"
+    rollback(tmp_path)
+    assert current_pointer(tmp_path).release_id == "r1"
+    with pytest.raises(NoPriorRelease):
+        rollback(tmp_path)
+
+
+def test_rollback_after_a_direct_repromote_of_an_old_release_undoes_that_repromote(tmp_path):
+    r1, inv1, pay1 = _fixture("r1")
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    promote(tmp_path, "r1")
+    promote(tmp_path, "r2")
+    promote(tmp_path, "r1")
+
+    rollback(tmp_path)
+    assert current_pointer(tmp_path).release_id == "r2"
+
+
+def test_deployment_gate_fixes_do_not_break_an_existing_single_release_production_layout(tmp_path):
+    release, inventory, payloads = _fixture("p5-6-2026-09-21b")
+    stage_release(tmp_path, release, inventory, payloads)
+    promote(tmp_path, "p5-6-2026-09-21b")
+
+    assert current_pointer(tmp_path).sequence == 0
+    assert current_pointer(tmp_path).previous_release_id is None
+    assert resolve_release(tmp_path, "p5-6-2026-09-21b") == current_release(tmp_path)
+    with pytest.raises(NoPriorRelease):
+        rollback(tmp_path)
+
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    stage_release(tmp_path, r2, inv2, pay2)
+    assert promote(tmp_path, "r2").release_id == "r2"
+    rollback(tmp_path)
+    assert current_pointer(tmp_path).release_id == "p5-6-2026-09-21b"
 
 
 # --------------------------------------------------------------------------
