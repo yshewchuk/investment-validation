@@ -4287,21 +4287,27 @@ this design adds no new auto-retry-past-a-failure logic).
   promote itself moves, so without this check the cycle restages and
   repromotes the SAME `as_of` forever).** Does nothing if BOTH:
   `deployment.current_pointer`'s own `release_id` starts with the literal
-  prefix `"nightly-<as_of>-"`, AND a STATE catalog exists and
-  self-verifies for that `release_id` (`_read_state_catalog`'s existing
-  checks, the SAME ones `derive_catalog`'s own R1 already reuses — no new
-  check invented). **The prefix alone is not enough (CodeRabbit finding,
-  confirmed): a manually staged, prefix-matching release_id like
-  `"nightly-<as_of>-manual"` would satisfy a prefix-only check without
-  ever having gone through `phase5_state_stage`/`derive_catalog` at all.**
-  A plain `stage_release`/`promote` (MODEL side only, the existing manual
-  operator path) never writes a STATE catalog — only `derive_catalog`
-  does — so requiring one to exist AND self-verify means only a release
-  genuinely produced by `phase5_state_stage` (whether the automatic
-  sidecar submitted it, or an operator submitted the SAME job kind by
-  hand — either is a genuine completion of this `as_of`'s cycle) can ever
-  satisfy this check; an unrelated manually-staged, coincidentally-named
-  release cannot. Otherwise, does nothing until all six `training` jobs
+  prefix `"nightly-<as_of>-"`, AND the job catalog holds a `succeeded`
+  `phase5_state_stage` job whose OWN `new_release_id` parameter equals that
+  exact `release_id` (a catalog query by parameter value, not by dedup
+  key — this job's dedup key names a `prior_release_id` the terminal check
+  does not otherwise need to know). **Neither the prefix alone, nor the
+  prefix plus a merely-present, self-verifying catalog, is enough
+  (CodeRabbit findings, both confirmed):** a manually staged,
+  prefix-matching release_id like `"nightly-<as_of>-manual"` would satisfy
+  a prefix-only check without ever going through `phase5_state_stage` at
+  all; and a light-check FAILURE (step 4 below) leaves `new_release_id`
+  fully staged with a perfectly self-verifying catalog (R5) but a
+  `phase5_state_stage` job that reports failed/refused, never `succeeded`
+  — so a catalog-existence check alone would also wrongly treat a manually
+  `models_promote`-d, light-check-failed candidate (the `#149` scenario) as
+  this cycle's genuine completion. Requiring the JOB's own `succeeded`
+  checkpoint, not merely an artifact's presence, closes both gaps with no
+  new marker or mechanism: `phase5_state_stage` already reports
+  failed/refused on any light-check failure (step 4's own text), so a
+  `succeeded` checkpoint already means every light check passed.
+
+  Otherwise, does nothing until all six `training` jobs
   keyed to this `as_of` have `succeeded`; then submits ONE new job kind,
   `phase5_state_stage` (below), keyed
   `"nightly:<as_of>:pool_stage:<prior_release_id>"`, naming the six jobs'
