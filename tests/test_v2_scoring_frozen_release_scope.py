@@ -282,3 +282,24 @@ def test_out_of_scope_gate_result_does_not_leak_into_frozen_score(tmp_path):
     # The source-owned gate model (intercept 1.0) decides, not the leak.
     assert record.gate_terms["gate_score"] == 1.0
     assert "UNSUPPORTED_FROZEN_GATE" not in record.reason_codes
+
+
+def test_out_of_scope_size_role_does_not_force_a_missing_forecast_refusal(tmp_path):
+    """A STR-RUNUP 'size' binding submitted alongside an in-scope STR-THRU
+    driver must never add 'size' to this request's required_roles -- it
+    would make forecast validation demand an output that was correctly
+    filtered out of frozen_outputs as out-of-scope, refusing a record that
+    should have scored cleanly."""
+    driver = _binding(tmp_path, "b-driver", "driver", STRATEGY,
+                      output="driver_prediction", intercept=6.0)
+    other_size = _binding(tmp_path, "b-other-size", "size", OTHER_STRATEGY,
+                          output="forecast_abs_move", intercept=999.0)
+    release = _release((driver, other_size))
+    requests = (_inference_request(release, driver),
+               _inference_request(release, other_size))
+    record = _score(tmp_path, release, (driver, other_size), requests=requests)
+    assert record.forecasts["driver_prediction"] == 6.0
+    assert "MISSING_FORECAST_OUTPUT:size" not in record.reason_codes
+    # The bare fixture carries no payoff/analog score number, so NO_SCORE
+    # refuses this row independently of the out-of-scope size binding.
+    assert record.validation_status == "refused"

@@ -670,11 +670,15 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
                             scoped_binding_ids: frozenset[str] | None = None):
     """Fold the per-binding inference results into the canonical collections.
 
-    ``scoped_binding_ids`` (issue #93 review) narrows the answer-bearing
-    ``outputs``/``gate_result`` to the bindings scoped to this request; the
-    diagnostics (``state``, ``flags``, ``artifact_hashes``, ``required_roles``)
-    stay merged from every binding, and ``None`` keeps the historical unscoped
-    fold the direct eager-path callers use.
+    ``scoped_binding_ids`` (issue #93 review, extended by the CodeRabbit
+    follow-on) narrows every answer-bearing or refusal-affecting collection --
+    ``outputs``, ``gate_result``, ``required_roles``, ``state`` and ``flags``
+    -- to the bindings scoped to this request: an out-of-scope binding must
+    not demand a role forecast validation would then refuse on, nor stamp a
+    not-READY result's refusal onto an in-scope record. Only
+    ``artifact_hashes`` (pure provenance metadata) stays merged from every
+    binding, and ``None`` keeps the historical unscoped fold the direct
+    eager-path callers use.
     """
     outputs = {}
     state = {}
@@ -688,6 +692,9 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
         role_name, role_outputs, result_state, role_flags, hashes, current_gate = (
             _frozen_result_state(result, binding, inference_request, days)
         )
+        in_scope = (scoped_binding_ids is None
+                    or getattr(binding, "binding_id", None)
+                    in scoped_binding_ids)
         # A gate-only size producer feeds the gate's ``pred_abs_move`` columns
         # alone, never ``result.forecast_abs_move`` (legacy
         # ``_forecast_for_gate``). Keep its provenance/refusal, hold the value
@@ -699,16 +706,23 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
             # capture submits every release binding's inference request
             # unconditionally, so a multi-strategy release routinely hands
             # ``score_frozen`` bindings outside its own (strategy, clock).
-            if (scoped_binding_ids is None
-                    or getattr(binding, "binding_id", None)
-                    in scoped_binding_ids):
+            if in_scope:
                 outputs.update(role_outputs)
-            if role_name in {"driver", "size", "implied_t1", "runup_move",
-                             "iv_crush"}:
+            # CodeRabbit follow-on (issue #93): scoping only the outputs still
+            # let an out-of-scope binding add its role here, so forecast
+            # validation demanded (and refused on) a target that was correctly
+            # filtered out of ``frozen_outputs``.
+            if in_scope and role_name in {"driver", "size", "implied_t1",
+                                          "runup_move", "iv_crush"}:
                 required_roles.append(role_name)
-        state.update(result_state)
-        flags.extend(role_flags)
-        flags.extend(getattr(result, "reason_codes", ()) or ())
+        # CodeRabbit follow-on (issue #93): an out-of-scope not-READY result's
+        # state/refusal codes would otherwise force ``score_frozen``'s final
+        # status check to refuse an in-scope record.
+        if in_scope:
+            state.update(result_state)
+            flags.extend(role_flags)
+            flags.extend(getattr(result, "reason_codes", ()) or ())
+        # ``artifact_hashes`` stays unscoped: pure provenance metadata.
         artifact_hashes.extend(hashes)
         if current_gate is not None:
             # issue #93 review: an out-of-scope binding's gate result must
@@ -716,9 +730,7 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
             # has no scoped gate binding at all (the executor_bindings-based
             # pop in ``_frozen_gate_inputs`` would then never run) -- same
             # unconditional-capture reachability as above.
-            if (scoped_binding_ids is None
-                    or getattr(binding, "binding_id", None)
-                    in scoped_binding_ids):
+            if in_scope:
                 gate_result = current_gate
     return outputs, state, flags, artifact_hashes, required_roles, gate_result
 
