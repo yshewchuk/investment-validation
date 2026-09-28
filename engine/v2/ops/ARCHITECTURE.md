@@ -284,9 +284,10 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   `resource_classes=frozenset({"validation"})` (a pure comparison, no
   provider fetch — the same classification `decision_evidence` already
   has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
-  `checkpoint_contract="native_parity_report.v1.1"` (a minor version bump
-  from today's `native_parity_report.v1.0` — see "Outputs" below for the
-  one additive field), `namespaces=frozenset({"shadow", "smoke"})`.
+  `checkpoint_contract="native_parity_report.v1.1"` (matching
+  `native_parity_report.SCHEMA_VERSION`, which Phase 1 (`#132`) already
+  bumped from `v1.0` — see "Outputs" below for the two additive fields
+  this contract already covers), `namespaces=frozenset({"shadow", "smoke"})`.
   `worker.py::dispatch` gains a `"native_parity"` branch routing to
   `native_parity_report.run_native_parity_worker` (below), the same
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
@@ -457,15 +458,30 @@ a submission source" rule Part 4 already established for
   raise `VALIDATION_FAILED` — the correct outcome for THAT case is
   unchanged. `compare_native_vs_legacy` itself gains no new parameter and
   no new branch for this: the decision of which path to take is
-  `run_native_parity_worker`'s own, so `run_shadow_nightly`'s test-only
-  path (which never has refusals to give it) is unaffected either way.
+  `run_native_parity_worker`'s own (still unbuilt — Phase 2), so
+  `run_shadow_nightly`'s test-only path, which calls `native_parity_handler`
+  directly and never `run_native_parity_worker`, never reaches this
+  `_empty_native_report` branch at all — see the next bullet,
+  `apply_native_refusals`, for the one behavior change that DOES already
+  reach that existing test-only path today.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
   unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
   refused native rows are counted separately" (user decision, option (c)).
   `compare_native_vs_legacy` itself is UNCHANGED — pure, refusal-blind,
-  unaware `native_score_batch` can refuse a row at all — so
-  `run_shadow_nightly`'s own test-only path (which has no refusals to give
-  it) sees no behavior change. `run_native_parity_worker` calls this AFTER
+  unaware `native_score_batch` can refuse a row at all. **But
+  `native_parity_handler` — the EXISTING function `run_shadow_nightly`
+  already calls, unchanged in signature — now calls
+  `apply_native_refusals(report, {}, ())` unconditionally right after
+  `compare_native_vs_legacy`, on every `"compared"` report it writes (Phase
+  1, `#132`, already on `main`): with no refusals to apply this changes no
+  row's classification, but every report that test-only path writes now
+  also carries the two new, always-present, empty fields
+  `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
+  `SCHEMA_VERSION` `native_parity_report.v1.1`, not the pre-redo `v1.0` — a
+  real, already-shipped change to this existing artifact's shape, not a
+  no-op reserved for `run_native_parity_worker`.** Once Phase 2 builds it,
+  `run_native_parity_worker` calls this the SAME way, this time with real
+  `native_refusals`/`unkeyable_refusals`, AFTER
   `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
   key in the report's own `only_legacy` list that is ALSO a key of
   `native_refusals` (population-key → refusal code, built from
