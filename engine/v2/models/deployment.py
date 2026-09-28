@@ -667,9 +667,16 @@ def _rollback_target(root: Path) -> str:
     immediately before the most recent forward move -- so N chained
     ``rollback()`` calls undo N chained promotions and never revisit a
     release a prior rollback already left. Refuses :class:`NoPriorRelease`
-    when fewer than two ids remain on the replayed stack, and
+    when fewer than two ids remain on the replayed stack,
     :class:`StagingRefused` (``HISTORY_UNREADABLE``) when a recorded
-    history entry can't be read.
+    history entry can't be read, :class:`StagingRefused`
+    (``HISTORY_SEQUENCE_GAP``) when the read sequences aren't exactly the
+    contiguous range ``0..len(history) - 1`` (a hole in the middle is
+    corruption :func:`_repair_history` can never restore, and replaying a
+    gapped history as consecutive undo steps would target the wrong
+    release), and :class:`StagingRefused` (``HISTORY_INCONSISTENT``) when
+    the top of the replayed stack disagrees with the release ``DEPLOYED``
+    actually names.
     """
     try:
         history = pointer_history(root)
@@ -678,6 +685,12 @@ def _rollback_target(root: Path) -> str:
             path="$.history", code="HISTORY_UNREADABLE",
             detail="a recorded pointer-history entry could not be read",
         ),)) from exc
+    sequences = [state.sequence for state in history]
+    if sequences != list(range(len(history))):
+        raise StagingRefused((ReleaseIssue(
+            path="$.history", code="HISTORY_SEQUENCE_GAP",
+            detail=f"expected contiguous sequences 0..{len(history) - 1}, got {sequences}",
+        ),))
     stack: list[str] = []
     for state in history:
         if state.action == "rollback":
@@ -687,6 +700,14 @@ def _rollback_target(root: Path) -> str:
             stack.append(state.release_id)
     if len(stack) < 2:
         raise NoPriorRelease("no prior release to roll back to")
+    pointer = current_pointer(root)
+    live_release_id = None if pointer is None else pointer.release_id
+    if stack[-1] != live_release_id:
+        raise StagingRefused((ReleaseIssue(
+            path="$.history", code="HISTORY_INCONSISTENT",
+            detail=f"replayed history believes {stack[-1]!r} is live, "
+                   f"DEPLOYED says {live_release_id!r}",
+        ),))
     return stack[-2]
 
 

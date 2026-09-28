@@ -452,6 +452,30 @@ def test_rollback_refuses_when_a_history_entry_is_corrupted(tmp_path):
     assert current_pointer(tmp_path).release_id == "r2"
 
 
+def test_rollback_refuses_when_a_history_entry_is_missing_from_the_middle(tmp_path):
+    """A history/*.json deleted from the middle (a hole _repair_history can
+    never restore) refuses StagingRefused(HISTORY_SEQUENCE_GAP) instead of
+    replaying the gapped history as consecutive undo steps and moving
+    DEPLOYED to the wrong release."""
+    r1, inv1, pay1 = _fixture("r1")
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    r3, inv3, pay3 = _fixture("r3", intercept=100.0, coefficient=200.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    stage_release(tmp_path, r3, inv3, pay3)
+    promote(tmp_path, "r1")
+    promote(tmp_path, "r2")
+    promote(tmp_path, "r3")
+    assert len(list((tmp_path / "history").glob("*.json"))) == 3
+
+    (tmp_path / "history" / "000001.json").unlink()
+
+    with pytest.raises(StagingRefused) as error:
+        rollback(tmp_path)
+    assert "HISTORY_SEQUENCE_GAP" in [item.code for item in error.value.issues]
+    assert current_pointer(tmp_path).release_id == "r3"
+
+
 def test_stage_release_refuses_two_bindings_for_the_same_role_strategy_clock(tmp_path):
     release, inventory, payloads = _fixture("r1")
     first = release.bindings[0]
