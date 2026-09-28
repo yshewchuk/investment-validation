@@ -263,11 +263,14 @@ def test_frozen_curated_append_correction_tombstone_and_noop_replay(tmp_path):
 def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path):
     """#81: a caller-supplied ``fence_check`` must be COMPOSED with
     ``commit_daily_market_candidate``'s own head fence, never replace it. A
-    same-receipt replay after the head has already moved must still refuse
-    ``SNAPSHOT_CONFLICT`` even when the caller's own ``fence_check`` is a
-    no-op that would, by itself, allow the call (mirrors an attempt-lease
-    check on an attempt that is still live) -- this is the exact scenario the
-    bug let through silently."""
+    genuinely DIFFERENT candidate (a different writer racing against the same
+    stale parent) must still be refused with ``SNAPSHOT_CONFLICT`` even when
+    the caller's own ``fence_check`` is a no-op that would, by itself, allow
+    the call (mirrors an attempt-lease check on an attempt that is still live)
+    -- this is the exact scenario the bug let through silently. (#98's fix
+    only exempts a same-effect retry, whose resulting snapshot does match what
+    is actually at head; this different candidate's resulting snapshot does
+    not, so the conflict stands.)"""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
     contract = _obj_contract("daily_market")
@@ -320,19 +323,119 @@ def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path)
         attempt_id="attempt-1", fence=1)
     assert receipt1.resulting_head_snapshot_id != parent_ref.snapshot_id
 
-    # Same receipt/request/attempt/fence/scope/resulting-snapshot as above,
-    # but still claiming the OLD (now-stale) expected head, with a
-    # caller-supplied fence_check that is itself a permissive no-op. The
-    # composed head fence must still catch the stale expectation and refuse
-    # SNAPSHOT_CONFLICT -- the bug let the no-op fence_check replace the head
-    # fence outright and silently return the prior receipt instead.
+    # A genuinely DIFFERENT candidate -- different ticker/raw/revision, built
+    # against the SAME pre-receipt-1 ``parent`` -- races against the stale
+    # head expectation with a caller-supplied fence_check that is itself a
+    # permissive no-op. Its own resulting snapshot does not match what is
+    # actually at head, so the composed head fence must still refuse
+    # SNAPSHOT_CONFLICT: the no-op fence_check must not replace the head
+    # fence outright and silently return a prior receipt.
+    append_row2 = dict(rows[0], ticker="YYY")
+    append_raw2 = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"kind":"synthetic-append-2"}', response_kind="complete",
+            response_meta={}),
+        source="synthetic", endpoint="daily_market",
+        request={"ticker": "YYY"}, received_at=clock.now().isoformat())
+    revision2 = _frozen_revision(append_row2, append_raw2.raw_receipt_id, "revision-2")
+    (revision2,), _ = data_incremental._stage_normalizations(
+        conn, store, {append_raw2.raw_receipt_id: append_raw2}, (revision2,),
+        contract.contract_id, clock)
+    coverage2 = _coverage(revision2, append_raw2.raw_receipt_id)
+    candidate2 = data_incremental.build_daily_market_candidate(
+        parent, store, (revision2,), coverage=coverage2,
+        parent_snapshot_id=parent_ref.snapshot_id)
+
     with pytest.raises(DataError) as err:
         data_incremental.commit_daily_market_candidate(
-            conn, store, candidate, scope="shadow",
+            conn, store, candidate2, scope="shadow",
             expected_head_snapshot_id=parent_ref.snapshot_id, expected_head_generation=1,
-            clock=clock, request_hash=request_hash, receipt_id="receipt-1",
-            attempt_id="attempt-1", fence=1, fence_check=lambda _c: None)
+            clock=clock, request_hash="sha256:" + "2" * 64, receipt_id="receipt-2",
+            attempt_id="attempt-2", fence=2, fence_check=lambda _c: None)
     assert err.value.code == "SNAPSHOT_CONFLICT"
+
+
+def test_retry_of_the_same_effect_after_a_crash_before_attempt_commit_succeeds(tmp_path):
+    """#98: a retry using the SAME candidate/receipt/attempt (simulating a crash between
+    commit_daily_market_candidate's own commit and the caller's later attempt-commit step)
+    must succeed as an idempotent replay, not fail permanently with SNAPSHOT_CONFLICT,
+    even though the head has since moved past the retry's stale expected_head_snapshot_id."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    contract = _obj_contract("daily_market")
+    rows = _obj_daily_market_rows()
+    table = _table_from_rows(contract, rows)
+    ref = store.publish_bytes(_to_bytes(table), schema_ref="parquet_fragment.v1")
+    object_ref = data_incremental.ObjectRef(
+        kind="parquet_fragment", object_id=ref.artifact_id,
+        content_hash=ref.content_hash, byte_size=ref.byte_size)
+    inspection = inspect_fragment(store, object_ref, contract, _DAILY_MARKET_REF, "2024")
+    receipt_ref = content_hash({"synthetic-base": True})
+    record = data_incremental.manifests.fragment_record(
+        inspection, _DAILY_MARKET_REF, input_receipt_refs=(receipt_ref,),
+        import_request_hash=receipt_ref)
+    manifest = dataset_manifest(
+        _DAILY_MARKET_REF, (record,), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent_ref = snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal.v1",
+        source_priority_version="synthetic", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="shadow", request_hash=content_hash({"base": "r0"}),
+        contracts=(contract,), objects=(object_ref,), records=(record,), manifests=(manifest,),
+        snapshot=parent_ref, expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="base-receipt", attempt_id="base-attempt", fence=1,
+        fence_check=lambda _c: None, clock=clock, store=store)
+    parent = Repository(conn).resolve_full(parent_ref.snapshot_id)
+
+    append_row = dict(rows[0], ticker="ZZZ")
+    append_raw = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"kind":"synthetic-append"}', response_kind="complete",
+            response_meta={}),
+        source="synthetic", endpoint="daily_market",
+        request={"ticker": "ZZZ"}, received_at=clock.now().isoformat())
+    revision = _frozen_revision(append_row, append_raw.raw_receipt_id, "revision-1")
+    (revision,), _ = data_incremental._stage_normalizations(
+        conn, store, {append_raw.raw_receipt_id: append_raw}, (revision,),
+        contract.contract_id, clock)
+    coverage = _coverage(revision, append_raw.raw_receipt_id)
+    candidate = data_incremental.build_daily_market_candidate(
+        parent, store, (revision,), coverage=coverage,
+        parent_snapshot_id=parent_ref.snapshot_id)
+
+    request_hash = "sha256:" + "1" * 64
+    receipt1 = data_incremental.commit_daily_market_candidate(
+        conn, store, candidate, scope="shadow",
+        expected_head_snapshot_id=parent_ref.snapshot_id, expected_head_generation=1,
+        clock=clock, request_hash=request_hash, receipt_id="receipt-1",
+        attempt_id="attempt-1", fence=1)
+    assert receipt1.resulting_head_snapshot_id != parent_ref.snapshot_id
+
+    # Crash here: the effect's own commit landed (the head advanced to
+    # candidate.snapshot.snapshot_id) but the caller's later attempt-commit
+    # step never ran. The retry re-presents the SAME stale expected head.
+    receipt2 = data_incremental.commit_daily_market_candidate(
+        conn, store, candidate, scope="shadow",
+        expected_head_snapshot_id=parent_ref.snapshot_id, expected_head_generation=1,
+        clock=clock, request_hash=request_hash, receipt_id="receipt-1",
+        attempt_id="attempt-1", fence=1)
+
+    assert receipt2.receipt_id == receipt1.receipt_id
+    assert receipt2.resulting_head_snapshot_id == receipt1.resulting_head_snapshot_id
+    assert receipt2.resulting_head_snapshot_id == candidate.snapshot.snapshot_id
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope='shadow'"
+    ).fetchone()
+    assert (head["snapshot_id"], head["generation"]) == (
+        candidate.snapshot.snapshot_id, 2)
+    resolved = Repository(conn).resolve_full(receipt2.resulting_head_snapshot_id)
+    manifest_ids = {item.fragment_id for item in
+                    resolved.table_manifests["daily_market"].fragment_refs}
+    records = tuple(item for item in resolved.records if item.fragment_id in manifest_ids)
+    zzz_rows = [row for row in data_incremental.load_daily_market_rows(
+        store, records, contract) if row["ticker"] == "ZZZ"]
+    assert len(zzz_rows) == 1
 
 
 def test_normalizer_id_bump_changes_cache_identity(tmp_path):

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.calendar_moves_jobs import (
@@ -18,6 +18,7 @@ from engine.v2.ops.calendar_moves_jobs import (
     cached_unit_outcomes,
 )
 from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.legacy_adapter import copy_read_set
@@ -31,6 +32,68 @@ NATIVE_DAILY_MARKET_ACCOUNT = "orats-daily-market"
 #: One daily_market fetch unit costs two ORATS calls (``hist/summaries`` and
 #: ``hist/cores``), so the reserved provider budget must count both.
 ORATS_CALLS_PER_DAILY_MARKET_UNIT = 2
+
+
+def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:
+    """Key a legacy ``score.json`` document's own ``rows`` array by
+    ``engine.v2.ops.decision_validation.population_key``'s
+    ``"ticker|strategy|event_date"`` format.
+
+    Pure: no filesystem, no clock. A ``score_document`` with no ``"rows"``
+    key returns ``{}`` (not a refusal) -- ``native_parity_handler``'s own
+    ``_refuse_empty_inputs`` already turns an empty ``legacy_rows`` into a
+    ``VALIDATION_FAILED`` refusal downstream.
+
+    Does NOT reuse ``population_key``'s own ``.get(key, "")`` empty-string
+    substitution for a missing ``ticker``/``strategy``/``event_date``: every
+    row's three key fields are validated present and non-empty before any
+    key is computed, and any two rows sharing one ``population_key`` value
+    are rejected as a collision -- never silently keyed by whichever key a
+    dict comprehension iterates last. Every one of these checks is a
+    batch-level refusal for the WHOLE call, raised before any dict is
+    constructed -- never a per-row skip.
+
+    Raises ``engine.v2.ops.errors.fail("VALIDATION_FAILED", ...)`` (an
+    ``OpsError``) when:
+    - ``score_document["rows"]`` is present but is not a list;
+    - any element of that list is not a mapping;
+    - any row is missing, or has a non-string or empty/falsy, ``ticker``,
+      ``strategy``, or ``event_date``;
+    - any row's ``ticker`` or ``strategy`` contains the ``"|"``
+      ``population_key`` delimiter;
+    - two rows produce the same ``population_key`` value.
+    """
+    if "rows" not in score_document:
+        return {}
+    rows = score_document["rows"]
+    if not isinstance(rows, list):
+        raise fail("VALIDATION_FAILED", "legacy parity rows is not a list",
+                   details={"type": type(rows).__name__})
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise fail("VALIDATION_FAILED", "legacy parity row is not a mapping",
+                       details={"index": index, "type": type(row).__name__})
+    required = ("ticker", "strategy", "event_date")
+    delimiter_checked = ("ticker", "strategy")
+    for index, row in enumerate(rows):
+        for field_name in required:
+            value = row.get(field_name)
+            if not isinstance(value, str) or not value:
+                raise fail("VALIDATION_FAILED", "legacy parity row missing required field",
+                           details={"index": index, "field": field_name})
+            if field_name in delimiter_checked and "|" in value:
+                raise fail("VALIDATION_FAILED",
+                           "legacy parity row field contains the population key delimiter",
+                           details={"index": index, "field": field_name})
+    keys = [population_key(row) for row in rows]
+    seen: dict[str, int] = {}
+    for index, key in enumerate(keys):
+        if key in seen:
+            raise fail("VALIDATION_FAILED", "legacy parity rows have duplicate population key",
+                       details={"population_key": key, "indices": [seen[key], index]})
+        seen[key] = index
+    return dict(zip(keys, rows))
+
 
 GRAPH = {
     "refresh": (), "finality": ("refresh",), "features": ("finality",),

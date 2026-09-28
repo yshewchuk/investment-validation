@@ -57,6 +57,7 @@ __all__ = [
     "MODEL_RELEASE_ROOT_ENV",
     "POINTER_STATE_V1",
     "STAGED_MANIFEST_V1",
+    "CorruptManifest",
     "DeploymentError",
     "MissingReleaseRoot",
     "NoPriorRelease",
@@ -132,6 +133,21 @@ class StaleReleaseHash(DeploymentError):
         self.hash_version = hash_version
         super().__init__(f"{self.code}: {release_id} is staged under hash version "
                           f"{hash_version}, not {RELEASE_HASH_SEMANTIC_V2}")
+
+
+class CorruptManifest(DeploymentError):
+    """A staged manifest's declared release_hash no longer matches its own
+    recomputed content hash -- the manifest was tampered or corrupted on
+    disk after staging. Refused before promote/rollback ever move the
+    pointer."""
+
+    code = "CORRUPT_MANIFEST"
+
+    def __init__(self, release_id: str) -> None:
+        """Build the CORRUPT_MANIFEST refusal message, naming the release."""
+        self.release_id = release_id
+        super().__init__(f"{self.code}: {release_id}'s staged manifest content "
+                          f"hash does not match its declared release_hash")
 
 
 # --------------------------------------------------------------------------
@@ -272,6 +288,36 @@ def _read_manifest(root: Path, release_id: str) -> StagedManifest | None:
 # --------------------------------------------------------------------------
 
 
+def _duplicate_binding_issues(release: ModelRelease) -> tuple[ReleaseIssue, ...]:
+    """Every ``(role, strategy_id)`` pair bound at most once.
+
+    Deliberately NOT clock-qualified: ``scoring.release_bindings.
+    _resolve_model_bindings`` resolves its runtime catalog by
+    ``f"{role}:{strategy_id}"`` alone, and nothing anywhere filters
+    candidate bindings by ``decision_clock_id`` before that lookup runs. A
+    release with two bindings sharing a ``(role, strategy_id)`` but
+    different ``decision_clock_id`` values would stage/promote cleanly
+    under a clock-qualified check, then make every score for that role/
+    strategy fail with ``ModelNotReady("ambiguous binding")`` at read time
+    -- so this check uses the SAME coarser key scoring does. Self-contained
+    on ``release`` alone -- no ``inventory`` needed -- so both
+    ``_compatibility_issues`` (staging, cross-checked against the inventory
+    too) and ``_swap_pointer`` (promote/rollback, re-verified independent of
+    whatever staged the manifest) share this ONE definition of "no
+    ambiguous inference binding".
+    """
+    issues: list[ReleaseIssue] = []
+    seen = set()
+    for binding in release.bindings:
+        key = (binding.role, binding.strategy_id)
+        path = f"$.bindings[{binding.binding_id}]"
+        if key in seen:
+            issues.append(ReleaseIssue(path=path, code="DUPLICATE_BINDING", detail=repr(key)))
+        else:
+            seen.add(key)
+    return tuple(issues)
+
+
 def _compatibility_issues(
     release: ModelRelease, inventory: ModelReleaseInventory,
 ) -> tuple[ReleaseIssue, ...]:
@@ -289,6 +335,7 @@ def _compatibility_issues(
             path="$.release_id", code="RELEASE_ID_MISMATCH",
             detail=f"{release.release_id} != {inventory.release_id}",
         ))
+    issues.extend(_duplicate_binding_issues(release))
     by_key = {binding.key: binding for binding in inventory.bindings}
     seen = set()
     for binding in release.bindings:
@@ -563,11 +610,24 @@ def _repair_history(root: Path) -> None:
 
 
 def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> PointerState:
+    """Validate a staged release, then move ``DEPLOYED`` to it.
+
+    Shared by both :func:`promote` and :func:`rollback`. Refuses
+    :class:`ReleaseNotStaged`, :class:`StaleReleaseHash`,
+    :class:`CorruptManifest`, or :class:`StagingRefused` (duplicate
+    bindings) before the pointer ever moves; a no-op if ``release_id`` is
+    already live.
+    """
     manifest = _read_manifest(root, release_id)
     if manifest is None:
         raise ReleaseNotStaged(release_id)
     if manifest.release_hash_version != RELEASE_HASH_SEMANTIC_V2:
         raise StaleReleaseHash(release_id, manifest.release_hash_version)
+    if not _manifest_hash_matches(manifest):
+        raise CorruptManifest(release_id)
+    duplicate_issues = _duplicate_binding_issues(manifest.release)
+    if duplicate_issues:
+        raise StagingRefused(duplicate_issues)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:
@@ -597,18 +657,75 @@ def promote(root: Path, release_id: str, *, clock: Clock = SystemClock()) -> Poi
     return _swap_pointer(Path(root), release_id, "promote", clock)
 
 
+def _rollback_target(root: Path) -> str:
+    """The release id a rollback should land on.
+
+    Replays ``pointer_history`` as an undo stack: push the release id on
+    every ``"promote"`` action (including a promote back to an older
+    release id), pop on every ``"rollback"`` action. The target is the
+    second-from-top id after the replay -- the release that was live
+    immediately before the most recent forward move -- so N chained
+    ``rollback()`` calls undo N chained promotions and never revisit a
+    release a prior rollback already left. Refuses :class:`NoPriorRelease`
+    when fewer than two ids remain on the replayed stack,
+    :class:`StagingRefused` (``HISTORY_UNREADABLE``) when a recorded
+    history entry can't be read, :class:`StagingRefused`
+    (``HISTORY_SEQUENCE_GAP``) when the read sequences aren't exactly the
+    contiguous range ``0..len(history) - 1`` (a hole in the middle is
+    corruption :func:`_repair_history` can never restore, and replaying a
+    gapped history as consecutive undo steps would target the wrong
+    release), and :class:`StagingRefused` (``HISTORY_INCONSISTENT``) when
+    the top of the replayed stack disagrees with the release ``DEPLOYED``
+    actually names.
+    """
+    try:
+        history = pointer_history(root)
+    except (OSError, ValueError) as exc:
+        raise StagingRefused((ReleaseIssue(
+            path="$.history", code="HISTORY_UNREADABLE",
+            detail="a recorded pointer-history entry could not be read",
+        ),)) from exc
+    sequences = [state.sequence for state in history]
+    if sequences != list(range(len(history))):
+        raise StagingRefused((ReleaseIssue(
+            path="$.history", code="HISTORY_SEQUENCE_GAP",
+            detail=f"expected contiguous sequences 0..{len(history) - 1}, got {sequences}",
+        ),))
+    stack: list[str] = []
+    for state in history:
+        if state.action == "rollback":
+            if stack:
+                stack.pop()
+        else:
+            stack.append(state.release_id)
+    if len(stack) < 2:
+        raise NoPriorRelease("no prior release to roll back to")
+    pointer = current_pointer(root)
+    live_release_id = None if pointer is None else pointer.release_id
+    if stack[-1] != live_release_id:
+        raise StagingRefused((ReleaseIssue(
+            path="$.history", code="HISTORY_INCONSISTENT",
+            detail=f"replayed history believes {stack[-1]!r} is live, "
+                   f"DEPLOYED says {live_release_id!r}",
+        ),))
+    return stack[-2]
+
+
 def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:
     """Point ``DEPLOYED`` back at the release the current one was promoted
     from. Refuses :class:`NoPriorRelease` with nothing to roll back to, or
-    :class:`StaleReleaseHash` if THAT prior release is itself staged under
-    a superseded hash version.
+    :class:`StaleReleaseHash`/:class:`CorruptManifest` if THAT prior release
+    is itself staged under a superseded hash version or a tampered manifest.
+    Also refuses :class:`StagingRefused` when a recorded pointer-history
+    entry can't be read (``HISTORY_UNREADABLE``), the replayed sequences
+    aren't exactly contiguous (``HISTORY_SEQUENCE_GAP``), or the top of the
+    replayed history disagrees with the release ``DEPLOYED`` actually names
+    (``HISTORY_INCONSISTENT``).
     """
     root = Path(root)
-    current = current_pointer(root)
-    if (current is None or current.previous_release_id is None
-            or current.previous_release_id == current.release_id):
-        raise NoPriorRelease("no prior release to roll back to")
-    return _swap_pointer(root, current.previous_release_id, "rollback", clock)
+    _repair_history(root)
+    target = _rollback_target(root)
+    return _swap_pointer(root, target, "rollback", clock)
 
 
 def current_release(root: Path) -> ModelRelease | None:

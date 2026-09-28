@@ -177,6 +177,9 @@ class Service:
         self.materialization_base = (Path(materialization_base) if materialization_base
                                      else default_materialization_base(self.root))
         self.running = {}
+        #: monotonic time of the last best-effort pass renewing every OTHER
+        #: running attempt's lease (issue #106); None until the first pass.
+        self._other_leases_renewed_at = None
         self.launches = {}
         #: attempt_id -> (monotonic time, observed state) of its last heartbeat row.
         self.observed = {}
@@ -834,7 +837,8 @@ class Service:
                     details={"reason": "generation_not_pinned"}))
             refuse_generation_mismatch(self.conn, self.store, receipt_id=receipt_id,
                                        barrier_manifest=manifest)
-        pin_read_set(self.conn, claim.attempt_id, manifest, self.store_root)
+        pin_read_set(self.conn, claim.attempt_id, manifest, self.store_root,
+                     keepalive=self._renew_other_leases)
         return manifest
 
     def _populate_legacy_staging(self, claim, manifest):
@@ -847,7 +851,8 @@ class Service:
                 details={"needed_bytes": total,
                          "scratch_limit_bytes": claim.resources.scratch_limit_bytes}))
         staging = self.store.staging_dir(claim.attempt_id)
-        copy_read_set(self.store_root, staging / "legacy", [ref["path"] for ref in refs])
+        copy_read_set(self.store_root, staging / "legacy", [ref["path"] for ref in refs],
+                      keepalive=self._renew_other_leases)
 
     def _build_snapshot_overlay(self, claim, launch):
         """Attempt-19 fix: an ``_OVERLAY_KINDS`` attempt's private legacy
@@ -1015,11 +1020,48 @@ class Service:
         if state is not None:
             state.interval_peak, state.interval_peak_step = status["memory"], state.current_step
 
+    def _renew_other_leases(self, exclude_attempt_id=None):
+        """issue #106: best-effort lease renewal for every OTHER running attempt.
+
+        One long single-attempt stretch -- a coordinator effect inside
+        ``_finish``, or ``_launch``'s read-set hashing/copying before the new
+        attempt is even in ``self.running`` -- used to starve every other live
+        attempt of its ``_poll`` heartbeat, so the next tick's ``expire_leases``
+        fenced a perfectly healthy sibling. This is the renewal point those
+        stretches call. Throttled (ONE shared timer) to at most once per
+        ``LEASE_SECONDS / 4`` monotonic seconds; a sibling's renewal failure is
+        swallowed -- that attempt's own ``_poll``/``expire_leases`` path owns
+        reporting it, it is not this pass's failure to raise. The shared timer
+        advances only after an ALL-SUCCEEDED pass (round-3 fix), so a failed
+        renewal is retried on the very next call rather than waiting out the
+        full throttle interval while the failing sibling nears its expiry.
+        """
+        now = self.clock.monotonic()
+        if (self._other_leases_renewed_at is not None
+                and now - self._other_leases_renewed_at < LEASE_SECONDS / 4):
+            return
+        all_ok = True
+        for attempt_id, running in list(self.running.items()):
+            if attempt_id == exclude_attempt_id:
+                continue
+            try:
+                heartbeat(self.conn, attempt_id, running.claim.fence,
+                          clock=self.clock, lease_seconds=LEASE_SECONDS)
+            except Exception:
+                all_ok = False
+        if all_ok:
+            self._other_leases_renewed_at = now
+
     def _finish(self, running, status):
         claim = running.claim
         launch = self.launches.pop(claim.attempt_id, None)
-        keepalive = Keepalive(self.conn, claim.attempt_id, claim.fence, clock=self.clock,
-                              lease_seconds=LEASE_SECONDS)
+        own_keepalive = Keepalive(self.conn, claim.attempt_id, claim.fence, clock=self.clock,
+                                  lease_seconds=LEASE_SECONDS)
+
+        def keepalive():
+            own_keepalive()
+            self._renew_other_leases(exclude_attempt_id=claim.attempt_id)
+
         try:
             self._commit_success(running, status, launch, keepalive)
         except Exception as exc:
@@ -1302,7 +1344,7 @@ class Service:
                                         clock=self.clock, keepalive=keepalive)
         if claim.spec.kind == "engineering_gate":
             return engineering_gate_effect(self.conn, self.store, claim, self.code_source,
-                                           clock=self.clock)
+                                           clock=self.clock, keepalive=keepalive)
         if claim.spec.kind == "publication":
             return publication_effect(self.conn, self.store, claim, self.root, self.code_source,
                                       clock=self.clock, store_root=self.store_root,

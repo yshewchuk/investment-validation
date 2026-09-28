@@ -276,8 +276,23 @@ def test_ambiguous_model_binding_raises_model_not_ready(tmp_path):
             role="gate", strategy_id="STR-THRU", clock_id="entry-close"),),
         artifact_manifest_ref="manifest://r", evidence_refs=("evidence://r",))
     dep_root = _dep_root(tmp_path)
-    deployment.stage_release(dep_root, release, inventory, {member_hash: payload})
-    deployment.promote(dep_root, "r-dup")
+    for binding in release.bindings:
+        for member in binding.members:
+            deployment._atomic_write_bytes(dep_root / member.path, payload)
+    manifest = deployment.StagedManifest(
+        release=release,
+        release_hash=deployment._release_hash(release),
+        staged_at="2024-01-01T00:00:00Z",
+        release_hash_version=deployment.RELEASE_HASH_SEMANTIC_V2,
+    )
+    deployment._atomic_write_bytes(
+        deployment._manifest_path(dep_root, "r-dup"), deployment._encode(manifest))
+    pointer = deployment.PointerState(
+        sequence=0, release_id="r-dup", previous_release_id=None,
+        action="promote", at="2024-01-01T00:00:00Z")
+    deployment._atomic_write_bytes(
+        deployment._pointer_path(dep_root), deployment._encode(pointer))
+    deployment._append_history(dep_root, pointer)
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "model:gate:STR-THRU"

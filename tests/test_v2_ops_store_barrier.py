@@ -25,6 +25,7 @@ from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.stages import CheckParameters
 from engine.v2.ops.store_barrier import (
     confirm_read_set,
+    pin_files,
     pin_read_set,
     read_set_complete,
     verified_write_in,
@@ -189,7 +190,10 @@ def test_o17_pinned_read_set_refuses_mutated_and_undeclared_inputs(tmp_path):
     _submit(conn, clock, "r1", "reader")
     claim = _claim(conn, clock, supervisor)
 
-    pin_read_set(conn, claim.attempt_id, _manifest(pinned, "data/x.bin"), prod)
+    keepalive_calls = []
+    pin_read_set(conn, claim.attempt_id, _manifest(pinned, "data/x.bin"), prod,
+                 keepalive=lambda: keepalive_calls.append(None))
+    assert keepalive_calls  # once per declared file, plus once per hash chunk
     assert read_set_complete(conn, claim.attempt_id) is True
     confirm_read_set(conn, claim.attempt_id, prod)
 
@@ -213,6 +217,39 @@ def test_o17_pinned_read_set_refuses_mutated_and_undeclared_inputs(tmp_path):
         pin_read_set(conn, second.attempt_id, _manifest(pinned, "data/missing.bin"), prod)
     pin_read_set(conn, second.attempt_id, _manifest(pinned, "data/x.bin", complete=False), prod)
     assert read_set_complete(conn, second.attempt_id) is False
+
+
+def test_o17_pin_files_keepalive_is_called_per_file_and_per_hash_chunk(tmp_path):
+    """issue #106 round 3: ``pin_files``' ``keepalive`` fires once per declared
+    file AND once per 1 MiB ``file_hash`` chunk, so a single huge input renews
+    its siblings mid-hash -- calling it more for a bigger file than a small
+    one, not just a fixed +1. The returned manifest is byte-identical to the
+    no-keepalive baseline either way."""
+    prod = tmp_path / "prod"
+    (prod / "data").mkdir(parents=True)
+    big = prod / "data" / "big.bin"
+    small = prod / "data" / "small.bin"
+    big.write_bytes(b"x" * 2_621_400)  # three 1 MiB chunk reads
+    small.write_bytes(b"small")       # one
+    paths = ["data/big.bin", "data/small.bin"]
+
+    def chunks(path):
+        return -(-path.stat().st_size // (1 << 20))
+
+    def pin_counted(selected):
+        calls = []
+        manifest = pin_files(prod, selected, keepalive=lambda: calls.append(None))
+        return manifest, len(calls)
+
+    baseline = pin_files(prod, paths)
+    manifest, combined_calls = pin_counted(paths)
+    assert manifest == baseline
+    assert combined_calls == (1 + chunks(big)) + (1 + chunks(small)) == 6
+    _, big_calls = pin_counted(["data/big.bin"])
+    _, small_calls = pin_counted(["data/small.bin"])
+    assert big_calls == 1 + chunks(big) == 4
+    assert small_calls == 1 + chunks(small) == 2
+    assert big_calls > small_calls
 
 
 @dataclass(frozen=True)

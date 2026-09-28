@@ -203,13 +203,19 @@ calls `run_shadow_nightly`, which "has no production caller [and] needs
 14 caller-supplied stage handlers nothing builds" — a manual script
 outside any schedule is not what "the REAL nightly" means. This doc
 describes the design Phase 2 of this redo will leave it, not a
-pre-existing fact: Phase 1 (this push) is documentation only, for
-`legacy_parity_rows` and the new `native_parity` job kind together, both
-gated on cutover PR-7a (`#88`) merging first — `native_parity`'s native-side
-input is the `native_score_batch` job's staged `records.json`/`refusals.json`
-output PR-7a's design places there, so this redo cannot be implemented
-before that one lands. Cutover PR-3 (`native_score_batch.py`, `#66`) is
-already merged, unlike when the original PR-4 was written. One piece is
+pre-existing fact: Phase 1 (cutover PR-4 redo slice 1, `#132`) has
+landed the pure functions this section documents — `legacy_parity_rows`,
+`native_parity_report._empty_native_report`, and
+`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` bumped
+`v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. The new
+`native_parity` job kind (its `dispatch` branch, and any submission path
+that enumerates `BoardRequest`s and stages this job) stays deferred,
+gated on cutover PR-7a (`#88`) merging first — `native_parity`'s
+native-side input is the `native_score_batch` job's staged
+`records.json`/`refusals.json` output PR-7a's design places there, so
+that wiring cannot be implemented before that one lands. Cutover PR-3
+(`native_score_batch.py`, `#66`) is already merged, unlike when the
+original PR-4 was written. One piece is
 untouched by this redo, real code already on `main`, independent of
 everything `#66`/`#88` supply: `native_parity_report.py`'s tolerance
 policy is already pluggable — see "the tolerance policy is now pluggable"
@@ -278,9 +284,10 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   `resource_classes=frozenset({"validation"})` (a pure comparison, no
   provider fetch — the same classification `decision_evidence` already
   has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
-  `checkpoint_contract="native_parity_report.v1.1"` (a minor version bump
-  from today's `native_parity_report.v1.0` — see "Outputs" below for the
-  one additive field), `namespaces=frozenset({"shadow", "smoke"})`.
+  `checkpoint_contract="native_parity_report.v1.1"` (matching
+  `native_parity_report.SCHEMA_VERSION`, which Phase 1 (`#132`) already
+  bumped from `v1.0` — see "Outputs" below for the two additive fields
+  this contract already covers), `namespaces=frozenset({"shadow", "smoke"})`.
   `worker.py::dispatch` gains a `"native_parity"` branch routing to
   `native_parity_report.run_native_parity_worker` (below), the same
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
@@ -335,11 +342,14 @@ a submission source" rule Part 4 already established for
   agree — a plain `{key: row for row in rows}` comprehension in
   `legacy_parity_rows` would then silently keep whichever row iterated
   last and drop the other with no trace. `legacy_parity_rows` therefore
-  validates every row before keying any of them: a missing/empty
-  `ticker`/`strategy`/`event_date`, OR two rows sharing one
-  `population_key` value, each raises `OpsError` — matching
+  validates every row before keying any of them: a missing, non-string,
+  or empty `ticker`/`strategy`/`event_date`; a `ticker` or `strategy`
+  containing the `"|"` `population_key` delimiter (CodeRabbit round 3 —
+  `population_key` joins on `"|"`, so an unescaped delimiter inside a
+  field would let two distinct rows collide under one key); OR two rows
+  sharing one `population_key` value — each raises `OpsError` — matching
   `decision_population`'s own code, `VALIDATION_FAILED` (detail naming
-  the row index/missing field, or the repeated key and both rows'
+  the row index/offending field, or the repeated key and both rows'
   indices) — for the WHOLE call, before any dict is constructed: a
   batch-level refusal, never a per-row skip or a last-write-wins
   collision, so a malformed or duplicate-keyed `score.json` is never
@@ -375,10 +385,12 @@ a submission source" rule Part 4 already established for
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
   This is the real (only) production caller `tools/native_parity_run.py`
   was originally designed to be. **That script is dropped from this redo
-  entirely — no code for it was ever written** (confirmed against `main`:
-  neither the file nor `legacy_parity_rows`/`row_explanations` exist
-  today, so nothing needs migrating away from it), never built as a
-  parallel manual path alongside the job. There is exactly one way a real
+  entirely — no code for it was ever written** (`tools/native_parity_run.py`
+  and `row_explanations` never existed and still don't; `legacy_parity_rows`
+  now exists on `main` as of Phase 1, `#132`, but only as the pure function
+  this section documents — nothing calls it in production yet, so nothing
+  needs migrating away from the dropped script), never built as a parallel
+  manual path alongside the job. There is exactly one way a real
   `native_parity_report.json` gets produced in this codebase once Phase 2
   lands, not two.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
@@ -446,15 +458,30 @@ a submission source" rule Part 4 already established for
   raise `VALIDATION_FAILED` — the correct outcome for THAT case is
   unchanged. `compare_native_vs_legacy` itself gains no new parameter and
   no new branch for this: the decision of which path to take is
-  `run_native_parity_worker`'s own, so `run_shadow_nightly`'s test-only
-  path (which never has refusals to give it) is unaffected either way.
+  `run_native_parity_worker`'s own (still unbuilt — Phase 2), so
+  `run_shadow_nightly`'s test-only path, which calls `native_parity_handler`
+  directly and never `run_native_parity_worker`, never reaches this
+  `_empty_native_report` branch at all — see the next bullet,
+  `apply_native_refusals`, for the one behavior change that DOES already
+  reach that existing test-only path today.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
   unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
   refused native rows are counted separately" (user decision, option (c)).
   `compare_native_vs_legacy` itself is UNCHANGED — pure, refusal-blind,
-  unaware `native_score_batch` can refuse a row at all — so
-  `run_shadow_nightly`'s own test-only path (which has no refusals to give
-  it) sees no behavior change. `run_native_parity_worker` calls this AFTER
+  unaware `native_score_batch` can refuse a row at all. **But
+  `native_parity_handler` — the EXISTING function `run_shadow_nightly`
+  already calls, unchanged in signature — now calls
+  `apply_native_refusals(report, {}, ())` unconditionally right after
+  `compare_native_vs_legacy`, on every `"compared"` report it writes (Phase
+  1, `#132`, already on `main`): with no refusals to apply this changes no
+  row's classification, but every report that test-only path writes now
+  also carries the two new, always-present, empty fields
+  `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
+  `SCHEMA_VERSION` `native_parity_report.v1.1`, not the pre-redo `v1.0` — a
+  real, already-shipped change to this existing artifact's shape, not a
+  no-op reserved for `run_native_parity_worker`.** Once Phase 2 builds it,
+  `run_native_parity_worker` calls this the SAME way, this time with real
+  `native_refusals`/`unkeyable_refusals`, AFTER
   `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
   key in the report's own `only_legacy` list that is ALSO a key of
   `native_refusals` (population-key → refusal code, built from
@@ -693,8 +720,8 @@ before ever reaching it — under today's production default the selected
 this doc's own Diagrams section names (see below) is therefore still
 accurate.
 
-**Cutover PR-7b (design — this PR adds no code; the next PR in this
-sequence implements what this section describes).** PR-7a's own text above
+**Cutover PR-7b (design — this design PR itself added no code; the
+implementing sequence below is now under way).** PR-7a's own text above
 named the gap precisely and refused to close it: "PR-7a's shadow batch does
 not submit at all, full stop, until either (a) a future PR changes the
 production input mode to one that pins a snapshot, or (b) the still-missing
@@ -704,6 +731,17 @@ section is (a). It does not attempt (b): the per-event raw-row producer
 (`calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` staging
 for `NightlyEventInputs`) stays exactly as out of scope as PR-7a already
 declared it — a later PR, mirroring PR-7a's own boundary.
+
+**Status:** PR-7b-1 (#145) adds `_ensure_shadow_snapshot` and its
+production-default seams to `nightly_trigger.py`, added unused — see the
+"Split into small code PRs" list below. `_submit_plan` still calls neither
+it nor anything downstream of it: PR-7b-2 is what wires it in and flips
+`_default_plan`'s `input_mode`/`snapshot_scope` literals, together, in one
+slice (see that bullet below for why the two changes cannot ship
+separately). Until PR-7b-2 merges, this section still describes running
+production behavior accurately: every shadow-nightly plan still pins no
+`SnapshotRef`, exactly as "The concrete gap in running code today" states
+next.
 
 **The concrete gap in running code today.** `nightly_trigger._default_plan`
 (`nightly_trigger.py:~518-528`, both line numbers approximate — issue #104/
@@ -1300,7 +1338,7 @@ happened at all.
 implementing sequence, each independently mergeable and each with its own
 tests:
 
-- **PR-7b-1 (shadow snapshot import producer, added unused).**
+- **PR-7b-1 (shadow snapshot import producer, added unused — this slice, #145).**
   `_ensure_shadow_snapshot` plus the `_drive_jobs_to_terminal` extraction
   shared with `_default_serve` — the function and its tests only, NOT yet
   called from `_submit_plan` (per the Small PRs guidance: "add the new
@@ -2564,6 +2602,28 @@ network, or database access.
 
 ## Failure semantics
 
+- **Backup retry after the effect already delivered (`backup.run_backup`, fixed for #98)** —
+  `run_backup` claims the `backup` outbox row for its `key`
+  (`outbox.claim`, only `pending` or an expired `running` row matches) then
+  copies artifacts and calls `outbox.complete`, which sets the row
+  `delivered`. `effects_graph.backup_effect` writes this stage's `watermark`
+  in a SEPARATE transaction right after `run_backup` returns, and the job's
+  attempt commit follows that. A crash between the `delivered` write and the
+  watermark/attempt commit means a retry re-invokes `run_backup` with the
+  SAME `key` while the row is already `delivered` — `claim`'s predicate
+  matches neither `pending` nor an expired `running` row, so it returned
+  `None` and `run_backup` raised `STALE_EXPECTATION` permanently (the job,
+  and every stage depending on it, could never succeed). **Fixed:**
+  `run_backup` now checks, before raising, whether an outbox row for this
+  exact `(kind="backup", key)` is already `delivered`; if so it returns that
+  row's stored `receipt_json` (the manifest `complete` recorded) as-is —
+  no re-copy, no re-claim, no second backup — so `backup_effect` proceeds to
+  write the watermark normally, exactly as if this call had just completed
+  the work itself. A `pending` row is unaffected by this fix: `claim()`
+  already accepts it normally, so it is claimed and backed up as before.
+  Only a row that is `running` with an unexpired lease (or one lost to a
+  concurrent claim) still refuses `STALE_EXPECTATION` exactly as before;
+  an ALREADY-`delivered` row for the identical key short-circuits instead.
 - **Worker exit vs. process-family aliveness (`executor.poll`)** — `poll()`
   samples `running.process.poll()` for the worker's own exit code, then
   scans the watched process family (`executor_watchdog.observe`, the
@@ -3603,6 +3663,165 @@ no snapshot head (`effects=("staged",)`, `stages.py:282`), so it cannot
 race `"score"`'s own commit or anyone else's — the sidecar pattern is still
 the right choice for scheduling/transaction independence, not for a
 head-commit race.
+
+### `supervisor.py` (issue #106: a long single-attempt effect must not starve every other live attempt's lease)
+
+`Service.tick()` (`supervisor.py:227`) is fully synchronous: `expire_leases`,
+`reconcile()`, then one Python `for` loop over `self.running.items()`
+(`supervisor.py:231`) calling `_poll` on each entry in turn, then
+`claim_next`/`_launch` for a new attempt. There is no background thread —
+`lifecycle.Keepalive`'s own docstring is explicit about why ("the catalog
+connection is not shared across threads") — so any ONE entry's `_poll` that
+blocks for longer than `LEASE_SECONDS` (120s) delays every OTHER entry's own
+`_poll`/`heartbeat` call until it returns. Two concrete ways a single tick
+already reaches that duration, both pre-existing and both now fixed by the
+same mechanism:
+
+- `_poll` → `_finish` → `_commit_success` → `_coordinator_effect`, for any
+  of the 14 `_COORDINATOR_EFFECT_KINDS` (see "Primary contracts" above) that
+  runs a genuinely long, single-attempt effect. `engineering_gate_effect`
+  (`effects_graph.py:189`) was the sharpest case: it called
+  `legacy_adapter.run_engineering_gate`, a single blocking
+  `subprocess.run(..., timeout=600)` (`legacy_adapter.py:1156-1167`) with NO
+  `keepalive` parameter anywhere in the chain — up to 600s with zero
+  renewal calls for ANY attempt, not even its own.
+- `Service._launch`'s pre-work (`supervisor.py:483-509`): hashing the
+  worker's read set (`legacy_adapter.manifest_files`) and copying it into
+  private legacy staging (`legacy_adapter.copy_read_set`) run inline,
+  before the attempt is added to `self.running` at all, so no `_poll` for
+  ANY attempt happens until this returns. The existing comment at
+  `supervisor.py:513-520` already documents that THIS attempt's own lease
+  expiring here is handled (handed to recovery, not crashed) — but nothing
+  renewed every OTHER already-running attempt's lease while this ran.
+
+**The consequence issue #106 reports**: a live, healthy attempt's
+`lease_expires_at` (last set by a PRIOR tick's `heartbeat`, `lifecycle.py:
+151-154`) passes while a DIFFERENT attempt's single long effect or launch
+pre-work occupies the entire tick. The NEXT tick's `expire_leases`
+(`recovery.py:113-122`) fences it off (`_fence_off`, `recovery.py:106-110`
+— an unconditional write, no liveness check of its own) purely because
+nobody renewed it in time, and that SAME tick's `reconcile()`
+(`supervisor.py:217-225`) then SIGKILLs its still-live process tree
+(`signal_owned(proof.alive, self.boot, hard=True)`) — a healthy worker
+killed for being heartbeat-starved, not for actually being dead.
+
+**Fix — extend the existing `Keepalive` renewal points to cover every live
+attempt, and give `engineering_gate_effect` a renewal point to call:**
+
+- `Keepalive` (`lifecycle.py:168-199`) itself is UNCHANGED: it still
+  renews exactly the one `(attempt_id, fence)` pair it was built for, and
+  still raises `LEASE_LOST` only for that pair, so every existing caller
+  that already threads a `Keepalive` through an effect (import publish,
+  export, backup, materialization verification) keeps its current
+  single-attempt failure semantics exactly as before.
+- `Service._finish` (`supervisor.py:773-785`) now wraps that per-attempt
+  `Keepalive` in a small closure before handing it to `_commit_success`:
+  the wrapper calls the original `Keepalive` first (unchanged: raises
+  `LEASE_LOST` for the CURRENT attempt on its own renewal failure, exactly
+  as before), then best-effort renews every OTHER `attempt_id` currently
+  in `self.running` via the same `heartbeat()` primitive `_poll` already
+  uses, throttled together at the same `LEASE_SECONDS / 4` interval
+  `Keepalive` already uses (one shared timer, not one per attempt) so a
+  coordinator effect that calls its keepalive often does not multiply
+  writes. A failed renewal for one of those OTHER attempts is swallowed,
+  not raised: that attempt's own `_poll`/`heartbeat` or `expire_leases`
+  already owns deciding whether IT is still live — this wrapper's job is
+  only to make sure a slow neighbor does not cost it a lease it never
+  actually lost, never to make a correctness decision on its behalf. Any
+  attempt not yet added to `self.running` (mid-`_launch`, before its own
+  first `_poll`) is not in the dict yet and is therefore not renewed by
+  this mechanism either — that gap is `_launch`'s own pre-work, below.
+- `Service._launch`'s pre-work (`supervisor.py:483-509`) now takes the
+  SAME "renew every other running attempt" closure and passes it down
+  through `legacy_adapter.manifest_files`/`copy_read_set`'s existing `for`
+  loops (one call point per file, throttled the same way) instead of
+  running the whole hash-and-copy pass with no renewal calls at all.
+  `manifest_files`/`copy_read_set` gain an optional `keepalive` parameter
+  (default `None`, a no-op) — every other caller/test that does not pass
+  one keeps today's exact behavior.
+- `engineering_gate_effect` (`effects_graph.py:189`) gains the same
+  optional `keepalive` parameter every OTHER coordinator effect in this
+  file already accepts, and `_coordinator_effect`'s existing call site
+  (`supervisor.py:1058-1060`) now passes its own. `legacy_adapter.
+  run_engineering_gate` (`legacy_adapter.py:1156`) replaces its single
+  blocking `subprocess.run(timeout=600)` with a `subprocess.Popen` polled
+  on a short interval (`proc.communicate(timeout=poll_interval)`, catching
+  `subprocess.TimeoutExpired` to call `keepalive()` and check the ORIGINAL
+  600s deadline) — the same poll-instead-of-block shape `tools/
+  bounded_run.py` already uses for its own long subprocess wait. Reaching
+  the 600s deadline still kills the subprocess and refuses exactly as
+  before (`WORKER_FAILED`/a typed `OpsError`); the only change is that a
+  RUN inside that window no longer goes 600s without a single renewal call
+  for any attempt.
+
+**Failure semantics (unchanged unless noted):**
+
+- The CURRENT attempt's own lease loss during its coordinator effect: still
+  `LEASE_LOST`, still raised by the wrapped `Keepalive` exactly as before —
+  this fix adds a renewal side-effect, it does not touch that raise.
+- Another attempt's lease loss, discovered while THIS attempt's keepalive
+  best-effort-renews it: never raised here. That attempt's own next
+  `_poll`/`heartbeat` (if it is still in `self.running`) or the next tick's
+  `expire_leases`/`reconcile` (if `_fence_off` already ran) is the only
+  place that failure is acted on — unchanged from before this fix, since
+  before this fix nothing renewed it here at all.
+- `engineering_gate_effect` exceeding its 600s deadline: unchanged —
+  refused as a worker/attempt failure, same as a `subprocess.run` timeout
+  raised before.
+- No new attempt `state` value and no new transition: `recovery_pending`,
+  `running`, `starting` and the rest are exactly as documented above; this
+  fix only adds renewal CALLS at points that previously had none.
+
+**Round 2 (CodeRabbit, five gaps in the above, all fixed):**
+
+- **Renewal only ran BETWEEN files, not DURING one.** `manifest_files`'s
+  hash pass and `copy_read_set`'s copy pass each called `keepalive()` once
+  before starting a file, but a SINGLE file large enough to make either
+  `_digest` or the copy itself exceed `LEASE_SECONDS` alone got no renewal
+  call at all during that one operation. `_digest` and `fingerprints.
+  file_hash` (a second, identical chunked-sha256 implementation used by
+  `store_barrier.pin_files`) now call `keepalive` once per 1MB chunk, the
+  same chunk size their `hashlib.sha256().update()` loop already reads in.
+  `copy_read_set`'s `shutil.copyfile` (an opaque, single C-level call with
+  no per-chunk hook) is replaced with a manual chunked read/write loop at
+  the same 1MB granularity, calling `keepalive` once per chunk — the
+  surrounding symlink/ancestor checks, the post-copy `_digest` verification
+  and the final `chmod(0o444)` are unchanged.
+- **`_pin_read_set`'s OWN hashing pass had no renewal hook at all.**
+  `Service._launch` calls `_pin_read_set` (→ `store_barrier.pin_read_set` →
+  `store_barrier.pin_files` → `fingerprints.file_hash`) BEFORE
+  `_populate_legacy_staging`/`copy_read_set` even starts — a second,
+  separate hash pass over the same declared read set that round 1 never
+  touched. `pin_files`/`pin_read_set` now accept the same optional
+  `keepalive` parameter (forwarded into `file_hash`, and called once per
+  file in `pin_files`'s own loop); `Service._pin_read_set` passes
+  `keepalive=self._renew_other_leases` into its `pin_read_set` call.
+- **`run_engineering_gate`'s poll loop ignored the remaining deadline.**
+  Each `proc.communicate(timeout=poll_interval)` waited the FULL
+  `poll_interval` regardless of how much of the overall `timeout` was left,
+  so a child that exited just past the deadline but within one
+  `poll_interval` window returned normally instead of timing out — a
+  regression from the original blocking `subprocess.run(timeout=timeout)`,
+  which enforced the exact deadline. Each poll now waits at most
+  `min(poll_interval, deadline - now)`, going straight to the
+  kill-and-raise branch once that remainder is non-positive, so the
+  overall deadline is enforced to the same precision as before.
+- **A `keepalive()` failure orphaned the gate subprocess.** If `keepalive()`
+  raised (e.g. `LEASE_LOST`, because THIS attempt itself lost its lease
+  mid-gate-run) partway through the poll loop, that exception escaped
+  `run_engineering_gate` without killing or reaping `proc` —
+  `Popen.communicate()` never terminates the child for the caller. The poll
+  loop now kills and reaps the subprocess in a cleanup path that also runs
+  when `keepalive()` raises, before that exception propagates; a normal
+  exit or a genuine timeout are unaffected.
+- **The shared renewal throttle advanced even on a failed pass.**
+  `_renew_other_leases` set its shared `_other_leases_renewed_at` timer
+  BEFORE attempting any renewal, so a transient `heartbeat()` failure for a
+  sibling with almost no lease left still suppressed the NEXT renewal
+  attempt for a full `LEASE_SECONDS / 4` — potentially past that sibling's
+  real expiry. The timer now advances only when every renewal in the pass
+  succeeds; any failure leaves it unchanged, so the very next call retries
+  the whole batch immediately instead of waiting out the throttle window.
 
 ### `nightly_trigger.py` (issue #103: a bounded `serve`, never an unbounded hold on the legacy lock)
 
