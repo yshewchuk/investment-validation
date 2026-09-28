@@ -675,6 +675,17 @@ def load_raw_receipt(conn: Any, store: ArtifactStore, receipt_id: str) -> bytes:
 def cache_normalization(conn: Any, store: ArtifactStore,
                         raw: RawReceiptRecord, revisions: Sequence[DailyMarketRevision], *,
                         normalizer_id: str, contract_id: str, created_at: str) -> NormalizationRecord:
+    """Cache one raw receipt's normalized revisions under
+    ``(raw_hash, normalizer_id, contract_id)``.
+
+    A byte-identical replay of the same raw content is a cache hit even when
+    ``normalized_hash`` differs, as long as the stored and incoming revisions
+    are the same facts modulo attempt-specific ``received_at``/
+    ``revision_ordinal`` bookkeeping (``_revision_identity_document``): those
+    candidate fields are now re-derived from each attempt's own clock, so a
+    raw-receipt cache hit or a revert legitimately normalizes to a document
+    with a different hash under the same normalization identity.
+    """
     ordered = tuple(sorted(revisions, key=lambda item: item.candidate.revision_id))
     document = {"schema_version": NORMALIZED_SCHEMA_REF, "raw_hash": raw.raw_hash,
                 "normalizer_id": normalizer_id,
@@ -687,16 +698,18 @@ def cache_normalization(conn: Any, store: ArtifactStore,
         "SELECT * FROM data_normalizations WHERE normalization_id = ?",
         (normalization_id,)).fetchone()
     if existing is not None:
-        if existing["normalized_hash"] != normalized_hash:
-            raise errors.fail("IDENTITY_CONFLICT",
-                              "normalization identity has conflicting content")
         object_ref = _object_ref_document(existing["artifact_ref_json"])
         stored = store.read_verified(_artifact_ref(object_ref, NORMALIZED_SCHEMA_REF))
         stored_revisions = _normalized_revisions(stored)
+        if existing["normalized_hash"] != normalized_hash and (
+                tuple(_revision_identity_document(item) for item in stored_revisions) !=
+                tuple(_revision_identity_document(item) for item in ordered)):
+            raise errors.fail("IDENTITY_CONFLICT",
+                              "normalization identity has conflicting content")
         return NormalizationRecord(
             normalization_id=normalization_id, raw_hash=raw.raw_hash,
             normalizer_id=normalizer_id, contract_id=contract_id,
-            normalized_hash=normalized_hash, object_ref=object_ref,
+            normalized_hash=existing["normalized_hash"], object_ref=object_ref,
             revisions=stored_revisions, cache_hit=True)
 
     encoded = canonical_json(document).encode("utf-8")
@@ -1186,6 +1199,7 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
     if merge_rows is None:
         raise errors.fail("RESOURCE_UNAVAILABLE",
                           "the provider adapter cannot rebuild cached daily_market rows")
+    observed_at = format_timestamp(SystemClock().now())
     units = {str(unit.get("request_id", "")): unit for unit in plan.get("units", ())}
     fetched = []
     for outcome in plan.get("cached", ()):
@@ -1196,7 +1210,7 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
         record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})
         raw_bytes = store.read_verified(_artifact_ref(record.object_ref, RAW_SCHEMA_REF))
         fetched.append(_fetched_unit_rows(
-            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows, unit), record))
+            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows, unit), record, observed_at))
     return tuple(fetched)
 
 
@@ -1235,20 +1249,21 @@ def _fetch_unit(conn, store, contract, unit, fetcher):
         "partition_key": str(unit["partition_key"]),
         "keys": [str(key) for key in unit.get("expected_keys", ())],
     }
+    observed_at = format_timestamp(SystemClock().now())
     record = cache_raw_receipt(
         conn, store,
         RawPayload(payload=raw_bytes, response_kind=response_kind,
                    response_meta=dict(response_meta)),
         source=FETCH_SOURCE, endpoint=request["table_name"], request=request,
-        received_at=format_timestamp(SystemClock().now()))
-    return _fetched_unit_rows(contract, unit, ticker_rows, record)
+        received_at=observed_at)
+    return _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at)
 
 
-def _fetched_unit_rows(contract, unit, ticker_rows, record):
+def _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at):
     """One ``_FetchedUnit`` from ``(unit, ticker_rows, receipt)`` -- shared by
     the live-fetch and cache-only branches so both stage identical evidence."""
     revisions = tuple(
-        _fetched_revision(contract, unit, row, record.raw_receipt_id, record.received_at)
+        _fetched_revision(contract, unit, row, record.raw_receipt_id, observed_at)
         for row in ticker_rows)
     session_date = _session_date(unit["partition_key"])
     expected = tuple(
@@ -1508,7 +1523,7 @@ def _stage_normalizations(conn, store, raw_records, revisions, contract_id, cloc
         if raw is None:
             raise errors.fail("INPUT_CHANGED", "revision references an uncached raw receipt")
         record = cache_normalization(
-            conn, store, raw, group, normalizer_id="daily_market.v2",
+            conn, store, raw, group, normalizer_id="daily_market.v3",
             contract_id=contract_id, created_at=format_timestamp(clock.now()))
         cache_hits += int(record.cache_hit)
         normalized.extend(dataclasses.replace(

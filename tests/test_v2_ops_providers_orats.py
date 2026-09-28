@@ -363,6 +363,92 @@ def test_run_daily_market_refresh_reingests_a_session_when_only_one_ticker_chang
     assert rows["BBB"]["mcap_usd"] == pytest.approx(5e8)
 
 
+def _refresh_attempt(tmp_path, head_row, plan_hash, fetcher):
+    root = tmp_path / ("attempt-" + plan_hash.removeprefix("sha256:")[:8])
+    root.mkdir()
+    document = {
+        "catalog_path": str(tmp_path / "ops.sqlite"),
+        "objects_root": str(tmp_path),
+        "scope": "shadow",
+        "expected_head_generation": head_row["generation"],
+        "expected_head_snapshot_id": head_row["snapshot_id"],
+        "table_name": "daily_market",
+    }
+    (root / "incremental_refresh_input.json").write_text(canonical_json(document))
+    (root / "refresh_plan.json").write_text(canonical_json({"fetch_units": [dict(UNIT)]}))
+    parameters = RefreshParameters(
+        expected_ids=(REQUEST_ID,), parent_snapshot_id=head_row["snapshot_id"],
+        refresh_plan_hash=plan_hash, provider_calls=1,
+        catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
+        scope="shadow", expected_head_generation=head_row["generation"],
+        expected_head_snapshot_id=head_row["snapshot_id"])
+    return data_incremental.run_daily_market_refresh(parameters, root, fetcher=fetcher)
+
+
+def _committed_rows(conn, store, snapshot_id):
+    committed = Repository(conn).resolve_full(snapshot_id)
+    contract = next(item for item in committed.contracts if item.table_name == "daily_market")
+    fragment_ids = {ref.fragment_id
+                    for ref in committed.table_manifests["daily_market"].fragment_refs}
+    records = [record for record in committed.records if record.fragment_id in fragment_ids]
+    return {row["ticker"]: row
+            for row in data_incremental.load_daily_market_rows(store, records, contract)}
+
+
+def _ok_fetcher():
+    return orats_daily_market_fetcher(http_get=_ok_fake(), api_key="test-key")
+
+
+def _corrected_fetcher(spot):
+    return orats_daily_market_fetcher(http_get=_FakeHttp({
+        "hist/summaries": (200, {}, _body([dict(SUMMARIES_ROW, stockPrice=spot)])),
+        "hist/cores": (200, {}, _body([CORES_ROW])),
+    }), api_key="test-key")
+
+
+def test_run_daily_market_refresh_a_reverted_ticker_wins_over_a_stale_correction(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+
+    first = _refresh_attempt(tmp_path, _head(conn), "sha256:" + "f" * 64, _ok_fetcher())
+    assert first["status"] == "complete"
+
+    corrected = _refresh_attempt(tmp_path, _head(conn), "sha256:" + "a" * 64,
+                                 _corrected_fetcher(105.0))
+    assert corrected["status"] == "complete"
+    assert _committed_rows(conn, store, corrected["candidate_snapshot_id"])["AAA"]["spot"] == 105.0
+
+    reverted = _refresh_attempt(tmp_path, _head(conn), "sha256:" + "b" * 64, _ok_fetcher())
+
+    assert reverted["status"] == "complete"
+    assert _committed_rows(conn, store, reverted["candidate_snapshot_id"])["AAA"]["spot"] == 100.0
+
+
+def test_run_daily_market_refresh_a_reverted_ticker_with_new_provenance_is_recommitted(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+
+    first = _refresh_attempt(tmp_path, _head(conn), "sha256:" + "c" * 64, _ok_fetcher())
+    assert first["status"] == "complete"
+
+    corrected = _refresh_attempt(tmp_path, _head(conn), "sha256:" + "d" * 64,
+                                 _corrected_fetcher(105.0))
+    assert corrected["status"] == "complete"
+
+    extra = dict(SUMMARIES_ROW, ticker="ZZZ")
+    extra_cores = dict(CORES_ROW, ticker="ZZZ")
+    reverted = _refresh_attempt(tmp_path, _head(conn), "sha256:" + "e" * 64,
+                                orats_daily_market_fetcher(http_get=_FakeHttp({
+                                    "hist/summaries": (200, {}, _body([SUMMARIES_ROW, extra])),
+                                    "hist/cores": (200, {}, _body([CORES_ROW, extra_cores])),
+                                }), api_key="test-key"))
+
+    assert reverted["status"] == "complete"
+    assert _committed_rows(conn, store, reverted["candidate_snapshot_id"])["AAA"]["spot"] == 100.0
+
+
 def test_refresh_plan_table_name_mismatch_is_contract_mismatch(tmp_path):
     document = {"catalog_path": str(tmp_path / "ops.sqlite"),
                 "objects_root": str(tmp_path), "table_name": "daily_market"}
