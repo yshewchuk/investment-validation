@@ -438,6 +438,38 @@ the release's own shape, and always fails the whole call (and, through it,
 the whole `score_frozen_batch` batch — batch preflight does not re-check
 this, so the first affected request's `score_frozen` call raises it).
 
+`score_frozen` scopes `results`/`inference_requests` themselves the same
+way, not only the executor/target-selection path: `_collect_frozen_results`
+takes `scoped_binding_ids` and only folds a binding's own result into
+`outputs` (the `frozen_outputs` fallback `_frozen_forecast_inputs` publishes
+for a target no scoped executor claims) or accepts it as `gate_result` (the
+`frozen_score` `_frozen_gate_inputs` publishes before its own scoped-gate
+executor lookup) when that binding's `binding_id` is in the scoped set.
+Without this, an out-of-scope binding whose own target/gate role no scoped
+binding ALSO claims would still leak its raw result into the published
+record even though `_frozen_scoped_bindings` had already excluded it from
+canonical executor selection — reachable in production because
+`tools/capture_tier0_corpus.py::_frozen_runtime` (see Reachability below)
+submits an `InferenceRequest` for every binding in the release
+unconditionally, so `score_frozen` routinely infers bindings outside this
+request's own scope. **Known residual limitation**: this scoping keys off
+`executor_bindings` being a non-`None` tuple; when it is the empty tuple
+(the release genuinely has zero bindings matching this request's own
+`(strategy, decision_clock)` at all — every binding present belongs to
+another strategy), `_frozen_native_inputs` currently falls back to the
+historical UNSCOPED fold instead of scoping to nothing, because several
+`test_v2_scoring_application.py` tests exercise `score_frozen` with a
+degenerate, non-`ModelRelease` `release=object()` (real callers never do
+this) and rely on that fallback to keep publishing their synthetic
+fallback-binding results. A real production release with zero matching
+bindings for this request's strategy would therefore still leak an
+out-of-scope binding's result under this one specific condition. Tracked
+as a follow-up rather than fixed here (closing it needs either changing
+`test_v2_scoring_application.py`'s fixtures away from `object()` releases,
+or a way for `_frozen_scoped_bindings` to distinguish "no scoping
+information available" from "confirmed zero matches" — either is its own
+concern, not a one-line fix within this PR's scope).
+
 Reachability: `frozen_batch.score_frozen_batch` is the Phase 6 production
 frozen batch boundary this scoping protects (it has no `engine/v2/ops`
 caller yet). `checks/phase4_real.py`, `tools/phase4_targeted_replay.py` and
@@ -446,16 +478,17 @@ before calling `score_frozen` (their own binding-selection path rejects a
 selected binding whose `strategy_id` is neither the request's own nor
 `"*"`, or whose `decision_clock_id` differs), so scoping is a no-op for
 them once wildcard bindings are honored — the filtered set already equals
-the input set. `tools/capture_tier0_corpus.py` also calls `score_frozen`,
-but its release is built from `source["model_bindings"]` via
-`package_frozen_resources`, which only enforces that its OWN bindings share
-one strategy and decision clock with EACH OTHER — it never compares either
-value against the request being scored. Scoping is therefore a no-op for
-capture only when its source bindings happen to be request-compatible; a
-capture candidate whose bindings target a different strategy or clock than
-the request would have its non-matching bindings scoped out, which capture
-does not do today. `native_score_batch` goes through `score_one`, never
-`score_frozen`, and is unaffected.
+the input set. `tools/capture_tier0_corpus.py::_frozen_runtime` also calls
+`score_frozen`, but it builds an `InferenceRequest` for EVERY binding in
+`_package_release(package, ...)`'s release unconditionally — it never
+compares a binding's `strategy_id`/`decision_clock_id` against the request
+being scored before submitting it. This is exactly the shape the
+`outputs`/`gate_result` scoping above protects against (capture is the
+real-production path that makes an out-of-scope inference request
+routine, not just a synthetic test scenario), subject to the residual
+limitation noted above when the release has zero matching bindings for
+this request's strategy at all. `native_score_batch` goes through
+`score_one`, never `score_frozen`, and is unaffected.
 
 ### `release_bindings.py` (the 4c R1–R6 template)
 

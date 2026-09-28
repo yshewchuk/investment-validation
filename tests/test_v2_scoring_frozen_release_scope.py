@@ -242,3 +242,43 @@ def test_single_strategy_release_unchanged(tmp_path):
     assert record.forecasts["driver_prediction"] == 6.0
     assert record.gate_terms["gate_score"] == 1.0
     assert record.gate_terms["gate_pass"] is True
+
+
+# == out-of-scope results never reach the published output ======================
+
+
+def test_out_of_scope_forecast_result_does_not_leak_into_frozen_outputs(tmp_path):
+    """A STR-RUNUP binding's own (non-colliding) target must never surface
+    in a STR-THRU record's frozen_outputs, even when its inference request
+    is submitted alongside the in-scope one (as capture always does)."""
+    driver = _binding(tmp_path, "b-driver", "driver", STRATEGY,
+                      output="driver_prediction", intercept=6.0)
+    other = _binding(tmp_path, "b-other", "size", OTHER_STRATEGY,
+                     output="forecast_abs_move", intercept=999.0)
+    release = _release((driver, other))
+    requests = (_inference_request(release, driver),
+                _inference_request(release, other))
+    record = _score(tmp_path, release, (driver, other), requests=requests)
+    # ``forecast_abs_move`` is STR-RUNUP's size target, claimed by no scoped
+    # STR-THRU binding: the raw out-of-scope result must not surface here.
+    assert record.forecasts["driver_prediction"] == 6.0
+    assert record.forecasts["forecast_abs_move"] is None
+
+
+def test_out_of_scope_gate_result_does_not_leak_into_frozen_score(tmp_path):
+    """A STR-RUNUP gate binding's score must never populate this STR-THRU
+    request's gate_score when STR-THRU has no gate binding of its own in
+    this release."""
+    driver = _binding(tmp_path, "b-driver", "driver", STRATEGY,
+                      output="driver_prediction", intercept=6.0)
+    other_gate = _binding(tmp_path, "b-other-gate", "gate", OTHER_STRATEGY,
+                          output="gate_score", intercept=-42.0)
+    release = _release((driver, other_gate))
+    requests = (_inference_request(release, driver),
+               _inference_request(release, other_gate))
+    record = _score(tmp_path, release, (driver, other_gate), requests=requests)
+    assert record.forecasts["driver_prediction"] == 6.0
+    assert record.gate_terms["gate_score"] != -42.0
+    # The source-owned gate model (intercept 1.0) decides, not the leak.
+    assert record.gate_terms["gate_score"] == 1.0
+    assert "UNSUPPORTED_FROZEN_GATE" not in record.reason_codes

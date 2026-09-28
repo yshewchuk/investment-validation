@@ -666,7 +666,16 @@ def _frozen_result_state(result, binding, inference_request, days):
 
 
 def _collect_frozen_results(results, bindings, inference_requests, days,
-                            gate_only_forecast=frozenset()):
+                            gate_only_forecast=frozenset(), *,
+                            scoped_binding_ids: frozenset[str] | None = None):
+    """Fold the per-binding inference results into the canonical collections.
+
+    ``scoped_binding_ids`` (issue #93 review) narrows the answer-bearing
+    ``outputs``/``gate_result`` to the bindings scoped to this request; the
+    diagnostics (``state``, ``flags``, ``artifact_hashes``, ``required_roles``)
+    stay merged from every binding, and ``None`` keeps the historical unscoped
+    fold the direct eager-path callers use.
+    """
     outputs = {}
     state = {}
     flags = []
@@ -684,7 +693,16 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
         # ``_forecast_for_gate``). Keep its provenance/refusal, hold the value
         # and the ``size`` role out of the top-level score output.
         if not _is_gate_only_size(binding, gate_only_forecast):
-            outputs.update(role_outputs)
+            # issue #93 review: an out-of-scope binding's raw result must never
+            # populate ``frozen_outputs``, even when no scoped binding claims
+            # the same canonical target -- reachable in production because
+            # capture submits every release binding's inference request
+            # unconditionally, so a multi-strategy release routinely hands
+            # ``score_frozen`` bindings outside its own (strategy, clock).
+            if (scoped_binding_ids is None
+                    or getattr(binding, "binding_id", None)
+                    in scoped_binding_ids):
+                outputs.update(role_outputs)
             if role_name in {"driver", "size", "implied_t1", "runup_move",
                              "iv_crush"}:
                 required_roles.append(role_name)
@@ -693,7 +711,15 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
         flags.extend(getattr(result, "reason_codes", ()) or ())
         artifact_hashes.extend(hashes)
         if current_gate is not None:
-            gate_result = current_gate
+            # issue #93 review: an out-of-scope binding's gate result must
+            # never populate ``frozen_score`` either, even when this request
+            # has no scoped gate binding at all (the executor_bindings-based
+            # pop in ``_frozen_gate_inputs`` would then never run) -- same
+            # unconditional-capture reachability as above.
+            if (scoped_binding_ids is None
+                    or getattr(binding, "binding_id", None)
+                    in scoped_binding_ids):
+                gate_result = current_gate
     return outputs, state, flags, artifact_hashes, required_roles, gate_result
 
 
@@ -1092,9 +1118,17 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     if days is not None:
         features["days_before_print"] = days
     gate_only_forecast = _frozen_gate_only_forecast(base, bindings, executor_bindings)
+    # issue #93 review: only a NON-EMPTY scoped set can narrow the published
+    # answers; an empty one means the release exposed no matching binding at
+    # all (synthetic/degenerate callers), so keep the historical unscoped
+    # fold there, exactly like the ``None`` default.
+    scoped_binding_ids = (frozenset(
+        getattr(b, "binding_id", None) for b in executor_bindings)
+        if executor_bindings else None)
     outputs, result_state, flags, artifact_hashes, required_roles, gate_result = (
         _collect_frozen_results(results, bindings, inference_requests, days,
-                                gate_only_forecast)
+                                gate_only_forecast,
+                                scoped_binding_ids=scoped_binding_ids)
     )
     context.update(result_state)
     frozen_interval = {
