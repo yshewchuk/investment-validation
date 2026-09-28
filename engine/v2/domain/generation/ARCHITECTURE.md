@@ -50,8 +50,17 @@ store, catalog, calendar or network access. Every field is read as-is, never
 computed by this package:
 
 - `spot`, `forecast_abs_move` (or `forecast`), `width` — sizing.
-- `strike`, `expiry`, `post_event_expiry` — a caller-already-resolved value,
-  used exactly as given (bypasses native selection for that field entirely).
+- `strike`, `expiry` — a caller-already-resolved value, used exactly as
+  given wherever it is checked (bypasses native selection for that field).
+- `post_event_expiry` — an alternate already-resolved expiry, honored as the
+  same unconditional bypass as `expiry` by `_expiry()` (every put-ladder
+  strategy's fallback, and STR-THRU/STR-RUNUP whenever `_select_listed_straddle`
+  itself declines to run) and by `has_resolvable_expiry`. **Known gap
+  (issue #114, not fixed here):** whenever `_select_listed_straddle` DOES
+  run for STR-THRU/STR-RUNUP (`strike` or `expiry` missing), its own
+  `_resolve_straddle_expiry` checks only `expiry`, not `post_event_expiry` —
+  a row with `post_event_expiry` captured but not `expiry` can fall into
+  native DTE-based selection instead of using it.
 - `quotes` — a mapping keyed by `(right, strike, expiry)` (or an equivalent
   `"right:strike:expiry"` string), each value `{"bid", "ask"}`. The contract
   domain native selects from whenever `strike`/`expiry` is missing.
@@ -62,8 +71,12 @@ computed by this package:
   `_check_stale_quote` docstring for the same characterization of this
   field). Read ONLY by STR-RUNUP's `first_dte_at_least` expiry rule (issue
   #95; see "Failure semantics").
-- `resolved_legs` — an explicit leg list that bypasses geometry resolution
-  entirely (the pinned/replay case).
+- `resolved_legs` — an explicit leg list meant to bypass geometry resolution
+  entirely (the pinned/replay case). **Known gap (issue #115, not fixed
+  here):** `generate()` currently resolves expiry/strike BEFORE it checks
+  `resolved_legs`, so a pinned input with legs but no top-level
+  `expiry`/`strike` can still raise a refusal from ordinary resolution
+  before the bypass is ever reached.
 
 `price` additionally takes the `quotes` mapping directly as its own
 parameter, not through `inputs`.
@@ -105,9 +118,20 @@ package.
 
 ## Failure semantics
 
-Every refusal is a raised exception carrying a specific code as its message
-— never a bare exception with no code, and never a silent substitution of a
-different answer than the one actually requested:
+Most refusals are raised exceptions carrying a specific code as their
+message — never a bare exception with no code, and never a silent
+substitution of a different answer than the one actually requested. A few
+are instead returned as data, never raised:
+
+- `DISABLED` strategies: `generate` returns a `Geometry` whose `.refusal`
+  is `UNVALIDATED_STRUCTURE` (empty legs); it never raises for this case.
+- `price` given an already-refused `Geometry`: returns a `Pricing` carrying
+  that SAME `.refusal` unchanged (empty legs, zero cost); it never
+  re-raises or re-derives a different code.
+- `has_resolvable_expiry` always returns a plain `bool`; it never raises,
+  even where the resolution it is checking for would itself refuse.
+
+Raised exceptions:
 
 - `GeometryRefusal` codes raised by `generate`: `"<field> must be finite"`
   (a required numeric field, such as `spot`/`width`, is missing or not a
@@ -120,23 +144,35 @@ different answer than the one actually requested:
   strike, or two legs collide on one contract), and, for STR-RUNUP only
   (issue #95): `MISSING_ENTRY_DATE` (no `entry_date` captured),
   `INVALID_ENTRY_DATE:<value>` (`entry_date` present but not an ISO date),
-  and `NO_EXPIRY_DTE_AT_LEAST:30` (no listed expiry reaches 30 DTE counted
-  from `entry_date`).
-- `PricingRefusal` codes raised by `price`: `INVALID_FILL_ALPHA`,
-  `MISSING_QUOTE:<leg>`, `INVALID_QUOTE:<leg>`.
-- This package never catches or downgrades its own refusals; the caller
-  (`engine/v2/scoring/stages.py`) catches them and republishes the code as
-  the resulting `Geometry`/`Pricing`'s `.refusal`.
+  and `NO_EXPIRY_DTE_AT_LEAST:<threshold>` (no listed expiry reaches
+  STR-RUNUP's own minimum-DTE threshold, counted from `entry_date`; the
+  threshold itself is a strategy parameter, not documented here — see
+  `_resolve_first_dte_at_least` and legacy's `straddle_runup` factory).
+  `GeometryRefusal` also surfaces from `price()` for a non-numeric/non-finite
+  `fill_alpha` (via the shared `_finite_float` helper, same message shape as
+  the sizing fields above) — a DIFFERENT exception type than the next bullet
+  raises for a `fill_alpha` that parses fine but is out of range.
+- `PricingRefusal` codes raised by `price`: `INVALID_FILL_ALPHA` (a finite
+  `fill_alpha` outside `[0, 1]` — note a non-finite one is `GeometryRefusal`
+  instead, per above), `MISSING_QUOTE:<leg>`, `INVALID_QUOTE:<leg>` (a
+  negative bid, or an ask below its bid).
+- This package never catches or downgrades one of its own RAISED refusals;
+  the caller (`engine/v2/scoring/stages.py`) catches them and republishes
+  the code as the resulting `Geometry`/`Pricing`'s `.refusal`.
 - **STR-RUNUP's expiry rule (issue #95).** `_resolve_straddle_expiry`
   dispatches on `strategy`: a caller-supplied `expiry` bypasses every DTE
   rule unconditionally for every strategy (matching legacy's `fixed` kind).
   Otherwise, `strategy == "STR-RUNUP"` uses legacy's own `straddle_runup`
   rule (`engine/structures.py`, `ExpirySelector(kind="first_dte_at_least",
-  target_dte=30)`): the earliest listed expiry whose DTE, counted from
-  `entry_date` (not `event_date`), is at least 30. Every other strategy
-  (STR-THRU, and every put-ladder strategy) is unaffected and keeps
-  `first_post_event`: the earliest listed expiry on/after `event_date`, with
-  the AMC/BMO distinction applied when `session` is known.
+  ...)`): the earliest listed expiry whose DTE, counted from `entry_date`
+  (not `event_date`), reaches STR-RUNUP's own minimum-DTE threshold. Every
+  other strategy (STR-THRU, and every put-ladder strategy) is unaffected and
+  keeps `first_post_event`: the earliest listed expiry on/after `event_date`,
+  with the AMC/BMO distinction applied when `session` is known.
+- **Known gaps, not fixed here** (see "Inputs" for detail, filed as
+  issues #114 and #115): `_resolve_straddle_expiry` does not honor a
+  captured `post_event_expiry` the way `_expiry()` does; `generate()`
+  resolves expiry/strike before it checks `resolved_legs`.
 
 ## Invariants
 
@@ -156,7 +192,22 @@ different answer than the one actually requested:
 
 ## Diagrams
 
-Not added: this package's control flow is a single function (`generate`)
-branching on `strategy` and on which fields `inputs` already carries, fully
-described above; a diagram would not tell a reader anything the code and
-this doc do not already state.
+STR-THRU/STR-RUNUP expiry dispatch (`_resolve_straddle_expiry`), the
+control flow issue #95 changed:
+
+```mermaid
+flowchart TD
+    A["caller-supplied expiry present?"] -->|yes, listed| B["use it\n(legacy fixed)"]
+    A -->|yes, not listed| C["raise EXPIRY_NOT_LISTED"]
+    A -->|no| D{"strategy == STR-RUNUP?"}
+    D -->|yes| E["earliest listed expiry with\nDTE from entry_date >= threshold"]
+    E -->|none qualifies| F["raise NO_EXPIRY_DTE_AT_LEAST"]
+    E -->|found| G["use it"]
+    D -->|no\n(STR-THRU / put-ladder)| H["earliest listed expiry\non/after event_date"]
+    H -->|none survives| I["raise NO_EXPIRY_ON_OR_AFTER"]
+    H -->|found| G
+```
+
+Not added for the rest of the package: strike selection, put-ladder
+placement and pricing are each already single, short, linearly-described
+functions with no branching this diagram's level would clarify further.
