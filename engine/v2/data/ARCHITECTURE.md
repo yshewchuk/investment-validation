@@ -571,6 +571,93 @@ call whose code argument sits on its own line):
 raised only by `engine.v2.research`, never from inside this package. None
 of the 22 is dead in `DATA_FAILURE_CODES` overall.
 
+### `daily_market` re-ingest identity and partial-response detection (#97)
+
+Before this fix, any second fetch of an already-committed `daily_market`
+session refused permanently with `IDENTITY_CONFLICT` (a changed
+context-ticker universe, a smoke or shadow run of the same session, or a
+provider correction all hit it), and a genuinely partial provider response
+could be committed as if it were complete. Three independent identity/
+completeness fixes, all in `incremental.py` unless noted:
+
+- **Revision identity now distinguishes content, so a corrected payload
+  supersedes the old one instead of conflicting.** `_fetched_revision`
+  previously derived `revision_id` from `(unit.request_id, ticker,
+  session_date)` alone and hard-coded `revision_ordinal=1` for every fetch.
+  Two revisions for the same logical key with DIFFERENT row content — a
+  provider correction, or a `_load_retained_revisions`-reloaded revision
+  from an earlier committed run merging against a freshly re-fetched one in
+  `select_revision_winners` — collided on that same `revision_id`, and
+  since their payloads differed, the early exact-id dedup loop refused
+  `IDENTITY_CONFLICT: one revision id has conflicting payloads` before
+  ranking ever ran. Fixed to match this package's own precedent for a
+  content-addressed revision id
+  (`event_revisions.event_revision_candidate`'s `revision_id="event_rev_" +
+  content_hash(payload)...`) and `engine.v2.ops.forward_calendar_store`'s
+  precedent for a received-at-derived ordinal (`_revision`'s
+  `revision_ordinal=int(pd.Timestamp(received_at).timestamp() *
+  1_000_000)`): `revision_id` now folds in `content` (the same
+  `revision_content_hash` already computed for
+  `RevisionCandidate.content_hash`), and `revision_ordinal` is derived from
+  `received_at` the same way, instead of the constant `1`. A corrected
+  fetch therefore gets both a distinct `revision_id` (no more early
+  exact-id collision against the retained one) and a strictly later
+  ordinal, so `_rank_revision_group` picks it over the earlier revision by
+  ordinal precedence and never reaches its own "equal-ranked ... conflicting
+  content" refusal — that refusal is reserved for two revisions genuinely
+  arriving at the identical instant with different content, still refused
+  as an unresolvable ambiguity. Two fetches of byte-identical raw content
+  never reach any of this: `cache_raw_receipt` already de-dupes on content
+  and reuses the ORIGINAL `received_at` on a cache hit
+  (`cache_raw_receipt`'s `existing` branch), so a pure replay reproduces the
+  exact same `revision_id`/`revision_ordinal` every time.
+- **Normalization identity now includes the expected-key set.**
+  `cache_normalization`'s `normalization_id` keyed only on `(raw_hash,
+  normalizer_id, contract_id)`. ORATS's `hist/summaries`/`hist/cores`
+  responses are market-wide per-`tradeDate` dumps (see
+  `engine.v2.ops.providers.orats_daily_market`'s own module docstring), so
+  the SAME raw payload bytes — and thus the same `raw_hash` — can be
+  normalized against two DIFFERENT `expected_keys` sets from two separate
+  fetch units of the same session (e.g. a context-ticker universe that grew
+  between an earlier and a later run), each producing a different filtered
+  `revisions` list from the identical raw receipt under what was the same
+  `normalization_id` — refusing the second as `IDENTITY_CONFLICT:
+  normalization identity has conflicting content`. `normalization_id` now
+  additionally folds in a canonical (sorted, deduplicated) hash of the
+  unit's `expected_keys`, so two different requested-key sets over the same
+  raw payload get distinct normalization identities and never collide; a
+  replay with the identical `expected_keys` still hits the same id and its
+  existing cache-hit/conflicting-content check, unchanged.
+- **Coverage `expected` comes from the unit's requested keys, never from
+  the rows that happened to come back.** `_fetched_unit_rows` built
+  `_FetchedUnit.expected` from `_coverage_key(item) for item in
+  revisions` — the revisions actually produced from RETURNED rows — so
+  coverage completeness was a tautology: a unit could never be anything but
+  complete against its own returned set, no matter how many expected
+  tickers a truncated response actually omitted. `expected` is now built
+  directly from `unit["expected_keys"]` paired with the unit's own session
+  date (`unit["partition_key"]`), independent of what came back, so a
+  missing expected ticker is a genuine gap `build_completed_coverage` can
+  see. This only matters once
+  `engine.v2.ops.providers.orats_daily_market._classify` stops masking the
+  gap: it previously folded every expected-but-not-returned ticker into
+  `empty_keys` — `incremental_data.classify_response`'s "the provider
+  affirmatively reported no data for this key" signal, which ORATS never
+  actually gives per ticker — which made its `covered` set always equal
+  `requested` and so `_response_kind` could never see `covered !=
+  requested`, the exact condition that already yields `"partial"` (a
+  retryable gap, `_FAILURE_CODE_BY_KIND["partial"] = "TRANSIENT_SOURCE"`,
+  already wired but previously unreachable for this provider) in
+  `classify_response`'s own general framework. `_classify` no longer
+  synthesizes `empty_keys` from absence, only from `returned`: a 2xx
+  response missing an expected ticker now classifies `"partial"`, which
+  `_overall_kind` turns into a `TRANSIENT_SOURCE` refusal at fetch time
+  (`_fetch_unit` never gets a `response_kind` to cache), so
+  `nightly._native_cached_outcome`'s `response_kind = 'complete'` cache
+  lookup can never see it, and a genuinely complete day (every expected
+  ticker returned, or the provider's whole-response 2xx-with-zero-rows
+  `not_final` case for a date not yet published) is unaffected.
+
 ### `catalog.commit_snapshot` / `generic_incremental.commit_generic_table_candidate` — the #56 fence-composition contract (4c R1–R6)
 
 This is the interface #56 was filed to have documented: after #55/#73,
