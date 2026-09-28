@@ -661,9 +661,12 @@ status transition:
    entry after a prior TERMINAL failure of this specific job mints a
    genuinely NEW idempotency key, so
    `_insert_or_match` inserts a fresh row rather than matching the old
-   terminal one — while a same-attempt-number resubmission (the
-   crash-immediately-after-submit case) still dedupes exactly as
-   intended.** This lookup's own row, if any, is what decides everything
+   terminal one — while a same-attempt-number RE-ENTRY (the
+   crash-immediately-after-submit case) finds this SAME row already
+   sitting under the key on the very next tick and is handled by THIS
+   step's own lookup below, not by a second call into `_insert_or_match`:
+   no resubmission is attempted at all for a key that already has a row
+   (see the branches immediately below).** This lookup's own row, if any, is what decides everything
    below — steps 2 and 3 (reading the head, then calling `plan_import`)
    run ONLY when NO row exists yet under this exact key; a key that
    already has a row, in ANY state, never reaches them (the same "checked
@@ -3079,19 +3082,27 @@ was needed where a separate status was not.
   reads, not a watchlist) would be sufficient for what this job's content
   depends on, but is not sufficient as a SUBMISSION key once R3's retry
   requirement is added — see R3 above for why `attempt` must be part of
-  the key, not merely a nice-to-have. A resubmission for the SAME
-  `as_of`/`attempt` (a crash-then-resume tick that has not yet failed)
-  reads the SAME `expected_head_snapshot_id`/`expected_head_generation`
-  CAS pair (recomputed fresh from `data_snapshot_heads` each call, per R2
-  above the existing job already makes this a no-op) and, if the legacy
-  store has not moved, produces byte-identical `SnapshotImportRequest`/
-  manifest content — `request_hash` dedupes it exactly like every other
-  job kind's own idempotent resubmission in this package. A resubmission
+  the key, not merely a nice-to-have. A tick that RE-ENTERS for the SAME
+  `as_of`/`attempt` after a crash-then-resume that has not yet failed
+  never re-reads `expected_head_snapshot_id`/`expected_head_generation` or
+  calls `submit_import` again at all (round-4 Opus-gate finding on
+  `1148b46`, real — an earlier draft of this bullet described the
+  resubmission as reaching `submit_import` and being deduped there by a
+  fresh CAS read and `request_hash`, which contradicts step 1/R3 above:
+  step 1's own lookup finds THIS row already sitting under the key and
+  reattaches to it directly, so `_insert_or_match` is never called a
+  second time for this key at all — there is no "byte-identical request"
+  to compare, because no second request is ever built). A resubmission
   under a NEW `attempt` value (a genuine retry after a prior terminal
-  failure, per R3) is, by construction, a DIFFERENT namespace+key pair, so
-  it is never subject to `_insert_or_match`'s same-key/different-digest
-  `IDEMPOTENCY_CONFLICT` check at all — a different key is not a
-  conflicting use of the SAME key, it is a distinct submission.
+  failure, per R3) is, by construction, a DIFFERENT namespace+key pair
+  that step 1 finds NO row under, so it reaches `submit_import` and
+  `_insert_or_match` fresh, inserting rather than matching — a different
+  key is not a conflicting use of the SAME key, it is a distinct
+  submission, and `_insert_or_match`'s same-key/different-digest
+  `IDEMPOTENCY_CONFLICT` check is therefore never even reached by this
+  phase's own retry path (it remains a real submission-layer invariant
+  for OTHER callers that do resubmit under an unchanged key; this phase
+  simply never does).
 - **Coordination with #104/#117 (merged, `d080b0d`).** That PR's own
   `_default_plan` change (below) derives `input_manifest`/`year_start`/
   `year_end` and is unrelated in mechanism to this design's `_submit_plan`
