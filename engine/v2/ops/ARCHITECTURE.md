@@ -3176,34 +3176,61 @@ this design adds no new auto-retry-past-a-failure logic).
   produces the identical object, and `derive_catalog` records these three
   rows as unchanged from the prior release) — not because it expects new
   content most nights.
-- `submit_pool_nightly_stage_if_ready(as_of)` — does nothing until all six
-  `training` jobs keyed to this `as_of` have `succeeded`; then submits ONE
-  new job kind, `phase5_state_stage` (below), keyed
+- `submit_pool_nightly_stage_if_ready(as_of)` — **terminal condition,
+  checked FIRST, before anything else (Opus gate finding: round 2's fix
+  made every id/key a function of the LIVE pointer, which a successful
+  promote itself moves, so without this check the cycle restages and
+  repromotes the SAME `as_of` forever, nesting `new_release_id` deeper
+  every tick).** Does nothing if `deployment.current_pointer`'s own
+  `release_id` already starts with the literal prefix `"nightly-<as_of>-"`
+  — that prefix can only ever be produced by THIS `as_of`'s own nightly
+  cycle already having promoted (see `new_release_id`'s naming rule below),
+  so a live pointer already carrying it means this `as_of` is DONE; no
+  training/stage/promote step for it runs again until a later `as_of`
+  starts a new cycle. Otherwise, does nothing until all six `training` jobs
+  keyed to this `as_of` have `succeeded`; then submits ONE new job kind,
+  `phase5_state_stage` (below), keyed
   `"nightly:<as_of>:pool_stage:<prior_release_id>"`, naming the six jobs'
   own ids as its `input_refs` (their checkpointed outputs are what it
   reads — see "Inputs" for the new kind) and `prior_release_id = `
   **whatever `deployment.current_pointer` names at THIS submission
-  instant, pinned into the job's own parameters** — never re-resolved live
-  inside the worker (the opposite choice from `_computed_moves_identity`'s
-  "resolve the head FRESH," and deliberately so: a training-job dataset
-  build SHOULD always see the latest committed data, but a
-  release-carry-forward must never silently absorb a pointer that moved
-  after the decision to stage was made — see "concurrent promote" below).
+  instant (already checked above to NOT be one of this `as_of`'s own
+  releases), pinned into the job's own parameters** — never re-resolved
+  live inside the worker (the opposite choice from
+  `_computed_moves_identity`'s "resolve the head FRESH," and deliberately
+  so: a training-job dataset build SHOULD always see the latest committed
+  data, but a release-carry-forward must never silently absorb a pointer
+  that moved after the decision to stage was made — see "concurrent
+  promote" below).
   The key names `prior_release_id`, not only `as_of` (CodeRabbit finding:
   an earlier draft's `"nightly:<as_of>:pool_stage"` gave a retry with a
   changed `prior_release_id` the SAME key as the attempt it was retrying,
   so the "any state" skip rule would have silently swallowed the retry —
   see R3 below).
-- `submit_pool_nightly_promote_if_ready(as_of)` — does nothing until the
-  `phase5_state_stage` job keyed to this `as_of` has `succeeded`; then
-  submits the EXISTING `models_promote` job kind (unchanged) for the
-  `release_id` that job staged, keyed
-  `"nightly:<as_of>:pool_promote:<prior_release_id>"` — naming
+- `submit_pool_nightly_promote_if_ready(as_of)` — reads
+  `deployment.current_pointer` fresh, the SAME `prior_release_id` value
+  `submit_pool_nightly_stage_if_ready`'s terminal check above already rules
+  out being one of this `as_of`'s own releases, and looks for a
+  `phase5_state_stage` job keyed `"nightly:<as_of>:pool_stage:
+  <that_prior_release_id>"` — i.e. the stage job that used THIS exact
+  live pointer as its prior, never merely "some stage job for this
+  `as_of`" (round-2 wording was ambiguous once a single `as_of` can have
+  several stage attempts under different priors, Opus gate finding). Does
+  nothing if that job has not `succeeded` yet, or if the live pointer has
+  already moved past it (the `ConcurrentPromote`/ its own re-check below
+  cover that case). Otherwise submits the EXISTING `models_promote` job
+  kind — **round-2 addition, not "unchanged": `PromoteParameters` gains
+  `expected_previous_release_id` and `run_promote_worker` forwards it, see
+  "code-PR split" step 2 below** — for the `release_id` that job staged,
+  keyed `"nightly:<as_of>:pool_promote:<prior_release_id>"` — naming
   `prior_release_id`, not only `as_of`, for the SAME reason the stage key
   does (Opus gate finding, one phase later than the CodeRabbit finding
   above): see "recovery after a stale promote" below for why a
   `pool_promote` key of `as_of` alone would make a `StaleExpectedRelease`
-  refusal permanent for that `as_of`.
+  refusal permanent for that `as_of`. Once this succeeds, the live pointer
+  becomes `"nightly-<as_of>-<prior_release_id>"`, which is exactly the
+  prefix the stage step's terminal condition (above) then recognizes —
+  this is what stops the cycle for this `as_of`, not a separate flag.
 
 **The one new job kind: `phase5_state_stage`.** A `"delivery"`-class job
 (like `models_promote`, not `"experiment_heavy"` — it does no ML fitting,
@@ -3818,7 +3845,7 @@ flowchart LR
     T2 -->|"all 6 succeeded"| SJ[("phase5_state_stage" JobKind\nnew, PR-13a)]
     SJ -.->|"ConcurrentPromote"| REFUSE["no write; retry\nnext tick, new prior"]
     RPT --> T3["submit_pool_nightly_promote_if_ready(as_of)"]
-    T3 -->|"stage succeeded"| PJ[("models_promote" JobKind\nunchanged)]
+    T3 -->|"stage succeeded"| PJ[("models_promote" JobKind\ngains expected_previous_release_id)]
     PJ --> DEPLOYED[("DEPLOYED" pointer)]
 ```
 
