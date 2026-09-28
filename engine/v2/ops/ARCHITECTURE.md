@@ -2542,12 +2542,19 @@ hold, extended here rather than re-argued from scratch.
   `self._native_parity_memo`, it is never incremented, never backed off,
   and never counts an attempt: a clean, decoded, confirmed-wrong tag is
   not a failure to retry, it is a fact about an immutable artifact that
-  will never become true. It is set only on a clean mismatch (never on a
-  read/decode exception, which goes through `self._native_parity_memo`
-  above instead) and is overwritten — never merely cleared — the next
-  time `_native_parity_identity` returns a DIFFERENT
-  `native_score_batch_job_id`, whether or not that new identity's own
-  check turns out to match `v2.0`.
+  will never become true. `_reconcile_native_parity` only ever WRITES this
+  field once a check for a NEW `native_score_batch_job_id` (one that does
+  not already equal the field's current value) actually runs to a clean,
+  decoded result — never before the check, and never on a read/decode
+  exception, which goes through `self._native_parity_memo` above instead
+  and leaves this field exactly as it was: a job whose schema could not be
+  read this tick is neither confirmed a mismatch nor confirmed `v2.0`, so
+  nothing here should change on its account. A clean result sets the
+  field to that `native_score_batch_job_id` on a MISMATCH, or resets it to
+  `None` on a MATCH (the check passed; there is nothing left to skip, and
+  this job id must never be mistaken for a still-mismatched one on some
+  later tick) — the two clean outcomes always disagree on what the field
+  becomes, never both writing the same job id into it.
 - **R3, retry.** The job's own `RetryPolicy("bounded", 2, (5, 30))` covers
   a transient worker crash (a disk error reading a bound input, for
   example); a session whose key already exists — succeeded OR failed — is
