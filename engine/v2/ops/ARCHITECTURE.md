@@ -1016,7 +1016,17 @@ network, or database access.
   `run_native_score_batch_worker`'s `fields_by_request` map, one row
   clobbering the other's inputs with no refusal for either — nothing in
   this module can say which of the two rows is "the bad one", so the whole
-  attempt fails instead of guessing.
+  attempt fails instead of guessing. `as_of`, `snapshot_id` and
+  `calendar_revision` (Opus gate, PR #66) are likewise validated once,
+  batch-level, before any row is attempted: a `None`, unparseable, or
+  timezone-aware `as_of` raises `ValueError` (via `nightly_source_bundle
+  .validated_as_of`) instead of only surfacing once
+  `assemble_nightly_source_bundle` re-validates it inside every single row
+  — which would otherwise refuse every row individually while the attempt
+  still reported success — and a non-string or empty `snapshot_id`/
+  `calendar_revision` raises `ValueError` instead of flowing straight into
+  every row's `ScoreRequest` as the literal string `"None"` or `""` via
+  `str()`.
 - **R1, missing input — per row (never raises; one bad row does not sink the
   batch).** Once a release is in hand, every OTHER failure is scoped to one
   `BoardRequest` and collected as a `NativeScoreBatchRowRefusal` in the
@@ -1098,17 +1108,26 @@ network, or database access.
   staged value, an arbitrary `ValueError` message from a nested builder,
   or another module's own free-text refusal detail) could otherwise echo
   staged content into a file this module cannot guarantee stays private.
-  Every OTHER refusal code's `detail` names only a small, closed-vocabulary
-  identifier this module already controls (a role key like
-  `"driver:STR-THRU"`, a `decision_clock_id`, or the strategy string) —
-  CodeRabbit's review did not flag those, and this PR does not change
-  them.
-  This module never suppresses a batch-level (non-`ValueError`) exception
-  from a row: only `ValueError`/`NightlySourceBundleRefusal` (both
-  `ValueError` subclasses) are caught per row; anything else (e.g. a
-  programming bug raising `TypeError` inside a helper) propagates and fails
-  the whole attempt, on the reasoning that a defect the row-level contract
-  did not anticipate should not be silently absorbed into "one more
+  Every OTHER refusal code's `detail` names only a small, module-controlled
+  identifier such as a role key like `"driver:STR-THRU"` or a
+  `decision_clock_id` — CodeRabbit's review did not flag those, and this PR
+  does not change them. `UNSUPPORTED_STRATEGY` is the one exception: its
+  `detail` does echo the row's own (caller-supplied) strategy string via
+  `{strategy!r}`, so it is not strictly closed-vocabulary the way a role
+  key is — it was left as-is because a strategy name is not the kind of
+  value CWE-209 is about (it identifies which option set membership check
+  failed, not staged market/model content), but it is not the same
+  guarantee as the four fixed-detail codes above.
+  This module never suppresses a batch-level exception from a row: only
+  `ValueError`/`TypeError`/`NightlySourceBundleRefusal` (a `ValueError`
+  subclass) are caught per row — `_calendar_row_problem` and the
+  `_iso`/date-parsing helpers it wraps can raise either `TypeError` or
+  `ValueError` on a malformed staged value, and both are converted to a
+  `CALENDAR_ROW_INVALID` refusal, not just `ValueError` alone. Anything
+  else (e.g. a programming bug raising some other exception type inside a
+  helper) propagates and fails the whole attempt, on the reasoning that a
+  defect the row-level contract did not anticipate should not be silently
+  absorbed into "one more
   refusal."
 - **The post-`as_of` panel-feature anchor gap ([issue #53](
   https://github.com/yshewchuk/investment-validation/issues/53)) is fixed

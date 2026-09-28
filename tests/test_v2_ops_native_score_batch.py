@@ -314,6 +314,32 @@ def test_duplicate_event_key_raises(tmp_path):
         _assemble(binding, [_event_inputs(), _event_inputs()])
 
 
+@pytest.mark.parametrize("bad_as_of", [None, "not-a-date",
+                                       pd.Timestamp("2026-01-10", tz="UTC")])
+def test_invalid_as_of_raises_batch_level(tmp_path, bad_as_of):
+    """Opus gate (PR #66): as_of is a batch-level, not per-row, argument, so
+    a None/unparseable/timezone-aware value must raise here rather than
+    only surfacing once assemble_nightly_source_bundle re-validates it
+    inside every single row (which would refuse every row while the
+    attempt still reported success)."""
+    binding = _stage_release(tmp_path)
+    with pytest.raises(ValueError):
+        _assemble(binding, [_event_inputs()], as_of=bad_as_of)
+
+
+@pytest.mark.parametrize("field", ["snapshot_id", "calendar_revision"])
+@pytest.mark.parametrize("bad_value", [None, "", 123])
+def test_invalid_snapshot_or_calendar_revision_raises_batch_level(
+        tmp_path, field, bad_value):
+    """Opus gate (PR #66): a non-string or empty snapshot_id/
+    calendar_revision must raise here rather than flowing straight into
+    every row's ScoreRequest as the literal string "None" or "" via
+    str()."""
+    binding = _stage_release(tmp_path)
+    with pytest.raises(ValueError):
+        _assemble(binding, [_event_inputs()], **{field: bad_value})
+
+
 def test_duplicate_request_hash_across_distinct_keys_raises(tmp_path):
     """CodeRabbit round 2 (PR #66): ScoreRequest carries no ticker of its
     own, so two DISTINCT BoardRequest keys whose calendar_row shares the

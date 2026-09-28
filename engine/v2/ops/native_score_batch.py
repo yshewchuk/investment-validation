@@ -27,6 +27,7 @@ from engine.v2.scoring.identity import request_hash
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     assemble_nightly_source_bundle,
+    validated_as_of,
 )
 from engine.v2.scoring.release_bindings import ScoringReleaseBinding
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
@@ -294,6 +295,40 @@ def _assemble_one_event(
     return (request, native_inputs)
 
 
+def _checked_batch_arguments(
+    *,
+    binding: Any,
+    snapshot_id: Any,
+    calendar_revision: Any,
+    as_of: Any,
+    events: Sequence[Any],
+) -> tuple[NightlyEventInputs, ...]:
+    """Validate every batch-level (shared-by-every-row) argument to
+    :func:`assemble_score_batch_inputs`, or raise.
+
+    Split out purely to keep :func:`assemble_score_batch_inputs` under its
+    line budget -- see that function's own docstring for why each of these
+    checks exists and raises rather than becoming a per-row refusal.
+    """
+    if not isinstance(binding, ScoringReleaseBinding):
+        raise TypeError("binding must be a ScoringReleaseBinding")
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise ValueError("snapshot_id must be a non-empty string")
+    if not isinstance(calendar_revision, str) or not calendar_revision:
+        raise ValueError("calendar_revision must be a non-empty string")
+    try:
+        validated_as_of(as_of, label="as_of")
+    except NightlySourceBundleRefusal as exc:
+        raise ValueError(f"invalid as_of: {exc.code}: {exc.detail}") from exc
+    events = tuple(events)
+    if any(not isinstance(event, NightlyEventInputs) for event in events):
+        raise TypeError("events must be a sequence of NightlyEventInputs")
+    keys = [event.key for event in events]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate BoardRequest key in events")
+    return events
+
+
 def assemble_score_batch_inputs(
     *,
     as_of: Any,
@@ -336,15 +371,19 @@ def assemble_score_batch_inputs(
     clobbering the other's inputs with no visible refusal for either.
     Nothing here can say which of the two rows is "the bad one", so this is
     batch-level, not a row-level refusal.
+
+    ``as_of``/``snapshot_id``/``calendar_revision`` are batch-level, shared-
+    by-every-row arguments validated once, here, before any row is
+    attempted (Opus gate, PR #66; see :func:`_checked_batch_arguments`): a
+    bad ``as_of`` would otherwise only surface once ``assemble_nightly_
+    source_bundle`` re-validates it inside each row, refusing every row
+    individually while the attempt still reports success, and a bad
+    ``snapshot_id``/``calendar_revision`` would otherwise flow straight
+    into every ``ScoreRequest`` via ``str()``.
     """
-    if not isinstance(binding, ScoringReleaseBinding):
-        raise TypeError("binding must be a ScoringReleaseBinding")
-    events = tuple(events)
-    if any(not isinstance(event, NightlyEventInputs) for event in events):
-        raise TypeError("events must be a sequence of NightlyEventInputs")
-    keys = [event.key for event in events]
-    if len(keys) != len(set(keys)):
-        raise ValueError("duplicate BoardRequest key in events")
+    events = _checked_batch_arguments(
+        binding=binding, snapshot_id=snapshot_id, calendar_revision=calendar_revision,
+        as_of=as_of, events=events)
     gate_policy = dict(gate_policy or {})
 
     results: dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]] = {}
