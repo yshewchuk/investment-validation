@@ -148,6 +148,18 @@ def _is_iso_date(value: object) -> bool:
     return True
 
 
+def _result_path_for(job) -> str:
+    """The result artifact the job's own worker writes.
+
+    A ``forward_calendar_refresh`` job must refuse a binding of its OWN
+    output path; every other kind (and a ``None``/test-double job) falls back
+    to the computed-moves path.
+    """
+    if getattr(job, "kind", None) == FORWARD_CALENDAR_REFRESH_ACTION:
+        return FORWARD_CALENDAR_RESULT_PATH
+    return COMPUTED_MOVES_RESULT_PATH
+
+
 def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> tuple[str, ...]:
     """Semantic checks layered on the strict dataclass document decoder.
 
@@ -170,10 +182,13 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
     `run_refresh_worker` has to `refresh_parameter_problems`, not the only
     place they are ever checked. ``job.provider_budget_ref`` is read (was
     previously ignored) to enforce provider-budget/call-count consistency,
-    and ``COMPUTED_MOVES_RESULT_PATH`` may never be bound as this job's own
-    input (the worker writes it itself). The final two checks --
+    and this job's OWN result path (``COMPUTED_MOVES_RESULT_PATH`` for
+    ``computed_moves_refresh``, ``FORWARD_CALENDAR_RESULT_PATH`` for
+    ``forward_calendar_refresh``) may never be bound as this job's own input
+    (the worker writes it itself). The final two checks --
     ``horizon_days`` (a real ``int`` inside ``[1, MAX_HORIZON_DAYS]``) and
-    ``tickers`` (a tuple/list of unique bounded non-empty strings) -- apply
+    ``tickers`` (a tuple/list of unique bounded non-empty strings that,
+    whenever non-empty, must also match ``expected_ids`` as a set) -- apply
     to BOTH job kinds: they are harmless for ``computed_moves_refresh``,
     which never reads either field, since their defaults
     (``DEFAULT_HORIZON_DAYS`` and an empty tuple) both already pass.
@@ -189,7 +204,7 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
                    ("scope", params.scope, 128)))
                + incremental_data._head_binding_problems(params)
                + incremental_data._refresh_budget_problems(
-                   job, params, result_path=COMPUTED_MOVES_RESULT_PATH))
+                   job, params, result_path=_result_path_for(job)))
     if not _is_iso_date(params.as_of):
         problems.append("as_of must be an ISO date")
     if (isinstance(params.horizon_days, bool)
@@ -202,6 +217,8 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
     elif (any(not isinstance(item, str) or not item or len(item) > 128 for item in tickers)
           or len(set(tickers)) != len(tickers)):
         problems.append("tickers must be unique bounded nonempty strings")
+    elif tickers and set(tickers) != set(params.expected_ids):
+        problems.append("tickers must match expected_ids for a ticker-scoped forward calendar refresh")
     return tuple(problems)
 
 

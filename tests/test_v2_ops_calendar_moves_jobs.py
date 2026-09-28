@@ -173,6 +173,18 @@ def test_result_path_as_an_input_binding_is_a_problem():
     assert any("input binding" in problem for problem in problems)
 
 
+def test_forward_calendar_result_path_as_an_input_binding_is_a_problem():
+    """A forward_calendar_refresh job must refuse a binding of its OWN result
+    path. Before this fix the check always compared against
+    COMPUTED_MOVES_RESULT_PATH, so a binding literally named
+    FORWARD_CALENDAR_RESULT_PATH slipped past it entirely."""
+    problems = calendar_moves_parameter_problems(
+        _job(kind=FORWARD_CALENDAR_REFRESH_ACTION),
+        _params(tickers=("AAPL",),
+                input_bindings={FORWARD_CALENDAR_RESULT_PATH: "some-ref"}))
+    assert any("input binding" in problem for problem in problems)
+
+
 def test_valid_parameters_have_no_problems():
     assert calendar_moves_parameter_problems(_job(), _params()) == ()
 
@@ -194,6 +206,25 @@ def test_tickers_duplicate_is_a_problem():
     problems = calendar_moves_parameter_problems(
         _job(), _params(tickers=("AAPL", "AAPL")))
     assert any("tickers" in problem for problem in problems)
+
+
+def test_tickers_not_matching_expected_ids_is_a_problem():
+    """forward_calendar_store commits whatever tickers set it is passed, so a
+    caller could otherwise submit tickers=("MSFT",) with expected_ids=("AAPL",)
+    and only discover the mismatch after an unwanted refresh had committed."""
+    problems = calendar_moves_parameter_problems(
+        _job(), _params(expected_ids=("AAPL",), tickers=("MSFT",)))
+    assert any("tickers" in problem and "expected_ids" in problem for problem in problems)
+
+
+def test_tickers_matching_expected_ids_in_another_order_is_no_problem():
+    assert calendar_moves_parameter_problems(
+        _job(), _params(expected_ids=("AAPL", "MSFT"), tickers=("MSFT", "AAPL"))) == ()
+
+
+def test_empty_tickers_never_requires_matching_expected_ids():
+    assert calendar_moves_parameter_problems(
+        _job(), _params(expected_ids=("AAPL", "MSFT"), tickers=())) == ()
 
 
 def test_valid_forward_calendar_fields_have_no_problems():

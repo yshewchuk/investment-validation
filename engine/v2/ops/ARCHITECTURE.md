@@ -942,12 +942,19 @@ network, or database access.
   `computed_moves_store._validate_input_document`'s own revalidation of the
   same fields (below) is a second, defense-in-depth layer, not the only
   place they are checked — again, the same relationship
-  `run_refresh_worker` has to its own sibling check. `tickers`/`horizon_days`/
-  `table_name` are no longer fields on `CalendarMovesParameters` at all
-  (Round 3): the first two were read only by the now-removed
-  `forward_calendar_refresh` job wrapper, and `table_name` was never read by
-  either store — there is nothing left to validate-or-refuse for them, so
-  they were deleted rather than defended.
+  `run_refresh_worker` has to its own sibling check. `horizon_days`/`tickers`
+  are fields on `CalendarMovesParameters` again (restored by this PR): both
+  are read only by `forward_calendar_refresh` (`computed_moves_refresh` never
+  reads either), and `calendar_moves_parameter_problems` validates both for
+  BOTH job kinds — harmless for `computed_moves_refresh`, whose defaults for
+  both fields already pass. `horizon_days` must be an `int` inside
+  `[1, MAX_HORIZON_DAYS]`, inclusive; `tickers` must be a tuple/list of
+  unique bounded non-empty strings, and whenever it is non-empty it must also
+  match `expected_ids` as a set (a ticker-scoped forward calendar refresh
+  cannot commit a different ticker set than the coverage denominator its job
+  reports). `table_name`, by contrast, is still not a field on
+  `CalendarMovesParameters` at all: it was never read by either store, so
+  there is nothing to validate-or-refuse for it.
 - **Training/promote refusal** — `run_training_worker` maps every refusal
   the underlying tool can raise to a typed `OpsError` rather than an
   untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
