@@ -981,18 +981,30 @@ starts working with no change of its own.
   — the assembled map (never partial per row: a key is present only with a
   complete, buildable pair) plus every row that could not be assembled, each
   a typed `.code`/`.detail`/`.key` refusal object. `run_native_score_batch_worker`
-  writes this as two staged files: `records.json` (an envelope document,
-  `{"schema_version": "native_score_batch_records.v1.0", "authoritative":
-  false, "known_gaps": [], "records": [...]}` — see "Failure semantics" for
-  `authoritative`/`known_gaps` — whose `records` array is the `tuple[
-  ScoreRecord, ...]` `score_batch` returns, each `to_document`-serialized,
-  in `ScoreBatch.requests` order, never reordered to match `events.json`)
-  and `refusals.json` (one document per row refusal, `{"key": ..., "code":
-  ..., "detail": ...}`, in the order `events.json` declared them). A batch
-  whose every row refuses still completes the job successfully with an
-  empty `records` array and a full `refusals.json` — refusing every row is
-  a valid, reportable outcome, not a worker failure (see "Failure
-  semantics").
+  writes this as two staged files, BOTH keyed by the same canonical
+  `_board_request_key(key: BoardRequest) -> str` string (Cutover PR-4
+  redo's v2.0 schema — see "Cutover PR-4 (redo)" above for the full key
+  design and the `INVALID_KEY_FIELD` per-row refusal that makes it a true
+  bijection): `records.json` (an envelope document,
+  `{"schema_version": "native_score_batch_records.v2.0", "authoritative":
+  false, "known_gaps": [], "records": {canonical_key: to_document(record),
+  ...}}` — see "Failure semantics" for `authoritative`/`known_gaps` —
+  whose `records` object pairs `assembled.keys()` (the `BoardRequest`s, in
+  `assembled`'s own dict order) against the `tuple[ScoreRecord, ...]`
+  `score_batch` returns, each `to_document`-serialized; keying by
+  `canonical_key` rather than array position is exactly what makes the
+  pairing correct once any row has refused, never a reconstruction from
+  `events.json`'s own order) and `refusals.json` (`{"schema_version":
+  "native_score_batch_refusals.v2.0", "refusals": {canonical_key: {"code":
+  ..., "detail": ...}, ...}}`, the same `code`/`detail` fields
+  `NativeScoreBatchRowRefusal.as_document()` already carries, minus the
+  now-redundant nested `"key"` dict). A batch whose every row refuses
+  still completes the job successfully with an empty `records` object and
+  a full `refusals` object — refusing every row is a valid, reportable
+  outcome, not a worker failure (see "Failure semantics"), and (Cutover
+  PR-4 redo) is exactly the case `native_parity_report._empty_native_report`
+  (above) exists to turn into a real report rather than a refused
+  comparison.
 - `computed_moves_store.py` commits one new snapshot generation per run,
   carrying every other table forward unchanged alongside a fresh
   `computed_moves` table version (`engine/v2/data/computed_moves_table.py`;
@@ -2037,10 +2049,14 @@ network, or database access.
   `NativeScoreBatchRowRefusal` for that row exactly like every other
   re-wrapped `NightlySourceBundleRefusal`, never a batch-level failure.
   `records.json`'s envelope still carries `known_gaps` (now empty for a
-  normal batch: `{"schema_version": "native_score_batch_records.v1.0",
-  "authoritative": false, "known_gaps": [], "records": [...]}`) — the key
-  stays in the schema for a future gap this module might need to flag, but
-  nothing populates it today. `authoritative` stays `false` regardless:
+  normal batch — shown here in this PR-7a design's original `v1.0` array
+  shape; Cutover PR-4 (redo, above) supersedes the envelope's `records`
+  value with the keyed `v2.0` object, `known_gaps` and `authoritative`
+  unchanged: `{"schema_version": "native_score_batch_records.v2.0",
+  "authoritative": false, "known_gaps": [], "records": {canonical_key:
+  ...}}`) — the key stays in the schema for a future gap this module
+  might need to flag, but nothing populates it today. `authoritative`
+  stays `false` regardless:
   that flag is this PR's own shadow-only design decision (per the user's
   cutover-wiring decision), independent of the panel-anchor gap, and no
   caller may treat `authoritative: false` output as a board-serving input.
