@@ -168,15 +168,16 @@ def commit_generic_table_candidate(
     ``publish``): ``_head_fence`` alone, exactly as before.
 
     Because ``_head_fence`` runs before ``catalog.commit_snapshot``'s
-    idempotent-replay shortcut lookup, replaying an IDENTICAL call here after
-    a successful commit raises ``SNAPSHOT_CONFLICT`` instead of returning the
-    prior receipt -- NOT idempotent under replay. That conflict is AMBIGUOUS,
-    not proof of success: a head mismatch is equally true whether this call
-    committed or another writer moved the head, and a NEW head expectation
-    does not resolve it -- the shortcut would derive
-    ``resulting_head_generation`` from that expectation, not the original
-    receipt. Reconcile against the stored receipt, not the fence result,
-    before treating a retry as applied.
+    idempotent-replay shortcut, a replay here is idempotent only when the
+    original commit did NOT advance the head (``candidate.snapshot`` already
+    equalled the expected head): ``_head_fence`` still matches and the shortcut
+    returns a receipt, though ``resulting_head_generation`` is derived from
+    ``expected_head_generation + 1``, not the unchanged value the original
+    receipt stored. If the commit DID advance the head, a replay's head
+    expectation no longer matches, so ``_head_fence`` raises
+    ``SNAPSHOT_CONFLICT`` first -- itself AMBIGUOUS, since another writer could
+    cause the same conflict. Either way, reconcile against the stored receipt,
+    not the fence result, before treating a retry as applied.
     """
     clock = clock or SystemClock()
     request_hash = request_hash or content_hash({"changeset": candidate.changeset_hash})
