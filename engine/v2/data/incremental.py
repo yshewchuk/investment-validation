@@ -204,7 +204,7 @@ def select_revision_winners(
     unique: dict[str, DailyMarketRevision] = {}
     for revision in revisions:
         prior = unique.get(revision.candidate.revision_id)
-        if prior is not None and _revision_document(prior) != _revision_document(revision):
+        if prior is not None and _revision_identity_document(prior) != _revision_identity_document(revision):
             raise errors.fail("IDENTITY_CONFLICT", "one revision id has conflicting payloads")
         unique[revision.candidate.revision_id] = revision
     grouped: dict[str, list[DailyMarketRevision]] = {}
@@ -538,6 +538,23 @@ def _revision_document(revision):
         "raw_receipt_id": revision.raw_receipt_id,
         "normalization_id": revision.normalization_id,
     }
+
+
+def _revision_identity_document(revision):
+    """``_revision_document`` with attempt-specific bookkeeping removed, for
+    deciding whether two entries sharing a (content-derived) revision_id are
+    the same FACT. A session-wide re-fetch that changes one ticker gives
+    every OTHER, unchanged ticker in that same fetch a new raw_receipt_id
+    and a new received_at/revision_ordinal even though its row is identical;
+    that must not look like a genuine identity conflict."""
+    document = _revision_document(revision)
+    candidate = dict(document["candidate"])
+    candidate.pop("received_at", None)
+    candidate.pop("revision_ordinal", None)
+    document["candidate"] = candidate
+    document.pop("raw_receipt_id", None)
+    document.pop("normalization_id", None)
+    return document
 
 
 def _coverage_key_identity(key):
@@ -1013,8 +1030,19 @@ def _record_candidate_references(c: Any, committed_receipt_id: str,
                 "deleted, row_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (revision.candidate.revision_id, committed_receipt_id, *values,
                  format_timestamp(clock.now())))
-        elif tuple(existing) != values:
-            raise errors.fail("IDENTITY_CONFLICT", "revision identity has conflicting content")
+        else:
+            identity_existing = (existing["ticker"], existing["session_date"],
+                                 existing["source"], existing["source_priority"],
+                                 existing["finality_rank"], existing["deleted"],
+                                 existing["row_hash"])
+            identity_new = (
+                revision.ticker, revision.session_date, revision.candidate.source,
+                revision.candidate.source_priority,
+                1 if revision.candidate.finality == "final" else 0,
+                int(revision.deleted), revision.candidate.content_hash)
+            if identity_existing != identity_new:
+                raise errors.fail("IDENTITY_CONFLICT",
+                                  "revision identity has conflicting content")
 
 
 def _candidate_head_fence(c: Any, scope: str, expected_snapshot: str | None,
@@ -1124,6 +1152,10 @@ def _acquire_refresh_units(parameters, root, document, fetcher):
            for unit in (*units, *tuple(plan.get("units", ())))):
         raise errors.fail("CONTRACT_MISMATCH",
                           "refresh plan table_name does not match the staged refresh identity")
+    if any("expected_keys" not in unit
+           for unit in (*units, *tuple(plan.get("units", ())))):
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "refresh plan fetch unit is missing expected_keys")
     conn = catalog.sqlite3.connect(str(document["catalog_path"]))
     conn.row_factory = catalog.sqlite3.Row
     try:

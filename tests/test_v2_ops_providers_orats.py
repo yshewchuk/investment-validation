@@ -306,12 +306,80 @@ def test_run_daily_market_refresh_reingests_a_committed_session_with_a_correctio
     assert rows[0]["mcap_usd"] == pytest.approx(1e9)
 
 
+def test_run_daily_market_refresh_reingests_a_session_when_only_one_ticker_changes(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    unit = dict(UNIT, expected_keys=["AAA", "BBB"])
+    bbb_summaries = dict(SUMMARIES_ROW, ticker="BBB", stockPrice=50.0)
+    bbb_cores = dict(CORES_ROW, ticker="BBB", mktCap=500_000.0)
+
+    def attempt(name, head_row, plan_hash, fetcher):
+        root = tmp_path / name
+        root.mkdir()
+        document = {
+            "catalog_path": str(tmp_path / "ops.sqlite"),
+            "objects_root": str(tmp_path),
+            "scope": "shadow",
+            "expected_head_generation": head_row["generation"],
+            "expected_head_snapshot_id": head_row["snapshot_id"],
+            "table_name": "daily_market",
+        }
+        (root / "incremental_refresh_input.json").write_text(canonical_json(document))
+        (root / "refresh_plan.json").write_text(canonical_json({"fetch_units": [unit]}))
+        parameters = RefreshParameters(
+            expected_ids=(REQUEST_ID,), parent_snapshot_id=head_row["snapshot_id"],
+            refresh_plan_hash=plan_hash, provider_calls=1,
+            catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
+            scope="shadow", expected_head_generation=head_row["generation"],
+            expected_head_snapshot_id=head_row["snapshot_id"])
+        return data_incremental.run_daily_market_refresh(parameters, root, fetcher=fetcher)
+
+    first = attempt("attempt-1", head, "sha256:" + "d" * 64,
+                    orats_daily_market_fetcher(http_get=_FakeHttp({
+                        "hist/summaries": (200, {}, _body([SUMMARIES_ROW, bbb_summaries])),
+                        "hist/cores": (200, {}, _body([CORES_ROW, bbb_cores])),
+                    }), api_key="test-key"))
+    assert first["status"] == "complete"
+
+    changed_summaries = dict(SUMMARIES_ROW, stockPrice=105.0)
+    second = attempt("attempt-2", _head(conn), "sha256:" + "e" * 64,
+                     orats_daily_market_fetcher(http_get=_FakeHttp({
+                         "hist/summaries": (200, {}, _body([changed_summaries, bbb_summaries])),
+                         "hist/cores": (200, {}, _body([CORES_ROW, bbb_cores])),
+                     }), api_key="test-key"))
+
+    assert second["status"] == "complete"
+    committed = Repository(conn).resolve_full(second["candidate_snapshot_id"])
+    contract = next(item for item in committed.contracts if item.table_name == "daily_market")
+    fragment_ids = {ref.fragment_id
+                    for ref in committed.table_manifests["daily_market"].fragment_refs}
+    records = [record for record in committed.records if record.fragment_id in fragment_ids]
+    rows = {row["ticker"]: row
+            for row in data_incremental.load_daily_market_rows(store, records, contract)}
+    assert rows["AAA"]["spot"] == 105.0
+    assert rows["BBB"]["spot"] == 50.0
+    assert rows["BBB"]["mcap_usd"] == pytest.approx(5e8)
+
+
 def test_refresh_plan_table_name_mismatch_is_contract_mismatch(tmp_path):
     document = {"catalog_path": str(tmp_path / "ops.sqlite"),
                 "objects_root": str(tmp_path), "table_name": "daily_market"}
     (tmp_path / "refresh_plan.json").write_text(canonical_json({
         "fetch_units": [{"request_id": "u1", "table_name": "option_chains",
                          "partition_key": SESSION_DATE, "expected_keys": ["AAA"]}]}))
+    with pytest.raises(DataError) as exc:
+        data_incremental._acquire_refresh_units(None, tmp_path, document, None)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def test_refresh_plan_unit_missing_expected_keys_is_contract_mismatch(tmp_path):
+    document = {"catalog_path": str(tmp_path / "ops.sqlite"),
+                "objects_root": str(tmp_path), "table_name": "daily_market"}
+    (tmp_path / "refresh_plan.json").write_text(canonical_json({
+        "fetch_units": [{"request_id": "u1", "table_name": "daily_market",
+                         "partition_key": SESSION_DATE}]}))
     with pytest.raises(DataError) as exc:
         data_incremental._acquire_refresh_units(None, tmp_path, document, None)
     assert exc.value.code == "CONTRACT_MISMATCH"
