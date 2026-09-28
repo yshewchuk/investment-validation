@@ -253,10 +253,11 @@ uncaught traceback instead.
     refusal every other condition here gets. Pre-existing, not introduced
     or fixed by this doc; tracked as a follow-up (issue #70).
   - **A single day-partition scan that still exceeds
-    `maximum_result_rows`** (`_scan.py`'s path only — `_snapshot.py` has no
-    finer split to fall back to). `RESULT_LIMIT_EXCEEDED`
-    (`category="resource"`, not retryable): the table needs finer
-    partitioning than this rule can supply; it never truncates silently.
+    `maximum_result_rows`** (`_scan.py`'s path, and — since issue #107 —
+    `_snapshot.py`'s: see "`_snapshot.read_table` splits like `_scan.py`
+    (issue #107)" below). `RESULT_LIMIT_EXCEEDED` (`category="resource"`,
+    not retryable): the table needs finer partitioning than this rule can
+    supply; it never truncates silently.
   - **No overlap rows after a join/filter** (fill quality's
     `since`-filtered join). `POPULATION_COLLAPSED`
     (`category="validation"`, not retryable) — an empty report is refused
@@ -306,6 +307,32 @@ uncaught traceback instead.
   a caller that wants "publish this exact changeset once" relies on the
   `SNAPSHOT_CONFLICT` fence, not on this package silently no-op-ing a
   duplicate call.
+
+**`_snapshot.read_table` splits like `_scan.py` (issue #107).**
+`_snapshot.read_table` used to issue ONE `DataQuery` across every requested
+partition, bounded only by `contract.maximum_result_rows` — for
+`option_chains` (2.1M-4.3M rows in every year 2018-2026 against a
+2,000,000-row cap), that scan always raised `RESULT_LIMIT_EXCEEDED` against
+a production-size snapshot; unit tests only passed because their fixtures
+were tiny. `_snapshot.read_table` now reads each requested partition (or,
+with no `partition_keys` given, every partition the snapshot has) through
+`_scan.read_table`, which already scans a partition as its calendar months
+and, on overflow, a month as its days, propagating `RESULT_LIMIT_EXCEEDED`
+only when a single day still exceeds the cap. This is a delegation, not a
+merge of the two modules (issue #69 tracks that): `_snapshot.read_table`
+keeps its own signature (`partition_keys` only, no `key_filter`), its own
+pre-`_scan` guard for "no declared partition column, or no partition values
+available at all" (the bare-`ValueError` case above, issue #70, unchanged
+by this fix), and its own empty-result frame shape (`pd.Series(dtype=
+"object")` per requested column, so a caller that reads an empty frame's
+dtypes sees the same shape as before `_scan.read_table`'s own empty-frame
+constructor, which does not fix a dtype, was introduced into this path).
+Every one of `_snapshot.read_table`'s three existing production callers
+(`_chains.read_chain_keys`/`read_chains_for_years`/`load_chain_index`,
+`_trades_publish.read_event_rows`/`read_existing_trades`) is unaffected in
+its own interface — only the underlying scan is now bounded and split, so
+each keeps working, rather than raising, against a production-size
+snapshot.
 
 ## Invariants
 
