@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -338,6 +339,67 @@ def test_busy_legacy_with_a_real_flock_records_retry_and_never_probes(tmp_path):
     assert receipt.status == "completed" and submit.calls == [(AS_OF, "plan_after_release")]
 
 
+def test_busy_legacy_does_not_overwrite_a_resumable_submitted_state(tmp_path):
+    # Tick 1: a normal run reaches "submitted" with a plan_ref and the process
+    # dies before serving -- the durable state on disk is "submitted".
+    plan, submit = FakePlan("plan_resume"), FakeSubmit()
+
+    def die_after_submit(root, plan_ref, clock):
+        raise RuntimeError("simulated process death after submit")
+
+    with pytest.raises(RuntimeError):
+        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit,
+             die_after_submit)
+    first = load_state(tmp_path, AS_OF)
+    assert first is not None and first.status == "submitted"
+    assert first.plan_ref == "plan_resume"
+    assert len(plan.calls) == 1
+    first = replace(first, error_count=1)
+    write_state(tmp_path, first)
+
+    # Tick 2: the test holds the legacy lock, so _LegacyLock returns held=False.
+    lock = tmp_path / "reports" / ".nightly.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = lock.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        busy = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit,
+                    die_after_submit)
+    finally:
+        holder.close()
+    assert busy.status == "busy_legacy"
+    assert busy.plan_ref == "plan_resume"  # carried forward, never None
+    assert busy.error_count == 1
+    assert len(plan.calls) == 1  # the busy tick never re-planned
+    unchanged = load_state(tmp_path, AS_OF)
+    assert unchanged == first  # nothing was persisted by the busy tick
+    assert unchanged.error_count == 1
+
+    # Tick 3: the lock is free -> resume the SAME plan_ref, no new plan.
+    serve = FakeServe("completed")
+    resumed = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert resumed.status == "completed" and resumed.plan_ref == "plan_resume"
+    assert len(plan.calls) == 1  # the plan was built exactly once, on tick 1
+    assert submit.calls == [(AS_OF, "plan_resume"), (AS_OF, "plan_resume")]
+    assert serve.calls == [("plan_resume", tmp_path)]
+
+
+def test_busy_legacy_with_no_resumable_state_still_persists_as_before(tmp_path):
+    lock = tmp_path / "reports" / ".nightly.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = lock.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), FakePlan(),
+                       FakeSubmit(), FakeServe())
+    finally:
+        holder.close()
+    assert receipt.status == "busy_legacy"
+    assert receipt.plan_ref is None and receipt.error_count == 0
+    stored = load_state(tmp_path, AS_OF)
+    assert stored == receipt  # the ordinary busy path still writes to disk
+
+
 def test_the_lock_is_held_for_the_whole_run_and_released_after(tmp_path):
     # FakeSubmit/FakeServe assert the lock is held during their calls; the
     # busy-tick check below proves it is released when the run returns.
@@ -581,6 +643,9 @@ def test_default_plan_passes_full_run_and_the_full_population(tmp_path, monkeypa
     from engine.v2.ops import bootstrap, cli
 
     monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+    manifest_path = tmp_path / "captured_manifest.json"
+    monkeypatch.setattr(nightly_trigger, "_capture_input_manifest",
+                        lambda *a, **k: manifest_path)
 
     def fake_plan(args, root, conn, clock):
         captured["args"] = args
@@ -593,6 +658,7 @@ def test_default_plan_passes_full_run_and_the_full_population(tmp_path, monkeypa
     assert args.full_run is True
     assert args.expected_population == document
     assert args.tickers == "AAA,BBB" and args.context_tickers == "AAA,BBB"
+    assert args.input_manifest == manifest_path
 
 
 def test_scheduled_run_declares_the_full_population(tmp_path):
@@ -653,3 +719,88 @@ def test_lock_and_state_paths_live_under_the_root(tmp_path):
     assert nightly_trigger.legacy_lock_path(tmp_path) == tmp_path / "reports" / ".nightly.lock"
     assert state_path(tmp_path, AS_OF) == (
         tmp_path / "reports" / "phase6" / "nightly_trigger" / f"{AS_OF}.json")
+
+
+# --------------------------------------------------------------------------
+# 16. issue #104: per-as_of input manifest capture and year derivation
+# --------------------------------------------------------------------------
+
+
+def test_derive_years_matches_legacy_context_years_formula():
+    # 35 days after 2026-01-15 is 2026-02-19: the horizon stays in 2026.
+    assert nightly_trigger._derive_years("2026-01-15") == (2025, 2026)
+    # 35 days after 2026-11-30 is 2027-01-04: a late-November as_of pulls in
+    # the following year, which the fixed 2024/2026 pair could never express.
+    assert nightly_trigger._derive_years("2026-11-30") == (2025, 2027)
+
+
+def test_capture_input_manifest_writes_a_per_as_of_path_and_returns_it(tmp_path, monkeypatch):
+    from engine.v2.ops import capture_inputs
+
+    class FakeManifest:
+        def __init__(self, selected_session):
+            self.selected_session = selected_session
+
+    def fake_capture(root, *, as_of, tickers, context_tickers, year_start, year_end):
+        return FakeManifest(as_of)
+
+    def fake_write_manifest(manifest, output):
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(manifest.selected_session)
+        return path
+
+    monkeypatch.setattr(capture_inputs, "write_manifest", fake_write_manifest)
+    first = nightly_trigger._capture_input_manifest(
+        tmp_path, "2026-01-15", ("AAA",), ("AAA",), 2025, 2026, capture_fn=fake_capture)
+    second = nightly_trigger._capture_input_manifest(
+        tmp_path, "2026-11-30", ("AAA",), ("AAA",), 2025, 2027, capture_fn=fake_capture)
+    target = tmp_path / "reports" / "phase6" / "nightly_trigger"
+    assert first == target / "2026-01-15.input_manifest.json"
+    assert second == target / "2026-11-30.input_manifest.json"
+    assert first.is_file() and second.is_file()
+    assert first.read_text() == "2026-01-15"
+    assert second.read_text() == "2026-11-30"
+
+
+def test_capture_input_manifest_refuses_a_selected_session_mismatch(tmp_path, monkeypatch):
+    from engine.v2.ops import capture_inputs
+
+    class FakeManifest:
+        selected_session = "2026-01-14"
+
+    def fake_capture(root, *, as_of, tickers, context_tickers, year_start, year_end):
+        return FakeManifest()
+
+    def explode(manifest, output):
+        raise AssertionError("a mismatched manifest must never be written")
+
+    monkeypatch.setattr(capture_inputs, "write_manifest", explode)
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._capture_input_manifest(
+            tmp_path, "2026-01-15", ("AAA",), ("AAA",), 2025, 2026, capture_fn=fake_capture)
+    assert raised.value.code == "INPUT_CHANGED"
+    assert not (tmp_path / "reports" / "phase6" / "nightly_trigger"
+                / "2026-01-15.input_manifest.json").exists()
+
+
+def test_default_plan_has_no_input_manifest_when_there_is_no_population(tmp_path, monkeypatch):
+    captured = {}
+    from engine.v2.ops import bootstrap, cli
+
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+
+    def should_not_be_called(*args, **kwargs):
+        raise AssertionError("should not be called")
+
+    monkeypatch.setattr(nightly_trigger, "_capture_input_manifest", should_not_be_called)
+
+    def fake_plan(args, root, conn, clock):
+        captured["args"] = args
+        return {"plan_ref": "plan_no_pop", "plan": {}}
+
+    monkeypatch.setattr(cli, "_plan_command", fake_plan)
+    assert nightly_trigger._default_plan(tmp_path, AS_OF, (), (), None) == "plan_no_pop"
+    args = captured["args"]
+    assert args.input_manifest is None
+    assert (args.year_start, args.year_end) == nightly_trigger._derive_years(AS_OF)

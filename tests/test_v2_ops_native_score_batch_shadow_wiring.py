@@ -139,6 +139,84 @@ def test_identity_picks_latest_of_two_sessions(tmp_path):
     assert identity[:2] == nightly._session_scope_from_score_key(later_key)
 
 
+def test_identity_orders_by_created_at_not_scope_hash(tmp_path):
+    """CodeRabbit/Opus gate finding: the old code picked the "latest" score
+    job in a session by ``max(scope_hash)`` -- a content hash with no time
+    meaning -- so whichever of two same-session jobs (e.g. a legacy-mode
+    run followed by a snapshot-mode rerun) happened to hash higher won, not
+    whichever ran later. This builds two real succeeded "score" jobs in the
+    SAME session with different ``scope_hash`` (different ticker sets),
+    searching ticker candidates (computing each candidate's real
+    idempotency key through the same ``build_legacy_job_requests`` path,
+    never a hand-written hash) until the SECOND, later-created job has the
+    LOWER scope_hash -- guaranteeing hash order and creation order
+    disagree -- then asserts the later-created job wins.
+    """
+    conn, clock, _ = catalog(tmp_path)
+    session = "2026-01-01"
+    first_key = _mark_score_succeeded(conn, clock, session=session, tickers=("FIRST",))
+    _, first_hash = nightly._session_scope_from_score_key(first_key)
+
+    plan = nightly.build_nightly_plan(ROOT, session)
+    later_key = None
+    for candidate in range(200):
+        tickers = (f"CAND{candidate}",)
+        requests = nightly.build_legacy_job_requests(plan, tickers=tickers,
+                                                       year_start=2025, year_end=2026)
+        score_request = next(r for r in requests if r.idempotency_key.endswith(":score"))
+        _, candidate_hash = nightly._session_scope_from_score_key(score_request.idempotency_key)
+        if candidate_hash < first_hash:
+            clock.advance(60)
+            later_key = _mark_score_succeeded(conn, clock, session=session, tickers=tickers)
+            break
+    assert later_key is not None, "no candidate ticker found a lower scope_hash within 200 tries"
+    _, later_hash = nightly._session_scope_from_score_key(later_key)
+    assert later_hash < first_hash  # hash order alone would pick `first`
+
+    identity = nightly._native_score_batch_identity(conn)
+
+    assert identity[:2] == (session, later_hash)  # time order (the fix) picks `later`
+
+
+def test_identity_skips_row_with_missing_created_at(tmp_path):
+    """A row whose ``created_at`` is blank (defensive: the column is
+    ``NOT NULL`` in the schema, so this should never happen, but the
+    function must never crash on it or let it silently win a time
+    comparison) is excluded entirely -- the function falls back to the
+    next valid candidate, never raises."""
+    conn, clock, _ = catalog(tmp_path)
+    valid_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
+    clock.advance(3600)
+    blank_key = _mark_score_succeeded(conn, clock, session="2026-01-02")
+    conn.execute("UPDATE jobs SET created_at = '' WHERE job_id = ?",
+                 (job_id_for("shadow", blank_key),))
+    conn.commit()
+
+    identity = nightly._native_score_batch_identity(conn)
+
+    assert identity is not None
+    assert identity[:2] == nightly._session_scope_from_score_key(valid_key)
+
+
+def test_identity_tie_breaks_deterministically_when_created_at_matches(tmp_path):
+    """Two succeeded "score" jobs in the same session landing on the exact
+    same ``created_at`` (no clock advance between them) must still produce
+    one consistent, deterministic answer -- never a crash, and never a
+    different answer across repeated calls."""
+    conn, clock, _ = catalog(tmp_path)
+    session = "2026-01-01"
+    key_a = _mark_score_succeeded(conn, clock, session=session, tickers=("AAAA",))
+    key_b = _mark_score_succeeded(conn, clock, session=session, tickers=("BBBB",))
+
+    first_call = nightly._native_score_batch_identity(conn)
+    second_call = nightly._native_score_batch_identity(conn)
+
+    assert first_call is not None
+    assert first_call == second_call
+    assert first_call[:2] in (nightly._session_scope_from_score_key(key_a),
+                              nightly._session_scope_from_score_key(key_b))
+
+
 def test_submit_dedupes_an_existing_job_under_the_key(tmp_path, monkeypatch):
     """The dedup branch in isolation from the currently-unbuilt PR-6 producer:
     ``_native_score_batch_identity`` is monkeypatched for THIS ONE test to

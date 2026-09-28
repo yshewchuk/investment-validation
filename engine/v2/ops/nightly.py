@@ -46,8 +46,10 @@ GRAPH = {
     # ARCHITECTURE.md "Outputs"/"Failure semantics" for
     # supervisor.Service._reconcile_computed_moves_refresh, the ONLY
     # place a computed_moves_refresh job is ever submitted.
-    # forward_calendar_refresh gets no GRAPH node at all -- see
-    # calendar_moves_jobs.py's own module docstring (issue #52).
+    # forward_calendar_refresh now has a JobKind (calendar_moves_jobs.py;
+    # issue #52's prerequisite landed in #55) but still gets no GRAPH node --
+    # nightly wiring and a supervisor.Service submitter are a separate, later
+    # PR, mirroring this stage's own Part 3/Part 4 split.
     "computed_moves_refresh": ("refresh",),
     # spec_ns_c: the per-night native-vs-legacy parity report, parented on
     # "score" because that is the last stage whose rows both sides can read.
@@ -972,26 +974,48 @@ def _native_score_batch_identity(conn):
     succeeded "score" job -- no pandas scan) identity for the supervisor's
     own sidecar (``supervisor.Service._reconcile_native_score_batch_shadow``):
     the ``(session, scope_hash)`` of the LATEST succeeded legacy "score" job
-    (by session, then by scope_hash -- the same "chronologically latest
-    session, never latest-UPDATED row" reasoning ``_computed_moves_identity``
-    already documents), and whether that SPECIFIC job pinned a snapshot
-    (``_stage_parameters`` only sets ``snapshot_generation_id`` when a
-    plan's ``input_mode="snapshot"``; production's own default,
-    ``"legacy"``, never does).
+    -- latest SESSION first (the same "chronologically latest session,
+    never latest-UPDATED row" reasoning ``_computed_moves_identity`` already
+    documents), then, among jobs sharing that session, latest by
+    ``jobs.created_at`` -- a real time order, never by ``scope_hash``: two
+    "score" jobs in the SAME session (a legacy-mode run and a later
+    snapshot-mode rerun, say) differ only in ``scope_hash``, a content
+    hash with no time meaning, so picking by ``max(scope_hash)`` (the
+    original, wrong version of this function) picked whichever happened to
+    hash higher, not whichever ran later -- and whether that SPECIFIC job
+    pinned a snapshot (``_stage_parameters`` only sets
+    ``snapshot_generation_id`` when a plan's ``input_mode="snapshot"``;
+    production's own default, ``"legacy"``, never does).
 
-    Returns ``None`` when no legacy "score" job has ever succeeded.
+    A row whose ``created_at`` is missing or blank (the schema declares the
+    column ``NOT NULL``, so this should never happen, but this function
+    never trusts a row that violates its own contract enough to crash or
+    silently win a time comparison it cannot make) is excluded from
+    consideration entirely. A ``created_at`` tie among same-session
+    candidates breaks on ``scope_hash`` alone, only to keep the result
+    deterministic -- any deterministic choice among truly-simultaneous
+    jobs is correct; ordering by ``scope_hash`` FIRST was the bug.
+
+    Returns ``None`` when no legacy "score" job has ever succeeded, or none
+    of its rows carry both a parseable idempotency key and a usable
+    ``created_at``.
     """
     rows = conn.execute(
-        "SELECT idempotency_key, spec_json FROM jobs WHERE kind = ? AND state = 'succeeded'",
+        "SELECT idempotency_key, spec_json, created_at FROM jobs WHERE kind = ? AND state = 'succeeded'",
         (_LEGACY_SCORE_KIND,)).fetchall()
     candidates = []
     for row in rows:
         parsed = _session_scope_from_score_key(row["idempotency_key"])
-        if parsed is not None:
-            candidates.append((parsed[0], parsed[1], row["spec_json"]))
+        if parsed is None:
+            continue
+        created_at = row["created_at"]
+        if not created_at:
+            continue
+        candidates.append((parsed[0], created_at, parsed[1], row["spec_json"]))
     if not candidates:
         return None
-    session, scope_hash, spec_json = max(candidates, key=lambda item: (item[0], item[1]))
+    session, _, scope_hash, spec_json = max(
+        candidates, key=lambda item: (item[0], item[1], item[2]))
     parameters = json.loads(spec_json).get("parameters") or {}
     snapshot_pinned = bool(parameters.get("snapshot_generation_id"))
     return session, scope_hash, snapshot_pinned
