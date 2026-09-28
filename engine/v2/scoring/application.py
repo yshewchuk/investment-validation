@@ -458,7 +458,11 @@ def _runup_frozen_output(result, binding, inference_request,
         return {}, {}, ("INVALID_RUNUP_HORIZON",)
     scale = days / _RUNUP_BASE_DAYS
     state = _runup_state(result, binding, inference_request, raw, named, days, scale)
-    return {"runup_move_prediction": state["runup_move_prediction"]}, state, ()
+    outputs = {
+        "runup_move_raw_d14": state["runup_move_raw_d14"],
+        "runup_move_prediction": state["runup_move_prediction"],
+    }
+    return outputs, state, ()
 
 
 def _frozen_role_outputs(binding) -> frozenset[str]:
