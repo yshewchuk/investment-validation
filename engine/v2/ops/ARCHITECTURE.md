@@ -4285,8 +4285,8 @@ this design adds no new auto-retry-past-a-failure logic).
   checked FIRST, before anything else (Opus gate finding: round 2's fix
   made every id/key a function of the LIVE pointer, which a successful
   promote itself moves, so without this check the cycle restages and
-  repromotes the SAME `as_of` forever, nesting `new_release_id` deeper
-  every tick).** Does nothing if `deployment.current_pointer`'s own
+  repromotes the SAME `as_of` forever).** Does nothing if
+  `deployment.current_pointer`'s own
   `release_id` already starts with the literal prefix `"nightly-<as_of>-"`
   — that prefix can only ever be produced by THIS `as_of`'s own nightly
   cycle already having promoted (see `new_release_id`'s naming rule below),
@@ -4333,9 +4333,10 @@ this design adds no new auto-retry-past-a-failure logic).
   above): see "recovery after a stale promote" below for why a
   `pool_promote` key of `as_of` alone would make a `StaleExpectedRelease`
   refusal permanent for that `as_of`. Once this succeeds, the live pointer
-  becomes `"nightly-<as_of>-<prior_release_id>"`, which is exactly the
-  prefix the stage step's terminal condition (above) then recognizes —
-  this is what stops the cycle for this `as_of`, not a separate flag.
+  becomes `new_release_id` — `"nightly-<as_of>-<prior_digest>"`, defined
+  below — whose `"nightly-<as_of>-"` PREFIX is exactly what the stage
+  step's terminal condition (above) then recognizes; this is what stops
+  the cycle for this `as_of`, not a separate flag.
 
 **The one new job kind: `phase5_state_stage`.** A `"delivery"`-class job
 (like `models_promote`, not `"experiment_heavy"` — it does no ML fitting,
@@ -4343,12 +4344,40 @@ only hashing and small-file I/O over outputs the six `training` jobs
 already computed), worker `"phase5_state_stage"`, checkpoint contract
 `"phase5_state_stage_result.v1.0"`, parameters
 `{prior_release_id, new_release_id, as_of, training_job_ids: tuple[str,
-...]}`. `new_release_id = "nightly-<as_of>-<prior_release_id>"`,
-`submit_pool_nightly_stage_if_ready`'s own choice (Opus gate finding: an
-`as_of`-only id, the obvious default, is what makes "recovery after a
-stale promote" below impossible — naming `prior_release_id` inside the id
-itself, not only in the dedup key, is what lets a retry under a new prior
-mint a release the old, now-stale one never occupied). Its worker:
+...]}`. `new_release_id = f"nightly-{as_of}-{prior_digest}"`, where
+`prior_digest = hashlib.sha256(prior_release_id.encode("utf-8")).hexdigest()[:16]`
+— a FIXED-length (16 hex chars), not `prior_release_id` itself (Opus gate
+finding: an earlier draft nested the full prior id — `new_release_id =
+"nightly-<as_of>-<prior_release_id>"` — which grows by
+`len(prior_release_id)` every night, since on a normal night the prior IS
+yesterday's own nightly release; each cycle nests one level deeper than
+the last, and the id exceeds the 255-byte filename limit that
+`<root>/releases/<new_release_id>/` (models doc §4) imposes after roughly
+13 nights, failing every stage attempt from then on). Digesting the prior
+id instead of nesting it keeps `new_release_id`'s length constant forever:
+`prior_release_id` going into any given night's digest is itself always
+either this same bounded `"nightly-<as_of>-<16 hex chars>"` shape (a prior
+nightly cycle) or some other pre-existing, already-bounded release id
+(this cycle's first night, or a manual operator release), so the digest's
+INPUT length never grows with the number of nightly cycles already run,
+and the digest's OUTPUT length is fixed by construction regardless of its
+input's length. The `"nightly-<as_of>-"` PREFIX every other reference to
+this id in this section relies on (the terminal condition above, the
+dedup keys below) is unchanged by this fix — only the SUFFIX after it
+changes, from the literal prior id to its digest.
+`submit_pool_nightly_stage_if_ready`'s own choice to derive the suffix
+from `prior_release_id` at all (Opus gate finding: an `as_of`-only id, the
+obvious default, is what makes "recovery after a stale promote" below
+impossible) still holds under the digest: deriving the
+suffix from `prior_release_id`, not only naming `prior_release_id` in the
+dedup key, is what lets a retry under a new prior mint a release the old,
+now-stale one never occupied — a cryptographic digest preserves this in
+practice, not by construction the way literal nesting did: two DIFFERENT
+`prior_release_id` values collide in `prior_digest` only with negligible
+(SHA-256, truncated to 64 bits) probability, and even in that
+astronomically unlikely event, `derive_catalog`'s own same-id/different-
+content refusal (models doc §7.7 R3) is the existing backstop — not a new
+one added for this fix. Its worker:
 
 1. Reads each named `training` job's checkpointed outputs (the frozen-state
    JSON files under that attempt's `training/` output directory —
@@ -4486,10 +4515,14 @@ release). The reconcile's next tick re-evaluates
 `submit_pool_nightly_stage_if_ready` for the SAME `as_of` from scratch: it
 reads `current_pointer` fresh, gets a NEW `prior_release_id` (the one the
 concurrent promote just installed), and computes a NEW `new_release_id =
-"nightly-<as_of>-<new_prior_release_id>"` — genuinely new because the id
-itself names `prior_release_id`, so it can never collide with the
-abandoned release's id, and `phase5_state_stage`'s own dedup key
-(`"nightly:<as_of>:pool_stage:<prior_release_id>"`) is likewise fresh. The
+"nightly-<as_of>-<new_prior_digest>"` — different from the abandoned
+release's id with SHA-256 collision-resistant probability (the same
+negligible, not structurally-impossible, risk "the one new job kind"
+above notes, with the same `derive_catalog` R3 backstop if it ever
+somehow didn't differ), and `phase5_state_stage`'s own dedup key
+(`"nightly:<as_of>:pool_stage:<prior_release_id>"`) is likewise fresh —
+that key names `prior_release_id` VERBATIM, not its digest, so it differs
+trivially whenever the two `prior_release_id` values differ at all. The
 whole stage → promote cycle for that `as_of` reruns end to end under the
 new prior; `derive_catalog`/`carry_forward_release` never see the old
 `new_release_id` again, so their own same-content-no-op /
