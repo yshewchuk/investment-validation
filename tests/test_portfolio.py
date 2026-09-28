@@ -96,6 +96,31 @@ class TestStates:
         assert book["state"].iloc[0] == "unresolvable"
         assert len(book) == 1, "a trade the book could not follow must not vanish"
 
+    def test_a_past_exit_with_no_outcome_row_does_not_crash(self, ledger_stub):
+        """Issue #65: a schema_version-3 row past its exit date with no
+        outcome row yet gets a bare float NaN for `exit_finality` out of
+        the left-merge (pandas fills an unmatched row with NaN, not {} or
+        None), and `NaN or {}` is truthy in Python — it does not become
+        {}, and the next `.get("is_final")` used to raise AttributeError.
+        NaN must be treated as an absent receipt, i.e. not final yet."""
+        entry = (pd.Timestamp.today() - pd.Timedelta(days=10)).date()
+        exit_ = (pd.Timestamp.today() - pd.Timedelta(days=2)).date()
+        row = _pred(ticker="AAA", row_id="AAA-row",
+                    event_date=str(entry))
+        row["schema_version"] = 3
+        row["structure"] = {"entry_date": str(entry), "exit_date": str(exit_)}
+        # A non-empty outcomes table with no row for "AAA-row" forces the
+        # real left-merge path (an empty outcomes table takes a different
+        # branch in build_book that never NaNs this column).
+        other_outcome = {"row_id": "ZZZ-other-row", "status": "resolved",
+                          "reason": None, "realized_pnl": 0.1,
+                          "realized_entry_cost": 6.0, "realized_exit_value": 6.6,
+                          "exit_finality": {"is_final": True}}
+        ledger_stub([row], outcomes=[other_outcome])
+        book = portfolio.build_book()
+        assert list(book["ticker"]) == ["AAA"]
+        assert book["state"].iloc[0] == "awaiting_exit"
+
     def test_equal_dollars_is_the_default_not_equal_contracts(self, ledger_stub):
         """One contract each is not equal sizing. Premiums in a single week ran
         $2.40 to $69.00, so a one-contract book puts 29x more capital behind the
