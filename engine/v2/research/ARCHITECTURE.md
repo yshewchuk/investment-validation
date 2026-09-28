@@ -339,13 +339,15 @@ by this fix), and its own empty-result frame shape (`pd.Series(dtype=
 "object")` per requested column, so a caller that reads an empty frame's
 dtypes sees the same shape as before — `_scan.read_table`'s own empty-frame
 constructor, which does not fix a dtype, is never introduced into this
-path). The four direct callers of `_snapshot.read_table` (`_chains.
+path). The five direct callers of `_snapshot.read_table` (`_chains.
 read_chain_keys`, `_chains.read_chains_for_years`, `_trades_publish.
-read_event_rows`, `_trades_publish.read_existing_trades`) and the `_chains.
-load_chain_index` wrapper (which reaches `_snapshot.read_table` only
-through `read_chains_for_years`, not directly) keep their existing
-interfaces — only the underlying scan is now bounded and split, so each
-keeps working, rather than raising, against a production-size snapshot.
+read_event_rows`, `_trades_publish.read_existing_trades`, `_replay_run.
+events_frame`) and the `_chains.load_chain_index` wrapper (which reaches
+`_snapshot.read_table` only through `read_chains_for_years`, not directly)
+keep their existing interfaces. Partitions that fit, or that can be safely
+split, can now be read from a production-size snapshot; an oversized
+partition with a nullable observation-time column still raises
+`RESULT_LIMIT_EXCEEDED`.
 
 Routing `trades` through `_scan.read_table` for the first time (it was
 previously read with one unbounded `DataQuery`, so `_scan.py`'s splitting
