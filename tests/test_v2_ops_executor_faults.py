@@ -13,12 +13,13 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import ProcessIdentity
-from engine.v2.foundation import SystemClock
+from engine.v2.foundation import SystemClock, content_hash
 from engine.v2.ops import worker as worker_module
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops import executor
 from engine.v2.ops.executor import Running
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.executor_cgroup import probe
 from engine.v2.ops.executor_watchdog import find_owners, observe, process_info, process_table, signal_owned
 from engine.v2.ops import executor_watchdog as ew
@@ -260,7 +261,7 @@ def test_o31_worker_failure_never_carries_exception_text(tmp_path, monkeypatch):
     details = json.loads((tmp_path / "diagnostics" / "failure_details.json").read_text())
     assert details == {"exception_type": "RuntimeError",
                        "location": details["location"]}
-    assert details["location"].endswith("test_v2_ops_executor_faults.py:238")
+    assert details["location"].endswith("test_v2_ops_executor_faults.py:239")
     assert "S3CRET-VALUE" not in json.dumps(details)
 
 
@@ -474,3 +475,62 @@ def test_poll_does_not_fail_a_clean_exit_with_a_live_straggler(tmp_path, monkeyp
     assert status2["done"] is True
     assert running.failure is None
     assert json.loads(bytes(running.data)) == {"ok": 1}
+
+
+def test_poll_race_e2e_attempt_still_succeeds_with_worker_result(tmp_path, monkeypatch):
+    """Regression for issue #105, end to end: a real ``artifact_check`` job run
+    through a real ``Service`` and a real worker subprocess, with
+    ``executor.observe`` forced to still report the process family alive for
+    exactly one tick after the worker's real exit code is already 0 (the
+    reported race). Proves the attempt is not failed by that forced tick and
+    the job still reaches ``succeeded`` with its real output recorded -- not
+    just that ``poll()``'s own return dict looks right in isolation."""
+    conn, _, _ = catalog(tmp_path)
+    clock = SystemClock()
+    spec = request(kind="artifact_check", checkpoint_contract_ref="receipt.v1.0",
+                   parameters={"expected_ids": []},
+                   implementation_ref=content_hash(worker_source_manifest(
+                       Path(__file__).resolve().parents[1])),
+                   environment_ref=content_hash(environment_identity(1)))
+    job = submit(conn, registry(), POLICY, spec, clock=clock)
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=Path(__file__).resolve().parents[1])
+    service.start()
+
+    for _ in range(200):
+        service.tick()
+        if service.running:
+            break
+        time.sleep(0.02)
+    assert service.running, "job never launched"
+    attempt_id = next(iter(service.running))
+
+    real_observe = executor.observe
+    forced = {"done": False}
+
+    def fake_observe(identities, boot_id):
+        ids, alive, memory = real_observe(identities, boot_id)
+        running = service.running.get(attempt_id)
+        if (not forced["done"] and running is not None
+                and running.process.poll() == 0 and not alive):
+            forced["done"] = True
+            return ids, ids, memory  # force: report the family "alive" for one tick
+        return ids, alive, memory
+
+    monkeypatch.setattr(executor, "observe", fake_observe)
+
+    try:
+        for _ in range(500):
+            service.tick()
+            if attempt_id not in service.running:
+                break
+            time.sleep(0.02)
+        assert attempt_id not in service.running, "job never finished"
+        assert forced["done"], ("the race was never exercised -- the clean exit "
+                                "and the alive scan never overlapped a tick")
+        row = conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job.job_id,)).fetchone()
+        assert row[0] == "succeeded"
+        assert conn.execute("SELECT COUNT(*) FROM attempt_outputs WHERE attempt_id = ?",
+                            (attempt_id,)).fetchone()[0] == 1
+    finally:
+        service.close()

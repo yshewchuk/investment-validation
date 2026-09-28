@@ -119,6 +119,12 @@ def persist_members(conn, attempt_id, identities):
 
 
 def poll(conn, running, *, boot_id, clock, grace_seconds=2):
+    """Advance one observation tick for a launched worker.
+
+    Returns ``dict(done, memory, exit_code)``. See this package's
+    ARCHITECTURE.md, "Failure semantics" -> "Worker exit vs. process-family
+    aliveness", for the exit-code/liveness classification this applies.
+    """
     # Sample the worker's own exit code before scanning the process family, and
     # never call a clean exit a failure: a worker that exits 0 can briefly leave
     # a child/grandchild process (a straggler) alive past its own exit, and a
