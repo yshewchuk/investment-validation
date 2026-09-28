@@ -2396,16 +2396,21 @@ this design adds no new auto-retry-past-a-failure logic).
 - `submit_pool_nightly_stage_if_ready(as_of)` — does nothing until all six
   `training` jobs keyed to this `as_of` have `succeeded`; then submits ONE
   new job kind, `phase5_state_stage` (below), keyed
-  `"nightly:<as_of>:pool_stage"`, naming the six jobs' own ids as its
-  `input_refs` (their checkpointed outputs are what it reads — see
-  "Inputs" for the new kind) and `prior_release_id = ` **whatever
-  `deployment.current_pointer` names at THIS submission instant, pinned
-  into the job's own parameters** — never re-resolved live inside the
-  worker (the opposite choice from `_computed_moves_identity`'s "resolve
-  the head FRESH," and deliberately so: a training-job dataset build
-  SHOULD always see the latest committed data, but a release-carry-forward
-  must never silently absorb a pointer that moved after the decision to
-  stage was made — see "concurrent promote" below).
+  `"nightly:<as_of>:pool_stage:<prior_release_id>"`, naming the six jobs'
+  own ids as its `input_refs` (their checkpointed outputs are what it
+  reads — see "Inputs" for the new kind) and `prior_release_id = `
+  **whatever `deployment.current_pointer` names at THIS submission
+  instant, pinned into the job's own parameters** — never re-resolved live
+  inside the worker (the opposite choice from `_computed_moves_identity`'s
+  "resolve the head FRESH," and deliberately so: a training-job dataset
+  build SHOULD always see the latest committed data, but a
+  release-carry-forward must never silently absorb a pointer that moved
+  after the decision to stage was made — see "concurrent promote" below).
+  The key names `prior_release_id`, not only `as_of` (CodeRabbit finding:
+  an earlier draft's `"nightly:<as_of>:pool_stage"` gave a retry with a
+  changed `prior_release_id` the SAME key as the attempt it was retrying,
+  so the "any state" skip rule would have silently swallowed the retry —
+  see R3 below).
 - `submit_pool_nightly_promote_if_ready(as_of)` — does nothing until the
   `phase5_state_stage` job keyed to this `as_of` has `succeeded`; then
   submits the EXISTING `models_promote` job kind (unchanged) for the
@@ -2521,8 +2526,10 @@ forward. `phase5_state_stage`'s worker re-checks `current_pointer`
 immediately before its first write (step 3 above) and refuses
 `ConcurrentPromote(prior_release_id, actual_release_id)` rather than stage
 over a moved pointer — the reconcile then re-submits the SAME cycle's stage
-job under a NEW `prior_release_id` on its next tick (a fresh dedup key,
-since the parameters changed). **That check alone is not enough**: a
+job under a NEW `prior_release_id` on its next tick, now a genuinely fresh
+dedup key (`"nightly:<as_of>:pool_stage:<prior_release_id>"`, fixed above
+per CodeRabbit finding, since the OLD key would otherwise have collided
+with the refused attempt). **That check alone is not enough**: a
 `models_promote` job can sit queued for a while (`claim_next`'s admission
 order, or simply the box being busy) between `submit_pool_nightly_
 promote_if_ready` submitting it and the worker actually calling
@@ -2534,20 +2541,51 @@ takes no "expected prior" argument at all. This design's first code PR (see
 the split, updated below) adds one: `deployment.promote` gains an optional,
 keyword-only `expected_previous_release_id: str | None = None` (`None`
 preserves every existing caller's behavior unchanged, including the manual
-operator workflow), checked INSIDE `_swap_pointer` — atomically, in the
-SAME read-current-pointer-then-write step that already exists, never a
-separate read-then-write — refusing `StaleExpectedRelease(expected, actual)`
-(a new `DeploymentError` subclass) if the live pointer disagrees, BEFORE the
-pointer write happens. `submit_pool_nightly_promote_if_ready` passes the
-SAME `prior_release_id` `phase5_state_stage` pinned, so the promote worker's
-own atomic check is what actually closes this race, not the sidecar's
-earlier, best-effort one (which stays, since it fails a doomed attempt
-cheaply, before the box does the write at all). PR-13b's own monthly
-promote path needs the SAME parameter for the reverse race (a monthly
-promote must not silently discard a nightly pool advance that landed after
-ITS `prior_release_id` was pinned); since this design's own code PR already
-extends `promote`'s signature, PR-13b's promote calls reuse it rather than
-inventing a second mechanism.
+operator workflow), checked at the SAME point `_swap_pointer` already
+reads `previous = current_pointer(root)` (`deployment.py:572`), refusing
+`StaleExpectedRelease(expected, actual)` (a new `DeploymentError`
+subclass) before the pointer write, if the live value disagrees.
+
+**What this guard is, and is not (CodeRabbit finding: the original wording
+overstated it).** This check is NOT a compare-and-swap primitive, and
+`_swap_pointer` gains no new lock. `_swap_pointer` already reads the
+pointer, computes the next history sequence, then performs one atomic
+FILE WRITE (`_atomic_write_bytes`, `deployment.py:565-586`) — but the read
+and the write are two separate steps with no lock spanning them; that is
+a pre-existing property of `_swap_pointer`, not something this design's
+new parameter changes for better or worse. `expected_previous_release_id`
+is a value-level check at the same read point every other
+`_swap_pointer` decision (the recorded `previous_release_id`, the next
+`sequence`) already depends on, so it is exactly as safe as `_swap_pointer`
+already is today for a caller who is the ONLY writer executing at that
+moment — no more, no less. In production, that precondition already holds
+for every JOB-DRIVEN caller: `promote_job_kind`'s existing
+`store_domains=(("deployment_pointer", "write"),)` lease (documented at
+`training.py:186-190`, a 2026-09-26 finding predating this design)
+serializes every `models_promote` claim globally, so no two
+`_swap_pointer` executions are ever concurrent among today's manual
+operator submissions, this design's nightly promote, or PR-13b's future
+monthly promote — they queue behind the same lease. `submit_pool_nightly_
+promote_if_ready` passes the SAME `prior_release_id` `phase5_state_stage`
+pinned, so the guard's real job is catching a QUEUED decision gone stale
+(the scenario above), not a live race between simultaneous writers — that
+scenario cannot arise among job-driven callers because of the lease, and
+the guard does not depend on it being able to. **Residual, pre-existing
+gap, explicitly out of scope for this design and its code-PR split:** a
+DIRECT, non-job call to `deployment.promote`/`rollback` (a script or test
+calling the function outside the job/lease system) is not covered by the
+`deployment_pointer` lease, and `_swap_pointer` has no independent lock
+against another such direct call or against a queued job — filed as an
+issue (see "code-PR split" below) rather than fixed here, since it
+predates PR-13a, affects the existing manual workflow identically, and a
+real fix (a cross-process file lock or a true conditional write inside
+`_swap_pointer` itself) is a `deployment.py`-wide change well past a
+nightly-cadence design's scope. PR-13b's own monthly promote path needs
+the SAME `expected_previous_release_id` parameter for the reverse race (a
+monthly promote must not silently discard a nightly pool advance that
+landed after ITS `prior_release_id` was pinned); since this design's own
+code PR already extends `promote`'s signature, PR-13b's promote calls
+reuse it rather than inventing a second mechanism.
 
 **R1–R6, `phase5_state_stage`.**
 
@@ -2561,11 +2599,13 @@ inventing a second mechanism.
   today. Refuses on any light-check failure (step 4).
 - **R2, cache.** None: every input is read fresh from the named jobs'
   checkpointed outputs and the current release store.
-- **R3, retry.** The dedup key (`"nightly:<as_of>:pool_stage"`) is checked
-  "in any state" ONLY for the SAME `as_of` and the SAME six job ids — a
-  retry after `ConcurrentPromote` above submits under a DIFFERENT
-  `prior_release_id`, hence a logically new attempt, never silently
-  retried under the old key. Retrying with identical parameters after a
+- **R3, retry.** The dedup key
+  (`"nightly:<as_of>:pool_stage:<prior_release_id>"`) names
+  `prior_release_id`, not only `as_of` and the six job ids (CodeRabbit
+  finding, fixed above): a retry after `ConcurrentPromote` above submits
+  under a DIFFERENT `prior_release_id`, hence a genuinely fresh key, never
+  silently swallowed by the "any state" skip rule as a duplicate of the
+  refused attempt. Retrying with identical parameters after a
   transient failure (a disk error mid-write) is safe: steps 1–3 are
   write-once/content-addressed throughout (§7.6/§7.7 R3), so a second
   attempt either completes the same result or finds it already there.
@@ -2645,6 +2685,14 @@ separate PRs, above).**
    `submit_pool_nightly_*_if_ready` functions, wired into `tick()`, with
    `submit_pool_nightly_promote_if_ready` passing `expected_previous_
    release_id=prior_release_id` to `promote_plan`.
+
+**Filed, not fixed here (Strict scope):** a GitHub issue for
+`_swap_pointer`'s missing cross-process lock against a direct,
+non-job caller of `deployment.promote`/`rollback` ("concurrent promote"
+above) — real, pre-existing, unrelated to this design's own job-driven
+callers (which are already serialized by the `deployment_pointer` lease),
+and a `deployment.py`-wide fix is out of scope for a nightly-cadence
+design PR.
 
 ## Invariants
 

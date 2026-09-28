@@ -387,13 +387,25 @@ value, `_swap_pointer` checks it against the CURRENT `current_pointer`
 read — in the same read this function already does, not a second one —
 and refuses `StaleExpectedRelease(expected_previous_release_id, actual)` (a
 new `DeploymentError` subclass) BEFORE the atomic pointer write, if they
-disagree. This is what makes `phase5_state_stage`'s own `ConcurrentPromote`
-check (a best-effort, early refusal at staging time) actually safe: without
-this, a `models_promote` job that queues for a while between submission and
-execution could still promote a stale, carried-forward release over a
-newer one that landed in between. `rollback` takes no such parameter — it
-has no "prior release" the caller names; it already resolves its target
-from the live pointer's own recorded history.
+disagree. This closes the QUEUED-JOB window `phase5_state_stage`'s own
+`ConcurrentPromote` check (a best-effort, early refusal at staging time)
+leaves open: without it, a `models_promote` job that queues for a while
+between submission and execution could still promote a stale,
+carried-forward release over a newer one that landed in between. **It is
+not a lock and does not make `_swap_pointer` a true compare-and-swap**
+(CodeRabbit finding): the read of `current_pointer` and the eventual
+atomic file write remain two separate steps with no lock spanning them —
+exactly as safe as `_swap_pointer` already is today for a caller that is
+the only writer executing at that moment, no more. In production every
+JOB-DRIVEN caller already meets that precondition via `promote_job_kind`'s
+existing `deployment_pointer` write lease (`engine/v2/ops/
+training.py:186-190`), which serializes every `models_promote` claim
+globally; a DIRECT, non-job call to `promote`/`rollback` is not covered by
+that lease and remains a pre-existing gap this parameter does not close
+(see the ops doc's "Concurrent promote" for the full argument and the
+filed issue). `rollback` takes no such parameter — it has no "prior
+release" the caller names; it already resolves its target from the live
+pointer's own recorded history.
 
 ### 7.3 `resolve_release` / `current_release` (read path, unchanged by this PR)
 
