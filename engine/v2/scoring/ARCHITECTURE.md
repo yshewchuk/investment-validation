@@ -365,16 +365,23 @@ backing the `"runup_move"` role (`application._runup_executor_spec` /
 (`stages._execute_forecast`) — populates TWO fields, never one conflated
 name: `runup_move_raw_d14` (the model's own D14-horizon magnitude) and
 `runup_move_prediction` (`runup_move_raw_d14` scaled by
-`days_before_print / 14`, exactly once, the row's PUBLISHED value — the one
-`financial.py`'s `_runup_fair_premium` and every external consumer reads).
-The model stage (`stages._runup_model_inputs`/`_runup_residual_bands`)
-prefers `runup_move_raw_d14`, falling back to `runup_move_prediction` only
-when no raw field was produced (never true after this fix, kept as a
-defensive default); it refuses (`MISSING_MODEL_INPUT:runup_move_prediction`)
-when neither value is a finite number. Before this fix, a frozen-sourced
-value was scaled once at capture and a second time by the model stage's own
-`native_payoff.scale_runup_move`; a live-local value was never scaled for
-publication at all.
+`days_before_print / 14`, exactly once, the row's PUBLISHED value). Two
+direct readers: `financial.py`'s `_runup_fair_premium` and
+`checks/phase4_real.py`'s `_legacy_fair_premium` (the parity checker's own
+copy of the same formula); other consumers (serving, UI) read it only
+through their own field mappings, not documented here. The model stage
+(`stages._runup_model_inputs`/`_runup_residual_bands`) prefers
+`runup_move_raw_d14`, falling back to `runup_move_prediction` only when no
+raw field was produced -- for a row that goes on to score with a valid
+horizon, never true after this fix (kept as a defensive default); an
+invalid or missing `days_before_print` can still take this fallback path
+before the model stage's own horizon check refuses the row
+(`MISSING_MODEL_INPUT:days_before_print`), so the guarantee applies only to
+scored, valid-horizon rows. The model stage refuses
+(`MISSING_MODEL_INPUT:runup_move_prediction`) when neither value is a finite
+number. Before this fix, a frozen-sourced value was scaled once at capture
+and a second time by the model stage's own `native_payoff.scale_runup_move`;
+a live-local value was never scaled for publication at all.
 
 ### `release_bindings.py` (the 4c R1–R6 template)
 
