@@ -61,7 +61,10 @@ builds them (`engine/v2/ops/training.py`'s `MODES = ("recipe", "state",
 "board_analog", "trailing_cutoff")`; `tools/phase5_training_job.py`'s
 `STATES` names exactly those six, `driver_residual_pool:size` through
 `trailing_pnl_cutoff`). The chooser pool is the one exception: it is built
-inline from `data/features/chooser_analog_pool.parquet`, not from a
+inline from the `features.chooser_analog_pool` feature table
+(`tools/phase5_prepare_release.py`'s `CHOOSER_POOL_ID`; a repo-relative
+filesystem path underneath it, never named here — see that constant's own
+module for the concrete location), not from a
 training job; see `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
 pool/residual refresh". Nothing resubmits any of these on a cadence today — "the only
 path that creates one is a `submit` an operator ran by hand"
@@ -705,13 +708,20 @@ Opus gate finding, see §2/§4), so its refusal is `ReleaseLayoutError`
   own R5 already documents for the model side.
 - **R6, idempotency.** Same inputs always produce the same output body —
   this function IS idempotent (R3), because it never mints an id itself;
-  `new_release_id` is supplied by the caller, a function of `(as_of,
-  prior_release_id)`, not of `as_of` alone: ordinarily one per nightly
-  cycle, but the ops doc's "recovery after a stale promote" has a retry
-  mint a FRESH `new_release_id` for the SAME `as_of` under a NEW
-  `prior_release_id` after a `ConcurrentPromote` refusal, so more than one
-  `new_release_id` can exist for one `as_of` (see the ops doc for why that
-  retry's id is still distinct from the abandoned one it replaces).
+  `new_release_id` is supplied by the caller. The idempotency contract is
+  per `(as_of, prior_release_id, training_job_ids)`, NOT per `as_of` alone
+  (CodeRabbit finding, confirmed): that full triple is what the ops doc's
+  own `phase5_state_stage` R6 already keys its "same inputs, same output"
+  claim on, and it is what determines both `new_release_id` (via
+  `prior_release_id`'s digest, see the ops doc) and `changed_rows` (via
+  `training_job_ids`'s checkpointed outputs). One `as_of` can therefore
+  have MULTIPLE staged candidates, each a distinct
+  `(prior_release_id, training_job_ids)` pair — ordinarily one, but the ops
+  doc's "recovery after a stale promote" mints a fresh `new_release_id` for
+  the SAME `as_of` under a NEW `prior_release_id` after a
+  `ConcurrentPromote` refusal — while only ONE of them is ever promoted;
+  the others are abandoned, inert, staged-but-never-read candidates (ops
+  doc R5).
 
 ## 8. Invariants
 

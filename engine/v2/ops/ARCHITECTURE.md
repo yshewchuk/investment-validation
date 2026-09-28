@@ -4391,11 +4391,13 @@ one added for this fix. Its worker:
    MOVE" rule), not duplicated.
 2. Builds the chooser pool's row inline, the same way
    `tools/phase5_prepare_release.py`'s `chooser_pool_payloads` does today
-   — from whatever `data/features/chooser_analog_pool.parquet` currently
-   holds, with no training job of its own. **Open dependency, named
-   precisely, not solved here (CodeRabbit finding, confirmed):** this
-   design does NOT name what refreshes that parquet file itself on any
-   cadence, and does not claim to. Until that producer is identified and
+   — from whatever the `features.chooser_analog_pool` feature table
+   (`CHOOSER_POOL_ID`; a logical name, not a filesystem path — see models
+   doc §1) currently holds, with no training job of its own. **Open
+   dependency, named precisely, not solved here (CodeRabbit finding,
+   confirmed):** this design does NOT name what refreshes that feature
+   table itself on any cadence, and does not claim to. Until that producer
+   is identified and
    confirmed (a separate, later change — the artifact/interface shape here
    does not depend on it), THIS step's chooser-pool row must be treated the
    SAME way the driver pools already are: a re-verify against whatever the
@@ -4481,11 +4483,18 @@ instant and this job's write, a `new_release_id` that still carries forward
 the OLDER `prior_release_id`'s bindings would, if promoted, silently roll
 the model bindings back to the older set while still advancing the pools
 forward. `phase5_state_stage`'s worker re-checks `current_pointer`
-immediately before the catalog/manifest writes (step 3 above — step 1's
-object writes, content-addressed and harmless regardless, already
-happened by this point) and refuses
-`ConcurrentPromote(prior_release_id, actual_release_id)` rather than stage
-over a moved pointer — the reconcile then re-submits the SAME cycle's stage
+immediately before the FIRST MANIFEST write (step 3 above, `derive_catalog`'s
+own atomic write — CodeRabbit finding: not "before its first write"; steps
+1–2's object writes into the content-addressed store already happened by
+this point) and refuses `ConcurrentPromote(prior_release_id,
+actual_release_id)` rather than stage over a moved pointer. A
+`ConcurrentPromote` refusal therefore leaves whatever steps 1–2 already
+wrote as ORPHANED objects under `<root>/objects/` — no catalog or manifest
+under `new_release_id` is ever written, so nothing reads them, and they are
+harmless, content-addressed leftovers, exactly the partial-write shape R5
+already documents for a crash at this same point (this refusal and a crash
+here are indistinguishable to the store: both leave objects with no
+referencing manifest). The reconcile then re-submits the SAME cycle's stage
 job under a NEW `prior_release_id` on its next tick, now a genuinely fresh
 dedup key (`"nightly:<as_of>:pool_stage:<prior_release_id>"`, fixed above
 per CodeRabbit finding, since the OLD key would otherwise have collided
@@ -4611,18 +4620,27 @@ reuse it rather than inventing a second mechanism.
   `models_promote` from inside this job; promotion is the next phase's own
   submission, only after this job's checkpoint reports `succeeded`.
 - **R5, partial write.** A crash or refusal after some objects are written
-  but before both manifests exist leaves `new_release_id` PARTIALLY staged;
-  a light-check failure (step 4d above, CodeRabbit finding) leaves it FULLY
-  staged instead, since both manifests are already written by the time
-  checks run (R4). Either way is harmless for the SAME reason:
-  `models_promote` (next phase) is never submitted for a `release_id` this
-  job did not report `succeeded` for, and `deployment.resolve_release`/
+  but before both manifests exist leaves `new_release_id` PARTIALLY staged
+  (the SAME ORPHANED-object shape "concurrent promote" above documents for
+  a `ConcurrentPromote` refusal — a crash and a refusal are
+  indistinguishable to the store at this point); a light-check failure
+  (step 4d above, CodeRabbit finding) leaves it FULLY staged instead, since
+  both manifests are already written by the time checks run (R4). Along
+  THIS design's own automatic path, either way is harmless for the SAME
+  reason: `submit_pool_nightly_promote_if_ready` never submits
+  `models_promote` for a `release_id` `phase5_state_stage` did not itself
+  report `succeeded` for, and `deployment.resolve_release`/
   `_read_state_catalog` are never called against an unpromoted,
   uncommitted-to id by any production reader — a staged-but-never-promoted
   candidate is inert, not a partial-write hazard in the sense R5 usually
-  means. A retry (R3) completes, or verifies and no-ops over, identical
-  content already written (models doc §7.7 R3, corrected below); nothing
-  under `DEPLOYED` is ever touched by this job.
+  means, PROVIDED nothing promotes it manually. **That proviso is not
+  itself enforced by `models_promote`/`_swap_pointer`** — see "a failure
+  leaves the previous release deployed" below and `#149` for the residual,
+  pre-existing, out-of-scope gap a light-check-failed (FULLY staged)
+  candidate shares with any other manually-staged release. A retry (R3)
+  completes, or verifies and no-ops over, identical content already
+  written (models doc §7.7 R3, corrected below); nothing under `DEPLOYED`
+  is ever touched by THIS job.
 - **R6, idempotency.** Same six job ids, same `prior_release_id`, same
   `as_of` always produce the same `new_release_id` content (R3/R4 above);
   the job id itself is one dedup key per cycle, not a fresh one per retry.
@@ -4654,11 +4672,18 @@ distinguished "staged by an operator by hand, verified nowhere" from
 "staged by a job that then failed a downstream check" for ANY existing
 writer into the release store, and this design adds no such distinction
 either — the SAME gap already exists today for any manually-staged
-release an operator promotes without independently re-checking it. Closing
-it (verifying a release before every promote, not only before this
-design's own automatic one) is a `deployment.py`-wide policy change, out
-of scope for a nightly-cadence design PR, the same reasoning "concurrent
-promote" above uses to scope `#137` out.
+release an operator promotes without independently re-checking it.
+**Filed, not fixed here (Strict scope): `#149`** — a real guard (an
+explicit stage-success check `models_promote` runs before promoting a
+`phase5_state_stage`-produced release, or reordering `phase5_state_stage`
+so both manifests are written only after light checks pass, a bigger
+change to this design's own deliberate R4 ordering) is a `deployment.py`-
+or `phase5_state_stage`-level change, out of scope for a nightly-cadence
+design PR, the same reasoning "concurrent promote" above uses to scope
+`#137` out. **The job that DOES enforce the invariant today is
+`submit_pool_nightly_promote_if_ready` alone** — no other job, check, or
+guard does; a direct/manual `models_promote` submission is unprotected,
+exactly as it is today for any other manually-staged release.
 
 **Calibration cadence — flagged for the user, not decided here (my own
 recommendation, not a settled decision).** `payoff_line`, `payoff_surface`,
@@ -4711,13 +4736,16 @@ separate PRs, above).**
    `submit_pool_nightly_promote_if_ready` passing `expected_previous_
    release_id=prior_release_id` to `promote_plan`.
 
-**Filed, not fixed here (Strict scope): #137.** A GitHub issue for
-`_swap_pointer`'s missing cross-process lock against a direct,
+**Filed, not fixed here (Strict scope): #137, #149.** #137: a GitHub issue
+for `_swap_pointer`'s missing cross-process lock against a direct,
 non-job caller of `deployment.promote`/`rollback` ("concurrent promote"
 above) — real, pre-existing, unrelated to this design's own job-driven
 callers (which are already serialized by the `deployment_pointer` lease),
 and a `deployment.py`-wide fix is out of scope for a nightly-cadence
-design PR.
+design PR. #149: `_swap_pointer` cannot distinguish a light-check-failed,
+FULLY staged candidate from a succeeded one ("a failure leaves the
+previous release deployed" and R5 above) — also real, also pre-existing
+for any manually-staged release, also out of scope here.
 
 ### `nightly_trigger.py` (issue #102: `busy_legacy` must never overwrite a resumable state)
 
