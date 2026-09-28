@@ -89,6 +89,10 @@ STATUSES = ("submitted", "not_yet", "missed", "already_submitted", "busy_legacy"
 TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "missed",
                                "failed_setup"})
 #: A recorded plan_ref means the decision is made: resume it, never re-plan.
+#: A "timed_out" status with NO plan_ref (the pre-plan snapshot-import wait,
+#: Cutover PR-7b) is resumable too: the decision to proceed with this as_of
+#: was already made on the tick that first wrote this status, even though no
+#: plan exists yet -- see run_trigger's `resuming` computation.
 RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out"})
 FAILURE_STATUSES = frozenset({"error", "failed", "failed_setup", "missed", "timed_out"})
 SUCCESS_JOB_STATES = frozenset({"succeeded"})
@@ -399,7 +403,12 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     """The whole tick: terminal -> resume -> lock -> window -> probe -> submit -> serve.
 
     The resume check runs before the legacy lock is attempted, so a busy lock
-    can never overwrite a resumable state's plan_ref.
+    can never overwrite a resumable state's plan_ref. A "timed_out" status
+    with no plan_ref yet (the pre-plan snapshot-import wait) resumes the
+    same way, skipping straight past `_decide`'s window check -- the
+    decision to proceed with this as_of was already made on an earlier
+    tick, so a later tick must not re-litigate the window (gate-round-4
+    fix, Cutover PR-7b-2).
 
     ``tickers``/``context_tickers`` are the plan's watchlist and historical
     evidence universe (``full_population`` derives both from the native
@@ -414,7 +423,8 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     prior = load_state(root, as_of)
     if prior is not None and prior.status in TERMINAL_STATUSES:
         return _idle(clock, as_of, prior)
-    resuming = prior is not None and bool(prior.plan_ref) and prior.status in RESUME_STATUSES
+    resuming = prior is not None and prior.status in RESUME_STATUSES and (
+        bool(prior.plan_ref) or prior.status == "timed_out")
     with _LegacyLock(legacy_lock_path(root)) as held:
         if not held:
             if resuming:
@@ -432,8 +442,11 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
                 "another heavy run holds the legacy nightly lock; retrying next tick",
                 snapshot_attempt=prior.snapshot_attempt if prior is not None else 0))
         if resuming:
+            # plan_fn is forwarded (not None) so a pre-plan timed_out resume (plan_ref None)
+            # re-plans through the SAME injected seam; production run_trigger callers pass
+            # plan_fn=None here, where _submit_plan resolves it to _default_plan unchanged.
             return _submit_plan(root, as_of, tickers=(), context_tickers=(), clock=clock,
-                                plan_fn=None, submit_fn=submit_fn, serve_fn=serve_fn,
+                                plan_fn=plan_fn, submit_fn=submit_fn, serve_fn=serve_fn,
                                 ensure_snapshot_fn=ensure_snapshot_fn,
                                 full_run=full_run, prior=prior, plan_ref=prior.plan_ref)
         return _decide(root, as_of, tickers=tickers, context_tickers=context_tickers,
