@@ -804,3 +804,218 @@ def test_default_plan_has_no_input_manifest_when_there_is_no_population(tmp_path
     args = captured["args"]
     assert args.input_manifest is None
     assert (args.year_start, args.year_end) == nightly_trigger._derive_years(AS_OF)
+
+
+# --------------------------------------------------------------------------
+# 17. Cutover PR-7b: _ensure_shadow_snapshot (added unused; not yet wired
+# into _submit_plan -- these tests exercise it directly)
+# --------------------------------------------------------------------------
+
+
+class _FakeManifest:
+    def __init__(self, selected_session):
+        self.selected_session = selected_session
+
+
+class _FakePlan:
+    def __init__(self, selected_session):
+        self.legacy_input_manifest = _FakeManifest(selected_session)
+
+
+def _open_ops_catalog(root, clock):
+    from engine.v2.ops.bootstrap import open_catalog
+
+    ops_root = nightly_trigger._ops_root(root)
+    ops_root.mkdir(parents=True, exist_ok=True)
+    return open_catalog(ops_root / "catalog.sqlite", clock=clock)
+
+
+def _seed_snapshot_import_job(conn, clock, *, as_of, attempt, state):
+    """A minimal, real ``snapshot_import`` job row under the exact key
+    ``_ensure_shadow_snapshot`` would look up -- the same "submit through
+    real submission machinery, then set state directly" shape PR-7a's own
+    ``_mark_score_succeeded`` fixture uses, simplified to a raw INSERT since
+    this job kind takes no dependencies. Returns the row's job_id.
+    """
+    from engine.v2.ops.submission import job_id_for
+
+    key = f"shadow_snapshot_import:{as_of}:{attempt}"
+    job_id = job_id_for("shadow", key)
+    stamp = clock.now().isoformat()
+    conn.execute(
+        "INSERT INTO jobs (job_id, namespace, idempotency_key, request_digest, principal, "
+        "kind, spec_json, resource_class, checkpoint_contract_ref, retry_json, state, "
+        "priority, max_attempts, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (job_id, "shadow", key, "digest", "operator", "snapshot_import", "{}",
+         "legacy_rebuild", "snapshot_import_inspections.v1.0", "{}", state, 0, 1, stamp, stamp))
+    conn.commit()
+    return job_id
+
+
+def _explode(*args, **kwargs):
+    raise AssertionError("must not be called on this branch")
+
+
+def test_ensure_shadow_snapshot_succeeded_under_current_attempt_is_a_noop(tmp_path, monkeypatch):
+    """R2/R6, and the cache-hit branch reading resulting_head_snapshot_id off
+    an already-succeeded job rather than re-resolving the mutable head: a job
+    already ``succeeded`` under this exact ``attempt`` key is a pure cache
+    hit -- plan_import_fn/submit_import_fn/serve_fn are never called, and the
+    returned snapshot_id comes off the job's own committed receipt via
+    ``_resulting_head_snapshot_id``, not a fresh ``data_snapshot_heads``
+    read (this test never seeds that table at all, so any such read would
+    surface as None, not the value asserted below).
+    """
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=2, state="succeeded")
+    conn.close()
+    monkeypatch.setattr(nightly_trigger, "_resulting_head_snapshot_id",
+                        lambda root, conn, job_id: "snap_from_receipt")
+
+    result = nightly_trigger._ensure_shadow_snapshot(
+        tmp_path, AS_OF, clock, 2, plan_import_fn=_explode, submit_import_fn=_explode,
+        serve_fn=_explode)
+
+    assert result == ("ready", "snap_from_receipt")
+
+
+def test_ensure_shadow_snapshot_terminal_failed_job_raises_without_resubmitting(tmp_path):
+    """R1(b)/R3: a job that is terminal but not succeeded under this exact
+    attempt key raises INPUT_CHANGED immediately -- it is never resubmitted
+    under the same key."""
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="failed")
+    conn.close()
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._ensure_shadow_snapshot(
+            tmp_path, AS_OF, clock, 0, plan_import_fn=_explode, submit_import_fn=_explode,
+            serve_fn=_explode)
+    assert raised.value.code == "INPUT_CHANGED"
+
+
+def test_ensure_shadow_snapshot_session_mismatch_returns_not_yet(tmp_path):
+    """R1(a): the legacy store has not caught up to as_of yet -- returned as
+    not_yet, no submission attempted, no attempt consumed."""
+    clock = FakeClock(IN_WINDOW)
+
+    def fake_plan_import(root, expected_head_snapshot_id, expected_head_generation):
+        assert expected_head_snapshot_id is None and expected_head_generation == 0
+        return _FakePlan("2026-09-24")  # a different session than AS_OF
+
+    result = nightly_trigger._ensure_shadow_snapshot(
+        tmp_path, AS_OF, clock, 0, plan_import_fn=fake_plan_import,
+        submit_import_fn=_explode, serve_fn=_explode)
+
+    assert result == ("not_yet", None)
+
+
+def test_ensure_shadow_snapshot_clean_round_trip_returns_ready(tmp_path):
+    """A clean plan-import -> submit -> serve round trip: no existing row,
+    a matching session, a fresh submission, and a fake serve_fn returning
+    ("ready", snapshot_id) directly."""
+    clock = FakeClock(IN_WINDOW)
+    calls = {}
+
+    def fake_plan_import(root, expected_head_snapshot_id, expected_head_generation):
+        return _FakePlan(AS_OF)
+
+    def fake_submit_import(root, conn, plan, idempotency_key, clock_arg):
+        calls["submit_key"] = idempotency_key
+        return "job_fresh"
+
+    def fake_serve(root, conn, job_id, clock_arg, deadline_at):
+        calls["serve"] = (job_id, deadline_at)
+        return "ready", "snap_committed"
+
+    result = nightly_trigger._ensure_shadow_snapshot(
+        tmp_path, AS_OF, clock, 3, plan_import_fn=fake_plan_import,
+        submit_import_fn=fake_submit_import, serve_fn=fake_serve)
+
+    assert result == ("ready", "snap_committed")
+    assert calls["submit_key"] == f"shadow_snapshot_import:{AS_OF}:3"
+    assert calls["serve"] == ("job_fresh", nightly_trigger._serve_deadline(clock))
+
+
+def test_ensure_shadow_snapshot_fresh_attempt_after_terminal_failure_retries(tmp_path):
+    """R3/R6: a terminal failure under attempt 0 must never be retried under
+    that SAME key (a bare as_of-only key would keep matching the dead row
+    forever); a fresh attempt=1 mints a genuinely new key and succeeds."""
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="failed")
+    conn.close()
+
+    with pytest.raises(OpsError):
+        nightly_trigger._ensure_shadow_snapshot(
+            tmp_path, AS_OF, clock, 0, plan_import_fn=_explode, submit_import_fn=_explode,
+            serve_fn=_explode)
+
+    def fake_plan_import(root, expected_head_snapshot_id, expected_head_generation):
+        return _FakePlan(AS_OF)
+
+    def fake_submit_import(root, conn, plan, idempotency_key, clock_arg):
+        assert idempotency_key == f"shadow_snapshot_import:{AS_OF}:1"
+        return "job_retry"
+
+    def fake_serve(root, conn, job_id, clock_arg, deadline_at):
+        return "ready", "snap_retry"
+
+    result = nightly_trigger._ensure_shadow_snapshot(
+        tmp_path, AS_OF, clock, 1, plan_import_fn=fake_plan_import,
+        submit_import_fn=fake_submit_import, serve_fn=fake_serve)
+
+    assert result == ("ready", "snap_retry")
+
+
+def test_ensure_shadow_snapshot_reattaches_to_a_non_terminal_job_without_resubmitting(tmp_path):
+    """A non-terminal existing row under the current attempt key (queued,
+    running, retry_wait, ...) is reattached to and waited on directly --
+    plan_import_fn/submit_import_fn are never called a second time for it."""
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    job_id = _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="queued")
+    conn.close()
+
+    def fake_serve(root, conn, seen_job_id, clock_arg, deadline_at):
+        assert seen_job_id == job_id
+        return "timed_out", None
+
+    result = nightly_trigger._ensure_shadow_snapshot(
+        tmp_path, AS_OF, clock, 0, plan_import_fn=_explode, submit_import_fn=_explode,
+        serve_fn=fake_serve)
+
+    assert result == ("timed_out", None)
+
+
+def test_default_serve_snapshot_import_maps_deadline_exceeded_to_timed_out(tmp_path, monkeypatch):
+    """The production serve_fn default: a "deadline_exceeded" drive-to-
+    terminal outcome maps to ("timed_out", None); the still-running job is
+    left exactly as it is (this default issues no UPDATE/DELETE against
+    `jobs` -- _drive_jobs_to_terminal and get_job only ever read it)."""
+    from engine.v2.ops import supervisor
+
+    monkeypatch.setattr(supervisor, "Service", lambda *a, **k: object())
+    captured = {}
+
+    def fake_serve(service, *, until=None, deadline_at=None):
+        captured["deadline_at"] = deadline_at
+        return "deadline_exceeded"
+
+    monkeypatch.setattr(supervisor, "serve", fake_serve)
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    job_id = _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="queued")
+    deadline_at = nightly_trigger._serve_deadline(clock)
+
+    result = nightly_trigger._default_serve_snapshot_import(tmp_path, conn, job_id, clock,
+                                                            deadline_at)
+    state = conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job_id,)).fetchone()["state"]
+    conn.close()
+
+    assert result == ("timed_out", None)
+    assert captured["deadline_at"] == deadline_at
+    assert state == "queued"

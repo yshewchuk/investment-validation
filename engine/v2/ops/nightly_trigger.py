@@ -45,7 +45,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as clock_time
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Literal
 from zoneinfo import ZoneInfo
 
 from engine.v2.foundation import SystemClock, format_timestamp
@@ -99,6 +99,9 @@ FinalityProvider = Callable[[str, Iterable[str]], "tuple[bool, str]"]
 PlanCallable = Callable[..., str]
 SubmitCallable = Callable[..., object]
 ServeCallable = Callable[..., str]
+#: ``_drive_jobs_to_terminal``'s three-way outcome, shared by ``_default_serve``
+#: and ``_ensure_shadow_snapshot``'s snapshot-import drive (Cutover PR-7b).
+ServeOutcome = Literal["timed_out", "completed", "failed"]
 
 
 @dataclass(frozen=True)
@@ -635,10 +638,13 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
     owns the process for the duration (while holding the legacy lock), so the
     native DAG runs in-process here instead of needing a second supervisor.
     The job set is resolved through the idempotent ``cli._submit_command`` (a
-    no-op resubmission), then polled until every job is terminal. ``serve`` is
-    bounded by ``_serve_deadline``/``DEFAULT_SERVE_DEADLINE_ET`` (an absolute
-    same-day ET cutoff, not a duration) and this returns ``"timed_out"`` if that
-    deadline fires before every job is terminal, so a wedged job never blocks
+    no-op resubmission), then polled until every job is terminal via
+    :func:`_drive_jobs_to_terminal` (shared with
+    ``_ensure_shadow_snapshot``'s own drive-to-terminal step, Cutover PR-7b, so
+    there is exactly one polling loop in this module). ``serve`` is bounded by
+    ``_serve_deadline``/``DEFAULT_SERVE_DEADLINE_ET`` (an absolute same-day ET
+    cutoff, not a duration) and this returns ``"timed_out"`` if that deadline
+    fires before every job is terminal, so a wedged job never blocks
     indefinitely. The final status is ``completed`` only when every job
     succeeded, else ``failed``.
     """
@@ -646,7 +652,7 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
     from engine.v2.ops.bootstrap import open_catalog
     from engine.v2.ops.profiles import DEFAULT_POLICY
     from engine.v2.ops.stages import registry
-    from engine.v2.ops.supervisor import Service, serve
+    from engine.v2.ops.supervisor import Service
 
     ops_root = _ops_root(root)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
@@ -661,14 +667,27 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
             raise fail("INVALID_REQUEST", "the submitted plan produced no jobs")
         service = Service(conn, ops_root, registry(), DEFAULT_POLICY, clock=clock,
                           code_source=repo_root())
-        deadline_at = _serve_deadline(clock)
-        outcome = serve(service, until=lambda: _jobs_terminal(conn, job_ids),
-                        deadline_at=deadline_at)
-        if outcome == "deadline_exceeded":
-            return "timed_out"
-        return "completed" if _jobs_succeeded(conn, job_ids) else "failed"
+        return _drive_jobs_to_terminal(service, conn, job_ids, _serve_deadline(clock))
     finally:
         conn.close()
+
+
+def _drive_jobs_to_terminal(service, conn, job_ids,
+                            deadline_at) -> ServeOutcome:
+    """Poll ``service`` until every job in ``job_ids`` is terminal or
+    ``deadline_at`` fires. Returns ``"timed_out"`` on ``serve``'s own
+    ``"deadline_exceeded"``, else ``"completed"`` when every job succeeded,
+    else ``"failed"``. Shared by ``_default_serve`` and
+    ``_ensure_shadow_snapshot`` (Cutover PR-7b) so there is exactly one
+    polling loop in this module.
+    """
+    from engine.v2.ops.supervisor import serve
+
+    outcome = serve(service, until=lambda: _jobs_terminal(conn, job_ids),
+                    deadline_at=deadline_at)
+    if outcome == "deadline_exceeded":
+        return "timed_out"
+    return "completed" if _jobs_succeeded(conn, job_ids) else "failed"
 
 
 def _job_states(conn, job_ids) -> tuple[str, ...]:
@@ -688,6 +707,211 @@ def _jobs_terminal(conn, job_ids) -> bool:
 def _jobs_succeeded(conn, job_ids) -> bool:
     states = _job_states(conn, job_ids)
     return bool(states) and all(state in SUCCESS_JOB_STATES for state in states)
+
+
+def _default_plan_import(root, expected_head_snapshot_id, expected_head_generation):
+    """The production plan-import: the same ``engine.v2.data.import_snapshot.
+    plan_import`` call ``ops snapshot plan-import`` makes (``cli.
+    snapshot_command``), scoped to ``"shadow"`` -- the production default for
+    ``_ensure_shadow_snapshot``'s ``plan_import_fn`` seam (Cutover PR-7b).
+    """
+    from engine.v2.data.import_snapshot import plan_import
+
+    return plan_import(source_root=root, scope="shadow",
+                       expected_head_snapshot_id=expected_head_snapshot_id,
+                       expected_head_generation=expected_head_generation)
+
+
+def _default_submit_import(root, conn, plan, idempotency_key, clock) -> str:
+    """Publish and submit ``plan`` through the real ``ops snapshot plan-
+    import``/``submit`` path (``cli.snapshot_command``'s own two calls,
+    ``save_import_plan`` then ``submit_import``) -- the production default for
+    ``_ensure_shadow_snapshot``'s ``submit_import_fn`` seam (Cutover PR-7b).
+    Returns the new job's id.
+    """
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.snapshot_import import save_import_plan, submit_import
+    from engine.v2.ops.stages import registry
+    from engine.v2.ops.submission import NamespacePolicy
+
+    store = ArtifactStore(_ops_root(root))
+    plan_ref = save_import_plan(conn, store, plan, clock=clock)
+    policy = NamespacePolicy({"operator": frozenset({"shadow", "smoke"})})
+    receipt = submit_import(conn, store, plan_ref.artifact_id, registry=registry(),
+                            policy=policy, clock=clock, idempotency_key=idempotency_key,
+                            repo_root=repo_root())
+    return receipt.job_id
+
+
+def _resulting_head_snapshot_id(root, conn, job_id) -> str | None:
+    """Read ``SnapshotImportReceipt.resulting_head_snapshot_id`` off a
+    succeeded ``snapshot_import`` job's own committed output artifact --
+    never a fresh ``data_snapshot_heads`` read, which may already differ by
+    the time this runs (Cutover PR-7b: an operator could run ``ops snapshot
+    submit``/``promote`` by hand in between).
+    """
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.checkpoints import artifact
+    from engine.v2.ops.submission import get_job
+
+    receipt = get_job(conn, job_id)
+    if not receipt.output_refs:
+        raise fail("INPUT_CHANGED",
+                   "the shadow snapshot import succeeded with no output artifact",
+                   details={"job_id": job_id})
+    store = ArtifactStore(_ops_root(root))
+    ref = artifact(conn, store, receipt.output_refs[0])
+    document = json.loads(store.read_verified(ref))
+    return document.get("resulting_head_snapshot_id")
+
+
+def _default_serve_snapshot_import(root, conn, job_id, clock,
+                                   deadline_at) -> tuple[str, str | None]:
+    """Drive ONE ``snapshot_import`` job to terminal and interpret the
+    outcome -- the production default for ``_ensure_shadow_snapshot``'s
+    ``serve_fn`` seam (Cutover PR-7b). Reuses :func:`_drive_jobs_to_terminal`,
+    the SAME polling loop ``_default_serve`` uses, so there is exactly one
+    ``supervisor.serve`` call site in this module. Returns ``("ready",
+    snapshot_id)`` once the job succeeds (reading ``resulting_head_
+    snapshot_id`` off its own committed receipt) or ``("timed_out", None)``
+    if ``deadline_at`` fires first; raises the typed, non-retryable
+    ``INPUT_CHANGED`` ``OpsError`` on any other terminal outcome.
+    """
+    from engine.v2.ops.profiles import DEFAULT_POLICY
+    from engine.v2.ops.stages import registry
+    from engine.v2.ops.supervisor import Service
+
+    ops_root = _ops_root(root)
+    service = Service(conn, ops_root, registry(), DEFAULT_POLICY, clock=clock,
+                      code_source=repo_root())
+    outcome = _drive_jobs_to_terminal(service, conn, (job_id,), deadline_at)
+    if outcome == "timed_out":
+        return "timed_out", None
+    if outcome != "completed":
+        raise fail("INPUT_CHANGED",
+                   "the shadow snapshot import ended without succeeding",
+                   details={"job_id": job_id})
+    return "ready", _resulting_head_snapshot_id(root, conn, job_id)
+
+
+def _shadow_import_job_identity(as_of: str, attempt: int) -> tuple[str, str]:
+    """The ``attempt``-namespaced idempotency key and its job id.
+
+    ``attempt`` (the caller's dedicated ``snapshot_attempt`` counter, never
+    ``error_count``) namespaces ``f"shadow_snapshot_import:{as_of}:{attempt}"``:
+    a fresh call after a prior TERMINAL failure of this specific job must mint
+    a genuinely new key, because ``submission._insert_or_match`` matches an
+    existing row under an unchanged key regardless of that row's own state --
+    retrying under the SAME key would either re-match the dead row forever or
+    risk an ``IDEMPOTENCY_CONFLICT`` if the legacy store moved since. A call
+    that re-enters for the SAME ``attempt`` (crash-then-resume, or a prior
+    ``"not_yet"``/``"timed_out"`` from :func:`_ensure_shadow_snapshot`) finds
+    any existing row under that SAME key FIRST -- a plain, cheap catalog
+    lookup, before anything else runs -- and never calls
+    ``plan_import``/``submit_import`` again for it. (Cutover PR-7b.)
+    """
+    from engine.v2.ops.submission import job_id_for
+
+    key = f"shadow_snapshot_import:{as_of}:{attempt}"
+    return key, job_id_for("shadow", key)
+
+
+def _shadow_import_existing_outcome(root, conn, job_id, state, clock, serve_fn):
+    """Decides the outcome of an ALREADY-EXISTING ``snapshot_import`` row found
+    under this exact ``attempt`` key (Cutover PR-7b): a ``succeeded`` row
+    returns ``("ready", ...)`` immediately, reading ``snapshot_id`` off that
+    job's own committed receipt (never a fresh ``data_snapshot_heads`` read,
+    which may already differ); a non-terminal row (``queued``, ``running``,
+    ``retry_wait``, ...) is reattached to and waited on, WITHOUT calling
+    ``plan_import``/``submit_import`` again; a row that is terminal but not
+    ``succeeded`` raises the typed, non-retryable ``INPUT_CHANGED``
+    ``OpsError`` immediately instead of resubmitting.
+    """
+    if state == "succeeded":
+        return "ready", _resulting_head_snapshot_id(root, conn, job_id)
+    if state in TERMINAL_JOB_STATES:
+        raise fail("INPUT_CHANGED",
+                   "the shadow snapshot import ended without succeeding",
+                   details={"job_id": job_id, "state": state})
+    return serve_fn(root, conn, job_id, clock, _serve_deadline(clock))
+
+
+def _ensure_shadow_snapshot(root: Path, as_of: str, clock, attempt: int, *,
+                            plan_import_fn=None, submit_import_fn=None,
+                            serve_fn=None) -> tuple[str, str | None]:
+    """Cutover PR-7b (design: ``ARCHITECTURE.md`` "Cutover PR-7b's input
+    sourcing" / "``nightly_trigger.py`` (Cutover PR-7b design)"). Commits (or
+    reattaches to) the ``as_of`` session's ``shadow``-scope snapshot BEFORE any
+    plan is built -- NOT YET called from ``_submit_plan`` in this slice (added
+    unused, per the small-PRs "add the new code first, unused... then wire it
+    in" split): a later PR wires it in behind ``_submit_plan``'s own
+    ``ensure_snapshot_fn`` seam, inside the same ``if plan_ref is None:`` guard.
+
+    Returns ``("ready", snapshot_id)`` once a ``shadow``-scope snapshot is
+    confirmed fresh for ``as_of`` and committed (or was already committed by
+    an earlier call under this exact ``attempt``); ``("not_yet", None)`` when
+    the legacy store has not caught up to ``as_of`` yet (the legacy input
+    manifest's own ``selected_session`` does not match -- no attempt consumed,
+    retry with the SAME ``attempt``); ``("timed_out", None)`` when the import
+    job has not reached terminal before its deadline (it keeps running under
+    its own lease; a later call with the SAME ``attempt`` reattaches to it); or
+    raises the typed, non-retryable ``INPUT_CHANGED`` ``OpsError`` when the
+    import job reaches a terminal, non-``succeeded`` state under this exact
+    ``attempt`` -- never resubmitted under the SAME ``attempt``, only under a
+    genuinely NEW one (the caller's ``TriggerReceipt.snapshot_attempt``, bumped
+    only on this raise).
+
+    The key/job-id rule is :func:`_shadow_import_job_identity`'s and the
+    existing row's own state decides everything in
+    :func:`_shadow_import_existing_outcome`; a row's absence falls through to a
+    fresh plan-import. The catalog connection, the cheap existence check and
+    the ``data_snapshot_heads`` CAS-pair read are this function's own direct
+    reads, never behind a seam -- the same "cheap, catalog-only identity check,
+    done first" pattern ``nightly.submit_native_score_batch_shadow_if_ready``
+    already uses for a different job kind (Cutover PR-7a).
+
+    ``plan_import_fn`` (``=None``, defaulting to :func:`_default_plan_import`)
+    wraps ``engine.v2.data.import_snapshot.plan_import``: ``(root, expected_
+    head_snapshot_id, expected_head_generation) -> ImportPlan``. ``submit_
+    import_fn`` (``=None``, defaulting to :func:`_default_submit_import`)
+    wraps ``snapshot_import.save_import_plan`` + ``submit_import``: ``(root,
+    conn, plan, idempotency_key, clock) -> str`` (the new job's id).
+    ``serve_fn`` (``=None``, defaulting to
+    :func:`_default_serve_snapshot_import`) drives ONE job to terminal and
+    interprets the outcome: ``(root, conn, job_id, clock, deadline_at) ->
+    tuple[str, str | None]`` -- ``("ready", snapshot_id)`` or ``("timed_out",
+    None)``, or it raises -- the SAME three-way contract this function itself
+    has.
+    """
+    from engine.v2.foundation import ensure_directory
+    from engine.v2.ops.bootstrap import open_catalog
+    from engine.v2.ops.submission import get_job
+
+    plan_import_fn = plan_import_fn or _default_plan_import
+    submit_import_fn = submit_import_fn or _default_submit_import
+    serve_fn = serve_fn or _default_serve_snapshot_import
+
+    key, job_id = _shadow_import_job_identity(as_of, attempt)
+    ops_root = _ops_root(root)
+    ensure_directory(ops_root)
+    conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
+    try:
+        existing = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if existing is not None:
+            return _shadow_import_existing_outcome(root, conn, job_id,
+                                                   get_job(conn, job_id).state, clock, serve_fn)
+        head_row = conn.execute(
+            "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = 'shadow'"
+        ).fetchone()
+        expected_head_snapshot_id = head_row["snapshot_id"] if head_row is not None else None
+        expected_head_generation = head_row["generation"] if head_row is not None else 0
+        plan = plan_import_fn(root, expected_head_snapshot_id, expected_head_generation)
+        if plan.legacy_input_manifest.selected_session != as_of:
+            return "not_yet", None
+        new_job_id = submit_import_fn(root, conn, plan, key, clock)
+        return serve_fn(root, conn, new_job_id, clock, _serve_deadline(clock))
+    finally:
+        conn.close()
 
 
 def _parser() -> argparse.ArgumentParser:
