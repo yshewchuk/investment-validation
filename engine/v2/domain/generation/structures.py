@@ -206,7 +206,8 @@ def _resolve_first_dte_at_least(inputs: Mapping[str, Any], expiries: list[str]) 
     earliest post-event expiry was listed, even when it was far short of the
     30 DTE legacy requires.
     """
-    entry_source = inputs.get("quote_date") or inputs.get("entry_date")
+    quote_date = inputs.get("quote_date")
+    entry_source = quote_date if quote_date is not None else inputs.get("entry_date")
     if entry_source is None:
         raise GeometryRefusal("MISSING_ENTRY_DATE")
     try:
