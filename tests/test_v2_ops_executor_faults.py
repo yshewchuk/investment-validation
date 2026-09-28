@@ -498,25 +498,25 @@ def test_poll_reaps_a_real_surviving_straggler_after_a_clean_exit(tmp_path):
          "import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
          "pathlib.Path(%r).write_text('ready'); time.sleep(30)" % str(ready)],
         start_new_session=True)
-    for _ in range(50):
-        if ready.exists():
-            break
-        time.sleep(0.01)
-    assert ready.exists(), "straggler never installed its SIGTERM handler"
-    parent = subprocess.Popen([sys.executable, "-c", "pass"])
-    parent_identity = process_info(parent.pid, "boot")[0]
-    straggler_identity = process_info(straggler.pid, "boot")[0]
-    parent.wait()
-    assert parent.poll() == 0
-
-    read_fd, write_fd = os.pipe()
-    os.set_blocking(read_fd, False)
-    os.close(write_fd)
-    running = Running(claim=claim, process=parent, result_fd=read_fd,
-                      identities=(parent_identity, straggler_identity),
-                      started=clock.monotonic())
-
     try:
+        for _ in range(50):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        assert ready.exists(), "straggler never installed its SIGTERM handler"
+        parent = subprocess.Popen([sys.executable, "-c", "pass"])
+        parent_identity = process_info(parent.pid, "boot")[0]
+        straggler_identity = process_info(straggler.pid, "boot")[0]
+        parent.wait()
+        assert parent.poll() == 0
+
+        read_fd, write_fd = os.pipe()
+        os.set_blocking(read_fd, False)
+        os.close(write_fd)
+        running = Running(claim=claim, process=parent, result_fd=read_fd,
+                          identities=(parent_identity, straggler_identity),
+                          started=clock.monotonic())
+
         done = False
         for _ in range(50):
             status = executor.poll(conn, running, boot_id="boot", clock=clock)
