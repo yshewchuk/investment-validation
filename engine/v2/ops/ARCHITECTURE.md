@@ -332,8 +332,30 @@ a submission source" rule Part 4 already established for
   job-bound inputs (`score.json` from the paired `"score"` job;
   `records.json`/`refusals.json` from the paired `native_score_batch` job
   — see "Inputs" below for exactly how `_native_parity_identity` finds
-  both), builds `legacy_rows`/`native_rows`/`native_refusals`/
-  `unkeyable_refusals`, and branches on whether `legacy_rows` and
+  both). **Checks BOTH documents' `schema_version` BEFORE parsing either
+  one's row content (Opus gate finding, real gap): `records_document[
+  "schema_version"] == "native_score_batch_records.v2.0"` AND
+  `refusals_document["schema_version"] == "native_score_batch_refusals.v2.0"`.**
+  `_native_parity_identity` (above) is a cheap CATALOG-only lookup — it
+  finds the latest succeeded `native_score_batch` job by idempotency key
+  alone, never opening that job's own output files — so it cannot itself
+  tell a job that ran on this redo's OLD `v1.0` schema (bare-array
+  `records`, no `unkeyable_refusals`) from one that ran on the NEW `v2.0`
+  schema this redo defines; a shadow deployment window where the "latest
+  succeeded" `native_score_batch` job predates this redo's own worker
+  change is a real, if transient, rollout state, not a defect. Rather than
+  feed a `v1.0`-shaped array into the `v2.0`-shaped reader below (which
+  expects `records`/`refusals` to be `dict`s, not arrays, and would either
+  crash or silently misread), `run_native_parity_worker` treats a
+  `schema_version` mismatch on EITHER document EXACTLY like
+  `_native_parity_identity` returning `None` (below, "R1, missing input"):
+  no submission this tick, tried again next tick, once a fresh
+  `native_score_batch` run under the CURRENT worker produces a `v2.0`
+  artifact. This is a wait state, never a refusal and never a job
+  failure. Only once BOTH tags match does it build
+  `legacy_rows`/`native_rows`/`native_refusals`/`unkeyable_refusals` (via
+  `_native_rows_and_refusals`, below, which then trusts the schema without
+  re-checking it), and branches on whether `legacy_rows` and
   `native_rows` share any key (below, `_empty_native_report`) before
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
@@ -507,8 +529,22 @@ a submission source" rule Part 4 already established for
   in practice (native's own board universe enumerates one `BoardRequest`
   per `(ticker, strategy, event_date, session)` combination the events
   table actually carries); this guard exists because the projection makes
-  a collision POSSIBLE, not because one has occurred. The third return
-  value is `refusals_document.get("unkeyable_refusals", ())`, passed
+  a collision POSSIBLE, not because one has occurred. **This function
+  REQUIRES the key — `refusals_document["unkeyable_refusals"]`, never
+  `.get("unkeyable_refusals", ())` (Opus gate finding, real gap).** Its only
+  caller (`run_native_parity_worker`, below) has already confirmed
+  `refusals_document["schema_version"] == "native_score_batch_refusals.v2.0"`
+  (below) before calling this function at all, and the v2.0 writer ALWAYS
+  emits this key, even as `[]` for a batch with no unkeyable refusals (the
+  "refusals.json" bullet, above) — so its absence on a document already
+  confirmed v2.0 means the file is malformed (truncated, hand-edited, or
+  written by a defective producer), never a legitimate "this batch has
+  none" case a silent default could paper over. A `KeyError` here is
+  caught by `run_native_parity_worker` alongside its other
+  `records.json`/`refusals.json` decode failures (below, "R1, missing
+  input") and fails the WHOLE job attempt, exactly like a document that
+  fails to decode at all — never a per-row skip, and never a silently
+  empty `unkeyable_refusals`. The (now guaranteed-present) value is passed
   through completely unchanged — `INVALID_KEY_FIELD` rows (below) never
   had a `population_key` computed for them at all (that is exactly what
   makes them "unkeyable"), so there is nothing for this function to
@@ -1108,7 +1144,12 @@ starts working with no change of its own.
   pairing correct once any row has refused, never a reconstruction from
   `events.json`'s own order) and `refusals.json` (`{"schema_version":
   "native_score_batch_refusals.v2.0", "refusals": {canonical_key: {"code":
-  ..., "detail": ...}, ...}}`, the same `code`/`detail` fields
+  ..., "detail": ...}, ...}, "unkeyable_refusals": [{"key": {"ticker":
+  ..., "strategy": ..., "event_date": ..., "session": ...}, "code":
+  "INVALID_KEY_FIELD", "detail": ...}, ...]}` — `unkeyable_refusals` is
+  ALWAYS present, `[]` for a batch with none, never omitted (`native_parity_
+  report._native_rows_and_refusals`, above, requires the key rather than
+  defaulting it), the same `code`/`detail` fields
   `NativeScoreBatchRowRefusal.as_document()` already carries, minus the
   now-redundant nested `"key"` dict). A batch whose every row refuses
   still completes the job successfully with an empty `records` object and
@@ -2276,7 +2317,19 @@ hold, extended here rather than re-argued from scratch.
   succeeded `native_score_batch` job yet) is not a refusal — the sidecar
   submits nothing and tries again next tick, exactly like
   `computed_moves_refresh`/`native_score_batch` waiting on their own
-  prerequisites. Inside the worker: an unparseable `BoardRequest` key (not
+  prerequisites. **A `schema_version` mismatch on either `records.json` or
+  `refusals.json` (Opus gate finding, real gap) is treated the SAME way,
+  not as a job failure:** `run_native_parity_worker` checks both tags
+  (its own "Checks BOTH documents' `schema_version`" step, above) BEFORE
+  parsing either document's row content, and the "latest succeeded"
+  `native_score_batch` job `_native_parity_identity` found being one that
+  ran on this redo's OLD `v1.0` schema (a real, transient rollout-window
+  state — `_native_parity_identity`'s own catalog-only lookup cannot tell
+  the two schema versions apart without opening files, which it
+  deliberately does not do) skips submission this tick exactly like `None`
+  would, rather than crashing on a `v1.0` array where the `v2.0` reader
+  expects a `dict`. Inside the worker (once both tags match): an
+  unparseable `BoardRequest` key (not
   exactly 4 `"|"`-separated fields), two distinct `records.json`/
   `refusals.json` keys colliding on the same projected `population_key`
   (`_native_rows_and_refusals`, above), a `records.json`/`refusals.json`
