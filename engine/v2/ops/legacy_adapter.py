@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -113,11 +112,20 @@ def finality_coverage_frame(table: str, column: str, stamp):
         return None
 
 
-def _digest(path: Path) -> str:
+def _digest(path: Path, *, keepalive: Callable[[], None] | None = None) -> str:
+    """SHA-256 of ``path``, optionally renewing per 1MB chunk.
+
+    ``keepalive`` (issue #106, round 3): called once per chunk read so ONE
+    file large enough to exceed ``LEASE_SECONDS`` on its own still renews
+    during its hash, not only between files. The callable is already
+    internally throttled, so this is cheap.
+    """
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
             digest.update(chunk)
+            if keepalive is not None:
+                keepalive()
     return "sha256:" + digest.hexdigest()
 
 
@@ -126,7 +134,8 @@ def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
     """Return a complete, immutable read-set manifest and reject indirection.
 
     ``keepalive`` (issue #106): an optional zero-arg renewal callable invoked
-    once per manifest iteration, so a long hash pass cannot starve other live
+    once per manifest iteration AND once per chunk of each file's hash, so a
+    long hash pass -- even ONE huge file -- cannot starve other live
     attempts' leases. Omitting it is exactly the old behavior.
     """
     base = Path(root).resolve()
@@ -139,9 +148,26 @@ def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
         if source.is_symlink() or not source.is_file():
             raise fail("INPUT_CHANGED", "legacy read-set member is missing or indirect",
                        details={"path": relative})
-        result[relative] = {"content_hash": _digest(source),
+        result[relative] = {"content_hash": _digest(source, keepalive=keepalive),
                             "byte_size": source.stat().st_size}
     return result
+
+
+def _copy_chunked(source: Path, destination: Path, *,
+                  keepalive: Callable[[], None] | None = None) -> None:
+    """Bytes-only copy in 1MB chunks, renewing ``keepalive`` per chunk.
+
+    Issue #106 round 3: replaces ``shutil.copyfile`` so ONE huge file renews
+    other attempts' leases DURING its own copy, not only between files. No
+    metadata is preserved -- ``copy_read_set``'s own ``chmod`` sets the final
+    mode either way. Extracted from ``copy_read_set`` (code-budget split by
+    the stage being done, not a raised budget).
+    """
+    with source.open("rb") as src, destination.open("wb") as dst:
+        for chunk in iter(lambda: src.read(1 << 20), b""):
+            dst.write(chunk)
+            if keepalive is not None:
+                keepalive()
 
 
 def copy_read_set(source_root: Path | str, private_root: Path | str,
@@ -150,7 +176,8 @@ def copy_read_set(source_root: Path | str, private_root: Path | str,
     """Copy declared inputs privately, preserving bytes without links.
 
     ``keepalive`` (issue #106): forwarded into the manifest hash pass and
-    called once per copy-loop iteration; ``None`` keeps today's behavior.
+    called once per copy-loop iteration AND once per chunk of both the copy
+    and the post-copy verification hash; ``None`` keeps today's behavior.
     """
     source_raw = Path(source_root)
     target_raw = Path(private_root)
@@ -177,8 +204,11 @@ def copy_read_set(source_root: Path | str, private_root: Path | str,
                 raise fail("INTEGRITY_FAILED", "private destination ancestor is a symlink")
         if destination.exists() and destination.is_symlink():
             raise fail("INTEGRITY_FAILED", "private destination is a symlink")
-        shutil.copyfile(source / relative, destination)
-        if destination.is_symlink() or _digest(destination) != expected["content_hash"]:
+        # Chunked copy (issue #106 round 3): replaces shutil.copyfile so a
+        # single huge file renews DURING the copy, not only between files.
+        _copy_chunked(source / relative, destination, keepalive=keepalive)
+        if destination.is_symlink() or _digest(destination, keepalive=keepalive) \
+                != expected["content_hash"]:
             raise fail("INTEGRITY_FAILED", "private legacy copy failed verification",
                        details={"path": relative})
         destination.chmod(0o444)
@@ -1178,7 +1208,10 @@ def run_engineering_gate(repo_root, *, timeout=600, keepalive=None, poll_interva
     ``keepalive`` (issue #106) is called between poll intervals so a gate run
     longer than ``poll_interval`` cannot starve sibling leases; a genuine
     timeout still raises ``subprocess.TimeoutExpired``, exactly as the old
-    blocking ``subprocess.run`` did.
+    blocking ``subprocess.run`` did. Round-3 fixes: each poll waits only the
+    REMAINING deadline (never past it), and any exception escaping the poll
+    loop -- e.g. a ``keepalive`` raising ``LEASE_LOST`` -- kills and reaps the
+    child instead of orphaning it.
     """
     import subprocess
 
@@ -1187,21 +1220,37 @@ def run_engineering_gate(repo_root, *, timeout=600, keepalive=None, poll_interva
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + timeout
     stdout = stderr = None
+    finished = False
     try:
         while True:
+            # Round-3 fix 2: never wait past the original deadline -- the
+            # blocking subprocess.run(timeout=...) it replaces enforced the
+            # exact deadline, and a full poll_interval here did not.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                finished = True
+                raise subprocess.TimeoutExpired(proc.args, timeout, output=stdout,
+                                                stderr=stderr)
             try:
-                stdout, stderr = proc.communicate(timeout=poll_interval)
+                stdout, stderr = proc.communicate(timeout=min(poll_interval, remaining))
+                finished = True
                 break
             except subprocess.TimeoutExpired:
                 if keepalive is not None:
                     keepalive()
-                if time.monotonic() >= deadline:
-                    proc.kill()
-                    stdout, stderr = proc.communicate()
-                    raise subprocess.TimeoutExpired(proc.args, timeout, output=stdout,
-                                                    stderr=stderr)
-    except subprocess.TimeoutExpired:
-        raise
+    finally:
+        if not finished:
+            # Round-3 fix 3: a keepalive() failure (or anything else escaping
+            # the loop) must not leave the gate subprocess running: Popen does
+            # not terminate the child for the caller. Best-effort kill+reap,
+            # swallowing cleanup errors so the original exception propagates.
+            try:
+                proc.kill()
+                proc.communicate()
+            except Exception:
+                pass
     result = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     return _json_stdout(result, "engineering gate produced no JSON")
 

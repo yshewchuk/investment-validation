@@ -354,3 +354,38 @@ def test_sibling_lease_renewal_failure_is_swallowed(tmp_path, monkeypatch):
     assert _lease_row(conn, claim_b.attempt_id) == b_lease_before  # B was NOT renewed
     assert _lease_row(conn, claim_a.attempt_id) == format_timestamp(
         clock.now() + timedelta(seconds=LEASE_SECONDS))  # A still renewed normally
+
+
+def test_a_failed_renewal_pass_does_not_throttle_the_next_call(tmp_path, monkeypatch):
+    """Round-3 fix: the shared throttle timer advances only after an
+    ALL-SUCCEEDED pass. One sibling failing must leave it unset, so the very
+    next call -- with no clock time elapsed, where an all-succeeded first pass
+    would have thrown it away -- runs a full second pass over both attempts."""
+    import engine.v2.ops.supervisor as supervisor_module
+
+    conn, clock, supervisor = catalog(tmp_path)
+    claim_a = enqueue_claim(conn, clock, supervisor, key="a")
+    claim_b = enqueue_claim(conn, clock, supervisor, key="b")
+    service = Service(conn, tmp_path, REGISTRY, TEST_POLICY, clock=clock, code_source=ROOT)
+    _running_entry(service, clock, claim_a)
+    _running_entry(service, clock, claim_b)
+
+    original = supervisor_module.heartbeat
+    attempted = []
+
+    def flaky_heartbeat(conn_arg, attempt_id, fence, *, clock, lease_seconds):
+        attempted.append(attempt_id)
+        if len(attempted) == 1:  # A's renewal in the first pass only
+            raise RuntimeError("simulated first-pass renewal failure")
+        return original(conn_arg, attempt_id, fence, clock=clock, lease_seconds=lease_seconds)
+
+    monkeypatch.setattr(supervisor_module, "heartbeat", flaky_heartbeat)
+    service._renew_other_leases()
+    assert attempted == [claim_a.attempt_id, claim_b.attempt_id]
+    assert service._other_leases_renewed_at is None  # the failed pass armed nothing
+
+    service._renew_other_leases()  # not throttled: a second FULL pass over both
+    assert attempted == [claim_a.attempt_id, claim_b.attempt_id] * 2
+
+    service._renew_other_leases()  # the all-succeeded second pass DID arm the throttle
+    assert attempted == [claim_a.attempt_id, claim_b.attempt_id] * 2

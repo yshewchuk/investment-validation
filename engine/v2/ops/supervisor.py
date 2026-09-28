@@ -592,7 +592,8 @@ class Service:
                     details={"reason": "generation_not_pinned"}))
             refuse_generation_mismatch(self.conn, self.store, receipt_id=receipt_id,
                                        barrier_manifest=manifest)
-        pin_read_set(self.conn, claim.attempt_id, manifest, self.store_root)
+        pin_read_set(self.conn, claim.attempt_id, manifest, self.store_root,
+                     keepalive=self._renew_other_leases)
         return manifest
 
     def _populate_legacy_staging(self, claim, manifest):
@@ -785,13 +786,16 @@ class Service:
         stretches call. Throttled (ONE shared timer) to at most once per
         ``LEASE_SECONDS / 4`` monotonic seconds; a sibling's renewal failure is
         swallowed -- that attempt's own ``_poll``/``expire_leases`` path owns
-        reporting it, it is not this pass's failure to raise.
+        reporting it, it is not this pass's failure to raise. The shared timer
+        advances only after an ALL-SUCCEEDED pass (round-3 fix), so a failed
+        renewal is retried on the very next call rather than waiting out the
+        full throttle interval while the failing sibling nears its expiry.
         """
         now = self.clock.monotonic()
         if (self._other_leases_renewed_at is not None
                 and now - self._other_leases_renewed_at < LEASE_SECONDS / 4):
             return
-        self._other_leases_renewed_at = now
+        all_ok = True
         for attempt_id, running in list(self.running.items()):
             if attempt_id == exclude_attempt_id:
                 continue
@@ -799,7 +803,9 @@ class Service:
                 heartbeat(self.conn, attempt_id, running.claim.fence,
                           clock=self.clock, lease_seconds=LEASE_SECONDS)
             except Exception:
-                continue
+                all_ok = False
+        if all_ok:
+            self._other_leases_renewed_at = now
 
     def _finish(self, running, status):
         claim = running.claim
