@@ -897,13 +897,15 @@ network, or database access.
   reports a family member alive at that same tick — a worker that exits 0
   can briefly leave a child/grandchild process (a straggler) running past
   its own exit, or a liveness read can momentarily overlap the exit itself.
-  `done` only becomes `True` once the whole family has drained (`alive` is
-  empty), so a straggler after a clean exit is waited out, not killed and
-  not treated as a failure, and the worker's already-buffered result
-  (`running.data`) is used once `done` is `True`. Before this fix, ANY
-  exit code observed while a family member was still alive — zero
-  included — set `WORKER_FAILED` and discarded a successful worker's
-  result (issue #105).
+  Either way, once the worker's own exit code is known and a family member
+  is still alive, `poll()` calls `stop()` (TERM, then KILL after
+  `grace_seconds`) to reap it — bounded, not waited on indefinitely — and
+  `done` only becomes `True` once the whole family has actually drained.
+  So a straggler after a clean exit is reaped, not treated as a failure,
+  and the worker's already-buffered result (`running.data`) is used once
+  `done` is `True`. Before this fix, ANY exit code observed while a family
+  member was still alive — zero included — set `WORKER_FAILED` and
+  discarded a successful worker's result (issue #105).
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
   code (root doc §5), never defaulted. `board_requests` follows the same

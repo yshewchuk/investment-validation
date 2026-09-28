@@ -477,6 +477,57 @@ def test_poll_does_not_fail_a_clean_exit_with_a_live_straggler(tmp_path, monkeyp
     assert json.loads(bytes(running.data)) == {"ok": 1}
 
 
+def test_poll_reaps_a_real_surviving_straggler_after_a_clean_exit(tmp_path):
+    """A real parent process exits 0 immediately, leaving a real detached child
+    still running (a genuine straggler, no mocking of ``observe``). ``poll()``
+    must not hang waiting for it forever: it keeps calling ``stop()`` (TERM,
+    then KILL after ``grace_seconds``) without ever setting ``running.failure``,
+    and reaches ``done`` once the child is actually gone -- bounded, not an
+    infinite wait."""
+    conn, clock, supervisor = catalog(tmp_path)
+    submit(conn, registry(), POLICY,
+           request(kind="artifact_check", checkpoint_contract_ref="receipt.v1.0",
+                   parameters={"expected_ids": []}),
+           clock=clock)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock)
+
+    straggler = subprocess.Popen(
+        [sys.executable, "-c", "import signal,time; "
+         "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
+        start_new_session=True)
+    parent = subprocess.Popen([sys.executable, "-c", "pass"])
+    parent_identity = process_info(parent.pid, "boot")[0]
+    straggler_identity = process_info(straggler.pid, "boot")[0]
+    parent.wait()
+    assert parent.poll() == 0
+
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.close(write_fd)
+    running = Running(claim=claim, process=parent, result_fd=read_fd,
+                      identities=(parent_identity, straggler_identity),
+                      started=clock.monotonic())
+
+    try:
+        done = False
+        for _ in range(50):
+            status = executor.poll(conn, running, boot_id="boot", clock=clock)
+            assert running.failure is None
+            clock.advance(0.05)
+            if status["done"]:
+                done = True
+                break
+            time.sleep(0.05)
+        assert done, "a real surviving straggler after a clean exit must still finish, not hang"
+        assert status["exit_code"] == 0
+        assert running.failure is None
+    finally:
+        if straggler.poll() is None:
+            straggler.kill()
+        straggler.wait()
+
+
 def test_poll_race_e2e_attempt_still_succeeds_with_worker_result(tmp_path, monkeypatch):
     """Regression for issue #105, end to end: a real ``artifact_check`` job run
     through a real ``Service`` and a real worker subprocess, with
