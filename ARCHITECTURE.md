@@ -104,7 +104,8 @@ request body and, if durable, in the operator guides instead — see
     "reverse import closure" comment block has the exact rule). Its input is
     the PR's changed-file list plus `tools/mutation_pilot.toml`'s module
     partition and `[pr_selection]` allowlist; its output is the module
-    subset the CI matrix runs. `module_dependency_closure` walks
+    subset the CI matrix runs. `*ARCHITECTURE.md` entries are inert for
+    selection. `module_dependency_closure` walks
     `build_import_graph`'s real, statically-resolved edges
     (`_ImportGraph.precise`) rather than a DYNAMIC file's catch-all edge
     (`build_import_graph` gives a file it cannot parse precisely — e.g. one

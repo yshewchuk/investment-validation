@@ -2512,10 +2512,12 @@ def test_scoring_stages_change_no_longer_selects_every_enabled_module():
         "tests/test_v2_scoring_runup_frozen.py",
     ]
     selected = pilot.changed_modules(CFG, names, changed)
-    assert "scoring_application" in selected
-    assert "scoring_stages" in selected
-    assert len(selected) < len(names), (
-        "selected every enabled module -- the conftest.py cascade defect is back"
+    assert set(selected) == set(names) - {
+        "canonical", "data_incremental", "no_fit", "research",
+    }, (
+        "selection drifted from the exact expected set -- re-check whether "
+        "this is a narrowing regression (e.g. back toward all 33) or a "
+        "legitimate closure change that needs this expectation updated"
     )
 
 
