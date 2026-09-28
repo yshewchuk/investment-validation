@@ -143,8 +143,8 @@ were kept, under the same names, because a sibling in-flight branch
 (`worktree-agent-aa49bb24e5d746918`) already owned the name `_scan.py` for
 its own version when `_snapshot.py`'s functionality was needed — a
 naming collision avoidance, not a design intent to have two mechanisms.
-Tracked as a follow-up (see hand-back); not fixed here because neither
-module changed in this PR.
+Tracked as a follow-up (issue #69); not fixed here because neither module
+changed in this PR.
 
 Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The only consumers are the CLI
@@ -179,10 +179,13 @@ else it reads (see Failure semantics, Invariants). No third-party service.
 
 ## Failure semantics
 
-The 4c R1–R6 template. Every refusal is a `DataError`
+The 4c R1–R6 template. Every refusal is meant to be a `DataError`
 (`engine.v2.data.errors.DataError`) carrying one of the registered
-`DATA_FAILURE_CODES`; a CLI catches it at `main()` and exits 2 with the code
-and message on stderr rather than a bare traceback.
+`DATA_FAILURE_CODES`, which a CLI catches at `main()` and exits 2 with the
+code and message on stderr rather than a bare traceback — with one
+pre-existing exception, called out below where it applies
+(`_snapshot.py`'s bare `ValueError`, issue #70), that escapes as an
+uncaught traceback instead.
 
 - **R1, missing input.**
   - **No committed scope head, and no explicit `--snapshot-id`.**
@@ -248,7 +251,7 @@ and message on stderr rather than a bare traceback.
     `v2_reconcile_trades.py`) catch only `DataError` at `main()`, so this
     one condition escapes as an uncaught traceback rather than the typed
     refusal every other condition here gets. Pre-existing, not introduced
-    or fixed by this doc; tracked as a follow-up (see hand-back).
+    or fixed by this doc; tracked as a follow-up (issue #70).
   - **A single day-partition scan that still exceeds
     `maximum_result_rows`** (`_scan.py`'s path only — `_snapshot.py` has no
     finer split to fall back to). `RESULT_LIMIT_EXCEEDED`
