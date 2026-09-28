@@ -260,12 +260,14 @@ uncaught traceback instead.
     one condition escapes as an uncaught traceback rather than the typed
     refusal every other condition here gets. Pre-existing, not introduced
     or fixed by this doc; tracked as a follow-up (issue #70).
-  - **A single day-partition scan that still exceeds
-    `maximum_result_rows`** (`_scan.py`'s path, and — since issue #107 —
-    `_snapshot.py`'s: see "`_snapshot.read_table` splits like `_scan.py`
-    (issue #107)" below). `RESULT_LIMIT_EXCEEDED` (`category="resource"`,
-    not retryable): the table needs finer partitioning than this rule can
-    supply; it never truncates silently.
+  - **A whole-partition scan with a nullable observation-time column that
+    exceeds `maximum_result_rows`, or a single day-partition scan that still
+    exceeds `maximum_result_rows`** (`_scan.py`'s path, and — since issue
+    #107 — `_snapshot.py`'s: see "`_snapshot.read_table` splits like
+    `_scan.py` (issue #107)" below). `RESULT_LIMIT_EXCEEDED`
+    (`category="resource"`, not retryable): the table needs finer
+    partitioning (or, for the nullable case, a different split strategy)
+    than this rule can supply; it never truncates or drops rows silently.
   - **No overlap rows after a join/filter** (fill quality's
     `since`-filtered join). `POPULATION_COLLAPSED`
     (`category="validation"`, not retryable) — an empty report is refused
@@ -325,8 +327,10 @@ a production-size snapshot; unit tests only passed because their fixtures
 were tiny. `_snapshot.read_table` now reads each requested partition (or,
 with no `partition_keys` given, every partition the snapshot has) through
 `_scan.read_table`, which already scans a partition as its calendar months
-and, on overflow, a month as its days, propagating `RESULT_LIMIT_EXCEEDED`
-only when a single day still exceeds the cap. This is a delegation, not a
+and, on overflow, a month as its days. A whole partition with a nullable
+observation-time column raises `RESULT_LIMIT_EXCEEDED` instead of splitting;
+otherwise the delegated scan propagates `RESULT_LIMIT_EXCEEDED` only when a
+single day still exceeds the cap. This is a delegation, not a
 merge of the two modules (issue #69 tracks that): `_snapshot.read_table`
 keeps its own signature (`partition_keys` only, no `key_filter`), its own
 pre-`_scan` guard for "no declared partition column, or no partition values

@@ -113,6 +113,14 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
     ``RESULT_LIMIT_EXCEEDED`` instead of silently dropping its null-valued
     rows. A day that still exceeds the cap propagates the error — the table
     needs finer partitions than this rule can supply.
+
+    An unfiltered, non-nullable partition whose manifest row count already
+    exceeds the cap skips the doomed full-scan attempt and splits directly,
+    since the full scan could not possibly succeed there. A predicate-filtered
+    or nullable-column partition still tries the full scan first: a predicate
+    can bring the true row count under the cap even when the manifest's raw
+    total is over it, and the nullable case is the null-preservation reason
+    above.
     """
     partition_filter = _partition_filter(contract, table_name, records)
     if partition_filter is None:
@@ -120,6 +128,13 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
             repository, snapshot_ref, table_name, contract, columns,
             _partition_interval(contract, table_name, records), tuple(key_filter))
     predicates = (*key_filter, partition_filter)
+    if (not key_filter
+            and not _observation_column_is_nullable(contract)
+            and sum(record.row_count for record in records)
+                    > contract.maximum_result_rows):
+        return _split_by_calendar(
+            repository, snapshot_ref, table_name, contract, columns,
+            _partition_interval(contract, table_name, records), predicates)
     try:
         return [_scan_interval(repository, snapshot_ref, table_name, contract,
                                columns, predicates, None)]
