@@ -332,8 +332,9 @@ a submission source" rule Part 4 already established for
   job-bound inputs (`score.json` from the paired `"score"` job;
   `records.json`/`refusals.json` from the paired `native_score_batch` job
   — see "Inputs" below for exactly how `_native_parity_identity` finds
-  both), builds `legacy_rows`/`native_rows`/`native_refusals`, and calls
-  the SAME `compare_native_vs_legacy` (unchanged) and the new
+  both), builds `legacy_rows`/`native_rows`/`native_refusals`, and branches
+  on whether `native_rows` is empty (below, `_empty_native_report`) before
+  calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
   This is the real (only) production caller `tools/native_parity_run.py`
   was originally designed to be. **That script is dropped from this redo
@@ -343,6 +344,40 @@ a submission source" rule Part 4 already established for
   parallel manual path alongside the job. There is exactly one way a real
   `native_parity_report.json` gets produced in this codebase once Phase 2
   lands, not two.
+- **`native_parity_report._empty_native_report(legacy_rows, dimensions,
+  tolerance_policy) -> dict`** (new, private) — closes a real gap
+  `compare_native_vs_legacy`'s own `_refuse_empty_inputs` would otherwise
+  cause (CodeRabbit round 3, real finding): a night where `native_score_batch`
+  ran and EVERY row refused (plausible, even likely, while native coverage
+  is still partial — every row hits `UNSUPPORTED_STRATEGY` or similar)
+  leaves `native_rows` genuinely empty while `native_refusals` is fully
+  populated. Calling `compare_native_vs_legacy` in that state would hit its
+  UNCHANGED `_refuse_empty_inputs` check (`not native_rows` →
+  `VALIDATION_FAILED`) and fail the WHOLE job attempt — even though "every
+  legacy row's native counterpart was explicitly refused" is exactly the
+  reportable outcome `native_refused` (below) exists to carry, not a
+  missing-input failure. `run_native_parity_worker` therefore checks
+  `native_rows`/`native_refusals` BEFORE calling `compare_native_vs_legacy`
+  at all: if `native_rows` is empty AND `native_refusals` is non-empty
+  (every native row that existed was refused, not simply absent),
+  `_empty_native_report` builds the SAME dict shape
+  `compare_native_vs_legacy` would return for a would-be empty comparison
+  — `{"schema_version": SCHEMA_VERSION, "tolerance_policy_id":
+  tolerance_policy.policy_id, "compared": [], "only_legacy":
+  sorted(legacy_rows), "only_native": [], "mismatches": []}` — WITHOUT
+  calling `compare_native_vs_legacy` (there is no numeric comparison to
+  make: nothing was scored), and `apply_native_refusals` runs on it exactly
+  as it would on a real comparison's output, narrowing `only_legacy` by
+  `native_refused` the identical way. If `native_rows` AND `native_refusals`
+  are BOTH empty (native_score_batch produced nothing at all — a genuinely
+  missing native input, not "every row refused"), or if `legacy_rows` is
+  empty, `run_native_parity_worker` calls `compare_native_vs_legacy`
+  normally and lets its EXISTING `_refuse_empty_inputs` raise
+  `VALIDATION_FAILED` — the correct outcome for THAT case is unchanged.
+  `compare_native_vs_legacy` itself gains no new parameter and no new
+  branch for this: the decision of which path to take is
+  `run_native_parity_worker`'s own, so `run_shadow_nightly`'s test-only
+  path (which never has refusals to give it) is unaffected either way.
 - **`native_parity_report.apply_native_refusals(report, native_refusals) ->
   dict`** (new) — the mechanism for "missing or refused native rows are
   counted separately" (user decision, option (c)). `compare_native_vs_legacy`
@@ -350,7 +385,8 @@ a submission source" rule Part 4 already established for
   can refuse a row at all — so `run_shadow_nightly`'s own test-only path
   (which has no refusals to give it) sees no behavior change.
   `run_native_parity_worker` calls this AFTER `compare_native_vs_legacy`
-  returns: any key in the report's own `only_legacy` list that is ALSO a
+  or `_empty_native_report` (above) returns: any key in the report's own
+  `only_legacy` list that is ALSO a
   key of `native_refusals` (population-key → refusal code, built from
   `records.json`'s paired `refusals.json`) moves from `only_legacy` into a
   NEW `"native_refused"` list (each entry `{"row_key": ..., "refusal_code":
@@ -858,6 +894,32 @@ material": `BoardRequest`'s own fields and
   `dict[BoardRequest, ...]`, `native_score_batch.py:332`'s own return
   type) already carries this exact identity per successful row; no new
   identity is derived, only re-formatted for JSON.
+  **The join character is validated out of every source field before
+  encoding, not merely tolerated after (CodeRabbit round 3, real
+  finding).** `event_date_iso` can never contain `"|"` (a fixed
+  `YYYY-MM-DD` form), but `ticker`/`strategy`/`session` are free-text-shaped
+  inputs this design does not control at the source. A NEW per-row check,
+  `native_score_batch._board_request_key(key: BoardRequest) -> str`, raises
+  a `NativeScoreBatchRowRefusal` (new code `INVALID_KEY_FIELD`, the same
+  collected-never-raised per-row mechanism `UNSUPPORTED_STRATEGY` already
+  uses) the moment `"|"` appears in `key.ticker`, `key.strategy`, or
+  `key.session` — BEFORE that row is ever encoded into `records.json`'s or
+  `refusals.json`'s own keys, both of which route through this one
+  function. This makes the join a true bijection BY CONSTRUCTION (none of
+  the four source values can ever contain the separator, so encoding and
+  `_population_key_from_board_request_key`'s own decode are exact
+  inverses) rather than merely "safe because a malformed encoding would
+  also fail to re-parse as exactly 4 parts," which was this design's
+  original, weaker argument and is not enough on its own: two DISTINCT
+  malformed rows sharing an embedded `"|"` could still encode to the
+  IDENTICAL 5-or-more-part string and be silently indistinguishable to a
+  reader, even though each individually fails `_population_key_from_board_request_key`'s
+  own 4-part check. One row refusing this way is a normal, reportable
+  per-row outcome — same `records.json`/`refusals.json` shape as any other
+  refusal — never a batch-level `OpsError`. Phase 2's test plan adds a
+  case for each of `ticker`/`session` (the two genuinely free-text fields)
+  carrying an embedded `"|"`, asserting the row refuses `INVALID_KEY_FIELD`
+  and every OTHER row in the same batch still assembles normally.
 - **`records.json`.** `"records"` changes from a bare array (today) to a
   JSON object: `{canonical_key: to_document(record), ...}`. Built inside
   `run_native_score_batch_worker` by zipping `assembled.keys()` (the
@@ -883,12 +945,15 @@ material": `BoardRequest`'s own fields and
   is either in `assembled` with a complete pair, or in `refusals`, never
   both) is exactly what lets `apply_native_refusals` (above) trust the two
   files never claim the SAME key twice.
-- **What does NOT change.** `run_native_score_batch_worker`'s assembly,
-  the no-fit guard, and per-row refusal CODES are all unchanged by this
-  redo — only the two output files' own top-level shape. A caller that
-  reads `records.json`'s OLD array shape (none exists in production
-  today — see "Cutover PR-4 (redo)" above) would break; no such caller
-  exists to migrate.
+- **What does NOT change.** `run_native_score_batch_worker`'s assembly and
+  the no-fit guard are unchanged by this redo; every EXISTING per-row
+  refusal code (`UNSUPPORTED_STRATEGY` and the rest) keeps its exact prior
+  meaning — this redo adds exactly one NEW code, `INVALID_KEY_FIELD`
+  (above), for the one new failure mode the keyed schema itself introduces
+  (an embedded `"|"`), and changes the two output files' own top-level
+  shape. A caller that reads `records.json`'s OLD array shape (none exists
+  in production today — see "Cutover PR-4 (redo)" above) would break; no
+  such caller exists to migrate.
 
 **Cited, not solved here: `native_score_batch` does not submit at all under
 today's production default.** `#88`'s own R1 (above, "Per-event raw
@@ -2073,9 +2138,19 @@ hold, extended here rather than re-argued from scratch.
   `refusals.json` keys colliding on the same projected `population_key`
   (`_native_rows_and_refusals`, above), a `records.json`/`refusals.json`
   that fails to decode, or `compare_native_vs_legacy`'s own existing
-  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty
-  `legacy_rows`/`native_rows`/no shared key) each fail the job's OWN
-  attempt — never a partial or synthetic-empty report. This is a REAL
+  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty `legacy_rows`, OR
+  on BOTH `native_rows` and `native_refusals` empty together, OR no shared
+  key) each fail the job's OWN attempt — never a partial or
+  synthetic-empty report. **One case is explicitly NOT this refusal
+  (CodeRabbit round 3, real finding):** `native_rows` empty while
+  `native_refusals` is non-empty — every native row `native_score_batch`
+  attempted was refused, not simply absent — is a legitimate reportable
+  outcome, not a missing-input failure. `run_native_parity_worker` checks
+  for this case BEFORE calling `compare_native_vs_legacy` and routes it
+  through `_empty_native_report` (above) instead, so a fully-refused batch
+  still produces a `native_parity_report.json` (with every legacy row
+  falling out of `only_legacy` into `native_refused` via
+  `apply_native_refusals`) rather than failing the attempt. This is a REAL
   join-format risk stated explicitly, not a defensive-only note:
   `population_key` and `_population_key_from_board_request_key` must
   format `event_date` identically (e.g. both an ISO date string, never one
