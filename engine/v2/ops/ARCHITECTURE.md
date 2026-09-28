@@ -474,22 +474,48 @@ this doc's own Diagrams section already names (see below).
 `submit_native_score_batch_shadow_if_ready` gathers three things before it
 ever builds a `JobSpec`:
 
-- **The release binding (`#59`/PR-1).** Two cheap, uncached calls, both run
-  before anything expensive: `engine.v2.models.deployment.production_release_root()`
-  (`deployment.py:142`) for the configured path, and
-  `engine.v2.scoring.release_bindings.resolve_production_release_binding()`
-  (`release_bindings.py:195`) to verify that path actually has something
-  `DEPLOYED` and hash-verified — the sidecar keeps only the path string,
-  `str(production_release_root())`, for `parameters["release_root"]`, and
-  discards the `ScoringReleaseBinding` object `resolve_production_release_binding()`
-  returns (it carries no root path of its own; only resolved catalog
-  state). `run_native_score_batch_worker` (`native_score_batch.py:430`)
-  never receives that object either — it independently re-resolves via
-  `resolve_release_binding(parameters["release_root"])`
-  (`release_bindings.py:148`, called at `native_score_batch.py:447`),
-  matching `ScoringReleaseBinding`'s own documented contract that a second
-  `resolve_release_binding` call always re-verifies fresh, never reuses a
-  cached instance across a process boundary.
+- **The release binding (`#59`/PR-1) — a cheap identity gate in front of an
+  expensive verification, not two cheap calls.** An earlier draft of this
+  bullet called `resolve_production_release_binding()` cheap and ran it
+  unconditionally on every tick; that was wrong (Opus gate finding, this
+  round) — it hash-verifies every model file and loads every payoff,
+  recalibration, and analog artifact for the resolved release, which is
+  exactly the kind of per-tick cost `computed_moves_refresh`'s own memo
+  pattern exists to avoid paying redundantly. This design instead runs
+  three calls, gated in two stages:
+
+  1. `engine.v2.models.deployment.production_release_root()`
+     (`deployment.py:142`) — cheap, one `os.environ` read, fresh every
+     tick, never cached.
+  2. `engine.v2.models.deployment.current_pointer(root)`
+     (`deployment.py:526`) — also cheap: one file-existence check plus one
+     small JSON decode of the pointer file (`_pointer_path`, `PointerState`
+     — `release_id`, `previous_release_id`), never a hash-verify or an
+     artifact load. Returns `None` if nothing has ever been promoted at
+     that root. This call runs on EVERY tick, unconditionally, and is what
+     replaces the earlier draft's unconditional expensive call.
+  3. `engine.v2.scoring.release_bindings.resolve_production_release_binding()`
+     (`release_bindings.py:195`) — the expensive, hash-verifying call —
+     runs ONLY when step 2's `release_id` differs from a one-slot,
+     root-keyed memo of the last `release_id` this sidecar itself already
+     fully verified (success OR failure; a release that fails hash
+     verification is memoized too, so a persistently-broken release isn't
+     re-hashed every tick either — only a CHANGED `release_id` forces a
+     fresh check, on the very next tick after the change, matching R2's
+     existing "promoted mid-session, next tick" guarantee below). On
+     success the sidecar keeps only the path string,
+     `str(production_release_root())`, for `parameters["release_root"]`,
+     and discards the `ScoringReleaseBinding` object itself (it carries no
+     root path of its own; only resolved catalog state) — this memo is
+     purely an internal cost-control detail of the sidecar's OWN gate, not
+     a change to `ScoringReleaseBinding`'s contract. `run_native_score_batch_worker`
+     (`native_score_batch.py:430`) never receives that object either — it
+     independently re-resolves via `resolve_release_binding(parameters["release_root"])`
+     (`release_bindings.py:148`, called at `native_score_batch.py:447`),
+     matching `ScoringReleaseBinding`'s own documented contract that a
+     second `resolve_release_binding` call always re-verifies fresh, never
+     reuses a cached instance across a process boundary — the worker's own
+     verification is intentionally NOT covered by the sidecar's memo.
 
   `production_release_root()` reads the `MODEL_RELEASE_ROOT` environment
   variable directly, fresh on every call (`deployment.py:85`, `:161`) —
@@ -498,9 +524,14 @@ ever builds a `JobSpec`:
   `Service.tick` runs in) must have `MODEL_RELEASE_ROOT` set in ITS OWN
   process environment before it starts; this design adds no second way to
   configure it. Left unset or blank, `production_release_root()` itself
-  raises `MissingReleaseRoot` (`deployment.py:110`) — the sidecar's own
-  call to it sees this directly. `resolve_production_release_binding()`
-  catches that SAME exception from its own internal call to
+  raises `MissingReleaseRoot` (`deployment.py:110`) — both the sidecar's
+  step 1 and `current_pointer`'s own caller see this directly, before step
+  2 even runs. `current_pointer(root)` returning `None` (nothing ever
+  promoted at a configured root) is treated the same as the expensive
+  path's own `NoCurrentRelease` outcome, without needing to call the
+  expensive path at all — cutting straight to R1 below on the cheap check
+  alone. `resolve_production_release_binding()` (step 3, when it does run)
+  catches `MissingReleaseRoot` from its own internal call to
   `production_release_root()` and re-raises it as
   `ModelNotReady("release_root", ...)` (`release_bindings.py:206-208`); a
   root that IS configured but names nothing `DEPLOYED` is a different,
@@ -511,49 +542,82 @@ ever builds a `JobSpec`:
   release root") — a configured but empty release store, not a
   missing/blank env var.
 
-  All three (`MissingReleaseRoot`, `ModelNotReady`, `NoCurrentRelease`) are
-  R1 below, and — CodeRabbit round 3, real finding — all three are checked
-  BEFORE the identity memo/backoff below is ever touched, so a release
-  promoted mid-session is picked up on the very next tick, never locked out
-  by an attempt count exhausted earlier for an unrelated reason (see
-  "Failure semantics" below, R2, for the full account). Legacy scoring,
-  which never calls `production_release_root`/`resolve_release_binding` at
+  All three (`MissingReleaseRoot`, `ModelNotReady`, `NoCurrentRelease`,
+  whether reached via the cheap `current_pointer() is None` shortcut or via
+  a full step-3 verification) are R1 below, and — CodeRabbit round 3, real
+  finding — all three are checked BEFORE the SEPARATE build-attempt
+  memo/backoff below (the one guarding `board_requests`/raw-row-staging) is
+  ever touched, so a release promoted mid-session is picked up on the very
+  next tick, never locked out by an attempt count exhausted earlier for an
+  unrelated reason (see "Failure semantics" below, R2, for the full
+  account of BOTH memos). Legacy scoring, which never calls
+  `production_release_root`/`current_pointer`/`resolve_release_binding` at
   all, is completely unaffected either way.
-- **Per-event raw rows (`#48`/PR-2, `#67`).** The builder enumerates
+- **Per-event raw rows — a still-missing producer (cutover PR-6), not
+  something this design reuses.** The builder enumerates
   `native_board_universe.board_requests(as_of, horizon_days, tickers,
   events_table)` (`native_board_universe.py:198`) against the SAME pinned
   snapshot/session the succeeded `"score"` job `_native_score_batch_identity`
   itself found — recovered from that job's own recorded request, never a
   freshly-resolved head (unlike `computed_moves_refresh`, which deliberately
   re-resolves fresh — here genuine night-over-night parity with legacy's own
-  read snapshot is the point). For each `BoardRequest` it reads the same
-  staged `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows`
-  the legacy `"score"` action itself reads from that snapshot (the pinned v2
-  snapshot-read bridge UD-4 closed, `#68`), and packages them as one
-  `native_score_batch.NightlyEventInputs` document per row
-  (`native_score_batch.py:52-68`) — the SAME already-staged-rows shape
-  `assemble_nightly_source_bundle` requires (`nightly_source_bundle.py:479-508`).
-  This raw-row enumeration/staging step is exactly the piece this doc's own
-  PR-3 section names as still missing ("a later cutover PR (PR-4/PR-6)...
-  enumerates `BoardRequest`s, stages their per-event inputs"): PR-7a is that
-  later PR.
-  This enumeration/staging step runs synchronously inside `Service.tick()`,
-  exactly where `computed_moves_refresh`'s own `target_tickers_from_snapshot`
-  scan already runs (`_build_native_computed_moves_plan`, `nightly.py:614`)
-  — the same tick-blocking trade-off that precedent already accepts, not a
-  new one (CodeRabbit round 1: flagged as a real risk if left unbounded).
-  Two bounds keep it from being worse: (1) the R2 memo below runs this
-  build AT MOST ONCE per newly-selected `(as_of, scope_hash)` identity,
-  never every ~1s tick; (2) its I/O is bounded by the SAME committed rows
-  the legacy `"score"` job it reads from ALREADY read this session — never
-  a fresh scan of history or of the whole universe — so one native-batch
-  build adds, at most, one more read of a row set `"score"` already paid
-  for once. If a later PR's implementation measures this as not bounded in
-  practice, it must move the build off `tick()`'s synchronous path (e.g., a
-  two-tick handoff: one tick marks a pending build, an out-of-process step
-  performs it, a later tick submits once its output is ready) before it
-  ships — this design accepts the one-tick synchronous build only because
-  of bound (2), not because blocking `tick()` is free.
+  read snapshot is the point). For each `BoardRequest` it must then produce
+  the staged `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/
+  `quote_rows` a `NightlyEventInputs` document needs
+  (`native_score_batch.py:52-68`) — and **no production code does this
+  today**. An earlier draft of this bullet claimed the builder "reads the
+  same staged... rows the legacy `"score"` action itself reads from that
+  snapshot" and cited `#68` as "the pinned v2 snapshot-read bridge UD-4
+  closed." Both claims are false (Opus gate finding, this round, verified
+  against `56087a8`'s own diff): `#68` ("research: close UD-4 — pinned v2
+  snapshot reads") is entirely about `engine/v2/research/` tooling
+  (fill_quality, polygon_fills, signal_screen, replay, build_trades,
+  reconcile_trades), not scoring inputs, and does not touch this path; and
+  legacy `"score"`, in its default `"legacy"` input mode, does not read or
+  produce any of these five row shapes at all — it loads features through
+  `FeatureContext.load`/`score_calendar` (`legacy_adapter.py:547-601`) and
+  pins no snapshot in the process. There is no existing legacy read this
+  design can piggy-back on.
+
+  Building this row producer — staging `calendar_row`/`panel_row`/
+  `panel_anchor`/`tier4_row`/`quote_rows` per `BoardRequest` from the
+  pinned snapshot, in the shape `NightlyEventInputs` and
+  `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479-508`)
+  both require — is a genuine, still-missing prerequisite. This doc's own
+  PR-3 section already names it as such ("a later cutover PR (PR-4/PR-6)...
+  enumerates `BoardRequest`s, stages their per-event inputs"); this doc's
+  own PR-7a introduction (above) likewise lists it under "cutover PR-6,"
+  left implicit. PR-7a's submission-side design assumes that producer
+  exists and packages its output as one `native_score_batch.NightlyEventInputs`
+  document per row, but building the producer itself is explicitly OUT OF
+  SCOPE for this design and must land first, as its own PR with its own
+  review — its failure modes (a symbol with no legacy-comparable row shape,
+  a stale or partial snapshot read, the cost of producing rows for a ticker
+  universe legacy never scores this way) are a separate design question, not
+  a tick-loop sidecar concern this bullet can settle.
+
+  This enumeration/staging step, once its producer exists, is expected to
+  run synchronously inside `Service.tick()`, exactly where
+  `computed_moves_refresh`'s own `target_tickers_from_snapshot` scan already
+  runs (`_build_native_computed_moves_plan`, `nightly.py:614`) — the same
+  tick-blocking trade-off that precedent already accepts, not a new one
+  (CodeRabbit round 1: flagged as a real risk if left unbounded). One bound
+  this design DOES commit to: the build-attempt memo (Failure semantics,
+  R2 below) runs this build AT MOST ONCE per newly-selected `(as_of,
+  scope_hash)` identity, never every ~1s tick. This design does NOT,
+  however, additionally claim the resulting I/O is bounded by rows legacy
+  `"score"` already read this session — it is not, for the reason above:
+  legacy `"score"` reads through a different path and produces none of
+  these five row shapes, so this build is a genuinely NEW read against the
+  snapshot store, not a reuse of one `"score"` already paid for (the
+  earlier draft's tick-cost bound made exactly this wrong assumption). The
+  still-missing producer's own PR must therefore measure and state its own
+  per-tick cost against the actual snapshot store, not assume it inherits
+  `"score"`'s existing budget; if that PR's implementation measures the
+  cost as not bounded in practice, it must move the build off `tick()`'s
+  synchronous path (e.g., a two-tick handoff: one tick marks a pending
+  build, an out-of-process step performs it, a later tick submits once its
+  output is ready) before it ships.
 - **`SourceBundle` (`#48`/PR-2, `#67`) is never built at submission time.**
   `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479`) and
   `source_inputs.build_native_score_inputs` (`source_inputs.py:1034`) both
@@ -911,6 +975,12 @@ addressed as `job_<id>#score` via `_job_output`, `nightly.py:180-188`).
   'nightly:<as_of>:%:native_score_batch'`, then the latest succeeded
   `attempts` row for it (`input_bindings.py:43-45`'s own query is the same
   shape).
+  (Nit, CodeRabbit: `LIKE` treats a bare `_` as a single-character wildcard,
+  and `<as_of>` is an ISO date with none, so this specific pattern is safe
+  today — but the SAME query shape used with a value that could ever
+  contain `_` or `%` should escape them, e.g. `LIKE ... ESCAPE '\'` with
+  `_`/`%` backslash-escaped in the literal, matching whatever escaping
+  convention `input_bindings.py:43-45`'s own query already uses, if any.)
 - **Row keys.** Each successful row's own `BoardRequest` (ticker, strategy,
   ISO `event_date`, `session`) is exactly what `assemble_score_batch_inputs`
   already keys its `dict[BoardRequest, tuple[ScoreRequest,
@@ -924,24 +994,26 @@ addressed as `job_<id>#score` via `_job_output`, `nightly.py:180-188`).
   round 1, real finding — a prior draft of this design recommended exactly
   that positional zip; it is wrong and is corrected here).
 
-  **Left for the parity job's own PR to implement, but specified here
-  precisely enough to build against without a second design pass**:
-  `run_native_score_batch_worker` changes `records.json`'s `records` field
-  from a bare array to a JSON object keyed by a canonical string form of
-  each row's `BoardRequest` — `f"{ticker}|{strategy}|{event_date.isoformat()}|{session}"`,
-  the SAME four fields, in the SAME order, `NightlyEventInputs.key`/
-  `NativeScoreBatchRowRefusal.as_document()`'s own `"key"` dict already
-  carries (`native_score_batch.py:56`, `:84-89`), just flattened into one
-  string because a JSON object's keys must be strings, never nested. (This
-  is a change to `native_score_batch.py`'s own output contract,
-  `native_score_batch_records.v1.0` — a new schema version — and to
-  `refusals.json` too, for the same key, so both files use one consistent
-  join key.) The parity job then reads `records.json` as `{board_request_key:
-  ScoreRecord document}` directly — no positional logic, no separate
-  `events.json` read needed to recover the key — and joins it against
-  whatever key legacy's own rows use by projecting THAT key down to the
-  same four fields (ticker, strategy, event_date, session), which every
-  legacy board row already carries under those or equivalent names.
+  **Left entirely to the `native_parity` job's own re-plan — not designed
+  here.** An earlier revision of this bullet prescribed a specific fix (a
+  `records.json` schema change to a canonical-string-keyed object) as
+  something built "precisely enough to build against without a second
+  design pass." That was wrong for this PR: acceptance criterion 4 of this
+  same design states the row-key/join gap is "not designed here," and
+  choosing `records.json`'s own future output schema is a change to
+  `native_score_batch.py`'s output contract — code, and a second component's
+  contract at that — which belongs to whichever PR builds `native_parity`,
+  reviewed on its own terms (a schema version bump, `refusals.json`
+  consistency, and how legacy's own row identity gets projected down to
+  match are all real decisions a single bullet here cannot make well).
+  What IS in scope for PR-7a, and stated above, is the hazard itself:
+  refused rows break positional pairing, so whatever `native_parity` does
+  must key on row identity, never array position. This bullet does not
+  choose that key's field set, string form, schema version, or how it
+  reaches `refusals.json`; the parity PR designs all of that against
+  `BoardRequest`'s existing fields and `NightlyEventInputs.key`/
+  `NativeScoreBatchRowRefusal.as_document()`'s existing `"key"` dict
+  (`native_score_batch.py:56`, `:84-89`) as its starting material.
 - **Namespace/authority.** Every one of these jobs is submitted under a
   `NamespacePolicy` scoped to `{"shadow"}` only, mirroring
   `_reconcile_computed_moves_refresh`'s own inline policy
@@ -1785,35 +1857,51 @@ function is never part of.
 
 - **R1 missing input.** No succeeded legacy `"score"` job for any session
   yet (`_native_score_batch_identity` returns `None`), no configured
-  production release (`resolve_production_release_binding()` raising
-  `ModelNotReady("release_root", ...)` for a missing/blank
-  `MODEL_RELEASE_ROOT`, or `NoCurrentRelease` for a configured root with
-  nothing `DEPLOYED`), or `board_requests` returning empty for that
-  session's pinned snapshot — each case returns without submitting
-  anything; there is no partial or synthetic-empty job.
-- **R2 cache.** Once a job exists under today's session's idempotency key,
-  in any state, it is never rebuilt or resubmitted — the existence check
-  runs before any raw row is read or `events.json` is built. **A
-  release-unavailable outcome (`ModelNotReady`/`NoCurrentRelease`) is
-  checked BEFORE the identity memo/backoff below is touched at all, and
-  NEVER counts as one of its spent attempts** (CodeRabbit round 3, real
-  finding — a prior draft of this design inherited `computed_moves_refresh`'s
-  memo wholesale, which would have let release-unavailable outcomes exhaust
-  the same backoff schedule as a genuine build failure, silently locking an
-  unchanged `(as_of, scope_hash)` identity out for the rest of the session
-  even after a later promotion). This ordering is deliberate: release
-  resolution is cheap — one `os.environ` read plus a hash-verify, no
-  pandas, no `board_requests` enumeration — cheaper even than
-  `_native_score_batch_identity`'s own two `SELECT`s, so checking it every
-  tick, unconditionally, costs nothing the memo below exists to protect
-  against. The memo/backoff (mirroring `computed_moves_refresh`'s own,
-  `_COMPUTED_MOVES_MAX_ATTEMPTS`/`_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped)
-  engages ONLY once release resolution has already succeeded and the build
-  reaches the expensive `board_requests`/raw-row-staging step — the actual
-  work that schedule exists to bound. A release promoted mid-session is
-  therefore picked up on the VERY NEXT tick, unconditionally, never blocked
-  by an attempt count exhausted earlier in the session for an unrelated
-  reason.
+  production release (`current_pointer(root)` returning `None`, or the
+  expensive verification raising `ModelNotReady("release_root", ...)` for a
+  missing/blank `MODEL_RELEASE_ROOT`, or `NoCurrentRelease` for a
+  configured root with nothing `DEPLOYED`), or `board_requests` returning
+  empty for that session's pinned snapshot — each case returns without
+  submitting anything; there is no partial or synthetic-empty job.
+- **R2 cache — two separate memos, not one.** Once a job exists under
+  today's session's idempotency key, in any state, it is never rebuilt or
+  resubmitted — the existence check runs before any raw row is read or
+  `events.json` is built. Below that, this design keeps two independent
+  memos that must not be conflated:
+
+  1. **The release-identity memo (Inputs, above).** A one-slot,
+     root-keyed memo of the last `release_id` `current_pointer(root)`
+     reported and this sidecar fully verified (success or failure). The
+     expensive `resolve_production_release_binding()`/`resolve_release_binding()`
+     call runs ONLY when the cheap `current_pointer(root)` read (one file
+     stat, one small JSON decode — genuinely cheap, unlike the earlier
+     draft's claim that the hash-verifying call itself was cheap) reports a
+     DIFFERENT `release_id` than this memo holds. This memo is checked, and
+     can update, on EVERY tick regardless of the build-attempt memo below —
+     a release change is never delayed by the other memo's backoff.
+  2. **The build-attempt memo/backoff** (mirroring `computed_moves_refresh`'s
+     own, `_COMPUTED_MOVES_MAX_ATTEMPTS`/`_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped),
+     guarding the expensive `board_requests`/raw-row-staging step once a
+     usable release IS in hand. **A release-unavailable outcome
+     (`current_pointer(root) is None`, `ModelNotReady`, or
+     `NoCurrentRelease`) is checked BEFORE this second memo is touched at
+     all, and NEVER counts as one of its spent attempts** (CodeRabbit round
+     3, real finding — a prior draft of this design inherited
+     `computed_moves_refresh`'s memo wholesale, which would have let
+     release-unavailable outcomes exhaust the same backoff schedule as a
+     genuine build failure, silently locking an unchanged `(as_of,
+     scope_hash)` identity out for the rest of the session even after a
+     later promotion).
+
+  Net effect: the release-identity memo (1) makes the per-tick cost of
+  CHECKING for a release change genuinely cheap (a stat and a small JSON
+  read, not a hash-verify), while the build-attempt memo (2) makes the cost
+  of the expensive raw-row-staging step bounded to at most once per
+  `(as_of, scope_hash)` identity. A release promoted mid-session is
+  therefore picked up on the VERY NEXT tick by memo (1) unconditionally,
+  and — because memo (1) sits strictly before memo (2) in this ordering —
+  never blocked by an attempt count memo (2) exhausted earlier in the
+  session for an unrelated reason.
 - **R3 retry.** This function retries nothing itself; the submitted job's
   own `RetryPolicy("bounded", 2, (5, 30))` (`stages.py:283`) covers worker
   attempts, and a session whose key already exists — succeeded OR failed —
