@@ -203,13 +203,19 @@ calls `run_shadow_nightly`, which "has no production caller [and] needs
 14 caller-supplied stage handlers nothing builds" — a manual script
 outside any schedule is not what "the REAL nightly" means. This doc
 describes the design Phase 2 of this redo will leave it, not a
-pre-existing fact: Phase 1 (this push) is documentation only, for
-`legacy_parity_rows` and the new `native_parity` job kind together, both
-gated on cutover PR-7a (`#88`) merging first — `native_parity`'s native-side
-input is the `native_score_batch` job's staged `records.json`/`refusals.json`
-output PR-7a's design places there, so this redo cannot be implemented
-before that one lands. Cutover PR-3 (`native_score_batch.py`, `#66`) is
-already merged, unlike when the original PR-4 was written. One piece is
+pre-existing fact: Phase 1 (cutover PR-4 redo slice 1, `#132`) has
+landed the pure functions this section documents — `legacy_parity_rows`,
+`native_parity_report._empty_native_report`, and
+`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` bumped
+`v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. The new
+`native_parity` job kind (its `dispatch` branch, and any submission path
+that enumerates `BoardRequest`s and stages this job) stays deferred,
+gated on cutover PR-7a (`#88`) merging first — `native_parity`'s
+native-side input is the `native_score_batch` job's staged
+`records.json`/`refusals.json` output PR-7a's design places there, so
+that wiring cannot be implemented before that one lands. Cutover PR-3
+(`native_score_batch.py`, `#66`) is already merged, unlike when the
+original PR-4 was written. One piece is
 untouched by this redo, real code already on `main`, independent of
 everything `#66`/`#88` supply: `native_parity_report.py`'s tolerance
 policy is already pluggable — see "the tolerance policy is now pluggable"
@@ -375,10 +381,12 @@ a submission source" rule Part 4 already established for
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
   This is the real (only) production caller `tools/native_parity_run.py`
   was originally designed to be. **That script is dropped from this redo
-  entirely — no code for it was ever written** (confirmed against `main`:
-  neither the file nor `legacy_parity_rows`/`row_explanations` exist
-  today, so nothing needs migrating away from it), never built as a
-  parallel manual path alongside the job. There is exactly one way a real
+  entirely — no code for it was ever written** (`tools/native_parity_run.py`
+  and `row_explanations` never existed and still don't; `legacy_parity_rows`
+  now exists on `main` as of Phase 1, `#132`, but only as the pure function
+  this section documents — nothing calls it in production yet, so nothing
+  needs migrating away from the dropped script), never built as a parallel
+  manual path alongside the job. There is exactly one way a real
   `native_parity_report.json` gets produced in this codebase once Phase 2
   lands, not two.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
