@@ -103,7 +103,7 @@ def _install_fake_fetcher(monkeypatch, row):
 def _submit_refresh(conn, store, clock, tmp_path, head):
     parent = Repository(conn).resolve(head["snapshot_id"])
     unit = RefreshUnit(request_id=REQUEST_ID, table_name="daily_market",
-                       partition_key="2026", expected_keys=("AAA",))
+                       partition_key="2026-01-02", expected_keys=("AAA",))
     configure_account(conn, ACCOUNT, "generation-1", remaining=5, live_reserve=1)
     refresh_plan = plan_refresh(
         parent, (unit,), cached_outcomes={}, provider_account=ACCOUNT,
