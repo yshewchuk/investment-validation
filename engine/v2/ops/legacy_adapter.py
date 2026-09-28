@@ -6,6 +6,8 @@ import json
 import os
 import shutil
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from engine.data.finality import _coverage_frame as _legacy_coverage_frame
@@ -119,11 +121,19 @@ def _digest(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str]) -> dict:
-    """Return a complete, immutable read-set manifest and reject indirection."""
+def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str], *,
+                   keepalive: Callable[[], None] | None = None) -> dict:
+    """Return a complete, immutable read-set manifest and reject indirection.
+
+    ``keepalive`` (issue #106): an optional zero-arg renewal callable invoked
+    once per manifest iteration, so a long hash pass cannot starve other live
+    attempts' leases. Omitting it is exactly the old behavior.
+    """
     base = Path(root).resolve()
     result = {}
     for relative in paths:
+        if keepalive is not None:
+            keepalive()
         safe_relative_path(relative)
         source = base / relative
         if source.is_symlink() or not source.is_file():
@@ -135,17 +145,24 @@ def manifest_files(root: Path | str, paths: tuple[str, ...] | list[str]) -> dict
 
 
 def copy_read_set(source_root: Path | str, private_root: Path | str,
-                  paths: tuple[str, ...] | list[str]) -> dict:
-    """Copy declared inputs privately, preserving bytes without links."""
+                  paths: tuple[str, ...] | list[str], *,
+                  keepalive: Callable[[], None] | None = None) -> dict:
+    """Copy declared inputs privately, preserving bytes without links.
+
+    ``keepalive`` (issue #106): forwarded into the manifest hash pass and
+    called once per copy-loop iteration; ``None`` keeps today's behavior.
+    """
     source_raw = Path(source_root)
     target_raw = Path(private_root)
     if source_raw.is_symlink() or target_raw.is_symlink():
         raise fail("INTEGRITY_FAILED", "private root may not be a symlink")
     source = source_raw.resolve()
     target = target_raw.resolve()
-    manifest = manifest_files(source, paths)
+    manifest = manifest_files(source, paths, keepalive=keepalive)
     target.mkdir(parents=True, exist_ok=True)
     for relative, expected in manifest.items():
+        if keepalive is not None:
+            keepalive()
         current = source
         for component in Path(relative).parts[:-1]:
             current = current / component
@@ -1153,17 +1170,39 @@ def run_legacy_rebuild(candidate_root, repo_root, *, tables=None, sample=None, t
     return {"schema_version": "legacy_rebuild_report.v1.0", "returncode": result.returncode}
 
 
-def run_engineering_gate(repo_root, *, timeout=600):
+def run_engineering_gate(repo_root, *, timeout=600, keepalive=None, poll_interval=5.0):
     """Run the Phase 1 structural/engineering gate over ``repo_root``.
 
     ``checks/*`` is verification tooling, never importable from
     ``engine/v2/**`` — this is a subprocess boundary, not a Python import.
+    ``keepalive`` (issue #106) is called between poll intervals so a gate run
+    longer than ``poll_interval`` cannot starve sibling leases; a genuine
+    timeout still raises ``subprocess.TimeoutExpired``, exactly as the old
+    blocking ``subprocess.run`` did.
     """
     import subprocess
 
     script = Path(repo_root) / "checks" / "rearchitecture_phase1_gate.py"
-    result = subprocess.run([sys.executable, str(script)], cwd=str(repo_root),
-                            capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.Popen([sys.executable, str(script)], cwd=str(repo_root),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + timeout
+    stdout = stderr = None
+    try:
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=poll_interval)
+                break
+            except subprocess.TimeoutExpired:
+                if keepalive is not None:
+                    keepalive()
+                if time.monotonic() >= deadline:
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                    raise subprocess.TimeoutExpired(proc.args, timeout, output=stdout,
+                                                    stderr=stderr)
+    except subprocess.TimeoutExpired:
+        raise
+    result = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     return _json_stdout(result, "engineering gate produced no JSON")
 
 

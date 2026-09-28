@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
 
 from engine.v2.contracts import EngineeringNight, JobSpec, OperationsStatus
@@ -175,8 +176,11 @@ def ledger_export_effect(conn, store, claim, ops_root, repo_root, *, clock,
 # --------------------------------------------------------------------------
 
 
-def _run_engineering_gate(repo_root):
-    raw = _run_engineering_gate_subprocess(repo_root)
+def _run_engineering_gate(repo_root, keepalive=None):
+    # The seam stub in tests takes only ``repo_root``; pass the issue #106
+    # ``keepalive`` through only when one was actually given.
+    raw = (_run_engineering_gate_subprocess(repo_root, keepalive=keepalive)
+           if keepalive is not None else _run_engineering_gate_subprocess(repo_root))
     # Coverage is a commit-time ratchet, not a nightly check (decision #3):
     # excluded from both the recorded rows and this stage's own "ok".
     rows = {**raw.get("structural", {}),
@@ -186,7 +190,8 @@ def _run_engineering_gate(repo_root):
             "code_hash": raw.get("code_hash")}
 
 
-def engineering_gate_effect(conn, store, claim, repo_root, *, clock):
+def engineering_gate_effect(conn, store, claim, repo_root, *, clock,
+                            keepalive: Callable[[], None] | None = None):
     scope = effect_scope(claim)
     session = claim.spec.parameters["session"]
     # guide §5.5 item 1: the real 2026-09-14 failure -- an earlier generation
@@ -195,7 +200,7 @@ def engineering_gate_effect(conn, store, claim, repo_root, *, clock):
     # code_hash, collided with it. Scoping the receipt per generation is what
     # fixes that; a genuine retry of the SAME generation stays idempotent.
     generation = _generation_ref(claim)
-    document = _run_engineering_gate(repo_root)
+    document = _run_engineering_gate(repo_root, keepalive=keepalive)
     ref = store.publish_bytes(json.dumps(document, sort_keys=True, default=str).encode(),
                               schema_ref="engineering_gate.v1.0")
 

@@ -1,6 +1,12 @@
-"""Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28)."""
+"""Shadow compatibility and experiment lifecycle checks (O16-O18/O27-O28).
+
+Issue #106 additions at the bottom: the optional ``keepalive`` seams of
+``manifest_files``/``copy_read_set``/``run_engineering_gate`` renew other live
+attempts' leases mid-stretch, and must not change any returned result.
+"""
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +29,7 @@ from engine.v2.ops.legacy_adapter import (
     legacy_action,
     manifest_files,
     overlay_read_set,
+    run_engineering_gate,
 )
 from engine.v2.ops.nightly import (
     GRAPH,
@@ -318,3 +325,81 @@ def test_o16_whole_legacy_nightly_is_not_an_adapter_entry(tmp_path):
             os.environ.pop("INVESTING_PLAN_ROOT", None)
         else:
             os.environ["INVESTING_PLAN_ROOT"] = original_root_env
+
+
+# --------------------------------------------------------------------------
+# issue #106: the optional ``keepalive`` seams (pre-fix these calls did not
+# exist at all, so the keyword-argument tests below fail against the old code)
+# --------------------------------------------------------------------------
+
+
+def test_manifest_files_and_copy_read_set_keepalive_hooks(tmp_path):
+    """``keepalive`` runs once per iteration and changes nothing else: the
+    manifest dict and the copied bytes are byte-for-byte the no-keepalive
+    baseline (whose own non-regression guard is the unhooked
+    ``test_private_copy_rejects_indirection_and_is_read_only`` above)."""
+    source = tmp_path / "source"
+    (source / "nested").mkdir(parents=True)
+    (source / "a.txt").write_bytes(b"alpha")
+    (source / "nested" / "b.txt").write_bytes(b"bravo")
+    paths = ("a.txt", "nested/b.txt")
+
+    manifest_calls = []
+    baseline_manifest = manifest_files(source, paths)
+    hooked_manifest = manifest_files(source, paths, keepalive=lambda: manifest_calls.append(1))
+    assert hooked_manifest == baseline_manifest
+    assert len(manifest_calls) == len(paths)  # once per path, before processing it
+
+    copy_calls = []
+    baseline_copy = copy_read_set(source, tmp_path / "private", paths)
+    hooked_copy = copy_read_set(source, tmp_path / "private2", paths,
+                                keepalive=lambda: copy_calls.append(1))
+    assert hooked_copy == baseline_copy
+    # forwarded into the internal manifest_files pass AND once per copy
+    # iteration: 2 * len(paths) in total.
+    assert len(copy_calls) == 2 * len(paths)
+    for relative in paths:
+        assert (tmp_path / "private2" / relative).read_bytes() == (source / relative).read_bytes()
+
+
+def _gate_repo(tmp_path, script_source):
+    repo = tmp_path / "gate-repo"
+    (repo / "checks").mkdir(parents=True)
+    (repo / "checks" / "rearchitecture_phase1_gate.py").write_text(script_source)
+    return repo
+
+
+def test_run_engineering_gate_result_is_keepalive_independent(tmp_path):
+    """The fast-gate contract is unchanged: same JSON out, with or without a
+    ``keepalive`` -- and the no-keepalive call is the pre-#106 baseline."""
+    source = "import json\nprint(json.dumps({'ok': True, 'rows': {}}))\n"
+    repo = _gate_repo(tmp_path, source)
+    expected = {"ok": True, "rows": {}}
+    assert run_engineering_gate(repo) == expected
+    calls = []
+    assert run_engineering_gate(repo, keepalive=lambda: calls.append(1)) == expected
+
+
+def test_run_engineering_gate_calls_keepalive_while_the_gate_runs(tmp_path):
+    """A gate longer than one ``poll_interval`` renews instead of blocking:
+    the old single blocking ``subprocess.run(timeout=600)`` never called
+    anything until the subprocess exited."""
+    repo = _gate_repo(tmp_path, "import json, time\ntime.sleep(1.5)\n"
+                                "print(json.dumps({'ok': True, 'marker': 'slow'}))\n")
+    calls = []
+    result = run_engineering_gate(repo, timeout=30, keepalive=lambda: calls.append(1),
+                                  poll_interval=0.05)
+    assert calls  # at least one renewal happened during the wait
+    assert result == {"ok": True, "marker": "slow"}  # and the result is still returned
+
+
+def test_run_engineering_gate_timeout_still_raises_timeout_expired(tmp_path):
+    """A genuine timeout keeps the exact exception type the old blocking
+    ``subprocess.run(timeout=...)`` raised (both it and ``Popen`` +
+    ``communicate(timeout=...)`` raise ``subprocess.TimeoutExpired``)."""
+    repo = _gate_repo(tmp_path, "import time\ntime.sleep(30)\n")
+    calls = []
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_engineering_gate(repo, timeout=0.4, keepalive=lambda: calls.append(1),
+                             poll_interval=0.05)
+    assert calls  # renewals happened during the wait before the kill
