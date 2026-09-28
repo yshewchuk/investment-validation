@@ -1761,7 +1761,7 @@ retry, transaction, partial write, idempotency).
   in-process deadline above is the primary mechanism and this is only the
   backstop for its own failure.
 
-### `nightly_trigger.py` (issue #104: a per-`as_of` input manifest, not one static file; years derived like legacy)
+### `nightly_trigger.py` (issue #104: a per-`as_of` input manifest, not one static file; years derived like legacy) — the 4c R1–R6 template
 
 - **R1, missing input.** `_qualification_path(root, QUALIFICATION_INPUT_MANIFEST)`
   used to point at exactly one file,
@@ -1778,15 +1778,13 @@ retry, transaction, partial write, idempotency).
   per-`as_of` path (`reports/phase6/nightly_trigger/<as_of>.input_manifest.json`)
   rather than the one shared name — a stale prior night's manifest is never
   read for a different night, because there is no shared name left to
-  collide on. The write itself is direct and non-atomic
-  (`capture_inputs.write_manifest` is a plain `Path.write_text`, no
-  tmp-file-plus-rename): an interrupted write can leave a partial manifest
-  at that path, and a later capture for the SAME `as_of` simply overwrites
-  whatever was there. This only runs when a
-  `universe` is actually declared (the population document resolves to at
-  least one ticker); with none,
+  collide on. This only runs when a `universe` is actually declared (the
+  population document resolves to at least one ticker); with none,
   `input_manifest` stays `None`, unchanged from before — a plan with no
-  tickers has nothing for `capture` to enumerate against.
+  tickers has nothing for `capture` to enumerate against. Separately,
+  `cli._read_input_manifest_ref` (unchanged by this PR) already refuses
+  `INPUT_CHANGED` at plan time if the path this PR hands it is missing or a
+  symlink, before publishing its bytes.
 - **R1 (defensive), a manifest for the wrong session.** `capture_inputs.capture(...,
   as_of=as_of, ...)`'s own `selected_session` field is derived from this
   same `as_of` (`str(scope.as_of.date())`), so an in-process capture can
@@ -1800,6 +1798,52 @@ retry, transaction, partial write, idempotency).
   proceeds with a manifest captured for a different session"), now
   impossible to reach silently even if the assumption above ever stops
   holding.
+- **R2, cache.** A new plan build always captures inputs again — there is no
+  check for an existing `<as_of>.input_manifest.json` to reuse. This is
+  deliberate, not a missed optimization: a fresh capture is what makes the
+  manifest actually reflect the CURRENT legacy store, which is the entire
+  point of this PR. What IS cached, downstream of this, is the plan itself:
+  once `cli._read_input_manifest_ref` has read the file and published its
+  bytes, the resulting plan document's `input_manifest_ref` points at that
+  immutable, content-addressed artifact — never back at the mutable
+  per-`as_of` file path.
+- **R3, retry.** If no `plan_ref` was ever saved for this `as_of` (or a
+  prior attempt only reached `"error"`/`"timed_out"` before a plan was
+  built), a later eligible attempt calls `_default_plan` again and captures
+  inputs fresh, same as the first attempt. Once a `plan_ref` IS saved,
+  `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
+  RESUME_STATUSES`) calls `_submit_plan` directly with that existing
+  `plan_ref` and never reaches `_default_plan`/`_capture_input_manifest`
+  again — a resumed retry submits and serves the SAME already-pinned plan,
+  it does not recapture or replan.
+- **R4, transaction.** The manifest file write (`write_manifest`, inside
+  `_capture_input_manifest`) happens before `cli._plan_command` opens any
+  catalog transaction, and is not itself part of one: it is a plain
+  filesystem write under `reports/`, unrelated to the operations catalog.
+  If `_plan_command` then fails for an unrelated reason (a validation
+  refusal, a resource problem) AFTER the manifest was already written, that
+  file is simply left on disk, referenced by no persisted plan — an orphan,
+  not a torn write; the NEXT attempt for the same `as_of` (per R2/R6)
+  overwrites it with a fresh capture regardless.
+- **R5, partial write.** `capture_inputs.write_manifest` is a plain
+  `Path.write_text`, not a tmp-file-plus-rename: a process killed mid-write
+  can leave a truncated, invalid-JSON file at the per-`as_of` path. Nothing
+  in this PR reads that file back for its own sake — `cli._read_input_manifest_ref`
+  reads it once, at the SAME plan-building call that just wrote it (there is
+  no separate later reader) — so a partial write here surfaces immediately,
+  as that same call's own JSON-parse or hash-check failure, not as a
+  silently wrong manifest picked up by some future attempt.
+- **R6, idempotency.** A second capture for the same `as_of` (e.g. a
+  same-day re-plan after a first attempt never reached `_plan_command`, or
+  an operator re-running `ops plan` by hand) overwrites the same per-`as_of`
+  path. That new capture can legitimately differ from the first (the legacy
+  store may have moved between the two calls) — this is not a bug, since
+  nothing downstream depends on repeated captures being byte-identical.
+  Critically, it also cannot retroactively change any EXISTING plan: a plan
+  already built pins its own `input_manifest_ref` to the immutable artifact
+  `cli._read_input_manifest_ref` published from whatever bytes existed at
+  THAT call's own read — overwriting the file afterward has no effect on
+  that already-persisted plan.
 - **Years, derived per `as_of`, not fixed.** `year_start=2024, year_end=2026`
   were a hardcoded pair everywhere `_default_plan` built a plan, silently
   excluding any scoring year outside that fixed window once the calendar
