@@ -430,17 +430,27 @@ def _calendar_from_dates(dates, *, extend_days: int) -> TradingCalendar:
     condition in this package does, so a CLI's ``except DataError`` at
     ``main()`` catches it and exits 2 with the code, instead of leaking an
     uncaught traceback.
+
+    Deduplicates BEFORE ever materializing a Python list: the real
+    ``daily_market`` panel this is read from carries one row per
+    (ticker, date), so ``dates`` can be millions of rows wide for a
+    calendar that only has a few thousand distinct days in it.
+    ``pd.to_datetime``/``dropna``/``normalize``/``unique`` are all
+    vectorized over ``dates`` as given (a ``pandas.Series`` in both real
+    callers); only the deduplicated result — the actual calendar size, not
+    the row count it was read from — is ever turned into a Python list
+    (inside :class:`TradingCalendar`'s own constructor).
     """
-    observed = pd.to_datetime(pd.Series(list(dates)), errors="coerce").dropna()
+    observed = pd.DatetimeIndex(pd.to_datetime(dates, errors="coerce")).dropna().normalize().unique()
     if observed.empty:
         raise errors.fail(
             "CALENDAR_UNAVAILABLE",
             "no dates to build a trading calendar from",
         )
-    last = pd.Timestamp(observed.max()).normalize()
+    last = pd.Timestamp(observed.max())
     future = projected_trading_days(last, last + pd.Timedelta(days=extend_days))
     return TradingCalendar(
-        list(observed) + list(future), observed_through=last
+        observed.append(pd.DatetimeIndex(future)), observed_through=last
     )
 
 

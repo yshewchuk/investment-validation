@@ -25,7 +25,7 @@ from engine.v2.contracts.data import DatasetManifest  # noqa: E402
 from engine.v2.data import catalog, manifests  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.research import _chains, _pricing, _replay_run, replay  # noqa: E402
+from engine.v2.research import _chains, _plan, _pricing, _replay_run, replay  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
     contract_for,
@@ -497,3 +497,38 @@ def test_trading_calendar_csv_fallback_is_not_reachable_from_the_package():
         and references_bare_trading_calendar(path.read_text())
     ]
     assert offenders == [], f"trading_calendar reachable from: {offenders}"
+
+
+def test_replay_derives_the_calendar_from_the_snapshot_when_none_is_given(tmp_path):
+    """``replay()`` itself derives a calendar from its own ``(repository,
+    snapshot_ref)`` when its caller leaves ``calendar`` unset -- the
+    guarantee ``_replay_run.run``/``_build_run.run`` already get by
+    resolving one explicitly ALSO holds for any other direct caller of
+    ``replay()``. The ``daily_market`` fixture spans exactly the same
+    window ``_calendar()`` does, so the two calendars agree on every date
+    this event set actually touches, and the two runs must match exactly.
+    (``check_dtype`` is off only for the resolution unit: the snapshot's
+    ``daily_market`` parquet column is ``timestamp[ns]`` while
+    ``pd.bdate_range`` carries ``datetime64[us]`` under pandas 3 — every
+    VALUE the runs produce is still compared for exact equality.)
+    """
+    conn, clock, store = catalog_and_store(tmp_path)
+    snap = _commit(conn, clock, store, chain_rows=_chain_rows(),
+                   event_rows=_event_rows(), receipt_id="r1")
+    repository = Repository(conn, store)
+
+    derived = replay.replay(repository, snap, "STR-THRU", _events())
+    explicit = replay.replay(repository, snap, "STR-THRU", _events(), calendar=_calendar())
+
+    pd.testing.assert_frame_equal(derived.trades, explicit.trades, check_dtype=False)
+    conn.close()
+
+
+def test_plan_events_refuses_with_no_calendar():
+    """``plan_events`` has no repository/snapshot of its own to derive a
+    calendar from, so a direct call with ``calendar=None`` is a typed
+    refusal, never the removed legacy-CSV fallback.
+    """
+    with pytest.raises(DataError) as err:
+        _plan.plan_events(_pricing.straddle_through(), _events())
+    assert err.value.code == "CALENDAR_UNAVAILABLE"
