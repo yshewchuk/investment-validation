@@ -4481,7 +4481,9 @@ instant and this job's write, a `new_release_id` that still carries forward
 the OLDER `prior_release_id`'s bindings would, if promoted, silently roll
 the model bindings back to the older set while still advancing the pools
 forward. `phase5_state_stage`'s worker re-checks `current_pointer`
-immediately before its first write (step 3 above) and refuses
+immediately before the catalog/manifest writes (step 3 above — step 1's
+object writes, content-addressed and harmless regardless, already
+happened by this point) and refuses
 `ConcurrentPromote(prior_release_id, actual_release_id)` rather than stage
 over a moved pointer — the reconcile then re-submits the SAME cycle's stage
 job under a NEW `prior_release_id` on its next tick, now a genuinely fresh
@@ -4625,19 +4627,38 @@ reuse it rather than inventing a second mechanism.
   `as_of` always produce the same `new_release_id` content (R3/R4 above);
   the job id itself is one dedup key per cycle, not a fresh one per retry.
 
-**A failure leaves the previous release deployed (the invariant this whole
-design exists to prove, not merely assert).** `models_promote` refuses
-`ReleaseNotStaged` for anything `phase5_state_stage` did not itself report
-`succeeded` for (existing behavior, unchanged); `phase5_state_stage` never
-touches `DEPLOYED` (R4/R5 above); and `submit_pool_nightly_promote_if_ready`
-never submits `models_promote` until the stage job's checkpoint says
-`succeeded`. So every one of: a `training` job failing, a light check
-failing, a `ConcurrentPromote` refusal, or the supervisor crashing at any
-point before a successful `models_promote` — leaves `DEPLOYED` exactly
-where it was before the cycle started. This is the SAME structural
-guarantee `models_promote`'s existing "refuses an unstaged release" already
-gives the manual operator workflow; this design adds no new promote-time
-logic, only new, gated ways to reach a staged candidate automatically.
+**A failure leaves the previous release deployed, for this design's own
+AUTOMATIC path (Opus gate finding: the original wording overstated this as
+a general `models_promote` guarantee).** `phase5_state_stage` never touches
+`DEPLOYED` (R4/R5 above), and `submit_pool_nightly_promote_if_ready` — the
+automatic sidecar this design adds — never submits `models_promote` until
+the stage job's checkpoint itself says `succeeded`. So along the automatic
+path, every one of: a `training` job failing, a light check failing, a
+`ConcurrentPromote` refusal, or the supervisor crashing at any point before
+a successful `models_promote` — leaves `DEPLOYED` exactly where it was
+before the cycle started; this design adds no new promote-time logic, only
+new, gated ways to reach a staged candidate automatically. **This is
+narrower than "`models_promote` refuses anything not reported
+`succeeded`," which is false:** `_swap_pointer`'s `ReleaseNotStaged` check
+(`deployment.py:621-623`) only tests that a manifest exists on disk under
+`release_id` — it has no notion of which job, if any, wrote it or whether
+that job's own checkpoint reported success. R5 above is explicit that a
+light-check failure (step 4d) leaves `new_release_id` FULLY staged, both
+manifests already durably written, exactly like a fully-succeeded stage —
+`_swap_pointer` cannot tell the two apart. So a manual, direct `ops submit
+models_promote --release-id <that failed release>` (or any other direct
+`deployment.promote` call) WOULD succeed in deploying a light-check-failed
+candidate; nothing in `_swap_pointer` refuses it. This is not a new gap
+this design introduces: `models_promote`/`deployment.promote` has never
+distinguished "staged by an operator by hand, verified nowhere" from
+"staged by a job that then failed a downstream check" for ANY existing
+writer into the release store, and this design adds no such distinction
+either — the SAME gap already exists today for any manually-staged
+release an operator promotes without independently re-checking it. Closing
+it (verifying a release before every promote, not only before this
+design's own automatic one) is a `deployment.py`-wide policy change, out
+of scope for a nightly-cadence design PR, the same reasoning "concurrent
+promote" above uses to scope `#137` out.
 
 **Calibration cadence — flagged for the user, not decided here (my own
 recommendation, not a settled decision).** `payoff_line`, `payoff_surface`,

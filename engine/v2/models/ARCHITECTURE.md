@@ -705,8 +705,13 @@ Opus gate finding, see §2/§4), so its refusal is `ReleaseLayoutError`
   own R5 already documents for the model side.
 - **R6, idempotency.** Same inputs always produce the same output body —
   this function IS idempotent (R3), because it never mints an id itself;
-  `new_release_id` is supplied by the caller, exactly one per nightly
-  cycle (keyed by `as_of`, see the ops doc).
+  `new_release_id` is supplied by the caller, a function of `(as_of,
+  prior_release_id)`, not of `as_of` alone: ordinarily one per nightly
+  cycle, but the ops doc's "recovery after a stale promote" has a retry
+  mint a FRESH `new_release_id` for the SAME `as_of` under a NEW
+  `prior_release_id` after a `ConcurrentPromote` refusal, so more than one
+  `new_release_id` can exist for one `as_of` (see the ops doc for why that
+  retry's id is still distinct from the abandoned one it replaces).
 
 ## 8. Invariants
 
