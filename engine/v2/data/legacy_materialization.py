@@ -4,9 +4,10 @@ Pure logic only: this module never opens a file, a database connection or a
 legacy ``engine.*`` symbol (Layer 1, ``system_rearchitecture.md`` §4.1). Its
 own module-level imports are ``engine.v2.contracts``, ``engine.v2.foundation``,
 and this package's own ``errors``, ``price_history_table``, ``time_formats``,
-and ``query`` modules — not ``repository``, which every function here takes
-as a plain parameter (``repository.table_contract``/``.explain_dependencies``,
-etc.), never as an import. ``engine/v2/data/legacy_adapter.py`` — the
+and ``query`` modules — not ``repository``, which functions needing table
+operations receive as a plain parameter (``repository.table_contract``/
+``.explain_dependencies``, etc.), never as an import.
+``engine/v2/data/legacy_adapter.py`` — the
 package's one legacy-importing module — imports *from* this module at
 module level (``from . import errors, legacy_materialization``), never the
 other way, so there is no module-level import cycle between the two.
