@@ -335,6 +335,19 @@ uncaught traceback instead.
   only a different pinned `snapshot_id` can. `trading_calendar()` itself
   stays, unchanged, for legacy-parity tests and direct library callers —
   it is never reached from anywhere in this package's own code.
+- **A `--years`-scoped rebuild only ever tombstones rows inside its own
+  scope** (issue #108). `_build_run.run` narrows the REPLAY to `--years`
+  via `filter_events`, but a rebuild's tombstone set
+  (`_trades_revisions.revisions_for_rebuild`) must be narrowed the same
+  way: it tombstones an existing replay-provenance row of a
+  `rebuilt_strategies` member only when the row's own `year` column is
+  also inside the rebuilt `years` (when `years` is given) AND the rebuild
+  no longer produces its `trade_id`. A year outside the rebuilt scope is
+  never touched, so `tools/v2_build_trades.py --years Y` cannot delete
+  another year's already-published rows for the same strategy — the
+  requested year's own no-longer-produced rows are still tombstoned.
+  Omitting `--years` rebuilds (and tombstones) every year, unchanged from
+  before.
 - Never mutates the legacy trades ledger and never calls a network
   provider; `engine/build_trades.py` and `engine/data/pulls` (legacy,
   unchanged) keep doing both.
