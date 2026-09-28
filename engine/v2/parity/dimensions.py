@@ -73,19 +73,27 @@ NEVER_RAN_DIMENSIONS = {
 
 
 def compare_dimension(expected: dict, actual: dict, dimension: str, *,
-                      compare_records=compare_records) -> dict:
-    """Compare one dimension's expected/actual views under the exact policy.
+                      compare_records=compare_records,
+                      tolerance_policy=SCORE_RECORD_V1) -> dict:
+    """Compare one dimension's expected/actual views under one policy.
 
     The body is the Phase 4 checker's ``_compare_dimension`` moved here
     unchanged; ``compare_records`` is injectable only so the checker's own
     negative controls keep rebinding it through ``checks.phase4_real``.
+    ``tolerance_policy`` defaults to ``SCORE_RECORD_V1`` -- exact for every
+    field, since that policy declares no rules -- so every existing caller
+    (the Phase 4 checker, every test) is unaffected by this parameter's
+    addition. A caller that wants per-field numeric tolerances for a
+    *parity* comparison (never for the Phase 4 checker's own tier-0-style
+    exact check) passes a different ``TolerancePolicy`` explicitly; this
+    module invents no field's tolerance value itself.
     """
     comparison = compare_records(
         expected, actual,
         comparison_kind=f"phase4_{dimension}_parity",
         left_ref="frozen_legacy_record",
         right_ref="native_score_record",
-        tolerance_policy=SCORE_RECORD_V1,
+        tolerance_policy=tolerance_policy,
     )
     return {
         "agree": comparison.verdict == AGREE,
