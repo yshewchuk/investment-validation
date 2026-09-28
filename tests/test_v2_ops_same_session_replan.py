@@ -78,7 +78,7 @@ from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor, claim_next
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit, submit_graph
-from tests.ops_support import DEFAULT_POLICY, sample
+from tests.ops_support import DEFAULT_POLICY, TEST_POLICY, sample
 
 REPO = Path(__file__).resolve().parents[1]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
@@ -141,7 +141,7 @@ def test_identical_resubmission_of_the_same_plan_returns_the_same_jobs(tmp_path)
 
 
 def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_rows_survive(
-        tmp_path, capsys):
+        tmp_path, monkeypatch, capsys):
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
@@ -159,6 +159,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
                      "--tickers", "FAKE", "--input-manifest", str(manifest_v1),
                      "--expected-population", str(population_file)]) == 0
     plan_ref_1 = json.loads(capsys.readouterr().out)["plan_ref"]
+    monkeypatch.setattr(cli, "DEFAULT_POLICY", TEST_POLICY)
     assert cli.main(["--root", str(root), "submit", "--plan", plan_ref_1,
                      "--idempotency-key", "gen1"]) == 0
     submission_1 = json.loads(capsys.readouterr().out)
@@ -212,7 +213,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
 # --------------------------------------------------------------------------
 
 
-def test_same_plan_different_cli_idempotency_key_is_still_a_retry(tmp_path, capsys):
+def test_same_plan_different_cli_idempotency_key_is_still_a_retry(tmp_path, monkeypatch, capsys):
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
@@ -225,6 +226,7 @@ def test_same_plan_different_cli_idempotency_key_is_still_a_retry(tmp_path, caps
                      "--expected-population", str(population_file)]) == 0
     plan_ref = json.loads(capsys.readouterr().out)["plan_ref"]
 
+    monkeypatch.setattr(cli, "DEFAULT_POLICY", TEST_POLICY)
     assert cli.main(["--root", str(root), "submit", "--plan", plan_ref,
                      "--idempotency-key", "s1"]) == 0
     jobs_1 = [j["job_id"] for j in json.loads(capsys.readouterr().out)["jobs"]]

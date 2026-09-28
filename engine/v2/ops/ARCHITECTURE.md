@@ -1219,6 +1219,25 @@ network, or database access.
 
 ## Failure semantics
 
+- **Worker exit vs. process-family aliveness (`executor.poll`)** — `poll()`
+  samples `running.process.poll()` for the worker's own exit code, then
+  scans the watched process family (`executor_watchdog.observe`, the
+  worker pid plus any descendants) for liveness. `WORKER_FAILED` is only
+  raised when the exit code is non-zero (including a negative,
+  signal-killed code) while a family member is still alive; a clean
+  `exit_code == 0` never sets `WORKER_FAILED`, even if `observe` still
+  reports a family member alive at that same tick — a worker that exits 0
+  can briefly leave a child/grandchild process (a straggler) running past
+  its own exit, or a liveness read can momentarily overlap the exit itself.
+  Either way, once the worker's own exit code is known and a family member
+  is still alive, `poll()` calls `stop()` (TERM, then KILL after
+  `grace_seconds`) to reap it — bounded, not waited on indefinitely — and
+  `done` only becomes `True` once the whole family has actually drained.
+  So a straggler after a clean exit is reaped, not treated as a failure,
+  and the worker's already-buffered result (`running.data`) is used once
+  `done` is `True`. Before this fix, ANY exit code observed while a family
+  member was still alive — zero included — set `WORKER_FAILED` and
+  discarded a successful worker's result (issue #105).
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
   code (root doc §5), never defaulted. `board_requests` follows the same
@@ -2003,6 +2022,191 @@ no snapshot head (`effects=("staged",)`, `stages.py:282`), so it cannot
 race `"score"`'s own commit or anyone else's — the sidecar pattern is still
 the right choice for scheduling/transaction independence, not for a
 head-commit race.
+
+### `nightly_trigger.py` (issue #103: a bounded `serve`, never an unbounded hold on the legacy lock)
+
+`nightly_trigger.py`'s own module docstring already describes its
+scheduling and idempotency design (see "Purpose" above for where this
+package's other modules are indexed); this subsection covers only the
+failure semantics this PR adds or changes, the same R-numbered vocabulary
+`docs/COMPONENT_ARCHITECTURE_TEMPLATE.md` names (missing input, cache,
+retry, transaction, partial write, idempotency).
+
+- **R3, retry — `serve` now has a wall-clock deadline, never an unbounded
+  `while True`.** `supervisor.serve(service, *, once=False, until=None,
+  deadline_at=None)` gained a keyword-only `deadline_at`: an absolute,
+  `service.clock`-comparable datetime. Checked every tick, right alongside
+  `until()` (after `service.tick()`, before the sleep) — never before the
+  first tick, so the recovery pass `service.start()` performs always runs
+  first, same as today. Once `service.clock.now() >= deadline_at`, `serve`
+  stops and returns `"deadline_exceeded"` even though `until()` has not
+  fired; it still calls `service.close()` in the same `finally` either way.
+  Neither existing caller is affected: `cli.py`'s `serve_command` (the real
+  `ops serve` daemon) passes no `deadline_at` and keeps running forever, by
+  design — this parameter exists for `nightly_trigger.py`'s own bounded
+  `serve` call alone.
+  `nightly_trigger._default_serve` now computes
+  `deadline_at = _serve_deadline(clock)`, a new helper returning an
+  ABSOLUTE ET wall-clock cutoff on TODAY's calendar date (`clock.now()`'s
+  own ET date, not the as-of, and not a duration from when this particular
+  call started): `datetime.combine(clock.now().astimezone(ET).date(),
+  _boundary(DEFAULT_SERVE_DEADLINE_ET), tzinfo=ET)` — `_boundary` (already
+  used to parse `DEFAULT_WINDOW_START_ET`/`DEFAULT_DEADLINE_ET`) turns the
+  `"HH:MM"` string constant `DEFAULT_SERVE_DEADLINE_ET` into a
+  `datetime.time` before `datetime.combine`. `DEFAULT_SERVE_DEADLINE_ET`
+  is a new module-level constant next to `DEFAULT_DEADLINE_ET`, set with a
+  deliberate margin before the legacy cron's own evening start (this
+  repo's own judgment call, not a measured or externally specified bound
+  — the same kind of call `_COMPUTED_MOVES_BACKOFF_SECONDS` already
+  documents this way; the exact clock times live in the constant itself
+  and in `ops/systemd/native-nightly-trigger.service`'s own
+  `TimeoutStartSec`, not repeated here). Deliberately an ABSOLUTE same-day
+  cutoff, not a duration from when `serve` happened to start: a
+  duration-based deadline (this PR's first draft used `clock.now() +
+  timedelta(hours=12)`) still let a RESUMED `"timed_out"` serve starting
+  late in the day claim a fresh full budget of its own, reaching into the
+  legacy cron's own window — the exact hole a CodeRabbit review on this PR
+  found. Because `_serve_deadline` reads `clock.now()`'s OWN date every
+  time it is called, not the plan's `as_of`, every call to `_default_serve`
+  on the same calendar date — the first one and every resumed one —
+  computes the IDENTICAL cutoff, so no number of resumes on that date can
+  push the lock-holding past it: a resume ticking after the cutoff has
+  already passed computes a `deadline_at` already in the past, and
+  `serve`'s own deadline check only runs right after `service.tick()`
+  returns (before the next tick, never mid-tick) — so such a resume stops
+  at the very next post-tick check rather than running a further cycle of
+  real work, still resumable, never a wedge. A tick already in flight when
+  the cutoff arrives is NOT interrupted mid-tick — `serve` cannot guarantee
+  the lock is released AT the cutoff itself, only at the next check after
+  the CURRENT tick returns; a tick that never returns at all is exactly
+  what the systemd `TimeoutStartSec` backstop below exists for. This
+  reasoning does not depend on the resume happening on the SAME calendar
+  day the retry window originally opened on: `default_as_of` skips
+  non-trading days (weekends, holidays), so `main`'s own normal call path
+  CAN legitimately ask about the same `as_of` again several calendar days
+  later (e.g. a Friday `as_of` whose Saturday window went unresolved is
+  still the answer `default_as_of` gives on the following Monday, since no
+  trading day falls between them) — `run_trigger`'s resume branch (below)
+  does not recheck the original retry window in that case either, and
+  `_serve_deadline` simply computes THAT later day's own cutoff, which is
+  still always ahead of that same day's own legacy cron start. `serve`'s
+  own `until=lambda: _jobs_terminal(...)` argument is unchanged. A
+  `"deadline_exceeded"` outcome makes `_default_serve` return the new
+  sentinel `"timed_out"` instead of `"completed"`/`"failed"` — the
+  in-process jobs are left exactly where the supervisor's own recovery
+  already leaves an interrupted attempt (`recovery.py`, unchanged by this
+  PR); nothing here cancels or force-fails them.
+- **R6, idempotency — a timeout resumes the SAME plan, it never re-plans.**
+  `"timed_out"` is a new member of `STATUSES` and of `RESUME_STATUSES`
+  (alongside `"submitting"`/`"submitted"`/`"error"`): a receipt recorded
+  `"timed_out"` still carries `plan_ref`, so `run_trigger`'s resume branch
+  (`prior.plan_ref and prior.status in RESUME_STATUSES`) picks it up on
+  the next tick and calls `_submit_plan` again with the SAME `plan_ref` —
+  never `_decide`, so the retry window is not re-checked and no second
+  plan is ever built for this as-of while a resumable one already exists
+  (the window was already open the first time; the resume path's whole
+  point, shared with `"error"`/`"submitted"`, is that the decision is
+  already made). Resubmitting the same `plan_ref` is the existing
+  no-op-by-identity submit (`_default_submit`'s own docstring), and `serve`
+  is simply called again with a fresh `deadline_at`.
+  `"timed_out"` is also added to `FAILURE_STATUSES`, the same treatment
+  `"error"` already gets: `main`'s exit code is 1 (so a monitor sees a
+  problem) even though the state is not terminal and the trigger keeps
+  retrying it. It is deliberately NOT added to `TERMINAL_STATUSES` — unlike
+  `"failed"`, a bare timeout must stay resumable rather than given up on
+  immediately, since the resume path (this bullet's own first paragraph)
+  never re-checks the retry window before serving again. Concretely, on
+  the SAME calendar day: the timer's next tick (it fires every 30 minutes,
+  all day) resumes the same `plan_ref` and calls `_default_serve` again;
+  `_serve_deadline` recomputes the identical, already-past cutoff for that
+  same day, so this resumed serve also stops on its own first tick and is
+  again recorded `"timed_out"`. This repeats, one timer tick apart, until
+  R3's consecutive-timeout counter below reaches its terminal `"failed"`
+  state — ordinarily within an hour or two of the original timeout, the
+  same evening, never "the next day": there is no calendar-day check
+  anywhere in this path, only the counter.
+- **R3, retry — bounded, like every other consecutive-failure case in this
+  module.** Even with `_serve_deadline`'s same-day cutoff closing the
+  cross-into-legacy-window hole above, an unbounded same-day resume-forever
+  would still let a genuinely wedged run reacquire the lock every 30
+  minutes right up against that cutoff, over and over, for the rest of the
+  day — the exact production risk this issue opened over, just bounded to
+  one calendar day instead of unbounded. `_submit_plan` now counts consecutive
+  `"timed_out"` outcomes for this as-of the same way `_failure` already
+  counts consecutive `"error"` outcomes (a separate counter namespace:
+  a `"timed_out"` streak and an `"error"` streak never accumulate into
+  each other's count, since they are only ever incremented from a prior
+  receipt of the SAME status). At `MAX_CONSECUTIVE_ERRORS` consecutive
+  timeouts (the same small, fixed constant `_failure` already uses for
+  consecutive `"error"`s) the receipt becomes `"failed"` (terminal) instead of another
+  `"timed_out"` — `error_count` carries the streak length onto that
+  terminal receipt, same as `_failure`'s own `"failed_setup"` transition.
+  `error_count` is state internal to this module's own idempotency record;
+  it is never compared across `"timed_out"` and `"error"` receipts.
+- **R1, missing/unfittable input — refused before submission, not left to
+  wedge a `serve` loop.** `nightly.py` gains `plan_cpu_problems`/
+  `refuse_unfittable_cpu_plan`, the CPU-count twin of the existing
+  `plan_memory_problems`/`refuse_unfittable_memory_plan` (§8.1): a static,
+  host-structural check (`resources.worker_cpu_ids(policy, sample)`'s
+  length, after `reserved_cpu_count`) that asks whether a named resource
+  profile's `cpu_count` could EVER be admitted, independent of what else is
+  running. Unlike the memory check, `sample`'s `allowed_cpu_ids` is NOT
+  `sample_capacity`'s own live reading (`os.sched_getaffinity(0)` of the
+  calling process) passed straight through: `cli.py`'s `_submit_command`
+  first replaces that sample's `allowed_cpu_ids` with `range(os.cpu_count())`
+  before passing it to `refuse_unfittable_cpu_plan`. This is a deliberate,
+  measured deviation from `sample_capacity`'s live affinity reading, for the
+  same reason `plan_memory_problems` reads `sample.host_total_bytes` rather
+  than a live, per-process figure: `allowed_cpu_ids` (unlike
+  `host_total_bytes`) IS exactly the calling process's own
+  `sched_setaffinity`/taskset restriction, so passing it straight through
+  made this check fail two ordinary, previously-passing tests that submit a
+  real `DEFAULT_POLICY` nightly plan under `oc_check.py`'s own narrower
+  `bounded_run --cores 4` test wrapper (a profile whose declared `cpu_count`
+  fits production's `bounded_run --cores 8` failed this check purely because
+  the TEST harness's own core allowance is narrower) — a false positive of
+  exactly the shape the memory check's own docstring already warns against
+  ("never trips on another process's transient memory use"). `os.cpu_count()`
+  (the host's logical CPU count, unaffected by this process's own affinity
+  mask) is the closest available analogue to `host_total_bytes` on today's
+  `CapacitySample`, which has no separate host-total CPU field of its own.
+  `cli.py`'s `_submit_command` calls this immediately after its existing
+  `refuse_unfittable_memory_plan` call, same requests, same typed refusal
+  shape: `RESOURCE_PROFILE_UNSATISFIABLE` (never a distinct code — an
+  unfittable-CPU plan and an unfittable-memory plan are the same class of
+  finding, "this plan can never be admitted on this host," at the same call
+  site, before any job row is inserted). This closes the specific gap issue
+  #103 named: a job whose profile needs more CPUs than this host's logical
+  CPU count ever offers previously stayed queued forever under the
+  claim-time-only `PROFILE_EXCEEDS_CAPACITY` reason (`resources._fits_at_all`,
+  unchanged by this PR — it remains the claim-time backstop for a plan built
+  by a caller other than `ops plan`/`ops submit`, e.g. a raw `JobSpec`, and
+  the one that still catches a profile that fits the host but not THIS
+  process's own narrower `--cores`/taskset restriction); now a
+  host-impossible plan is refused at submit time instead, before the
+  trigger's `serve` ever starts waiting on it. **Known residual gap, not
+  closed by this PR:** a profile that fits the raw host CPU count but not
+  the specific `--cores`/taskset allowance the nightly trigger's own
+  `bounded_run` wrapper runs under (e.g. production's `--cores 8` on a
+  larger host) is NOT caught at plan time by this check — only by
+  `serve`'s own bounded deadline above, which still guarantees the legacy
+  lock is released and the run becomes resumable rather than wedging
+  forever.
+- **Backstop, outside this process.** `ops/systemd/native-nightly-trigger.service`
+  (not installed or enabled by this PR — this unit has no production
+  caller yet) gains a `TimeoutStartSec`, set comfortably above the worst
+  case a single `Type=oneshot` invocation can ever legitimately run: the
+  retry window's earliest possible open through `DEFAULT_SERVE_DEADLINE_ET`,
+  plus room for probe/plan/submit overhead, as a backstop for the case the in-process
+  deadline itself never gets checked at all (the process wedged somewhere
+  `serve`'s own tick loop never resumes,
+  e.g. inside a blocking call the deadline check never regains control
+  from) — systemd killing the unit still leaves the legacy lock file
+  present but unlocked (the flock is process-held, released automatically
+  when the process dies), so the NEXT tick's `_LegacyLock.acquire` succeeds
+  normally; it does not itself write a receipt, which is exactly why the
+  in-process deadline above is the primary mechanism and this is only the
+  backstop for its own failure.
 
 ## Invariants
 

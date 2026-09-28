@@ -37,6 +37,7 @@ from engine.v2.data.reference_catalog import (
 from engine.v2.data.reference_inputs import LEGACY_REFERENCE_INPUTS_V1
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import SystemClock, content_hash, format_timestamp, to_document
+from engine.v2.ops import cli
 from engine.v2.ops import executor
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import cache_identity, register_artifact
@@ -588,6 +589,7 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
                              observation_ceiling=f"{SESSION}T23:59:59.000000Z")
     assert inputs["materialization_request_hash"] == widened.request_hash  # refs from the catalog
 
+    monkeypatch.setattr(cli, "DEFAULT_POLICY", TEST_POLICY)
     ids, specs = _submitted_specs(case, planned["plan_ref"], "k1")
     by_kind = {spec["kind"]: (job_id, spec) for job_id, spec in specs.items()}
     materialize_id, materialize = by_kind["legacy_materialize"]
@@ -658,9 +660,10 @@ def test_snapshot_plan_refuses_a_snapshot_with_no_committed_reference_inputs(cas
     assert err.value.problem.details["data_code"] == "SNAPSHOT_NOT_READY"
 
 
-def test_newer_reference_inputs_change_the_request_and_job_identity(case):
+def test_newer_reference_inputs_change_the_request_and_job_identity(case, monkeypatch):
     argv = _plan_files(case)
     first = dispatch(parser().parse_args(argv), case.root, case.conn, case.clock)
+    monkeypatch.setattr(cli, "DEFAULT_POLICY", TEST_POLICY)
     first_ids, first_specs = _submitted_specs(case, first["plan_ref"], "refs-1")
     record_reference_inputs(case, case.snap.snapshot_id, "r2-references",
                             registry=b'{"models": [], "retrained": true}')

@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from engine.v2.foundation import (
@@ -31,6 +33,7 @@ from engine.v2.ops.lifecycle import attempt_receipts, request_cancel
 from engine.v2.ops.nightly import (
     build_legacy_job_requests,
     refuse_oversize_plan,
+    refuse_unfittable_cpu_plan,
     refuse_unfittable_memory_plan,
 )
 from engine.v2.ops.plans import nightly_plan, request_from_plan, save_plan
@@ -640,6 +643,23 @@ def _submit_nightly(plan, conn, store, policy, clock):
     # on another process's transient memory use.
     refuse_unfittable_memory_plan(requests, policy=DEFAULT_POLICY,
                                   sample=sample_capacity(store.root, clock=clock))
+    # issue #103: the CPU twin of the memory check above -- same requests, same typed
+    # refusal, before any job row is inserted. Unlike the memory check, this canNOT
+    # reuse sample_capacity()'s own allowed_cpu_ids directly: that field is THIS
+    # process's own os.sched_getaffinity(0), which a narrower wrapper (a test run under
+    # bounded_run --cores 4, a CI sandbox) can restrict well below what an ordinary
+    # production host offers -- and, measured directly, doing so makes an ordinary
+    # existing test (submitting a real DEFAULT_POLICY nightly plan under a 4-core test
+    # wrapper) fail with a false RESOURCE_PROFILE_UNSATISFIABLE. os.cpu_count() is the
+    # host-wide logical CPU count and, unlike allowed_cpu_ids, is NOT narrowed by this
+    # process's own sched_setaffinity/taskset restriction -- the CPU analogue of the
+    # memory check's own host-total (sample.host_total_bytes, also unaffected by this
+    # process's own limits) rather than its live, per-process reading.
+    capacity = sample_capacity(store.root, clock=clock)
+    host_cpus = os.cpu_count() or len(capacity.allowed_cpu_ids)
+    refuse_unfittable_cpu_plan(
+        requests, policy=DEFAULT_POLICY,
+        sample=replace(capacity, allowed_cpu_ids=tuple(range(host_cpus))))
     receipts = submit_graph(conn, registry(), policy, requests, clock=clock)
     return {"run_id": "run_" + plan["plan_hash"][:24],
             "jobs": [to_document(item) for item in receipts]}

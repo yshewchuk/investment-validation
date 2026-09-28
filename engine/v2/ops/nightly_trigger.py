@@ -73,19 +73,24 @@ DEFAULT_DEADLINE_ET = "06:00"
 DEFAULT_DEADLINE_GRACE = timedelta(minutes=5)
 #: ``error`` turns into the terminal ``failed_setup`` after this many in a row.
 MAX_CONSECUTIVE_ERRORS = 3
+#: An ABSOLUTE ET cutoff, on whatever calendar day ``serve`` is called (never a duration from
+#: when this particular call started, which a resumed ``timed_out`` serve would otherwise get
+#: fresh, reaching arbitrarily late into the day) -- OUR OWN judgment call (not measured or
+#: externally specified): 1.5 hours of margin before the legacy cron's 21:30 ET window.
+DEFAULT_SERVE_DEADLINE_ET = "20:00"
 STATE_DIR = ("reports", "phase6", "nightly_trigger")
 #: Where the operator drops the native nightly's own qualification documents.
 QUALIFICATION_INPUT_MANIFEST = "input_manifest.json"
 QUALIFICATION_POPULATION = "expected_population.json"
 
 STATUSES = ("submitted", "not_yet", "missed", "already_submitted", "busy_legacy", "error",
-            "submitting", "completed", "failed", "failed_setup", "idle")
+            "submitting", "completed", "failed", "failed_setup", "idle", "timed_out")
 #: A terminal as-of never probes, never writes and never submits again.
 TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "missed",
                                "failed_setup"})
 #: A recorded plan_ref means the decision is made: resume it, never re-plan.
-RESUME_STATUSES = frozenset({"submitting", "submitted", "error"})
-FAILURE_STATUSES = frozenset({"error", "failed", "failed_setup", "missed"})
+RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out"})
+FAILURE_STATUSES = frozenset({"error", "failed", "failed_setup", "missed", "timed_out"})
 SUCCESS_JOB_STATES = frozenset({"succeeded"})
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "cancelled", "blocked"})
 _HANDLED_FAILURES = (OpsError, OSError, ValueError, TypeError)
@@ -298,6 +303,18 @@ def _window(as_of: str, window_start_et: str, deadline_et: str) -> tuple[datetim
             datetime.combine(opened_on, _boundary(deadline_et), tzinfo=ET))
 
 
+def _serve_deadline(clock) -> datetime:
+    """Today's ET calendar-day cutoff (``DEFAULT_SERVE_DEADLINE_ET``), from ``clock.now()``'s
+    OWN date -- never the plan's ``as_of`` and never a duration from when this call started.
+    Every call on the same calendar day (the first serve and every resumed one) therefore
+    computes the IDENTICAL absolute cutoff, so no number of same-day resumes can push serving
+    past it; a call made after the cutoff has already passed returns a ``deadline_at`` already
+    in the past, so ``serve`` stops on its very first tick rather than running another cycle.
+    """
+    today_et = clock.now().astimezone(ET).date()
+    return datetime.combine(today_et, _boundary(DEFAULT_SERVE_DEADLINE_ET), tzinfo=ET)
+
+
 def _receipt(clock, as_of: str, status: str, detail: str,
              plan_ref: str | None = None, error_count: int = 0) -> TriggerReceipt:
     return TriggerReceipt(as_of=as_of, status=status, detail=detail,
@@ -419,6 +436,18 @@ def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, pla
         final = serve_fn(root, plan_ref, clock)
     except _HANDLED_FAILURES as exc:
         return _failure(root, clock, as_of, plan_ref, exc, prior)
+    if final == "timed_out":
+        previous = prior.error_count if prior is not None and prior.status == "timed_out" else 0
+        count = previous + 1
+        if count >= MAX_CONSECUTIVE_ERRORS:
+            return _record(root, _receipt(
+                clock, as_of, "failed",
+                f"serve exceeded its deadline {count} consecutive times; giving up",
+                plan_ref=plan_ref, error_count=count))
+        return _record(root, _receipt(
+            clock, as_of, "timed_out",
+            "serve exceeded its deadline; the legacy lock is released, resuming next tick",
+            plan_ref=plan_ref, error_count=count))
     status = "completed" if str(final) == "completed" else "failed"
     return _record(root, _receipt(clock, as_of, status,
                                   f"the submitted plan finished {status}", plan_ref=plan_ref))
@@ -536,8 +565,12 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
     owns the process for the duration (while holding the legacy lock), so the
     native DAG runs in-process here instead of needing a second supervisor.
     The job set is resolved through the idempotent ``cli._submit_command`` (a
-    no-op resubmission), then polled until every job is terminal. The final
-    status is ``completed`` only when every job succeeded, else ``failed``.
+    no-op resubmission), then polled until every job is terminal. ``serve`` is
+    bounded by ``_serve_deadline``/``DEFAULT_SERVE_DEADLINE_ET`` (an absolute
+    same-day ET cutoff, not a duration) and this returns ``"timed_out"`` if that
+    deadline fires before every job is terminal, so a wedged job never blocks
+    indefinitely. The final status is ``completed`` only when every job
+    succeeded, else ``failed``.
     """
     from engine.v2.ops import cli
     from engine.v2.ops.bootstrap import open_catalog
@@ -558,7 +591,11 @@ def _default_serve(root: Path, plan_ref: str, clock) -> str:
             raise fail("INVALID_REQUEST", "the submitted plan produced no jobs")
         service = Service(conn, ops_root, registry(), DEFAULT_POLICY, clock=clock,
                           code_source=repo_root())
-        serve(service, until=lambda: _jobs_terminal(conn, job_ids))
+        deadline_at = _serve_deadline(clock)
+        outcome = serve(service, until=lambda: _jobs_terminal(conn, job_ids),
+                        deadline_at=deadline_at)
+        if outcome == "deadline_exceeded":
+            return "timed_out"
         return "completed" if _jobs_succeeded(conn, job_ids) else "failed"
     finally:
         conn.close()

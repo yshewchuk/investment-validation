@@ -119,6 +119,24 @@ def persist_members(conn, attempt_id, identities):
 
 
 def poll(conn, running, *, boot_id, clock, grace_seconds=2):
+    """Advance one observation tick for a launched worker.
+
+    Returns ``dict(done, memory, exit_code)``. See this package's
+    ARCHITECTURE.md, "Failure semantics" -> "Worker exit vs. process-family
+    aliveness", for the exit-code/liveness classification this applies.
+    """
+    # Sample the worker's own exit code before scanning the process family. A
+    # clean exit_code == 0 never sets WORKER_FAILED, even if a family member
+    # (a straggler child/grandchild that outlives the worker briefly, or a
+    # liveness read momentarily overlapping the exit itself) is still alive --
+    # but that straggler is still reaped on the normal TERM-then-KILL(grace_seconds)
+    # schedule below, bounded, not waited on forever: `done` needs the whole
+    # family to be gone, so an unreaped straggler would otherwise hang the
+    # attempt (and its lease, kept alive by the heartbeat) indefinitely.
+    # Before this fix, ANY exit code observed while a family member was still
+    # alive -- zero included -- set WORKER_FAILED and discarded a successful
+    # worker's already-buffered result (issue #105).
+    exit_code = running.process.poll()
     running.identities, alive, memory = observe(running.identities, boot_id)
     persist_members(conn, running.claim.attempt_id, running.identities)
     running.peak = max(running.peak, memory)
@@ -127,9 +145,9 @@ def poll(conn, running, *, boot_id, clock, grace_seconds=2):
         running.failure = "RESOURCE_LIMIT_EXCEEDED"
     if running.failure and alive:
         stop(running, boot_id=boot_id, clock=clock, grace_seconds=grace_seconds)
-    exit_code = running.process.poll()
-    if exit_code is not None and alive:
-        running.failure = running.failure or "WORKER_FAILED"
+    elif exit_code is not None and alive:
+        if exit_code != 0:
+            running.failure = running.failure or "WORKER_FAILED"
         stop(running, boot_id=boot_id, clock=clock, grace_seconds=grace_seconds)
     return dict(done=exit_code is not None and not alive, memory=memory, exit_code=exit_code)
 

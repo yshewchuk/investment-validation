@@ -431,12 +431,20 @@ def _update_head(conn: sqlite3.Connection, scope: str, new_snapshot_id: str,
 
 def _existing_receipt(conn: sqlite3.Connection, receipt_id: str, request_hash: str, attempt_id: str,
                       fence: int, scope: str, snapshot: SnapshotRef,
-                      resulting_generation: int) -> SnapshotImportReceipt | None:
+                      expected_head_snapshot_id: str | None,
+                      expected_head_generation: int) -> SnapshotImportReceipt | None:
     """A prior committed receipt under ``receipt_id``, only if it is genuinely
     the same call replayed: same ``request_hash``, ``attempt_id``, ``scope``
     and resulting ``snapshot_id`` (task brief review fix — the short-circuit
     must verify what it short-circuits, not just trust the id). Anything else
     stored under this ``receipt_id`` is ``IDENTITY_CONFLICT``, nothing written.
+
+    Rebuilds ``resulting_head_generation``/``prior_head_snapshot_id`` from
+    the *same* already-at-head rule ``commit_snapshot`` itself applies (bug
+    fix, #77/#82): the original commit never bumped the generation or moved
+    the head when its candidate already equalled
+    ``expected_head_snapshot_id``, so a replay of that call must not claim
+    it did either.
     """
     row = conn.execute("SELECT * FROM data_import_receipts WHERE receipt_id = ?",
                        (receipt_id,)).fetchone()
@@ -448,9 +456,13 @@ def _existing_receipt(conn: sqlite3.Connection, receipt_id: str, request_hash: s
     if found != expected:
         raise fail("IDENTITY_CONFLICT", "receipt_id already exists with a different outcome",
                   details={"receipt_id": receipt_id})
+    already_at_head = snapshot.snapshot_id == expected_head_snapshot_id
+    resulting_generation = (expected_head_generation if already_at_head
+                            else expected_head_generation + 1)
     return SnapshotImportReceipt(
         receipt_id=receipt_id, request_hash=request_hash, attempt_id=attempt_id, fence=fence,
-        snapshot_ref=snapshot, legacy_snapshot_object_ref=None, prior_head_snapshot_id=None,
+        snapshot_ref=snapshot, legacy_snapshot_object_ref=None,
+        prior_head_snapshot_id=expected_head_snapshot_id,
         resulting_head_snapshot_id=snapshot.snapshot_id, resulting_head_generation=resulting_generation,
         status="committed", problem=None, envelope={})
 
@@ -488,7 +500,7 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
     with _immediate_transaction(conn):
         fence_check(conn)
         shortcut = _existing_receipt(conn, receipt_id, request_hash, attempt_id, fence, scope,
-                                     snapshot, expected_head_generation + 1)
+                                     snapshot, expected_head_snapshot_id, expected_head_generation)
         if shortcut is not None:
             return shortcut
         _check_head_expectation(_current_head(conn, scope), expected_head_snapshot_id,

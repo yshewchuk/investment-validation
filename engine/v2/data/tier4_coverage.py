@@ -5,7 +5,13 @@ caches its planned population needs. Refuse with a stable code that lists
 every missing triple when the pinned reference inputs don't cover them. Do
 not fit on a miss in Phase 2."
 
-Three pure functions, legacy-free:
+Three functions, not all pure and not legacy-free:
+``champion_producer_models`` is a pure in-memory transform with no legacy
+dependency; ``required_serving_triples`` is pure computation but reaches
+into legacy code, through ``legacy_adapter.legacy_serving_fold``, for the
+scorer's own fold rule; ``missing_triples`` performs real I/O, reading
+Tier-4 serving-cache header bytes off the artifact store through
+``legacy_adapter.legacy_tier4_serving_header``:
 
 * :func:`champion_producer_models` — the champions with a Tier-4 ``produces``
   from an already-parsed list of champion registry entries

@@ -2,6 +2,7 @@
 import json
 import os
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,14 @@ def test_o06_actual_child_affinity_threads_and_outputs(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM attempt_outputs").fetchone()[0] == 1
     assert conn.execute("SELECT memory_peak_bytes FROM attempts").fetchone()[0] > 0
     assert conn.execute("SELECT released_at FROM resource_reservations").fetchone()[0]
+
+
+def test_serve_with_a_past_deadline_returns_deadline_exceeded(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=Path(__file__).resolve().parents[1])
+    outcome = serve(service, deadline_at=clock.now() - timedelta(seconds=1))
+    assert outcome == "deadline_exceeded"
 
 
 def candidate(claim):
