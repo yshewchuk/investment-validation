@@ -75,6 +75,39 @@ def resolve_snapshot(repository, *, scope: str = DEFAULT_SCOPE, snapshot_id: str
     return repository.resolve_pinned(scope)
 
 
+def _validated_partition_keys(contract, table_name: str, keys) -> list[str]:
+    """``keys`` cast-checked against each declared partition column's
+    physical type, then returned as their original string form.
+
+    A value that cannot be cast to its column's declared type (e.g. a
+    non-integer string for an ``int64`` partition column) is refused with
+    ``ValueError`` rather than silently excluded by ``_scan.read_table``'s
+    plain string-membership filter -- a caller must never get a partial
+    read that looks complete. A syntactically valid but absent key (e.g.
+    ``"1999"`` when no such partition exists) is not this function's
+    concern: it passes validation here and simply matches nothing in
+    ``_scan.read_table``, which is a legitimate empty result, not a
+    refusal.
+    """
+    for column in contract.partition_columns:
+        physical = next((c.physical_type for c in contract.columns
+                         if c.name == column), None)
+        for key in keys:
+            try:
+                if physical == "int64":
+                    int(key)
+                elif physical == "bool":
+                    bool(key)
+                # any other declared physical type has no narrower cast to
+                # validate against here; a plain string is always valid.
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{table_name}: partition key {key!r} is not a valid "
+                    f"{physical!r} value for column {column!r}"
+                ) from None
+    return list(keys)
+
+
 def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str],
                partition_keys: Sequence[str] | None = None) -> pd.DataFrame:
     """One table's pinned rows, projected to ``columns``, as a frame.
@@ -91,10 +124,11 @@ def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str]
     empty-result frame shape.
     """
     contract = repository.table_contract(snapshot_ref, table_name)
-    keys = partition_keys if partition_keys else sorted(
+    keys = (_validated_partition_keys(contract, table_name, partition_keys)
+            if partition_keys else sorted(
         {record.partition_key for record
          in repository.fragment_records(snapshot_ref, table_name)}
-    )
+    ))
     if not contract.partition_columns or not keys:
         # A scan must be bounded by at least one key predicate or a time bound.
         raise ValueError(
