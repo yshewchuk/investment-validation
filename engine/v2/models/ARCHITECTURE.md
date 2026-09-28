@@ -184,12 +184,14 @@ third-party service. `hashlib.sha256` for every content hash;
   `content_hash`, is `StagingRefused` too (`MISSING_MEMBER_PAYLOAD` /
   `PAYLOAD_HASH_MISMATCH`). **New in this PR:** `_compatibility_issues`
   also refuses two inference bindings that declare the same
-  `(role, strategy_id, decision_clock_id)` key (`DUPLICATE_BINDING`).
-  Previously the `seen` set recorded each key but nothing ever read it
-  back, so a duplicate bound silently — the release still staged, and
-  whichever binding `scoring.release_bindings` happened to resolve for
-  that key at read time was unspecified. The check now runs before a key
-  is added to `seen`, so the second binding for any key raises instead.
+  `(role, strategy_id, decision_clock_id)` key (`DUPLICATE_BINDING`), via
+  `_duplicate_binding_issues(release)` — a check that needs only `release`,
+  no `inventory`, so §7.2's `_swap_pointer` shares the exact same function
+  to re-verify it at promote/rollback time too. Previously the `seen` set
+  recorded each key but nothing ever read it back, so a duplicate bound
+  silently — the release still staged, and whichever binding
+  `scoring.release_bindings` happened to resolve for that key at read time
+  was unspecified.
 - **R2, cache.** None: every call re-derives the release hash and re-checks
   every member from the caller's arguments; nothing is memoized.
 - **R3, retry.** None needed: staging the same `release_id` with identical
@@ -232,7 +234,17 @@ third-party service. `hashlib.sha256` for every content hash;
   never called it, so a manifest tampered or corrupted on disk after
   staging still promoted — production then refused every score with
   `MODEL_NOT_READY` until an operator noticed, well after the pointer had
-  already moved.
+  already moved. `_swap_pointer` also re-runs the SAME binding-uniqueness
+  check `stage_release` runs at staging time (`_duplicate_binding_issues`,
+  factored out of `_compatibility_issues` so staging and the pointer swap
+  share one definition of "no duplicate inference binding") and refuses
+  `StagingRefused(DUPLICATE_BINDING)` if the manifest's OWN bindings — the
+  ones a valid hash proves were exactly what got staged — still declare two
+  bindings for the same `(role, strategy_id, decision_clock_id)`. This
+  covers a release staged by a version of `stage_release` that predates the
+  duplicate-binding gate (or by any future staging path that forgets to
+  call it): the hash check alone proves the manifest matches what was
+  staged, not that what was staged was itself valid.
 - **R2, cache.** None: `current_pointer`/`_read_manifest` re-read from disk
   on every call.
 - **R3, retry.** A repeated `promote(root, same_release_id)` when that
