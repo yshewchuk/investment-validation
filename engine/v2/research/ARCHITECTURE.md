@@ -361,11 +361,21 @@ split, can now be read from a production-size snapshot; an oversized
 partition with a nullable observation-time column still raises
 `RESULT_LIMIT_EXCEEDED`.
 
-Routing `trades` through `_scan.read_table` for the first time (it was
-previously read with one unbounded `DataQuery`, so `_scan.py`'s splitting
-never applied to it) exposed two defects in `_scan.py` itself that this PR
-also fixes, since they are reachable only because of this delegation, not
-pre-existing for any table this PR's diff does not touch. `option_chains`
+`_snapshot.read_table` routing `trades` through `_scan.read_table` for the
+first time (it was previously read with one unbounded `DataQuery`, so this
+particular caller never split it) is not what first exposed the two
+defects fixed below: `polygon_fills.read_trades` (untouched by this PR)
+already reads `trades` through `_scan.read_table` directly, so both
+defects were ALREADY live there before this PR, not newly created by it.
+Fixing them in `_scan.py` itself therefore also changes
+`polygon_fills.read_trades`'s own behavior, not just `_snapshot.
+read_table`'s new delegation: a `trades` partition with a null
+`entry_date` now returns those rows instead of silently dropping them
+(their exit legs can now add contracts `collect_contracts` used to never
+see), and an oversized `trades` partition with a nullable observation
+column now raises `RESULT_LIMIT_EXCEEDED` instead of splitting it (and,
+before this PR's partition-key predicate fix, sometimes returning the same
+row twice across a year boundary). `option_chains`
 (partition column `year`, observation-time column `obs_date`) and
 `earnings_events` (`year`, `event_date`) use different columns for the
 two roles, but `legacy_annotations.json` documents each one's `year` as
