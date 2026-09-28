@@ -503,9 +503,12 @@ call whose code argument sits on its own line):
 | `EVIDENCE_SCOPE_INCOMPLETE` | validation | no | `legacy_materialization` (a `trades` scan whose real span escapes a too-narrow `evidence_scope`) |
 | `TIER4_CACHE_STALE` | validation | no | `legacy_materialization`, `reference_inputs` |
 | `STALE_EXPECTATION` | validation | no | `repository` (`explain_dependencies`'s chain-query path, `repository.py:649`) |
+| `CALENDAR_UNAVAILABLE` | validation | no | `engine.v2.research` (`_plan.py:79`, `_pricing.py:447`), through `data.errors`; no module inside this package raises it |
 
-All 21 registered codes are exercised by at least one module in this
-package; none is dead in `DATA_FAILURE_CODES` from this package's side.
+21 of the 22 registered codes are raised by a module in this package;
+`CALENDAR_UNAVAILABLE` is registered here (`contracts/data.py:153`) but
+raised only by `engine.v2.research`, never from inside this package. None
+of the 22 is dead in `DATA_FAILURE_CODES` overall.
 
 ### `catalog.commit_snapshot` / `generic_incremental.commit_generic_table_candidate` — the #56 fence-composition contract (4c R1–R6)
 
