@@ -46,6 +46,7 @@ __all__ = [
     "NoCurrentRelease",
     "ScoringReleaseBinding",
     "ReleaseBindingError",
+    "resolve_production_release_binding",
     "resolve_release_binding",
 ]
 
@@ -189,6 +190,23 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
         frozen_inference=FrozenInference(dep_root),
         payoff_artifacts=payoff, recalibration_artifacts=recalibration, analog_artifacts=analog,
     )
+
+
+def resolve_production_release_binding() -> ScoringReleaseBinding:
+    """``resolve_release_binding`` against the ONE configured production
+    release root (``engine.v2.models.deployment.production_release_root``).
+
+    R1(g): a missing ``MODEL_RELEASE_ROOT`` is ``deployment.
+    MissingReleaseRoot``, wrapped here as ``ModelNotReady("release_root",
+    ...)`` -- this module's one refusal shape covers a missing config key
+    exactly like a missing file. See ``engine/v2/scoring/ARCHITECTURE.md``'s
+    ``release_bindings.py`` section.
+    """
+    try:
+        root = deployment.production_release_root()
+    except deployment.MissingReleaseRoot as exc:
+        raise ModelNotReady("release_root", "no production release root is configured") from exc
+    return resolve_release_binding(root)
 
 
 def _read_and_verify_manifest(dep_root: Path, release_id: str) -> "deployment.StagedManifest":

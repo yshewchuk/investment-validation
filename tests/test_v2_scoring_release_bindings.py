@@ -41,6 +41,7 @@ from engine.v2.models.recalibration_artifact import (
 from engine.v2.scoring.release_bindings import (
     ModelNotReady,
     NoCurrentRelease,
+    resolve_production_release_binding,
     resolve_release_binding,
 )
 
@@ -554,3 +555,42 @@ def test_repeated_calls_do_not_share_a_cache_across_release_changes(tmp_path):
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "payoff_line:STR-THRU"
     _assert_no_leak(tmp_path, error.value)
+
+
+def test_resolve_production_release_binding_missing_env_var_raises_model_not_ready(monkeypatch):
+    """No MODEL_RELEASE_ROOT configured raises ModelNotReady, not
+    MissingReleaseRoot directly."""
+    monkeypatch.delenv("MODEL_RELEASE_ROOT", raising=False)
+    with pytest.raises(ModelNotReady) as error:
+        resolve_production_release_binding()
+    assert error.value.member_id == "release_root"
+
+
+def test_resolve_production_release_binding_reads_the_configured_root(monkeypatch, tmp_path):
+    """resolve_production_release_binding() resolves the release staged
+    under the configured MODEL_RELEASE_ROOT."""
+    _stage_and_promote(tmp_path)
+    _happy_catalog(tmp_path)
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    binding = resolve_production_release_binding()
+    assert binding.release_id == _RELEASE_ID
+
+
+def test_promote_plan_and_resolve_production_release_binding_agree_on_the_same_configured_root(monkeypatch, tmp_path):
+    """The two named consumers of MODEL_RELEASE_ROOT must resolve the SAME
+    on-disk deployment directory for the SAME configured value.
+    promote_plan's plan-time release_root (via production_deployment_root)
+    and resolve_release_binding's own dep_root (via
+    resolve_production_release_binding) must be identical -- this is the
+    defect an Opus merge-gate review found: promote and scoring disagreed
+    by one directory level for the same MODEL_RELEASE_ROOT."""
+    from engine.v2.models import deployment
+    from engine.v2.ops import training
+    _stage_and_promote(tmp_path)
+    _happy_catalog(tmp_path)
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    plan = training.promote_plan(release_root="", release_id=_RELEASE_ID)
+    assert plan["parameters"]["release_root"] == str(_dep_root(tmp_path))
+    assert plan["parameters"]["release_root"] == str(deployment.production_deployment_root())
+    binding = resolve_production_release_binding()
+    assert binding.release_id == _RELEASE_ID

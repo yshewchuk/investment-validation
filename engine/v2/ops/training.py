@@ -248,11 +248,24 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
 
 
 def promote_plan(*, release_root, release_id) -> dict:
+    """Build an operator-submitted ``models_promote`` plan. An empty
+    ``release_root`` resolves ``engine.v2.models.deployment.
+    production_deployment_root()`` (config key ``MODEL_RELEASE_ROOT``,
+    one level below the value that key names -- see that function's
+    docstring) here, at plan time -- a missing key is ``INVALID_REQUEST``
+    and never reaches the worker with an empty root."""
     from engine.v2.foundation import content_hash
+    from engine.v2.models import deployment
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
-    if not release_root or not release_id:
-        raise fail("INVALID_REQUEST", "promote plan needs a release root and a release id")
+    if not release_id:
+        raise fail("INVALID_REQUEST", "promote plan needs a release id")
+    if not release_root:
+        try:
+            release_root = deployment.production_deployment_root()
+        except deployment.MissingReleaseRoot as exc:
+            raise fail("INVALID_REQUEST", "no release root given and no production "
+                       "release root is configured") from exc
     # Absolute at plan time: the worker's cwd is its code snapshot
     # (``executor.launch``), so a relative path would promote somewhere the
     # operator never named.

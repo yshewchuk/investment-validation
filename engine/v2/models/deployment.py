@@ -54,19 +54,25 @@ from .releases import ModelReleaseInventory, ReleaseIssue, require_complete_rele
 
 __all__ = [
     "DEPLOYMENT_REFUSAL",
+    "MODEL_RELEASE_ROOT_ENV",
     "POINTER_STATE_V1",
     "STAGED_MANIFEST_V1",
     "DeploymentError",
+    "MissingReleaseRoot",
     "NoPriorRelease",
     "PointerState",
     "ReleaseNotStaged",
     "StagedManifest",
     "StagingRefused",
+    "StaleReleaseHash",
     "current_pointer",
     "current_release",
     "pointer_history",
+    "production_deployment_root",
+    "production_release_root",
     "promote",
     "resolve_release",
+    "restage_semantic_hash",
     "rollback",
     "stage_release",
 ]
@@ -76,6 +82,7 @@ POINTER_STATE_V1 = "deployment_pointer_state.v1.0"
 DEPLOYMENT_REFUSAL = "MODEL_DEPLOYMENT_REFUSED"
 RELEASE_HASH_MEMBER_V1 = "member_only.v1"
 RELEASE_HASH_SEMANTIC_V2 = "semantic_manifest.v2"
+MODEL_RELEASE_ROOT_ENV = "MODEL_RELEASE_ROOT"
 
 
 class DeploymentError(Exception):
@@ -97,6 +104,85 @@ class ReleaseNotStaged(DeploymentError):
 
 class NoPriorRelease(DeploymentError):
     """A rollback was requested with no earlier pointer state to return to."""
+
+
+class MissingReleaseRoot(DeploymentError):
+    """No production release root is configured -- see production_release_root()."""
+
+    code = "MISSING_RELEASE_ROOT"
+
+    def __init__(self) -> None:
+        """Build the MISSING_RELEASE_ROOT refusal message."""
+        super().__init__(f"{self.code}: set {MODEL_RELEASE_ROOT_ENV} to the "
+                          f"production release root")
+
+
+class StaleReleaseHash(DeploymentError):
+    """A promote/rollback target's staged manifest predates the current
+    release_hash_version. restage_semantic_hash() rewrites it in place, from
+    already-staged content -- no retraining, no payload re-read -- but this
+    is never applied automatically; a promote/rollback call only refuses."""
+
+    code = "STALE_RELEASE_HASH"
+
+    def __init__(self, release_id: str, hash_version: str) -> None:
+        """Build the STALE_RELEASE_HASH refusal message, naming the release
+        and its stale hash version."""
+        self.release_id = release_id
+        self.hash_version = hash_version
+        super().__init__(f"{self.code}: {release_id} is staged under hash version "
+                          f"{hash_version}, not {RELEASE_HASH_SEMANTIC_V2}")
+
+
+# --------------------------------------------------------------------------
+# production configuration
+# --------------------------------------------------------------------------
+
+
+def production_release_root() -> Path:
+    """The one configured production STORE root -- read fresh from
+    ``MODEL_RELEASE_ROOT`` on every call, never cached. This is the store
+    root, NOT this module's own ``root`` parameter:
+    ``release_bindings.resolve_release_binding`` and
+    ``checks/phase5_release.py`` both navigate from a value at this level
+    by appending their own ``deployment/`` subdirectory
+    (``<release_root>/deployment/DEPLOYED``); this module's own
+    :func:`promote`/:func:`rollback`/:func:`resolve_release`/
+    :func:`current_release`/:func:`stage_release`/
+    :func:`restage_semantic_hash` all take THAT ``deployment/`` directory
+    itself as their ``root`` -- see :func:`production_deployment_root`,
+    which is what a caller of any of those wants, not this function
+    directly. Raises :class:`MissingReleaseRoot` when the variable is
+    unset or blank -- there is no fallback default, because a silent
+    default here would let an operator promote or resolve against the
+    wrong store without any signal. Always returns an absolute,
+    ``~``-expanded path (``Path(...).expanduser().resolve()``).
+    """
+    value = os.environ.get(MODEL_RELEASE_ROOT_ENV, "").strip()
+    if not value:
+        raise MissingReleaseRoot()
+    return Path(value).expanduser().resolve()
+
+
+def production_deployment_root() -> Path:
+    """``production_release_root() / "deployment"`` -- the directory this
+    module's own root-taking functions (:func:`promote`, :func:`rollback`,
+    :func:`resolve_release`, :func:`current_release`, :func:`stage_release`,
+    :func:`restage_semantic_hash`) expect as their ``root`` argument when
+    operating against the ONE configured production store, matching the
+    same ``<release_root>/deployment/`` layout
+    ``release_bindings.resolve_release_binding`` and
+    ``checks/phase5_release.py`` already use for the identical value.
+    ``training.promote_plan`` resolves an omitted ``--release-root``
+    through THIS function, never through :func:`production_release_root`
+    directly -- the two disagreed on which directory ``MODEL_RELEASE_ROOT``
+    named until this function existed (2026-09-27 Opus gate finding:
+    scoring's resolution and promote's resolution pointed at directories
+    one level apart for the same configured value). Raises
+    :class:`MissingReleaseRoot` exactly as :func:`production_release_root`
+    does, for the same reason.
+    """
+    return production_release_root() / "deployment"
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -358,6 +444,67 @@ def stage_release(
     return manifest
 
 
+def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
+    """Rewrite ``release_id``'s staged manifest to the current semantic hash
+    version, in place, from its already-staged :class:`~.contracts.ModelRelease`
+    -- no payload re-read, no re-staging of objects, no touch to ``DEPLOYED``
+    or ``history/``.
+
+    An explicit, operator-run upgrade step, never automatic --
+    :func:`stage_release`'s own idempotent re-stage of identical content
+    deliberately KEEPS a legacy manifest's original bytes and version (see
+    ``tests/test_checks_phase5_acceptance.py::
+    test_model_release_loader_and_restage_support_versioned_hashes``).
+    :func:`promote`/:func:`rollback` refuse any ``release_hash_version``
+    other than ``RELEASE_HASH_SEMANTIC_V2`` (:class:`StaleReleaseHash`);
+    this is how an already-staged legacy release becomes eligible again,
+    without retraining or re-uploading a single byte.
+
+    Refuses :class:`ReleaseNotStaged` if nothing is staged under
+    ``release_id``. Refuses :class:`StagingRefused` (``RELEASE_ID_REUSED``,
+    the same code :func:`stage_release` uses for the same condition) if the
+    EXISTING manifest does not verify under its OWN declared
+    ``release_hash_version`` first -- a corrupt or tampered manifest is
+    never a starting point for a rewrite. A manifest already at
+    ``RELEASE_HASH_SEMANTIC_V2`` is returned unchanged (idempotent no-op).
+    """
+    root = Path(root)
+    try:
+        existing = _read_manifest(root, release_id)
+    except (OSError, ValueError) as exc:
+        # _read_manifest's decode can raise a bare json.JSONDecodeError or
+        # engine.v2.foundation.typed.DocumentError (both ValueError
+        # subclasses), or a bare OSError racing the is_file() check --
+        # exactly the same failure family engine/v2/scoring/
+        # release_bindings.py's _read_and_verify_manifest already catches
+        # for the identical read. Never left to escape uncaught.
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="MANIFEST_UNREADABLE",
+            detail="the existing staged manifest could not be read",
+        ),)) from exc
+    if existing is None:
+        raise ReleaseNotStaged(release_id)
+    if existing.release.release_id != release_id:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="RELEASE_ID_MISMATCH",
+            detail=f"staged manifest at this path declares release_id "
+                    f"{existing.release.release_id!r}, not {release_id!r}",
+        ),))
+    if not _manifest_hash_matches(existing):
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="RELEASE_ID_REUSED",
+            detail="the existing staged manifest has an invalid release hash",
+        ),))
+    if existing.release_hash_version == RELEASE_HASH_SEMANTIC_V2:
+        return existing
+    rewritten = dataclasses.replace(
+        existing, release_hash=_release_hash(existing.release),
+        release_hash_version=RELEASE_HASH_SEMANTIC_V2,
+    )
+    _atomic_write_bytes(_manifest_path(root, release_id), _encode(rewritten))
+    return rewritten
+
+
 def resolve_release(root: Path, release_id: str) -> ModelRelease:
     """The exact staged ``ModelRelease`` for ``release_id`` — by id, not by pointer.
 
@@ -416,8 +563,11 @@ def _repair_history(root: Path) -> None:
 
 
 def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> PointerState:
-    if _read_manifest(root, release_id) is None:
+    manifest = _read_manifest(root, release_id)
+    if manifest is None:
         raise ReleaseNotStaged(release_id)
+    if manifest.release_hash_version != RELEASE_HASH_SEMANTIC_V2:
+        raise StaleReleaseHash(release_id, manifest.release_hash_version)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:
@@ -438,12 +588,21 @@ def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> Poi
 
 
 def promote(root: Path, release_id: str, *, clock: Clock = SystemClock()) -> PointerState:
-    """Atomically point ``DEPLOYED`` at ``release_id``. Refuses an unstaged release."""
+    """Atomically point ``DEPLOYED`` at ``release_id``.
+
+    Refuses an unstaged release (:class:`ReleaseNotStaged`) or one staged
+    under a superseded ``release_hash_version`` (:class:`StaleReleaseHash`)
+    -- see :func:`restage_semantic_hash`.
+    """
     return _swap_pointer(Path(root), release_id, "promote", clock)
 
 
 def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:
-    """Point ``DEPLOYED`` back at the release the current one was promoted from."""
+    """Point ``DEPLOYED`` back at the release the current one was promoted
+    from. Refuses :class:`NoPriorRelease` with nothing to roll back to, or
+    :class:`StaleReleaseHash` if THAT prior release is itself staged under
+    a superseded hash version.
+    """
     root = Path(root)
     current = current_pointer(root)
     if (current is None or current.previous_release_id is None
