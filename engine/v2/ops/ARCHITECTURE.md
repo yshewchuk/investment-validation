@@ -487,6 +487,17 @@ ever builds a `JobSpec`:
   matching `ScoringReleaseBinding`'s own documented contract that a second
   `resolve_release_binding` call always re-verifies fresh, never reuses a
   cached instance across a process boundary.
+  `production_release_root()` reads the `MODEL_RELEASE_ROOT` environment
+  variable directly, fresh on every call (`deployment.py:85`, `:161`) —
+  never from `.env`, a config file, or any cached value. The nightly
+  process that runs this sidecar (`ops serve`, the same OS process
+  `Service.tick` runs in) must have `MODEL_RELEASE_ROOT` set in ITS OWN
+  process environment before it starts; this design adds no second way to
+  configure it. Left unset (or pointed at a root with nothing `DEPLOYED`),
+  `production_release_root()` raises `MissingReleaseRoot`
+  (`deployment.py:110`) — R1 above — and legacy scoring, which never calls
+  `production_release_root`/`resolve_release_binding` at all, is
+  completely unaffected.
 - **Per-event raw rows (`#48`/PR-2, `#67`).** The builder enumerates
   `native_board_universe.board_requests(as_of, horizon_days, tickers,
   events_table)` (`native_board_universe.py:198`) against the SAME pinned
