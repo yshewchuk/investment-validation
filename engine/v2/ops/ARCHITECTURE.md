@@ -332,8 +332,9 @@ a submission source" rule Part 4 already established for
   job-bound inputs (`score.json` from the paired `"score"` job;
   `records.json`/`refusals.json` from the paired `native_score_batch` job
   — see "Inputs" below for exactly how `_native_parity_identity` finds
-  both), builds `legacy_rows`/`native_rows`/`native_refusals`, and branches
-  on whether `native_rows` is empty (below, `_empty_native_report`) before
+  both), builds `legacy_rows`/`native_rows`/`native_refusals`/
+  `unkeyable_refusals`, and branches on whether `legacy_rows` and
+  `native_rows` share any key (below, `_empty_native_report`) before
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
   This is the real (only) production caller `tools/native_parity_run.py`
@@ -344,38 +345,65 @@ a submission source" rule Part 4 already established for
   parallel manual path alongside the job. There is exactly one way a real
   `native_parity_report.json` gets produced in this codebase once Phase 2
   lands, not two.
-- **`native_parity_report._empty_native_report(legacy_rows, dimensions,
-  tolerance_policy) -> dict`** (new, private) — closes a real gap
-  `compare_native_vs_legacy`'s own `_refuse_empty_inputs` would otherwise
-  cause (CodeRabbit round 3, real finding): a night where `native_score_batch`
-  ran and EVERY row refused (plausible, even likely, while native coverage
-  is still partial — every row hits `UNSUPPORTED_STRATEGY` or similar)
-  leaves `native_rows` genuinely empty while `native_refusals` is fully
-  populated. Calling `compare_native_vs_legacy` in that state would hit its
-  UNCHANGED `_refuse_empty_inputs` check (`not native_rows` →
-  `VALIDATION_FAILED`) and fail the WHOLE job attempt — even though "every
-  legacy row's native counterpart was explicitly refused" is exactly the
-  reportable outcome `native_refused` (below) exists to carry, not a
-  missing-input failure. `run_native_parity_worker` therefore checks
-  `native_rows`/`native_refusals` BEFORE calling `compare_native_vs_legacy`
-  at all: if `native_rows` is empty AND `native_refusals` is non-empty
-  (every native row that existed was refused, not simply absent),
-  `_empty_native_report` builds the SAME dict shape
-  `compare_native_vs_legacy` would return for a would-be empty comparison
-  — `{"schema_version": SCHEMA_VERSION, "tolerance_policy_id":
+- **`native_parity_report._empty_native_report(legacy_rows, native_rows,
+  dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
+  gap `compare_native_vs_legacy`'s own row-sharing checks would otherwise
+  cause (CodeRabbit round 3; widened by an Opus gate finding, both real).
+  Two EXISTING, UNCHANGED checks inside `compare_native_vs_legacy` can both
+  fire even though a refusal fully explains the gap: `_refuse_empty_inputs`
+  (`not native_rows` → `VALIDATION_FAILED`) when native produced nothing at
+  all, and the function's own `if not compared: raise fail("VALIDATION_FAILED",
+  "native parity report shares no row key", ...)` (`native_parity_report.py:179`,
+  pre-existing, unchanged by this redo) whenever `legacy_rows` and
+  `native_rows` share NO key — which happens not only when `native_rows`
+  is empty, but also when `native_rows` is non-empty yet none of its keys
+  overlap `legacy_rows`'s (every row that would have overlapped was
+  instead refused). `run_native_parity_worker` therefore computes
+  `shared = set(legacy_rows) & set(native_rows)` BEFORE calling
+  `compare_native_vs_legacy` at all, and takes this path whenever `shared`
+  is empty AND EITHER `native_refusals` (keyed) OR `unkeyable_refusals`
+  (above) is non-empty — "some refusal exists to explain why nothing
+  matched," not "native_rows is empty." This covers every case the
+  narrower "`native_rows` empty" check alone would miss:
+  - **All refused, none keyable.** Every row refused `INVALID_KEY_FIELD`
+    (above): `native_rows` and the keyed `native_refusals` are BOTH empty,
+    but `unkeyable_refusals` is fully populated. The narrower check (only
+    testing keyed `native_refusals`) would wrongly fall through to a
+    normal `compare_native_vs_legacy` call and hit `_refuse_empty_inputs`.
+  - **Disjoint keys, native_rows non-empty.** Every legacy row's native
+    counterpart was refused (keyed or unkeyable), while `native_rows`
+    itself holds OTHER rows entirely (different tickers/strategies,
+    genuinely `only_native`) that share no key with `legacy_rows`. Because
+    `native_rows` is non-empty, `_refuse_empty_inputs` would not fire, but
+    `shared` is still empty, so the pre-existing "no shared key" check
+    (line 179 above) would — even though every legacy row's absence IS
+    explained by a refusal, exactly `native_refused`/`native_refused_unmatched`'s
+    (below) reportable outcome, not a missing-input failure.
+  - **All refused, keyable.** The ORIGINAL narrower case (`native_rows`
+    empty, keyed `native_refusals` fully populated): still covered, since
+    `shared` is trivially empty when `native_rows` is.
+
+  In every covered case, `_empty_native_report` builds the SAME dict shape
+  `compare_native_vs_legacy` would return for a would-be comparison with no
+  shared keys — `{"schema_version": SCHEMA_VERSION, "tolerance_policy_id":
   tolerance_policy.policy_id, "compared": [], "only_legacy":
-  sorted(legacy_rows), "only_native": [], "mismatches": []}` — WITHOUT
-  calling `compare_native_vs_legacy` (there is no numeric comparison to
-  make: nothing was scored), and `apply_native_refusals` runs on it exactly
-  as it would on a real comparison's output, narrowing `only_legacy` by
-  `native_refused` the identical way. If `native_rows` AND `native_refusals`
-  are BOTH empty (native_score_batch produced nothing at all — a genuinely
-  missing native input, not "every row refused"), or if `legacy_rows` is
-  empty, `run_native_parity_worker` calls `compare_native_vs_legacy`
-  normally and lets its EXISTING `_refuse_empty_inputs` raise
-  `VALIDATION_FAILED` — the correct outcome for THAT case is unchanged.
-  `compare_native_vs_legacy` itself gains no new parameter and no new
-  branch for this: the decision of which path to take is
+  sorted(legacy_rows), "only_native": sorted(native_rows), "mismatches":
+  []}` (unlike the original narrower version, `only_native` is NOT
+  hardcoded `[]`: because `shared` is empty by construction on this path,
+  EVERY key of `native_rows` is, by definition, `only_native` — never
+  `compared`, since nothing shared) — WITHOUT calling
+  `compare_native_vs_legacy` (there is no numeric comparison to make:
+  nothing shared was scored against anything), and `apply_native_refusals`
+  runs on it exactly as it would on a real comparison's output, narrowing
+  `only_legacy` by `native_refused`/`native_refused_unmatched` the
+  identical way. If `shared` is empty and BOTH `native_refusals` and
+  `unkeyable_refusals` are empty (native_score_batch produced nothing at
+  all AND refused nothing — a genuinely missing native input, nothing to
+  explain the gap), or if `legacy_rows` is empty, `run_native_parity_worker`
+  calls `compare_native_vs_legacy` normally and lets its EXISTING checks
+  raise `VALIDATION_FAILED` — the correct outcome for THAT case is
+  unchanged. `compare_native_vs_legacy` itself gains no new parameter and
+  no new branch for this: the decision of which path to take is
   `run_native_parity_worker`'s own, so `run_shadow_nightly`'s test-only
   path (which never has refusals to give it) is unaffected either way.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
@@ -937,7 +965,25 @@ material": `BoardRequest`'s own fields and
   collected-never-raised per-row mechanism `UNSUPPORTED_STRATEGY` already
   uses) the moment `"|"` appears in `key.ticker`, `key.strategy`, or
   `key.session` — BEFORE that row is ever encoded into `records.json`'s
-  own keys (which route through this one function). This makes the
+  own keys (which route through this one function).
+  **This check runs FIRST among `_assemble_one_event`'s per-row checks,
+  before `_calendar_row_problem`/`CALENDAR_ROW_INVALID` and every other
+  existing check in the "R1, missing input — per row" list below (Opus
+  gate finding, real gap).** `_board_request_key` reads only `key`
+  (`BoardRequest`'s own `ticker`/`strategy`/`session` fields, fixed at row
+  construction, never the staged `calendar_row`/`panel_row`), so it needs
+  no staged input to evaluate and has no ordering dependency on anything
+  that check list resolves; placing it first means a row whose key is
+  unsafe to encode is ALWAYS refused `INVALID_KEY_FIELD`, never one of the
+  other codes, even when that same row would independently also fail a
+  later check (a malformed `calendar_row`, an unsupported strategy, and so
+  on) — a row can be refused only once, so the FIRST check that trips
+  decides its code, and this ordering guarantees that code is always
+  `INVALID_KEY_FIELD` whenever the key itself is unsafe. Every check AFTER
+  this one — `_calendar_row_problem` included — can therefore assume
+  `key.ticker`/`key.strategy`/`key.session` are already known "|"-free and
+  need not re-validate them before their own encoding or comparisons. This
+  makes the
   `records.json` join a true bijection BY CONSTRUCTION for every row that
   DOES get a canonical key (none of the four source values feeding it can
   ever contain the separator, so encoding and
@@ -2001,6 +2047,14 @@ network, or database access.
   batch).** Once a release is in hand, every OTHER failure is scoped to one
   `BoardRequest` and collected as a `NativeScoreBatchRowRefusal` in the
   returned tuple, not raised:
+  - `INVALID_KEY_FIELD` (this redo, above) — `_board_request_key(key)`
+    raises the moment `"|"` appears in `key.ticker`/`key.strategy`/
+    `key.session`. This check runs FIRST, before every check below
+    INCLUDING `_calendar_row_problem` (below): it reads only `key`, needs
+    no staged `calendar_row`/`panel_row`, and a row that would also fail a
+    later check is refused `INVALID_KEY_FIELD` and only that, never the
+    later code, because the first check that trips is the one that
+    decides a row's refusal code.
   - `CALENDAR_ROW_INVALID` — the staged `calendar_row` itself is malformed:
     not a mapping at all (CodeRabbit round 5, PR #66 — a null/wrong-typed
     `calendar_row` in `events.json` would otherwise raise `AttributeError`
@@ -2012,8 +2066,11 @@ network, or database access.
     and which was previously unchecked before that point).
   - `CALENDAR_ROW_KEY_MISMATCH` — `calendar_row["ticker"]`/`calendar_row[
     "event_date"]` does not match the row's own `NightlyEventInputs.key`.
-    Both checks live in one helper (`_calendar_row_problem`) run first,
-    before every other per-row check: nothing else in this module or in
+    Both checks live in one helper (`_calendar_row_problem`) run first
+    among this module's PRE-EXISTING per-row checks — this redo's own
+    `INVALID_KEY_FIELD` (above) runs before even this one, since it does
+    not touch `calendar_row` at all — before every other per-row check:
+    nothing else in this module or in
     `assemble_nightly_source_bundle` (which only checks `panel_row` against
     `calendar_row`, never against the caller's `BoardRequest`) verifies
     that a staged `calendar_row` actually belongs to the key it was paired
@@ -2218,19 +2275,34 @@ hold, extended here rather than re-argued from scratch.
   `refusals.json` keys colliding on the same projected `population_key`
   (`_native_rows_and_refusals`, above), a `records.json`/`refusals.json`
   that fails to decode, or `compare_native_vs_legacy`'s own existing
-  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty `legacy_rows`, OR
-  on BOTH `native_rows` and `native_refusals` empty together, OR no shared
-  key) each fail the job's OWN attempt — never a partial or
-  synthetic-empty report. **One case is explicitly NOT this refusal
-  (CodeRabbit round 3, real finding):** `native_rows` empty while
-  `native_refusals` is non-empty — every native row `native_score_batch`
-  attempted was refused, not simply absent — is a legitimate reportable
-  outcome, not a missing-input failure. `run_native_parity_worker` checks
-  for this case BEFORE calling `compare_native_vs_legacy` and routes it
-  through `_empty_native_report` (above) instead, so a fully-refused batch
-  still produces a `native_parity_report.json` (with every legacy row
-  falling out of `only_legacy` into `native_refused` via
-  `apply_native_refusals`) rather than failing the attempt. This is a REAL
+  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty `legacy_rows`) OR
+  its own existing "no shared key" check (`native_parity_report.py:179`,
+  `if not compared: raise fail(...)`) each fail the job's OWN attempt —
+  never a partial or synthetic-empty report, EXCEPT in the cases named
+  below. **`shared = set(legacy_rows) & set(native_rows)` being empty is
+  explicitly NOT this refusal whenever a refusal explains it (CodeRabbit
+  round 3; widened by an Opus gate finding, both real):** an empty
+  `shared` with either the keyed `native_refusals` or the new
+  `unkeyable_refusals` (above) non-empty covers three cases — `native_rows`
+  empty while `native_refusals` is non-empty (every attempted row refused,
+  not simply absent); `native_rows` and keyed `native_refusals` BOTH empty
+  while `unkeyable_refusals` is fully populated (every row refused
+  `INVALID_KEY_FIELD`, so nothing was ever keyable to begin with); and
+  `native_rows` non-empty but sharing no key with `legacy_rows` because
+  every legacy-side counterpart was refused while native's other rows
+  belong to different tickers/strategies entirely — each a legitimate
+  reportable outcome, not a missing-input failure. `run_native_parity_worker`
+  checks for `shared` being empty (with a refusal to explain it) BEFORE
+  calling `compare_native_vs_legacy` and routes it through
+  `_empty_native_report` (above) instead in all three cases, so a batch
+  that shares nothing but has a refusal on record still produces a
+  `native_parity_report.json` (with every explained legacy row falling out
+  of `only_legacy` into `native_refused`/`native_refused_unmatched` via
+  `apply_native_refusals`) rather than failing the attempt. An empty
+  `shared` with BOTH `native_refusals` and `unkeyable_refusals` empty (a
+  genuinely missing native input, nothing on record to explain the gap)
+  still falls through to `compare_native_vs_legacy`'s existing checks and
+  fails the attempt, unchanged. This is a REAL
   join-format risk stated explicitly, not a defensive-only note:
   `population_key` and `_population_key_from_board_request_key` must
   format `event_date` identically (e.g. both an ISO date string, never one
