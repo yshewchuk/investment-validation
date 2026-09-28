@@ -73,10 +73,12 @@ changed by this PR.
   (a legacy record's flat fields; a native `resolved_request`/stage-value
   view) — never a file path, a store, or a network call. This package
   reads nothing from disk and touches no database.
-- `tolerance_policy`: a `TolerancePolicy` value object, always passed in
-  by the caller (a caller-owned config, never resolved from an
-  environment variable, a file, or a database row by this package
-  itself).
+- `tolerance_policy`: an optional keyword argument on both
+  `compare_dimension` and `compare_records`, defaulting to
+  `SCORE_RECORD_V1` when the caller omits it; a caller wanting a
+  different policy passes one in explicitly (a caller-owned config,
+  never resolved from an environment variable, a file, or a database
+  row by this package itself).
 
 ## Outputs
 
@@ -162,9 +164,13 @@ module. `compare_dimension` now takes `tolerance_policy` as a keyword
 argument (default `SCORE_RECORD_V1`, unchanged), and passes it straight
 through to `compare_records` (which already had this exact parameter,
 independently, and always did — only `compare_dimension`'s own wrapper
-was the fixed point). Every existing caller (`checks/phase4_real.py`,
-every test) passes none of them, so none of them can observe any change
-in behavior from this addition.
+was the fixed point). `checks/phase4_real.py` and most existing tests
+pass none of them and so cannot observe a behavior change; two tests in
+`tests/test_v2_ops_native_shadow_render.py`, though —
+`test_native_parity_handler_threads_tolerance_policy_into_written_report`
+and `test_tolerance_policy_is_threaded_through_compare_dimension_and_report`
+— DO pass an explicit `tolerance_policy`, which proves the new keyword
+is really threaded through rather than merely accepted and ignored.
 
 **Per-field tolerances come from ONE config policy — the
 `TolerancePolicy` type already defined in `tolerance.py` — never a
@@ -233,8 +239,12 @@ flowchart LR
     DIAG -. re-exports .-> REC
 ```
 
-`compare_dimension` is the one entry point both real production consumers
-call; `compare_records` underneath it is the actual comparator, and
+`compare_dimension` is the one entry point every caller in the diagram
+uses; `checks/phase4_real.py` calls it in production today, while
+`engine/v2/ops/native_parity_report.py` imports it too but currently has
+only test callers of its own, not a production one — see
+`engine/v2/ops/ARCHITECTURE.md` for that detail. `compare_records`
+underneath it is the actual comparator, and
 `tolerance_policy` (the new pluggable seam) flows from the caller, through
 `compare_dimension`, into `compare_records`, never resolved or defaulted
 inside `compare_records` itself beyond its own existing

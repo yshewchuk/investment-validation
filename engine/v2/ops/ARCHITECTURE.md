@@ -1544,15 +1544,18 @@ into `engine.dashboard.nightly`.
   own R6; `build_native_bundle_rows`'s `score_one` calls are
   content-addressed), and `compare_native_vs_legacy` is a pure function of
   `(legacy_rows, native_rows, dimensions, row_explanations, tolerance_policy)`.
-  `tolerance_policy` defaults to `SCORE_RECORD_V1` and is not itself
-  content-addressed into the report, so a caller that changes it without
-  changing anything else gets a different report for the same inputs — a
-  deliberate policy change producing a different comparison, not a
-  violation of this invariant. Promoting a
-  new release between two runs changes the resolved bindings and therefore
-  the native side's values — a different release genuinely producing a
-  different report is the correct, by-design outcome, matching PR-3's own
-  R6 note for the identical reason.
+  `tolerance_policy` defaults to `SCORE_RECORD_V1` and the report records
+  only `tolerance_policy_id`, never the policy's own rules, so a change
+  is guaranteed a different report only when it changes the resulting
+  comparison outcome or changes `policy_id` itself; a policy object
+  swapped for a different one that happens to keep the same `policy_id`
+  and produce the same comparison result yields the same report. A
+  deliberate policy change producing a different comparison is the
+  correct, by-design outcome, not a violation of this invariant.
+  Promoting a new release between two runs changes the resolved bindings
+  and therefore the native side's values — a different release genuinely
+  producing a different report is the correct, by-design outcome,
+  matching PR-3's own R6 note for the identical reason.
 
 ## Invariants
 
