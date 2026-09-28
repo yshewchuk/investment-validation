@@ -276,7 +276,15 @@ third-party service. `hashlib.sha256` for every content hash;
   promotions back, never ping-ponging between two ids. `NoPriorRelease`
   is refused when fewer than two ids remain on the replayed stack — the
   same case the old `current.previous_release_id is None` check covered,
-  now correct across chained rollbacks too. The new `PointerState` written
+  now correct across chained rollbacks too. `rollback` also refuses
+  `StagingRefused` in three cases the replay itself cannot silently paper
+  over: `HISTORY_UNREADABLE` when `pointer_history(root)` cannot be read or
+  parsed at all; `HISTORY_SEQUENCE_GAP` when the on-disk history's sequence
+  numbers are not exactly contiguous `0..len(history)-1` (a lost or
+  duplicated entry); and `HISTORY_INCONSISTENT` when the replayed stack's
+  top does not match what `DEPLOYED` currently says is live (the history
+  and the pointer have diverged). All three stop the rollback rather than
+  guess at a target from data that can no longer be trusted. The new `PointerState` written
   by a rollback still sets `previous_release_id` to the id it is replacing
   (the release being rolled away from), exactly like a promote — only the
   TARGET selection changed, not the record shape.

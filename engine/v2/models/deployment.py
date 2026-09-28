@@ -716,6 +716,11 @@ def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:
     from. Refuses :class:`NoPriorRelease` with nothing to roll back to, or
     :class:`StaleReleaseHash`/:class:`CorruptManifest` if THAT prior release
     is itself staged under a superseded hash version or a tampered manifest.
+    Also refuses :class:`StagingRefused` when a recorded pointer-history
+    entry can't be read (``HISTORY_UNREADABLE``), the replayed sequences
+    aren't exactly contiguous (``HISTORY_SEQUENCE_GAP``), or the top of the
+    replayed history disagrees with the release ``DEPLOYED`` actually names
+    (``HISTORY_INCONSISTENT``).
     """
     root = Path(root)
     _repair_history(root)
