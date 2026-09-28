@@ -627,7 +627,18 @@ completeness fixes, all in `incremental.py` unless noted:
   unit's `expected_keys`, so two different requested-key sets over the same
   raw payload get distinct normalization identities and never collide; a
   replay with the identical `expected_keys` still hits the same id and its
-  existing cache-hit/conflicting-content check, unchanged.
+  existing cache-hit/conflicting-content check, unchanged. This alone is not
+  enough: `data_normalizations` also carries a DB-level `UNIQUE (raw_hash,
+  normalizer_id, contract_id)` from schema migration v10, predating
+  `normalization_id` varying with `expected_keys`, which still refuses the
+  second row outright (a raw `sqlite3.IntegrityError`, not the application's
+  own `IDENTITY_CONFLICT`) even once its `normalization_id` correctly
+  differs. Migration v13 drops that stale constraint: `normalization_id`
+  (the primary key) is already the sole identity `cache_normalization`'s own
+  conflicting-content check uses, so the coarser triple no longer needs to
+  be unique on its own. Migrations are checksummed and immutable once
+  applied (`engine/v2/ops/migrations.py`), so this is a new migration, never
+  an edit to v10's own statements.
 - **Coverage `expected` comes from the unit's requested keys, never from
   the rows that happened to come back.** `_fetched_unit_rows` built
   `_FetchedUnit.expected` from `_coverage_key(item) for item in
