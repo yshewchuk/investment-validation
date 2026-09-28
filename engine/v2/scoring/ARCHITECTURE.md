@@ -448,14 +448,22 @@ raises it).
 
 Reachability: `frozen_batch.score_frozen_batch` is the Phase 6 production
 frozen batch boundary this scoping will protect (it has no `engine/v2/ops`
-caller yet). `checks/phase4_real.py`, `tools/phase4_targeted_replay.py`,
-`checks/phase5_phase4_replay.py` and `tools/capture_tier0_corpus.py` each
-call `score_frozen` too, but already build a per-record `ModelRelease`
-holding only the bindings selected for that one record (its own
-strategy's, plus any `"*"`-strategy binding it shares) — once wildcard
-bindings are honored, scoping stays a no-op for them (the filtered set
-equals the input set). `native_score_batch` goes through `score_one`,
-never `score_frozen`, and is unaffected.
+caller yet). `checks/phase4_real.py`, `tools/phase4_targeted_replay.py` and
+`checks/phase5_phase4_replay.py` validate request-compatible bindings
+before calling `score_frozen` (their own binding-selection path rejects a
+selected binding whose `strategy_id` is neither the request's own nor
+`"*"`, or whose `decision_clock_id` differs), so scoping is a no-op for
+them once wildcard bindings are honored — the filtered set already equals
+the input set. `tools/capture_tier0_corpus.py` also calls `score_frozen`,
+but its release is built from `source["model_bindings"]` via
+`package_frozen_resources`, which only enforces that its OWN bindings share
+one strategy and decision clock with EACH OTHER — it never compares either
+value against the request being scored. Scoping is therefore a no-op for
+capture only when its source bindings happen to be request-compatible; a
+capture candidate whose bindings target a different strategy or clock than
+the request would have its non-matching bindings scoped out, which capture
+does not do today. `native_score_batch` goes through `score_one`, never
+`score_frozen`, and is unaffected.
 
 ### `release_bindings.py` (the 4c R1–R6 template)
 
