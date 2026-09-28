@@ -649,13 +649,26 @@ idempotent-replay shortcut too.
   `fence`, `scope`, and resulting `snapshot_id` as the stored row) —
   anything else stored under that `receipt_id` is `IDENTITY_CONFLICT`. As
   covered in R3 above, `fence_check` always runs before this shortcut is
-  even looked up, so a cancelled or lease-expired attempt cannot ride a
-  same-`receipt_id` replay past the attempt-fence check either — and,
-  specifically through `commit_generic_table_candidate`'s composed
-  `_head_fence`, a same-attempt replay of a commit that *did* move the head
-  cannot reach this shortcut at all: it is refused with `SNAPSHOT_CONFLICT`
-  first. The shortcut is reachable through that composed path only when the
-  original commit was already a no-op.
+  even looked up — but what that buys a replay depends entirely on what the
+  caller's own `fence_check` actually checks, since `commit_snapshot` skips
+  its own `_check_head_expectation` on a matching replay for every caller
+  alike (`catalog.py:488-492`), not only the composed one. Through
+  `commit_generic_table_candidate`'s composed `_head_fence`, a same-attempt
+  replay of a commit that *did* move the head cannot reach this shortcut at
+  all — it is refused with `SNAPSHOT_CONFLICT` first, so the shortcut is
+  reachable through that path only when the original commit was already a
+  no-op — and a cancelled or lease-expired attempt cannot ride a
+  same-`receipt_id` replay past the composed `verify_fence` check either.
+  Neither guarantee holds for `computed_moves_store.py`/
+  `price_history_store.py`'s direct `catalog.commit_snapshot` calls, whose
+  own `fence_check` never inspects the head at all (see the fence-
+  composition diagram's note, above): a matching replay there returns the
+  prior receipt even if the head has moved since, and — for
+  `price_history_store.py`'s hard-coded no-op, or `computed_moves_store.py`
+  with no attempt staged — nothing at the fence step refuses a cancelled or
+  lease-expired attempt's replay either; the shortcut's own exact-match
+  requirement on `request_hash`/`attempt_id`/`fence`/`scope`/`snapshot_id`
+  is these two callers' only protection against an unwanted replay.
 
 ### `repository.py` — read paths (R1–R6 summary)
 
@@ -846,7 +859,7 @@ flowchart TD
     CS --> STEP1{"fence_check(conn)  -- ALWAYS first,\nbefore the shortcut lookup"}
     STEP1 -->|"mismatch (e.g. head moved\nsince caller's static expectation)"| REFUSED["raise immediately --\nSNAPSHOT_CONFLICT / CANCELLED / LEASE_LOST;\nnothing written, shortcut never looked up"]
     STEP1 -->|match| STEP2["_existing_receipt: same\nreceipt_id/request_hash/attempt_id/\nfence/scope/snapshot_id?"]
-    STEP2 -->|"yes: idempotent replay\n(only reachable when the original\ncommit was a no-op -- head never\nmoved, so the static expectation\nstill matches)"| RETURN_SHORTCUT["return prior receipt\n(commit_snapshot's OWN\n_check_head_expectation is\nskipped here -- but the fence\nabove already ran and passed)"]
+    STEP2 -->|"yes: idempotent replay\n(what this guarantees depends on\nthe caller's own fence_check --\nsee note below)"| RETURN_SHORTCUT["return prior receipt\n(commit_snapshot's OWN\n_check_head_expectation is skipped\nhere for EVERY caller, not only\nthe composed-_head_fence one)"]
     STEP2 -->|no| HEADCHECK["_check_head_expectation\n(SNAPSHOT_CONFLICT on mismatch)"]
     HEADCHECK --> INSERTS["idempotent inserts,\nreceipt, record_references,\nhead CAS"]
     INSERTS --> COMMIT["COMMIT"]
@@ -858,7 +871,24 @@ straight into `catalog.commit_snapshot`'s own `fence_check` parameter with
 no `_head_fence` composition in front of it, unlike every path shown above
 that runs through `commit_generic_table_candidate`. `price_history_store.py`
 goes further still: it passes `fence_check=lambda c: None`
-(`price_history_store.py:634`) — a genuine no-op — so it has no attempt-lease
-check at all through this parameter, relying entirely on
-`commit_snapshot`'s own `expected_head_snapshot_id`/`expected_head_generation`
-compare-and-swap for conflict detection.
+(`price_history_store.py:634`) — a genuine no-op.
+
+Neither module's `fence_check` ever inspects the head, so **the "only
+reachable when the original commit was a no-op" replay guarantee is
+specific to the `commit_generic_table_candidate` path's composed
+`_head_fence`**, not a property of `commit_snapshot` itself:
+`commit_snapshot` skips its own `_check_head_expectation` on a matching
+replay for every caller alike (`catalog.py:488-492`), so for these two
+direct callers, a matching replay (same `request_hash`/`attempt_id`/
+`fence`/`scope`/resulting `snapshot_id`) returns the prior receipt even if
+the head *has* moved since the original call — the static
+"expectation still matches" property the composed path relies on for its
+guarantee simply does not exist here, since neither direct caller's
+`fence_check` ever compares against the head. `computed_moves_store.py`'s
+`verify_fence` (when an attempt is staged) still refuses a cancelled or
+lease-expired attempt's replay at the fence step, same as through the
+composed path; `price_history_store.py`'s hard-coded no-op refuses nothing
+at the fence step at all — its only protection against an unwanted stale
+replay is that the shortcut itself only fires on a byte-identical
+`request_hash`/`attempt_id`/`fence`/`scope`/`snapshot_id` match (R6, above),
+never on a merely similar one.
