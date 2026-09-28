@@ -4285,14 +4285,23 @@ this design adds no new auto-retry-past-a-failure logic).
   checked FIRST, before anything else (Opus gate finding: round 2's fix
   made every id/key a function of the LIVE pointer, which a successful
   promote itself moves, so without this check the cycle restages and
-  repromotes the SAME `as_of` forever).** Does nothing if
-  `deployment.current_pointer`'s own
-  `release_id` already starts with the literal prefix `"nightly-<as_of>-"`
-  — that prefix can only ever be produced by THIS `as_of`'s own nightly
-  cycle already having promoted (see `new_release_id`'s naming rule below),
-  so a live pointer already carrying it means this `as_of` is DONE; no
-  training/stage/promote step for it runs again until a later `as_of`
-  starts a new cycle. Otherwise, does nothing until all six `training` jobs
+  repromotes the SAME `as_of` forever).** Does nothing if BOTH:
+  `deployment.current_pointer`'s own `release_id` starts with the literal
+  prefix `"nightly-<as_of>-"`, AND a STATE catalog exists and
+  self-verifies for that `release_id` (`_read_state_catalog`'s existing
+  checks, the SAME ones `derive_catalog`'s own R1 already reuses — no new
+  check invented). **The prefix alone is not enough (CodeRabbit finding,
+  confirmed): a manually staged, prefix-matching release_id like
+  `"nightly-<as_of>-manual"` would satisfy a prefix-only check without
+  ever having gone through `phase5_state_stage`/`derive_catalog` at all.**
+  A plain `stage_release`/`promote` (MODEL side only, the existing manual
+  operator path) never writes a STATE catalog — only `derive_catalog`
+  does — so requiring one to exist AND self-verify means only a release
+  genuinely produced by `phase5_state_stage` (whether the automatic
+  sidecar submitted it, or an operator submitted the SAME job kind by
+  hand — either is a genuine completion of this `as_of`'s cycle) can ever
+  satisfy this check; an unrelated manually-staged, coincidentally-named
+  release cannot. Otherwise, does nothing until all six `training` jobs
   keyed to this `as_of` have `succeeded`; then submits ONE new job kind,
   `phase5_state_stage` (below), keyed
   `"nightly:<as_of>:pool_stage:<prior_release_id>"`, naming the six jobs'
