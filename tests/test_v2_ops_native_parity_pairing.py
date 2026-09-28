@@ -62,6 +62,14 @@ def test_legacy_parity_rows_rejects_empty_field():
     assert exc.value.problem.details["field"] == "ticker"
 
 
+def test_legacy_parity_rows_rejects_non_string_field():
+    with pytest.raises(OpsError) as exc:
+        legacy_parity_rows({"rows": [{"ticker": 123, "strategy": "S",
+                                      "event_date": "2026-01-01"}]})
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.problem.details["field"] == "ticker"
+
+
 def test_legacy_parity_rows_rejects_duplicate_key():
     with pytest.raises(OpsError) as exc:
         legacy_parity_rows({"rows": [

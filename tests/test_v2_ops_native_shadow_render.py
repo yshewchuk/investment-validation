@@ -330,6 +330,23 @@ def test_native_parity_handler_status_is_explicit_and_the_report_is_separate(tmp
     assert report["mismatches"] == []
 
 
+def test_native_parity_handler_report_always_carries_v1_1_refusal_fields(tmp_path):
+    """v1.1: the handler's written report always carries the additive
+    refusal fields, even though this handler has no refusal inputs."""
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    report_path = tmp_path / "parity_report.json"
+
+    native = native_parity_handler(
+        _NATIVE_PLAN, legacy_rows={key: dict(row) for key, row in rows.items()},
+        native_rows=rows, report_path=report_path)({"session": _EVENT_DATE})
+    assert native["native_parity"]["status"] == "compared"
+
+    report = json.loads(report_path.read_text())
+    assert report["schema_version"] == "native_parity_report.v1.1"
+    assert report["native_refused"] == []
+    assert report["native_refused_unmatched"] == []
+
+
 def test_native_parity_handler_threads_tolerance_policy_into_written_report(tmp_path):
     """The report file on disk carries the caller's tolerance_policy_id,
     not just the in-memory return value."""

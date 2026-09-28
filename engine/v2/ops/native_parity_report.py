@@ -314,6 +314,7 @@ def native_parity_handler(
             return {**value, "native_parity": {"status": "not_applicable"}}
         report = compare_native_vs_legacy(
             legacy_rows, native_rows, dimensions, tolerance_policy=tolerance_policy)
+        report = apply_native_refusals(report, {}, ())
         write_parity_report(report, path)
         return {**value, "native_parity": {
             "status": "compared",

@@ -74,7 +74,8 @@ def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:
     required = ("ticker", "strategy", "event_date")
     for index, row in enumerate(rows):
         for field_name in required:
-            if not row.get(field_name):
+            value = row.get(field_name)
+            if not isinstance(value, str) or not value:
                 raise fail("VALIDATION_FAILED", "legacy parity row missing required field",
                            details={"index": index, "field": field_name})
     keys = [population_key(row) for row in rows]
