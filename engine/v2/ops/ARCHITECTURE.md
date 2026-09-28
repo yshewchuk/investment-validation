@@ -3197,7 +3197,13 @@ this design adds no new auto-retry-past-a-failure logic).
 - `submit_pool_nightly_promote_if_ready(as_of)` — does nothing until the
   `phase5_state_stage` job keyed to this `as_of` has `succeeded`; then
   submits the EXISTING `models_promote` job kind (unchanged) for the
-  `release_id` that job staged, keyed `"nightly:<as_of>:pool_promote"`.
+  `release_id` that job staged, keyed
+  `"nightly:<as_of>:pool_promote:<prior_release_id>"` — naming
+  `prior_release_id`, not only `as_of`, for the SAME reason the stage key
+  does (Opus gate finding, one phase later than the CodeRabbit finding
+  above): see "recovery after a stale promote" below for why a
+  `pool_promote` key of `as_of` alone would make a `StaleExpectedRelease`
+  refusal permanent for that `as_of`.
 
 **The one new job kind: `phase5_state_stage`.** A `"delivery"`-class job
 (like `models_promote`, not `"experiment_heavy"` — it does no ML fitting,
@@ -3205,7 +3211,12 @@ only hashing and small-file I/O over outputs the six `training` jobs
 already computed), worker `"phase5_state_stage"`, checkpoint contract
 `"phase5_state_stage_result.v1.0"`, parameters
 `{prior_release_id, new_release_id, as_of, training_job_ids: tuple[str,
-...]}`. Its worker:
+...]}`. `new_release_id = "nightly-<as_of>-<prior_release_id>"`,
+`submit_pool_nightly_stage_if_ready`'s own choice (Opus gate finding: an
+`as_of`-only id, the obvious default, is what makes "recovery after a
+stale promote" below impossible — naming `prior_release_id` inside the id
+itself, not only in the dedup key, is what lets a retry under a new prior
+mint a release the old, now-stale one never occupied). Its worker:
 
 1. Reads each named `training` job's checkpointed outputs (the frozen-state
    JSON files under that attempt's `training/` output directory —
@@ -3230,7 +3241,10 @@ already computed), worker `"phase5_state_stage"`, checkpoint contract
    input currently holds, not a confirmed append of newly-settled events.
    The scope language above and the root doc reflect this — neither claims
    the chooser pool grows nightly, only that this step re-derives its row.
-3. Calls `checks.phase5_release.derive_catalog` (models doc §7.7) with
+3. Calls `deployment.derive_catalog` (models doc §2/§7.7 — moved into
+   `deployment.py` itself, not `checks/phase5_release.py`, precisely so
+   this `engine/v2/ops` worker can call it: `checks/import_layers.py`
+   refuses any v2-to-`checks` import, and this is that import) with
    `changed_rows` built from steps 1–2, then `deployment.
    carry_forward_release` (models doc §7.6) — **refusing, before either
    write, if `current_pointer` no longer names `prior_release_id`**
@@ -3328,6 +3342,34 @@ operator workflow), checked at the SAME point `_swap_pointer` already
 reads `previous = current_pointer(root)` (`deployment.py:572`), refusing
 `StaleExpectedRelease(expected, actual)` (a new `DeploymentError`
 subclass) before the pointer write, if the live value disagrees.
+
+**Recovery after a stale promote is refused (Opus gate finding: the
+design did not say, and an `as_of`-only key/id would make it impossible).**
+`StaleExpectedRelease` means `phase5_state_stage` already succeeded and
+`new_release_id` is already durably staged, carrying forward the NOW-STALE
+`prior_release_id`'s bindings — that staged release is simply abandoned,
+never promoted, never retried, never cleaned up (it is inert, harmless,
+content-addressed waste, the same as any other staged-but-never-promoted
+release). The reconcile's next tick re-evaluates
+`submit_pool_nightly_stage_if_ready` for the SAME `as_of` from scratch: it
+reads `current_pointer` fresh, gets a NEW `prior_release_id` (the one the
+concurrent promote just installed), and computes a NEW `new_release_id =
+"nightly-<as_of>-<new_prior_release_id>"` — genuinely new because the id
+itself names `prior_release_id`, so it can never collide with the
+abandoned release's id, and `phase5_state_stage`'s own dedup key
+(`"nightly:<as_of>:pool_stage:<prior_release_id>"`) is likewise fresh. The
+whole stage → promote cycle for that `as_of` reruns end to end under the
+new prior; `derive_catalog`/`carry_forward_release` never see the old
+`new_release_id` again, so their own same-content-no-op /
+different-content-refuse rule (models doc §7.6/§7.7 R3) never has a
+different-content collision to refuse. Had `new_release_id` been keyed by
+`as_of` alone (the obvious, and wrong, default), this retry would try to
+stage genuinely different content — different carried-forward bindings —
+under the SAME id the abandoned release already occupies, and
+`derive_catalog`'s R3 would refuse it forever: that `as_of` could never
+promote again without manual intervention. This is the same class of
+defect the owner already fixed for the stage key (CodeRabbit, above), one
+phase later.
 
 **What this guard is, and is not (CodeRabbit finding: the original wording
 overstated it).** This check is NOT a compare-and-swap primitive, and
@@ -3455,7 +3497,21 @@ separate PRs, above).**
 2. Add `deployment.promote`'s `expected_previous_release_id` parameter
    (models doc §7.2's "Further extension") — a standalone, backward-
    compatible safety fix, independently valuable to the existing manual
-   operator workflow, not only to this design's automation.
+   operator workflow, not only to this design's automation. Propagating a
+   caller's value all the way to `deployment.promote` needs three more
+   changes in this same step (Opus gate finding: without them the
+   parameter can never reach the worker call site) — `training.py`'s
+   `PromoteParameters` gains one new field,
+   `expected_previous_release_id: str | None = None` (backward-compatible:
+   every existing `models_promote` submission omits it and gets today's
+   behavior, an unconditional promote); `promote_plan(*, release_root,
+   release_id, expected_previous_release_id=None)` gains the matching
+   keyword argument and threads it into the `PromoteParameters(...)` it
+   builds; `run_promote_worker` reads
+   `parameters.get("expected_previous_release_id")` and passes it as
+   `deployment.promote`'s own `expected_previous_release_id` keyword.
+   Step 5 below is the only caller that ever passes a non-`None` value;
+   today's manual `ops submit models_promote` still omits it.
 3. Extract `frozen_state_payloads`/`chooser_pool_payloads`/`write_object`-
    based assembly out of `tools/phase5_prepare_release.py` into a library
    module both it and the new worker call; add `carry_forward_release`

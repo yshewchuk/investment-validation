@@ -67,7 +67,8 @@ pool/residual refresh". Nothing resubmits any of these on a cadence today — "t
 path that creates one is a `submit` an operator ran by hand"
 (`run_promote_worker`'s own docstring, which is equally true of `training`).
 This design's own new code is entirely on the STATE side —
-`checks.phase5_release.derive_catalog` (§2/§7.7) — plus one small, new MODEL-
+`deployment.derive_catalog` (§2/§7.7 — moved here from `checks/
+phase5_release.py`; see §4's revised note) — plus one small, new MODEL-
 side primitive, `deployment.carry_forward_release` (§2/§7.6), because the
 nightly cycle never changes a `ModelBinding` at all (that is cutover PR-13b's
 monthly retrain).
@@ -140,12 +141,29 @@ this PR:
   ONLY by the nightly reconcile, which changes no binding; cutover PR-13b's
   monthly retrain still calls `stage_release` directly, with a real,
   freshly-built inventory, because it does change bindings. See §7.6.
-- `checks.phase5_release.derive_catalog(release_root, prior_release_id,
+- `deployment.derive_catalog(release_root, prior_release_id,
   new_release_id, changed_rows, *, clock) -> Path` **(proposed, cutover
-  PR-13a design, not yet implemented; lives beside the existing
-  `write_manifest`/`manifest_body`/`STATE_SPECS` in `checks/
-  phase5_release.py`, not in this package — see §4's existing note that the
-  state catalog write is that module's job, never `deployment.py`'s)** —
+  PR-13a design, not yet implemented; lives HERE, in `deployment.py` — a
+  package-boundary fix this design makes, not just a new function (Opus
+  gate finding: the proposed caller is a NEW `engine/v2/ops` worker, and
+  `checks/import_layers.py` refuses any v2-to-`checks` import, so this
+  function can never live in `checks/phase5_release.py` the way §4's OLD
+  note assumed). Cutover PR-13a's first code PR moves the small set of
+  catalog primitives it needs — `StateSpec`/`STATE_SPECS`, `MANIFEST_NAME`,
+  `manifest_body`, `write_manifest`, `read_manifest`, `member_row`,
+  `deployment_root`, `object_relpath`, `write_object`, `sha256_bytes`, and
+  `ReleaseLayoutError` (now a `DeploymentError` subclass, see §7.7) — from
+  `checks/phase5_release.py` into this module too, alongside it.
+  `checks/phase5_release.py` re-exports every one of them UNCHANGED by
+  name, so none of its five existing importers (`tools/
+  phase5_prepare_release.py`, `tools/phase5_calibration_keys.py`, `checks/
+  phase5_acceptance.py`, `checks/phase5_consumers.py`, `checks/
+  phase5_phase4_replay.py`) needs an import-line change — this package now
+  OWNS writing/reading its own release catalog, the same way it already
+  owns `manifest.json`; `checks/phase5_release.py` becomes a thin
+  compatibility re-export, matching the direction the layer rule already
+  requires (verification code MAY depend on this package; this package may
+  never depend on `checks`))** —
   read the prior release's own state catalog (`phase5_release.json`, §4's
   updated, per-`release_id` path — a prerequisite fix this design's first
   code PR makes, see the ops doc), replace the rows named in `changed_rows`
@@ -205,7 +223,7 @@ non-model state) — never by opening a staged object file directly outside
   `restage_semantic_hash` — no payload bytes (every member is already
   durably written under its unchanged `content_hash`), no inventory, no
   training-job output.
-- **`checks.phase5_release.derive_catalog`** (proposed, cutover PR-13a): the
+- **`deployment.derive_catalog`** (proposed, cutover PR-13a): the
   prior release's own state catalog body (read fresh, self-hash-verified
   the same way `release_bindings._read_state_catalog` verifies it today)
   plus the freshly content-addressed nightly training-job outputs named in
@@ -227,18 +245,27 @@ non-model state) — never by opening a staged object file directly outside
   other file under the release store is ever touched by this function.
 - Every non-model frozen-state builder (`training/residuals.py`,
   `training/chooser_pool.py`, …) returns an immutable dataclass; the
-  release/state catalog write (`phase5_release.json`) is `checks/
-  phase5_release.py`'s job, not this package's — this package only defines
+  release/state catalog write (`phase5_release.json`) was `checks/
+  phase5_release.py`'s job, not this package's — this package only defined
   the artifact TYPEs and the verified loaders that later read them back.
+  **Revised, cutover PR-13a's first code PR (Opus gate finding):** that
+  split no longer holds once a production caller (the new `engine/v2/ops`
+  nightly worker) needs to WRITE this catalog — `checks/import_layers.py`
+  refuses any v2-to-`checks` import, so a production writer cannot call
+  into `checks/phase5_release.py`. The catalog primitives move here (see
+  §2's `derive_catalog` entry for the full list); `checks/phase5_release.py`
+  keeps re-exporting all of them for its own five existing importers, so
+  the state catalog's SCHEMA is unchanged, only which package owns writing
+  and reading it.
 - **`carry_forward_release`** (proposed, cutover PR-13a): one new,
   immutable `manifest.json` under `<root>/releases/<new_release_id>/` —
   identical bindings to the prior release's manifest, only `release_id`
   differs. No new object under `<root>/objects/`.
-- **`derive_catalog`** (proposed, cutover PR-13a; the write itself is
-  `checks/phase5_release.py`'s, per the note above — named here because it
-  changes where this package's own state catalog lives): today
+- **`derive_catalog`** (proposed, cutover PR-13a; the write is now this
+  package's own, per the revised note above — it changes where this
+  package's own state catalog lives): today
   `phase5_release.json` sits at ONE path per release ROOT
-  (`checks/phase5_release.py`'s `MANIFEST_NAME`, joined directly under the
+  (`MANIFEST_NAME`, joined directly under the
   root `tools/phase5_prepare_release.py --out` is given), sharing that one
   file across every `release_id` ever staged under that root — `deployment.
   rollback` swaps only the `DEPLOYED` pointer and never touches it
@@ -546,11 +573,12 @@ implemented; MODEL side only — see §1's "why nightly does not...")
   re-serializes, or otherwise perturbs a binding; only `release_id`
   differs.
 
-### 7.7 `checks.phase5_release.derive_catalog` (proposed, cutover PR-13a
-design, not yet implemented; STATE side. Lives in `checks/
-phase5_release.py`, not this package, so its refusal is a
-`ReleaseLayoutError`, that module's own type, not a `DeploymentError`
-subclass)
+### 7.7 `deployment.derive_catalog` (proposed, cutover PR-13a
+design, not yet implemented; STATE side. Lives HERE, in `deployment.py`
+(moved from the original design's `checks/phase5_release.py` placement —
+Opus gate finding, see §2/§4), so its refusal is `ReleaseLayoutError`
+(unchanged name, now a `DeploymentError` subclass defined in this module;
+`checks/phase5_release.py` re-exports it for its existing catchers)
 
 - **R1, missing input.** Refuses if the prior release's own catalog cannot
   be read, or fails its own `manifest_hash`/`release_id` self-check
@@ -558,8 +586,9 @@ subclass)
   release_id, not reimplementing them). Refuses if any key in
   `changed_rows` does not name a `member_id` `STATE_SPECS` declares.
   Refuses if any CARRIED-OVER row's object path cannot be found under
-  `deployment_root(release_root)/objects/` (`checks/phase5_release.py`'s own
-  `deployment_root`/`object_relpath` — the ONE content-addressed store
+  `deployment_root(release_root)/objects/` (this module's own
+  `deployment_root`/`object_relpath`, moved here from `checks/
+  phase5_release.py` — see §2/§4 — the ONE content-addressed store
   every release staged under this root writes into and shares; moving the
   catalog file to a per-`release_id` path, §1/§4, does not move this
   store).
@@ -590,9 +619,9 @@ subclass)
   already exists, the caller reads it back and compares it, byte-for-byte,
   to the body this call would otherwise write — identical content is a
   no-op (the existing file is left alone, untouched, never rewritten);
-  different content refuses `ReleaseLayoutError` — `checks/
-  phase5_release.py`'s own plain `ValueError` subclass, with no typed
-  `.code` field the way `DeploymentError` subclasses have one — naming the
+  different content refuses `ReleaseLayoutError` — now a `DeploymentError`
+  subclass defined in this module (moved from `checks/phase5_release.py`'s
+  own plain `ValueError` subclass; §2/§4), naming the
   same "this release id is already taken by different content" condition
   `stage_release`'s `RELEASE_ID_REUSED` names.
 - **R4, transaction.** One atomic write (temp + fsync + rename, matching
