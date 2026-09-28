@@ -67,6 +67,19 @@ owner = "P6-6"
 notes = "Not in _DAG_STAGES, so the default plan omits it before NO_JOB_STAGES ever runs; only include_prerequisites=True starts from plan[\"order\"] (which does include it) and NO_JOB_STAGES filters it out there. Neither planning path ever submits it as a job; only run_shadow_nightly (test-only, walks the whole GRAPH inline) executes it. See engine/v2/ops/ARCHITECTURE.md's native_parity discussion."
 
 [[row]]
+id = "nightly-native-score-batch"
+area = "nightly"
+capability = "Native score-batch shadow submission: tick-loop sidecar builds/submits native_score_batch jobs once cutover PR-6's raw-row producer lands"
+old = []
+new = ["nightly:v2 native_score_batch", "py:engine/v2/ops/nightly.py::submit_native_score_batch_shadow_if_ready"]
+producer = "supervisor.Service's own tick loop calls submit_native_score_batch_shadow_if_ready via _reconcile_native_score_batch_shadow, gated on a verified production model release root; the still-missing cutover PR-6 raw-row producer means this always returns None or raises today, never reaching submission.submit"
+identity = "job idempotency key nightly:<as_of>:<scope_hash>:native_score_batch, keyed to the specific succeeded \"score\" job _native_score_batch_identity selected"
+tests = ["tests/test_v2_ops_native_score_batch_shadow_wiring.py"]
+disposition = "native"
+owner = "P6-6"
+notes = "Not in _DAG_STAGES/NO_JOB_STAGES's job-submission stage lists; the only submitter is supervisor.Service's own tick sidecar, never build_legacy_job_requests/run_shadow_nightly. See engine/v2/ops/ARCHITECTURE.md's native_score_batch failure-semantics section for why R4/R5 (submission.submit, events.json staging) are not yet reachable."
+
+[[row]]
 id = "nightly-refresh"
 evidence = "job:incremental_refresh"
 area = "nightly"
