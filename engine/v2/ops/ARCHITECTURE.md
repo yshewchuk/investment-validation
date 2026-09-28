@@ -57,20 +57,23 @@ alongside the nightly stage kinds, not in
 (`native_board_universe.py`) — a pure key `(ticker, strategy, event_date,
 session)` and the function that enumerates one per event × native-covered
 strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
-`computed_moves_job_kind` (registered in `stages.py::_core_kinds`, the same
-ordinary-job-kind pattern as `training`/`promote_job_kind` above, not a
-coordinator effect), `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
-`calendar_moves_job_spec`, and `run_computed_moves_worker` (dispatched by
-`worker.py` for worker `"computed_moves_refresh"`) — see "Primary contracts"
-below for what this adapts; "Outputs" below now covers its nightly caller
-(Part 4). `calendar_moves_jobs.py` registers only `computed_moves_refresh`:
-`forward_calendar_refresh` still has no `JobKind` — issue #52's prerequisite
-(an attempt-fence check in the store's own commit path, so a
-cancelled/expired attempt can never commit — see below) is now in place
-(#55), but registering the kind itself (worker dispatch, loader callback,
-parameter validation) is a separate, later change, and Part 4 wires only
-`computed_moves_refresh` into the nightly graph for the same reason —
-`forward_calendar_refresh` gets neither a `JobKind` nor a `GRAPH` node.
+`computed_moves_job_kind`/`forward_calendar_job_kind` (both registered in
+`stages.py::_core_kinds`, the same ordinary-job-kind pattern as
+`training`/`promote_job_kind` above, not a coordinator effect),
+`CalendarMovesParameters`/`calendar_moves_parameter_problems`/
+`calendar_moves_job_spec`, and `run_computed_moves_worker`/
+`run_forward_calendar_worker` (dispatched by `worker.py` for worker
+`"computed_moves_refresh"`/`"forward_calendar_refresh"` respectively) — see
+"Primary contracts" below for what each adapts; "Outputs" below now covers
+`computed_moves_refresh`'s nightly caller (Part 4). Issue #52's prerequisite
+(an attempt-fence check in `forward_calendar_store`'s own commit path, so a
+cancelled/expired attempt can never commit — see below) landed in #55;
+`forward_calendar_refresh` now has a `JobKind` too (worker dispatch, a
+loader callback, parameter validation — a separate, later change from #55
+itself), but it still has neither a `nightly.py` `GRAPH`/`OPTIONAL` node nor
+a `supervisor.Service` submitter: that wiring is a separate, later PR,
+mirroring how `computed_moves_refresh`'s own Part 4 nightly wiring (#54)
+followed its Part 3 registration (#50).
 
 A small number of natively-fetched data stores live directly in this
 package rather than delegating computation to another v2 layer — like
@@ -118,15 +121,38 @@ head-conflict detection active on that shortcut path too). Omitting
 `fence_check` (the default) keeps this function's previous, unchanged
 behavior for its other two callers, `engine/v2/data/incremental.py`'s
 generic-refresh path and `engine/v2/research/_trades_publish.py`, neither
-of which is touched by this change. This runner still has no job-layer
-bridge: registering
-`forward_calendar_refresh` as a `JobKind` (worker dispatch, a loader
-callback, parameter validation) is a separate, later change — see "Primary
-contracts" above. Its pure helpers (`horizon_dates`, `date_units`,
-`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
-`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
-are unit-testable without a catalog or a network. Today this runner has no
-production caller, only its own test module.
+of which is touched by this change. `calendar_moves_jobs.run_forward_calendar_worker` (dispatched by `worker.py`
+for worker `"forward_calendar_refresh"`) is this runner's job-layer bridge:
+it decodes the job's own `CalendarMovesParameters` (which now carries
+`tickers`/`horizon_days` again — see "Primary contracts" above) and calls
+`incremental_data._load_forward_calendar_refresh_callback()` to get a
+`(parameters, root)`-shaped closure with the two injected network edges
+pre-bound, the same lazy-construction shape
+`_load_computed_moves_refresh_callback` already has. Unlike
+`computed_moves_refresh`, whose staged document restates several fields
+`computed_moves_store` reads back from it, `forward_calendar_refresh`'s own
+staged document (`refresh_staging.py`,
+`REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]`) carries ONLY
+`attempt_id`/`fence` — every other value this runner needs already lives on
+the job's own immutable `CalendarMovesParameters`, so restating it could
+only drift. `attempt_id`/`fence` vary per attempt (a retried attempt gets a
+new fence), so they cannot be pre-bound the way the fetchers are: the
+closure reads the staged document at call time, from the attempt's own
+`root`, after first format-checking `parameters.expected_head_snapshot_id`
+(the same bounded-1..128-char-or-`None` one-line shape check
+`computed_moves_store._validate_document_head` uses, mirrored not imported)
+— before that file read or any other I/O — then passes
+`attempt_id`/`fence` straight through to `run_forward_calendar_refresh`,
+which is what actually makes the #55 fence check live for a supervised,
+leased, retried, cancellable attempt rather than the permanent `None`/`None`
+no-op it would otherwise stay. Its pure helpers (`horizon_dates`,
+`date_units`, `ticker_units`, `plan_forward_calendar`,
+`resolve_session_claims`, `nasdaq_rows_from_payload`,
+`nasdaq_claims_from_rows`, `pending_tickers`) are unit-testable without a
+catalog or a network. This runner's only production-shaped caller today is
+`run_forward_calendar_worker`; nothing yet submits a
+`forward_calendar_refresh` job (no nightly `GRAPH` node, no
+`supervisor.Service` submitter — a separate, later PR).
 
 `native_score_batch.py` (this PR adds this module, its `stages.py` job kind
 and its `worker.py` dispatch branch together — this doc describes the
@@ -201,11 +227,15 @@ job kind from the nightly graph. `nightly.py` is not touched by this PR.
   weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
   (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
   `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
-  `expected_head_snapshot_id`, `attempt_id`, `fence`) — there is no staged
-  input-document file for this runner: it has no `JobKind` (see "Primary
-  contracts" above), so there is no admitted job to stage one from, and
-  `refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES` has no
-  `"forward_calendar_refresh"` entry; and the two injected network edges,
+  `expected_head_snapshot_id`, `attempt_id`, `fence`) — most of these now
+  come straight off the job's own `CalendarMovesParameters` (see "Primary
+  contracts" above); `attempt_id`/`fence` come from
+  `forward_calendar_refresh`'s own small staged document
+  (`refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]`
+  → `forward_calendar_refresh_input.json`, `{"attempt_id": claim.attempt_id,
+  "fence": claim.fence}` only — every other field would only drift from the
+  immutable job parameters, so this document is deliberately smaller than
+  `computed_moves_refresh`'s own); and the two injected network edges,
   `providers.nasdaq_calendar.
   nasdaq_calendar_fetcher` (one call per discovery date) and
   `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
@@ -333,11 +363,16 @@ job kind from the nightly graph. `nightly.py` is not touched by this PR.
 
 **`computed_moves_refresh` is registered as an ordinary job kind (Part 3) and
 now has a nightly `GRAPH`/`OPTIONAL` node and a SUPERVISED submitter (Part 4,
-revised after Opus BLOCK(3)); `forward_calendar_refresh` still has no
-`JobKind` at all.** `stages.py::_core_kinds` includes
-`calendar_moves_jobs.computed_moves_job_kind()`, and `worker.py::dispatch`
+revised after Opus BLOCK(3)); `forward_calendar_refresh` now has a `JobKind`
+too (issue #52's prerequisite landed in #55; this is a separate, later
+change from #55 itself), but still has neither a `GRAPH`/`OPTIONAL` node nor
+a submitter — that wiring is a separate, later PR.** `stages.py::_core_kinds`
+includes `calendar_moves_jobs.computed_moves_job_kind()` and
+`calendar_moves_jobs.forward_calendar_job_kind()`; `worker.py::dispatch`
 routes worker `"computed_moves_refresh"` to
-`calendar_moves_jobs.run_computed_moves_worker`. `nightly.py`'s `GRAPH` still
+`calendar_moves_jobs.run_computed_moves_worker` and worker
+`"forward_calendar_refresh"` to
+`calendar_moves_jobs.run_forward_calendar_worker`. `nightly.py`'s `GRAPH` still
 carries a `"computed_moves_refresh": ("refresh",)` node, and `OPTIONAL`
 still includes it, but ONLY for `run_shadow_nightly`'s own whole-graph walk
 (see "Diagrams" below) — no *submission* path builds a job for it from that
@@ -444,13 +479,17 @@ note below) — so a caller's coverage denominator never disagrees with what
 the worker independently recomputes; it now takes `as_of` directly rather
 than a nightly `plan`/`context_tickers` (neither was ever read by its body).
 `forward_calendar_refresh` was registered, and briefly wired into a draft of
-this same nightly stage, in an earlier draft of this PR too, but that
+this same nightly stage, in an earlier draft of PR #50 too, but that
 registration (and its `run_forward_calendar_worker` job-layer adapter) was
 pulled before merge: see "Primary contracts" above and issue #52 (no
 attempt-fence check in `forward_calendar_store`'s commit path — a gap the
 job registration would have made newly reachable as a supervised, leased,
-retried, cancellable attempt) — Part 4 wires only `computed_moves_refresh`
-for the same reason; `forward_calendar_refresh` gets no `GRAPH` node either.
+retried, cancellable attempt) — Part 4 wired only `computed_moves_refresh`
+for the same reason. Issue #52's prerequisite landed in #55, and
+`forward_calendar_refresh` was re-registered as a `JobKind` in a later PR
+(worker dispatch, loader callback, parameter validation, and a small staged
+`attempt_id`/`fence` document — see "Primary contracts"/"Inputs" above) —
+but it still has no `GRAPH`/`OPTIONAL` node and no submitter of its own.
 `run_computed_moves_refresh` is also still not itself a bare
 `engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
 `parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
@@ -483,12 +522,19 @@ legitimately finds has no committable rows (`_capture_targets`'s "too_few"
 outcome — a real business finding, not a failure) still counts as covered:
 the run genuinely finished considering it. A caller building `expected_ids`
 before submission must derive it the same way, from
-`target_tickers_from_snapshot` against the same pinned inputs — there is no
-`tickers` field on `CalendarMovesParameters` to disagree with (removed, see
-"Primary contracts" above and "Failure semantics" below): `computed_moves_refresh`
-has never read one, unlike the now-removed `forward_calendar_refresh` job
-wrapper, whose own now-moot `tickers=()` "whole market" denominator this
-fix's design deliberately does not reuse.
+`target_tickers_from_snapshot` against the same pinned inputs — `CalendarMovesParameters.tickers` (restored, see "Primary contracts" above)
+is `forward_calendar_refresh`'s own field, never read by
+`computed_moves_refresh`: this fix's `target_tickers_from_snapshot`-derived
+denominator design is specific to `computed_moves_refresh` and is not reused
+by `forward_calendar_refresh`, whose own `expected_ids` must instead equal
+`set(tickers)` — `run_forward_calendar_refresh` always reports
+`completed_ids=tuple(sorted(set(tickers)))` (see its own module docstring),
+so a `tickers=()` ("whole market") submission can never satisfy this job
+kind's own coverage check, which requires a non-empty `expected_ids`
+(`_expected_ids_problems`): submitting a whole-market forward-calendar
+refresh as a job is not yet supported end-to-end (only a ticker-scoped
+request is); the standalone runner itself still accepts `tickers=()` for a
+direct, non-job invocation.
 Every field of the staged input document, and
 `parameters`' own `parent_snapshot_id`/`refresh_plan_hash`, are validated up
 front (`_validate_input_document`, split into `_validate_document_identity`/
