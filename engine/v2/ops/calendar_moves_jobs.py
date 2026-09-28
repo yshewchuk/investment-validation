@@ -1,12 +1,18 @@
-"""S4C Part 3: the natively-owned calendar/moves refresh job kind.
+"""S4C Part 3: the natively-owned calendar/moves refresh job kinds.
 
-``computed_moves_refresh`` is an ordinary ``JobKind`` entry
-(``stages.py::_core_kinds``), dispatched by ``worker.py`` to
-``run_computed_moves_worker`` below. It decodes the job's own
-``CalendarMovesParameters`` document and adapts Part 1's standalone runner
-(``computed_moves_store.run_computed_moves_refresh`` -- which is not itself
+``computed_moves_refresh`` and ``forward_calendar_refresh`` are ordinary
+``JobKind`` entries (``stages.py::_core_kinds``), each dispatched by
+``worker.py`` to its own ``run_*_worker`` below. Each decodes the job's own
+``CalendarMovesParameters`` document and adapts its store's standalone runner
+into a ``RefreshCallback``-shaped closure: Part 1's
+``computed_moves_store.run_computed_moves_refresh`` (which is not itself
 ``RefreshCallback``-shaped, since ``main``'s ``RefreshParameters`` has no
-``as_of``/``tickers`` field) into a closure that IS. The shared
+``as_of``/``tickers`` field), and
+``forward_calendar_store.run_forward_calendar_refresh`` (an explicit, fully
+keyword-only runner). The latter's closure reads ``attempt_id``/``fence``
+from ``forward_calendar_refresh``'s own small staged document
+(``refresh_staging.py``), since those vary per attempt and cannot be
+pre-bound on the job's immutable ``CalendarMovesParameters``. The shared
 provider-receipt cache and failure classification this store (and this
 module) imports live in ``engine.v2.ops.unit_receipts`` (P6 slice-4c split,
 Part 0); this module re-exports them under their original names for anything
@@ -17,6 +23,8 @@ node and ``OPTIONAL`` includes it (Part 4), but no nightly submission path
 ever builds a job for it: it is submitted only by ``supervisor.Service``'s
 own tick-loop sidecar, after a native ``"refresh"`` job has already
 succeeded -- see ``ARCHITECTURE.md`` "Outputs"/"Failure semantics".
+``forward_calendar_refresh`` gets neither a GRAPH/OPTIONAL node nor a
+supervisor submitter: that wiring is a separate, later PR.
 """
 from __future__ import annotations
 
@@ -49,11 +57,23 @@ COMPUTED_MOVES_RESULT_PATH = "computed_moves_refresh_result.json"
 #: This kind returns the shared refresh-evidence document; the checkpoint
 #: contract names the same schema `incremental_refresh` uses.
 COMPUTED_MOVES_RESULT_SCHEMA = REFRESH_RESULT_SCHEMA
+FORWARD_CALENDAR_REFRESH_ACTION = "forward_calendar_refresh"
+FORWARD_CALENDAR_RESULT_PATH = "forward_calendar_refresh_result.json"
+#: Both kinds return the shared refresh-evidence document; each checkpoint
+#: contract names the same schema `incremental_refresh` uses.
+FORWARD_CALENDAR_RESULT_SCHEMA = REFRESH_RESULT_SCHEMA
+#: forward_calendar_refresh's own horizon default when a caller's
+#: ``CalendarMovesParameters`` document omits ``horizon_days``.
+DEFAULT_HORIZON_DAYS = 21
 
 __all__ = [
     "COMPUTED_MOVES_REFRESH_ACTION",
     "COMPUTED_MOVES_RESULT_PATH",
     "COMPUTED_MOVES_RESULT_SCHEMA",
+    "DEFAULT_HORIZON_DAYS",
+    "FORWARD_CALENDAR_REFRESH_ACTION",
+    "FORWARD_CALENDAR_RESULT_PATH",
+    "FORWARD_CALENDAR_RESULT_SCHEMA",
     "NATIVE_COMPUTED_MOVES_ACCOUNT",
     "NATIVE_NASDAQ_ACCOUNT",
     "NATIVE_YFINANCE_ACCOUNT",
@@ -64,9 +84,11 @@ __all__ = [
     "calendar_moves_job_spec",
     "calendar_moves_parameter_problems",
     "computed_moves_job_kind",
+    "forward_calendar_job_kind",
     "provider_failure_code",
     "record_unit_receipt",
     "run_computed_moves_worker",
+    "run_forward_calendar_worker",
 ]
 
 
@@ -77,12 +99,16 @@ class CalendarMovesParameters:
     ``main``'s ``incremental_data.RefreshParameters`` has no ``as_of`` field,
     so this job family carries its own parameters dataclass with it, plus
     every field ``RefreshParameters`` already has (the plan-binding fields
-    mirror it exactly). ``tickers``/``horizon_days`` were removed once
-    ``forward_calendar_refresh``'s job-kind wiring was pulled from this PR
-    (they had no remaining reader); ``table_name`` was never read -- see
-    ``ARCHITECTURE.md``. ``expected_ids`` is the worker coverage denominator
-    the supervisor checks the result against: one id per computed_moves
-    target ticker.
+    mirror it exactly). ``horizon_days``/``tickers`` exist for
+    ``forward_calendar_refresh`` only (``computed_moves_refresh`` never reads
+    either); ``table_name`` was never read -- see ``ARCHITECTURE.md``. An
+    empty ``tickers`` tuple is meaningful to the standalone runner (it means
+    the whole market), but this job kind's own coverage check requires a
+    non-empty ``expected_ids``, so a whole-market run cannot be submitted as
+    a job today (only a ticker-scoped one can); the standalone runner remains
+    the only way to run a whole-market forward-calendar refresh directly.
+    ``expected_ids`` is the worker coverage denominator the supervisor checks
+    the result against: one id per target ticker.
     """
 
     expected_ids: tuple[str, ...]
@@ -99,6 +125,8 @@ class CalendarMovesParameters:
     as_of: str | None = None
     all_scoreable: bool = True
     since: str | None = None
+    horizon_days: int = DEFAULT_HORIZON_DAYS
+    tickers: tuple[str, ...] = ()
 
 
 def _is_hash(value: object) -> bool:
@@ -143,9 +171,16 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
     place they are ever checked. ``job.provider_budget_ref`` is read (was
     previously ignored) to enforce provider-budget/call-count consistency,
     and ``COMPUTED_MOVES_RESULT_PATH`` may never be bound as this job's own
-    input (the worker writes it itself).
+    input (the worker writes it itself). The final two checks --
+    ``horizon_days`` (a real ``int`` inside ``[1, MAX_HORIZON_DAYS]``) and
+    ``tickers`` (a tuple/list of unique bounded non-empty strings) -- apply
+    to BOTH job kinds: they are harmless for ``computed_moves_refresh``,
+    which never reads either field, since their defaults
+    (``DEFAULT_HORIZON_DAYS`` and an empty tuple) both already pass.
     """
     from engine.v2.ops import incremental_data
+    from engine.v2.ops.forward_calendar_store import MAX_HORIZON_DAYS
+
     problems = (incremental_data._expected_ids_problems(params)
                + incremental_data._plan_binding_problems(params)
                + incremental_data._bounded_nonempty_problems((
@@ -157,6 +192,16 @@ def calendar_moves_parameter_problems(job, params: CalendarMovesParameters) -> t
                    job, params, result_path=COMPUTED_MOVES_RESULT_PATH))
     if not _is_iso_date(params.as_of):
         problems.append("as_of must be an ISO date")
+    if (isinstance(params.horizon_days, bool)
+            or not isinstance(params.horizon_days, int)
+            or not 1 <= params.horizon_days <= MAX_HORIZON_DAYS):
+        problems.append(f"horizon_days must be an int between 1 and {MAX_HORIZON_DAYS}")
+    tickers = params.tickers
+    if not isinstance(tickers, (tuple, list)):
+        problems.append("tickers must be a tuple or list of ticker symbols")
+    elif (any(not isinstance(item, str) or not item or len(item) > 128 for item in tickers)
+          or len(set(tickers)) != len(tickers)):
+        problems.append("tickers must be unique bounded nonempty strings")
     return tuple(problems)
 
 
@@ -171,6 +216,15 @@ def _job_kind(name: str, schema: str) -> JobKind:
 
 def computed_moves_job_kind() -> JobKind:
     return _job_kind(COMPUTED_MOVES_REFRESH_ACTION, COMPUTED_MOVES_RESULT_SCHEMA)
+
+
+def forward_calendar_job_kind() -> JobKind:
+    return _job_kind(FORWARD_CALENDAR_REFRESH_ACTION, FORWARD_CALENDAR_RESULT_SCHEMA)
+
+
+def _schema_for(kind: str) -> str:
+    return (COMPUTED_MOVES_RESULT_SCHEMA if kind == COMPUTED_MOVES_REFRESH_ACTION
+            else FORWARD_CALENDAR_RESULT_SCHEMA)
 
 
 def calendar_moves_job_spec(kind: str, plan, parameters: CalendarMovesParameters, *,
@@ -198,7 +252,7 @@ def calendar_moves_job_spec(kind: str, plan, parameters: CalendarMovesParameters
         environment_ref=environment_ref, parameters=to_document(params),
         input_refs=tuple(input_refs), output_namespace=output_namespace,
         resource_class="io_fetch", provider_budget_ref=plan.provider_account,
-        retry_policy_ref="bounded", checkpoint_contract_ref=COMPUTED_MOVES_RESULT_SCHEMA,
+        retry_policy_ref="bounded", checkpoint_contract_ref=_schema_for(kind),
         dependency_job_ids=tuple(dependency_job_ids))
 
 
@@ -229,13 +283,30 @@ def run_computed_moves_worker(parameters, root, *, refresh_callback=None) -> dic
         failure_message="computed moves refresh did not produce complete coverage")
 
 
+def run_forward_calendar_worker(parameters, root, *, refresh_callback=None) -> dict:
+    """Decode the job's parameters, resolve the forward_calendar callback and
+    run the shared calendar/moves worker for the forward_calendar kind."""
+    from engine.v2.ops import incremental_data
+
+    params = _decode(parameters)
+    callback = refresh_callback or incremental_data._load_forward_calendar_refresh_callback()
+    return _run_calendar_moves_worker(
+        params, root, kind=FORWARD_CALENDAR_REFRESH_ACTION,
+        result_path=FORWARD_CALENDAR_RESULT_PATH, schema=FORWARD_CALENDAR_RESULT_SCHEMA,
+        callback=callback,
+        failure_message="forward calendar refresh did not produce complete coverage")
+
+
 def _validate_calendar_moves_coverage(params: CalendarMovesParameters, result) -> None:
     """Same contract as ``incremental_data._validate_refresh_coverage``, but
-    set-based rather than ordered-tuple: ``computed_moves_store`` never
-    promises to return ``completed_ids`` in the caller's ``expected_ids``
-    order (its "complete"/"noop" paths all report ``tuple(sorted(targets))``,
-    alphabetical, not caller order) -- an ordered comparison would fail a
-    correctly covered, already-committed result on order alone.
+    set-based rather than ordered-tuple: BOTH stores share this property --
+    ``computed_moves_store`` never promises to return ``completed_ids`` in the
+    caller's ``expected_ids`` order (its "complete"/"noop" paths all report
+    ``tuple(sorted(targets))``, alphabetical, not caller order), and
+    ``forward_calendar_store.run_forward_calendar_refresh`` also always
+    reports ``completed_ids`` as the sorted tuple of the unique ticker set on
+    every terminal status -- an ordered comparison would fail a correctly
+    covered, already-committed result on order alone.
     """
     expected = set(params.expected_ids)
     completed = result.completed_ids
@@ -253,12 +324,13 @@ def _validate_calendar_moves_coverage(params: CalendarMovesParameters, result) -
 
 def _run_calendar_moves_worker(params: CalendarMovesParameters, root, *, kind, result_path,
                                schema, callback, failure_message) -> dict:
-    """Every argument the one public worker function above already resolved:
+    """Every argument the TWO public worker functions above already resolved:
     a decoded ``params`` and a bound ``(parameters, root)``-shaped callback.
 
-    Unlike ``run_daily_market_refresh``,
-    ``computed_moves_store.run_computed_moves_refresh`` writes no result
-    artifact of its own -- it simply returns a ``RefreshCallbackResult`` --
+    Unlike ``run_daily_market_refresh``, neither
+    ``computed_moves_store.run_computed_moves_refresh`` nor
+    ``forward_calendar_store.run_forward_calendar_refresh`` writes its own
+    result artifact -- each simply returns a ``RefreshCallbackResult`` --
     so this function writes ``root / result_path`` itself, after validating,
     rather than reading one back for an integrity cross-check the way
     ``incremental_data._validate_callback_result`` does for

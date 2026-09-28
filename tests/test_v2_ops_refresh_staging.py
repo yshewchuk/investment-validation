@@ -4,11 +4,11 @@ The staged document must be reproducible from the admitted, hashed JobSpec
 alone -- never the environment and never a legacy path -- because it decides
 which catalog and objects root a supervised refresh attempt commits into.
 
-S4C Part 3 adds ``computed_moves_refresh``'s own staged document.
-``forward_calendar_refresh`` deliberately stays unregistered (see
-``refresh_staging.py``'s module docstring), so it is now this test module's
-own example of "a kind without a registered document" instead of
-``computed_moves_refresh``.
+S4C Part 3 adds ``computed_moves_refresh``'s own staged document; the S4C
+follow-up gives ``forward_calendar_refresh`` its own much smaller one --
+``attempt_id``/``fence`` only (see ``refresh_staging.py``'s module docstring).
+``artifact_check`` is now this module's example of "a kind without a
+registered document".
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def test_staged_document_is_byte_identical_across_calls_and_environment(tmp_path
 def test_kind_without_a_registered_document_stages_nothing(tmp_path):
     staging = tmp_path / "staging"
     staging.mkdir()
-    claim = SimpleNamespace(spec=SimpleNamespace(kind="forward_calendar_refresh", parameters={}))
+    claim = SimpleNamespace(spec=SimpleNamespace(kind="artifact_check", parameters={}))
     stage_refresh_input(claim, staging)
     assert list(staging.iterdir()) == []
 
@@ -110,3 +110,17 @@ def test_computed_moves_refresh_document_is_byte_identical_across_calls(tmp_path
     second = (staging / name).read_bytes()
 
     assert first == second
+
+
+def test_forward_calendar_refresh_stages_only_its_attempt_and_fence(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    claim = _claim(_computed_moves_parameters(), kind="forward_calendar_refresh",
+                   attempt_id="att-fc-1", fence=4)
+    name = REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]
+
+    stage_refresh_input(claim, staging)
+
+    assert json.loads((staging / name).read_bytes()) == {
+        "attempt_id": "att-fc-1", "fence": 4,
+    }
