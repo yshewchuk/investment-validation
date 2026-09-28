@@ -223,6 +223,105 @@ def test_run_computed_moves_refresh_captures_one_complete_unit(tmp_path, monkeyp
     assert row["outcome"] == "added"
 
 
+def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_after_as_of(
+        tmp_path, monkeypatch):
+    """Issue #99: a re-run of a past session fetches the ticker's FULL
+    history at the run's real wall-clock time, which extends past ``as_of``.
+    Nothing may reach ``build_rows`` beyond ``as_of``: not the closes series,
+    and not an event dated on/after it (which would be scored against real
+    future closes and committed stamped ``computed_at = as_of``, leaking
+    realized data).
+
+    Row-level read-back through this repo's scan helpers is genuinely not
+    reachable here -- ``_scan_rows`` (the store's only generic scanner) is
+    year-partitioned and ``computed_moves`` fragments are partitioned by
+    ticker, so ``int(partition_key)`` raises before any scan -- so this uses
+    the sanctioned fallback: the capture log proves a fragment WAS written
+    (``outcome == "added"``, not a skip), and a ``build_rows`` spy asserts
+    what actually survived into the row builder -- no event at/after
+    ``as_of``, a series truncated at ``as_of``, and the ordinary pre-``as_of``
+    event still computing a real (non-skipped) move.
+
+    The committed-row proof below instead uses a direct
+    ``DataQuery``/``KeyPredicate`` scan -- the same mechanism
+    ``tests/test_v2_ops_price_history.py`` uses for its own
+    ticker-partitioned table.
+    """
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    extended = pd.bdate_range("2024-01-02", "2024-02-29")  # runs well past _AS_OF
+    csv_bytes = "\n".join(["Date,Close"] + [f"{d.date()},{100.0 + i}"
+                                            for i, d in enumerate(extended)]).encode()
+    events_rows = ([_event_row("AAAA", d) for d in _EVENT_DAYS]  # all before _AS_OF
+                   + [_event_row("AAAA", pd.Timestamp("2024-02-08"))])  # after _AS_OF
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+
+    captured: dict = {}
+    real_build_rows = computed_moves_store.build_rows
+
+    def _spy_build_rows(ticker, events, sd, sc, daily, **kwargs):
+        captured["event_dates"] = [str(ts.date()) for ts in events["event_date"]]
+        captured["series_last"] = str(pd.Timestamp(sd[-1]).date())
+        captured["rows"] = real_build_rows(ticker, events, sd, sc, daily, **kwargs)
+        return captured["rows"]
+
+    monkeypatch.setattr(computed_moves_store, "build_rows", _spy_build_rows)
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    fetcher = _CountingFetcher(csv_bytes)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)
+
+    assert result.status == "complete"
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("AAAA",)).fetchone()
+    assert row["outcome"] == "added"  # a fragment WAS written -- the ticker wasn't skipped
+
+    assert captured["event_dates"]  # the spy really fired
+    assert captured["series_last"] <= _AS_OF  # series truncated at as_of_day
+    assert all(d < _AS_OF for d in captured["event_dates"])
+    assert "2024-02-08" not in captured["event_dates"]  # the leaked event never got here
+
+    rows = captured["rows"]
+    assert rows
+    # Every committed row is dated strictly before _AS_OF -- not even a
+    # skipped=True placeholder exists for the post-as_of event.
+    assert all(r["event_date"] < _AS_OF for r in rows)
+    pre = [r for r in rows if r["event_date"] == str(_EVENT_DAYS[0].date())]
+    assert len(pre) == 1
+    assert pre[0]["skipped"] is False
+    assert pre[0]["realized_move_pct"] is not None  # ordinary case still computes
+
+    from engine.v2.contracts import DataQuery, KeyPredicate
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(result.candidate_snapshot_id)
+    dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
+        columns=("event_date", "realized_move_pct", "skipped"),
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAAA",)),),
+        order_by=("ticker", "event_date"), max_batch_rows=100, max_result_rows=100)
+    committed_rows = [r for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
+                      for r in batch.to_pylist()]
+
+    assert committed_rows
+    assert all(str(r["event_date"]) < _AS_OF for r in committed_rows)  # no post-as_of row at all
+    committed_pre = [r for r in committed_rows
+                     if str(r["event_date"]) == str(_EVENT_DAYS[0].date())]
+    assert len(committed_pre) == 1
+    assert committed_pre[0]["skipped"] is False
+    assert committed_pre[0]["realized_move_pct"] is not None
+
+
 def test_run_computed_moves_refresh_completed_ids_cover_every_target_even_when_one_has_no_committable_rows(
         tmp_path, monkeypatch):
     """Round 3 fix (Opus finding 2): completed_ids must report the full

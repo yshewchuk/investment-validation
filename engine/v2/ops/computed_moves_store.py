@@ -775,9 +775,24 @@ def _capture_targets(conn, store, plan, fetcher, clock, *, events_by_ticker,
                              "created_at": created_at, "outcome": "too_few"})
             continue
         sd, sc = series
+        # Issue #99: the fetch returns history up to the run's real wall
+        # clock, later than as_of_day on a backfill re-run. Truncate the
+        # series BEFORE hashing (capture identity stays a pure function of
+        # as_of + the truncated source) and bound events to strictly before
+        # as_of_ts, or a post-as_of event scored against real future closes
+        # commits as a row stamped computed_at = as_of_day.
+        as_of_ts = pd.Timestamp(as_of_day)
+        keep = sd <= np.datetime64(as_of_ts)
+        sd, sc = sd[keep], sc[keep]
+        if sd.size == 0:
+            capture_id = _capture_id_for(unit)
+            attempts.append({"capture_id": capture_id, "ticker": ticker,
+                             "created_at": created_at, "outcome": "too_few"})
+            continue
         source_hash = hashlib.sha256(np.ascontiguousarray(sc).tobytes()).hexdigest()
         capture_id = _capture_id_for(unit, source_hash=source_hash)
-        events = events[events["event_date"] >= pd.Timestamp(sd[0])]
+        events = events[(events["event_date"] >= pd.Timestamp(sd[0]))
+                        & (events["event_date"] < as_of_ts)]
         rows = build_rows(
             ticker, events, sd, sc, daily_by_ticker.get(ticker, _EMPTY_DAILY),
             computed_at=as_of_day, source_hash=source_hash, capture_id=capture_id)
