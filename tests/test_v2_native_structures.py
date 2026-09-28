@@ -3,7 +3,7 @@ import pytest
 from engine.v2.domain.generation import (
     GeometryRefusal, generate, has_resolvable_expiry, price,
 )
-from engine.structures import twin_peak, twin_peak_5
+from engine.structures import ExpirySelector, twin_peak, twin_peak_5
 
 
 def _inputs():
@@ -607,3 +607,169 @@ def test_ladder_row_with_no_captured_expiry_reaches_pricing_through_the_gate():
     assert values.get("entry_cost") is not None
     assert values.get("legs")
     assert {leg["expiry"] for leg in values["legs"]} == {"2026-09-19"}
+
+
+# --------------------------------------------------------------------------
+# STR-RUNUP's own expiry rule (issue #95): legacy's straddle_runup factory
+# (engine/structures.py, ~line 934) uses ExpirySelector("first_dte_at_least",
+# target_dte=30), counted from the ENTRY session -- not first_post_event,
+# which is correct for STR-THRU but silently priced a too-short-dated
+# straddle for STR-RUNUP. The expiry pair below (2025-05-09 / 2025-05-16)
+# and the 31-DTE-from-entry framing reproduce the issue's own reported
+# evidence (a real chain shape: standard Friday listed-options expirations,
+# one week apart, with entry_date picked so the earlier one is a real,
+# already-listed contract that is merely too close -- 24 DTE, not a
+# fabricated non-expiry).
+# --------------------------------------------------------------------------
+
+
+def _runup_chain():
+    """Two real Friday expirations one week apart, both with a common ATM
+    call/put pair at strike 100 -- 2025-05-09 (24 DTE from the 2025-04-15
+    entry session) and 2025-05-16 (31 DTE), matching issue #95's own
+    evidence table."""
+    return {
+        ("C", 100.0, "2025-05-09"): {"bid": 4.0, "ask": 5.0},
+        ("P", 100.0, "2025-05-09"): {"bid": 3.5, "ask": 4.5},
+        ("C", 100.0, "2025-05-16"): {"bid": 5.0, "ask": 6.0},
+        ("P", 100.0, "2025-05-16"): {"bid": 4.5, "ask": 5.5},
+    }
+
+
+def test_str_runup_uses_first_dte_at_least_30_from_entry_not_first_post_event():
+    """The reported defect: with only entry_date/quotes captured (the state
+    every row legacy failed to price arrives in), STR-RUNUP must pick the
+    earliest expiry with >= 30 DTE from the ENTRY session (2025-05-16, 31
+    DTE), not the earliest post-event expiry (2025-05-09, which is only 24
+    DTE from entry and is legacy's STR-THRU answer, not STR-RUNUP's)."""
+    quotes = _runup_chain()
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "entry_date": "2025-04-15",
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    geometry = generate("STR-RUNUP", inputs)
+
+    assert {leg.expiry for leg in geometry.legs} == {"2025-05-16"}
+    assert {leg.strike for leg in geometry.legs} == {100.0}
+    priced = price(geometry, quotes, 0.5)
+    assert priced.refusal is None
+    assert priced.entry_cost == pytest.approx(5.5 + 5.0)
+
+    # Cross-checked against legacy's own real ExpirySelector, not a
+    # reimplementation: same rule, same chain, same entry session.
+    import pandas as pd
+    chain = pd.DataFrame({
+        "expiry": [pd.Timestamp("2025-05-09"), pd.Timestamp("2025-05-16")],
+        "dte": [24, 31],
+    })
+    legacy_expiry = ExpirySelector(kind="first_dte_at_least", target_dte=30).select(
+        chain, pd.Timestamp("2025-05-09"), "BMO",
+    )
+    assert str(legacy_expiry.date()) == "2025-05-16"
+
+
+def test_str_thru_is_unaffected_by_the_str_runup_expiry_fix():
+    """The same chain, same inputs, but STR-THRU keeps legacy's
+    first_post_event rule (earliest post-event expiry, 2025-05-09) --
+    matching issue #95's own evidence that STR-THRU agrees on 2025-05-09
+    both before and after this fix."""
+    quotes = _runup_chain()
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "entry_date": "2025-04-15",
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    geometry = generate("STR-THRU", inputs)
+
+    assert {leg.expiry for leg in geometry.legs} == {"2025-05-09"}
+
+
+def test_str_runup_refuses_when_no_listed_expiry_reaches_30_dte_from_entry():
+    """A chain with real listed expiries, none of them 30+ DTE from entry,
+    must refuse -- never silently price the too-short-dated one, which is
+    exactly the defect this closes."""
+    quotes = {
+        ("C", 100.0, "2025-05-09"): {"bid": 4.0, "ask": 5.0},
+        ("P", 100.0, "2025-05-09"): {"bid": 3.5, "ask": 4.5},
+    }
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "entry_date": "2025-04-15",
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    with pytest.raises(GeometryRefusal, match="NO_EXPIRY_DTE_AT_LEAST:30"):
+        generate("STR-RUNUP", inputs)
+
+
+def test_str_runup_refuses_without_a_captured_entry_date():
+    """No entry_date at all (never legacy's fixed/first_post_event fallback
+    territory for STR-RUNUP) must refuse rather than guess an anchor."""
+    quotes = _runup_chain()
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    with pytest.raises(GeometryRefusal, match="MISSING_ENTRY_DATE"):
+        generate("STR-RUNUP", inputs)
+
+
+def test_str_runup_refuses_with_an_invalid_captured_entry_date():
+    """A captured entry_date that is not a parseable ISO date must refuse
+    with INVALID_ENTRY_DATE, not MISSING_ENTRY_DATE and not a silent
+    fallback to some other expiry rule."""
+    quotes = _runup_chain()
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        "entry_date": "not-a-date",
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    with pytest.raises(GeometryRefusal, match="INVALID_ENTRY_DATE:not-a-date"):
+        generate("STR-RUNUP", inputs)
+
+
+def test_str_runup_dte_anchor_prefers_quote_date_over_entry_date():
+    """A stale-quote fallback can set quote_date EARLIER than entry_date
+    (engine/score.py's _fresh_quote_date). The DTE count must anchor on
+    quote_date in that case, matching legacy's obs_date=quote_date -- not
+    entry_date, which would count too few days and could reject an expiry
+    legacy actually accepted."""
+    quotes = _runup_chain()
+    inputs = {
+        "spot": 100.0,
+        "forecast_abs_move": 8.0,
+        # entry_date alone is only 24 DTE from 2025-05-09 (too short), but
+        # quote_date is 7 days earlier, making 2025-05-09 exactly 31 DTE --
+        # long enough. If the code wrongly anchored on entry_date, this
+        # would silently pick 2025-05-16 instead (also >=30 DTE from
+        # entry_date), not refuse.
+        "entry_date": "2025-04-15",
+        "quote_date": "2025-04-08",
+        "event_date": "2025-05-09",
+        "session": "BMO",
+        "quotes": quotes,
+    }
+
+    geometry = generate("STR-RUNUP", inputs)
+
+    assert geometry.legs[0].expiry == "2025-05-09"

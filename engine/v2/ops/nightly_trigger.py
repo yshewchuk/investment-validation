@@ -380,7 +380,10 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
                 submit_fn: SubmitCallable | None = None,
                 serve_fn: ServeCallable | None = None,
                 full_run: bool = True) -> TriggerReceipt:
-    """The whole tick: terminal -> lock -> resume -> window -> probe -> submit -> serve.
+    """The whole tick: terminal -> resume -> lock -> window -> probe -> submit -> serve.
+
+    The resume check runs before the legacy lock is attempted, so a busy lock
+    can never overwrite a resumable state's plan_ref.
 
     ``tickers``/``context_tickers`` are the plan's watchlist and historical
     evidence universe (``full_population`` derives both from the native
@@ -395,12 +398,22 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     prior = load_state(root, as_of)
     if prior is not None and prior.status in TERMINAL_STATUSES:
         return _idle(clock, as_of, prior)
+    resuming = prior is not None and bool(prior.plan_ref) and prior.status in RESUME_STATUSES
     with _LegacyLock(legacy_lock_path(root)) as held:
         if not held:
+            if resuming:
+                # issue #102: a resumable state must never be overwritten by a busy-lock tick.
+                # This receipt is for THIS tick's own visibility only -- write_state is never
+                # called, so the durable state is untouched and the next tick loads the SAME
+                # prior state again, exactly as if this busy tick had not happened.
+                return _receipt(
+                    clock, as_of, "busy_legacy",
+                    "another heavy run holds the legacy nightly lock; retrying the resume next tick",
+                    plan_ref=prior.plan_ref, error_count=prior.error_count)
             return _record(root, _receipt(
                 clock, as_of, "busy_legacy",
                 "another heavy run holds the legacy nightly lock; retrying next tick"))
-        if prior is not None and prior.plan_ref and prior.status in RESUME_STATUSES:
+        if resuming:
             return _submit_plan(root, as_of, tickers=(), context_tickers=(), clock=clock,
                                 plan_fn=None, submit_fn=submit_fn, serve_fn=serve_fn,
                                 full_run=full_run, prior=prior, plan_ref=prior.plan_ref)

@@ -158,3 +158,197 @@ def test_tombstone_survives_lower_priority_later_revision():
 
     assert first.rows == retried.rows == ()
     assert retried.changes == ()
+
+
+def test_mcap_carries_forward_from_prior_when_session_has_none():
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker AAA, date 2024-01-02, mcap_usd=1e9
+    prior = [base]
+    incoming_row = dict(
+        base, date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    incoming = _revision(incoming_row, revision_id="fetched")
+
+    merged = merge_daily_market(contract, prior, (), (incoming,))
+
+    row = next(r for r in merged.rows if r["ticker"] == "AAA"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] == base["mcap_usd"]
+    assert row["mcap_log"] == base["mcap_log"]
+    assert row["mcap_asof"] == datetime(2024, 1, 2)
+    assert row["mcap_age_days"] == 3.0
+    assert row["src_mcap"] == "orats.cores"
+
+
+def test_mcap_stays_none_when_no_prior_value_is_loaded():
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]
+    incoming_row = dict(
+        base, ticker="ZZZ", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    incoming = _revision(incoming_row, revision_id="fetched-zzz")
+
+    merged = merge_daily_market(contract, [base], (), (incoming,))
+
+    row = next(r for r in merged.rows if r["ticker"] == "ZZZ")
+    assert row["mcap_usd"] is None
+    assert row["mcap_asof"] is None
+
+
+def test_mcap_carry_preserves_original_observation_date_across_two_hops():
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker AAA, date 2024-01-02, mcap_usd=1e9
+
+    # First hop: 2024-01-05 has no cores data; carries from 2024-01-02.
+    first_incoming_row = dict(
+        base, date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    first_incoming = _revision(first_incoming_row, revision_id="hop-1")
+    first_merge = merge_daily_market(contract, [base], (), (first_incoming,))
+    hop1_row = next(r for r in first_merge.rows if r["date"] == datetime(2024, 1, 5))
+    assert hop1_row["mcap_asof"] == datetime(2024, 1, 2)
+    assert hop1_row["src_mcap"] == "orats.cores"
+
+    # Second hop: 2024-01-09 also has no cores data. `prior` for this refresh is
+    # `first_merge.rows` -- it only contains the 2024-01-02 original and the
+    # 2024-01-05 carried row (no fresh 2024-01-02 row separately). The carried
+    # asof must still be 2024-01-02, and the age must be measured from there
+    # (7 days), not from 2024-01-05 (which would wrongly give 4 days).
+    second_incoming_row = dict(
+        base, date=datetime(2024, 1, 9), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    second_incoming = _revision(second_incoming_row, revision_id="hop-2")
+    second_merge = merge_daily_market(
+        contract, list(first_merge.rows), (), (second_incoming,))
+    hop2_row = next(r for r in second_merge.rows if r["date"] == datetime(2024, 1, 9))
+
+    assert hop2_row["mcap_asof"] == datetime(2024, 1, 2)
+    assert hop2_row["mcap_age_days"] == 7.0
+    assert hop2_row["src_mcap"] == "orats.cores"
+
+
+def test_mcap_carries_within_the_same_incoming_batch():
+    # Day 1 and day 2 both arrive as NEW revisions in ONE merge call, with nothing
+    # previously committed (prior=()). Day 2 has no cores data; it must still carry
+    # day 1's fresh value from within this same batch, not only from `prior`.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker AAA, date 2024-01-02, mcap_usd=1e9
+    day1 = _revision(base, revision_id="day1")
+    day2_row = dict(
+        base, date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    day2 = _revision(day2_row, revision_id="day2")
+
+    merged = merge_daily_market(contract, (), (), (day1, day2))
+
+    row = next(r for r in merged.rows if r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] == base["mcap_usd"]
+    assert row["mcap_asof"] == datetime(2024, 1, 2)
+    assert row["mcap_age_days"] == 3.0
+    assert row["src_mcap"] == "orats.cores"
+
+
+def test_mcap_carries_into_a_retained_row_with_no_cap_of_its_own():
+    # A retained revision (an already-committed row being replayed) that itself has
+    # mcap_usd=None must still be backfilled from `prior`, the same as a freshly
+    # fetched row would be -- an incremental replay must match a clean rebuild.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker BBB-equivalent shape; override ticker below
+    earlier = dict(base, ticker="CCC", date=datetime(2024, 1, 2))
+    retained_row = dict(
+        base, ticker="CCC", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    retained = _revision(retained_row, revision_id="retained-ccc")
+
+    merged = merge_daily_market(contract, [earlier], (retained,), ())
+
+    row = next(r for r in merged.rows if r["ticker"] == "CCC"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] == earlier["mcap_usd"]
+    assert row["mcap_asof"] == datetime(2024, 1, 2)
+    assert row["src_mcap"] == "orats.cores"
+
+
+def test_mcap_carry_never_rewrites_a_row_with_no_winner_this_build():
+    # An already-committed row with no cap of its own (DDD, 2024-01-05) sits in `prior`
+    # alongside an eligible earlier observation (DDD, 2024-01-02) with a real cap. Nothing
+    # in this build's incoming/retained revisions touches DDD at all -- only an unrelated
+    # ticker (EEE) is being appended. DDD 2024-01-05 must come out of the merge byte-for-byte
+    # unchanged: no carried cap, and it must not appear in `merged.changes`.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]
+    earlier = dict(base, ticker="DDD", date=datetime(2024, 1, 2))
+    untouched = dict(
+        base, ticker="DDD", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    unrelated_append = dict(base, ticker="EEE", date=datetime(2024, 1, 2))
+    unrelated = _revision(unrelated_append, revision_id="unrelated-eee")
+
+    merged = merge_daily_market(contract, [earlier, untouched], (), (unrelated,))
+
+    row = next(r for r in merged.rows if r["ticker"] == "DDD"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row == untouched
+    assert all(change.revision_id != "unrelated-eee" or "DDD" not in str(change)
+               for change in merged.changes)
+    assert {change.revision_id for change in merged.changes} == {"unrelated-eee"}
+
+
+def test_mcap_carry_ignores_a_same_build_correction_of_the_prior_cap():
+    # `prior` has FFF/2024-01-02 with a real cap. This SAME build corrects that exact row to
+    # drop the cap (mcap_usd=None) and, in the same build, needs to carry into FFF/2024-01-05
+    # (no cap of its own). Since the 2024-01-02 cap was superseded THIS build, there is no
+    # earlier real observation left -- 2024-01-05 must end up None, matching a clean rebuild
+    # that never had a cap for FFF at all.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker AAA, date 2024-01-02, mcap_usd=1e9
+    capped_prior_row = dict(base, ticker="FFF", date=datetime(2024, 1, 2))
+    correction_row = dict(
+        base, ticker="FFF", date=datetime(2024, 1, 2), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    correction = _revision(correction_row, revision_id="correct-fff-0102", ordinal=2)
+    later_row = dict(
+        base, ticker="FFF", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    later = _revision(later_row, revision_id="fff-0105")
+
+    merged = merge_daily_market(contract, [capped_prior_row], (), (correction, later))
+
+    row = next(r for r in merged.rows if r["ticker"] == "FFF"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] is None
+    assert row["mcap_asof"] is None
+
+    # Clean rebuild agrees: no prior at all, same two revisions applied directly.
+    clean = merge_daily_market(contract, (), (), (correction, later))
+    clean_row = next(r for r in clean.rows if r["ticker"] == "FFF"
+                      and r["date"] == datetime(2024, 1, 5))
+    assert clean_row["mcap_usd"] is None
+    assert clean_row["mcap_asof"] is None
+
+
+def test_mcap_carry_ignores_a_same_build_deletion_of_the_prior_cap():
+    # Same shape, but this build DELETES the capped prior row instead of correcting it.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]
+    capped_prior_row = dict(base, ticker="GGG", date=datetime(2024, 1, 2))
+    deletion = _revision(capped_prior_row, revision_id="delete-ggg-0102", ordinal=2,
+                          deleted=True)
+    later_row = dict(
+        base, ticker="GGG", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    later = _revision(later_row, revision_id="ggg-0105")
+
+    merged = merge_daily_market(contract, [capped_prior_row], (), (deletion, later))
+
+    row = next(r for r in merged.rows if r["ticker"] == "GGG"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] is None
+    assert row["mcap_asof"] is None
+
+    # Clean rebuild agrees: the row was never there to begin with.
+    clean = merge_daily_market(contract, (), (), (later,))
+    clean_row = next(r for r in clean.rows if r["ticker"] == "GGG"
+                      and r["date"] == datetime(2024, 1, 5))
+    assert clean_row["mcap_usd"] is None
+    assert clean_row["mcap_asof"] is None

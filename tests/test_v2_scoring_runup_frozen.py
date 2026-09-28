@@ -215,6 +215,56 @@ def test_frozen_runup_scales_raw_d14_and_retains_provenance():
     assert provenance["calibration_artifact_hashes"] == ("sha256:calibration",)
 
 
+def test_frozen_runup_fallback_without_feature_order_scales_once():
+    """Regression: when a runup-role binding has no ``feature_order``
+    attribute at all, ``application._frozen_stage_executors`` builds no
+    canonical executor for it, so its output is served through the
+    ``frozen_outputs`` fallback dict instead (Opus gate round 2, PR #116).
+    Before the fix, that fallback dict omitted ``runup_move_raw_d14``, so
+    the forecast stage's own local-split guard mistook the ALREADY-SCALED
+    ``runup_move_prediction`` for the raw value and scaled it a second
+    time (8.0 -> 4.0 -> 2.0 instead of 8.0 -> 4.0)."""
+    release = SimpleNamespace(
+        release_id="release-1",
+        bindings=(
+            SimpleNamespace(
+                binding_id="implied-binding",
+                model_id="implied-model",
+                role="implied_t1",
+                feature_order=("days_before_print",),
+                output_names=("prediction",),
+                members=(_member("model", "sha256:implied"),),
+            ),
+            SimpleNamespace(
+                binding_id="runup-binding",
+                model_id="runup-model",
+                role="runup_move",
+                output_names=("prediction",),
+                members=(
+                    _member("model", "sha256:runup"),
+                    _member("residual_interval", "sha256:interval"),
+                    _member("calibration", "sha256:calibration"),
+                ),
+            ),
+        ),
+    )
+    inputs = replace(_inputs(), analogs=_analog_block())
+    record = application.score_frozen(
+        _request(),
+        _Frozen(),
+        release,
+        _inference_requests(),
+        {"_native_inputs": inputs},
+    )
+
+    assert record.validation_status == "scored"
+    # Raw D14 stays 8.0 (from the frozen fixture's prediction), unscaled.
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    # Published value is 8.0 * (7 / 14) == 4.0: scaled exactly once, not
+    # the 2.0 a second scaling pass would produce.
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
+
+
 def test_frozen_runup_rejects_pretransformed_model_output():
     frozen = _Frozen()
     frozen.runup_output = "runup_move_prediction"
@@ -250,7 +300,12 @@ def test_invalid_runup_artifact_refuses_without_local_or_supplied_fallback():
     assert record.readiness == "refused"
 
 
-def test_default_native_runup_numbers_and_record_shape_are_unchanged():
+def test_default_native_runup_publishes_the_scaled_move_and_raw_d14():
+    """2026-09-28 fix (issue #94): the local/live-model forecast path's raw
+    D14 model output (8.0) must be published scaled by days_before_print/14
+    (7/14 = 0.5 -> 4.0), matching legacy, with the raw D14 value published
+    separately under its own name -- not the raw 8.0 published unscaled,
+    which was the defect this closes."""
     inputs = _inputs()
     ordinary = replace(
         inputs,
@@ -279,8 +334,8 @@ def test_default_native_runup_numbers_and_record_shape_are_unchanged():
     record = application.score_one(_request(), ordinary)
 
     assert record.forecasts["driver_prediction"] == pytest.approx(6.0)
-    assert record.forecasts["runup_move_prediction"] == pytest.approx(8.0)
-    assert "runup_move_raw_d14" not in record.forecasts
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
     assert "runup_move_provenance" not in record.forecasts
     # No held-out forecast pool was declared, so the serialized interval
     # contract is explicit: forecast_sd is present as None, never fabricated.
