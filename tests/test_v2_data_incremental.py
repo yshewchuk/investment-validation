@@ -177,6 +177,7 @@ def test_mcap_carries_forward_from_prior_when_session_has_none():
     assert row["mcap_log"] == base["mcap_log"]
     assert row["mcap_asof"] == datetime(2024, 1, 2)
     assert row["mcap_age_days"] == 3.0
+    assert row["src_mcap"] == "orats.cores"
 
 
 def test_mcap_stays_none_when_no_prior_value_is_loaded():
@@ -206,6 +207,7 @@ def test_mcap_carry_preserves_original_observation_date_across_two_hops():
     first_merge = merge_daily_market(contract, [base], (), (first_incoming,))
     hop1_row = next(r for r in first_merge.rows if r["date"] == datetime(2024, 1, 5))
     assert hop1_row["mcap_asof"] == datetime(2024, 1, 2)
+    assert hop1_row["src_mcap"] == "orats.cores"
 
     # Second hop: 2024-01-09 also has no cores data. `prior` for this refresh is
     # `first_merge.rows` -- it only contains the 2024-01-02 original and the
@@ -222,3 +224,46 @@ def test_mcap_carry_preserves_original_observation_date_across_two_hops():
 
     assert hop2_row["mcap_asof"] == datetime(2024, 1, 2)
     assert hop2_row["mcap_age_days"] == 7.0
+    assert hop2_row["src_mcap"] == "orats.cores"
+
+
+def test_mcap_carries_within_the_same_incoming_batch():
+    # Day 1 and day 2 both arrive as NEW revisions in ONE merge call, with nothing
+    # previously committed (prior=()). Day 2 has no cores data; it must still carry
+    # day 1's fresh value from within this same batch, not only from `prior`.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker AAA, date 2024-01-02, mcap_usd=1e9
+    day1 = _revision(base, revision_id="day1")
+    day2_row = dict(
+        base, date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    day2 = _revision(day2_row, revision_id="day2")
+
+    merged = merge_daily_market(contract, (), (), (day1, day2))
+
+    row = next(r for r in merged.rows if r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] == base["mcap_usd"]
+    assert row["mcap_asof"] == datetime(2024, 1, 2)
+    assert row["mcap_age_days"] == 3.0
+    assert row["src_mcap"] == "orats.cores"
+
+
+def test_mcap_carries_into_a_retained_row_with_no_cap_of_its_own():
+    # A retained revision (an already-committed row being replayed) that itself has
+    # mcap_usd=None must still be backfilled from `prior`, the same as a freshly
+    # fetched row would be -- an incremental replay must match a clean rebuild.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker BBB-equivalent shape; override ticker below
+    earlier = dict(base, ticker="CCC", date=datetime(2024, 1, 2))
+    retained_row = dict(
+        base, ticker="CCC", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    retained = _revision(retained_row, revision_id="retained-ccc")
+
+    merged = merge_daily_market(contract, [earlier], (retained,), ())
+
+    row = next(r for r in merged.rows if r["ticker"] == "CCC"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] == earlier["mcap_usd"]
+    assert row["mcap_asof"] == datetime(2024, 1, 2)
+    assert row["src_mcap"] == "orats.cores"

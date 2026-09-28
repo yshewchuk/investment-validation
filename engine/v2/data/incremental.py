@@ -269,44 +269,56 @@ def _merge_changes(
 def _carry_forward_mcap(
     prior: Mapping[tuple[str, str], dict[str, Any]],
     result: Mapping[tuple[str, str], dict[str, Any]],
-    winner_by_key: Mapping[str, "DailyMarketRevision"],
-    incoming: Sequence["DailyMarketRevision"],
 ) -> None:
-    """Mutate `result` in place: backward-fill `mcap_usd` for a freshly fetched
-    (`incoming`) revision that wins its logical key but carries no same-day mcap, from the
-    same ticker's most recent PRIOR row (already loaded for this build's affected
-    partitions -- see ARCHITECTURE.md "daily_market normalizer versioning and mcap
-    carry-forward (#96)") with a non-null mcap_usd at an earlier date. Bounded to what
-    `prior` already holds; never scans beyond it.
+    """Mutate `result` in place: backward-fill `mcap_usd` for every row in this build's
+    final per-key winner set (`result` -- already resolved by `_apply_revision_winners`,
+    retained or freshly incoming, indistinguishably) that carries no mcap of its own, from
+    the same ticker's most recent earlier observation. That observation may be already
+    committed (`prior`) or resolved earlier in this same build (an earlier date for the
+    same ticker, already in `result` -- processed first, since this function walks each
+    ticker's dates in ascending order). `mcap_asof` always ends up the ORIGINAL observation
+    date (never an intermediate carried row's own session date), by threading it forward
+    explicitly rather than re-deriving it from a row's own key. Bounded to what `prior` and
+    this build's own `result` already hold; never scans beyond them.
     """
-    for revision in incoming:
-        if revision.row is None:
-            continue
-        key = (revision.ticker, revision.session_date)
-        row = result.get(key)
-        if row is None or row.get("mcap_usd") is not None:
-            continue
-        if winner_by_key.get(revision.candidate.logical_key) is not revision:
-            continue
-        candidates = [
-            (existing_key[1], existing_row)
-            for existing_key, existing_row in prior.items()
-            if existing_key[0] == revision.ticker
-            and existing_key[1] < revision.session_date
-            and existing_row.get("mcap_usd") is not None
-        ]
-        if not candidates:
-            continue
-        carried_date, carried_row = max(candidates, key=lambda item: item[0])
-        row["mcap_usd"] = carried_row["mcap_usd"]
-        row["mcap_log"] = carried_row.get("mcap_log")
-        observed_at = carried_row.get("mcap_asof") or carried_row["date"]
-        row["mcap_asof"] = observed_at
-        observed_date = observed_at.date() if hasattr(observed_at, "date") else \
-            date.fromisoformat(str(observed_at)[:10])
-        row["mcap_age_days"] = float(
-            (date.fromisoformat(revision.session_date) - observed_date).days
-        )
+    by_ticker: dict[str, list[str]] = {}
+    for ticker, session_date in result:
+        by_ticker.setdefault(ticker, []).append(session_date)
+
+    for ticker, dates in by_ticker.items():
+        dates.sort()
+        candidate_date = None
+        candidate_usd = None
+        candidate_log = None
+        candidate_asof = None
+        for existing_key, existing_row in prior.items():
+            if existing_key[0] != ticker or existing_row.get("mcap_usd") is None:
+                continue
+            if candidate_date is None or existing_key[1] > candidate_date:
+                candidate_date = existing_key[1]
+                candidate_usd = existing_row["mcap_usd"]
+                candidate_log = existing_row.get("mcap_log")
+                candidate_asof = existing_row.get("mcap_asof") or existing_row["date"]
+
+        for session_date in dates:
+            row = result[(ticker, session_date)]
+            if row.get("mcap_usd") is not None:
+                candidate_date = session_date
+                candidate_usd = row["mcap_usd"]
+                candidate_log = row.get("mcap_log")
+                candidate_asof = row.get("mcap_asof") or row["date"]
+                continue
+            if candidate_date is None or candidate_date >= session_date:
+                continue
+            row["mcap_usd"] = candidate_usd
+            row["mcap_log"] = candidate_log
+            row["mcap_asof"] = candidate_asof
+            row["src_mcap"] = "orats.cores"
+            observed_date = candidate_asof.date() if hasattr(candidate_asof, "date") else \
+                date.fromisoformat(str(candidate_asof)[:10])
+            row["mcap_age_days"] = float(
+                (date.fromisoformat(session_date) - observed_date).days
+            )
 
 
 def merge_daily_market(
@@ -321,7 +333,7 @@ def merge_daily_market(
     incoming = tuple(_validate_revision(contract, item) for item in incoming_revisions)
     winners = select_revision_winners((*retained, *incoming))
     result, winner_by_key = _apply_revision_winners(prior, winners)
-    _carry_forward_mcap(prior, result, winner_by_key, incoming)
+    _carry_forward_mcap(prior, result)
     changes = _merge_changes(contract, prior, result, winner_by_key)
 
     changed_partitions = tuple(sorted({change.partition_key for change in changes}))
