@@ -49,6 +49,7 @@ from engine.v2.research._pricing import (
     execution_variant_label,
     price_structure,
     structure_return,
+    trading_calendar_from_snapshot,
 )
 from engine.v2.research._trades_table import _trade_record
 
@@ -344,7 +345,7 @@ def replay(
         structure = STRUCTURES[strategy]()
     variant = variant or _variant_label(structure)
 
-    plan = plan_events(structure, events, calendar=calendar)
+    plan = plan_events(structure, events, calendar=_calendar(calendar, repository, snapshot_ref))
     _log(
         f"{strategy}/{variant}: planned {len(plan.frame):,} of {len(events):,} events "
         f"({plan.skipped.get('no_session', 0):,} without a session)"
@@ -401,6 +402,21 @@ def replay(
 def _variant_label(structure: Structure) -> str:
     """Stable, human-readable parameterization key for a structure."""
     return execution_variant_label(structure)
+
+
+def _calendar(calendar: TradingCalendar | None, repository, snapshot_ref):
+    """The calendar this run will use, deriving one from the snapshot if needed.
+
+    The one place ``calendar=None`` is allowed to mean anything but a
+    refusal: this is the pinned ``(repository, snapshot_ref)`` this call
+    itself was given, so deriving from it here is still deriving from
+    THIS run's own snapshot_id, never a local file. A caller that
+    supplies neither a calendar nor a resolvable snapshot gets
+    ``plan_events``'s typed refusal instead (see its docstring).
+    """
+    if calendar is None and repository is not None and snapshot_ref is not None:
+        return trading_calendar_from_snapshot(repository, snapshot_ref)
+    return calendar
 
 
 def _empty_trades() -> pd.DataFrame:

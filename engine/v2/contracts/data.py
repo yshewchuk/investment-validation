@@ -145,6 +145,12 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "CONTRACT_MISMATCH": ("validation", False),
     "QUERY_NOT_BOUNDED": ("validation", False),
     "RESULT_LIMIT_EXCEEDED": ("resource", False),
+    # PR-12 Opus-gate round 2: engine/v2/research's calendar derivation has
+    # two ways to come up empty-handed -- plan_events given no calendar and
+    # no way to derive one, or a pinned snapshot's daily_market table with
+    # no valid dates in it -- and both need a stable code instead of a bare
+    # ValueError or a re-used, less specific one.
+    "CALENDAR_UNAVAILABLE": ("validation", False),
     # S4B layering fix: the data-layer refresh wrapper resolves no provider
     # adapter (the ops layer injects the ORATS fetcher), so a direct call
     # without injection fails closed. Same name and semantics as the

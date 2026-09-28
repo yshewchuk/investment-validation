@@ -18,6 +18,18 @@ Deviations from a literal copy, all behavior-preserving:
 * ``trading_calendar`` resolves the S&P daily series off the repo root
   (``INVESTING_PLAN_ROOT`` or this worktree) instead of importing
   ``engine.paths``; the parse body is unchanged.
+* ``trading_calendar``'s "build a ``TradingCalendar`` from an observed date
+  series, then extend it forward" tail is factored into
+  ``_calendar_from_dates`` (bodies unchanged, just named) so
+  ``trading_calendar_from_snapshot`` below can reuse it.
+
+New, not from legacy: ``trading_calendar_from_snapshot`` (added for UD-4,
+PR-12's Opus-gate finding, 2026-09-27). ``engine/replay.py`` was never
+snapshot-pinned, so it had no reason to read a calendar from anywhere but a
+local file; this package is pinned, and ``_plan.py``'s ``calendar or
+trading_calendar()`` fallback silently reading the local CSV meant a v2
+replay/build-trades run was not actually reproducible from its recorded
+``snapshot_id`` alone. See that function's own docstring.
 """
 from __future__ import annotations
 
@@ -29,6 +41,8 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+
+import engine.v2.data.errors as errors
 
 # ==========================================================================
 # engine/fills.py
@@ -399,29 +413,94 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _calendar_from_dates(dates, *, extend_days: int) -> TradingCalendar:
+    """A ``TradingCalendar`` from an observed date series, extended forward.
+
+    ``extend_days`` calendar days of rule-projected weekdays are appended
+    past the last observed date, so an event after the observed history
+    still resolves. Shared by :func:`trading_calendar` (the legacy CSV
+    read) and :func:`trading_calendar_from_snapshot` (the pinned-snapshot
+    read) — this is the part of ``trading_calendar``'s original legacy body
+    that has nothing to do with WHERE the dates came from.
+
+    Raises ``engine.v2.data.errors.DataError`` (``CALENDAR_UNAVAILABLE``),
+    never a bare ``ValueError``, when ``dates`` has no valid values — a
+    pinned snapshot whose ``daily_market`` table is present but empty (or
+    every date unparseable) refuses the same way every other empty-result
+    condition in this package does, so a CLI's ``except DataError`` at
+    ``main()`` catches it and exits 2 with the code, instead of leaking an
+    uncaught traceback.
+
+    Deduplicates BEFORE ever materializing a Python list: the real
+    ``daily_market`` panel this is read from carries one row per
+    (ticker, date), so ``dates`` can be millions of rows wide for a
+    calendar that only has a few thousand distinct days in it.
+    ``pd.to_datetime``/``dropna``/``normalize``/``unique`` are all
+    vectorized over ``dates`` as given (a ``pandas.Series`` in both real
+    callers); only the deduplicated result — the actual calendar size, not
+    the row count it was read from — is ever turned into a Python list
+    (inside :class:`TradingCalendar`'s own constructor).
+    """
+    observed = pd.DatetimeIndex(pd.to_datetime(dates, errors="coerce")).dropna().normalize().unique()
+    if observed.empty:
+        raise errors.fail(
+            "CALENDAR_UNAVAILABLE",
+            "no dates to build a trading calendar from",
+        )
+    last = pd.Timestamp(observed.max())
+    future = projected_trading_days(last, last + pd.Timedelta(days=extend_days))
+    return TradingCalendar(
+        observed.append(pd.DatetimeIndex(future)), observed_through=last
+    )
+
+
 @lru_cache(maxsize=2)
 def trading_calendar(extend_days: int = 400) -> TradingCalendar:
     """Trading days from the cached S&P 500 daily series, extended forward.
 
-    History comes from the index series; ``extend_days`` calendar days of
-    rule-projected weekdays are appended so events past the end of the price
-    history still resolve. The source path mirrors ``engine.paths.GSPC_DAILY``
+    History comes from the index series; the source path mirrors
+    ``engine.paths.GSPC_DAILY``
     (``earnings_predictions/data/raw/polygon/gspc_daily.csv``) off this
-    worktree's root, never the legacy module.
+    worktree's root, never the legacy module. Not snapshot-pinned — this
+    local file is not part of any committed v2 snapshot, so a run that
+    calls this is not reproducible from a ``snapshot_id`` alone. No
+    production caller in this package uses it any more (see
+    :func:`trading_calendar_from_snapshot`); kept for the legacy-parity
+    tests that still compare against the legacy CSV read, and for any
+    direct/library caller that explicitly wants it.
     """
     path = _repo_root() / "earnings_predictions" / "data" / "raw" / "polygon" / "gspc_daily.csv"
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} missing — the trading calendar is derived from the S&P daily series"
+            f"S&P daily series not found at {path}; set INVESTING_PLAN_ROOT"
         )
     # yfinance multi-header: row 0 is field names, rows 1-2 are ticker/blank.
     df = pd.read_csv(path, skiprows=3, header=None, usecols=[0], names=["date"])
-    observed = pd.to_datetime(df["date"], errors="coerce").dropna()
-    last = pd.Timestamp(observed.max()).normalize()
-    future = projected_trading_days(last, last + pd.Timedelta(days=extend_days))
-    return TradingCalendar(
-        list(observed) + list(future), observed_through=last
-    )
+    return _calendar_from_dates(df["date"], extend_days=extend_days)
+
+
+def trading_calendar_from_snapshot(repository, snapshot_ref, *,
+                                   extend_days: int = 400) -> TradingCalendar:
+    """The pinned snapshot's own trading-day calendar, from ``daily_market``.
+
+    Every date any ticker in ``daily_market`` carries a row for, unioned
+    across the whole panel, for exactly this ``snapshot_ref`` — never the
+    scope's current head, never a local file, never an environment
+    variable. As long as the panel is non-empty on a real trading day (it
+    is, for the hundreds of tickers this program tracks), the union is a
+    reliable trading-calendar proxy, same principle as the legacy CSV using
+    one index's dates — only the DATE column is read, no price value.
+
+    Refuses rather than inventing one: a snapshot with no ``daily_market``
+    table propagates ``engine.v2.data.errors.DataError`` (``CONTRACT_MISMATCH``)
+    straight from the read, exactly like every other missing-table read in
+    this package (see ``ARCHITECTURE.md``'s Failure semantics). This
+    function never falls back to :func:`trading_calendar`'s CSV read.
+    """
+    import engine.v2.research._scan as _scan
+
+    dates = _scan.read_table(repository, snapshot_ref, "daily_market", ["date"])["date"]
+    return _calendar_from_dates(dates, extend_days=extend_days)
 
 
 # ==========================================================================
@@ -1402,6 +1481,7 @@ __all__ = [
     "ctr5", "execution_variant_label", "price_structure", "projected_trading_days",
     "put_butterfly", "put_butterfly_wide", "put_calendar", "put_condor",
     "put_condor_strike", "ramp7", "straddle_runup", "straddle_through",
-    "structure_return", "trading_calendar", "twin_peak", "twin_peak_5",
+    "structure_return", "trading_calendar", "trading_calendar_from_snapshot",
+    "twin_peak", "twin_peak_5",
     "us_market_holidays", "with_decision_offset",
 ]

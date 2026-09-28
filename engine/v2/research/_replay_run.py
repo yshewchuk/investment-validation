@@ -3,6 +3,14 @@
 Split out of ``engine.v2.research.replay`` (review blocker: module fan-out)
 with the bodies unchanged; ``run`` is the same function the CLI and the tests
 called there, now imported from here.
+
+``run`` resolves the replay calendar from the SAME pinned snapshot
+(``_pricing.trading_calendar_from_snapshot``, over ``daily_market``) rather
+than leaving ``replay``'s ``calendar`` argument unset — an unset ``calendar``
+falls all the way through ``_plan.plan_events`` to the legacy-CSV
+``trading_calendar()``, which is not part of any snapshot, so a run without
+this line was not actually reproducible from its recorded ``snapshot_id``
+(Opus-gate finding on PR-12, 2026-09-27).
 """
 from __future__ import annotations
 
@@ -13,9 +21,9 @@ from typing import Sequence
 
 import pandas as pd
 
+from engine.v2.research import _pricing, replay
 from engine.v2.research._snapshot import DEFAULT_SCOPE, read_table, resolve_snapshot
 from engine.v2.research._trades_table import to_trades_table
-from engine.v2.research.replay import replay
 
 __all__ = ["events_frame", "run"]
 
@@ -50,7 +58,9 @@ def run(repository, *, strategies: Sequence[str], events: pd.DataFrame,
     it, so a v2 row can never be mistaken for a legacy-replay row.
     """
     snapshot = resolve_snapshot(repository, scope=scope, snapshot_id=snapshot_id)
-    results = [replay(repository, snapshot, s, events) for s in strategies]
+    calendar = _pricing.trading_calendar_from_snapshot(repository, snapshot)
+    results = [replay.replay(repository, snapshot, s, events, calendar=calendar)
+               for s in strategies]
     trades = to_trades_table(results)
     if len(trades):
         trades["provenance"] = "engine.v2.research.replay"
