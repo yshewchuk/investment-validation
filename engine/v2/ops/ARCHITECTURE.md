@@ -497,11 +497,18 @@ ever builds a `JobSpec`:
   process that runs this sidecar (`ops serve`, the same OS process
   `Service.tick` runs in) must have `MODEL_RELEASE_ROOT` set in ITS OWN
   process environment before it starts; this design adds no second way to
-  configure it. Left unset (or pointed at a root with nothing `DEPLOYED`),
-  `production_release_root()` raises `MissingReleaseRoot`
-  (`deployment.py:110`) — R1 above — and legacy scoring, which never calls
-  `production_release_root`/`resolve_release_binding` at all, is
-  completely unaffected.
+  configure it. Left unset or blank, `production_release_root()` itself
+  raises `MissingReleaseRoot` (`deployment.py:110`) before any release is
+  even looked up — a pure environment-configuration failure, one layer
+  below release resolution. A `MODEL_RELEASE_ROOT` that IS set but names a
+  root with nothing `DEPLOYED` there is a DIFFERENT failure, one layer up:
+  `resolve_production_release_binding()`/`resolve_release_binding()`
+  raises `NoCurrentRelease` instead (`release_bindings.py:64-65`, "R1(a):
+  nothing has ever been promoted at this release root") — a configured but
+  empty release store, not a missing/blank env var. Both are R1 above,
+  caught the same way by this sidecar, and legacy scoring, which never
+  calls `production_release_root`/`resolve_release_binding` at all, is
+  completely unaffected either way.
 - **Per-event raw rows (`#48`/PR-2, `#67`).** The builder enumerates
   `native_board_universe.board_requests(as_of, horizon_days, tickers,
   events_table)` (`native_board_universe.py:198`) against the SAME pinned
