@@ -168,16 +168,14 @@ def commit_generic_table_candidate(
     ``publish``): ``_head_fence`` alone, exactly as before.
 
     Because ``_head_fence`` runs before ``catalog.commit_snapshot``'s
-    idempotent-replay shortcut, a replay here is idempotent only when the
-    original commit did NOT advance the head (``candidate.snapshot`` already
-    equalled the expected head): ``_head_fence`` still matches and the shortcut
-    returns the prior receipt, with ``resulting_head_generation`` correctly
-    unchanged (``catalog._existing_receipt``'s #77/#82 fix). If the commit DID
-    advance the head, a replay's head expectation no longer matches, so
-    ``_head_fence`` raises ``SNAPSHOT_CONFLICT`` first -- itself AMBIGUOUS,
-    since another writer could cause the same conflict. Either way, reconcile
-    against the stored receipt, not the fence result, before treating a retry
-    as applied.
+    idempotent-replay shortcut, a same-attempt retry whose head already sits
+    at ``candidate.snapshot`` one generation past the expected head (#98)
+    passes the fence and reaches the shortcut, which returns the prior
+    receipt with ``resulting_head_generation`` rebuilt by the same
+    already-at-head rule (``catalog._existing_receipt``'s #77/#82 fix). A
+    genuinely conflicting writer's candidate still fails the fence. Either
+    way, reconcile against the stored receipt, not the fence result, before
+    treating a retry as applied.
     """
     clock = clock or SystemClock()
     request_hash = request_hash or content_hash({"changeset": candidate.changeset_hash})
@@ -185,7 +183,8 @@ def commit_generic_table_candidate(
     attempt_id = attempt_id or "attempt_" + request_hash.removeprefix(CONTENT_HASH_PREFIX)[:32]
 
     def _combined_fence_check(conn_: Any) -> None:
-        _head_fence(conn_, scope, expected_head_snapshot_id, expected_head_generation)
+        _head_fence(conn_, scope, expected_head_snapshot_id, expected_head_generation,
+                    resulting_snapshot_id=candidate.snapshot.snapshot_id)
         if fence_check is not None:
             fence_check(conn_)
 
@@ -480,13 +479,20 @@ def _record_references(conn, receipt_id, candidate, clock):
             raise errors.fail("IDENTITY_CONFLICT", "generic revision identity has conflicting content")
 
 
-def _head_fence(conn, scope, expected_snapshot, expected_generation):
+def _head_fence(conn, scope, expected_snapshot, expected_generation, *,
+                resulting_snapshot_id=None):
     row = conn.execute(
         "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?", (scope,)
     ).fetchone()
     actual = None if row is None else (row["snapshot_id"], row["generation"])
-    if actual != (expected_snapshot, expected_generation):
-        raise errors.fail("SNAPSHOT_CONFLICT", "generic refresh lost its parent head")
+    if actual == (expected_snapshot, expected_generation):
+        return
+    if (resulting_snapshot_id is not None
+            and actual == (resulting_snapshot_id, expected_generation + 1)):
+        # #98: same-attempt retry of an already-applied effect; see
+        # incremental.py's _candidate_head_fence for the identical pattern.
+        return
+    raise errors.fail("SNAPSHOT_CONFLICT", "generic refresh lost its parent head")
 
 
 def _partition(contract, row):

@@ -417,3 +417,105 @@ def test_generic_refresh_worker_commits_json_timestamp_rows(tmp_path, table_name
         assert {item.partition_key for item in result_records} == {"2025"}
     else:
         assert matches[0]["bid"] == 2.1
+
+
+def test_retry_of_the_same_generic_effect_after_a_crash_before_attempt_commit_succeeds(
+        tmp_path):
+    """#98: a retry of the SAME generic candidate/receipt/attempt (simulating a
+    crash between commit_generic_table_candidate's own commit and the caller's
+    later attempt-commit step) must succeed as an idempotent replay, not fail
+    permanently with SNAPSHOT_CONFLICT because the head has since moved past
+    the retry's stale expected_head_snapshot_id."""
+    table_name = "earnings_events"
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    contract = from_document(
+        TableContract, build_legacy_mapping()["tables"][table_name])
+    contract_ref = TableContractRef(
+        contract_id=contract.contract_id,
+        definition_hash=contract.definition_hash,
+    )
+    base_row = _worker_row(table_name, 2024)
+    base_bytes = generic_incremental._parquet_bytes(contract, (base_row,))
+    published = store.publish_bytes(
+        base_bytes, schema_ref="parquet_fragment.v1.0")
+    obj = generic_incremental.ObjectRef(
+        kind="parquet_fragment",
+        object_id=published.artifact_id,
+        content_hash=published.content_hash,
+        byte_size=published.byte_size,
+    )
+    inspection = inspect_fragment(store, obj, contract, contract_ref, "2024")
+    receipt_ref = content_hash({"fixture": table_name})
+    record = generic_incremental.manifests.fragment_record(
+        inspection, contract_ref, input_receipt_refs=(receipt_ref,),
+        import_request_hash=receipt_ref)
+    manifest = dataset_manifest(
+        contract_ref, (record,), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent = snapshot_ref(
+        {table_name: manifest}, calendar_version="cal.v1",
+        source_priority_version="fixture", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="generic-worker",
+        request_hash=content_hash({"base": table_name}),
+        contracts=(contract,), objects=(obj,), records=(record,),
+        manifests=(manifest,), snapshot=parent,
+        expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="base-" + table_name, attempt_id="base-attempt-" + table_name,
+        fence=1, fence_check=lambda _conn: None, clock=clock, store=store,
+    )
+
+    incoming = dict(base_row)
+    incoming["event_date"] = datetime(2025, 1, 15)
+    incoming["year"] = 2025
+    incoming["session"] = "BMO"
+    logical_key = incremental_tables.logical_key_for_row(contract, incoming)
+    revision_candidate = RevisionCandidate(
+        revision_id="worker-" + table_name,
+        logical_key=logical_key,
+        source="fixture",
+        source_priority=0,
+        finality="final",
+        revision_ordinal=2,
+        received_at="2026-09-17T00:00:00Z",
+        content_hash=incremental_tables.revision_hash(
+            logical_key=logical_key, row=incoming, deleted=False),
+    )
+    coverage_key = CoverageKey(
+        item_key=logical_key, session_date="2025-01-15", ticker="AAA")
+    coverage = daily_incremental.build_completed_coverage(
+        contract_ref, source="fixture", endpoint="fixture",
+        interval=TimeInterval(
+            column="event_date", start_inclusive="2025-01-15",
+            end_exclusive="2025-01-15T23:59:59"),
+        expected=(coverage_key,),
+        outcomes=(CoverageOutcome(
+            key=coverage_key, status="present", receipt_id=receipt_ref,
+            revision_id=revision_candidate.revision_id, finality="final"),),
+        acquisition_receipt_refs=(receipt_ref,),
+        completed_at="2026-09-17T00:00:00Z",
+    )
+    resolved = Repository(conn).resolve_full(parent.snapshot_id)
+    table_candidate = generic_incremental.build_generic_table_candidate(
+        resolved, store, table_name,
+        (incremental_tables.GenericRevision(
+            candidate=revision_candidate, row=incoming),),
+        coverage=coverage, parent_snapshot_id=parent.snapshot_id)
+
+    request_hash = "sha256:" + "1" * 64
+    first = generic_incremental.commit_generic_table_candidate(
+        conn, store, table_candidate, scope="generic-worker",
+        expected_head_snapshot_id=parent.snapshot_id, expected_head_generation=1,
+        clock=clock, request_hash=request_hash, receipt_id="generic-receipt-1",
+        attempt_id="generic-attempt-1", fence=1)
+    assert first.resulting_head_snapshot_id == table_candidate.snapshot.snapshot_id
+
+    second = generic_incremental.commit_generic_table_candidate(
+        conn, store, table_candidate, scope="generic-worker",
+        expected_head_snapshot_id=parent.snapshot_id, expected_head_generation=1,
+        clock=clock, request_hash=request_hash, receipt_id="generic-receipt-1",
+        attempt_id="generic-attempt-1", fence=1)
+    assert second.receipt_id == first.receipt_id
+    assert second.resulting_head_snapshot_id == first.resulting_head_snapshot_id
+    assert second.resulting_head_snapshot_id == table_candidate.snapshot.snapshot_id

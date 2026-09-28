@@ -93,3 +93,25 @@ def test_backup_rejects_symlink_target_before_writing(tmp_path):
     with pytest.raises(Exception):
         run_backup(conn, key="b4", owner="worker", target=target, clock=clock, store=store)
     assert not (outside / "b4.sqlite").exists()
+
+
+def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
+    """#98: a retry after a crash between run_backup's own complete() (state=delivered)
+    and the caller's later watermark/attempt-commit step must succeed as an idempotent
+    replay, not fail permanently with STALE_EXPECTATION."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    ref = store.publish_bytes(b"evidence", schema_ref="evidence.v1.0")
+    prepare_backup(conn, "b4", {"evidence.bin": ref}, clock=clock)
+    backup = tmp_path / "backup"
+    first = run_backup(conn, key="b4", owner="worker", target=backup, clock=clock, store=store)
+    assert conn.execute("SELECT state FROM outbox WHERE logical_key='b4'").fetchone()[0] == "delivered"
+
+    # Simulate the retry that happens when the caller crashed after run_backup's own
+    # complete() but before it wrote the watermark/committed the attempt: run_backup is
+    # invoked again with the SAME key, while the outbox row is already delivered.
+    second = run_backup(conn, key="b4", owner="worker", target=backup, clock=clock, store=store)
+    assert second == first
+    assert conn.execute("SELECT state FROM outbox WHERE logical_key='b4'").fetchone()[0] == "delivered"
+    # No second backup was performed: the manifest file on disk is unchanged.
+    assert (backup / "b4.manifest.json").read_bytes()
