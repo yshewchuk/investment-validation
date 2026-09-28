@@ -681,30 +681,41 @@ section is (a). It does not attempt (b): the per-event raw-row producer
 for `NightlyEventInputs`) stays exactly as out of scope as PR-7a already
 declared it — a later PR, mirroring PR-7a's own boundary.
 
-**Status:** PR-7b-1 (#145) adds `_ensure_shadow_snapshot` and its
-production-default seams to `nightly_trigger.py`, added unused — see the
-"Split into small code PRs" list below. `_submit_plan` still calls neither
-it nor anything downstream of it: PR-7b-2 is what wires it in and flips
-`_default_plan`'s `input_mode`/`snapshot_scope` literals, together, in one
-slice (see that bullet below for why the two changes cannot ship
-separately). Until PR-7b-2 merges, this section still describes running
-production behavior accurately: every shadow-nightly plan still pins no
-`SnapshotRef`, exactly as "The concrete gap in running code today" states
-next.
+**Status:** PR-7b-1 (#145) added `_ensure_shadow_snapshot` and its
+production-default seams to `nightly_trigger.py`, unused — see the "Split
+into small code PRs" list below. PR-7b-2 (#150) wires it into `_submit_plan`
+as the new `ensure_snapshot_fn` seam (called immediately before `plan_fn`,
+inside the same `if plan_ref is None:` guard), adds `TriggerReceipt.
+snapshot_attempt` as the job-identity counter `_ensure_shadow_snapshot`'s
+own `attempt` parameter needs (a single, monotonic per-`as_of` counter,
+carried on every receipt and bumped only on a terminal `INPUT_CHANGED`
+refusal — never reused from `error_count`, which resets on several statuses
+that say nothing about the snapshot-import job's own identity), and flips
+`_default_plan`'s `input_mode`/`snapshot_scope` literals from `"legacy"`/
+`None` to `"snapshot"`/`"shadow"`, together in one slice (see that bullet
+below for why the two changes cannot ship separately). `_default_plan` also
+gains a pass-through `expected_shadow_snapshot_id` keyword, threaded to
+`args.expected_snapshot_id` — not yet read by `cli._plan_command`/
+`pin_snapshot_inputs` (PR-7b-3, below, adds that CAS check). As of PR-7b-2,
+"The concrete gap in running code today" below is CLOSED: every scheduled
+shadow-nightly plan now pins a verified `shadow`-scope `SnapshotRef` before
+`_default_plan` runs, rather than reading the legacy store live. The
+narrative below is kept as the design rationale for why that gap existed and
+what closed it, not as a description of current behavior.
 
-**The concrete gap in running code today.** `nightly_trigger._default_plan`
-(`nightly_trigger.py:~518-528`, both line numbers approximate — issue #104/
-PR #117, in flight, renumbers this function's body; see the coordination
-note below) hardcodes `input_mode="legacy"`, `snapshot_scope=None`,
-`refresh_mode="legacy"`, `refresh_plan=None` in the `argparse.Namespace` it
-builds for every call, unconditionally — there is no branch, no flag, and
-no caller-supplied override for any of the four. In `input_mode="legacy"`,
-`cli._plan_command`'s own `_snapshot_inputs` (`cli.py:454-467`) returns
-`None` before `snapshot_planning.pin_snapshot_inputs` is ever called, so
-the plan `nightly_trigger` submits every night pins no `SnapshotRef` at
-all — verified against current `main`, matching PR-7a's own verification of
-the identical fact. **Supervisor decision, option A**: the shadow nightly
-runs in `input_mode="snapshot"` — not narrowly scoped to feed only
+**The gap this section closed (historical — kept as the design rationale;
+see "Status" above for the current, closed state).** Before PR-7b-2,
+`nightly_trigger._default_plan` hardcoded `input_mode="legacy"`,
+`snapshot_scope=None`, `refresh_mode="legacy"`, `refresh_plan=None` in the
+`argparse.Namespace` it built for every call, unconditionally — there was no
+branch, no flag, and no caller-supplied override for any of the four. In
+`input_mode="legacy"`, `cli._plan_command`'s own `_snapshot_inputs`
+(`cli.py:454-467`) returned `None` before `snapshot_planning.
+pin_snapshot_inputs` was ever called, so the plan `nightly_trigger` submitted
+every night pinned no `SnapshotRef` at all — verified against `main` at the
+time, matching PR-7a's own verification of the identical fact.
+**Supervisor decision, option A**: the shadow nightly runs in
+`input_mode="snapshot"` — not narrowly scoped to feed only
 `native_score_batch`, but the WHOLE shadow plan `nightly_trigger` submits,
 so legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
 `"model_evidence"` (`SNAPSHOT_STAGES`, `nightly.py:379-380`) read through

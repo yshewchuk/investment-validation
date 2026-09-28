@@ -1258,6 +1258,33 @@ def test_ensure_snapshot_fn_terminal_failure_bumps_snapshot_attempt_and_survives
     assert third.status == "error" and third.snapshot_attempt == 2
 
 
+def test_ensure_snapshot_fn_transient_os_error_does_not_bump_snapshot_attempt(tmp_path):
+    """CodeRabbit round 1: only a terminal INPUT_CHANGED refusal mints a new
+    idempotency key; a transient OSError must not, since the underlying
+    import job (if any) may still be live under the OLD attempt's key."""
+    plan, submit, serve = FakePlan(), FakeSubmit(), FakeServe()
+
+    def transient_os_error(root, as_of, clock, attempt):
+        raise OSError("transient catalog hiccup")
+
+    first = _call_submit_plan(tmp_path, FakeClock(IN_WINDOW),
+                              ensure_snapshot_fn=transient_os_error, plan=plan, submit=submit,
+                              serve=serve)
+    assert first.status == "error" and first.snapshot_attempt == 0
+
+    seen_attempts = []
+
+    def records_attempt(root, as_of, clock, attempt):
+        seen_attempts.append(attempt)
+        raise OSError("still transient")
+
+    second = _call_submit_plan(tmp_path, FakeClock(IN_WINDOW),
+                               ensure_snapshot_fn=records_attempt, plan=plan, submit=submit,
+                               serve=serve, prior=first)
+    assert seen_attempts == [0]  # the SAME attempt, not bumped by the prior OSError
+    assert second.status == "error" and second.snapshot_attempt == 0
+
+
 def test_busy_legacy_between_submit_plan_entries_leaves_snapshot_attempt_unchanged(tmp_path):
     """Opus-gate regression, fb7d31e's finding 1 on e900074: a busy_legacy tick
     sandwiched between two _submit_plan entries must not touch snapshot_attempt."""
@@ -1318,4 +1345,5 @@ def test_alternating_terminal_failure_and_timeout_still_reaches_failed_setup_aft
     third = _call_submit_plan(tmp_path, FakeClock(IN_WINDOW), ensure_snapshot_fn=ensure_snapshot,
                               plan=plan, submit=submit, serve=serve, prior=prior)
     assert third.status == "failed_setup"
+    assert "3 consecutive times" in third.detail  # reports snapshot_attempt (3), not error_count
     assert third.snapshot_attempt == 3

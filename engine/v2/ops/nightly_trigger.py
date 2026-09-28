@@ -376,9 +376,10 @@ def _failure(root: Path, clock, as_of: str, plan_ref: str | None,
         snapshot_attempt if snapshot_attempt is not None
         else (prior.snapshot_attempt if prior is not None else 0))
     if count >= MAX_CONSECUTIVE_ERRORS or resolved_snapshot_attempt >= MAX_CONSECUTIVE_ERRORS:
+        giving_up_count = count if count >= MAX_CONSECUTIVE_ERRORS else resolved_snapshot_attempt
         return _record(root, _receipt(
             clock, as_of, "failed_setup",
-            f"setup failed {count} consecutive times; giving up: {detail}",
+            f"setup failed {giving_up_count} consecutive times; giving up: {detail}",
             plan_ref=plan_ref, error_count=count, snapshot_attempt=resolved_snapshot_attempt))
     return _record(root, _receipt(clock, as_of, "error", detail,
                                   plan_ref=plan_ref, error_count=count,
@@ -482,6 +483,15 @@ def _timeout_receipt(clock, as_of: str, plan_ref: str | None, snapshot_attempt: 
                     plan_ref=plan_ref, error_count=count, snapshot_attempt=snapshot_attempt)
 
 
+def _snapshot_attempt_bump(exc: BaseException) -> int:
+    """Only a terminal ``INPUT_CHANGED`` refusal from ``ensure_snapshot_fn``
+    mints a new idempotency key (CodeRabbit round 1); a transient failure
+    (e.g. a catalog-I/O ``OSError``) must not, since the import job already
+    submitted under the OLD attempt's key may still be running or already
+    have succeeded there."""
+    return 1 if isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED" else 0
+
+
 def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, plan_fn,
                  submit_fn, serve_fn, ensure_snapshot_fn, full_run,
                  prior: TriggerReceipt | None, plan_ref: str | None) -> TriggerReceipt:
@@ -503,7 +513,7 @@ def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, pla
             readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
         except _HANDLED_FAILURES as exc:
             return _failure(root, clock, as_of, None, exc, prior,
-                            snapshot_attempt=snapshot_attempt + 1)
+                            snapshot_attempt=snapshot_attempt + _snapshot_attempt_bump(exc))
         if readiness == "not_yet":
             return _record(root, _receipt(
                 clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet",
@@ -931,10 +941,9 @@ def _ensure_shadow_snapshot(root: Path, as_of: str, clock, attempt: int, *,
     """Cutover PR-7b (design: ``ARCHITECTURE.md`` "Cutover PR-7b's input
     sourcing" / "``nightly_trigger.py`` (Cutover PR-7b design)"). Commits (or
     reattaches to) the ``as_of`` session's ``shadow``-scope snapshot BEFORE any
-    plan is built -- NOT YET called from ``_submit_plan`` in this slice (added
-    unused, per the small-PRs "add the new code first, unused... then wire it
-    in" split): a later PR wires it in behind ``_submit_plan``'s own
-    ``ensure_snapshot_fn`` seam, inside the same ``if plan_ref is None:`` guard.
+    plan is built -- this is ``_submit_plan``'s default ``ensure_snapshot_fn``,
+    called inside the same ``if plan_ref is None:`` guard, immediately before
+    ``plan_fn`` (Cutover PR-7b-2).
 
     Returns ``("ready", snapshot_id)`` once a ``shadow``-scope snapshot is
     confirmed fresh for ``as_of`` and committed (or was already committed by
