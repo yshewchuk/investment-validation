@@ -2118,21 +2118,32 @@ hold, extended here rather than re-argued from scratch.
   succeeded `native_score_batch` job's `scope_hash`) resets the attempt
   count to zero with no backoff — a new identity always gets an immediate
   first try, exactly like `computed_moves_refresh`'s own memo
-  (`supervisor.py:383-456`). Every outcome against the CURRENT identity
-  that is NOT a submitted job — `submission.submit` raising, or being
-  rejected (e.g. an `IDEMPOTENCY_CONFLICT` on a race with another
-  submitter) — calls `Service`'s own existing `_computed_moves_backoff(memo,
-  now)` helper (`supervisor.py:298`, already generic over its `memo`
-  argument — called today from three `computed_moves_refresh` call sites,
-  `supervisor.py:374`, `:451`, `:458`) with `self._native_parity_memo`,
-  reusing the increment/clamp logic itself, not only the two constants, so
-  there is exactly one place either schedule's indexing math lives. After 5
-  attempts against the same identity, the sidecar stops trying that
-  identity at all until it changes (a later attempt count clamps to the
-  schedule's last entry, 1h, exactly like `computed_moves_refresh`'s own
-  clamp, `supervisor.py:440`). A successful submission (a `JobReceipt`
-  returned) clears the memo entirely, so the next distinct identity starts
-  from zero rather than inheriting a stale attempt count.
+  (`supervisor.py:383-456`). **The two CONSTANTS are reused; the existing
+  `_computed_moves_backoff` HELPER is not** (CodeRabbit round 2, real
+  finding): that method (`supervisor.py:298-309`) unconditionally ends with
+  `self._computed_moves_memo = memo` — it hardcodes ITS OWN slot regardless
+  of which `memo` dict is passed in, so calling it with
+  `self._native_parity_memo` would silently overwrite
+  `self._computed_moves_memo` with `native_parity`'s own state, corrupting
+  `computed_moves_refresh`'s independent retry tracking. `_reconcile_native_parity`
+  therefore applies the IDENTICAL increment/clamp arithmetic
+  (`memo["attempts"] += 1; memo["not_before"] = now +
+  self._COMPUTED_MOVES_BACKOFF_SECONDS[min(memo["attempts"] - 1,
+  len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]`, `supervisor.py:306-308`'s
+  own expression, copied not called) inline against
+  `self._native_parity_memo` on its own — reusing the two NUMBERS, never
+  the helper that writes to the wrong slot, so the two sidecars' retry
+  state can never cross-contaminate. Every outcome against the CURRENT
+  identity that is NOT a submitted job — `submission.submit` raising, or
+  being rejected (e.g. an `IDEMPOTENCY_CONFLICT` on a race with another
+  submitter) — runs this inline step. After 5 attempts against the same
+  identity, the sidecar stops trying that identity at all until it changes
+  (a later attempt count clamps to the schedule's last entry, 1h, exactly
+  like `computed_moves_refresh`'s own clamp, `supervisor.py:440`). A
+  successful submission (a `JobReceipt` returned) clears
+  `self._native_parity_memo` entirely (never `self._computed_moves_memo`),
+  so the next distinct identity starts from zero rather than inheriting a
+  stale attempt count.
 - **R3, retry.** The job's own `RetryPolicy("bounded", 2, (5, 30))` covers
   a transient worker crash (a disk error reading a bound input, for
   example); a session whose key already exists — succeeded OR failed — is

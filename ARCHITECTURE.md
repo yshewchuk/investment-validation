@@ -224,13 +224,34 @@ or a new consumer must update that package's README in the same change.
   `decision_commit`; `ledger_export` for `export`; `engineering_gate` for
   `engineering`). `native_parity` is not in `_DAG_STAGES` at all, so in
   production it is simply absent from the submitted list, not filtered out
-  of it. **The one trap worth stating here**: `NO_JOB_STAGES` (currently
-  `{"native_parity"}`) only does work on the *other* branch —
-  `include_prerequisites=True`, exercised by tests only — where
-  `_stage_sequence` instead returns `plan["order"]` (the full `GRAPH`
-  order, `native_parity` included) and strips `NO_JOB_STAGES` from it
-  before returning. See `engine/v2/ops/ARCHITECTURE.md` for the full
-  stage graph and its `OPTIONAL` markings and this same distinction.
+  of it. **The one trap worth stating here**: `NO_JOB_STAGES` (today
+  `{"native_parity"}`, since `native_parity` has no job kind of its own
+  yet) only does work on the *other* branch — `include_prerequisites=True`,
+  exercised by tests only — where `_stage_sequence` instead returns
+  `plan["order"]` (the full `GRAPH` order, `native_parity` included) and
+  strips `NO_JOB_STAGES` from it before returning. See
+  `engine/v2/ops/ARCHITECTURE.md` for the full stage graph and its
+  `OPTIONAL` markings and this same distinction.
+
+  **Design, not yet code (cutover PR-4 redo, `engine/v2/ops/ARCHITECTURE.md`'s
+  "Cutover PR-4 (redo)" section):** `native_parity` and `computed_moves_refresh`
+  both reach production submission through a FOURTH path, entirely outside
+  `GRAPH`/`_DAG_STAGES`/`build_legacy_job_requests`:
+  `supervisor.Service`'s own tick-loop sidecars.
+  `Service._reconcile_computed_moves_refresh` is real code today,
+  submitting `computed_moves_refresh` alone via `submission.submit` (never
+  `submit_graph`, so an optional stage's own submission problem can never
+  abort the required graph). A proposed `Service._reconcile_native_parity`,
+  calling a proposed `nightly.submit_native_parity_if_ready`, would submit
+  `native_parity` the identical way once built — neither symbol exists in
+  `nightly.py`/`supervisor.py` yet. Once that PR's code lands, `native_parity`
+  gains a real job kind and `NO_JOB_STAGES` becomes empty: `_stage_sequence`'s
+  test-only branch instead excludes `"native_parity"` by name, the same way
+  it already excludes `"computed_moves_refresh"` today (a real job kind
+  that is nonetheless never submitted through `_DAG_STAGES`). See that
+  doc's own "Cutover PR-4 (redo)" section for the full design, including
+  why `NO_JOB_STAGES`'s emptying does not change how `_DAG_STAGES` itself
+  behaves.
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
