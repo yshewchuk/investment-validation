@@ -1984,12 +1984,19 @@ function is never part of.
   `ModelNotReady("release_root", ...)` (step 3's own internal
   re-raise of a `MissingReleaseRoot` it independently hits) or
   `NoCurrentRelease` (a configured root naming nothing `DEPLOYED`) — each
-  case returns without submitting anything, silently (no report — these are
-  ordinary "nothing to do yet" outcomes); there is no partial or
-  synthetic-empty job.
+  case returns without submitting anything; there is no partial or
+  synthetic-empty job. All four ARE reported, deduplicated by
+  `Service._report_native_release_problem` (called directly inside
+  `_native_release_root_or_none`, independent of any exception or
+  backoff — a `MISSING_RELEASE_ROOT`/`MODEL_NOT_READY`/`NO_CURRENT_RELEASE`
+  problem folded into an always-registered `VALIDATION_FAILED`
+  `Problem.code`, per "Cutover PR-7a's input sourcing" above) — never
+  silent, but reported through a DIFFERENT mechanism than the
+  pinned-snapshot case below, and never touching the build-attempt memo
+  either way (R2).
 
-  **One R1 case is DIFFERENT and is reported, not silent: the selected
-  `"score"` job pinning a snapshot with no matching job yet
+  **One R1 case is additionally distinct in WHEN it is reachable: the
+  selected `"score"` job pinning a snapshot with no matching job yet
   (`snapshot_pinned` is `True`).** This is reachable TODAY, not a future
   concern — an operator's `--input-mode snapshot` plan pins a snapshot on
   `"score"` regardless of anything this PR builds (Opus gate finding: an
@@ -1998,13 +2005,15 @@ function is never part of.
   raw-row producer (cutover PR-6) that would enumerate `board_requests`
   and stage `events.json` for it does not exist, so
   `submit_native_score_batch_shadow_if_ready` `raise`s `VALIDATION_FAILED`
-  instead of silently returning `None` — the caller
+  instead of returning `None` — the caller
   (`Service._reconcile_native_score_batch_shadow`) already catches and
-  reports every exception this function raises (the identical
+  reports every exception this function raises through the SEPARATE
   `_report_native_score_batch_problem` dedup path a genuine build failure
-  uses), so an operator who switches production to snapshot mode before
-  PR-6 lands sees a deduplicated, reported problem instead of the sidecar
-  silently spending its backoff schedule with nothing to show for it.
+  already uses (unlike the four release-unavailable cases above, this one
+  DOES spend one of the build-attempt memo's own attempts, since it is a
+  genuine inability to build, not a release-availability check), so an
+  operator who switches production to snapshot mode before PR-6 lands
+  sees a deduplicated, reported problem either way.
 - **R2 cache — two separate memos, not one.** Once a job exists under
   today's session's idempotency key, in any state, it is never rebuilt or
   resubmitted — the existence check runs before any raw row is read or
@@ -2057,9 +2066,13 @@ function is never part of.
   immutable content-addressed artifact before `submit` is ever called;
   nothing is written to the catalog before that single insert.
 - **R6 idempotency.** The idempotency key is
-  `"nightly:<as_of>:<scope_hash>:native_score_batch"` — the SAME 4-part
-  `_DAG_STAGES` shape `build_legacy_job_requests` already uses for every
-  other stage (`nightly.py:996`), keyed to the SPECIFIC succeeded `"score"`
+  `"nightly:<as_of>:<scope_hash>:native_score_batch"` — the SAME shape
+  `build_legacy_job_requests` already uses for every other stage
+  (`nightly.py:996`), with the trailing stage name replaced; never a fixed
+  4-part split, since `scope_hash` (`_scope_hash` → `content_hash(...)
+  [:24]`) is itself a `"sha256:<hex>"` string that already contains a
+  colon, so a real key has five colon-separated segments, not four. Keyed
+  to the SPECIFIC succeeded `"score"`
   job `_native_score_batch_identity` selected, never session alone
   (CodeRabbit round 1, real finding). A newer succeeded `"score"` job for
   the same session under a DIFFERENT `scope_hash` (a wider re-run, a
