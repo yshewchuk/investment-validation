@@ -1019,3 +1019,96 @@ def test_default_serve_snapshot_import_maps_deadline_exceeded_to_timed_out(tmp_p
     assert result == ("timed_out", None)
     assert captured["deadline_at"] == deadline_at
     assert state == "queued"
+
+
+def _seed_snapshot_import_receipt_output(conn, clock, root, job_id, *, name, document):
+    """A real attempt + a real, content-addressed artifact registered as
+    that attempt's named output -- the shape a succeeded snapshot_import
+    job's coordinator effect actually produces
+    (``snapshot_promotion.snapshot_import_effect``), built through the real
+    ``ArtifactStore``/``register_artifact`` calls rather than a hand-invented
+    artifacts row. Reuses the job's existing attempt when there is one, so
+    several named outputs land on the SAME attempt -- the real publishing
+    shape, and the only shape that exercises name-vs-index selection.
+    """
+    import json as _json
+
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.ops.catalog import transaction
+    from engine.v2.ops.checkpoints import register_artifact
+    from engine.v2.ops.recovery import begin_epoch
+
+    store = ArtifactStore(nightly_trigger._ops_root(root))
+    ref = store.publish_bytes(_json.dumps(document).encode("utf-8"), schema_ref="test.v1.0")
+    existing = conn.execute("SELECT attempt_id FROM attempts WHERE job_id = ?",
+                            (job_id,)).fetchone()
+    if existing is None:
+        attempt_id = f"att_{job_id}_1"
+        epoch_id = begin_epoch(conn, clock=clock, boot_id="test", pid=1)
+        stamp = clock.now().isoformat()
+        conn.execute(
+            "INSERT INTO attempts (attempt_id, job_id, attempt_number, fence, supervisor_epoch, "
+            "host_boot_id, state, process_state, resources_json, created_at, lease_expires_at) "
+            "VALUES (?, ?, 1, 1, ?, 'test', 'succeeded', 'exited', '{}', ?, ?)",
+            (attempt_id, job_id, epoch_id, stamp, stamp))
+    else:
+        attempt_id = existing["attempt_id"]
+    with transaction(conn):
+        register_artifact(conn, ref, attempt_id, clock)
+    conn.execute("INSERT INTO attempt_outputs (attempt_id, name, artifact_id) VALUES (?, ?, ?)",
+                (attempt_id, name, ref.artifact_id))
+    conn.commit()
+
+
+def test_resulting_head_snapshot_id_selects_the_named_receipt_over_other_outputs(tmp_path):
+    """CodeRabbit round 1 (real): get_job().output_refs is ordered by
+    artifact_id, not by output name, so a naive output_refs[0] pick can
+    return the wrong artifact when a succeeded attempt published more than
+    one named output. Seed BOTH a non-receipt output and the real
+    "snapshot_import_receipt" output on the SAME attempt and assert the
+    receipt's own value is returned, not the other output's."""
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    job_id = _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="succeeded")
+    _seed_snapshot_import_receipt_output(conn, clock, tmp_path, job_id, name="snapshot_import",
+                                        document={"resulting_head_snapshot_id": "WRONG"})
+    _seed_snapshot_import_receipt_output(conn, clock, tmp_path, job_id,
+                                        name="snapshot_import_receipt",
+                                        document={"resulting_head_snapshot_id": "snap_real"})
+
+    result = nightly_trigger._resulting_head_snapshot_id(tmp_path, conn, job_id)
+    conn.close()
+
+    assert result == "snap_real"
+
+
+def test_resulting_head_snapshot_id_raises_when_the_receipt_has_no_snapshot_id(tmp_path):
+    """A receipt document present but missing (or carrying an empty)
+    resulting_head_snapshot_id must raise INPUT_CHANGED, never return None
+    silently."""
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    job_id = _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="succeeded")
+    _seed_snapshot_import_receipt_output(conn, clock, tmp_path, job_id,
+                                        name="snapshot_import_receipt",
+                                        document={"status": "committed"})
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._resulting_head_snapshot_id(tmp_path, conn, job_id)
+    conn.close()
+
+    assert raised.value.code == "INPUT_CHANGED"
+
+
+def test_resulting_head_snapshot_id_raises_when_there_is_no_receipt_artifact_at_all(tmp_path):
+    """A succeeded job with no attempt_outputs row at all (no receipt ever
+    published) must raise INPUT_CHANGED rather than crash or return None."""
+    clock = FakeClock(IN_WINDOW)
+    conn = _open_ops_catalog(tmp_path, clock)
+    job_id = _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="succeeded")
+
+    with pytest.raises(OpsError) as raised:
+        nightly_trigger._resulting_head_snapshot_id(tmp_path, conn, job_id)
+    conn.close()
+
+    assert raised.value.code == "INPUT_CHANGED"

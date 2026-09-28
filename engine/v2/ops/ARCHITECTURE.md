@@ -669,8 +669,8 @@ path reads this edge) and `OPTIONAL` gains `"native_score_batch"`.
 gets its first real caller here, closing the "no caller yet" dashed edge
 this doc's own Diagrams section already names (see below).
 
-**Cutover PR-7b (design — this PR adds no code; the next PR in this
-sequence implements what this section describes).** PR-7a's own text above
+**Cutover PR-7b (design — this design PR itself added no code; the
+implementing sequence below is now under way).** PR-7a's own text above
 named the gap precisely and refused to close it: "PR-7a's shadow batch does
 not submit at all, full stop, until either (a) a future PR changes the
 production input mode to one that pins a snapshot, or (b) the still-missing
@@ -680,6 +680,17 @@ section is (a). It does not attempt (b): the per-event raw-row producer
 (`calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` staging
 for `NightlyEventInputs`) stays exactly as out of scope as PR-7a already
 declared it — a later PR, mirroring PR-7a's own boundary.
+
+**Status:** PR-7b-1 (#145) adds `_ensure_shadow_snapshot` and its
+production-default seams to `nightly_trigger.py`, added unused — see the
+"Split into small code PRs" list below. `_submit_plan` still calls neither
+it nor anything downstream of it: PR-7b-2 is what wires it in and flips
+`_default_plan`'s `input_mode`/`snapshot_scope` literals, together, in one
+slice (see that bullet below for why the two changes cannot ship
+separately). Until PR-7b-2 merges, this section still describes running
+production behavior accurately: every shadow-nightly plan still pins no
+`SnapshotRef`, exactly as "The concrete gap in running code today" states
+next.
 
 **The concrete gap in running code today.** `nightly_trigger._default_plan`
 (`nightly_trigger.py:~518-528`, both line numbers approximate — issue #104/
@@ -1276,7 +1287,7 @@ happened at all.
 implementing sequence, each independently mergeable and each with its own
 tests:
 
-- **PR-7b-1 (shadow snapshot import producer, added unused).**
+- **PR-7b-1 (shadow snapshot import producer, added unused — this slice, #145).**
   `_ensure_shadow_snapshot` plus the `_drive_jobs_to_terminal` extraction
   shared with `_default_serve` — the function and its tests only, NOT yet
   called from `_submit_plan` (per the Small PRs guidance: "add the new

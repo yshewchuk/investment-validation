@@ -743,26 +743,44 @@ def _default_submit_import(root, conn, plan, idempotency_key, clock) -> str:
     return receipt.job_id
 
 
-def _resulting_head_snapshot_id(root, conn, job_id) -> str | None:
+def _resulting_head_snapshot_id(root, conn, job_id) -> str:
     """Read ``SnapshotImportReceipt.resulting_head_snapshot_id`` off a
-    succeeded ``snapshot_import`` job's own committed output artifact --
-    never a fresh ``data_snapshot_heads`` read, which may already differ by
-    the time this runs (Cutover PR-7b: an operator could run ``ops snapshot
-    submit``/``promote`` by hand in between).
+    succeeded ``snapshot_import`` job's own committed
+    ``"snapshot_import_receipt"`` output artifact -- selected by NAME, never
+    ``get_job().output_refs[0]`` (that list is ordered by artifact_id, not by
+    output name, and a succeeded attempt can publish more than one named
+    output -- e.g. the worker's own inspections output alongside the
+    coordinator's receipt, ``snapshot_promotion.snapshot_import_effect``).
+    Never a fresh ``data_snapshot_heads`` read either, which may already
+    differ by the time this runs (Cutover PR-7b: an operator could run ``ops
+    snapshot submit``/``promote`` by hand in between). Raises the typed,
+    non-retryable ``INPUT_CHANGED`` ``OpsError`` if no such output exists, or
+    if it exists but carries no usable ``resulting_head_snapshot_id`` --
+    never returns ``None``, so a caller's ``"ready"`` outcome always carries
+    a real snapshot id.
     """
     from engine.v2.foundation import ArtifactStore
     from engine.v2.ops.checkpoints import artifact
-    from engine.v2.ops.submission import get_job
 
-    receipt = get_job(conn, job_id)
-    if not receipt.output_refs:
+    row = conn.execute(
+        "SELECT ao.artifact_id FROM attempt_outputs ao "
+        "JOIN attempts a ON a.attempt_id = ao.attempt_id "
+        "WHERE a.job_id = ? AND a.state = 'succeeded' AND ao.name = 'snapshot_import_receipt' "
+        "ORDER BY a.attempt_number DESC LIMIT 1",
+        (job_id,)).fetchone()
+    if row is None:
         raise fail("INPUT_CHANGED",
-                   "the shadow snapshot import succeeded with no output artifact",
+                   "the shadow snapshot import succeeded with no receipt artifact",
                    details={"job_id": job_id})
     store = ArtifactStore(_ops_root(root))
-    ref = artifact(conn, store, receipt.output_refs[0])
+    ref = artifact(conn, store, row["artifact_id"])
     document = json.loads(store.read_verified(ref))
-    return document.get("resulting_head_snapshot_id")
+    snapshot_id = document.get("resulting_head_snapshot_id") if isinstance(document, dict) else None
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise fail("INPUT_CHANGED",
+                   "the shadow snapshot import receipt carries no resulting snapshot id",
+                   details={"job_id": job_id})
+    return snapshot_id
 
 
 def _default_serve_snapshot_import(root, conn, job_id, clock,
