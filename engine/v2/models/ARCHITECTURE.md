@@ -85,7 +85,7 @@ saves one: `StagedManifest` (`deployment.py:189-197`) holds only `release:
 ModelRelease`, `release_hash`, `staged_at`. The only function that builds a
 `ModelReleaseInventory` today, `current_release_inventory` (`inventory.py`),
 reads it fresh from the legacy champion registry (`engine.models.registry`)
-and `data/models/*` every time — it is not, and cannot be, "the prior
+and its own on-disk champion artifact store every time — it is not, and cannot be, "the prior
 release's inventory, carried over": `ModelReleaseInventory` carries fields
 (`releases.py`) a `ModelRelease`/`ModelBinding` (`contracts.py`) does not
 have at all — `strategy_ids` (plural, with a `"*"` wildcard),
@@ -261,9 +261,9 @@ non-model state) — never by opening a staged object file directly outside
   the state catalog's SCHEMA is unchanged, only which package owns writing
   and reading it.
 - **`carry_forward_release`** (proposed, cutover PR-13a): one new,
-  immutable `manifest.json` under `<root>/releases/<new_release_id>/` —
-  identical bindings to the prior release's manifest, only `release_id`
-  differs. No new object under `<root>/objects/`.
+  immutable `manifest.json` at `new_release_id`'s own per-release storage
+  location — identical bindings to the prior release's manifest, only
+  `release_id` differs. No new object in the shared object store.
 - **`derive_catalog`** (proposed, cutover PR-13a; the write is now this
   package's own, per the revised note above — it changes where this
   package's own state catalog lives): today
@@ -279,9 +279,9 @@ non-model state) — never by opening a staged object file directly outside
   EVERY scoring resolution — true today, with the existing manual operator
   workflow, before any of this design's automation exists; automating
   nightly releases only makes it fire far more often. This design's first
-  code PR (see the ops doc's split) moves it to
-  `<root>/releases/<release_id>/phase5_release.json`, alongside the model
-  manifest it now shares an immutable directory with — after which
+  code PR (see the ops doc's split) moves it beside the model manifest, to
+  each release's own per-release storage location, sharing that same
+  immutable directory with it — after which
   `promote`/`rollback` need no new logic at all, since whichever
   `release_id` becomes live, its own catalog already sits at its own
   immutable path, and `derive_catalog`'s "read the prior release's own
@@ -618,10 +618,19 @@ implemented; MODEL side only — see §1's "why nightly does not...")
   DIFFERENT content (byte-identical content is R3's no-op, below). Refuses
   a new `DeploymentError` subclass, `MissingCarriedOverObject` (naming the
   binding and its `content_hash`), if any binding's declared member cannot
-  be found under `<root>/objects/` — a staged release is content-addressed
-  and immutable (§4), so this can only mean the store was tampered with or
-  corrupted, never a normal state. Never reads or requires a
-  `ModelReleaseInventory`.
+  be found in the shared object store — a staged release is
+  content-addressed and immutable (§4), so this can only mean the store was
+  tampered with or corrupted, never a normal state. **Existence alone is
+  not enough (CodeRabbit finding, confirmed): also refuses
+  `CorruptCarriedObject` (naming the binding and its `content_hash`) if a
+  FOUND object's own bytes do not hash to the `content_hash` its binding
+  declares** — the same re-verification `_write_object` already does for
+  every freshly-staged object (`deployment.py:421-428`) and
+  `FrozenStateLoader` already does for every frozen-state read
+  (`frozen_state.py:84`), so a corrupted (not merely missing) object is
+  caught here too, before it is ever carried into a new, published release,
+  not only whenever some future reader happens to load it. Never reads or
+  requires a `ModelReleaseInventory`.
 - **R2, cache.** None: reads the prior manifest fresh, same as every other
   read in this module.
 - **R3, retry.** Calling this twice with the same `(prior_release_id,
@@ -655,13 +664,16 @@ Opus gate finding, see §2/§4), so its refusal is `ReleaseLayoutError`
   (reusing `_read_state_catalog`'s existing checks against the PRIOR
   release_id, not reimplementing them). Refuses if any key in
   `changed_rows` does not name a `member_id` `STATE_SPECS` declares.
-  Refuses if any CARRIED-OVER row's object path cannot be found under
-  `deployment_root(release_root)/objects/` (this module's own
-  `deployment_root`/`object_relpath`, moved here from `checks/
-  phase5_release.py` — see §2/§4 — the ONE content-addressed store
-  every release staged under this root writes into and shares; moving the
-  catalog file to a per-`release_id` path, §1/§4, does not move this
-  store).
+  Refuses if any CARRIED-OVER row's object cannot be found in the shared
+  object store (this module's own `deployment_root`/`object_relpath`,
+  moved here from `checks/phase5_release.py` — see §2/§4 — the ONE
+  content-addressed store every release staged under this root writes into
+  and shares; moving the catalog file to a per-`release_id` path, §1/§4,
+  does not move this store), OR if a FOUND carried-over object's own bytes
+  do not hash to its declared `content_hash` (`CorruptCarriedObject`,
+  CodeRabbit finding, confirmed — the SAME re-verification §7.6 R1 now
+  requires of `carry_forward_release`, applied here to the STATE side's own
+  carried-over rows).
   Refuses (the causality check named in the ops doc) if any of the FOUR
   event-scoped rows in `changed_rows` (`paired_residual_pool`,
   `board_analog_matcher`, `chooser_analog_pool`, `trailing_pnl_cutoff`)
@@ -819,10 +831,10 @@ Opus gate finding, see §2/§4), so its refusal is `ReleaseLayoutError`
   valuable even without the rest of this design; see §4 and §7.7) Not true
   today: `phase5_release.json` sits at one path per release ROOT, so
   `rollback` (which only ever swaps `DEPLOYED`) can leave it disagreeing
-  with the live pointer. Once it moves beside the model manifest under
-  `<root>/releases/<release_id>/`, `promote`/`rollback` need no new logic:
-  whichever `release_id` is live, both of its artifacts already sit
-  together, immutably, at their own path.
+  with the live pointer. Once it moves beside the model manifest, at each
+  release's own per-release storage location, `promote`/`rollback` need no
+  new logic: whichever `release_id` is live, both of its artifacts already
+  sit together, immutably, at their own path.
 
 ## 9. Diagrams
 

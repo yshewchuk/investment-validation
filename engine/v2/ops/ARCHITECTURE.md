@@ -4351,9 +4351,9 @@ finding: an earlier draft nested the full prior id — `new_release_id =
 "nightly-<as_of>-<prior_release_id>"` — which grows by
 `len(prior_release_id)` every night, since on a normal night the prior IS
 yesterday's own nightly release; each cycle nests one level deeper than
-the last, and the id exceeds the 255-byte filename limit that
-`<root>/releases/<new_release_id>/` (models doc §4) imposes after roughly
-13 nights, failing every stage attempt from then on). Digesting the prior
+the last, and an unboundedly growing id eventually violates the storage
+layer's own per-release path-length limit (models doc §4), failing every
+stage attempt from that night on). Digesting the prior
 id instead of nesting it keeps `new_release_id`'s length constant forever:
 `prior_release_id` going into any given night's digest is itself always
 either this same bounded `"nightly-<as_of>-<16 hex chars>"` shape (a prior
@@ -4380,12 +4380,12 @@ content refusal (models doc §7.7 R3) is the existing backstop — not a new
 one added for this fix. Its worker:
 
 1. Reads each named `training` job's checkpointed outputs (the frozen-state
-   JSON files under that attempt's `training/` output directory —
+   JSON files under that attempt's own output directory —
    `engine/v2/ops/training.py`'s `_output_entries`), verifies each against
    its own `FrozenStateLoader`/schema (the SAME verified load every other
    consumer of these files uses — never a raw, unverified `json.loads`),
-   and content-addresses them into the shared `<root>/objects/` store —
-   this is `tools/phase5_prepare_release.py`'s existing
+   and content-addresses them into the shared object store — this is
+   `tools/phase5_prepare_release.py`'s existing
    `frozen_state_payloads`/`write_object` logic, MOVED into a library
    module this worker and the CLI tool both call (the "pure functions
    MOVE" rule), not duplicated.
@@ -4489,7 +4489,7 @@ own atomic write — CodeRabbit finding: not "before its first write"; steps
 this point) and refuses `ConcurrentPromote(prior_release_id,
 actual_release_id)` rather than stage over a moved pointer. A
 `ConcurrentPromote` refusal therefore leaves whatever steps 1–2 already
-wrote as ORPHANED objects under `<root>/objects/` — no catalog or manifest
+wrote as ORPHANED objects in the shared object store — no catalog or manifest
 under `new_release_id` is ever written, so nothing reads them, and they are
 harmless, content-addressed leftovers, exactly the partial-write shape R5
 already documents for a crash at this same point (this refusal and a crash
@@ -4546,6 +4546,45 @@ under the SAME id the abandoned release already occupies, and
 promote again without manual intervention. This is the same class of
 defect the owner already fixed for the stage key (CodeRabbit, above), one
 phase later.
+
+**Automatic recovery has a floor: a hard training failure, or a champion
+that changes mid-cycle, never self-heals (CodeRabbit findings, confirmed;
+filed as `#154`).** Both are LIVENESS gaps, not safety gaps — in both
+cases the cycle stalls SAFELY (nothing wrong is ever promoted) rather than
+silently proceeding.
+1. **A hard training failure.** The "any state, do nothing" skip rule
+   above means a `training` job that reaches `blocked`/`failed`/
+   `cancelled` under `"nightly:<as_of>:pool_train:<state>"` is never
+   automatically retried under that SAME key; "an operator resubmits by
+   hand under a new key" (the same recovery story `training`/
+   `models_promote` already have) is the only path forward. But UNLIKE
+   that pre-existing manual workflow, `submit_pool_nightly_stage_if_ready`
+   is hard-wired to wait for jobs under the ORIGINAL SIX keys — a manual
+   resubmission under a different key is invisible to it. So a hard
+   training failure does not merely delay this `as_of`'s automatic cycle,
+   it PERMANENTLY takes it out of the automatic pipeline: the operator
+   must also run `phase5_state_stage` and `models_promote` for that
+   `as_of` by hand, the same as today's fully manual workflow, never
+   picked back up by the sidecar.
+2. **A champion that changes mid-cycle.** The three
+   `driver_residual_pool:*` training jobs are keyed only by `(as_of,
+   state)`, never by `prior_release_id` or champion identity. If a
+   monthly PR-13b retrain changes the champion strictly between this
+   `as_of`'s training succeeding and its (possibly `ConcurrentPromote`-
+   retried) stage succeeding, `phase5_state_stage`'s own light check
+   (step 4d above) correctly refuses to publish the resulting
+   driver-pool/binding mismatch every time it is tried — `DEPLOYED` is
+   never at risk — but the SAME "any state" skip rule means nothing ever
+   automatically re-runs those three training jobs against the new
+   champion either: this `as_of` is safely stuck, not silently wrong,
+   until an operator manually resubmits the affected training jobs and
+   redrives stage/promote by hand.
+
+Closing either gap properly (tracking a manual replacement job's id so the
+automatic phases can discover it, or keying the driver-pool training jobs
+to champion identity so a change mints a fresh, automatically-discoverable
+key) is real design work beyond this docs-only, nightly-cadence PR's own
+scope — `#154`, not fixed here.
 
 **What this guard is, and is not (CodeRabbit finding: the original wording
 overstated it).** This check is NOT a compare-and-swap primitive, and
@@ -4700,9 +4739,9 @@ would otherwise be matching.
 **Code-PR split (all within this PR's own scope; PR-13b/PR-13c are
 separate PRs, above).**
 
-1. Move `phase5_release.json` to `<root>/releases/<release_id>/
-   phase5_release.json` (models doc §4/§7.7/§8) — a standalone bug fix,
-   valuable even without the rest of this design; updates `checks/
+1. Move `phase5_release.json` beside the model manifest, to each release's
+   own per-release storage location (models doc §4/§7.7/§8) — a standalone
+   bug fix, valuable even without the rest of this design; updates `checks/
    phase5_release.py`, `release_bindings.py` and `tools/
    phase5_prepare_release.py` to match.
 2. Add `deployment.promote`'s `expected_previous_release_id` parameter
@@ -4736,8 +4775,8 @@ separate PRs, above).**
    `submit_pool_nightly_promote_if_ready` passing `expected_previous_
    release_id=prior_release_id` to `promote_plan`.
 
-**Filed, not fixed here (Strict scope): #137, #149.** #137: a GitHub issue
-for `_swap_pointer`'s missing cross-process lock against a direct,
+**Filed, not fixed here (Strict scope): #137, #149, #154.** #137: a GitHub
+issue for `_swap_pointer`'s missing cross-process lock against a direct,
 non-job caller of `deployment.promote`/`rollback` ("concurrent promote"
 above) — real, pre-existing, unrelated to this design's own job-driven
 callers (which are already serialized by the `deployment_pointer` lease),
@@ -4745,7 +4784,11 @@ and a `deployment.py`-wide fix is out of scope for a nightly-cadence
 design PR. #149: `_swap_pointer` cannot distinguish a light-check-failed,
 FULLY staged candidate from a succeeded one ("a failure leaves the
 previous release deployed" and R5 above) — also real, also pre-existing
-for any manually-staged release, also out of scope here.
+for any manually-staged release, also out of scope here. #154: neither a
+hard training failure nor a champion change mid-cycle has an automatic
+replacement-key path ("automatic recovery has a floor" above) — both are
+safe stalls, not silent wrongness, and closing them is real design work
+beyond this PR's own scope.
 
 ### `nightly_trigger.py` (issue #102: `busy_legacy` must never overwrite a resumable state)
 
