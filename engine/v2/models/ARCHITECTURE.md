@@ -171,7 +171,7 @@ third-party service. `hashlib.sha256` for every content hash;
 
 ## 7. Failure semantics (the 4c R1–R6 template)
 
-### 7.1 `stage_release` (unchanged by this PR)
+### 7.1 `stage_release` (extended by this PR: closes #101)
 
 - **R1, missing input.** `require_complete_release(inventory)` and this
   module's own `_compatibility_issues` (inference release vs. inventory:
@@ -182,7 +182,28 @@ third-party service. `hashlib.sha256` for every content hash;
   promote-time completeness gate to forget. A missing payload for a
   declared member, or a payload whose sha256 disagrees with its declared
   `content_hash`, is `StagingRefused` too (`MISSING_MEMBER_PAYLOAD` /
-  `PAYLOAD_HASH_MISMATCH`).
+  `PAYLOAD_HASH_MISMATCH`). **New in this PR:** `_compatibility_issues`
+  also refuses two inference bindings that declare the same
+  `(role, strategy_id)` pair (`DUPLICATE_BINDING`), via
+  `_duplicate_binding_issues(release)` — a check that needs only `release`,
+  no `inventory`, so §7.2's `_swap_pointer` shares the exact same function
+  to re-verify it at promote/rollback time too. **The key is
+  `(role, strategy_id)`, deliberately NOT including `decision_clock_id`**,
+  to match `scoring.release_bindings._resolve_model_bindings`'s own
+  ambiguity key (`"{role}:{strategy_id}"`, clock-independent — CodeRabbit
+  review, round 2): scoring's runtime catalog can never distinguish two
+  bindings that share a `(role, strategy_id)` but differ only in clock, so
+  a release with two such bindings would stage/promote cleanly under a
+  clock-qualified check yet make EVERY score for that role/strategy fail
+  with `ModelNotReady("ambiguous binding")` at read time — the same
+  "gate says fine, read path refuses everything" failure shape issue #101
+  is about in the first place, just for binding uniqueness instead of the
+  manifest hash. Previously the `seen` set recorded each key but nothing
+  ever read it back, so a duplicate bound silently — the release still
+  staged, and `scoring.release_bindings._resolve_model_bindings` raised
+  `ModelNotReady("ambiguous binding: 2 declared")` for every score of that
+  role/strategy at read time (it does not pick one of the two; it refuses
+  outright, the same way `StagingRefused` now does at stage/promote time).
 - **R2, cache.** None: every call re-derives the release hash and re-checks
   every member from the caller's arguments; nothing is memoized.
 - **R3, retry.** None needed: staging the same `release_id` with identical
@@ -203,33 +224,79 @@ third-party service. `hashlib.sha256` for every content hash;
 - **R6, idempotency.** Same `(release, inventory, payloads)` always
   produces the same staged manifest.
 
-### 7.2 `promote` / `rollback` (extended by this PR)
+### 7.2 `promote` / `rollback` (extended by this PR: closes #101)
 
 - **R1, missing input.** An unstaged `release_id` refuses
-  `ReleaseNotStaged` — unchanged. **New in this PR:** a staged release
-  whose manifest's `release_hash_version` is not the current
-  `RELEASE_HASH_SEMANTIC_V2` refuses `StaleReleaseHash(release_id,
-  hash_version)`, checked in `_swap_pointer` before either function does
-  anything else — including before the already-deployed no-op check below,
-  so re-promoting the CURRENTLY live release is refused too if that
-  release itself still carries a stale hash. This is deliberate: "the new
-  hash version is required for deployment" applies to every write to
-  `DEPLOYED`, not only a release that has never been live.
-  `restage_semantic_hash` (§7.5) is how an operator clears this refusal,
-  and it is never applied automatically — a promote/rollback call never
-  restages on the caller's behalf.
+  `ReleaseNotStaged` — unchanged. A staged release whose manifest's
+  `release_hash_version` is not the current `RELEASE_HASH_SEMANTIC_V2`
+  refuses `StaleReleaseHash(release_id, hash_version)`, checked in
+  `_swap_pointer` before either function does anything else — including
+  before the already-deployed no-op check below, so re-promoting the
+  CURRENTLY live release is refused too if that release itself still
+  carries a stale hash. `restage_semantic_hash` (§7.5) is how an operator
+  clears this refusal, and it is never applied automatically — a
+  promote/rollback call never restages on the caller's behalf.
+  **New in this PR:** `_swap_pointer` also recomputes the manifest's
+  content hash via `_manifest_hash_matches` and refuses
+  `CorruptManifest(release_id)` if it disagrees with the manifest's
+  declared `release_hash`, for both `promote` and `rollback`, before the
+  pointer moves. Previously only the hash *version* tag was checked;
+  `_manifest_hash_matches` itself existed (`scoring.release_bindings` and
+  `checks/phase5_acceptance.py` already call it on read) but `_swap_pointer`
+  never called it, so a manifest tampered or corrupted on disk after
+  staging still promoted — production then refused every score with
+  `MODEL_NOT_READY` until an operator noticed, well after the pointer had
+  already moved. `_swap_pointer` also re-runs the SAME binding-uniqueness
+  check `stage_release` runs at staging time (`_duplicate_binding_issues`,
+  factored out of `_compatibility_issues` so staging and the pointer swap
+  share one definition of "no duplicate inference binding") and refuses
+  `StagingRefused(DUPLICATE_BINDING)` if the manifest's OWN bindings — the
+  ones a valid hash proves were exactly what got staged — still declare two
+  bindings for the same `(role, strategy_id)`. This
+  covers a release staged by a version of `stage_release` that predates the
+  duplicate-binding gate (or by any future staging path that forgets to
+  call it): the hash check alone proves the manifest matches what was
+  staged, not that what was staged was itself valid.
 - **R2, cache.** None: `current_pointer`/`_read_manifest` re-read from disk
   on every call.
 - **R3, retry.** A repeated `promote(root, same_release_id)` when that
   release is already live is a no-op that returns the existing
   `PointerState` unchanged (never its own predecessor). A repeated
   `rollback()` with nothing earlier to return to refuses `NoPriorRelease`.
+  **Fixed in this PR:** `rollback`'s target is no longer the live
+  pointer's own `previous_release_id` field (which, after a rollback,
+  names the release just LEFT, not the one before it — promoting
+  r1→r2→r3 then rolling back twice used to land back on r3, the release
+  the first rollback had just left, instead of r1). `rollback` now calls
+  `_rollback_target`, which replays `pointer_history` as an undo stack —
+  push the target release id on every `promote` action, pop on every
+  `rollback` action — and returns the second-from-top id. Each rollback
+  now undoes exactly one prior forward move (a `promote`, whether to a
+  new release or back to an old one), so N chained rollbacks reach N
+  promotions back, never ping-ponging between two ids. `NoPriorRelease`
+  is refused when fewer than two ids remain on the replayed stack — the
+  same case the old `current.previous_release_id is None` check covered,
+  now correct across chained rollbacks too. `rollback` also refuses
+  `StagingRefused` in three cases the replay itself cannot silently paper
+  over: `HISTORY_UNREADABLE` when `pointer_history(root)` cannot be read or
+  parsed at all; `HISTORY_SEQUENCE_GAP` when the on-disk history's sequence
+  numbers are not exactly contiguous `0..len(history)-1` (a lost or
+  duplicated entry); and `HISTORY_INCONSISTENT` when the replayed stack's
+  top does not match what `DEPLOYED` currently says is live (the history
+  and the pointer have diverged). All three stop the rollback rather than
+  guess at a target from data that can no longer be trusted. The new `PointerState` written
+  by a rollback still sets `previous_release_id` to the id it is replacing
+  (the release being rolled away from), exactly like a promote — only the
+  TARGET selection changed, not the record shape.
 - **R4, transaction.** `_swap_pointer` reads the current pointer, computes
   the next sequence number, then performs the one atomic write that makes
   the new pointer live, and only afterward appends the immutable history
   entry (`_repair_history` re-derives a skipped history entry from the live
   pointer on the next call, so a crash between the pointer write and the
-  history append is self-healing, not a lost record).
+  history append is self-healing, not a lost record). `rollback` calls
+  `_repair_history` itself before replaying history for `_rollback_target`,
+  so a skipped entry from a crashed prior swap cannot shift the stack by
+  one and pick the wrong target.
 - **R5, partial write.** The pointer file is never partially written
   (same atomic-write primitive as staging): a crash during the write
   leaves `DEPLOYED` as either the OLD value or the fully-written NEW
@@ -352,7 +419,20 @@ below; `production_deployment_root` is `production_release_root() /
   `*Error`/`*Refusal`), never a bare exception or a substituted value.
 - **A hash mismatch never falls back.** No branch anywhere in this package
   substitutes a different object, an older cached value, or a default when
-  a content hash disagrees.
+  a content hash disagrees. (New, this PR) this now includes the pointer
+  swap itself: `promote`/`rollback` recompute and check the manifest hash,
+  not only its version tag, before `DEPLOYED` moves.
+- **A rollback undoes exactly one promotion.** (new, this PR) `rollback`'s
+  target is derived by replaying the full pointer history as a stack, never
+  by reading a single `previous_release_id` field off the live pointer —
+  so chained rollbacks walk chained promotions backward and never revisit
+  a release they just left.
+- **A staged release covers every inventory binding exactly once.** (new,
+  this PR) `_compatibility_issues` refuses a second inference binding for
+  a `(role, strategy_id)` pair already seen in the same release — the same
+  key `scoring.release_bindings` resolves by, clock-independent — so
+  `stage_release` never accepts a binding set scoring itself would call
+  ambiguous.
 - **Never fits anything.** `RuntimeFitForbidden`/`ReadOnlyArtifact`
   (adapters/loader) and `no_fit.py`'s guard (reused by
   `engine.v2.scoring.native_payoff`) are this package's enforcement of the
@@ -379,9 +459,9 @@ below; `production_deployment_root` is `production_release_root() /
 stateDiagram-v2
     [*] --> Staged: stage_release()\n(RELEASE_HASH_SEMANTIC_V2 always)
     Staged --> Staged: restage_semantic_hash()\n(legacy manifest -> v2, no-op if already v2)
-    Staged --> Deployed: promote()\nrefuses StaleReleaseHash\nunless hash_version == v2
+    Staged --> Deployed: promote()\nrefuses StaleReleaseHash\nunless hash_version == v2\nrefuses CorruptManifest\nif the manifest hash disagrees
     Deployed --> Deployed: promote() same id (no-op)
-    Deployed --> Deployed: rollback()\nrefuses StaleReleaseHash on the\nprevious release too
+    Deployed --> Deployed: rollback()\ntarget = 2nd-from-top of the\nreplayed promote/rollback stack\nrefuses StaleReleaseHash/CorruptManifest\non the target release too
     Staged --> [*]: resolve_release()\n(read-only, by id; accepts v1 or v2)
     Deployed --> [*]: current_release()\n(follows DEPLOYED; None if unset)
 ```
