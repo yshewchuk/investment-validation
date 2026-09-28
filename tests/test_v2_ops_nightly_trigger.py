@@ -1064,22 +1064,43 @@ def test_resulting_head_snapshot_id_selects_the_named_receipt_over_other_outputs
     """CodeRabbit round 1 (real): get_job().output_refs is ordered by
     artifact_id, not by output name, so a naive output_refs[0] pick can
     return the wrong artifact when a succeeded attempt published more than
-    one named output. Seed BOTH a non-receipt output and the real
-    "snapshot_import_receipt" output on the SAME attempt and assert the
-    receipt's own value is returned, not the other output's."""
+    one named output. CodeRabbit round 2 (real): a hardcoded pair of
+    document values happened to make the RECEIPT's own artifact_id sort
+    first anyway, so the old, buggy implementation passed this test by
+    coincidence. This version publishes both candidate documents first,
+    determines which one's artifact_id actually sorts first -- the one an
+    output_refs[0] pick would return -- and deliberately assigns THAT value
+    to the non-receipt-named output, so the test fails against the old
+    implementation regardless of what the two content hashes happen to be,
+    and passes only when the receipt is genuinely selected by name."""
+    import json as _json
+
+    from engine.v2.foundation import ArtifactStore
+
     clock = FakeClock(IN_WINDOW)
     conn = _open_ops_catalog(tmp_path, clock)
     job_id = _seed_snapshot_import_job(conn, clock, as_of=AS_OF, attempt=0, state="succeeded")
+
+    store = ArtifactStore(nightly_trigger._ops_root(tmp_path))
+    id_a = store.publish_bytes(_json.dumps({"resulting_head_snapshot_id": "A"}).encode(),
+                               schema_ref="test.v1.0").artifact_id
+    id_b = store.publish_bytes(_json.dumps({"resulting_head_snapshot_id": "B"}).encode(),
+                               schema_ref="test.v1.0").artifact_id
+    # Whichever of "A"/"B" has the artifact_id that sorts FIRST is the value
+    # an output_refs[0] pick (ORDER BY artifact_id) would return -- give
+    # that value to the non-receipt-named output, and the OTHER value to
+    # the real receipt-named output.
+    first_value, second_value = ("A", "B") if id_a < id_b else ("B", "A")
     _seed_snapshot_import_receipt_output(conn, clock, tmp_path, job_id, name="snapshot_import",
-                                        document={"resulting_head_snapshot_id": "WRONG"})
+                                        document={"resulting_head_snapshot_id": first_value})
     _seed_snapshot_import_receipt_output(conn, clock, tmp_path, job_id,
                                         name="snapshot_import_receipt",
-                                        document={"resulting_head_snapshot_id": "snap_real"})
+                                        document={"resulting_head_snapshot_id": second_value})
 
     result = nightly_trigger._resulting_head_snapshot_id(tmp_path, conn, job_id)
     conn.close()
 
-    assert result == "snap_real"
+    assert result == second_value
 
 
 def test_resulting_head_snapshot_id_raises_when_the_receipt_has_no_snapshot_id(tmp_path):
