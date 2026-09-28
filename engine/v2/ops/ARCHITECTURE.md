@@ -553,47 +553,76 @@ ever builds a `JobSpec`:
   account of BOTH memos). Legacy scoring, which never calls
   `production_release_root`/`current_pointer`/`resolve_release_binding` at
   all, is completely unaffected either way.
-- **Per-event raw rows — a still-missing producer (cutover PR-6), not
-  something this design reuses.** The builder enumerates
-  `native_board_universe.board_requests(as_of, horizon_days, tickers,
-  events_table)` (`native_board_universe.py:198`) against the SAME pinned
-  snapshot/session the succeeded `"score"` job `_native_score_batch_identity`
-  itself found — recovered from that job's own recorded request, never a
-  freshly-resolved head (unlike `computed_moves_refresh`, which deliberately
-  re-resolves fresh — here genuine night-over-night parity with legacy's own
-  read snapshot is the point). For each `BoardRequest` it must then produce
-  the staged `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/
-  `quote_rows` a `NightlyEventInputs` document needs
-  (`native_score_batch.py:52-68`) — and **no production code does this
-  today**. An earlier draft of this bullet claimed the builder "reads the
-  same staged... rows the legacy `"score"` action itself reads from that
-  snapshot" and cited `#68` as "the pinned v2 snapshot-read bridge UD-4
-  closed." Both claims are false (Opus gate finding, this round, verified
-  against `56087a8`'s own diff): `#68` ("research: close UD-4 — pinned v2
-  snapshot reads") is entirely about `engine/v2/research/` tooling
-  (fill_quality, polygon_fills, signal_screen, replay, build_trades,
-  reconcile_trades), not scoring inputs, and does not touch this path; and
-  legacy `"score"`, in its default `"legacy"` input mode, does not read or
-  produce any of these five row shapes at all — it loads features through
-  `FeatureContext.load`/`score_calendar` (`legacy_adapter.py:547-601`) and
-  pins no snapshot in the process. There is no existing legacy read this
-  design can piggy-back on.
+- **Per-event raw rows — a still-missing producer (cutover PR-6), and a
+  self-contradiction in an earlier draft, now resolved.** An earlier draft
+  of this bullet's own opening sentence claimed the builder enumerates
+  `board_requests` "against the SAME pinned snapshot/session the succeeded
+  `"score"` job... itself found — recovered from that job's own recorded
+  request," while a later sentence in the SAME bullet already said legacy
+  `"score"`, in its default `"legacy"` input mode, "pins no snapshot in the
+  process." Both cannot be true at once (Opus gate finding, this round).
+  The second statement is the one that is correct and verified: in the
+  production default input mode, `nightly._snapshot_inputs` returns `None`
+  (verified against current `main`), so the selected `"score"` job pins NO
+  snapshot at all. There is therefore no pinned snapshot for this design to
+  recover, and — as a direct consequence, not stated in the earlier draft —
+  `board_requests(as_of, horizon_days, tickers, events_table)`
+  (`native_board_universe.py:198`)'s own `events_table`/`horizon_days`
+  arguments, and the worker's own required `snapshot_id`/`calendar_revision`
+  parameters (`native_score_batch.py:52-68`), have NO stated source in that
+  mode either.
+
+  This design does not resolve that gap by inventing a fresh-head fallback
+  (that would be a NEW, unreviewed mechanic, not something already
+  established elsewhere): instead, **R1 (Failure semantics, below) gains an
+  explicit case for it** — whenever the selected `"score"` job pinned no
+  snapshot (`_snapshot_inputs` returned `None` for it), the sidecar refuses
+  exactly like a missing release, and submits nothing. In concrete terms,
+  under today's production default (`"legacy"` input mode), this means
+  PR-7a's shadow batch does not submit at all, full stop, until either (a)
+  a future PR changes the production input mode to one that pins a
+  snapshot, or (b) the still-missing raw-row producer below is given its
+  own, separately-designed way to source `snapshot_id`/`calendar_revision`/
+  `events_table`/`horizon_days` without a pinned `"score"`-job snapshot.
+  Neither (a) nor (b) is designed here; this bullet's job is to name the
+  gap precisely, not close it.
+
+  Independent of which mode eventually supplies these fields: for each
+  `BoardRequest` the builder must then produce the staged
+  `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` a
+  `NightlyEventInputs` document needs (`native_score_batch.py:52-68`) —
+  and **no production code does this today**. An earlier draft of this
+  bullet claimed the builder "reads the same staged... rows the legacy
+  `"score"` action itself reads from that snapshot" and cited `#68` as "the
+  pinned v2 snapshot-read bridge UD-4 closed." Both claims are false (Opus
+  gate finding, verified against `56087a8`'s own diff): `#68` ("research:
+  close UD-4 — pinned v2 snapshot reads") is entirely about
+  `engine/v2/research/` tooling (fill_quality, polygon_fills, signal_screen,
+  replay, build_trades, reconcile_trades), not scoring inputs, and does not
+  touch this path; and legacy `"score"`, in its default `"legacy"` input
+  mode, does not read or produce any of these five row shapes at all — it
+  loads features through `FeatureContext.load`/`score_calendar`
+  (`legacy_adapter.py:547-601`) and pins no snapshot in the process. There
+  is no existing legacy read this design can piggy-back on.
 
   Building this row producer — staging `calendar_row`/`panel_row`/
-  `panel_anchor`/`tier4_row`/`quote_rows` per `BoardRequest` from the
-  pinned snapshot, in the shape `NightlyEventInputs` and
+  `panel_anchor`/`tier4_row`/`quote_rows` per `BoardRequest` from a pinned
+  snapshot (once one exists to pin), in the shape `NightlyEventInputs` and
   `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479-508`)
-  both require — is a genuine, still-missing prerequisite. This doc's own
-  PR-3 section already names it as such ("a later cutover PR (PR-4/PR-6)...
-  enumerates `BoardRequest`s, stages their per-event inputs"); this doc's
-  own PR-7a introduction (above) likewise lists it under "cutover PR-6,"
-  left implicit. PR-7a's submission-side design assumes that producer
-  exists and packages its output as one `native_score_batch.NightlyEventInputs`
+  both require — is a genuine, still-missing prerequisite, and now covers
+  BOTH the row-staging work AND the snapshot-identity gap named above. This
+  doc's own PR-3 section already names the row-staging half as such ("a
+  later cutover PR (PR-4/PR-6)... enumerates `BoardRequest`s, stages their
+  per-event inputs"); this doc's own PR-7a introduction (above) likewise
+  lists it under "cutover PR-6," left implicit. PR-7a's submission-side
+  design assumes that producer exists (snapshot identity included) and
+  packages its output as one `native_score_batch.NightlyEventInputs`
   document per row, but building the producer itself is explicitly OUT OF
   SCOPE for this design and must land first, as its own PR with its own
   review — its failure modes (a symbol with no legacy-comparable row shape,
   a stale or partial snapshot read, the cost of producing rows for a ticker
-  universe legacy never scores this way) are a separate design question, not
+  universe legacy never scores this way, and now also which input mode or
+  mechanism supplies a snapshot at all) are a separate design question, not
   a tick-loop sidecar concern this bullet can settle.
 
   This enumeration/staging step, once its producer exists, is expected to
@@ -1856,13 +1885,24 @@ job existing, succeeding, or even having been attempted — stronger than
 function is never part of.
 
 - **R1 missing input.** No succeeded legacy `"score"` job for any session
-  yet (`_native_score_batch_identity` returns `None`), no configured
-  production release (`current_pointer(root)` returning `None`, or the
-  expensive verification raising `ModelNotReady("release_root", ...)` for a
-  missing/blank `MODEL_RELEASE_ROOT`, or `NoCurrentRelease` for a
-  configured root with nothing `DEPLOYED`), or `board_requests` returning
-  empty for that session's pinned snapshot — each case returns without
-  submitting anything; there is no partial or synthetic-empty job.
+  yet (`_native_score_batch_identity` returns `None`); that job pinning no
+  snapshot (`nightly._snapshot_inputs` returns `None` for it — the
+  production default under `"legacy"` input mode, per "Inputs" above); no
+  configured production release — and here the cheap and expensive paths
+  raise DIFFERENT, both-R1 outcomes that must not be confused (Opus gate
+  finding, this round: an earlier draft named only the expensive path's
+  wrapped exception): `production_release_root()` itself raising
+  `MissingReleaseRoot` directly, BEFORE `current_pointer`/step 3 ever run,
+  when `MODEL_RELEASE_ROOT` is unset/blank (the cheap path's own case,
+  never wrapped into anything); `current_pointer(root)` returning `None`
+  (a configured root with nothing ever promoted, found cheaply, without
+  needing step 3 at all); or, only once step 3 actually runs,
+  `ModelNotReady("release_root", ...)` (step 3's own internal
+  re-raise of a `MissingReleaseRoot` it independently hits) or
+  `NoCurrentRelease` (a configured root naming nothing `DEPLOYED`) — or
+  `board_requests` returning empty for that session's pinned snapshot (once
+  one exists) — each case returns without submitting anything; there is no
+  partial or synthetic-empty job.
 - **R2 cache — two separate memos, not one.** Once a job exists under
   today's session's idempotency key, in any state, it is never rebuilt or
   resubmitted — the existence check runs before any raw row is read or
@@ -1883,7 +1923,7 @@ function is never part of.
      own, `_COMPUTED_MOVES_MAX_ATTEMPTS`/`_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped),
      guarding the expensive `board_requests`/raw-row-staging step once a
      usable release IS in hand. **A release-unavailable outcome
-     (`current_pointer(root) is None`, `ModelNotReady`, or
+     (`MissingReleaseRoot`, `current_pointer(root) is None`, `ModelNotReady`, or
      `NoCurrentRelease`) is checked BEFORE this second memo is touched at
      all, and NEVER counts as one of its spent attempts** (CodeRabbit round
      3, real finding — a prior draft of this design inherited
