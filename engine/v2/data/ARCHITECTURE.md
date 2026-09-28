@@ -63,120 +63,177 @@ concern is `engine/v2/ops` (layer 7.0), one of this package's callers.
 
 ## Primary contracts and public interfaces
 
-`engine/v2/data/README.md`'s `<!-- public-interface: -->` directive lists
-every name importable directly off the package root
-(`from engine.v2.data import X`) — the only surface
-`checks/package_readmes.py` actually restricts. That checker's `observed()` (`checks/package_readmes.py:123-138`,
-using the module-file set `_package_modules` builds at lines 111-120) only
-flags a cross-package import as a
-"private name imported" violation when the imported name's *first dotted
-component after the package name* is **not itself an existing submodule
-file**. A submodule-qualified import — `from engine.v2.data.generic_incremental
-import commit_generic_table_candidate`, `from engine.v2.data.incremental
-import run_daily_market_refresh`, even `from engine.v2.data.incremental
-import _jsonable` (a leading-underscore name) — resolves `head` to the
-submodule itself, which does exist as a file, so the check never inspects
-the name past that point. In practice this package's real cross-package
-surface is broader than the README table: every module below is imported by
-at least one of `engine.v2.ops`/`engine.v2.research`/`engine.v2.serving`
-(see "Dependencies"), whether or not its names are also re-exported off the
-package root.
+`engine/v2/data/README.md`'s `<!-- public-interface: -->` directive is the
+list `checks/package_readmes.py` actually enforces. That checker's
+`observed()` (`checks/package_readmes.py:123-138`, using the module-file set
+`_package_modules` builds at lines 111-120) only flags a cross-package
+import as a "private name imported" violation when the imported name's
+*first dotted component after the package name* is **not itself an existing
+submodule file**. A submodule-qualified import — `from
+engine.v2.data.generic_incremental import commit_generic_table_candidate`,
+`from engine.v2.data.legacy_adapter import materialize`, even `from
+engine.v2.data.incremental import _jsonable` (a leading-underscore name) —
+resolves `head` to the submodule itself, which does exist as a file, so the
+check never inspects the name past that point.
 
-The load-bearing entrypoints, by area:
+Two consequences, both verified against the current tree (`checks/
+package_readmes.py --all` reports `READMES OK`, i.e. no violation exists
+today):
 
-- **Snapshot commit** — `catalog.commit_snapshot`, `catalog.record_failed_import`,
-  `catalog.move_head` (all package-root-exported). `commit_snapshot` is the
-  one place a snapshot's rows, membership and head move together, inside one
-  `BEGIN IMMEDIATE` transaction; see "Failure semantics" for its fence and
-  idempotency contract.
+1. **Directive membership does not mean the name is re-exported at the
+   package root.** `engine/v2/data/__init__.py`'s own `__all__` re-exports
+   exactly 24 names (`documents.loads_document`/`.decode_document`; all
+   eight `manifests` identity/verify functions cited below; the four
+   `generic_incremental` names; `build_legacy_mapping`; the `eod_inventory`/
+   `event_revisions` names). Most of the directive's other ~50 names —
+   `catalog.*`, `query.*`, `objects.*`, `repository.Repository`/
+   `.ResolvedSnapshot`, `errors.DataError`, `computed_moves.*`,
+   `price_history.*`, `price_history_query.*` — are declared public but are
+   **not** in `__init__.py`, so `from engine.v2.data import commit_snapshot`
+   (for example) is not actually importable; every real caller reaches them
+   through a submodule-qualified import instead.
+2. **The reverse gap also exists.** Several modules' names are documented as
+   "Public interface" in the README's own per-module prose table but are
+   absent from the machine-checked directive entirely: every name in
+   `legacy_adapter.py`, `reference_inputs.py`, `reference_catalog.py`,
+   `legacy_materialization.py`, and `time_formats.py`, plus
+   `price_history_table.py`'s two contract constants. This is not a
+   violation — the directive only needs to list a name if some importer
+   reaches it *unqualified*, and none does (confirmed: every real caller of
+   these modules uses a submodule-qualified import, per "Dependencies"
+   below) — but it means the directive is a narrower, stricter list than
+   "everything this package's README calls public," and a name's absence
+   from it does not mean the name is private or unused.
+   `generic_incremental`'s four names sit on the *other* side of this same
+   gap (point 1): genuinely re-exported at the package root, yet also
+   absent from the directive — an inconsistency in the README's own
+   bookkeeping, not a behavior difference, since (as above) no caller
+   imports them unqualified either way.
+
+The load-bearing entrypoints, by area (each name below is reachable from
+outside this package today, per "Dependencies"; only the ones marked
+"package-root" are also literally importable as `from engine.v2.data import
+X`):
+
+- **Snapshot commit** — `catalog.commit_snapshot`, `.record_failed_import`,
+  `.move_head` (directive-declared; not package-root — see point 1 above).
+  `commit_snapshot` is the one place a snapshot's rows, membership and head
+  move together, inside one `BEGIN IMMEDIATE` transaction; see "Failure
+  semantics" for its fence and idempotency contract.
 - **Contract-generic incremental commit** — `generic_incremental.
   build_generic_table_candidate`, `.commit_generic_table_candidate`,
-  `.load_generic_revisions`, `.decode_row`, and the `GenericTableCandidate`
-  dataclass (submodule-qualified only — not on the package-root directive).
-  `commit_generic_table_candidate` wraps `catalog.commit_snapshot` with this
-  package's own head-fence check, composed with an optional caller-supplied
-  `fence_check` (see "Failure semantics").
+  `.load_generic_revisions`, and the `GenericTableCandidate` dataclass are
+  package-root (all four in `__init__.py`'s `__all__`), but not in the
+  README directive (point 2 above). `decode_row` is neither: submodule-
+  qualified only. `commit_generic_table_candidate` wraps
+  `catalog.commit_snapshot` with a caller-supplied head-fence expectation,
+  composed with an optional caller-supplied `fence_check` — see "Failure
+  semantics" for exactly which real callers supply one and what it does to
+  the idempotent-replay shortcut.
 - **`daily_market` incremental refresh** — `incremental.run_daily_market_refresh`,
   `.run_incremental_refresh`, `.build_daily_market_candidate`,
   `.commit_daily_market_candidate`, `.merge_daily_market`,
   `.select_revision_winners`, `.cache_raw_receipt`/`.load_raw_receipt`,
-  `.cache_normalization` (submodule-qualified only). The shared merge
-  primitives one layer down are `incremental_tables.merge_table_rows`,
-  `.logical_key_for_row`, `.revision_hash`, and the `GenericRevision`/
-  `GenericMerge` dataclasses (package-root-exported).
+  `.cache_normalization` (not package-root, not in the directive; reached
+  only via submodule-qualified imports). The shared merge primitives one
+  layer down — `incremental_tables.merge_table_rows`, `.logical_key_for_row`,
+  `.revision_hash`, and the `GenericRevision`/`GenericMerge` dataclasses —
+  are the same: neither package-root nor directive-declared.
 - **Snapshot resolution and bounded reads** — `repository.Repository`,
-  `.ResolvedSnapshot` (package-root-exported). `Repository(conn, store=None)`
-  exposes: `resolve`/`resolve_pinned` (exact `SnapshotRef` re-verification;
-  `resolve_full`/`resolve_full_pinned` for the full `ResolvedSnapshot` a
-  caller carrying every table forward into a new commit needs — see
-  "Outputs"), `scan` (bounded Arrow scan, needs `store`), `get_event`/
-  `get_chain`/`get_price_series`/`get_close` (typed single-entity lookups
-  delegating to `events`/`chains`/`price_history_query`), `latest_dataset_version`
-  (a table's newest version independent of any snapshot's own cadence —
-  `price_history`'s case), `table_contract`/`fragment_records` (contract and
-  manifest facts a query planner needs without duplicating `resolve`'s own
-  walk), and `explain_dependencies` (§5.5: names the exact snapshot, dataset
-  versions, fragments, columns and predicates a `DataQuery`/`ChainQuery`
-  would touch; anything else is `UNSUPPORTED_CONTRACT`).
-- **Pure query/merge/identity primitives** (package-root-exported, no I/O):
-  `query.validate_query`, `.fragment_may_match`, `.row_matches`, `.order_key`,
-  `.arrow_type_for`, `.null_array_for`, `.ARROW_TYPES`; `manifests.
-  table_contract_hash`, `.fragment_record`, `.fragment_ref`, `.dataset_manifest`,
-  `.snapshot_ref`, `.verify_fragment_record`, `.verify_dataset_manifest`,
-  `.verify_snapshot_ref`, and the three `*_identity_payload` helpers;
-  `objects.publish_legacy_file`, `.inspect_fragment`, `.FragmentInspection`,
-  `.verify_object_path`; `documents.loads_document`, `.decode_document`;
+  `.ResolvedSnapshot` (directive-declared; not package-root).
+  `Repository(conn, store=None)` exposes: `resolve`/`resolve_pinned` (exact
+  `SnapshotRef` re-verification; `resolve_full`/`resolve_full_pinned` for
+  the full `ResolvedSnapshot` a caller carrying every table forward into a
+  new commit needs — see "Outputs"), `scan` (bounded Arrow scan, needs
+  `store`), `get_event`/`get_chain`/`get_price_series`/`get_close` (typed
+  single-entity lookups delegating to `events`/`chains`/
+  `price_history_query`), `latest_dataset_version` (a table's newest
+  version independent of any snapshot's own cadence — `price_history`'s
+  case), `table_contract`/`fragment_records` (contract and manifest facts a
+  query planner needs without duplicating `resolve`'s own walk), and
+  `explain_dependencies` (§5.5: names the exact snapshot, dataset versions,
+  fragments, columns and predicates a `DataQuery`/`ChainQuery` would touch;
+  anything else is `UNSUPPORTED_CONTRACT`).
+- **Pure query/merge/identity primitives, no I/O** — `query.validate_query`,
+  `.fragment_may_match`, `.row_matches`, `.order_key`, `.arrow_type_for`,
+  `.null_array_for`, `.ARROW_TYPES` (directive-declared; not package-root);
+  `manifests.table_contract_hash`, `.fragment_record`, `.fragment_ref`,
+  `.dataset_manifest`, `.snapshot_ref`, `.verify_fragment_record`,
+  `.verify_dataset_manifest`, `.verify_snapshot_ref` (directive-declared
+  **and** package-root — genuinely `from engine.v2.data import
+  table_contract_hash` importable); the three `*_identity_payload` helpers
+  (directive-declared, not package-root); `objects.publish_legacy_file`,
+  `.inspect_fragment`, `.FragmentInspection`, `.verify_object_path`
+  (directive-declared, not package-root); `documents.loads_document`,
+  `.decode_document` (directive-declared **and** package-root);
   `time_formats.NAIVE_TIMESTAMP_FORMAT`/`.NAIVE_TIMESTAMP_RE`/
-  `.format_naive_timestamp`/`.is_naive_timestamp`.
+  `.format_naive_timestamp`/`.is_naive_timestamp` (neither package-root nor
+  directive-declared — point 2 above; no observed cross-package importer
+  today).
 - **Legacy-touching seam** — `legacy_adapter.py` is the package's *only*
   module importing legacy `engine.*` code (17 declared entries in
   `checks/legacy_adapters.json`, all `package: "engine.v2.data"`, `module:
   "engine.v2.data.legacy_adapter"`; every other module in this package
-  reaches a legacy fact only through its thin accessors). Package-root
-  exports: `legacy_table_schemas`, `legacy_panel_columns`,
-  `legacy_tier4_columns`, `legacy_tier4_key_columns`, `legacy_source_priority`,
-  `read_legacy_part`, `coerce_legacy`, `materialize`, and the reference-path
-  accessors (`legacy_calendar_path`, `legacy_registry_path`,
-  `legacy_structures_path`, `legacy_models_dir`, `legacy_tier4_serving_dir`,
-  `legacy_chooser_pool_path`, `legacy_snapshot_path`, `legacy_data_dir`).
+  reaches a legacy fact only through its thin accessors). Its names —
+  `legacy_table_schemas`, `legacy_panel_columns`, `legacy_tier4_columns`,
+  `legacy_tier4_key_columns`, `legacy_source_priority`, `read_legacy_part`,
+  `coerce_legacy`, `materialize`, and the reference-path accessors
+  (`legacy_calendar_path`, `legacy_registry_path`, `legacy_structures_path`,
+  `legacy_models_dir`, `legacy_tier4_serving_dir`, `legacy_chooser_pool_path`,
+  `legacy_snapshot_path`, `legacy_data_dir`) — are neither package-root nor
+  directive-declared (point 2 above): `materialize` is the one name with a
+  real, verified cross-package caller today
+  (`engine.v2.ops.materialization_worker`, submodule-qualified — see
+  "Dependencies"); the rest are used only from within this package.
 - **Legacy mapping, materialization, reference inputs** — `legacy_mapping.
-  build_legacy_mapping`, `.LegacyMappingError` (package-root-exported);
-  `legacy_materialization.build_materialization_request`, `.read_plan_complete`,
-  `.materialize_tree`, `.LEGACY_SCORE_READ_PLAN_V1`, `.format_pinned_ref`,
-  `.parse_pinned_ref` (package-root-exported); `reference_inputs.
+  build_legacy_mapping` (directive-declared **and** package-root);
+  `.LegacyMappingError` (directive-declared, not package-root).
+  `legacy_materialization.build_materialization_request`,
+  `.read_plan_complete`, `.materialize_tree`, `.LEGACY_SCORE_READ_PLAN_V1`,
+  `.format_pinned_ref`, `.parse_pinned_ref`; `reference_inputs.
   LEGACY_REFERENCE_INPUTS_V1`, `.DATA_DIR`, `.LEGACY_SNAPSHOT_PATH`,
   `.TIER4_SERVING_DIR`, `.kind_for_path`, `.resolve_reference_files`,
-  `.manifest_pins`, `.publish_reference_inputs` (package-root-exported);
-  `reference_catalog.ReferenceInput`, `.REFERENCE_KINDS`, `.CALENDAR_KIND`,
+  `.manifest_pins`, `.publish_reference_inputs`; `reference_catalog.
+  ReferenceInput`, `.REFERENCE_KINDS`, `.CALENDAR_KIND`,
   `.LEGACY_SNAPSHOT_KIND`, `.REFERENCE_OBJECT_KIND`,
   `.insert_reference_inputs`, `.reference_inputs_for_snapshot`,
-  `.pinned_materialization_refs` (package-root-exported).
+  `.pinned_materialization_refs` — none of these three modules' names are
+  in the directive (point 2 above); all are reached by real cross-package
+  callers only via submodule-qualified imports: `legacy_materialization` by
+  `engine.v2.ops.capture_inputs`/`.snapshot_stages`/`.snapshot_planning` and
+  `engine.v2.research._scan`; `reference_inputs` by `engine.v2.ops.
+  snapshot_promotion`/`.snapshot_stages`/`.fingerprints`; `reference_catalog`
+  by `engine.v2.ops.snapshot_promotion`/`.snapshots`/`.snapshot_planning`/
+  `.price_history_store` (see "Dependencies").
 - **Snapshot import planning** — `import_snapshot.plan_import`, `.ImportPlan`,
-  `.request_hash`, `.PENDING_CALENDAR_VERSION` (submodule-qualified only;
-  called by `engine.v2.ops.snapshot_import`/`.snapshot_promotion`/`.cli`).
+  `.request_hash`, `.PENDING_CALENDAR_VERSION` (neither package-root nor
+  directive-declared; called by `engine.v2.ops.snapshot_import`/
+  `.snapshot_promotion`/`.cli`).
 - **Nightly barrier read plans** — `legacy_nightly_read_plan.
   LEGACY_NIGHTLY_READ_PLAN_V1`, `.BARRIER_KINDS`, `.FAMILIES`,
   `.NIGHTLY_CAPTURE_IMPLEMENTATION_REF`, `.required_families`,
-  `.manifest_problems` (submodule-qualified only; called by
-  `engine.v2.ops.capture_inputs`/`.ledger_history_import`/`.cli`).
+  `.manifest_problems` (neither package-root nor directive-declared; called
+  by `engine.v2.ops.capture_inputs`/`.ledger_history_import`/`.cli`).
 - **Tier-4 coverage** — `tier4_coverage.champion_producer_models`,
-  `.required_serving_triples`, `.missing_triples` (submodule-qualified only;
-  today exercised only by its own test module).
+  `.required_serving_triples`, `.missing_triples` (neither package-root nor
+  directive-declared; today exercised only by its own test module).
 - **`computed_moves`/`price_history` table families** — `computed_moves.
   build_rows`, `.build_ticker`, `.native_trading_calendar`,
   `.projected_trading_days`, `.session_move`, `.us_market_holidays`,
   `.NativeTradingCalendar` and `computed_moves_table.COMPUTED_MOVES_CONTRACT`/
-  `.COMPUTED_MOVES_TABLE_NAME` (package-root-exported); `price_history.
-  check_not_backdated`, `.latest_state`, `.diff_retrieval`, `.as_of_view`,
-  `.PRICE_HISTORY_VALUE_COLUMNS`, `price_history_table.
-  PRICE_HISTORY_CONTRACT`/`.PRICE_HISTORY_TABLE_NAME`, and
-  `price_history_query.get_price_series`/`.get_close` (package-root-exported,
-  and exposed again as `Repository.get_price_series`/`.get_close`).
-- **Errors** — `errors.DataError` (package-root-exported); `errors.fail`/
-  `.make_problem` build every `DataError` this package raises, from
-  `engine.v2.contracts.data.DATA_FAILURE_CODES` only (`errors.py:38`: an
-  unregistered code raises `ValueError` at construction rather than reaching
-  a caller as a guessed category).
+  `.COMPUTED_MOVES_TABLE_NAME` (directive-declared, not package-root);
+  `price_history.check_not_backdated`, `.latest_state`, `.diff_retrieval`,
+  `.as_of_view`, `.PRICE_HISTORY_VALUE_COLUMNS` (directive-declared, not
+  package-root); `price_history_table.PRICE_HISTORY_CONTRACT`/
+  `.PRICE_HISTORY_TABLE_NAME` (neither package-root nor directive-declared
+  — point 2 above); `price_history_query.get_price_series`/`.get_close`
+  (directive-declared, not package-root, and exposed again as
+  `Repository.get_price_series`/`.get_close`).
+- **Errors** — `errors.DataError` (directive-declared, not package-root);
+  `errors.fail`/`.make_problem` build every `DataError` this package
+  raises, from `engine.v2.contracts.data.DATA_FAILURE_CODES` only
+  (`errors.py:38`: an unregistered code raises `ValueError` at construction
+  rather than reaching a caller as a guessed category).
 
 ## Inputs
 
@@ -250,9 +307,11 @@ The load-bearing entrypoints, by area:
 - **A `computed_moves`/`price_history` fragment** per ticker (whole-partition
   rewrite, never a byte-level append — see "Invariants"), built by
   `computed_moves.build_rows` / `price_history.diff_retrieval` and committed
-  through the generic-incremental or `price_history`-specific path
-  (`engine.v2.ops.computed_moves_store`/`.price_history_store` — this
-  package supplies only the pure math and the `TableContract`s).
+  through `catalog.commit_snapshot` directly — `engine.v2.ops.
+  computed_moves_store.py` and `.price_history_store.py` each call
+  `catalog.commit_snapshot` themselves, never `generic_incremental`
+  (`computed_moves_store.py`'s own module docstring states this); this
+  package supplies only the pure math and the `TableContract`s.
 - **Refusals**: every failure this package raises is a `DataError` wrapping
   a `Problem` built from `engine.v2.contracts.data.DATA_FAILURE_CODES` — see
   "Failure semantics" for the full code table. Messages never carry a legacy
@@ -298,9 +357,11 @@ resolved head; `snapshot_import.py`/`snapshot_promotion.py`/`cli.py` call
 `ledger_history_import.py`/`cli.py` call `legacy_nightly_read_plan.*`;
 `forward_calendar_store.py`/`computed_moves_store.py` call
 `computed_moves.native_trading_calendar`/`.build_rows` and
-`computed_moves_table.*`, and both pass a `fence_check` into
-`generic_incremental.commit_generic_table_candidate` (see "Failure
-semantics"); `unit_receipts.py` calls `incremental.cache_raw_receipt`/
+`computed_moves_table.*`, but only `forward_calendar_store.py` passes a
+`fence_check` into `generic_incremental.commit_generic_table_candidate`;
+`computed_moves_store.py` calls `catalog.commit_snapshot` directly with its
+own `_fence_check_for` (`verify_fence` only, no head-fence composition —
+see "Failure semantics"); `unit_receipts.py` calls `incremental.cache_raw_receipt`/
 `RawPayload`/`load_raw_receipt`/`_jsonable` (the last a private name, legally
 reachable — see "Primary contracts"); `incremental_data.py`/`nightly.py`
 call `incremental.run_daily_market_refresh`/`FETCH_SOURCE`. `engine.v2.serving`
@@ -308,11 +369,13 @@ call `incremental.run_daily_market_refresh`/`FETCH_SOURCE`. `engine.v2.serving`
 ordinary downward import (7.0 > 1.0), never the reverse; the serving-side
 `(ticker, event_date) -> EventRef` resolver is built entirely on
 `Repository.scan`. `engine.v2.research` (layer 7.0/6.0-6.5 depending on the
-module) reads pinned snapshots and — `_trades_publish.py`,
-`reconcile_trades.py` — calls `generic_incremental.commit_generic_table_candidate`
-directly, without a `fence_check` (see "Failure semantics": this is the
-"omit it, keep unchanged `_head_fence`-only behavior" case the module's own
-docstring names). `tools/*`, `checks/*`, and `tests/test_v2_data_*.py` are
+module) reads pinned snapshots and — `_trades_publish.py` — calls
+`generic_incremental.commit_generic_table_candidate` directly, without a
+`fence_check` (see "Failure semantics": this is the "omit it, keep
+unchanged `_head_fence`-only behavior" case the module's own docstring
+names); `reconcile_trades.py` does not call it directly — it only imports
+building blocks from `_trades_publish.py`. `tools/*`, `checks/*`, and
+`tests/test_v2_data_*.py` are
 non-layered consumers per the root doc §1, exercising modules such as
 `tier4_coverage.py`/`incremental_tables.py` that have no other production
 caller yet.
@@ -432,19 +495,28 @@ idempotent-replay shortcut too.
   A caller that also wants an attempt-lease check
   (`engine.v2.ops.lifecycle.verify_fence`) passes
   `fence_check=lambda c: verify_fence(c, attempt_id, fence, now)` into
-  `commit_generic_table_candidate` — `forward_calendar_store.py`'s and
-  `computed_moves_store.py`'s own `_fence_check_for` follow exactly this
-  shape (both in `engine/v2/ops`, since this module cannot import
-  `engine.v2.ops.lifecycle` itself — see "Dependencies"). `verify_fence`
-  raises `CANCELLED` for a job whose state is `"cancelling"` and
-  `LEASE_LOST` for an attempt whose lease has already expired, inside the
-  same transaction the head compare-and-swap runs in — refused before any
-  row is inserted and before the head moves, never after a successful
-  commit. **Omitting `fence_check`** (the default) keeps this function's
-  previous, unchanged behavior for its other two production callers today —
-  `incremental.py`'s own `_run_generic_refresh` and
-  `engine.v2.research._trades_publish.publish` — which get `_head_fence`
-  alone, exactly as before #55/#73.
+  `commit_generic_table_candidate` — `forward_calendar_store.py`'s own
+  `_fence_check_for` does exactly this (`engine/v2/ops`, since this module
+  cannot import `engine.v2.ops.lifecycle` itself — see "Dependencies"); it
+  is the only production caller that composes an attempt-lease check into
+  `commit_generic_table_candidate` this way. `verify_fence` raises
+  `CANCELLED` for a job whose state is `"cancelling"` and `LEASE_LOST` for
+  an attempt whose lease has already expired, inside the same transaction
+  the head compare-and-swap runs in — refused before any row is inserted
+  and before the head moves, never after a successful commit. **Omitting
+  `fence_check`** (the default) keeps this function's previous, unchanged
+  behavior for its other production callers today — `incremental.py`'s own
+  `_run_generic_refresh` and `engine.v2.research._trades_publish.publish` —
+  which get `_head_fence` alone, exactly as before #55/#73.
+  `engine.v2.ops.computed_moves_store.py` has its own `_fence_check_for` of
+  the identical `lambda c: verify_fence(...)` shape, but it is never
+  composed through `commit_generic_table_candidate`: that module's own
+  docstring says it "never generic_incremental", and it calls
+  `catalog.commit_snapshot` directly (`computed_moves_store.py:402`),
+  passing its `_fence_check_for` as `commit_snapshot`'s `fence_check`
+  argument on its own — so it gets `verify_fence` alone, with no
+  `_head_fence` composition in front of it, unlike the
+  `commit_generic_table_candidate` path described above.
 - **R2, cache.** None: every manifest, contract and fragment is
   re-verified from its own content on every call (`_verify_everything`), and
   `commit_snapshot`'s idempotent-insert helpers (`_insert_contract`,
@@ -455,10 +527,31 @@ idempotent-replay shortcut too.
   compare-and-swap or a fence refusal raises immediately, leaving the
   caller's own retry policy (a job's `RetryPolicy`, one layer up in
   `engine.v2.ops`) to decide whether to build a fresh candidate and call
-  again. A repeated call under the *same* `receipt_id`/`request_hash`/
-  `attempt_id`/`fence`/`scope`/resulting snapshot is not a retry in this
-  sense — it is the idempotent-replay shortcut (R6, below), which still runs
-  the fence check first.
+  again. Through the *plain* `catalog.commit_snapshot` call (the
+  `computed_moves_store.py`/`price_history_store.py` path above), a repeated
+  call under the *same* `receipt_id`/`request_hash`/`attempt_id`/`fence`/
+  `scope`/resulting snapshot is not a retry in this sense — it is the
+  idempotent-replay shortcut (R6, below). Through
+  `commit_generic_table_candidate`'s *composed* fence, that shortcut is
+  reachable on retry only when the original commit was a no-op
+  (`already_at_head=True`, so the head never moved): the caller's
+  `expected_head_snapshot_id`/`expected_head_generation` are the static
+  values it computed before the first call, and `_head_fence` re-checks them
+  against the *current* head on every retry, including the replay one. If
+  the original call actually advanced the head, a same-attempt retry's
+  `_head_fence` check now disagrees with the (moved) current head and raises
+  `SNAPSHOT_CONFLICT` immediately — before `_existing_receipt` is ever
+  looked up, so the shortcut is refused, not returned. This is the
+  documented purpose of composing `_head_fence` in front of a caller's own
+  `fence_check` (`commit_generic_table_candidate`'s own docstring,
+  `generic_incremental.py:141-163`): it is what keeps head-conflict
+  detection active on the replay-shortcut path too, for every caller, not
+  only when no custom `fence_check` is supplied — a stale, already-
+  superseded attempt cannot silently replay a commit that has since moved
+  on. (That same docstring also names `computed_moves_store.py` as
+  following this pattern; per the corrected "Dependencies" section above,
+  it does not — that is the pre-existing, unchanged-code inaccuracy tracked
+  as #76.)
 - **R4, transaction.** One `BEGIN IMMEDIATE` transaction
   (`catalog._immediate_transaction`) covers the fence check, the shortcut
   lookup, every idempotent insert, the receipt insert, `record_references`
@@ -490,9 +583,14 @@ idempotent-replay shortcut too.
   the replay is provably the *same* call (same `request_hash`, `attempt_id`,
   `fence`, `scope`, and resulting `snapshot_id` as the stored row) —
   anything else stored under that `receipt_id` is `IDENTITY_CONFLICT`. As
-  covered above, this shortcut still runs `fence_check` first, so a
-  cancelled or lease-expired attempt cannot ride a same-`receipt_id` replay
-  past the attempt-fence check either.
+  covered in R3 above, `fence_check` always runs before this shortcut is
+  even looked up, so a cancelled or lease-expired attempt cannot ride a
+  same-`receipt_id` replay past the attempt-fence check either — and,
+  specifically through `commit_generic_table_candidate`'s composed
+  `_head_fence`, a same-attempt replay of a commit that *did* move the head
+  cannot reach this shortcut at all: it is refused with `SNAPSHOT_CONFLICT`
+  first. The shortcut is reachable through that composed path only when the
+  original commit was already a no-op.
 
 ### `repository.py` — read paths (R1–R6 summary)
 
@@ -668,17 +766,25 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-    CALLER["caller (e.g. forward_calendar_store.py,\ncomputed_moves_store.py)"] -->|"optional fence_check=\nlambda c: verify_fence(c, attempt_id, fence, now)"| CGT["commit_generic_table_candidate"]
-    CALLER -.->|"omit fence_check\n(incremental.py's _run_generic_refresh,\nresearch._trades_publish.publish)"| CGT
+    CALLER["forward_calendar_store.py\n(the only caller that composes\nan attempt-lease check)"] -->|"fence_check=\nlambda c: verify_fence(c, attempt_id, fence, now)"| CGT["commit_generic_table_candidate"]
+    CALLER2["incremental.py's _run_generic_refresh,\nresearch._trades_publish.publish\n(omit fence_check)"] -.-> CGT
+    OTHER["computed_moves_store.py, price_history_store.py\n(own verify_fence-based fence_check,\nnever generic_incremental --\nsee note below)"] -.->|"calls catalog.commit_snapshot\ndirectly, bypassing this function"| CS
 
     CGT --> COMBINED["_combined_fence_check(conn)\n1. always: _head_fence(conn, scope, expected_snapshot_id, expected_generation)\n   -> SNAPSHOT_CONFLICT on mismatch\n2. then, only if supplied: caller's fence_check(conn)\n   -> e.g. verify_fence: CANCELLED / LEASE_LOST"]
 
     COMBINED -->|passed as fence_check=| CS["catalog.commit_snapshot\n(inside BEGIN IMMEDIATE)"]
 
-    CS --> STEP1["fence_check(conn)  -- ALWAYS first,\nbefore the shortcut lookup"]
-    STEP1 --> STEP2["_existing_receipt: same\nreceipt_id/request_hash/attempt_id/\nfence/scope/snapshot_id?"]
-    STEP2 -->|yes: idempotent replay| RETURN_SHORTCUT["return prior receipt\n(commit_snapshot's OWN\n_check_head_expectation is\nskipped here -- but the fence\nabove already ran)"]
+    CS --> STEP1{"fence_check(conn)  -- ALWAYS first,\nbefore the shortcut lookup"}
+    STEP1 -->|"mismatch (e.g. head moved\nsince caller's static expectation)"| REFUSED["raise immediately --\nSNAPSHOT_CONFLICT / CANCELLED / LEASE_LOST;\nnothing written, shortcut never looked up"]
+    STEP1 -->|match| STEP2["_existing_receipt: same\nreceipt_id/request_hash/attempt_id/\nfence/scope/snapshot_id?"]
+    STEP2 -->|"yes: idempotent replay\n(only reachable when the original\ncommit was a no-op -- head never\nmoved, so the static expectation\nstill matches)"| RETURN_SHORTCUT["return prior receipt\n(commit_snapshot's OWN\n_check_head_expectation is\nskipped here -- but the fence\nabove already ran and passed)"]
     STEP2 -->|no| HEADCHECK["_check_head_expectation\n(SNAPSHOT_CONFLICT on mismatch)"]
     HEADCHECK --> INSERTS["idempotent inserts,\nreceipt, record_references,\nhead CAS"]
     INSERTS --> COMMIT["COMMIT"]
 ```
+
+Note: `computed_moves_store.py`'s own module docstring says its commits go
+"never `generic_incremental`" — its `_fence_check_for` closure is passed
+straight into `catalog.commit_snapshot`'s own `fence_check` parameter with
+no `_head_fence` composition in front of it, unlike every path shown above
+that runs through `commit_generic_table_candidate`.
