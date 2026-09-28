@@ -106,6 +106,7 @@ def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
     backup = tmp_path / "backup"
     first = run_backup(conn, key="b4", owner="worker", target=backup, clock=clock, store=store)
     assert conn.execute("SELECT state FROM outbox WHERE logical_key='b4'").fetchone()[0] == "delivered"
+    manifest_before_retry = (backup / "b4.manifest.json").read_bytes()
 
     # Simulate the retry that happens when the caller crashed after run_backup's own
     # complete() but before it wrote the watermark/committed the attempt: run_backup is
@@ -114,4 +115,4 @@ def test_run_backup_retry_after_the_effect_already_delivered_succeeds(tmp_path):
     assert second == first
     assert conn.execute("SELECT state FROM outbox WHERE logical_key='b4'").fetchone()[0] == "delivered"
     # No second backup was performed: the manifest file on disk is unchanged.
-    assert (backup / "b4.manifest.json").read_bytes()
+    assert (backup / "b4.manifest.json").read_bytes() == manifest_before_retry

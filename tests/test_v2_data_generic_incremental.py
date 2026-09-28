@@ -17,6 +17,7 @@ from engine.v2.contracts import (
 from engine.v2.data import generic_incremental, incremental_tables
 from engine.v2.data import incremental as daily_incremental
 from engine.v2.data.catalog import commit_snapshot
+from engine.v2.data.errors import DataError
 from engine.v2.data.legacy_mapping import build_legacy_mapping
 from engine.v2.data.manifests import dataset_manifest, snapshot_ref
 from engine.v2.data.objects import inspect_fragment
@@ -519,3 +520,58 @@ def test_retry_of_the_same_generic_effect_after_a_crash_before_attempt_commit_su
     assert second.receipt_id == first.receipt_id
     assert second.resulting_head_snapshot_id == first.resulting_head_snapshot_id
     assert second.resulting_head_snapshot_id == table_candidate.snapshot.snapshot_id
+
+    head = conn.execute(
+        "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = 'generic-worker'"
+    ).fetchone()
+    assert (head["snapshot_id"], head["generation"]) == (
+        table_candidate.snapshot.snapshot_id, 2)
+
+    # A genuinely DIFFERENT candidate from the SAME parent must NOT ride the
+    # #98 retry fence: head has moved to table_candidate's snapshot at
+    # generation 2, so this writer lost its parent and must be refused.
+    other_row = dict(incoming)
+    other_row["session"] = "AMC" if incoming["session"] != "AMC" else "BMO"
+    other_logical_key = incremental_tables.logical_key_for_row(contract, other_row)
+    other_revision_candidate = RevisionCandidate(
+        revision_id="worker-other-" + table_name,
+        logical_key=other_logical_key,
+        source="fixture",
+        source_priority=0,
+        finality="final",
+        revision_ordinal=3,
+        received_at="2026-09-17T00:00:00Z",
+        content_hash=incremental_tables.revision_hash(
+            logical_key=other_logical_key, row=other_row, deleted=False),
+    )
+    other_coverage_key = CoverageKey(
+        item_key=other_logical_key, session_date="2025-01-15", ticker="AAA")
+    other_coverage = daily_incremental.build_completed_coverage(
+        contract_ref, source="fixture", endpoint="fixture",
+        interval=TimeInterval(
+            column="event_date", start_inclusive="2025-01-15",
+            end_exclusive="2025-01-15T23:59:59"),
+        expected=(other_coverage_key,),
+        outcomes=(CoverageOutcome(
+            key=other_coverage_key, status="present", receipt_id=receipt_ref,
+            revision_id=other_revision_candidate.revision_id,
+            finality="final"),),
+        acquisition_receipt_refs=(receipt_ref,),
+        completed_at="2026-09-17T00:00:00Z",
+    )
+    other_candidate = generic_incremental.build_generic_table_candidate(
+        resolved, store, table_name,
+        (incremental_tables.GenericRevision(
+            candidate=other_revision_candidate, row=other_row),),
+        coverage=other_coverage, parent_snapshot_id=parent.snapshot_id)
+    assert (other_candidate.snapshot.snapshot_id
+            != table_candidate.snapshot.snapshot_id)
+    with pytest.raises(DataError) as err:
+        generic_incremental.commit_generic_table_candidate(
+            conn, store, other_candidate, scope="generic-worker",
+            expected_head_snapshot_id=parent.snapshot_id,
+            expected_head_generation=1,
+            clock=clock, request_hash="sha256:" + "2" * 64,
+            receipt_id="generic-receipt-2", attempt_id="generic-attempt-2",
+            fence=2)
+    assert err.value.code == "SNAPSHOT_CONFLICT"
