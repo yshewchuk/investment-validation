@@ -450,6 +450,44 @@ change; only a `store_domains` write against a legacy-owned table, or a
 neither is true of `native_parity`, which is exactly why this redo can
 schedule it now, well before Phase 7.
 
+**Cutover PR-7a (design — this PR adds no code; the next PR in this
+sequence implements what this section describes).** `native_score_batch`
+(`#66`) is registered as a job kind (`stages.py::_native_score_batch_kind`)
+but, as of `#66`/`#72`/`#68`, still has no production caller. This section
+describes the first one: the REAL production nightly submits it in shadow,
+alongside legacy scoring, with no authority change — never through
+`run_shadow_nightly` (no production caller, needs 14 caller-supplied stage
+handlers nothing builds) and never through `tools/native_parity_run.py`
+(operator-invoked, not wired to any schedule). Three new symbols, all
+mirroring the `computed_moves_refresh` precedent (Part 4, `#54`)
+byte-for-byte in shape:
+
+- `supervisor.Service._reconcile_native_score_batch_shadow` — a new
+  tick-loop sidecar method, called from `Service.tick` (`supervisor.py:227`)
+  right alongside its existing `self._reconcile_computed_moves_refresh()`
+  call (`supervisor.py:241`), never inside `build_legacy_job_requests`.
+- `nightly.submit_native_score_batch_shadow_if_ready` — the builder the
+  sidecar calls, mirroring `nightly.submit_computed_moves_refresh_if_ready`
+  (`nightly.py:858`).
+- `nightly._native_score_batch_identity` — a cheap catalog-only identity
+  check mirroring `nightly._computed_moves_identity` (`nightly.py:830`):
+  finds the latest session with a succeeded legacy `"score"` job, parsing
+  that job's own idempotency key — the standard `_DAG_STAGES` 4-part shape
+  (`"nightly:<session>:<scope_hash>:score"`, `nightly.py:996`), not
+  `_computed_moves_identity`'s own 3-part `"refresh"` format — to recover
+  BOTH the session and the exact `scope_hash` that `"score"` job was pinned
+  to (see "Failure semantics" below, R6, for why `scope_hash` matters here
+  and did not for `computed_moves_refresh`), and returns `None` when no
+  succeeded `"score"` job exists yet.
+
+`nightly.GRAPH` gains a `"native_score_batch": ("score",)` node
+(topological documentation only, exactly like
+`"computed_moves_refresh": ("refresh",)` at `nightly.py:51` — no submission
+path reads this edge) and `OPTIONAL` gains `"native_score_batch"`.
+`native_board_universe.board_requests` (`native_board_universe.py:198`)
+gets its first real caller here, closing the "no caller yet" dashed edge
+this doc's own Diagrams section already names (see below).
+
 ## Inputs
 
 - Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan`
@@ -526,12 +564,221 @@ schedule it now, well before Phase 7.
   `input_bindings={"events.json": <artifact ref>}` for the one staged
   events array.
 
+**Cutover PR-7a's input sourcing (design).**
+`submit_native_score_batch_shadow_if_ready` gathers three things before it
+ever builds a `JobSpec`:
+
+- **The release binding (`#59`/PR-1) — a cheap identity gate in front of an
+  expensive verification, not two cheap calls.** An earlier draft of this
+  bullet called `resolve_production_release_binding()` cheap and ran it
+  unconditionally on every tick; that was wrong (Opus gate finding, this
+  round) — it hash-verifies every model file and loads every payoff,
+  recalibration, and analog artifact for the resolved release, which is
+  exactly the kind of per-tick cost `computed_moves_refresh`'s own memo
+  pattern exists to avoid paying redundantly. This design instead runs
+  three calls, gated in two stages:
+
+  1. `engine.v2.models.deployment.production_release_root()`
+     (`deployment.py:142`) — cheap, one `os.environ` read, fresh every
+     tick, never cached.
+  2. `engine.v2.models.deployment.current_pointer(root)`
+     (`deployment.py:526`) — also cheap: one file-existence check plus one
+     small JSON decode of the pointer file (`_pointer_path`, `PointerState`
+     — `release_id`, `previous_release_id`), never a hash-verify or an
+     artifact load. Returns `None` if nothing has ever been promoted at
+     that root. This call runs on EVERY tick, unconditionally, and is what
+     replaces the earlier draft's unconditional expensive call.
+  3. `engine.v2.scoring.release_bindings.resolve_production_release_binding()`
+     (`release_bindings.py:195`) — the expensive, hash-verifying call —
+     runs ONLY when step 2's `release_id` differs from a one-slot,
+     root-keyed memo of the last `release_id` this sidecar itself already
+     fully verified (success OR failure; a release that fails hash
+     verification is memoized too, so a persistently-broken release isn't
+     re-hashed every tick either — only a CHANGED `release_id` forces a
+     fresh check, on the very next tick after the change, matching R2's
+     existing "promoted mid-session, next tick" guarantee below). On
+     success the sidecar keeps only the path string,
+     `str(production_release_root())`, for `parameters["release_root"]`,
+     and discards the `ScoringReleaseBinding` object itself (it carries no
+     root path of its own; only resolved catalog state) — this memo is
+     purely an internal cost-control detail of the sidecar's OWN gate, not
+     a change to `ScoringReleaseBinding`'s contract. `run_native_score_batch_worker`
+     (`native_score_batch.py:430`) never receives that object either — it
+     independently re-resolves via `resolve_release_binding(parameters["release_root"])`
+     (`release_bindings.py:148`, called at `native_score_batch.py:447`),
+     matching `ScoringReleaseBinding`'s own documented contract that a
+     second `resolve_release_binding` call always re-verifies fresh, never
+     reuses a cached instance across a process boundary — the worker's own
+     verification is intentionally NOT covered by the sidecar's memo.
+
+  `production_release_root()` reads the `MODEL_RELEASE_ROOT` environment
+  variable directly, fresh on every call (`deployment.py:85`, `:161`) —
+  never from `.env`, a config file, or any cached value. The nightly
+  process that runs this sidecar (`ops serve`, the same OS process
+  `Service.tick` runs in) must have `MODEL_RELEASE_ROOT` set in ITS OWN
+  process environment before it starts; this design adds no second way to
+  configure it. Left unset or blank, `production_release_root()` itself
+  raises `MissingReleaseRoot` (`deployment.py:110`) — both the sidecar's
+  step 1 and `current_pointer`'s own caller see this directly, before step
+  2 even runs. `current_pointer(root)` returning `None` (nothing ever
+  promoted at a configured root) is treated the same as the expensive
+  path's own `NoCurrentRelease` outcome, without needing to call the
+  expensive path at all — cutting straight to R1 below on the cheap check
+  alone. `resolve_production_release_binding()` (step 3, when it does run)
+  catches `MissingReleaseRoot` from its own internal call to
+  `production_release_root()` and re-raises it as
+  `ModelNotReady("release_root", ...)` (`release_bindings.py:206-208`); a
+  root that IS configured but names nothing `DEPLOYED` is a different,
+  un-wrapped failure one layer up, raised by the internal
+  `resolve_release_binding()` call `resolve_production_release_binding()`
+  makes once it has a root (`release_bindings.py:64-65`, `:148`, `:209`,
+  `NoCurrentRelease`, "R1(a): nothing has ever been promoted at this
+  release root") — a configured but empty release store, not a
+  missing/blank env var.
+
+  All three (`MissingReleaseRoot`, `ModelNotReady`, `NoCurrentRelease`,
+  whether reached via the cheap `current_pointer() is None` shortcut or via
+  a full step-3 verification) are R1 below, and — CodeRabbit round 3, real
+  finding — all three are checked BEFORE the SEPARATE build-attempt
+  memo/backoff below (the one guarding `board_requests`/raw-row-staging) is
+  ever touched, so a release promoted mid-session is picked up on the very
+  next tick, never locked out by an attempt count exhausted earlier for an
+  unrelated reason (see "Failure semantics" below, R2, for the full
+  account of BOTH memos). Legacy scoring, which never calls
+  `production_release_root`/`current_pointer`/`resolve_release_binding` at
+  all, is completely unaffected either way.
+- **Per-event raw rows — a still-missing producer (cutover PR-6), and a
+  self-contradiction in an earlier draft, now resolved.** An earlier draft
+  of this bullet's own opening sentence claimed the builder enumerates
+  `board_requests` "against the SAME pinned snapshot/session the succeeded
+  `"score"` job... itself found — recovered from that job's own recorded
+  request," while a later sentence in the SAME bullet already said legacy
+  `"score"`, in its default `"legacy"` input mode, "pins no snapshot in the
+  process." Both cannot be true at once (Opus gate finding, this round).
+  The second statement is the one that is correct and verified: in the
+  production default input mode, `nightly._snapshot_inputs` returns `None`
+  (verified against current `main`), so the selected `"score"` job pins NO
+  snapshot at all. There is therefore no pinned snapshot for this design to
+  recover, and — as a direct consequence, not stated in the earlier draft —
+  `board_requests(as_of, horizon_days, tickers, events_table)`
+  (`native_board_universe.py:198`)'s own `events_table`/`horizon_days`
+  arguments, and the worker's own required `snapshot_id`/`calendar_revision`
+  parameters (`native_score_batch.py:52-68`), have NO stated source in that
+  mode either.
+
+  This design does not resolve that gap by inventing a fresh-head fallback
+  (that would be a NEW, unreviewed mechanic, not something already
+  established elsewhere): instead, **R1 (Failure semantics, below) gains an
+  explicit case for it** — whenever the selected `"score"` job pinned no
+  snapshot (`_snapshot_inputs` returned `None` for it), the sidecar refuses
+  exactly like a missing release, and submits nothing. In concrete terms,
+  under today's production default (`"legacy"` input mode), this means
+  PR-7a's shadow batch does not submit at all, full stop, until either (a)
+  a future PR changes the production input mode to one that pins a
+  snapshot, or (b) the still-missing raw-row producer below is given its
+  own, separately-designed way to source `snapshot_id`/`calendar_revision`/
+  `events_table`/`horizon_days` without a pinned `"score"`-job snapshot.
+  Neither (a) nor (b) is designed here; this bullet's job is to name the
+  gap precisely, not close it.
+
+  Independent of which mode eventually supplies these fields: for each
+  `BoardRequest` the builder must then produce the staged
+  `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` a
+  `NightlyEventInputs` document needs (`native_score_batch.py:52-68`) —
+  and **no production code does this today**. An earlier draft of this
+  bullet claimed the builder "reads the same staged... rows the legacy
+  `"score"` action itself reads from that snapshot" and cited `#68` as "the
+  pinned v2 snapshot-read bridge UD-4 closed." Both claims are false (Opus
+  gate finding, verified against `56087a8`'s own diff): `#68` ("research:
+  close UD-4 — pinned v2 snapshot reads") is entirely about
+  `engine/v2/research/` tooling (fill_quality, polygon_fills, signal_screen,
+  replay, build_trades, reconcile_trades), not scoring inputs, and does not
+  touch this path; and legacy `"score"`, in its default `"legacy"` input
+  mode, does not read or produce any of these five row shapes at all — it
+  loads features through `FeatureContext.load`/`score_calendar`
+  (`legacy_adapter.py:547-601`) and pins no snapshot in the process. There
+  is no existing legacy read this design can piggy-back on.
+
+  Building this row producer — staging `calendar_row`/`panel_row`/
+  `panel_anchor`/`tier4_row`/`quote_rows` per `BoardRequest` from a pinned
+  snapshot (once one exists to pin), in the shape `NightlyEventInputs` and
+  `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479-508`)
+  both require — is a genuine, still-missing prerequisite, and now covers
+  BOTH the row-staging work AND the snapshot-identity gap named above. This
+  doc's own PR-3 section already names the row-staging half as such ("a
+  later cutover PR (PR-4/PR-6)... enumerates `BoardRequest`s, stages their
+  per-event inputs"); this doc's own PR-7a introduction (above) likewise
+  lists it under "cutover PR-6," left implicit. PR-7a's submission-side
+  design assumes that producer exists (snapshot identity included) and
+  packages its output as one `native_score_batch.NightlyEventInputs`
+  document per row, but building the producer itself is explicitly OUT OF
+  SCOPE for this design and must land first, as its own PR with its own
+  review — its failure modes (a symbol with no legacy-comparable row shape,
+  a stale or partial snapshot read, the cost of producing rows for a ticker
+  universe legacy never scores this way, and now also which input mode or
+  mechanism supplies a snapshot at all) are a separate design question, not
+  a tick-loop sidecar concern this bullet can settle.
+
+  This enumeration/staging step, once its producer exists, is expected to
+  run synchronously inside `Service.tick()`, exactly where
+  `computed_moves_refresh`'s own `target_tickers_from_snapshot` scan already
+  runs (`_build_native_computed_moves_plan`, `nightly.py:614`) — the same
+  tick-blocking trade-off that precedent already accepts, not a new one
+  (CodeRabbit round 1: flagged as a real risk if left unbounded). One bound
+  this design DOES commit to, precisely (CodeRabbit, this round, real
+  finding — "AT MOST ONCE, never every tick" was ambiguous about whether a
+  FAILED build gets retried at all): the build-attempt memo (Failure
+  semantics, R2 below) gates this build against the SAME bounded,
+  backoff-scheduled retry contract as `computed_moves_refresh`'s own memo
+  — a newly-selected `(as_of, scope_hash)` identity gets up to
+  `_COMPUTED_MOVES_MAX_ATTEMPTS`-many build attempts, each separated by
+  `_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped delay, NOT one attempt per tick
+  and NOT unboundedly either; once that identity's attempts are exhausted,
+  the memo stops retrying it for the rest of the session (a NEW identity —
+  a different `as_of` or a different `scope_hash` — gets its own fresh
+  attempt budget). This is the pre-submission build/staging retry contract
+  ONLY. It is separate from, and must not be confused with, the submitted
+  job's own POST-submission `RetryPolicy("bounded", 2, (5, 30))`
+  (`stages.py:283`, R3 below) — that policy covers the WORKER retrying an
+  already-admitted job attempt; this memo covers the SIDECAR deciding
+  whether to build and submit a job attempt at all.
+  however, additionally claim the resulting I/O is bounded by rows legacy
+  `"score"` already read this session — it is not, for the reason above:
+  legacy `"score"` reads through a different path and produces none of
+  these five row shapes, so this build is a genuinely NEW read against the
+  snapshot store, not a reuse of one `"score"` already paid for (the
+  earlier draft's tick-cost bound made exactly this wrong assumption). The
+  still-missing producer's own PR must therefore measure and state its own
+  per-tick cost against the actual snapshot store, not assume it inherits
+  `"score"`'s existing budget; if that PR's implementation measures the
+  cost as not bounded in practice, it must move the build off `tick()`'s
+  synchronous path (e.g., a two-tick handoff: one tick marks a pending
+  build, an out-of-process step performs it, a later tick submits once its
+  output is ready) before it ships.
+- **`SourceBundle` (`#48`/PR-2, `#67`) is never built at submission time.**
+  `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479`) and
+  `source_inputs.build_native_score_inputs` (`source_inputs.py:1034`) both
+  run INSIDE the worker, via `assemble_score_batch_inputs` (called from
+  `run_native_score_batch_worker`, `native_score_batch.py:451`), from the
+  raw rows staged in `events.json` — both are pure, I/O-free functions, so
+  building a `SourceBundle` belongs in the worker, consistent with
+  `NativeScoreBatchParameters`'s own doc comment that `events.json` is
+  "resolved into staging exactly like every other input-bound kind"
+  (`stages.py:39-41`). The submission side only gathers and serializes raw
+  rows; it never touches `engine.v2.scoring.source_inputs`.
+
+`events.json` itself is staged as one immutable, content-addressed
+artifact — admitted via `spec.input_refs`, never a `job_<id>#<name>`
+reference (`input_bindings.py:70-73`), since no prior job produces it.
+`parameters["input_bindings"] = {"events.json": <that artifact id>}`; no
+`dependency_job_ids` entry is needed for it.
+
 **Cutover PR-4 (redo)'s own input sourcing (design).**
 `submit_native_parity_if_ready` gathers nothing beyond what
 `_native_parity_identity` already found — unlike `native_score_batch`'s
-own sidecar, this job's body has no expensive board-universe enumeration
-or release resolution of its own, since every value it needs is already a
-committed job output:
+own sidecar, this job's body has no board-universe enumeration or release
+resolution of its own, since every value it needs is already a committed
+job output:
 
 - **Legacy source.** `job_<score_job_id>#score` — the SAME `score.json`
   `attempt_outputs` binding every other legacy-dependent job already reads
@@ -540,11 +787,8 @@ committed job output:
   the original PR-4 design.
 - **Native source, per `#88`.** `job_<native_score_batch_job_id>#records`
   and `job_<native_score_batch_job_id>#refusals` — the `native_score_batch`
-  job's own staged outputs, keyed by the canonical `BoardRequest` string
-  (`#88`'s own note: "left for the parity job's own PR to implement, but
-  specified here precisely enough to build against without a second
-  design pass" — this redo is that PR). Both bindings resolve through the
-  same `input_bindings.resolve_bindings`/`_resolve_job_binding` mechanism
+  job's own staged outputs. Both bindings resolve through the same
+  `input_bindings.resolve_bindings`/`_resolve_job_binding` mechanism
   `score.json` uses — no new binding mechanism. The `native_parity`
   `JobSpec`'s `dependency_job_ids` carries BOTH `score_job_id` and
   `native_score_batch_job_id`, since `_resolve_job_binding` refuses any
@@ -561,16 +805,79 @@ committed job output:
   no tolerance value belongs in a doc, a PR body, an issue, or — this
   redo adds — a job's persisted parameters row).
 
-`native_score_batch.py`'s own output schema changes as part of THIS PR,
-not `#88`'s: `records.json`'s `"records"` field becomes an object keyed
-by the canonical `BoardRequest` string instead of a bare array (new
-schema version `native_score_batch_records.v2.0`), and `refusals.json`
-gains the identical keying — exactly the change `#88`'s own design
-specifies and explicitly defers to "the parity job's own PR." See
-`native_score_batch.py`'s own module docs (updated in the same push as
-this doc, Phase 2 of this redo) for the schema-version bump.
-`run_native_score_batch_worker`'s other behavior (assembly, the no-fit
-guard, per-row refusal codes) is unchanged by this redo.
+**`records.json`/`refusals.json`'s own key schema — designed HERE, not by
+`#88`.** `#88`'s final text (above, "Row keys") deliberately does NOT
+prescribe a fix: an earlier draft of that bullet proposed a concrete
+canonical-string-keyed schema, and the Opus gate on `#88` struck it —
+"acceptance criterion 4 of this same design states the row-key/join gap
+is 'not designed here'... choosing `records.json`'s own future output
+schema is a change to `native_score_batch.py`'s output contract... which
+belongs to whichever PR builds `native_parity`, reviewed on its own
+terms." `#88` names only the HAZARD (a refused row breaks positional
+`events.json`/`records.json` pairing) and points at the "starting
+material": `BoardRequest`'s own fields and
+`NativeScoreBatchRowRefusal.as_document()`'s existing `"key"` dict
+(`native_score_batch.py:56`, `:82-91`). This redo makes that choice:
+
+- **The key.** One canonical string per row,
+  `f"{ticker}|{strategy}|{event_date_iso}|{session}"`, where
+  `event_date_iso = str(pd.Timestamp(event_date).date())` — the IDENTICAL
+  four fields, in the identical ISO-date form,
+  `NativeScoreBatchRowRefusal.as_document()`'s own `"key"` dict already
+  uses (`native_score_batch.py:87`); this redo flattens that dict into one
+  string, rather than inventing a new field set or date format, because a
+  JSON object's own keys must be strings. `BoardRequest` is `frozen`/`slots`
+  (`native_board_universe.py:56`, `:62-65`) and hashable, so `assembled` (a
+  `dict[BoardRequest, ...]`, `native_score_batch.py:332`'s own return
+  type) already carries this exact identity per successful row; no new
+  identity is derived, only re-formatted for JSON.
+- **`records.json`.** `"records"` changes from a bare array (today) to a
+  JSON object: `{canonical_key: to_document(record), ...}`. Built inside
+  `run_native_score_batch_worker` by zipping `assembled.keys()` (the
+  `BoardRequest`s, in `assembled`'s own dict order) against `records` (the
+  `tuple[ScoreRecord, ...]` `score_batch` returns) — valid because
+  `batch.requests = tuple(r for r, _ in assembled.values())`
+  (`native_score_batch.py:463`, unchanged) is built from that SAME
+  `assembled.values()` iteration, and `score_batch` preserves
+  `batch.requests` order (existing R6 invariant, unchanged) — never a
+  reconstruction from `events.json`'s own order, which is exactly the
+  positional pairing `#88` names as broken once any row has refused. New
+  schema version: `native_score_batch_records.v1.0` → `v2.0`.
+- **`refusals.json`.** Rekeyed the identical way, for symmetry and so
+  `native_parity` needs exactly ONE join key format for both files, never
+  two: `{canonical_key: {"code": ..., "detail": ...}, ...}` — the same
+  `code`/`detail` fields `NativeScoreBatchRowRefusal.as_document()`
+  already carries, minus the now-redundant nested `"key"` dict (the
+  object's own key IS the row identity; carrying it twice invites the two
+  copies drifting apart). The worker's own return-value output tag moves
+  `"native_score_batch_refusals.v1.0"` → `"native_score_batch_refusals.v2.0"`
+  alongside it. `assembled`/`refusals`'s own row-level SET is unchanged —
+  `assemble_score_batch_inputs`'s per-row either/or contract (PR-3: a key
+  is either in `assembled` with a complete pair, or in `refusals`, never
+  both) is exactly what lets `apply_native_refusals` (above) trust the two
+  files never claim the SAME key twice.
+- **What does NOT change.** `run_native_score_batch_worker`'s assembly,
+  the no-fit guard, and per-row refusal CODES are all unchanged by this
+  redo — only the two output files' own top-level shape. A caller that
+  reads `records.json`'s OLD array shape (none exists in production
+  today — see "Cutover PR-4 (redo)" above) would break; no such caller
+  exists to migrate.
+
+**Cited, not solved here: `native_score_batch` does not submit at all under
+today's production default.** `#88`'s own R1 (above, "Per-event raw
+rows") found that in the production default `"legacy"` input mode, the
+selected `"score"` job pins no snapshot, so PR-7a's shadow batch "does not
+submit at all, full stop" until either a future PR changes the production
+input mode or the still-missing raw-row producer gets its own way to
+source its inputs — named there as cutover PR-6/PR-7b (snapshot-mode
+inputs), NOT designed here or by `#88`. This redo does not solve that gap
+either: `_native_parity_identity` (above) simply keeps returning `None`
+(R1, "Failure semantics" below) for as long as no `native_score_batch` job
+ever succeeds — the SAME graceful "nothing to do yet" outcome it already
+has for the ordinary case of a night that has not reached that point yet,
+not a distinct failure mode this redo needs to handle specially. Once
+PR-7b unblocks `native_score_batch`'s own submission, `native_parity`
+starts working with no change of its own.
 
 ## Outputs
 
@@ -897,6 +1204,91 @@ byte-identical fragment content (same `fragment_id`, same object content
 hash) and the commit resolves back to the parent snapshot instead of a fresh
 generation.
 
+**Cutover PR-7a: where the native `ScoreRecord`s land (design).** Once a
+`native_score_batch` attempt succeeds, `records.json`/`refusals.json`
+(already documented above) are recorded as ordinary `attempt_outputs` rows
+keyed `(attempt_id, name)` — `name="records"` / `name="refusals"` — the
+identical durable mechanism `score.json` already lands through for the
+legacy `"score"` stage today (`attempt_outputs` row named `"score"`,
+addressed as `job_<id>#score` via `_job_output`, `nightly.py:180-188`).
+
+- **Durable address.** `job_<native_score_batch job_id>#records` (and
+  `#refusals`) — resolvable through
+  `engine.v2.ops.input_bindings.resolve_bindings`/`_resolve_job_binding`
+  (`input_bindings.py:31-55`, `:58-80`) exactly like `score.json`'s own
+  `job_<id>#score` binding; no new binding mechanism is needed. A future job
+  that declares the `native_score_batch` job_id in its own
+  `dependency_job_ids` can bind `{"records.json": "job_<id>#records"}`, the
+  identical shape `_decision_bindings`/`_render_bindings` already build for
+  `score.json` (`nightly.py:216`, `:225`).
+- **Per-night identity.** The job's idempotency key is
+  `"nightly:<as_of>:<scope_hash>:native_score_batch"` — keyed to the
+  SPECIFIC succeeded `"score"` job `_native_score_batch_identity` selected
+  (see "Failure semantics" below, R6), never session alone: a later
+  `"score"` job for the same session under a different `scope_hash` is a
+  genuinely different native batch and gets a distinct key, so a real
+  re-run is never silently treated as already covered (CodeRabbit round 1,
+  real finding — a prior draft of this design keyed session-only,
+  mirroring `computed_moves_refresh` for the wrong reason: ITS target set
+  is watchlist-independent, this one's is not). A later job finds that
+  night's attempt the same way `_native_score_batch_identity` does:
+  `SELECT ... FROM jobs WHERE state='succeeded' AND idempotency_key LIKE
+  'nightly:<as_of>:%:native_score_batch' ESCAPE '\'`, with any literal `_`
+  or `%` inside the substituted `<as_of>` value backslash-escaped before
+  the query is built (CodeRabbit, this round, real finding, escalated from
+  a "nit" in an earlier round to an actual fix here: a bare `LIKE` treats
+  `_` as a single-character wildcard, and today's `<as_of>` is a plain ISO
+  date with neither character — but writing the query defensively, with an
+  explicit `ESCAPE` clause, costs nothing and stops a future change to
+  `as_of`'s own format from silently turning this into a wildcard match
+  against the wrong session). Then the latest succeeded `attempts` row for
+  it (`input_bindings.py:43-45`'s own query is the same shape — that
+  query's own escaping convention, if it has one, should be matched here
+  too).
+- **Row keys.** Each successful row's own `BoardRequest` (ticker, strategy,
+  ISO `event_date`, `session`) is exactly what `assemble_score_batch_inputs`
+  already keys its `dict[BoardRequest, tuple[ScoreRequest,
+  NativeScoreInputs]]` by — but that key is NOT carried through to
+  `records.json` today: `ScoreBatch.requests` (and so the `records` array,
+  `native_score_batch.py:463-478`) is only the SUCCESSFUL subset, in
+  `assembled`'s own iteration order, with every refused row already
+  dropped. So a `records.json` row can NEVER be paired against
+  `events.json` by POSITION once any row has refused — the two arrays are
+  then different lengths with no fixed offset between them (CodeRabbit
+  round 1, real finding — a prior draft of this design recommended exactly
+  that positional zip; it is wrong and is corrected here).
+
+  **Left entirely to the `native_parity` job's own re-plan — not designed
+  here.** An earlier revision of this bullet prescribed a specific fix (a
+  `records.json` schema change to a canonical-string-keyed object) as
+  something built "precisely enough to build against without a second
+  design pass." That was wrong for this PR: acceptance criterion 4 of this
+  same design states the row-key/join gap is "not designed here," and
+  choosing `records.json`'s own future output schema is a change to
+  `native_score_batch.py`'s output contract — code, and a second component's
+  contract at that — which belongs to whichever PR builds `native_parity`,
+  reviewed on its own terms (a schema version bump, `refusals.json`
+  consistency, and how legacy's own row identity gets projected down to
+  match are all real decisions a single bullet here cannot make well).
+  What IS in scope for PR-7a, and stated above, is the hazard itself:
+  refused rows break positional pairing, so whatever `native_parity` does
+  must key on row identity, never array position. This bullet does not
+  choose that key's field set, string form, schema version, or how it
+  reaches `refusals.json`; the parity PR designs all of that against
+  `BoardRequest`'s existing fields and `NightlyEventInputs.key`/
+  `NativeScoreBatchRowRefusal.as_document()`'s existing `"key"` dict
+  (`native_score_batch.py:56`, `:84-89`) as its starting material.
+- **Namespace/authority.** Every one of these jobs is submitted under a
+  `NamespacePolicy` scoped to `{"shadow"}` only, mirroring
+  `_reconcile_computed_moves_refresh`'s own inline policy
+  (`supervisor.py:444`); `native_score_batch`'s registered
+  `namespaces=frozenset({"shadow", "smoke"})` (`stages.py:285`) already
+  forbids anything else, and its `effects=("staged",)` with no
+  `store_domains` (`stages.py:282`) means it commits no legacy-store head
+  and holds no read/write lease the legacy board depends on. No code path
+  from this job reaches the legacy board, the decisions pipeline, or
+  publication — the invariant this whole design exists to hold.
+
 ## Dependencies
 
 Imports observed in this package's own source, top-level and lazy
@@ -1045,6 +1437,25 @@ network, or database access.
 
 ## Failure semantics
 
+- **Worker exit vs. process-family aliveness (`executor.poll`)** — `poll()`
+  samples `running.process.poll()` for the worker's own exit code, then
+  scans the watched process family (`executor_watchdog.observe`, the
+  worker pid plus any descendants) for liveness. `WORKER_FAILED` is only
+  raised when the exit code is non-zero (including a negative,
+  signal-killed code) while a family member is still alive; a clean
+  `exit_code == 0` never sets `WORKER_FAILED`, even if `observe` still
+  reports a family member alive at that same tick — a worker that exits 0
+  can briefly leave a child/grandchild process (a straggler) running past
+  its own exit, or a liveness read can momentarily overlap the exit itself.
+  Either way, once the worker's own exit code is known and a family member
+  is still alive, `poll()` calls `stop()` (TERM, then KILL after
+  `grace_seconds`) to reap it — bounded, not waited on indefinitely — and
+  `done` only becomes `True` once the whole family has actually drained.
+  So a straggler after a clean exit is reaped, not treated as a failure,
+  and the worker's already-buffered result (`running.data`) is used once
+  `done` is `True`. Before this fix, ANY exit code observed while a family
+  member was still alive — zero included — set `WORKER_FAILED` and
+  discarded a successful worker's result (issue #105).
 - **Missing input** — a stage with an unmet dependency, or a job whose
   bound input artifact is absent, is refused with a typed `Problem`/error
   code (root doc §5), never defaulted. `board_requests` follows the same
@@ -1647,14 +2058,21 @@ hold, extended here rather than re-argued from scratch.
   consistently on its own side. A failed `native_parity` attempt has no
   descendant job (nothing declares it in `dependency_job_ids`), so
   `block_descendants` never reaches anything the legacy board needs.
-- **R2, cache.** Once a job exists under today's `(as_of, scope_hash)` key,
-  in any state, `submit_native_parity_if_ready` never rebuilds or
-  resubmits it — the existence check runs before any input is read. A new
-  `self._native_parity_memo` (the same `_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped
-  schedule and attempt cap `computed_moves_refresh`/`native_score_batch`
-  already use) throttles repeated no-op ticks the same way theirs do —
-  cheap here too: `_native_parity_identity` is two indexed `SELECT`s, no
-  pandas, no provider call, so a `None` identity costs nothing the memo
+- **R2, cache — one memo, not two.** Once a job exists under today's
+  `(as_of, scope_hash)` key, in any state, `submit_native_parity_if_ready`
+  never rebuilds or resubmits it — the existence check runs before any
+  input is read. Unlike `native_score_batch` (`#88`'s own R2: a SEPARATE
+  release-identity memo plus a build-attempt memo, because it gates an
+  expensive release re-verification independently of an expensive
+  board-enumeration build), `native_parity` needs only ONE memo,
+  `self._native_parity_memo`, mirroring the SHAPE of
+  `native_score_batch`'s own build-attempt memo/backoff
+  (`_COMPUTED_MOVES_MAX_ATTEMPTS`/`_COMPUTED_MOVES_BACKOFF_SECONDS`) —
+  there is no analogous release call here to gate separately, since this
+  job reads only already-committed job outputs. Cheap even without a
+  memo for the common case: `_native_parity_identity` is two indexed
+  `SELECT`s, no pandas, no provider call, so a `None` identity costs
+  nothing the memo
   needs to protect against; the memo only matters once a
   `native_score_batch` job HAS succeeded and a submission attempt (not the
   comparison itself, which only ever runs inside one attempt) needs
@@ -1697,6 +2115,306 @@ hold, extended here rather than re-argued from scratch.
   identical reason; because that changes `native_score_batch`'s own
   `scope_hash`-keyed identity, it also changes which `native_score_batch`
   job `native_parity` reads, not merely what it reads there.
+
+### `submit_native_score_batch_shadow_if_ready`'s own failure semantics for `native_score_batch` shadow submission (Cutover PR-7a design, the 4c R1–R6 template)
+
+**Design only — no code lands with this PR; a later PR in this sequence
+implements what this subsection describes**, mirroring
+`nightly.submit_computed_moves_refresh_if_ready`'s own failure semantics
+above byte-for-byte in shape. A shadow scoring failure must never block,
+degrade, or slow the legacy board: in the SUPERVISED path there is no
+legacy receipt to degrade, because the legacy nightly never depends on this
+job existing, succeeding, or even having been attempted — stronger than
+`OPTIONAL`'s usual `run_shadow_nightly`-report-walk meaning, which this
+function is never part of.
+
+- **R1 missing input.** No succeeded legacy `"score"` job for any session
+  yet (`_native_score_batch_identity` returns `None`); that job pinning no
+  snapshot (`nightly._snapshot_inputs` returns `None` for it — the
+  production default under `"legacy"` input mode, per "Inputs" above); no
+  configured production release — and here the cheap and expensive paths
+  raise DIFFERENT, both-R1 outcomes that must not be confused (Opus gate
+  finding, this round: an earlier draft named only the expensive path's
+  wrapped exception): `production_release_root()` itself raising
+  `MissingReleaseRoot` directly, BEFORE `current_pointer`/step 3 ever run,
+  when `MODEL_RELEASE_ROOT` is unset/blank (the cheap path's own case,
+  never wrapped into anything); `current_pointer(root)` returning `None`
+  (a configured root with nothing ever promoted, found cheaply, without
+  needing step 3 at all); or, only once step 3 actually runs,
+  `ModelNotReady("release_root", ...)` (step 3's own internal
+  re-raise of a `MissingReleaseRoot` it independently hits) or
+  `NoCurrentRelease` (a configured root naming nothing `DEPLOYED`) — or
+  `board_requests` returning empty for that session's pinned snapshot (once
+  one exists) — each case returns without submitting anything; there is no
+  partial or synthetic-empty job.
+- **R2 cache — two separate memos, not one.** Once a job exists under
+  today's session's idempotency key, in any state, it is never rebuilt or
+  resubmitted — the existence check runs before any raw row is read or
+  `events.json` is built. Below that, this design keeps two independent
+  memos that must not be conflated:
+
+  1. **The release-identity memo (Inputs, above).** A one-slot,
+     root-keyed memo of the last `release_id` `current_pointer(root)`
+     reported and this sidecar fully verified (success or failure). The
+     expensive `resolve_production_release_binding()`/`resolve_release_binding()`
+     call runs ONLY when the cheap `current_pointer(root)` read (one file
+     stat, one small JSON decode — genuinely cheap, unlike the earlier
+     draft's claim that the hash-verifying call itself was cheap) reports a
+     DIFFERENT `release_id` than this memo holds. This memo is checked, and
+     can update, on EVERY tick regardless of the build-attempt memo below —
+     a release change is never delayed by the other memo's backoff.
+  2. **The build-attempt memo/backoff** (mirroring `computed_moves_refresh`'s
+     own, `_COMPUTED_MOVES_MAX_ATTEMPTS`/`_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped),
+     guarding the expensive `board_requests`/raw-row-staging step once a
+     usable release IS in hand. **A release-unavailable outcome
+     (`MissingReleaseRoot`, `current_pointer(root) is None`, `ModelNotReady`, or
+     `NoCurrentRelease`) is checked BEFORE this second memo is touched at
+     all, and NEVER counts as one of its spent attempts** (CodeRabbit round
+     3, real finding — a prior draft of this design inherited
+     `computed_moves_refresh`'s memo wholesale, which would have let
+     release-unavailable outcomes exhaust the same backoff schedule as a
+     genuine build failure, silently locking an unchanged `(as_of,
+     scope_hash)` identity out for the rest of the session even after a
+     later promotion).
+
+  Net effect: the release-identity memo (1) makes the per-tick cost of
+  CHECKING for a release change genuinely cheap (a stat and a small JSON
+  read, not a hash-verify), while the build-attempt memo (2) makes the cost
+  of the expensive raw-row-staging step bounded to at most once per
+  `(as_of, scope_hash)` identity. A release promoted mid-session is
+  therefore picked up on the VERY NEXT tick by memo (1) unconditionally,
+  and — because memo (1) sits strictly before memo (2) in this ordering —
+  never blocked by an attempt count memo (2) exhausted earlier in the
+  session for an unrelated reason.
+- **R3 retry.** This function retries nothing itself; the submitted job's
+  own `RetryPolicy("bounded", 2, (5, 30))` (`stages.py:283`) covers worker
+  attempts, and a session whose key already exists — succeeded OR failed —
+  is never resubmitted by this function again.
+- **R4 transaction.** Submitted alone through `submission.submit` (one node,
+  never `submit_graph`), exactly like `computed_moves_refresh`, so a broken
+  shadow submission can never make a REQUIRED job's admission
+  all-or-nothing with it, and can never abort or delay `"score"`,
+  `"decision_commit"`, or publication.
+- **R5 partial write.** None: `events.json` is built and staged as one
+  immutable content-addressed artifact before `submit` is ever called;
+  nothing is written to the catalog before that single insert.
+- **R6 idempotency.** The idempotency key is
+  `"nightly:<as_of>:<scope_hash>:native_score_batch"` — the SAME 4-part
+  `_DAG_STAGES` shape `build_legacy_job_requests` already uses for every
+  other stage (`nightly.py:996`), keyed to the SPECIFIC succeeded `"score"`
+  job `_native_score_batch_identity` selected, never session alone
+  (CodeRabbit round 1, real finding). A newer succeeded `"score"` job for
+  the same session under a DIFFERENT `scope_hash` (a wider re-run, a
+  corrected watchlist) is a genuinely different native batch and gets a
+  distinct key; a retry that reproduces the identical `scope_hash` still
+  dedupes. `computed_moves_refresh`'s own key is deliberately session-only
+  instead, because ITS target set is always every scoreable ticker on the
+  head, independent of which watchlist's `"score"` job triggered the tick —
+  that reasoning does not carry over here, where the batch's inputs ARE the
+  specific `"score"` job's specific pinned rows.
+
+`Service._reconcile_native_score_batch_shadow` wraps the whole call in the
+identical try/except `_reconcile_publication_status`/
+`_reconcile_computed_moves_refresh` already use, memoized the same way (a
+new `self._native_score_batch_memo`, the same backoff schedule and attempt
+cap) — a broken build degrades only this shadow job, never `tick()`, never
+a required job's dispatch. **Why it is submitted the same way
+`computed_moves_refresh` is, never through `build_legacy_job_requests`**:
+reason (2) from that section applies unchanged — `submit_graph` validates
+and inserts all-or-none, so a plain exception building `events.json`, or a
+same-session resubmission whose digest drifted, would otherwise abort the
+WHOLE required graph, not just this shadow job. Reason (1) (the
+`_check_head_expectation` race between two jobs pinning the same head) does
+NOT apply here: `native_score_batch` carries no `store_domains` and commits
+no snapshot head (`effects=("staged",)`, `stages.py:282`), so it cannot
+race `"score"`'s own commit or anyone else's — the sidecar pattern is still
+the right choice for scheduling/transaction independence, not for a
+head-commit race.
+
+### `nightly_trigger.py` (issue #103: a bounded `serve`, never an unbounded hold on the legacy lock)
+
+`nightly_trigger.py`'s own module docstring already describes its
+scheduling and idempotency design (see "Purpose" above for where this
+package's other modules are indexed); this subsection covers only the
+failure semantics this PR adds or changes, the same R-numbered vocabulary
+`docs/COMPONENT_ARCHITECTURE_TEMPLATE.md` names (missing input, cache,
+retry, transaction, partial write, idempotency).
+
+- **R3, retry — `serve` now has a wall-clock deadline, never an unbounded
+  `while True`.** `supervisor.serve(service, *, once=False, until=None,
+  deadline_at=None)` gained a keyword-only `deadline_at`: an absolute,
+  `service.clock`-comparable datetime. Checked every tick, right alongside
+  `until()` (after `service.tick()`, before the sleep) — never before the
+  first tick, so the recovery pass `service.start()` performs always runs
+  first, same as today. Once `service.clock.now() >= deadline_at`, `serve`
+  stops and returns `"deadline_exceeded"` even though `until()` has not
+  fired; it still calls `service.close()` in the same `finally` either way.
+  Neither existing caller is affected: `cli.py`'s `serve_command` (the real
+  `ops serve` daemon) passes no `deadline_at` and keeps running forever, by
+  design — this parameter exists for `nightly_trigger.py`'s own bounded
+  `serve` call alone.
+  `nightly_trigger._default_serve` now computes
+  `deadline_at = _serve_deadline(clock)`, a new helper returning an
+  ABSOLUTE ET wall-clock cutoff on TODAY's calendar date (`clock.now()`'s
+  own ET date, not the as-of, and not a duration from when this particular
+  call started): `datetime.combine(clock.now().astimezone(ET).date(),
+  _boundary(DEFAULT_SERVE_DEADLINE_ET), tzinfo=ET)` — `_boundary` (already
+  used to parse `DEFAULT_WINDOW_START_ET`/`DEFAULT_DEADLINE_ET`) turns the
+  `"HH:MM"` string constant `DEFAULT_SERVE_DEADLINE_ET` into a
+  `datetime.time` before `datetime.combine`. `DEFAULT_SERVE_DEADLINE_ET`
+  is a new module-level constant next to `DEFAULT_DEADLINE_ET`, set with a
+  deliberate margin before the legacy cron's own evening start (this
+  repo's own judgment call, not a measured or externally specified bound
+  — the same kind of call `_COMPUTED_MOVES_BACKOFF_SECONDS` already
+  documents this way; the exact clock times live in the constant itself
+  and in `ops/systemd/native-nightly-trigger.service`'s own
+  `TimeoutStartSec`, not repeated here). Deliberately an ABSOLUTE same-day
+  cutoff, not a duration from when `serve` happened to start: a
+  duration-based deadline (this PR's first draft used `clock.now() +
+  timedelta(hours=12)`) still let a RESUMED `"timed_out"` serve starting
+  late in the day claim a fresh full budget of its own, reaching into the
+  legacy cron's own window — the exact hole a CodeRabbit review on this PR
+  found. Because `_serve_deadline` reads `clock.now()`'s OWN date every
+  time it is called, not the plan's `as_of`, every call to `_default_serve`
+  on the same calendar date — the first one and every resumed one —
+  computes the IDENTICAL cutoff, so no number of resumes on that date can
+  push the lock-holding past it: a resume ticking after the cutoff has
+  already passed computes a `deadline_at` already in the past, and
+  `serve`'s own deadline check only runs right after `service.tick()`
+  returns (before the next tick, never mid-tick) — so such a resume stops
+  at the very next post-tick check rather than running a further cycle of
+  real work, still resumable, never a wedge. A tick already in flight when
+  the cutoff arrives is NOT interrupted mid-tick — `serve` cannot guarantee
+  the lock is released AT the cutoff itself, only at the next check after
+  the CURRENT tick returns; a tick that never returns at all is exactly
+  what the systemd `TimeoutStartSec` backstop below exists for. This
+  reasoning does not depend on the resume happening on the SAME calendar
+  day the retry window originally opened on: `default_as_of` skips
+  non-trading days (weekends, holidays), so `main`'s own normal call path
+  CAN legitimately ask about the same `as_of` again several calendar days
+  later (e.g. a Friday `as_of` whose Saturday window went unresolved is
+  still the answer `default_as_of` gives on the following Monday, since no
+  trading day falls between them) — `run_trigger`'s resume branch (below)
+  does not recheck the original retry window in that case either, and
+  `_serve_deadline` simply computes THAT later day's own cutoff, which is
+  still always ahead of that same day's own legacy cron start. `serve`'s
+  own `until=lambda: _jobs_terminal(...)` argument is unchanged. A
+  `"deadline_exceeded"` outcome makes `_default_serve` return the new
+  sentinel `"timed_out"` instead of `"completed"`/`"failed"` — the
+  in-process jobs are left exactly where the supervisor's own recovery
+  already leaves an interrupted attempt (`recovery.py`, unchanged by this
+  PR); nothing here cancels or force-fails them.
+- **R6, idempotency — a timeout resumes the SAME plan, it never re-plans.**
+  `"timed_out"` is a new member of `STATUSES` and of `RESUME_STATUSES`
+  (alongside `"submitting"`/`"submitted"`/`"error"`): a receipt recorded
+  `"timed_out"` still carries `plan_ref`, so `run_trigger`'s resume branch
+  (`prior.plan_ref and prior.status in RESUME_STATUSES`) picks it up on
+  the next tick and calls `_submit_plan` again with the SAME `plan_ref` —
+  never `_decide`, so the retry window is not re-checked and no second
+  plan is ever built for this as-of while a resumable one already exists
+  (the window was already open the first time; the resume path's whole
+  point, shared with `"error"`/`"submitted"`, is that the decision is
+  already made). Resubmitting the same `plan_ref` is the existing
+  no-op-by-identity submit (`_default_submit`'s own docstring), and `serve`
+  is simply called again with a fresh `deadline_at`.
+  `"timed_out"` is also added to `FAILURE_STATUSES`, the same treatment
+  `"error"` already gets: `main`'s exit code is 1 (so a monitor sees a
+  problem) even though the state is not terminal and the trigger keeps
+  retrying it. It is deliberately NOT added to `TERMINAL_STATUSES` — unlike
+  `"failed"`, a bare timeout must stay resumable rather than given up on
+  immediately, since the resume path (this bullet's own first paragraph)
+  never re-checks the retry window before serving again. Concretely, on
+  the SAME calendar day: the timer's next tick (it fires every 30 minutes,
+  all day) resumes the same `plan_ref` and calls `_default_serve` again;
+  `_serve_deadline` recomputes the identical, already-past cutoff for that
+  same day, so this resumed serve also stops on its own first tick and is
+  again recorded `"timed_out"`. This repeats, one timer tick apart, until
+  R3's consecutive-timeout counter below reaches its terminal `"failed"`
+  state — ordinarily within an hour or two of the original timeout, the
+  same evening, never "the next day": there is no calendar-day check
+  anywhere in this path, only the counter.
+- **R3, retry — bounded, like every other consecutive-failure case in this
+  module.** Even with `_serve_deadline`'s same-day cutoff closing the
+  cross-into-legacy-window hole above, an unbounded same-day resume-forever
+  would still let a genuinely wedged run reacquire the lock every 30
+  minutes right up against that cutoff, over and over, for the rest of the
+  day — the exact production risk this issue opened over, just bounded to
+  one calendar day instead of unbounded. `_submit_plan` now counts consecutive
+  `"timed_out"` outcomes for this as-of the same way `_failure` already
+  counts consecutive `"error"` outcomes (a separate counter namespace:
+  a `"timed_out"` streak and an `"error"` streak never accumulate into
+  each other's count, since they are only ever incremented from a prior
+  receipt of the SAME status). At `MAX_CONSECUTIVE_ERRORS` consecutive
+  timeouts (the same small, fixed constant `_failure` already uses for
+  consecutive `"error"`s) the receipt becomes `"failed"` (terminal) instead of another
+  `"timed_out"` — `error_count` carries the streak length onto that
+  terminal receipt, same as `_failure`'s own `"failed_setup"` transition.
+  `error_count` is state internal to this module's own idempotency record;
+  it is never compared across `"timed_out"` and `"error"` receipts.
+- **R1, missing/unfittable input — refused before submission, not left to
+  wedge a `serve` loop.** `nightly.py` gains `plan_cpu_problems`/
+  `refuse_unfittable_cpu_plan`, the CPU-count twin of the existing
+  `plan_memory_problems`/`refuse_unfittable_memory_plan` (§8.1): a static,
+  host-structural check (`resources.worker_cpu_ids(policy, sample)`'s
+  length, after `reserved_cpu_count`) that asks whether a named resource
+  profile's `cpu_count` could EVER be admitted, independent of what else is
+  running. Unlike the memory check, `sample`'s `allowed_cpu_ids` is NOT
+  `sample_capacity`'s own live reading (`os.sched_getaffinity(0)` of the
+  calling process) passed straight through: `cli.py`'s `_submit_command`
+  first replaces that sample's `allowed_cpu_ids` with `range(os.cpu_count())`
+  before passing it to `refuse_unfittable_cpu_plan`. This is a deliberate,
+  measured deviation from `sample_capacity`'s live affinity reading, for the
+  same reason `plan_memory_problems` reads `sample.host_total_bytes` rather
+  than a live, per-process figure: `allowed_cpu_ids` (unlike
+  `host_total_bytes`) IS exactly the calling process's own
+  `sched_setaffinity`/taskset restriction, so passing it straight through
+  made this check fail two ordinary, previously-passing tests that submit a
+  real `DEFAULT_POLICY` nightly plan under `oc_check.py`'s own narrower
+  `bounded_run --cores 4` test wrapper (a profile whose declared `cpu_count`
+  fits production's `bounded_run --cores 8` failed this check purely because
+  the TEST harness's own core allowance is narrower) — a false positive of
+  exactly the shape the memory check's own docstring already warns against
+  ("never trips on another process's transient memory use"). `os.cpu_count()`
+  (the host's logical CPU count, unaffected by this process's own affinity
+  mask) is the closest available analogue to `host_total_bytes` on today's
+  `CapacitySample`, which has no separate host-total CPU field of its own.
+  `cli.py`'s `_submit_command` calls this immediately after its existing
+  `refuse_unfittable_memory_plan` call, same requests, same typed refusal
+  shape: `RESOURCE_PROFILE_UNSATISFIABLE` (never a distinct code — an
+  unfittable-CPU plan and an unfittable-memory plan are the same class of
+  finding, "this plan can never be admitted on this host," at the same call
+  site, before any job row is inserted). This closes the specific gap issue
+  #103 named: a job whose profile needs more CPUs than this host's logical
+  CPU count ever offers previously stayed queued forever under the
+  claim-time-only `PROFILE_EXCEEDS_CAPACITY` reason (`resources._fits_at_all`,
+  unchanged by this PR — it remains the claim-time backstop for a plan built
+  by a caller other than `ops plan`/`ops submit`, e.g. a raw `JobSpec`, and
+  the one that still catches a profile that fits the host but not THIS
+  process's own narrower `--cores`/taskset restriction); now a
+  host-impossible plan is refused at submit time instead, before the
+  trigger's `serve` ever starts waiting on it. **Known residual gap, not
+  closed by this PR:** a profile that fits the raw host CPU count but not
+  the specific `--cores`/taskset allowance the nightly trigger's own
+  `bounded_run` wrapper runs under (e.g. production's `--cores 8` on a
+  larger host) is NOT caught at plan time by this check — only by
+  `serve`'s own bounded deadline above, which still guarantees the legacy
+  lock is released and the run becomes resumable rather than wedging
+  forever.
+- **Backstop, outside this process.** `ops/systemd/native-nightly-trigger.service`
+  (not installed or enabled by this PR — this unit has no production
+  caller yet) gains a `TimeoutStartSec`, set comfortably above the worst
+  case a single `Type=oneshot` invocation can ever legitimately run: the
+  retry window's earliest possible open through `DEFAULT_SERVE_DEADLINE_ET`,
+  plus room for probe/plan/submit overhead, as a backstop for the case the in-process
+  deadline itself never gets checked at all (the process wedged somewhere
+  `serve`'s own tick loop never resumes,
+  e.g. inside a blocking call the deadline check never regains control
+  from) — systemd killing the unit still leaves the legacy lock file
+  present but unlocked (the flock is process-held, released automatically
+  when the process dies), so the NEXT tick's `_LegacyLock.acquire` succeeds
+  normally; it does not itself write a receipt, which is exactly why the
+  in-process deadline above is the primary mechanism and this is only the
+  backstop for its own failure.
 
 ## Invariants
 
@@ -1769,8 +2487,6 @@ flowchart TD
     features --> model_evidence
     score --> decision_validation
     score -.-> native_parity
-    score -.-> native_score_batch
-    native_score_batch -.-> native_parity
     decision_validation --> decision_commit
     decision_commit --> export
     decision_commit --> backup
@@ -1782,7 +2498,7 @@ flowchart TD
     publication --> delivery
 
     classDef optional stroke-dasharray: 4 3
-    class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh,native_score_batch optional
+    class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh optional
 ```
 
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
@@ -1791,13 +2507,33 @@ stamps `graph_order()`'s output into every plan's `"order"` field, and
 `run_shadow_nightly` is the only function that walks it whole, inline — it
 has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and
 `tests/test_v2_ops_native_shadow_render.py` call it, for every stage
-including `native_parity`. `computed_moves_refresh` (Part 4),
-`native_score_batch` (`#88`), and — as of this redo — `native_parity` are
-all real submittable job kinds reached a DIFFERENT way: each through its
-own tick-loop sidecar (`Service._reconcile_computed_moves_refresh`/
-`_reconcile_native_score_batch_shadow`/`_reconcile_native_parity`), never
-through this graph's own walk — see "Outputs"/"Failure semantics" above
-for how production submission reaches each one.
+including `native_parity`. `computed_moves_refresh` (Part 4) is a real
+submittable job kind reached a DIFFERENT way — through its own tick-loop
+sidecar (`Service._reconcile_computed_moves_refresh`), never through this
+graph's own walk.
+
+`native_score_batch` (Cutover PR-7a, `#88`, design) and `native_parity`
+(Cutover PR-4 redo, this design) are each designed to become real
+submittable job kinds reached the SAME way, through their own tick-loop
+sidecars (`_reconcile_native_score_batch_shadow`/`_reconcile_native_parity`)
+— see "Outputs"/"Failure semantics" above for
+`submit_native_score_batch_shadow_if_ready`/`submit_native_parity_if_ready`
+and the identical race/all-or-nothing rationale `computed_moves_refresh`
+already establishes for why neither will ever be folded into this graph's
+submission path once it exists. **This diagram is `nightly.py::GRAPH`/
+`OPTIONAL` as they exist TODAY** — matching the discipline `#88`'s own
+CodeRabbit review established for this exact diagram (an earlier draft of
+that design added a `score -.-> native_score_batch` edge and dashed
+`native_score_batch` node directly into it, which was wrong: PR-7a ships
+no code, so `GRAPH` does not contain it yet). This redo applies the same
+discipline to itself: `native_parity`'s existing node
+(`"native_parity": ("score",)`, `nightly.py:58`) is left exactly as it
+appears above, even though "Primary contracts" above describes Phase 2
+widening it to `("score", "native_score_batch")` — this doc-only PR ships
+no code either, so this diagram does not get ahead of it. The
+implementation PRs that follow both designs add their own real edges and
+nodes to this diagram when they ship code, not before — the same way `#54`
+added `computed_moves_refresh`'s own edge/node here when IT shipped code.
 
 Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
 only production caller, `cli.py`, always passes `include_prerequisites=False`,
@@ -1907,9 +2643,12 @@ flowchart LR
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
-    BR -.->|"no caller yet"| NC[(future native_score job)]
+    BR -.->|"Cutover PR-7a (design)"| NC[(nightly.submit_native_score_batch_shadow_if_ready)]
 ```
 
-No production job feeds `board_requests` today; the dashed edge marks the
-future `native_score` job kind this enumeration is built for (see
-"Dependencies" → "Callers" above).
+`board_requests` gets its first real caller in Cutover PR-7a's design
+(above): `submit_native_score_batch_shadow_if_ready` enumerates the
+session's `BoardRequest`s from it to build `events.json`'s per-event rows.
+Until that PR's code lands, the dashed edge is still aspirational, not a
+pre-existing fact — see "Dependencies" → "Callers" above and "Primary
+contracts" above for the full account.

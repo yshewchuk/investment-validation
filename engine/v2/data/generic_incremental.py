@@ -152,14 +152,32 @@ def commit_generic_table_candidate(
     that ALSO wants an attempt-lease check
     (``engine.v2.ops.lifecycle.verify_fence``) passes
     ``fence_check=lambda c: verify_fence(c, attempt_id, fence, now)`` -- see
-    ``forward_calendar_store.py``'s and ``computed_moves_store.py``'s own
-    ``_fence_check_for`` for the pattern (this module, in
-    ``engine/v2/data/``, cannot import ``engine.v2.ops.lifecycle`` itself --
-    see the layering note in ``engine/v2/data/catalog.py``). Omitting it
-    (the default) keeps this function's previous, unchanged behavior for
-    its other two callers (``engine/v2/data/incremental.py``'s
+    ``forward_calendar_store.py``'s own ``_fence_check_for`` for the pattern
+    (this module, in ``engine/v2/data/``, cannot import
+    ``engine.v2.ops.lifecycle`` itself -- see the layering note in
+    ``engine/v2/data/catalog.py``); it is the only caller of THIS function
+    that supplies a ``fence_check``. ``engine/v2/ops/computed_moves_store.py``
+    has its own, differently-wired ``_fence_check_for`` but never calls this
+    function at all -- its own module docstring says so ("never
+    ``generic_incremental``"): it passes that fence_check straight into
+    ``catalog.commit_snapshot`` directly, so none of this function's
+    ``_head_fence`` composition applies to it. Omitting ``fence_check`` here
+    (the default) keeps this function's previous, unchanged behavior for its
+    other two callers (``engine/v2/data/incremental.py``'s
     ``_run_generic_refresh`` and ``engine/v2/research/_trades_publish.py``'s
     ``publish``): ``_head_fence`` alone, exactly as before.
+
+    Because ``_head_fence`` runs before ``catalog.commit_snapshot``'s
+    idempotent-replay shortcut, a replay here is idempotent only when the
+    original commit did NOT advance the head (``candidate.snapshot`` already
+    equalled the expected head): ``_head_fence`` still matches and the shortcut
+    returns the prior receipt, with ``resulting_head_generation`` correctly
+    unchanged (``catalog._existing_receipt``'s #77/#82 fix). If the commit DID
+    advance the head, a replay's head expectation no longer matches, so
+    ``_head_fence`` raises ``SNAPSHOT_CONFLICT`` first -- itself AMBIGUOUS,
+    since another writer could cause the same conflict. Either way, reconcile
+    against the stored receipt, not the fence result, before treating a retry
+    as applied.
     """
     clock = clock or SystemClock()
     request_hash = request_hash or content_hash({"changeset": candidate.changeset_hash})

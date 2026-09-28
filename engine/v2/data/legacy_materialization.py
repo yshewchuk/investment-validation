@@ -1,12 +1,22 @@
 """Snapshot-to-legacy materialization planning — phase-2 guide §9.1, §9.2, D13/D14.
 
 Pure logic only: this module never opens a file, a database connection or a
-legacy ``engine.*`` symbol (Layer 1, ``system_rearchitecture.md`` §4.1). It
-imports only ``engine.v2.contracts``, ``engine.v2.foundation``, and this
-package's own ``repository`` (for its ``table_contract``/``explain_dependencies``
-public reads). ``engine/v2/data/legacy_adapter.py`` — the package's one
-legacy-importing module — imports *from* this module, never the other way,
-so there is no import cycle between the two.
+legacy ``engine.*`` symbol (Layer 1, ``system_rearchitecture.md`` §4.1). Its
+own module-level imports are ``engine.v2.contracts``, ``engine.v2.foundation``,
+and this package's own ``errors``, ``price_history_table``, ``time_formats``,
+and ``query`` modules — not ``repository``, which functions needing table
+operations receive as a plain parameter (``repository.table_contract``/
+``.explain_dependencies``, etc.), never as an import.
+``engine/v2/data/legacy_adapter.py`` — the
+package's one legacy-importing module — imports *from* this module at
+module level (``from . import errors, legacy_materialization``), never the
+other way, so there is no module-level import cycle between the two.
+``materialize_tree`` (around :844) and ``_tier4_cache_dir`` (around :1064)
+each import ``engine.v2.data.reference_inputs`` at call time instead —
+``reference_inputs`` imports ``legacy_adapter`` at module level and takes
+its path constants from it, so a module-level import here would close a
+cycle back through ``legacy_adapter`` (``_tier4_cache_dir``'s own docstring
+names this).
 
 :data:`LEGACY_SCORE_READ_PLAN_V1` is this task's central judgement call (task
 brief decision 1): which curated tables, in what scope, plus which model/

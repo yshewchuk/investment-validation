@@ -1205,3 +1205,42 @@ def refuse_unfittable_memory_plan(requests, *, policy=DEFAULT_POLICY, sample):
         raise fail("RESOURCE_PROFILE_UNSATISFIABLE",
                    "plan names a resource profile bigger than this host could ever admit",
                    details={"jobs": problems})
+
+
+def plan_cpu_problems(requests, *, policy=DEFAULT_POLICY, sample):
+    """Per-job STATIC cpu-count admission problems for an already-built request
+    graph -- the CPU twin of ``plan_memory_problems`` above (issue #103): a
+    profile whose ``cpu_count`` exceeds this host's allowed-affinity worker CPU
+    count (``resources.worker_cpu_ids``, after ``policy.reserved_cpu_count``)
+    can never be admitted, no matter how idle the host gets -- exactly the
+    claim-time ``PROFILE_EXCEEDS_CAPACITY`` reason (``resources._fits_at_all``),
+    caught here instead, before submission.
+
+    Returns a list of problem dicts (empty means every named profile's CPU
+    count could ever fit); never raises on its own.
+    """
+    from engine.v2.ops.resources import worker_cpu_ids
+
+    available_cpus = len(worker_cpu_ids(policy, sample))
+    problems = []
+    seen_classes: set[str] = set()
+    for request in requests:
+        resource_class = request.job.resource_class
+        if resource_class in seen_classes:
+            continue
+        seen_classes.add(resource_class)
+        profile = profile_named(policy, resource_class)
+        if profile.cpu_count > available_cpus:
+            problems.append({"kind": request.job.kind, "profile": profile.name,
+                             "needed_cpus": profile.cpu_count, "max_possible_cpus": available_cpus})
+    return problems
+
+
+def refuse_unfittable_cpu_plan(requests, *, policy=DEFAULT_POLICY, sample):
+    """Raise before submission if any job in ``requests`` names a resource
+    profile whose CPU count this host could never admit at all (issue #103)."""
+    problems = plan_cpu_problems(requests, policy=policy, sample=sample)
+    if problems:
+        raise fail("RESOURCE_PROFILE_UNSATISFIABLE",
+                   "plan names a resource profile needing more CPUs than this host could ever admit",
+                   details={"jobs": problems})

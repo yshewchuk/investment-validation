@@ -23,6 +23,7 @@ from engine.v2.dashboard import preview
 from engine.v2.foundation import SystemClock
 from engine.v2.ops import cli
 from engine.v2.ops.bootstrap import open_catalog
+from tests.ops_support import TEST_POLICY
 
 REPO = Path(__file__).resolve().parents[1]
 TOKEN = "refresh-launcher-secret"
@@ -138,6 +139,7 @@ def _stop(server, thread) -> None:
 def test_ops_root_refresh_returns_202_jobs_and_repeat_is_idempotent(tmp_path, monkeypatch, capsys):
     ops_root, plan_ref = _published_nightly_plan(tmp_path, capsys)
     assert _job_count(ops_root) == 0  # planning publishes no jobs
+    monkeypatch.setattr(cli, "DEFAULT_POLICY", TEST_POLICY)
     server, thread, release_id = _run_launcher(tmp_path, monkeypatch, ops_root=ops_root)
     try:
         assert release_id == "r1"  # the read-only launcher still starts and pins normally
