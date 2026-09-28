@@ -1648,3 +1648,43 @@ def test_str_runup_live_executor_produces_raw_d14_and_scaled_move_once():
     scaled = executors["runup_move_prediction"].predict(facts)
     assert raw["runup_move_raw_d14"] == pytest.approx(8.0)
     assert scaled["runup_move_prediction"] == pytest.approx(4.0)
+
+
+def test_str_runup_live_executor_raw_d14_stays_negative_unclamped():
+    """The raw D14 target must never be clamped even though the published
+    target is; a negative model output makes this observable."""
+    binding = ModelBinding(
+        binding_id="b-runup", model_id="runup_move_synthetic",
+        role="runup_move", strategy_id="*",
+        decision_clock_id="legacy.decision_offset.0",
+        adapter="joblib-estimator.v1",
+        feature_order=("or_implied", "iv30"),
+        output_names=("prediction",),
+        members=(ArtifactMember(
+            name="estimator", path="b-runup.joblib",
+            content_hash="sha256:deadbeef"),),
+    )
+    release = SimpleNamespace(release_id="rel-runup", bindings=(binding,))
+
+    def infer(release, request):
+        return SimpleNamespace(
+            status=MODEL_READY,
+            release_id=release.release_id,
+            binding_id=binding.binding_id,
+            model_id=binding.model_id,
+            output_names=binding.output_names,
+            predictions=((-3.0,),),
+            artifact_hashes=tuple(m.content_hash for m in binding.members),
+            reason_codes=(),
+        )
+
+    executors, _ = application._frozen_stage_executors(
+        (binding,), SimpleNamespace(infer=infer), release, 7.0,
+    )
+
+    assert "runup_move_raw_d14" in executors
+    assert "runup_move_prediction" in executors
+
+    facts = {"or_implied": 1.0, "iv30": 1.0}
+    assert executors["runup_move_raw_d14"].predict(facts)["runup_move_raw_d14"] == pytest.approx(-3.0)
+    assert executors["runup_move_prediction"].predict(facts)["runup_move_prediction"] == pytest.approx(0.0)
