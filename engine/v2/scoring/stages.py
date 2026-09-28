@@ -154,8 +154,8 @@ _PRICING_OUTPUTS = frozenset({
 })
 _FORECAST_OUTPUTS = frozenset({
     "driver_prediction", "forecast_abs_move", "runup_move_prediction",
-    "pred_iv_crush", "pred_iv_crush_30", "model_fair_pct",
-    "forecast_p10", "forecast_p90", "forecast_sd",
+    "runup_move_raw_d14", "pred_iv_crush", "pred_iv_crush_30",
+    "model_fair_pct", "forecast_p10", "forecast_p90", "forecast_sd",
 })
 _SIMULATION_OUTPUTS = frozenset({
     "exp_pnl_sim", "win_sim", "sim_p10", "sim_p90", "pool_n",

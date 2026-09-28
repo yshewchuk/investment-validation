@@ -357,6 +357,22 @@ refusals with a machine-checkable `.code`/`.detail` also exist at
 `AnalogRefusal` (`native_analog.py`) and `NightlySourceBundleRefusal`
 (`nightly_source_bundle.py`, below).
 
+**STR-RUNUP's `runup_move` forecast field (issue #94).** Every mechanism
+that produces this strategy's forecast — `score_frozen()`'s own
+`application._runup_frozen_output`, a live Tier-4/frozen-model executor
+backing the `"runup_move"` role (`application._runup_executor_spec` /
+`_frozen_stage_executors`), or a live local/champion model
+(`stages._execute_forecast`) — populates TWO fields, never one conflated
+name: `runup_move_raw_d14` (the model's own D14-horizon magnitude, read
+ONLY by the model stage, `stages._runup_model_inputs`/
+`_runup_residual_bands`) and `runup_move_prediction` (`runup_move_raw_d14`
+scaled by `days_before_print / 14`, exactly once, the row's PUBLISHED
+value — the one `financial.py`'s `_runup_fair_premium` and every external
+consumer reads). Before this fix, a frozen-sourced value was scaled once at
+capture and a second time by the model stage's own
+`native_payoff.scale_runup_move`; a live-local value was never scaled for
+publication at all.
+
 ### `release_bindings.py` (the 4c R1–R6 template)
 
 - **R1, missing input.** `resolve_release_binding(release_root)` validates
