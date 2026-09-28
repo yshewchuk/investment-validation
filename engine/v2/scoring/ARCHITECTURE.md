@@ -452,23 +452,23 @@ canonical executor selection — reachable in production because
 `tools/capture_tier0_corpus.py::_frozen_runtime` (see Reachability below)
 submits an `InferenceRequest` for every binding in the release
 unconditionally, so `score_frozen` routinely infers bindings outside this
-request's own scope. **Known residual limitation**: this scoping keys off
-`executor_bindings` being a non-`None` tuple; when it is the empty tuple
-(the release genuinely has zero bindings matching this request's own
-`(strategy, decision_clock)` at all — every binding present belongs to
-another strategy), `_frozen_native_inputs` currently falls back to the
-historical UNSCOPED fold instead of scoping to nothing, because several
-`test_v2_scoring_application.py` tests exercise `score_frozen` with a
-degenerate, non-`ModelRelease` `release=object()` (real callers never do
-this) and rely on that fallback to keep publishing their synthetic
-fallback-binding results. A real production release with zero matching
-bindings for this request's strategy would therefore still leak an
-out-of-scope binding's result under this one specific condition. Tracked
-as a follow-up rather than fixed here (closing it needs either changing
-`test_v2_scoring_application.py`'s fixtures away from `object()` releases,
-or a way for `_frozen_scoped_bindings` to distinguish "no scoping
-information available" from "confirmed zero matches" — either is its own
-concern, not a one-line fix within this PR's scope).
+request's own scope. `_frozen_scoped_bindings` distinguishes "no scoping
+information available" from "confirmed zero matches": it returns `None`
+only when `release` declares no `bindings` attribute at all (true only for
+a degenerate, non-`ModelRelease` `release=object()`, as a few
+`test_v2_scoring_application.py` tests use — real callers never do this),
+in which case the historical UNSCOPED fold applies; any real release
+(every `ModelRelease`, and any test double that declares a `bindings`
+tuple) returns its filtered tuple as-is, including when that tuple is
+empty — a release with zero bindings matching this request's own
+`(strategy, decision_clock)` therefore folds NOTHING from the frozen path,
+never falling back to publishing another strategy's out-of-scope result.
+The same distinction applies one binding-attribute level down: a binding
+that does not itself declare both `decision_clock_id` and `strategy_id`
+(again, only a degenerate test double — every real `ModelBinding` declares
+both as mandatory dataclass fields) carries no scope information of its
+own and is always treated as in scope, since it cannot be confirmed a
+non-match either.
 
 Reachability: `frozen_batch.score_frozen_batch` is the Phase 6 production
 frozen batch boundary this scoping protects (it has no `engine/v2/ops`
