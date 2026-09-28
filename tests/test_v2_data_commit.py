@@ -479,6 +479,40 @@ def test_reimport_identical_content_onto_same_head_is_a_noop(tmp_path):
     assert receipt_b.resulting_head_generation == 1
 
 
+def test_replay_of_already_at_head_commit_reports_correct_generation(tmp_path):
+    """#77/#82: replaying an already-at-head commit must not claim the head
+    advanced. The stored receipt's true resulting generation is the
+    *expected* generation (the head never moved) and its true prior head is
+    ``expected_head_snapshot_id`` -- not ``expected_head_generation + 1`` and
+    not ``None``.
+    """
+    conn, clock = _catalog(tmp_path)
+    record = _record_for("2024")
+    _, snap_a = _commit(conn, clock, [record], receipt_id="ra", scope="shadow")
+
+    manifest_again, snap_again = _manifest_and_snapshot([record])
+    assert snap_again.snapshot_id == snap_a.snapshot_id
+
+    original = commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("b-request"), contracts=[_SEC_CONTRACT],
+        objects=[record.object_ref], records=[record], manifests=[manifest_again],
+        snapshot=snap_again, expected_head_snapshot_id=snap_a.snapshot_id, expected_head_generation=1,
+        receipt_id="rb", attempt_id="att-b", fence=1, fence_check=_noop_fence, clock=clock)
+    assert original.resulting_head_generation == 1
+    assert original.prior_head_snapshot_id == snap_a.snapshot_id
+
+    # Same receipt_id/request_hash/attempt_id/fence/scope/snapshot_id: this
+    # hits the _existing_receipt shortcut instead of re-running the commit.
+    replay = commit_snapshot(
+        conn, scope="shadow", request_hash=_hash("b-request"), contracts=[_SEC_CONTRACT],
+        objects=[record.object_ref], records=[record], manifests=[manifest_again],
+        snapshot=snap_again, expected_head_snapshot_id=snap_a.snapshot_id, expected_head_generation=1,
+        receipt_id="rb", attempt_id="att-b", fence=1, fence_check=_noop_fence, clock=clock)
+
+    assert replay.resulting_head_generation == original.resulting_head_generation == 1
+    assert replay.prior_head_snapshot_id == original.prior_head_snapshot_id == snap_a.snapshot_id
+
+
 def test_reimport_dataset_version_with_different_parent_reuses_it(tmp_path):
     conn, clock = _catalog(tmp_path)
     record = _record_for("2024")
