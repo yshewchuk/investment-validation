@@ -526,7 +526,7 @@ idempotent-replay shortcut too.
   fragment record, every dataset manifest's own referenced-fragment set, the
   no-key-overlap invariant, and the snapshot's own table bindings — all
   *before* opening the transaction (`catalog.py`'s `_verify_everything`,
-  called at the top of `commit_snapshot`, `catalog.py:484`) — a
+  called at the top of `commit_snapshot`, `catalog.py:496`) — a
   `MANIFEST_CORRUPT` here means nothing has been written yet.
 - **R1 (continued), the fence itself.** `commit_generic_table_candidate`
   builds a single `_combined_fence_check(conn_)` closure
@@ -540,9 +540,9 @@ idempotent-replay shortcut too.
   *its* `fence_check` parameter (`generic_incremental.py:174-186`).
   `catalog.commit_snapshot` invokes whatever `fence_check` it was given as
   the very first statement inside its own transaction
-  (`catalog.py:488-489`, `fence_check(conn)`), **before** looking up the
-  idempotent-replay shortcut (`_existing_receipt`, `catalog.py:490`) and
-  before its own `_check_head_expectation` (`catalog.py:494`). This ordering
+  (`catalog.py:500-501`, `fence_check(conn)`), **before** looking up the
+  idempotent-replay shortcut (`_existing_receipt`, `catalog.py:502`) and
+  before its own `_check_head_expectation` (`catalog.py:506`). This ordering
   is deliberate, not incidental: `commit_snapshot` skips its *own*
   `_check_head_expectation` call whenever the replay shortcut matches (an
   identical retry under the same `receipt_id`/`request_hash`/`attempt_id`/
@@ -664,7 +664,7 @@ idempotent-replay shortcut too.
   `_insert_contract`/`_insert_object`/`_insert_fragment`/
   `_insert_dataset_version`/`_insert_snapshot`, each comparing the existing
   row's payload before deciding). Second, the receipt-level replay shortcut:
-  `_existing_receipt` (`catalog.py:432-455`) returns the prior committed
+  `_existing_receipt` (`catalog.py:432-467`) returns the prior committed
   receipt, without re-inserting anything or re-running the head CAS, only if
   the replay is provably the *same* call (same `request_hash`, `attempt_id`,
   `fence`, `scope`, and resulting `snapshot_id` as the stored row) —
@@ -673,7 +673,7 @@ idempotent-replay shortcut too.
   even looked up — but what that buys a replay depends entirely on what the
   caller's own `fence_check` actually checks, since `commit_snapshot` skips
   its own `_check_head_expectation` on a matching replay for every caller
-  alike (`catalog.py:488-492`), not only the composed one. Through
+  alike (`catalog.py:500-504`), not only the composed one. Through
   `commit_generic_table_candidate`'s composed `_head_fence`, a same-attempt
   replay of a commit that *did* move the head cannot reach this shortcut at
   all — it is refused with `SNAPSHOT_CONFLICT` first, so the shortcut is
@@ -909,7 +909,7 @@ reachable when the original commit was a no-op" replay guarantee is
 specific to the `commit_generic_table_candidate` path's composed
 `_head_fence`**, not a property of `commit_snapshot` itself:
 `commit_snapshot` skips its own `_check_head_expectation` on a matching
-replay for every caller alike (`catalog.py:488-492`), so for these two
+replay for every caller alike (`catalog.py:500-504`), so for these two
 direct callers, a matching replay (same `request_hash`/`attempt_id`/
 `fence`/`scope`/resulting `snapshot_id`) returns the prior receipt even if
 the head *has* moved since the original call — the static
