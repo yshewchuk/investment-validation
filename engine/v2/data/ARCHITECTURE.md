@@ -183,11 +183,14 @@ responsible for two things that follow from a change to that mapping:
   session already normalized under the old mapping is served back verbatim
   on any later replay that reuses its `raw_hash`, silently mixing pre- and
   post-fix rows under one identity. `_stage_normalizations` therefore pins
-  the literal string (`"daily_market.v2"` as of #96, was `"daily_market.v1"`)
-  and this string is bumped in the same PR as any change to the provider's
-  row mapping; a session cached under the old id is never read back into a
-  `v2`-normalized candidate; it is only revisited by a fresh fetch, which
-  gets a new raw receipt and a `v2` normalization id.
+  the literal string (`"daily_market.v3"` as of #97, was `"daily_market.v2"`
+  as of #96, `"daily_market.v1"` before that) and this string is bumped in
+  the same PR as any change that alters what a normalized document contains
+  for the same raw input — the #97 bump was for a changed `RevisionCandidate`
+  shape (content-addressed `revision_id`/`revision_ordinal`), not a changed
+  row mapping, but the same rule applies: a session cached under the old id
+  is never read back into a `v3`-normalized candidate; it is only revisited
+  by a fresh fetch, which gets a new raw receipt and a `v3` normalization id.
 - **mcap backward carry is bounded to the partitions this build already
   loaded, never a fresh historical scan, and it only ever writes into a row
   this build actually produced a winner for.** One ORATS `tradeDate` fetch
@@ -610,11 +613,33 @@ completeness fixes ship here, both in `incremental.py` unless noted:
   ordinal precedence and never reaches its own "equal-ranked ... conflicting
   content" refusal — that refusal is reserved for two revisions genuinely
   arriving at the identical instant with different content, still refused
-  as an unresolvable ambiguity. Two fetches of byte-identical raw content
-  never reach any of this: `cache_raw_receipt` already de-dupes on content
-  and reuses the ORIGINAL `received_at` on a cache hit
-  (`cache_raw_receipt`'s `existing` branch), so a pure replay reproduces the
-  exact same `revision_id`/`revision_ordinal` every time.
+  as an unresolvable ambiguity. `revision_ordinal`'s `received_at` is a
+  fresh `observed_at` captured once per acquisition attempt (in `_fetch_unit`
+  and `_cached_fetched_units`), deliberately NOT `cache_raw_receipt`'s own
+  `record.received_at` — which reuses the ORIGINAL timestamp on a
+  byte-identical raw cache hit — because a revision's ordinal has to mean
+  "when did this attempt confirm this fact", not "when were these exact raw
+  bytes first ever seen": a session that goes 100 → 105 → 100 must have the
+  reverted 100 outrank the intervening 105, which it cannot if its ordinal
+  is pinned to the first fetch's now-stale timestamp. `_FetchedUnit`'s own
+  `received_at` (and `raw_payload["received_at"]`, which feeds coverage's
+  `completed_at`) is untouched — that field's cache-replay reproducibility
+  is a different, still-correct invariant (see `_fetched_coverage`'s own
+  docstring). Because `revision_ordinal`/`received_at` are now always fresh,
+  `cache_normalization`'s existing-row check no longer requires an exact
+  `normalized_hash` match on a cache hit — it compares revision identity
+  (`_revision_identity_document`, ticker/session/row/deleted/content_hash)
+  instead, and always returns the stored document. A fragment-level
+  analogue of this same problem is fixed in `catalog.py`: `_insert_fragment`
+  compared the full stored row, including the two columns (
+  `import_request_hash`, `input_receipt_refs`) `fragment_id` itself already
+  excludes from identity (`manifests.fragment_record`'s own docstring), so a
+  revert arriving via a new session's receipts still refused
+  `IDENTITY_CONFLICT` one layer below the revision fix. It now compares only
+  the columns `fragment_id` actually covers and reuses the stored row's
+  provenance on a match; `commit_snapshot` reconciles any dataset manifest
+  whose `fragment_refs` would otherwise cite provenance the catalog does not
+  store, so every committed `manifest_hash` stays rebuildable.
 - **Normalization identity still does not include the expected-key set —
   tracked at #133, not fixed here.** `cache_normalization`'s
   `normalization_id` keys only on `(raw_hash, normalizer_id, contract_id)`.
