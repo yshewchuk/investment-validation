@@ -324,7 +324,7 @@ def test_native_parity_handler_status_is_explicit_and_the_report_is_separate(tmp
         native_rows=rows, report_path=report_path)({"session": _EVENT_DATE})
     assert native["native_parity"]["status"] == "compared"
     report = json.loads(report_path.read_text())
-    assert report["schema_version"] == "native_parity_report.v1.0"
+    assert report["schema_version"] == "native_parity_report.v1.1"
     assert sorted(report["compared"]) == sorted(rows)
     assert report["only_legacy"] == [] and report["only_native"] == []
     assert report["mismatches"] == []
@@ -403,7 +403,7 @@ def test_compare_refuses_an_unknown_dimension_and_write_propagates_oserror(tmp_p
         compare_native_vs_legacy({}, {}, ("not_a_dimension",))
     assert error.value.code == "INVALID_REQUEST"
     with pytest.raises(OSError):
-        write_parity_report({"schema_version": "native_parity_report.v1.0"},
+        write_parity_report({"schema_version": "native_parity_report.v1.1"},
                             tmp_path / "missing" / "parity_report.json")
 
 
@@ -428,7 +428,7 @@ def test_native_parity_stage_runs_optional_in_the_real_shadow_graph(tmp_path):
     stage_receipt = next(row for row in receipt["stages"]
                          if row["stage_id"] == "native_parity")
     assert stage_receipt["status"] == "succeeded"
-    assert json.loads(report_path.read_text())["schema_version"] == "native_parity_report.v1.0"
+    assert json.loads(report_path.read_text())["schema_version"] == "native_parity_report.v1.1"
 
 
 # --------------------------------------------------------------------------
