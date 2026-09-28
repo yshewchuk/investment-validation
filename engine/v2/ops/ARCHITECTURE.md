@@ -3536,9 +3536,15 @@ function is never part of.
 
   Net effect: the release-identity memo (1) makes the per-tick cost of
   CHECKING for a release change genuinely cheap (a stat and a small JSON
-  read, not a hash-verify), while the build-attempt memo (2) makes the cost
-  of the expensive raw-row-staging step bounded to at most once per
-  `(as_of, scope_hash)` identity. A release promoted mid-session is
+  read, not a hash-verify), while the build-attempt memo (2) bounds the
+  expensive raw-row-staging step to at most `_COMPUTED_MOVES_MAX_ATTEMPTS`
+  (5) unsuccessful attempts per `(as_of, scope_hash)` identity, spaced out
+  on `_COMPUTED_MOVES_BACKOFF_SECONDS`'s own schedule (30s, 120s, 600s,
+  1800s, 3600s) — never "once" (CodeRabbit round 7, real finding: this
+  paragraph previously said "at most once", which undersold both the
+  backoff schedule already documented two paragraphs up and, once cutover
+  PR-6 adds the raw-row producer, the up-to-5 real staging attempts one
+  identity can actually reach). A release promoted mid-session is
   therefore picked up on the VERY NEXT tick by memo (1) unconditionally,
   and — because memo (1) sits strictly before memo (2) in this ordering —
   never blocked by an attempt count memo (2) exhausted earlier in the

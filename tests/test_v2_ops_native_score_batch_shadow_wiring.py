@@ -177,22 +177,22 @@ def test_identity_orders_by_created_at_not_scope_hash(tmp_path):
         conn.commit()
         return score.idempotency_key
 
-    first_key = _mark(("FIRST",))
-    _, first_hash = nightly._session_scope_from_score_key(first_key)
-
-    later_key = None
-    for candidate in range(200):
-        tickers = (f"CAND{candidate}",)
+    candidate_tickers = [("FIRST",)] + [(f"CAND{candidate}",) for candidate in range(200)]
+    candidate_hashes = []
+    for tickers in candidate_tickers:
         requests = nightly.build_legacy_job_requests(plan, tickers=tickers,
                                                        year_start=2025, year_end=2026)
         score_request = next(r for r in requests if r.idempotency_key.endswith(":score"))
         _, candidate_hash = nightly._session_scope_from_score_key(score_request.idempotency_key)
-        if candidate_hash < first_hash:
-            clock.advance(60)
-            later_key = _mark(tickers)
-            break
-    assert later_key is not None, "no candidate ticker found a lower scope_hash within 200 tries"
-    _, later_hash = nightly._session_scope_from_score_key(later_key)
+        candidate_hashes.append((candidate_hash, tickers))
+
+    first_hash, first_tickers = max(candidate_hashes, key=lambda item: item[0])
+    later_hash, later_tickers = min(candidate_hashes, key=lambda item: item[0])
+    assert later_hash < first_hash, "candidate hashes must be distinct"
+
+    first_key = _mark(first_tickers)
+    clock.advance(60)
+    later_key = _mark(later_tickers)
     assert later_hash < first_hash  # hash order alone would pick `first`
 
     identity = nightly._native_score_batch_identity(conn)
@@ -340,9 +340,8 @@ def test_identity_lookup_failure_is_throttled_not_retried_every_tick(tmp_path, m
 
     service._reconcile_native_score_batch_shadow()  # 1st failure: attempts -> 1, backed off
     assert len(calls) == 1
-    assert service._native_score_batch_memo == {"identity": None, "attempts": 1,
-                                                 "not_before": service._native_score_batch_memo["not_before"]}
-    assert service._native_score_batch_memo["not_before"] > 0
+    assert service._native_score_batch_lookup_memo["attempts"] == 1
+    assert service._native_score_batch_lookup_memo["not_before"] > 0
 
     service._reconcile_native_score_batch_shadow()  # still inside backoff: must NOT call again
     assert len(calls) == 1
@@ -350,14 +349,13 @@ def test_identity_lookup_failure_is_throttled_not_retried_every_tick(tmp_path, m
     clock.advance(10_000)  # well past the backoff window
     service._reconcile_native_score_batch_shadow()
     assert len(calls) == 2
-    assert service._native_score_batch_memo["attempts"] == 2
+    assert service._native_score_batch_lookup_memo["attempts"] == 2
 
 
 def test_identity_lookup_failure_never_spends_a_real_identitys_attempt_budget(tmp_path, monkeypatch):
-    """CodeRabbit round 6, real finding: before the fix, a lookup failure
-    backed off `self._native_score_batch_memo or {...}` -- when a real
-    identity's memo already existed, the failure incremented THAT memo's
-    attempts instead of a dedicated identity: None bucket."""
+    """CodeRabbit round 7, real finding: a lookup failure must not
+    overwrite/replace a real identity's own build-attempt memo -- the two
+    now live in separate slots entirely."""
     conn, clock, _ = catalog(tmp_path)
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
@@ -373,8 +371,8 @@ def test_identity_lookup_failure_never_spends_a_real_identitys_attempt_budget(tm
 
     service._reconcile_native_score_batch_shadow()
 
-    # A NEW, separate identity: None bucket absorbed the failure...
-    assert service._native_score_batch_memo == {"identity": None, "attempts": 1,
-                                                 "not_before": service._native_score_batch_memo["not_before"]}
-    # ...the real identity's own attempt count (3) was never touched or
-    # visible here any more -- proving the failure did not increment it.
+    # The lookup failure landed in its OWN slot...
+    assert service._native_score_batch_lookup_memo["attempts"] == 1
+    # ...and the real identity's own memo (attempts=3) is untouched.
+    assert service._native_score_batch_memo == {"identity": real_identity, "attempts": 3,
+                                                 "not_before": 0.0}

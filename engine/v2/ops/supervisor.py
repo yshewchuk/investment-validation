@@ -215,8 +215,21 @@ class Service:
         #: self._computed_moves_memo (reusing
         #: _COMPUTED_MOVES_MAX_ATTEMPTS/_COMPUTED_MOVES_BACKOFF_SECONDS,
         #: never a separate schedule), guarding the build step in
-        #: submit_native_score_batch_shadow_if_ready.
+        #: submit_native_score_batch_shadow_if_ready. Holds ONLY a real
+        #: identity's build-attempt memo -- {"identity": tuple, "attempts":
+        #: int, "not_before": float} -- never an identity-lookup failure
+        #: (CodeRabbit round 7, real finding: an earlier draft's lookup
+        #: failure handler wrote into this SAME slot, silently discarding a
+        #: real identity's already-accumulated attempts on every transient
+        #: lookup error). See self._native_score_batch_lookup_memo below
+        #: for that separate concern.
         self._native_score_batch_memo = None
+        #: Cutover PR-7a: a SEPARATE one-slot backoff memo -- {"attempts":
+        #: int, "not_before": float} or None -- for a failure INSIDE the
+        #: identity lookup itself (a locked database, a malformed
+        #: spec_json), never conflated with self._native_score_batch_memo's
+        #: real-identity attempt count.
+        self._native_score_batch_lookup_memo = None
         self._last_native_score_batch_problem = None
 
     def start(self):
@@ -601,15 +614,17 @@ class Service:
         Returns the real identity tuple when the caller should proceed, or
         None when it should return immediately -- covering a throttled
         prior lookup failure (still inside its own not_before), a caught
-        exception (reported and backed off here, in a DEDICATED
-        identity: None memo bucket, never a real identity's), "no identity
+        exception (reported and backed off here, in a SEPARATE memo slot
+        (self._native_score_batch_lookup_memo), never touching
+        self._native_score_batch_memo's own real-identity attempt
+        count), "no identity
         yet", and "already submitted" (a job exists under that key); the
         last two clear self._native_score_batch_memo themselves."""
         from engine.v2.ops.nightly import _native_score_batch_identity, _native_score_batch_key
         from engine.v2.ops.submission import job_id_for
 
-        memo = self._native_score_batch_memo
-        if memo is not None and memo["identity"] is None and now < memo["not_before"]:
+        lookup_memo = self._native_score_batch_lookup_memo
+        if lookup_memo is not None and now < lookup_memo["not_before"]:
             return None
         try:
             identity = _native_score_batch_identity(self.conn)
@@ -618,9 +633,11 @@ class Service:
                 (job_id_for("shadow", _native_score_batch_key(identity[0], identity[1])),)
             ).fetchone() is not None
         except Exception as exc:
-            error_memo = memo if (memo is not None and memo["identity"] is None) else {
-                "identity": None, "attempts": 0, "not_before": 0.0}
-            self._native_score_batch_backoff(error_memo, now)
+            lookup_memo = lookup_memo or {"attempts": 0, "not_before": 0.0}
+            lookup_memo["attempts"] += 1
+            lookup_memo["not_before"] = now + self._COMPUTED_MOVES_BACKOFF_SECONDS[
+                min(lookup_memo["attempts"] - 1, len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]
+            self._native_score_batch_lookup_memo = lookup_memo
             self._report_native_score_batch_problem(exc)
             return None
         self._last_native_score_batch_problem = None
