@@ -329,12 +329,16 @@ def test_out_of_scope_size_role_does_not_force_a_missing_forecast_refusal(tmp_pa
     release = _release((driver, other_size))
     requests = (_inference_request(release, driver),
                _inference_request(release, other_size))
-    record = _score(tmp_path, release, (driver, other_size), requests=requests)
+    inputs = _native_inputs(
+        payoff_recipe={"min_trades": 2, "seed": 42, "draw_count": 16},
+        payoff_source_rows=_GOOD_PAYOFF_ROWS,
+        model_residual_rows=[{"prediction": 6.0, "residual": 0.0}],
+    )
+    record = _score(tmp_path, release, (driver, other_size), inputs=inputs,
+                    requests=requests)
     assert record.forecasts["driver_prediction"] == 6.0
     assert "MISSING_FORECAST_OUTPUT:size" not in record.reason_codes
-    # The bare fixture carries no payoff/analog score number, so NO_SCORE
-    # refuses this row independently of the out-of-scope size binding.
-    assert record.validation_status == "refused"
+    assert record.validation_status == "scored"
 
 
 def test_out_of_scope_not_ready_result_does_not_refuse_the_in_scope_record(tmp_path):
