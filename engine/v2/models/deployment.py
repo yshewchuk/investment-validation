@@ -288,6 +288,27 @@ def _read_manifest(root: Path, release_id: str) -> StagedManifest | None:
 # --------------------------------------------------------------------------
 
 
+def _duplicate_binding_issues(release: ModelRelease) -> tuple[ReleaseIssue, ...]:
+    """Every ``(role, strategy_id, decision_clock_id)`` key bound at most once.
+
+    Self-contained on ``release`` alone -- no ``inventory`` needed -- so both
+    ``_compatibility_issues`` (staging, cross-checked against the inventory
+    too) and ``_swap_pointer`` (promote/rollback, re-verified independent of
+    whatever staged the manifest) share this ONE definition of "no duplicate
+    inference binding".
+    """
+    issues: list[ReleaseIssue] = []
+    seen = set()
+    for binding in release.bindings:
+        key = (binding.role, binding.strategy_id, binding.decision_clock_id)
+        path = f"$.bindings[{binding.binding_id}]"
+        if key in seen:
+            issues.append(ReleaseIssue(path=path, code="DUPLICATE_BINDING", detail=repr(key)))
+        else:
+            seen.add(key)
+    return tuple(issues)
+
+
 def _compatibility_issues(
     release: ModelRelease, inventory: ModelReleaseInventory,
 ) -> tuple[ReleaseIssue, ...]:
@@ -305,15 +326,19 @@ def _compatibility_issues(
             path="$.release_id", code="RELEASE_ID_MISMATCH",
             detail=f"{release.release_id} != {inventory.release_id}",
         ))
+    issues.extend(_duplicate_binding_issues(release))
+    duplicate_keys = {issue.detail for issue in issues if issue.code == "DUPLICATE_BINDING"}
     by_key = {binding.key: binding for binding in inventory.bindings}
     seen = set()
     for binding in release.bindings:
         key = (binding.role, binding.strategy_id, binding.decision_clock_id)
         path = f"$.bindings[{binding.binding_id}]"
-        if key in seen:
-            issues.append(ReleaseIssue(path=path, code="DUPLICATE_BINDING", detail=repr(key)))
-            continue
-        seen.add(key)
+        if repr(key) in duplicate_keys:
+            if key in seen:
+                continue
+            seen.add(key)
+        else:
+            seen.add(key)
         counterpart = by_key.get(key)
         if counterpart is None:
             issues.append(ReleaseIssue(path=path, code="UNBOUND_IN_INVENTORY", detail=repr(key)))
@@ -582,6 +607,14 @@ def _repair_history(root: Path) -> None:
 
 
 def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> PointerState:
+    """Validate a staged release, then move ``DEPLOYED`` to it.
+
+    Shared by both :func:`promote` and :func:`rollback`. Refuses
+    :class:`ReleaseNotStaged`, :class:`StaleReleaseHash`,
+    :class:`CorruptManifest`, or :class:`StagingRefused` (duplicate
+    bindings) before the pointer ever moves; a no-op if ``release_id`` is
+    already live.
+    """
     manifest = _read_manifest(root, release_id)
     if manifest is None:
         raise ReleaseNotStaged(release_id)
@@ -589,6 +622,9 @@ def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> Poi
         raise StaleReleaseHash(release_id, manifest.release_hash_version)
     if not _manifest_hash_matches(manifest):
         raise CorruptManifest(release_id)
+    duplicate_issues = _duplicate_binding_issues(manifest.release)
+    if duplicate_issues:
+        raise StagingRefused(duplicate_issues)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:

@@ -451,6 +451,39 @@ def test_stage_release_refuses_two_bindings_for_the_same_role_strategy_clock(tmp
     assert not (tmp_path / "releases" / "r1" / "manifest.json").exists()
 
 
+def test_promote_refuses_a_staged_manifest_with_duplicate_bindings(tmp_path):
+    """Simulates a release staged by a version of stage_release that predates the
+    duplicate-binding gate (or any staging path that forgot to call it): write a
+    StagedManifest directly to disk, bypassing stage_release's own check entirely,
+    with a valid hash over its (duplicated) content -- proving promote's OWN
+    re-verification catches it independent of what staged the manifest."""
+    release, inventory, payloads = _fixture("r1")
+    first = release.bindings[0]
+    second = ModelBinding(
+        binding_id="b2", model_id=first.model_id, role=first.role,
+        strategy_id=first.strategy_id, decision_clock_id=first.decision_clock_id,
+        adapter=first.adapter, feature_order=first.feature_order,
+        output_names=first.output_names, members=first.members,
+    )
+    duplicated = ModelRelease(
+        release_id=release.release_id, deployment_id=release.deployment_id,
+        bindings=(first, second),
+    )
+    manifest = deployment_module.StagedManifest(
+        release=duplicated,
+        release_hash=deployment_module._release_hash(duplicated),
+        staged_at="2024-01-01T00:00:00Z",
+        release_hash_version=deployment_module.RELEASE_HASH_SEMANTIC_V2,
+    )
+    deployment_module._atomic_write_bytes(
+        deployment_module._manifest_path(tmp_path, "r1"), deployment_module._encode(manifest))
+
+    with pytest.raises(StagingRefused) as error:
+        promote(tmp_path, "r1")
+    assert "DUPLICATE_BINDING" in [item.code for item in error.value.issues]
+    assert current_pointer(tmp_path) is None
+
+
 def test_chained_rollback_undoes_chained_promotions_not_the_release_just_left(tmp_path):
     r1, inv1, pay1 = _fixture("r1")
     r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
