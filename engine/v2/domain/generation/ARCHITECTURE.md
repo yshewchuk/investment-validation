@@ -56,7 +56,7 @@ computed by this package:
   same unconditional bypass as `expiry` by `_expiry()` (every put-ladder
   strategy's fallback, and STR-THRU/STR-RUNUP whenever `_select_listed_straddle`
   itself declines to run) and by `has_resolvable_expiry`. **Known gap
-  (issue #114, not fixed here):** whenever `_select_listed_straddle` DOES
+  (issue #115, not fixed here):** whenever `_select_listed_straddle` DOES
   run for STR-THRU/STR-RUNUP (`strike` or `expiry` missing), its own
   `_resolve_straddle_expiry` checks only `expiry`, not `post_event_expiry` —
   a row with `post_event_expiry` captured but not `expiry` can fall into
@@ -74,7 +74,7 @@ computed by this package:
   anchors the same count on the chain's `obs_date`, which is `quote_date`
   (defaulting to `entry_date` when no stale-quote substitution happened).
 - `resolved_legs` — an explicit leg list meant to bypass geometry resolution
-  entirely (the pinned/replay case). **Known gap (issue #115, not fixed
+  entirely (the pinned/replay case). **Known gap (issue #114, not fixed
   here):** `generate()` currently resolves expiry/strike BEFORE it checks
   `resolved_legs`, so a pinned input with legs but no top-level
   `expiry`/`strike` can still raise a refusal from ordinary resolution
@@ -178,10 +178,10 @@ Raised exceptions:
   the AMC/BMO distinction applied when `session` is known — or, when
   `event_date` itself is not captured, the earliest listed expiry
   unconditionally (a deterministic default, not a refusal).
-- **Known gaps, not fixed here** (see "Inputs" for detail, filed as
-  issues #114 and #115): `_resolve_straddle_expiry` does not honor a
-  captured `post_event_expiry` the way `_expiry()` does; `generate()`
-  resolves expiry/strike before it checks `resolved_legs`.
+- **Known gaps, not fixed here** (see "Inputs" for detail): `_resolve_straddle_expiry`
+  does not honor a captured `post_event_expiry` the way `_expiry()` does
+  (issue #115); `generate()` resolves expiry/strike before it checks
+  `resolved_legs` (issue #114).
 
 ## Invariants
 
@@ -191,7 +191,7 @@ Raised exceptions:
   given — native selection only runs when the caller has nothing more
   specific to offer for that field. `resolved_legs` is MEANT to be the same
   kind of bypass but currently is not always one in practice — see the
-  known gap in "Inputs"/"Failure semantics" (issue #115).
+  known gap in "Inputs"/"Failure semantics" (issue #114).
 - For STR-THRU/STR-RUNUP, expiry resolution happens strictly before strike
   selection (`_select_listed_straddle`): choosing by strike distance first
   could silently pick a strike from the wrong expiry, whenever a later
