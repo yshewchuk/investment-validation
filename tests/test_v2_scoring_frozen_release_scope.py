@@ -303,3 +303,39 @@ def test_out_of_scope_size_role_does_not_force_a_missing_forecast_refusal(tmp_pa
     # The bare fixture carries no payoff/analog score number, so NO_SCORE
     # refuses this row independently of the out-of-scope size binding.
     assert record.validation_status == "refused"
+
+
+def test_out_of_scope_not_ready_result_does_not_refuse_the_in_scope_record(tmp_path):
+    """A STR-RUNUP binding whose artifact hash is deliberately wrong (so its
+    inference result comes back MODEL_NOT_READY) must never refuse this
+    STR-THRU request -- the driver binding is in scope and fully READY."""
+    driver = _binding(tmp_path, "b-driver", "driver", STRATEGY,
+                      output="driver_prediction", intercept=6.0)
+    # Same shape as ``_binding``, but the member's declared content_hash is
+    # all zeros, so FrozenInference's own hash check fails and this binding's
+    # inference result comes back MODEL_NOT_READY (ARTIFACT_INVALID) instead
+    # of READY.
+    other_path = tmp_path / "b-other.json"
+    other_path.write_text(json.dumps(
+        _linear(("x",), "driver_prediction", 100.0, (0.0,)), sort_keys=True))
+    other = ModelBinding(
+        binding_id="b-other", model_id="b-other-linear", role="implied_t1",
+        strategy_id=OTHER_STRATEGY, decision_clock_id=CLOCK,
+        adapter="json-linear.v1", feature_order=("x",),
+        output_names=("driver_prediction",),
+        members=(ArtifactMember(name="estimator", path="b-other.json",
+                                content_hash="sha256:" + "0" * 64),),
+    )
+    release = _release((driver, other))
+    requests = (_inference_request(release, driver),
+                _inference_request(release, other))
+    inputs = _native_inputs(
+        payoff_recipe={"min_trades": 2, "seed": 42, "draw_count": 16},
+        payoff_source_rows=_GOOD_PAYOFF_ROWS,
+        model_residual_rows=[{"prediction": 6.0, "residual": 0.0}],
+    )
+    record = _score(tmp_path, release, (driver, other), inputs=inputs,
+                    requests=requests)
+    assert record.forecasts["driver_prediction"] == 6.0
+    assert record.validation_status != "refused"
+    assert "MODEL_NOT_READY" not in record.reason_codes

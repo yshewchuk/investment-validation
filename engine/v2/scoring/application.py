@@ -1174,6 +1174,21 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     ), frozen_interval
 
 
+def _frozen_scoped_binding_ids(scoped_bindings) -> frozenset[Any] | None:
+    """The binding ids ``score_frozen``'s final not-READY check may consider.
+
+    ``None`` when the release exposed no matching binding at all (mirroring
+    the same non-empty guard ``_frozen_native_inputs`` applies): only a
+    non-empty scoped set can narrow the historical unscoped fold. Factored
+    out of ``score_frozen`` so the complexity budget sees it as one call
+    rather than a comprehension plus its empty-set fallback.
+    """
+    if not scoped_bindings:
+        return None
+    return frozenset(getattr(binding, "binding_id", None)
+                     for binding in scoped_bindings)
+
+
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
                  fields: Mapping[str, Any], *, observer: StageObserver | None = None) -> ScoreRecord:
     """Run verified inference through the canonical native scoring graph."""
@@ -1196,6 +1211,18 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     }
     if missing_runup:
         record = replace(record, uncertainty={**record.uncertainty, **missing_runup})
+    # CodeRabbit follow-on (issue #93): scope the final not-READY check to this
+    # request's own bindings -- an out-of-scope binding's not-READY inference
+    # result and reason codes must never force a refusal on an in-scope record,
+    # mirroring the same scoping already applied inside ``_frozen_native_inputs``
+    # and ``_collect_frozen_results``. ``None`` keeps the historical unscoped
+    # behavior when the release exposed no matching binding at all.
+    scoped_binding_ids = _frozen_scoped_binding_ids(scoped_bindings)
+    status_results = tuple(
+        result for result, binding in zip(results, bindings, strict=True)
+        if scoped_binding_ids is None
+        or getattr(binding, "binding_id", None) in scoped_binding_ids
+    )
     artifact_hashes = tuple(dict.fromkeys(
         hash_value
         for result in results
@@ -1209,9 +1236,9 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     record = replace(record, model_artifact_ids=artifact_hashes,
                      evidence_refs=tuple(dict.fromkeys((*request.dependency_refs,
                                                          *release_ids, *binding_ids))))
-    if any(getattr(result, "status", None) != "READY" for result in results):
+    if any(getattr(result, "status", None) != "READY" for result in status_results):
         record = replace(record, reason_codes=tuple(dict.fromkeys(
-            (*record.reason_codes, *_inference_refusal_reasons(results)))),
+            (*record.reason_codes, *_inference_refusal_reasons(status_results)))),
                          validation_status="refused", readiness="refused")
     return with_score_id(record)
 
