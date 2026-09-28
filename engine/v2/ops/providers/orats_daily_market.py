@@ -8,13 +8,22 @@ returns is the ``fetcher(unit)`` seam ``run_daily_market_refresh`` documents,
 and ``http_get`` is its sole test seam.
 
 The row builder ports the per-row field mapping of
-``engine/data/normalize/n_daily.py::normalize_ticker`` (ORATS decimal IVs to
-vol points, the three-era ``mktCap`` conversion, the ``src_*`` provenance
-columns) verbatim rather than importing that legacy module. It does not walk
-back over recent sessions: a market-wide date that is not published yet (404 on
-both endpoints, or a 2xx with no rows) is a ``SOURCE_NOT_FINAL`` refusal so the
-job's own retry policy owns that decision, and the unused ``lookback_days``
-parameter is kept for a future caller that plans one unit per candidate date.
+``engine.data.normalize.n_daily.normalize_ticker`` (ORATS decimal IVs to vol
+points, the three-era ``mktCap`` conversion, the ``src_*`` provenance
+columns, the ``PLAUSIBLE_RANGES`` clip, and the ``impliedMove <= 0``
+"no quote" sentinel mask) without importing that legacy module, to keep this
+module free of a v2 -> legacy production dependency; ``PLAUSIBLE_RANGES``
+here is a local, test-verified mirror of
+``engine.data.normalize.common.PLAUSIBLE_RANGES``. The backward-looking
+as-of ``mktCap`` carry legacy also performs is NOT done here: one tradeDate
+fetch unit only ever sees that day's ``cores`` rows, so a ticker with no
+``mktCap`` published that day is reported with ``mcap_usd=None`` by this
+module; ``engine.v2.data.incremental.merge_daily_market`` backward-fills it
+from the stored head. It does not walk back over recent sessions: a market-wide
+date that is not published yet (404 on both endpoints, or a 2xx with no rows)
+is a ``SOURCE_NOT_FINAL`` refusal so the job's own retry policy owns that
+decision, and the unused ``lookback_days`` parameter is kept for a future
+caller that plans one unit per candidate date.
 """
 from __future__ import annotations
 
@@ -35,6 +44,25 @@ SUMMARIES_ENDPOINT = "hist/summaries"
 CORES_ENDPOINT = "hist/cores"
 REQUEST_TIMEOUT_SECONDS = 30.0
 SENTINEL_THRESHOLD = 1e30
+
+#: Mirrors engine.data.normalize.common.PLAUSIBLE_RANGES exactly (not imported: this
+#: module must not depend on legacy engine.data code in production;
+#: tests/test_v2_ops_providers_orats_daily_market.py asserts the two tables match).
+#: A value outside its column's range is not a real quote and is masked to None.
+PLAUSIBLE_RANGES: dict[str, tuple[float, float]] = {
+    "implied_move": (0.0, 100.0),
+    "iv10": (0.0, 500.0),
+    "iv30": (0.0, 500.0),
+    "exern_iv10": (0.0, 500.0),
+    "exern_iv30": (0.0, 500.0),
+    "rvol30": (0.0, 500.0),
+    "skew": (-50.0, 50.0),
+    "contango": (-100.0, 100.0),
+    "fwd90_30": (0.0, 500.0),
+    "fexern90_30": (0.0, 500.0),
+    "iee": (-50.0, 50.0),
+    "spot": (0.0, 1e6),
+}
 
 #: raw ORATS key -> (daily_market column, multiplier), ported from
 #: ``engine/data/normalize/n_daily.py``'s SUMMARY_FIELDS. The multiplier turns
@@ -234,8 +262,10 @@ def _daily_market_row(ticker: str, session_date: str,
                       core: Mapping[str, Any] | None) -> dict:
     row = {"ticker": ticker, "date": session_date, "year": int(str(session_date)[:4])}
     for raw_key, (column, multiplier) in SUMMARY_FIELDS.items():
-        row[column] = _scaled_number(summary, raw_key, multiplier)
+        row[column] = _scaled_number(summary, raw_key, multiplier, column)
     row["src_iv"] = "orats.summaries"
+    if row.get("implied_move") is not None and row["implied_move"] <= 0:
+        row["implied_move"] = None
     market_cap = _market_cap(core, session_date)
     row["mcap_usd"] = market_cap
     row["mcap_log"] = math.log(market_cap) if market_cap is not None else None
@@ -248,7 +278,7 @@ def _daily_market_row(ticker: str, session_date: str,
 
 
 def _scaled_number(source: Mapping[str, Any] | None, key: str,
-                   multiplier: float) -> float | None:
+                   multiplier: float, column: str) -> float | None:
     if not source:
         return None
     value = source.get(key)
@@ -257,7 +287,11 @@ def _scaled_number(source: Mapping[str, Any] | None, key: str,
     number = float(value)
     if not math.isfinite(number) or abs(number) >= SENTINEL_THRESHOLD:
         return None
-    return number * multiplier
+    number *= multiplier
+    bounds = PLAUSIBLE_RANGES.get(column)
+    if bounds is not None and not (bounds[0] <= number <= bounds[1]):
+        return None
+    return number
 
 
 def _market_cap(core: Mapping[str, Any] | None, session_date: str) -> float | None:

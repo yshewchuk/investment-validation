@@ -158,3 +158,37 @@ def test_tombstone_survives_lower_priority_later_revision():
 
     assert first.rows == retried.rows == ()
     assert retried.changes == ()
+
+
+def test_mcap_carries_forward_from_prior_when_session_has_none():
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker AAA, date 2024-01-02, mcap_usd=1e9
+    prior = [base]
+    incoming_row = dict(
+        base, date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    incoming = _revision(incoming_row, revision_id="fetched")
+
+    merged = merge_daily_market(contract, prior, (), (incoming,))
+
+    row = next(r for r in merged.rows if r["ticker"] == "AAA"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row["mcap_usd"] == base["mcap_usd"]
+    assert row["mcap_log"] == base["mcap_log"]
+    assert row["mcap_asof"] == datetime(2024, 1, 2)
+    assert row["mcap_age_days"] == 3.0
+
+
+def test_mcap_stays_none_when_no_prior_value_is_loaded():
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]
+    incoming_row = dict(
+        base, ticker="ZZZ", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    incoming = _revision(incoming_row, revision_id="fetched-zzz")
+
+    merged = merge_daily_market(contract, [base], (), (incoming,))
+
+    row = next(r for r in merged.rows if r["ticker"] == "ZZZ")
+    assert row["mcap_usd"] is None
+    assert row["mcap_asof"] is None
