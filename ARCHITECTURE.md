@@ -92,7 +92,35 @@ request body and, if durable, in the operator guides instead — see
   outside those two modules, is not enforced against by either rule.
 - **`tools/*` and `experiments/*`.** Operator CLIs and the research program.
   Both may call into `engine/v2` and legacy `engine`, but neither is a
-  production package other packages depend on.
+  production package other packages depend on. Not a tracked component (no
+  `(pending)` entry above): `tools/*` documents itself inline, in extensive
+  module-level comments beside the code they describe, rather than in a
+  separate file.
+  - **Mutation-testing PR module selection** (`tools/mutation_pilot.py`,
+    shared by both `.github/workflows/mutation.yml` and
+    `mutation-mutmut.yml`): on a pull_request run, `changed_modules` selects
+    only the enabled mutation-test modules a PR's diff can affect, never
+    zero for an unrecognized path (`tools/mutation_pilot.py`'s own
+    "reverse import closure" comment block has the exact rule). Its input is
+    the PR's changed-file list plus `tools/mutation_pilot.toml`'s module
+    partition and `[pr_selection]` allowlist; its output is the module
+    subset the CI matrix runs. `module_dependency_closure` walks
+    `build_import_graph`'s real, statically-resolved edges
+    (`_ImportGraph.precise`) rather than a DYNAMIC file's catch-all edge
+    (`build_import_graph` gives a file it cannot parse precisely — e.g. one
+    referencing `sys.path`, `subprocess`, or a non-literal
+    `importlib.import_module` — an edge to every other tracked file, never a
+    narrower guess): reaching a DYNAMIC file, or changing one directly (e.g.
+    `tests/conftest.py`, applied to every test by pytest and therefore a
+    closure root for every module), still selects broadly, deliberately, but
+    that no longer cascades into selecting every enabled module for an
+    unrelated single-module change. Known failure mode, tracked in
+    [#155](https://github.com/yshewchuk/investment-validation/issues/155):
+    a module whose own test file reaches a changed file *only* through one
+    of the still-unresolvable constructs above (not through any other real,
+    statically-resolvable edge) is not selected — the same static-analysis
+    limitation `_is_dynamic_file`'s docstring documents, now reachable
+    instead of masked by every PR over-selecting.
 
 ## 2. Layers and allowed dependency direction
 
