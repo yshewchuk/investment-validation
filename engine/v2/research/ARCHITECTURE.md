@@ -362,7 +362,9 @@ partition with a nullable observation-time column still raises
 `RESULT_LIMIT_EXCEEDED`.
 
 `_snapshot.read_table` routing `trades` through `_scan.read_table` for the
-first time (it was previously read with one unbounded `DataQuery`, so this
+first time (it was previously read with one capped, unsplit `DataQuery` --
+`max_result_rows=contract.maximum_result_rows` and its own partition
+predicates, but never split into calendar months/days -- so this
 particular caller never split it) is not what first exposed the two
 defects fixed below: `polygon_fills.read_trades` (untouched by this PR)
 already reads `trades` through `_scan.read_table` directly, so both
