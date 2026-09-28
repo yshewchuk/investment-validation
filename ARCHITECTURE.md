@@ -246,6 +246,26 @@ or a new consumer must update that package's README in the same change.
   actually calls it." An architecture-doc update's production call path
   must trace the real chain — entrypoint → stage → module → new code — not
   cite a passing inventory row as proof.
+- **Native nightly pool/residual refresh (design, cutover PR-13a — proposed,
+  not yet implemented; split from cutover PR-13's original combined design,
+  #90, after 3 Opus BLOCKs on the combined scope).** A frozen release
+  (`engine/v2/models/deployment.py`) is staged and promoted only by an
+  operator today; legacy instead rebuilds the analog/residual pools and the
+  trailing entry-rule cutoff live, every scoring run
+  (`engine/v2/models/inventory.py`'s "What is NOT in the release" note;
+  `engine/pnl_sim.py`'s `trailing_cutoff`/`ResidualPool`). This design adds
+  one more `Service.tick()`-time reconcile, the same shape as
+  `_reconcile_computed_moves_refresh` above (per #54) — never a `nightly.py`
+  `GRAPH`/`_DAG_STAGES` node — that nightly appends newly-settled events
+  into the board-analog, chooser-analog and (driver + paired) residual
+  pools, advances the trailing cutoff, and produces a new, gated,
+  auto-promoted release that carries every model binding over unchanged.
+  Retraining the champion/gate/chooser models themselves, monthly, is
+  cutover PR-13b; a native producer for the Tier-4 forecasts table native
+  currently only imports from a legacy snapshot is cutover PR-13c; neither
+  is designed here. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
+  pool/residual refresh" and `engine/v2/models/ARCHITECTURE.md` §§1, 2, 7.6,
+  7.7, 8 for the full design.
 
 ### 4.1 Production flow
 

@@ -44,6 +44,66 @@ gets fit — see its own package doc reference in the root index. Nothing in
 `engine/v2/models` reads a live panel, calls `.fit()`, or writes
 `registry.json`.
 
+**Nightly refresh (design, cutover PR-13a — proposed, not yet implemented;
+scope: appending newly-settled events, never retraining).** Seven pieces of
+serving-time state each have a live legacy equivalent legacy recomputes
+in-process on every scoring run (`inventory.py`'s "What is NOT in the
+release" note): the board-analog population, the chooser-analog pool, three
+driver residual pools (`size`/`implied_t1`/`runup_move`), the paired
+residual pool, and the trailing entry-rule cutoff. This design advances all
+seven nightly, though for three of them (the driver residual pools) "advance"
+means re-verify against the current champion, not append new events — see
+§8's finding on why. All seven already have a native, content-hashed artifact
+type in this package (`analog_artifact.py`, `chooser_analog_pool.py`,
+`residual_artifact.py`, `trailing_cutoff_artifact.py`), and SIX of the seven
+already have an existing, already-submittable `training` job kind that
+builds them (`engine/v2/ops/training.py`'s `MODES = ("recipe", "state",
+"board_analog", "trailing_cutoff")`; `tools/phase5_training_job.py`'s
+`STATES` names exactly those six, `driver_residual_pool:size` through
+`trailing_pnl_cutoff`). The chooser pool is the one exception: it is built
+inline from `data/features/chooser_analog_pool.parquet`, not from a
+training job; see `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
+pool/residual refresh". Nothing resubmits any of these on a cadence today — "the only
+path that creates one is a `submit` an operator ran by hand"
+(`run_promote_worker`'s own docstring, which is equally true of `training`).
+This design's own new code is entirely on the STATE side —
+`checks.phase5_release.derive_catalog` (§2/§7.7) — plus one small, new MODEL-
+side primitive, `deployment.carry_forward_release` (§2/§7.6), because the
+nightly cycle never changes a `ModelBinding` at all (that is cutover PR-13b's
+monthly retrain).
+
+**Why nightly does not, and must not, call `require_complete_release`'s
+inventory machinery (root-caused, not assumed — this closes a gap #90's
+combined design left open across 3 Opus gate rounds).** `stage_release`
+requires a full `ModelReleaseInventory` to validate a `ModelRelease` against
+(`deployment.py:287`, `_compatibility_issues`), but a staged release never
+saves one: `StagedManifest` (`deployment.py:189-197`) holds only `release:
+ModelRelease`, `release_hash`, `staged_at`. The only function that builds a
+`ModelReleaseInventory` today, `current_release_inventory` (`inventory.py`),
+reads it fresh from the legacy champion registry (`engine.models.registry`)
+and `data/models/*` every time — it is not, and cannot be, "the prior
+release's inventory, carried over": `ModelReleaseInventory` carries fields
+(`releases.py`) a `ModelRelease`/`ModelBinding` (`contracts.py`) does not
+have at all — `strategy_ids` (plural, with a `"*"` wildcard),
+`compatible_clock_ids`, `target_contract_ref`, `upstream_artifact_ids`,
+`evidence_refs` per artifact, and `known_clock_ids`/`requirements`/
+`artifact_manifest_ref`/`evidence_refs`/`promotion_receipt_ref` at the
+release level — none of them round-trip through a `ModelRelease`, so there
+is no way to reconstruct one from what IS persisted. The resolution is not
+to solve that reconstruction problem (cutover PR-13b's monthly retrain still
+must, since it genuinely changes bindings and needs real inventory
+validation against the new artifacts) — it is to notice that
+`ModelReleaseInventory` is pure, discarded VALIDATION input: `resolve_release`
+and every scoring reader return only the persisted `ModelRelease`, never the
+inventory, so re-validating a set of bindings that provably has not changed
+adds nothing a byte-for-byte copy does not already guarantee. §7.6 below
+specifies `carry_forward_release`: it copies the prior release's own already-
+staged, already-once-validated `manifest.json` verbatim (only `release_id`
+differs) into a new release id, with no inventory argument, and refuses if
+any binding it is about to carry forward is not the one already staged for
+the prior release (so a monthly retrain that landed concurrently can never
+be silently dropped).
+
 ## 2. Primary contracts and public interfaces
 
 The full list is `README.md`'s `<!-- public-interface: ... -->` directive
@@ -66,6 +126,33 @@ this PR:
 - `deployment.restage_semantic_hash(root, release_id) -> StagedManifest`
   **(new, this PR)** — rewrite an already-staged manifest's hash to the
   current semantic version, in place, with no retraining; see §7.5.
+- `deployment.carry_forward_release(root, prior_release_id, new_release_id, *,
+  clock) -> StagedManifest` **(proposed, cutover PR-13a design, not yet
+  implemented)** — copy the prior release's already-staged `ModelRelease`
+  verbatim under a new `release_id`, with NO `ModelReleaseInventory`
+  argument (see §1's "why nightly does not..." note) and no new object
+  writes (every member's `content_hash` is unchanged, so `stage_release`'s
+  own write-once object store already holds every byte this needs). Used
+  ONLY by the nightly reconcile, which changes no binding; cutover PR-13b's
+  monthly retrain still calls `stage_release` directly, with a real,
+  freshly-built inventory, because it does change bindings. See §7.6.
+- `checks.phase5_release.derive_catalog(release_root, prior_release_id,
+  new_release_id, changed_rows, *, clock) -> Path` **(proposed, cutover
+  PR-13a design, not yet implemented; lives beside the existing
+  `write_manifest`/`manifest_body`/`STATE_SPECS` in `checks/
+  phase5_release.py`, not in this package — see §4's existing note that the
+  state catalog write is that module's job, never `deployment.py`'s)** —
+  read the prior release's own state catalog (`phase5_release.json`, §4's
+  updated, per-`release_id` path — a prerequisite fix this design's first
+  code PR makes, see the ops doc), replace the rows named in `changed_rows`
+  (`{member_id: {"objects": [...], "detail": ...}}` — a nightly append
+  supplies `board_analog_matcher`, `chooser_analog_pool`,
+  `driver_residual_pool:size`/`:implied_t1`/`:runup_move`,
+  `paired_residual_pool` and `trailing_pnl_cutoff`), carry every OTHER row
+  over UNCHANGED (same `objects`/`detail`, no new object written, verified
+  byte-identical against the prior catalog's own row), and atomically write
+  the new catalog body (`release_id = new_release_id`, a freshly recomputed
+  `manifest_hash`) to `<new_release_id>`'s own immutable path. See §7.7.
 - `release_bindings.resolve_release_binding(release_root) -> ScoringReleaseBinding`
   and `release_bindings.resolve_production_release_binding() -> ScoringReleaseBinding`
   **(new, this PR)** live in `engine/v2/scoring/` (layer 5.0, below `models`
@@ -108,6 +195,18 @@ non-model state) — never by opening a staged object file directly outside
   already-staged manifest (read once, verified under its own declared
   hash version before anything is trusted) — no payload bytes, no
   training/evaluation artifact, nothing outside that one manifest file.
+- **`deployment.carry_forward_release`** (proposed, cutover PR-13a): the
+  prior `release_id`'s already-staged manifest, read once and verified
+  under its own declared hash version, exactly like
+  `restage_semantic_hash` — no payload bytes (every member is already
+  durably written under its unchanged `content_hash`), no inventory, no
+  training-job output.
+- **`checks.phase5_release.derive_catalog`** (proposed, cutover PR-13a): the
+  prior release's own state catalog body (read fresh, self-hash-verified
+  the same way `release_bindings._read_state_catalog` verifies it today)
+  plus the freshly content-addressed nightly training-job outputs named in
+  `changed_rows` — never a live panel, a request, or anything the training
+  jobs did not already write to their own output directories.
 
 ## 4. Outputs
 
@@ -127,6 +226,32 @@ non-model state) — never by opening a staged object file directly outside
   release/state catalog write (`phase5_release.json`) is `checks/
   phase5_release.py`'s job, not this package's — this package only defines
   the artifact TYPEs and the verified loaders that later read them back.
+- **`carry_forward_release`** (proposed, cutover PR-13a): one new,
+  immutable `manifest.json` under `<root>/releases/<new_release_id>/` —
+  identical bindings to the prior release's manifest, only `release_id`
+  differs. No new object under `<root>/objects/`.
+- **`derive_catalog`** (proposed, cutover PR-13a; the write itself is
+  `checks/phase5_release.py`'s, per the note above — named here because it
+  changes where this package's own state catalog lives): today
+  `phase5_release.json` sits at ONE path per release ROOT
+  (`checks/phase5_release.py`'s `MANIFEST_NAME`, joined directly under the
+  root `tools/phase5_prepare_release.py --out` is given), sharing that one
+  file across every `release_id` ever staged under that root — `deployment.
+  rollback` swaps only the `DEPLOYED` pointer and never touches it
+  (`deployment.py`'s `rollback`/`_swap_pointer`), so rolling back today
+  already leaves this file's own `release_id` field disagreeing with the
+  rolled-back-to pointer, and `release_bindings._read_state_catalog`'s
+  existing equality check (`release_bindings.py:314-315`) then refuses
+  EVERY scoring resolution — true today, with the existing manual operator
+  workflow, before any of this design's automation exists; automating
+  nightly releases only makes it fire far more often. This design's first
+  code PR (see the ops doc's split) moves it to
+  `<root>/releases/<release_id>/phase5_release.json`, alongside the model
+  manifest it now shares an immutable directory with — after which
+  `promote`/`rollback` need no new logic at all, since whichever
+  `release_id` becomes live, its own catalog already sits at its own
+  immutable path, and `derive_catalog`'s "read the prior release's own
+  catalog" premise is literally true rather than assumed.
 
 ## 5. Dependencies
 
@@ -156,6 +281,12 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   the `deployment/` directory itself as `root`). Neither `nightly.py`,
   `worker.py` nor `stages.py` import this package's deployment surface
   directly — `stages.py` only registers `training.py`'s `JobKind`s.
+  **(Proposed, cutover PR-13a)** a new `engine/v2/ops` worker for the new
+  `phase5_state_stage` job kind (see the ops doc) gains the first caller of
+  `carry_forward_release`, following the SAME indirection: `nightly.py`
+  itself still imports neither this package nor `checks.phase5_release`
+  directly, only the new worker module does, exactly like `training.py`
+  today.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the
   deployment pointer read-only (`current_pointer`, `resolve_release`) to
   serve `/models/release.json`; never promotes.
@@ -344,6 +475,97 @@ below; `production_deployment_root` is `production_release_root() /
   rewritten manifest; calling it twice in a row is the second call's R3
   no-op.
 
+### 7.6 `carry_forward_release` (proposed, cutover PR-13a design, not yet
+implemented; MODEL side only — see §1's "why nightly does not...")
+
+- **R1, missing input.** Refuses `ReleaseNotStaged(prior_release_id)` if the
+  prior release is not staged — same refusal `resolve_release` already
+  uses; reuses `resolve_release`'s own read, not a second manifest parser.
+  Refuses `StagingRefused(RELEASE_ID_REUSED)` — same code `stage_release`
+  uses for the same condition — if `new_release_id` is already staged with
+  DIFFERENT content (byte-identical content is R3's no-op, below). Refuses
+  a new `DeploymentError` subclass, `MissingCarriedOverObject` (naming the
+  binding and its `content_hash`), if any binding's declared member cannot
+  be found under `<root>/objects/` — a staged release is content-addressed
+  and immutable (§4), so this can only mean the store was tampered with or
+  corrupted, never a normal state. Never reads or requires a
+  `ModelReleaseInventory`.
+- **R2, cache.** None: reads the prior manifest fresh, same as every other
+  read in this module.
+- **R3, retry.** Calling this twice with the same `(prior_release_id,
+  new_release_id)` is idempotent: the second call finds `new_release_id`
+  already staged with byte-identical bindings and returns the existing
+  manifest unchanged, exactly like `stage_release`'s own same-content
+  no-op (§7.1 R3) — unlike `restage_semantic_hash`, which repairs an
+  existing id in place, this function only ever mints a release that
+  either does not exist yet or already matches.
+- **R4, transaction.** No new object write at all (every member's bytes are
+  already durably staged under the prior release's own content hashes);
+  the only write is the new `manifest.json`, through the same
+  `_atomic_write_bytes` primitive every other write in this module uses.
+- **R5, partial write.** Never a half-written manifest (same atomic
+  primitive as `stage_release`/`restage_semantic_hash`); no object write to
+  leave partial.
+- **R6, idempotency.** The new manifest's bindings are byte-identical to
+  the prior release's — `carry_forward_release` never re-hashes,
+  re-serializes, or otherwise perturbs a binding; only `release_id`
+  differs.
+
+### 7.7 `checks.phase5_release.derive_catalog` (proposed, cutover PR-13a
+design, not yet implemented; STATE side. Lives in `checks/
+phase5_release.py`, not this package, so its refusal is a
+`ReleaseLayoutError`, that module's own type, not a `DeploymentError`
+subclass)
+
+- **R1, missing input.** Refuses if the prior release's own catalog cannot
+  be read, or fails its own `manifest_hash`/`release_id` self-check
+  (reusing `_read_state_catalog`'s existing checks against the PRIOR
+  release_id, not reimplementing them). Refuses if any key in
+  `changed_rows` does not name a `member_id` `STATE_SPECS` declares.
+  Refuses if any CARRIED-OVER row's object path cannot be found under
+  `deployment_root(release_root)/objects/` (`checks/phase5_release.py`'s own
+  `deployment_root`/`object_relpath` — the ONE content-addressed store
+  every release staged under this root writes into and shares; moving the
+  catalog file to a per-`release_id` path, §1/§4, does not move this
+  store).
+  Refuses (the causality check named in the ops doc) if any of the FOUR
+  event-scoped rows in `changed_rows` (`paired_residual_pool`,
+  `board_analog_matcher`, `chooser_analog_pool`, `trailing_pnl_cutoff`)
+  carries its own recorded `cutoff`/`month` dated on or after the cycle's
+  `as_of`; see the ops doc's causality invariant for which builders already
+  refuse this themselves and why this check is not redundant. The THREE
+  `driver_residual_pool:*` rows carry no such bound to check at all — see
+  §1's finding that they are tied to the champion model's own fit, not to
+  any event date — so this check does not apply to them (see the ops doc's
+  corrected causality section for what nightly resubmitting them actually
+  verifies instead).
+- **R2, cache.** None: reads the prior catalog fresh.
+- **R3, retry.** Calling this twice with the same `(prior_release_id,
+  new_release_id, changed_rows)` produces the SAME body both times — a pure
+  function of its inputs, unlike `carry_forward_release`, which reads
+  content that could in principle differ across calls only if the store
+  itself changed underneath it (never true for immutable, already-staged
+  content). The caller (the new `phase5_state_stage` worker, ops doc) is
+  responsible for writing it at most once to `new_release_id`'s own
+  immutable path; a second write to an existing path there refuses,
+  mirroring `RELEASE_ID_REUSED`.
+- **R4, transaction.** One atomic write (temp + fsync + rename, matching
+  every other write in this programme) of the new catalog body to
+  `new_release_id`'s own path. No object is rewritten: every carried-over
+  row's object already exists (write-once, content-addressed); only the
+  changed rows' objects are new writes, and those go through the same
+  `write_object` write-once helper `tools/phase5_prepare_release.py`
+  already uses.
+- **R5, partial write.** The one manifest write is never partial (R4's
+  atomic primitive). A crash after some `changed_rows` objects are written
+  but before the manifest write leaves orphaned, harmless, content-
+  addressed objects and no new catalog — the same shape `stage_release`'s
+  own R5 already documents for the model side.
+- **R6, idempotency.** Same inputs always produce the same output body —
+  this function IS idempotent (R3), because it never mints an id itself;
+  `new_release_id` is supplied by the caller, exactly one per nightly
+  cycle (keyed by `as_of`, see the ops doc).
+
 ## 8. Invariants
 
 - **Missing input → typed refusal, never a silent default** (root doc
@@ -372,6 +594,56 @@ below; `production_deployment_root` is `production_release_root() /
   These are deliberately different rules for deliberately different
   questions ("is this safe to make live" vs. "is this the release a past
   score actually used").
+- **Causality: no event settled on or after `as_of` enters a pool, residual
+  set, or cutoff row used to score `as_of`.** (proposed, cutover PR-13a)
+  Applies to the FOUR event-scoped members this design appends to
+  (`paired_residual_pool`, `board_analog_matcher`, `chooser_analog_pool`,
+  `trailing_pnl_cutoff`) — checked against each builder's real code, not
+  assumed: `make_paired_residual_pool_artifact`, `make_board_analog_pool_
+  artifact`, `build_chooser_analog_pool_artifact`'s underlying constructor,
+  and `build_trailing_cutoff_artifact` (the training-job-level builder, one
+  layer above `make_trailing_cutoff_artifact`, which only stores the value
+  it is given) all refuse, themselves, a row dated/closed on or after their
+  own `cutoff`/window bound. The nightly gate (ops doc) re-checking each of
+  these four rows' own recorded bound against `as_of` is a second,
+  independent check, not the only enforcement.
+- **The driver residual pools are not event-scoped at all (verified against
+  the code, not assumed — a finding this design surfaces, not one the task
+  brief's framing gets right by itself).** `tools/phase5_datasets.
+  champion_driver_pool(role)` — the ONLY real caller of
+  `make_driver_residual_pool_artifact`'s `flat_residuals`/`buckets` for the
+  `fold=None` member this package's `driver_residual_pool:*` rows are —
+  reads the CHAMPION model's OWN embedded, fit-time
+  `.residuals`/`.residual_buckets` attributes straight off its
+  hash-verified pickle (`Registry.load_champion(role, "*", verify=True)`).
+  Nothing about a newly-settled event, a cutoff, or `as_of` enters this
+  path at all: the driver pool's content changes if and only if the
+  champion model itself is refit — cutover PR-13b's monthly retrain, never
+  this nightly design. Resubmitting `mode=state,state=driver_residual_pool:
+  *` nightly (this design still does, since the champion could in
+  principle have changed since the last cycle even though this design
+  never changes it itself) re-derives byte-identical content every night
+  the champion is unchanged — content-addressed write-once dedup means no
+  new object is ever actually written, and `derive_catalog` records these
+  three rows as unchanged from the prior release. The "causality" question
+  simply does not apply to them: there is no event date in their content to
+  check against `as_of` in the first place.
+- **A carried-over binding's or row's bytes and hash are never
+  recomputed.** (proposed, cutover PR-13a) `carry_forward_release` only
+  ever copies a prior release's bindings verbatim — it never mints an
+  object for one. `derive_catalog` follows the same rule for the STATE
+  catalog's rows: a nightly append writes only the objects that actually
+  changed, and `derive_catalog`'s R1 refuses if a carried-over row's
+  declared object is missing rather than silently re-deriving it.
+- **A release's state catalog lives at its own immutable, per-`release_id`
+  path.** (proposed, cutover PR-13a's first code PR — a standalone bug fix,
+  valuable even without the rest of this design; see §4 and §7.7) Not true
+  today: `phase5_release.json` sits at one path per release ROOT, so
+  `rollback` (which only ever swaps `DEPLOYED`) can leave it disagreeing
+  with the live pointer. Once it moves beside the model manifest under
+  `<root>/releases/<release_id>/`, `promote`/`rollback` need no new logic:
+  whichever `release_id` is live, both of its artifacts already sit
+  together, immutably, at their own path.
 
 ## 9. Diagrams
 
@@ -384,6 +656,7 @@ stateDiagram-v2
     Deployed --> Deployed: rollback()\nrefuses StaleReleaseHash on the\nprevious release too
     Staged --> [*]: resolve_release()\n(read-only, by id; accepts v1 or v2)
     Deployed --> [*]: current_release()\n(follows DEPLOYED; None if unset)
+    Deployed --> Staged: carry_forward_release()\n(proposed, PR-13a — copies\nbindings verbatim, new release_id,\nno inventory)
 ```
 
 ```mermaid
