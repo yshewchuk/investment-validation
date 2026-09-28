@@ -257,9 +257,9 @@ def test_calendar_row_key_mismatch_refuses_without_sinking_batch(tmp_path):
 
 def test_calendar_row_unparseable_event_date_refuses_without_raising(tmp_path):
     """CodeRabbit round 3 (PR #66): _iso raises on an unparseable value --
-    _calendar_row_key_mismatch must convert that into this row's own
-    refusal rather than letting the exception escape and abort every other
-    row's assembly."""
+    _calendar_row_problem must convert that into this row's own refusal
+    rather than letting the exception escape and abort every other row's
+    assembly."""
     binding = _stage_release(tmp_path)
     good = _event_inputs()
     bad = _event_inputs(
@@ -269,7 +269,42 @@ def test_calendar_row_unparseable_event_date_refuses_without_raising(tmp_path):
     assembled, refusals = _assemble(binding, [good, bad])
     assert list(assembled) == [good.key]
     assert len(refusals) == 1
-    assert refusals[0].code == "CALENDAR_ROW_KEY_MISMATCH"
+    assert refusals[0].code == "CALENDAR_ROW_INVALID"
+    assert refusals[0].key == bad.key
+
+
+def test_calendar_row_not_a_mapping_refuses_without_raising(tmp_path):
+    """CodeRabbit round 5 (PR #66): a null calendar_row in events.json must
+    not reach calendar_row.get() and raise AttributeError -- it is this
+    row's own CALENDAR_ROW_INVALID refusal instead."""
+    binding = _stage_release(tmp_path)
+    good = _event_inputs()
+    bad = _event_inputs(
+        key=BoardRequest(ticker="OTHER", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15"), session="am"),
+        calendar_row=None)
+    assembled, refusals = _assemble(binding, [good, bad])
+    assert list(assembled) == [good.key]
+    assert len(refusals) == 1
+    assert refusals[0].code == "CALENDAR_ROW_INVALID"
+    assert refusals[0].key == bad.key
+
+
+def test_calendar_row_unparseable_expiry_refuses_without_raising(tmp_path):
+    """CodeRabbit round 5 (PR #66): _identity_context parses calendar_row
+    ["expiry"] outside every try/except in _assemble_one_event -- an
+    unparseable expiry must be caught in _calendar_row_problem, before that
+    point is ever reached."""
+    binding = _stage_release(tmp_path)
+    good = _event_inputs()
+    bad = _event_inputs(
+        key=BoardRequest(ticker="OTHER", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15"), session="am"),
+        calendar_row=_calendar_row(ticker="OTHER", expiry="not-a-date"))
+    assembled, refusals = _assemble(binding, [good, bad])
+    assert list(assembled) == [good.key]
+    assert len(refusals) == 1
+    assert refusals[0].code == "CALENDAR_ROW_INVALID"
     assert refusals[0].key == bad.key
 
 
@@ -376,6 +411,28 @@ def test_planted_record_identity_corruption_is_caught():
         corrupted, event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
 
 
+def _refusal_matches_key(document, *, ticker, strategy, event_date, session) -> bool:
+    """Independent identity check for one serialized refusal's key
+    (CodeRabbit round 5, PR #66) -- the assembly-level tests above only
+    check the in-memory BoardRequest key; this checks the published
+    refusals.json document itself."""
+    key = document["key"]
+    return (key["ticker"] == ticker and key["strategy"] == strategy
+            and key["event_date"] == event_date and key["session"] == session)
+
+
+def test_planted_refusal_key_corruption_is_caught():
+    """Proves _refusal_matches_key is not a tautology: it must fail on a
+    corrupted serialized key field."""
+    good = {"key": {"ticker": "TEST", "strategy": "TWIN-P",
+                    "event_date": "2026-01-15", "session": "am"}}
+    assert _refusal_matches_key(good, ticker="TEST", strategy="TWIN-P",
+                                event_date="2026-01-15", session="am")
+    corrupted = {"key": {**good["key"], "ticker": "WRONG"}}
+    assert not _refusal_matches_key(corrupted, ticker="TEST", strategy="TWIN-P",
+                                    event_date="2026-01-15", session="am")
+
+
 def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     _stage_release(tmp_path)
     root = tmp_path / "staging"
@@ -400,6 +457,37 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     refusals_document = json.loads((root / "refusals.json").read_text())
     assert len(refusals_document) == 1
     assert refusals_document[0]["code"] == "UNSUPPORTED_STRATEGY"
+    # CodeRabbit round 5 (PR #66): compare the refusal's serialized key
+    # against an independently-known expected identity, not just its code.
+    assert _refusal_matches_key(
+        refusals_document[0], ticker="TEST", strategy="TWIN-P",
+        event_date="2026-01-15", session="am")
+
+
+def test_run_native_score_batch_worker_scores_under_no_fit_guard(tmp_path, monkeypatch):
+    """CodeRabbit round 5 (PR #66): assert directly that fitting is forbidden
+    at the score_batch call site, so a mutation that drops the no_fit_guard
+    wrapping (while the model itself never fits) is caught. The count/content
+    checks above only prove scoring happened, not that it happened guarded."""
+    from engine.v2.models.no_fit import fitting_forbidden
+    from engine.v2.ops import native_score_batch as nsb_module
+
+    _stage_release(tmp_path)
+    root = tmp_path / "staging"
+    root.mkdir()
+    (root / "events.json").write_text(json.dumps([_event_doc()]))
+
+    real_score_batch = nsb_module.score_batch
+    seen: dict = {}
+
+    def spy(*args, **kwargs):
+        seen["forbidden"] = fitting_forbidden()
+        return real_score_batch(*args, **kwargs)
+
+    monkeypatch.setattr(nsb_module, "score_batch", spy)
+    run_native_score_batch_worker(
+        _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+    assert seen["forbidden"] is True
 
 
 def test_empty_events_is_a_legitimate_no_op(tmp_path):

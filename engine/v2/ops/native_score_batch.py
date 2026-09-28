@@ -29,7 +29,7 @@ from engine.v2.scoring.nightly_source_bundle import (
     assemble_nightly_source_bundle,
 )
 from engine.v2.scoring.release_bindings import ScoringReleaseBinding
-from engine.v2.scoring.source_inputs import build_native_score_inputs
+from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
 from engine.v2.scoring.stages import NativeScoreInputs
 
 __all__ = [
@@ -143,32 +143,87 @@ def _identity_context(as_of: Any, snapshot_id: str,
     }
 
 
-def _calendar_row_key_mismatch(key: BoardRequest, calendar_row: Mapping[str, Any]) -> str | None:
-    """``None`` if ``calendar_row``'s own ``ticker``/``event_date`` match
-    ``key``, else a detail string for a ``CALENDAR_ROW_KEY_MISMATCH``
-    refusal (CodeRabbit round 2, PR #66). Nothing else checks this:
-    ``assemble_nightly_source_bundle`` only checks ``panel_row`` against
-    ``calendar_row``, never against the caller's ``BoardRequest``, and
-    ``ScoreRequest`` itself carries no ticker/event_date of its own -- a
-    caller-side key/calendar_row pairing bug would otherwise pass silently
-    and could produce a duplicate ``request_hash`` (see
-    :func:`assemble_score_batch_inputs`) that corrupts a different row."""
-    calendar_ticker = calendar_row.get("ticker")
-    raw_event_date = calendar_row.get("event_date")
+def _calendar_row_problem(key: BoardRequest, calendar_row: Any) -> tuple[str, str] | None:
+    """``None`` if ``calendar_row`` is a well-formed mapping whose own
+    ``ticker``/``event_date``/``expiry`` are parseable and match ``key``,
+    else ``(code, fixed_detail)`` for a per-row refusal. Checked first,
+    before every other per-row check (CodeRabbit rounds 2-5, PR #66):
+
+    - Not a mapping at all (e.g. a null ``calendar_row`` in ``events.json``)
+      -- ``CALENDAR_ROW_INVALID``. Nothing upstream of this module checks
+      this; calling ``.get`` on a non-mapping would otherwise raise
+      ``AttributeError`` and abort the whole batch before
+      ``assemble_nightly_source_bundle`` gets a chance to refuse it.
+    - An unparseable ``event_date`` or ``expiry`` -- ``CALENDAR_ROW_INVALID``.
+      ``assemble_nightly_source_bundle`` never parses either itself (it
+      copies both straight into ``context``), and this module's own
+      ``_identity_context`` parses ``expiry`` later, outside every
+      try/except in :func:`_assemble_one_event` -- an unparseable value
+      must be caught here, before that point, not there.
+    - ``ticker``/``event_date`` not matching ``key`` -- ``CALENDAR_ROW_KEY_
+      MISMATCH``. Neither this module nor ``assemble_nightly_source_bundle``
+      (which only checks ``panel_row`` against ``calendar_row``, never
+      against the caller's ``BoardRequest``) verifies this elsewhere, and
+      ``ScoreRequest`` carries no ticker/event_date of its own -- a
+      caller-side pairing bug would otherwise pass silently and could
+      produce a duplicate ``request_hash`` (see
+      :func:`assemble_score_batch_inputs`) that corrupts a different row.
+
+    Every detail here is a FIXED string, never the raw staged value
+    (CodeRabbit round 4, CWE-209) -- ``refusals.json`` is a published
+    output of a successful attempt.
+    """
+    if not isinstance(calendar_row, Mapping):
+        return "CALENDAR_ROW_INVALID", "calendar row is missing or not an object"
     try:
-        # CodeRabbit round 3 (PR #66): _iso raises on an unparseable value --
-        # that must become this row's own refusal, never an exception that
-        # escapes _assemble_one_event and aborts every other row's assembly.
-        calendar_event_date = _iso(raw_event_date)
+        calendar_event_date = _iso(calendar_row.get("event_date"))
+        _iso(calendar_row.get("expiry"))
     except (TypeError, ValueError):
-        # CodeRabbit round 4 (PR #66, CWE-209): a fixed message, never the
-        # raw staged value -- refusals.json is a published output of a
-        # successful attempt, and this row's actual value belongs in the
-        # worker's own logs, not a document a future consumer might read.
-        return "calendar row event_date is invalid"
-    if calendar_ticker == key.ticker and calendar_event_date == _iso(key.event_date):
-        return None
-    return "calendar row does not match the request key"
+        return "CALENDAR_ROW_INVALID", "calendar row has an unparseable date field"
+    if calendar_row.get("ticker") != key.ticker or calendar_event_date != _iso(key.event_date):
+        return "CALENDAR_ROW_KEY_MISMATCH", "calendar row does not match the request key"
+    return None
+
+
+def _bundle_or_refusal(
+    key: BoardRequest,
+    event: NightlyEventInputs,
+    *,
+    strategy: str,
+    driver_identity: Any,
+    gate_identity: Any,
+    gate_policy: Mapping[str, Mapping[str, Any]],
+    as_of: Any,
+    feature_names: Sequence[str],
+    driver_name: str,
+) -> SourceBundle | NativeScoreBatchRowRefusal:
+    """``assemble_nightly_source_bundle``'s result, or a re-wrapped refusal.
+
+    Split out of :func:`_assemble_one_event` purely to keep it under its
+    line budget. ``exc.detail`` is never published (CodeRabbit round 5,
+    CWE-209): it can itself echo staged input (e.g. ``quote_domain_map``
+    embeds an invalid ``quote_status`` string into some refusals) --
+    ``exc.code`` is a closed, module-controlled vocabulary and is safe to
+    publish unchanged; the free-text detail is not.
+    """
+    try:
+        return assemble_nightly_source_bundle(
+            source_ref=f"native-score-batch:{key.ticker}:{_iso(key.event_date)}:{strategy}",
+            strategy=strategy, as_of=as_of,
+            calendar_row=event.calendar_row, panel_row=event.panel_row,
+            panel_anchor=event.panel_anchor,
+            tier4_row=event.tier4_row, quote_rows=event.quote_rows,
+            quote_status=event.quote_status, feature_names=feature_names,
+            driver_name=driver_name,
+            model_identity={f"driver:{strategy}": to_document(driver_identity),
+                            f"gate:{strategy}": to_document(gate_identity)},
+            model_artifact_refs={"driver_prediction": driver_identity.artifact_hash},
+            forecast_recipes={"driver_prediction": {"binding_id": driver_identity.binding_id}},
+            gate_recipe={**gate_policy[strategy], "binding_id": gate_identity.binding_id},
+        )
+    except NightlySourceBundleRefusal as exc:
+        return NativeScoreBatchRowRefusal(
+            key, exc.code, f"nightly_source_bundle refused: {exc.code}")
 
 
 def _assemble_one_event(
@@ -190,9 +245,9 @@ def _assemble_one_event(
     """
     key = event.key
     strategy = key.strategy
-    mismatch = _calendar_row_key_mismatch(key, event.calendar_row)
-    if mismatch is not None:
-        return NativeScoreBatchRowRefusal(key, "CALENDAR_ROW_KEY_MISMATCH", mismatch)
+    problem = _calendar_row_problem(key, event.calendar_row)
+    if problem is not None:
+        return NativeScoreBatchRowRefusal(key, *problem)
     if strategy != _SUPPORTED_STRATEGY:
         return NativeScoreBatchRowRefusal(
             key, "UNSUPPORTED_STRATEGY",
@@ -204,23 +259,12 @@ def _assemble_one_event(
     if strategy not in gate_policy:
         return NativeScoreBatchRowRefusal(
             key, "GATE_POLICY_NOT_STAGED", f"no gate policy staged for {strategy!r}")
-    try:
-        bundle = assemble_nightly_source_bundle(
-            source_ref=f"native-score-batch:{key.ticker}:{_iso(key.event_date)}:{strategy}",
-            strategy=strategy, as_of=as_of,
-            calendar_row=event.calendar_row, panel_row=event.panel_row,
-            panel_anchor=event.panel_anchor,
-            tier4_row=event.tier4_row, quote_rows=event.quote_rows,
-            quote_status=event.quote_status, feature_names=feature_names,
-            driver_name=driver_name,
-            model_identity={f"driver:{strategy}": to_document(driver_identity),
-                            f"gate:{strategy}": to_document(gate_identity)},
-            model_artifact_refs={"driver_prediction": driver_identity.artifact_hash},
-            forecast_recipes={"driver_prediction": {"binding_id": driver_identity.binding_id}},
-            gate_recipe={**gate_policy[strategy], "binding_id": gate_identity.binding_id},
-        )
-    except NightlySourceBundleRefusal as exc:
-        return NativeScoreBatchRowRefusal(key, exc.code, exc.detail)
+    bundle = _bundle_or_refusal(
+        key, event, strategy=strategy, driver_identity=driver_identity,
+        gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
+        feature_names=feature_names, driver_name=driver_name)
+    if isinstance(bundle, NativeScoreBatchRowRefusal):
+        return bundle
     event_id = event.calendar_row.get("event_id")
     if not isinstance(event_id, str) or not event_id:
         return NativeScoreBatchRowRefusal(
@@ -275,11 +319,12 @@ def assemble_score_batch_inputs(
     are not part of the release binding), any re-wrapped
     ``NightlySourceBundleRefusal`` from the per-event bundle assembly,
     ``MISSING_STAGED_INPUT`` (no ``event_id`` in the calendar row),
-    ``CALENDAR_ROW_KEY_MISMATCH`` (``calendar_row``'s own ``ticker``/
-    ``event_date`` does not match its ``NightlyEventInputs.key``) and
-    ``NATIVE_INPUT_BUILD_FAILED`` (a ``ValueError`` from
-    ``build_native_score_inputs``). Per-row assembly itself lives in
-    :func:`_assemble_one_event`.
+    ``CALENDAR_ROW_INVALID`` (``calendar_row`` is not a mapping, or its
+    ``event_date``/``expiry`` do not parse), ``CALENDAR_ROW_KEY_MISMATCH``
+    (``calendar_row``'s own ``ticker``/``event_date`` does not match its
+    ``NightlyEventInputs.key``) and ``NATIVE_INPUT_BUILD_FAILED`` (a
+    ``ValueError`` from ``build_native_score_inputs``). Per-row assembly
+    itself lives in :func:`_assemble_one_event`.
 
     A colliding ``request_hash`` across two DIFFERENT ``BoardRequest`` keys
     (CodeRabbit round 2, PR #66) also raises ``ValueError`` rather than

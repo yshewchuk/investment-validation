@@ -1021,19 +1021,27 @@ network, or database access.
   batch).** Once a release is in hand, every OTHER failure is scoped to one
   `BoardRequest` and collected as a `NativeScoreBatchRowRefusal` in the
   returned tuple, not raised:
+  - `CALENDAR_ROW_INVALID` — the staged `calendar_row` itself is malformed:
+    not a mapping at all (CodeRabbit round 5, PR #66 — a null/wrong-typed
+    `calendar_row` in `events.json` would otherwise raise `AttributeError`
+    out of the mismatch check below and abort the whole batch before
+    `assemble_nightly_source_bundle` ever got a chance to refuse it), or its
+    own `event_date`/`expiry` field does not parse as a date (CodeRabbit
+    round 3 covered `event_date`; round 5 closed the same gap for `expiry`,
+    which `_identity_context` also parses later in the same row's assembly
+    and which was previously unchecked before that point).
   - `CALENDAR_ROW_KEY_MISMATCH` — `calendar_row["ticker"]`/`calendar_row[
     "event_date"]` does not match the row's own `NightlyEventInputs.key`.
-    Checked first, before every other per-row check: nothing else in this
-    module or in `assemble_nightly_source_bundle` (which only checks
-    `panel_row` against `calendar_row`, never against the caller's
-    `BoardRequest`) verifies that a staged `calendar_row` actually belongs
-    to the key it was paired with. An unparseable `calendar_row[
-    "event_date"]` (CodeRabbit round 3, PR #66) is this same refusal, not a
-    raised exception: the date-parsing failure is caught inside the
-    mismatch check itself, so a malformed date in one row cannot abort
-    every other row's assembly. Its `detail` is a fixed string in both
-    cases (CodeRabbit round 4, CWE-209) — never the raw staged ticker/date
-    values — see the fixed-detail note below.
+    Both checks live in one helper (`_calendar_row_problem`) run first,
+    before every other per-row check: nothing else in this module or in
+    `assemble_nightly_source_bundle` (which only checks `panel_row` against
+    `calendar_row`, never against the caller's `BoardRequest`) verifies
+    that a staged `calendar_row` actually belongs to the key it was paired
+    with, and by the time this check runs, `calendar_row` is already known
+    to be a mapping with parseable dates (`CALENDAR_ROW_INVALID` above
+    already caught anything less). Its `detail` is a fixed string, same as
+    `CALENDAR_ROW_INVALID`'s (CodeRabbit round 4, CWE-209) — never the raw
+    staged ticker/date values — see the fixed-detail note below.
   - `UNSUPPORTED_STRATEGY` — `key.strategy != "STR-THRU"` (this bounded
     assembler's one supported strategy, matching `nightly_source_bundle.py`'s
     own documented scope).
@@ -1064,8 +1072,14 @@ network, or database access.
     raises (missing staged input, leaked feature name, invalid spot,
     post-`as_of` row, wrong-event panel row — see `engine/v2/scoring/
     ARCHITECTURE.md`) is caught and re-wrapped as a
-    `NativeScoreBatchRowRefusal` carrying that refusal's own `code`/`detail`
-    unchanged, plus the row's `key`.
+    `NativeScoreBatchRowRefusal` carrying that refusal's own `code` plus the
+    row's `key`, but a FIXED `detail` string (`"nightly_source_bundle
+    refused: {code}"`) rather than that refusal's own `detail` (CodeRabbit
+    round 5, CWE-209: some `nightly_source_bundle.py` refusals embed staged
+    input, such as an invalid `quote_status`, directly into their own
+    `detail`, and `refusals.json` is a published output of a successful
+    attempt — the `code` alone is a closed, module-controlled vocabulary and
+    safe to keep, so callers can still distinguish refusal reasons by code).
   - A `ValueError` from `build_native_score_inputs` itself (an
     unresolvable `forecast_recipes`/`gate_recipe` shape, an answer-field
     leak `_reject_answers` catches, an unsupported strategy) is likewise
@@ -1075,19 +1089,20 @@ network, or database access.
     `build_native_score_inputs`'s own message can name staged recipe/field
     shapes, and `refusals.json` is a published output of a successful
     attempt, not a log only this worker's own operator reads).
-  **Fixed-detail contract.** `CALENDAR_ROW_KEY_MISMATCH` and
-  `NATIVE_INPUT_BUILD_FAILED` never carry an input-derived or
-  exception-derived `detail` — both are fixed strings, precisely because
-  their underlying failure (an unparseable/mismatched staged value, or an
-  arbitrary `ValueError` message from a nested builder) could otherwise
-  echo staged content into a file this module cannot guarantee stays
-  private. Every OTHER refusal code's `detail` names only a small,
-  closed-vocabulary identifier this module already controls (a role key
-  like `"driver:STR-THRU"`, a `decision_clock_id`, the strategy string, or
-  a re-wrapped `NightlySourceBundleRefusal`'s own `detail` — see
-  `engine/v2/scoring/ARCHITECTURE.md` for that module's own refusal
-  detail conventions) — CodeRabbit's review did not flag those, and this
-  PR does not change them.
+  **Fixed-detail contract.** `CALENDAR_ROW_INVALID`, `CALENDAR_ROW_KEY_
+  MISMATCH`, `NATIVE_INPUT_BUILD_FAILED`, and the re-wrapped
+  `NightlySourceBundleRefusal` never carry an input-derived or
+  exception-derived `detail` — all four are fixed strings (or, for the
+  re-wrap, a fixed template around the closed-vocabulary `code` only),
+  precisely because their underlying failure (a malformed/mismatched
+  staged value, an arbitrary `ValueError` message from a nested builder,
+  or another module's own free-text refusal detail) could otherwise echo
+  staged content into a file this module cannot guarantee stays private.
+  Every OTHER refusal code's `detail` names only a small, closed-vocabulary
+  identifier this module already controls (a role key like
+  `"driver:STR-THRU"`, a `decision_clock_id`, or the strategy string) —
+  CodeRabbit's review did not flag those, and this PR does not change
+  them.
   This module never suppresses a batch-level (non-`ValueError`) exception
   from a row: only `ValueError`/`NightlySourceBundleRefusal` (both
   `ValueError` subclasses) are caught per row; anything else (e.g. a
