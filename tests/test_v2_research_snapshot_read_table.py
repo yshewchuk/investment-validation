@@ -108,6 +108,26 @@ def test_read_table_splits_a_partition_over_the_cap(tmp_path):
     conn.close()
 
 
+def test_read_table_splits_a_month_over_the_cap_by_day(tmp_path):
+    """Two days in the SAME month, each under the cap, whose combined month
+    total exceeds it: the month-level scan overflows and is re-scanned one
+    day at a time (``_scan.py``'s day-level split), never refusing."""
+    conn, store, snap = _commit_chains(
+        tmp_path,
+        {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
+        maximum_result_rows=4,
+    )
+    repository = Repository(conn, store)
+
+    frame = read_table(repository, snap, "option_chains", ("ticker", "obs_date"),
+                       partition_keys=["2024"])
+    assert len(frame) == 6
+
+    keys = {("TEST", pd.Timestamp("2024-01-10")), ("TEST", pd.Timestamp("2024-01-20"))}
+    assert _chains.read_chain_keys(repository, snap) == keys
+    conn.close()
+
+
 def test_read_table_without_partition_keys_scans_every_year(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
