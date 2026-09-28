@@ -394,6 +394,329 @@ path reads this edge) and `OPTIONAL` gains `"native_score_batch"`.
 gets its first real caller here, closing the "no caller yet" dashed edge
 this doc's own Diagrams section already names (see below).
 
+**Cutover PR-7b (design — this PR adds no code; the next PR in this
+sequence implements what this section describes).** PR-7a's own text above
+named the gap precisely and refused to close it: "PR-7a's shadow batch does
+not submit at all, full stop, until either (a) a future PR changes the
+production input mode to one that pins a snapshot, or (b) the still-missing
+raw-row producer... is given its own, separately-designed way to source
+`snapshot_id`/`calendar_revision`/`events_table`/`horizon_days`." This
+section is (a). It does not attempt (b): the per-event raw-row producer
+(`calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` staging
+for `NightlyEventInputs`) stays exactly as out of scope as PR-7a already
+declared it — a later PR, mirroring PR-7a's own boundary.
+
+**The concrete gap in running code today.** `nightly_trigger._default_plan`
+(`nightly_trigger.py:~518-528`, both line numbers approximate — issue #104/
+PR #117, in flight, renumbers this function's body; see the coordination
+note below) hardcodes `input_mode="legacy"`, `snapshot_scope=None`,
+`refresh_mode="legacy"`, `refresh_plan=None` in the `argparse.Namespace` it
+builds for every call, unconditionally — there is no branch, no flag, and
+no caller-supplied override for any of the four. In `input_mode="legacy"`,
+`cli._plan_command`'s own `_snapshot_inputs` (`cli.py:454-467`) returns
+`None` before `snapshot_planning.pin_snapshot_inputs` is ever called, so
+the plan `nightly_trigger` submits every night pins no `SnapshotRef` at
+all — verified against current `main`, matching PR-7a's own verification of
+the identical fact. **Supervisor decision, option A**: the shadow nightly
+runs in `input_mode="snapshot"` — not narrowly scoped to feed only
+`native_score_batch`, but the WHOLE shadow plan `nightly_trigger` submits,
+so legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
+`"model_evidence"` (`SNAPSHOT_STAGES`, `nightly.py:379-380`) read through
+the SAME pinned, frozen materialization
+`native_score_batch` will read through, once its own producer exists. This
+is a real, intentional behavior change to how the SHADOW comparison itself
+reads data (never to the real production legacy nightly — see point 4
+below, "How `nightly_trigger` switches to snapshot mode"), chosen because a
+side-by-side comparison where legacy and native can read the legacy store
+at two different moments is exactly the kind of noise this cutover effort
+has already spent real cost chasing down elsewhere (D14 corpus parity,
+the analog context-width defect) — freezing both sides to one snapshot
+removes that variable, not just for `native_score_batch` but for the whole
+comparison.
+
+**1. What creates and promotes each night's v2 snapshot — today, nothing
+does.** `ops snapshot plan-import`/`submit`/`promote`/`rollback`
+(`cli.py:926-956`, dispatching to `engine.v2.data.import_snapshot`/
+`engine.v2.ops.snapshot_import`/`engine.v2.ops.snapshot_promotion`) is a
+complete, tested, operator-invoked pipeline — but it has no scheduled
+caller anywhere in `engine/v2/ops` or `engine/v2/data`. Every "shadow"-scope
+snapshot committed to date was a manual `ops snapshot plan-import` +
+`submit` pair an operator ran by hand (Phase 2 sign-off/D14 corpus work);
+nothing re-runs it nightly. `computed_moves_store.py` and
+`forward_calendar_store.py` both already take a `parent_snapshot_id` and
+read through it (`_scan_once`/`daily_market` sessions respectively) — both
+silently assume SOME snapshot exists at whatever scope their own caller
+resolved; neither one is the producer either.
+
+Closing this needs a genuinely new nightly step, and it must run — and
+fully commit — BEFORE `nightly_trigger._default_plan` ever calls
+`cli._plan_command`, because `pin_snapshot_inputs` resolves the scope's
+head SYNCHRONOUSLY at plan-BUILD time (`snapshots.resolve_snapshot_head`,
+one `SELECT ... FROM data_snapshot_heads`): a plan cannot be built
+referencing a snapshot that has not committed yet. This rules out the
+`supervisor.Service` tick-loop sidecar shape `computed_moves_refresh`/
+PR-7a's own `native_score_batch` sidecar both use — those sidecars tick
+inside `Service.tick()`, which `nightly_trigger._default_serve`
+(`nightly_trigger.py:561-600`) only starts driving AFTER `_default_plan`
+has already built and `_default_submit` has already submitted that same
+night's plan (`_submit_plan`'s own order: `plan_fn` → write `"submitting"`
+→ `submit_fn` → `serve_fn`). A sidecar that only runs during `serve_fn`'s
+loop is structurally too late for this one input.
+
+The design instead adds a new phase to `nightly_trigger._default_plan`
+itself, run before it builds `plan_args`, mirroring the SAME in-process
+ownership `_default_serve`'s own docstring already states outright
+("the trigger owns the process for the duration... in-process here instead
+of needing a second supervisor"): a new function,
+`nightly_trigger._ensure_shadow_snapshot(root, as_of, clock, *,
+plan_import_fn=None, submit_import_fn=None, serve_fn=None)`, called from
+`_default_plan` immediately before the (issue #104/PR #117) manifest
+capture, that:
+
+1. Cheaply checks whether a `snapshot_import` job already exists (any
+   state) under the idempotency key `f"shadow_snapshot_import:{as_of}"` —
+   a plain catalog job lookup, the same "cheap, catalog-only identity
+   check" pattern `nightly._native_score_batch_identity` already
+   establishes for a different job kind. If `succeeded`, this phase is a
+   no-op (the crash-then-resume case: a prior tick for the SAME `as_of`
+   already finished this step). If a NON-succeeded attempt already exists
+   for `as_of` and the same `MAX_CONSECUTIVE_ERRORS`-shaped attempt budget
+   `nightly_trigger` already applies to the whole run is exhausted for this
+   `as_of`, this phase raises the same terminal failure the run already
+   would have (see "Failure semantics" below) rather than retrying forever.
+2. Otherwise, reads the CURRENT `shadow` scope head
+   (`SELECT snapshot_id, generation FROM data_snapshot_heads WHERE
+   scope='shadow'`; absent on a fresh catalog maps to `None`/`0`, the same
+   defaults `plan_import`'s own signature already accepts) as the
+   `expected_head_snapshot_id`/`expected_head_generation` CAS pair, and
+   calls `import_snapshot.plan_import(source_root=root, scope="shadow",
+   expected_head_snapshot_id=..., expected_head_generation=...)` — `root`
+   is the SAME checkout `nightly_trigger` already runs from (matching
+   `ops price-history capture --source-root`'s own precedent: the legacy
+   checkout IS this repo's own data tree, not a second clone).
+3. `plan_import`'s own `_check_snapshot_shape` derives `session` (surfaced
+   as `plan.legacy_input_manifest.selected_session`) from the legacy
+   store's OWN current state — never from `as_of` — exactly like
+   `capture_inputs.capture`'s identically-named field (issue #104/PR #117's
+   own precedent). `_ensure_shadow_snapshot` checks
+   `plan.legacy_input_manifest.selected_session == as_of` BEFORE
+   submitting anything: `probe_finality` having already said `as_of` is
+   final (checked one step earlier, in `_decide`) does not guarantee the
+   full legacy store snapshot-import reads (`daily_market`,
+   `earnings_events`, `feature_panel`, `tier4_forecasts` — a wider read set
+   than the single ORATS probe `probe_finality` itself makes) have
+   ALSO caught up. On a mismatch, this phase submits nothing and reports
+   `"not_yet"` — the SAME outcome, and the SAME no-attempt-consumed
+   treatment, `_decide` already gives a `probe_finality` miss; the next
+   tick retries the whole sequence, `plan_import` included, fresh.
+4. On a match, submits the plan through the REAL path —
+   `snapshot_import.save_import_plan` then
+   `snapshot_import.submit_import(..., idempotency_key=
+   f"shadow_snapshot_import:{as_of}")`, precisely `ops snapshot
+   plan-import` + `ops snapshot submit`'s own two calls
+   (`cli.snapshot_command`, `cli.py:926-956`), never a bespoke coordinator
+   call and never `run_shadow_nightly` — then drives that ONE job to
+   terminal with the SAME `supervisor.Service`/`supervisor.serve` helper
+   `_default_serve` already uses (factored so both share one small
+   `_drive_jobs_to_terminal(service, job_ids, deadline_at)` helper instead
+   of two copies of the same polling loop), bounded by the SAME
+   `_serve_deadline` the whole run already respects, and held under the
+   SAME `_LegacyLock` the whole run already holds — a slow import extends
+   the run the same way a slow `"score"`/`"render"` job already can today;
+   this design adds no new locking or scheduling primitive.
+5. Directly committing into scope `"shadow"` (via `commit_snapshot_for_
+   attempt(..., scope=request.scope, ...)`, `snapshot_promotion.py:208`)
+   rather than importing into a candidate scope and calling `ops snapshot
+   promote` afterward: `"shadow"` is already the scope
+   `nightly_trigger`'s OWN plan reads (`--snapshot-scope shadow`, point 4
+   below) and the scope `computed_moves_refresh`/`forward_calendar_refresh`
+   already read a `parent_snapshot_id` from — there is no second,
+   stricter-gated scope downstream of it a promotion step would be
+   protecting. `promote`'s candidate/comparison machinery stays exactly
+   what it already is: the mechanism for advancing a scope that DOES have
+   a downstream consumer needing pre-advance validation (a future
+   production cutover scope, not this shadow-only one).
+
+**2. `events_table` and per-event row loading for `board_requests` — where
+it comes from, and where the line is drawn.** `board_requests`
+(`native_board_universe.py:198`) itself is already pure and I/O-free: it
+takes an already-loaded `events_table` (`ticker`/`event_date`/`session`
+columns), `as_of`, `horizon_days`, and an optional ticker filter, and
+performs no I/O of its own (see "Inputs" above — unchanged by this PR).
+What this design adds is a name for where a caller gets that
+`events_table` once a `shadow`-scope snapshot exists to read it from:
+`computed_moves_store.py`'s own `_scan_once`/`_scan_rows`
+(`computed_moves_store.py:130-166`) already demonstrate the exact read —
+`Repository.scan` over the pinned snapshot's `earnings_events` table
+(`ticker`, `event_date`, `session`, `src_orats` columns), returned as a
+`pd.DataFrame` with `event_date` parsed to `datetime64[ns]`. A future
+caller building `native_score_batch`'s still-missing raw-row producer (or
+this PR's own code slice, if it turns out small enough to fold in — see
+"Split into small code PRs" below) reads `earnings_events` off the SAME
+pinned `SnapshotRef` `_ensure_shadow_snapshot` just committed and
+`pin_snapshot_inputs` resolves at plan time, the same way, through the
+same `Repository`, never a second read path.
+
+**Deliberately left open here, staying inside PR-7a's own stated
+boundary**: whether that caller pre-filters to `src_orats &
+session.notna()` before calling `board_requests` (as `computed_moves_
+store._scan_once` already does for ITS OWN, differently-scoped purpose),
+and the full per-event row staging (`calendar_row`/`panel_row`/
+`panel_anchor`/`tier4_row`/`quote_rows`) `NightlyEventInputs` needs — both
+are exactly the "still-missing producer" PR-7a already named as its own
+out-of-scope, separately-designed prerequisite (cutover PR-6). This PR
+closes only the snapshot-existence half of that gap (point 1) and names
+where the raw `events_table` scan itself belongs (this point); it does not
+design the producer.
+
+**3. A `calendar_revision` source for the ops layer — recommendation:
+the pinned snapshot's own `SnapshotRef.calendar_version`, NOT
+`forward_calendar_refresh`.** `EventRef.calendar_revision`
+(`contracts/data.py:436-441`) and `ScoreRequest.calendar_revision`
+(`contracts/scoring.py:31-36`) are both plain, required `str` fields in
+`engine.v2.contracts` — a package `engine/v2/ops` already imports from
+freely (`snapshot_planning.py` already imports `SnapshotRef` from it). The
+brief's finding that "it exists only as `EventRef.calendar_revision` in
+contracts/serving, and ops can't import serving" is about a DIFFERENT,
+narrower mechanism: `engine.v2.serving.projections`/`bridge`'s own
+event-revision resolution (`dvr.dataset_version_id`, a Phase-3
+`EventStream`/DVR concept) — that machinery is real, genuinely
+serving-layer, and genuinely unreachable from `ops` by the existing layer
+boundary (`ops` sits below `serving`; importing it backward would be a
+layering violation this doc's own layer map already forbids elsewhere).
+That machinery is not, however, the only thing that can fill a
+`calendar_revision: str` field — it is one possible SOURCE of a value for
+it, not the type's only legal producer.
+
+`SnapshotRef.calendar_version` (`contracts/data.py:356-368`) is already a real,
+computed, per-snapshot value: `manifests.snapshot_ref`
+(`snapshot_promotion.py:198`, inside `_commit_snapshot_import`) sets
+`calendar_version = "legacy_calendar:" + table_manifests["earnings_events"]
+.logical_content_hash` — a deterministic digest of exactly the
+`earnings_events` table version that snapshot pins. PR-7a's own text
+already establishes `calendar_revision` as ONE value shared across the
+WHOLE batch, never per-row ("`as_of`/`snapshot_id`/`calendar_revision` are
+batch-level, shared... fields", this file's own PR-7a section above) —
+which is exactly the granularity `SnapshotRef.calendar_version` already
+has: one value per pinned snapshot, not one per event. Recommendation:
+`calendar_revision` for a snapshot-mode batch IS that pinned snapshot's
+own `calendar_version` — "the calendar under which this batch's events
+were known" reads, honestly, as "the earnings_events table version this
+batch's pinned snapshot carries," which is precisely what `calendar_
+version` already names. Concretely, this needs one small addition, in
+scope for a later small code PR (not this design PR):
+`pin_snapshot_inputs`'s own returned dict (`snapshot_planning.py:168-170`)
+adds `"calendar_version": snapshot.calendar_version` alongside the fields
+it already returns (`snapshot_id`, `snapshot_manifest_hash`, ...), so a
+caller building `native_score_batch`'s batch-level `calendar_revision`
+argument reads it straight off `pin_snapshot_inputs`'s result rather than
+re-fetching and re-parsing the published `SnapshotRef` artifact a second
+time.
+
+`forward_calendar_refresh` (`#83`) is a poor fit for this and this design
+recommends against it: its own store (`forward_calendar_store.py`, see
+"Diagrams" below) exists to forecast FUTURE trading-day calendars for
+horizon math (Nasdaq/yfinance-confirmed session dates ahead of `as_of`,
+fed by the SAME parent snapshot's `daily_market` sessions) — a materially
+different concept from "which version of the `earnings_events` schedule
+this event's date was fixed under," which is what `calendar_revision`'s
+own name and `EarningsEvent`'s docstring ("a date move updates
+`event_ref.calendar_revision`... rather than renaming the event",
+`contracts/data.py:449`) both describe. `forward_calendar_refresh` also has
+no scheduled production caller today (`#83`'s own PR body: "not included
+in nightly runs or submitted automatically" — that wiring is explicitly
+its own later PR, "PR B"), so it could not supply a value every night even
+if the concepts matched. **Flagging for the user**: this is this design's
+own interpretation of an ambiguous, previously-undocumented field mapping
+(no prior PR states what `calendar_revision` should resolve to for a
+snapshot-pinned native batch) — worth a look before the implementing PR
+starts, even though nothing here blocks on it.
+
+**4. How `nightly_trigger` switches to snapshot mode, without touching the
+real legacy nightly — and coordination with #117.** `nightly_trigger.py`'s
+own module docstring already states the invariant this relies on: "the
+legacy nightly keeps its own crontab line and this module never touches
+it; what is scheduled here is the parallel shadow-mode qualification DAG."
+`nightly_trigger.py` has never had any code path into the real legacy
+nightly process — it is a wholly separate script on a separate crontab
+line. Flipping `_default_plan`'s two literals,
+`input_mode="legacy"` → `input_mode="snapshot"` and `snapshot_scope=None`
+→ `snapshot_scope="shadow"`, therefore changes ONLY what THIS module's own
+shadow-DAG plan looks like; there is no code path by which it could reach
+the separate legacy process, changed or not.
+
+**Coordination with #117 (issue #104, in flight).** #117 also edits
+`_default_plan`'s body — it adds its own new phase (`_capture_input_
+manifest`, deriving `year_start`/`year_end` fresh from `as_of`) immediately
+before the SAME `plan_args = argparse.Namespace(...)` call this design's
+`input_mode`/`snapshot_scope` literals live in, and both PRs branch from
+the same `main` commit (`ff8c398`). This is a genuine same-function,
+adjacent-lines overlap — not merely "different kwargs" — so whichever of
+the two merges second needs an ordinary `git merge origin/main` (never a
+rebase, per the standard PR-owner conflict flow) to combine: #117's own new
+phase (`_capture_input_manifest`, unconditional, unaffected by input
+mode — issue #104's own text already establishes the barrier-only
+`legacy_manifest.json` binding runs regardless of `input_mode`, see
+`nightly.py:472-484`'s `CROSS_CHECK_STAGES` handling), THIS design's own
+new earlier phase (`_ensure_shadow_snapshot`, gating whether `_default_
+plan` proceeds at all), and the `input_mode="snapshot"`/`snapshot_scope=
+"shadow"` literal change on the SAME `argparse.Namespace(...)` call #117's
+diff also touches. None of the three changes is logically entangled with
+either of the others — this is a textual merge, not a design conflict —
+but it is real enough that whichever PR lands second should say so
+explicitly in its own "conflict-only merge" note to the Opus gate, per the
+standard flow.
+
+**5. Failure semantics.** See the new `nightly_trigger.py` (Cutover PR-7b)
+subsection below, in this doc's "Failure semantics" chapter, for the full
+4c R1–R6 account. Restated here, briefly, per the brief's own framing: a
+missing or not-yet-fresh `shadow` snapshot makes `_ensure_shadow_snapshot`
+report `"not_yet"` (retried next tick, exactly like a `probe_finality`
+miss) or raise the SAME typed, non-retryable failure `nightly_trigger`
+already raises for any other missing precondition (issue #104/PR #117's
+own `INPUT_CHANGED` for a session mismatch is the direct precedent) — in
+either case `_default_plan` returns before `cli._plan_command` is ever
+called, the run for `as_of` is recorded exactly like any other today (an
+`"error"`/terminal-after-`MAX_CONSECUTIVE_ERRORS` receipt, no new receipt
+status), and — because this whole module has no code path into the real
+legacy nightly, changed or not — legacy scoring for that session proceeds
+completely independently, on its own separate crontab line, oblivious to
+whether the shadow snapshot import happened at all.
+
+**6. Split into small code PRs.** This design PR adds no code. The
+implementing sequence, each independently mergeable and each with its own
+tests:
+
+- **PR-7b-1 (shadow snapshot import producer).** `_ensure_shadow_snapshot`
+  plus the `_drive_jobs_to_terminal` extraction shared with `_default_
+  serve`, wired into `_default_plan` BEHIND the still-`"legacy"` default —
+  i.e. this slice adds the function and its tests but does not yet flip
+  the literals, so it ships with zero behavior change to what `ops submit`
+  actually does each night. Test plan: the four `_ensure_shadow_snapshot`
+  branches (already-succeeded no-op, attempt-budget-exhausted terminal
+  failure, `selected_session` mismatch → `"not_yet"`, and a clean
+  plan-import→submit→serve→committed-head round trip against a fake
+  catalog/store), each isolated with injected `plan_import_fn`/
+  `submit_import_fn`/`serve_fn` seams, matching this module's existing
+  testing style throughout.
+- **PR-7b-2 (flip the literals).** `input_mode="snapshot"`,
+  `snapshot_scope="shadow"`, wiring `_ensure_shadow_snapshot`'s call into
+  the live path. Small: two literal changes plus the tests that assert on
+  them (`test_default_plan_passes_full_run_and_the_full_population` and
+  its siblings need updating for the new `input_mode`/`snapshot_scope`
+  values, and a new test asserting `_ensure_shadow_snapshot` is actually
+  called before `cli._plan_command`). Branches from `main` after PR-7b-1
+  (and after #117, if that has not merged first) merges, per the
+  no-stacked-bases rule.
+- **PR-7b-3 (`calendar_version` on `pin_snapshot_inputs`'s return).** The
+  one-line addition named in point 3 above, plus a test asserting the
+  returned dict's `calendar_version` matches the resolved `SnapshotRef`'s
+  own field. Independent of PR-7b-1/2; can land in parallel.
+- **Events_table scan helper (out of scope for this sequence).** Left to
+  the still-missing raw-row producer's own PR (cutover PR-6), per point 2
+  above — not split out here because it has no caller until that producer
+  exists.
+
 ## Inputs
 
 - Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan`
@@ -1923,7 +2246,14 @@ function is never part of.
 - **R1 missing input.** No succeeded legacy `"score"` job for any session
   yet (`_native_score_batch_identity` returns `None`); that job pinning no
   snapshot (`nightly._snapshot_inputs` returns `None` for it — the
-  production default under `"legacy"` input mode, per "Inputs" above); no
+  production default under `"legacy"` input mode, per "Inputs" above —
+  **Cutover PR-7b's own design, above, closes this specific sub-case: once
+  `nightly_trigger` runs in `input_mode="snapshot"`, the selected `"score"`
+  job always pins a snapshot when one was committed for that night, and
+  `_ensure_shadow_snapshot`'s own R1 (its dedicated subsection below) is
+  what can still make no snapshot exist at all — this bullet's "no pinned
+  snapshot" case then only recurs if a caller runs the legacy-mode CLI path
+  directly, bypassing `nightly_trigger`**); no
   configured production release — and here the cheap and expensive paths
   raise DIFFERENT, both-R1 outcomes that must not be confused (Opus gate
   finding, this round: an earlier draft named only the expensive path's
@@ -2208,6 +2538,100 @@ retry, transaction, partial write, idempotency).
   in-process deadline above is the primary mechanism and this is only the
   backstop for its own failure.
 
+### `nightly_trigger.py` (Cutover PR-7b design: `_ensure_shadow_snapshot`, the 4c R1–R6 template)
+
+**Design only — no code lands with this PR; a later PR in this sequence
+implements what this subsection describes** (see the main narrative above,
+"Cutover PR-7b"). `_ensure_shadow_snapshot` is a new phase inside
+`_default_plan`, run before `cli._plan_command` is ever called; every
+outcome below is one `_default_plan` itself returns from or raises out of
+— there is no separate receipt status and no new field on `TriggerReceipt`.
+
+- **R1, missing input.** No committed `shadow`-scope head at all (`data_
+  snapshot_heads` has no row for `scope='shadow'`) is not itself a
+  refusal — it is the expected FIRST-EVER-NIGHT state, handled the same as
+  a stale one: `plan_import`'s own `expected_head_snapshot_id=None,
+  expected_head_generation=0` defaults already express "no prior head" as
+  a valid CAS precondition, so the first successful import commits one.
+  The actual R1 cases are: (a) `plan_import`'s own `session` (`plan.
+  legacy_input_manifest.selected_session`) does not equal `as_of` — the
+  legacy store's snapshot-import read set has not caught up to `as_of` yet
+  even though `probe_finality` already said `as_of` is final — reported as
+  `"not_yet"`, no attempt consumed, exactly like a `probe_finality` miss in
+  `_decide`; and (b) the submitted `snapshot_import` job itself reaches a
+  terminal `failed`/`conflict` state (a legacy read error, a `CAS`
+  mismatch from a concurrent writer to `scope='shadow'` this design does
+  not otherwise expect but does not assume impossible either) — raised as
+  the same typed, non-retryable `OpsError` (`INPUT_CHANGED`, mirroring
+  issue #104/PR #117's own `_capture_input_manifest` precedent for "a
+  precondition this call needed did not hold") that `_submit_plan`'s
+  existing `except _HANDLED_FAILURES` around its `plan_fn(root, ...)` call
+  already catches — no new exception-handling path in `_submit_plan`, only
+  a new failure mode inside the function it already wraps. Once raised,
+  `_default_plan` never reaches `cli._plan_command`: the plan for `as_of`
+  is not merely refused at submit time, it is never built, so no
+  `input_manifest`/`snapshot_scope`-carrying plan document exists for this
+  `as_of` at all. **This is the case the brief's own framing names
+  directly: a missing (or not-yet-fresh) snapshot means native — and, under
+  option A, the WHOLE shadow comparison — is refused for that night, while
+  legacy is unaffected**, because `nightly_trigger.py` has no code path
+  into the real legacy nightly process regardless of why or whether it
+  itself failed (see the main narrative's point 4).
+- **R2, cache.** The idempotency-key job lookup (`f"shadow_snapshot_
+  import:{as_of}"`) IS this phase's own cache check, and it is checked
+  FIRST, before `plan_import` ever enumerates the legacy store: a
+  `succeeded` job under that key makes this phase a no-op on any later
+  tick for the same `as_of` (the crash-between-commit-and-plan-build case:
+  `_default_plan` was interrupted after `_ensure_shadow_snapshot`
+  committed but before `cli._plan_command` returned). This is the SAME
+  shape as `nightly_trigger`'s own `"submitting"`-before-submit-call
+  idempotency record (module docstring) and as PR-7a's own `native_score_
+  batch` sidecar's "existence check runs before any raw row is read"
+  (R2 above) — a third instance of the same pattern in this same doc, not
+  a new one.
+- **R3, retry.** A non-`succeeded` prior attempt under the SAME key is
+  retried, bounded by the SAME `MAX_CONSECUTIVE_ERRORS`-shaped budget
+  `nightly_trigger` already applies to the whole run for a given `as_of`
+  (this phase does not keep a second, independent counter) — once
+  exhausted, the run for `as_of` is `"failed"` exactly as it already would
+  be today for any other exhausted precondition, not a new terminal state.
+  The submitted `snapshot_import` job's OWN retry policy
+  (`stages.py`'s existing `RetryPolicy` for that kind, unchanged by this
+  PR) covers a single ATTEMPT's own worker-level retries; this budget
+  covers `_ensure_shadow_snapshot` deciding whether to submit a fresh
+  attempt at all on a later tick, the same two-layer distinction PR-7a's
+  own "R3, retry" bullet above already draws for `native_score_batch`.
+- **R4, transaction.** `commit_snapshot_for_attempt` (unchanged by this
+  PR) already opens its own short transaction inside the coordinator
+  effect that runs when the submitted `snapshot_import` job's attempt
+  finishes (`snapshot_import_effect`, `snapshot_promotion.py`) — this
+  phase adds no transaction of its own; it only decides whether to call
+  `plan_import`/`submit_import` and then waits for that existing machinery
+  to finish. A crash between `_ensure_shadow_snapshot` submitting the job
+  and that job's own coordinator effect committing leaves the job in a
+  resumable, leased state the standing recovery pass
+  (`supervisor.py`, unchanged) already handles — not a torn write this
+  phase introduces.
+- **R5, partial write.** None of this phase's own: it writes nothing to
+  the filesystem or catalog directly; every write happens inside
+  `snapshot_import_effect`'s existing, already-audited commit path
+  (`snapshot_promotion.py`'s own module docstring: "No file copy, Arrow
+  scan, hash calculation... runs inside the transaction" — unchanged).
+- **R6, idempotency.** The idempotency key is `f"shadow_snapshot_import:
+  {as_of}"` — one key per `as_of`, deliberately narrower than `native_
+  score_batch`'s own 4-part `scope_hash`-carrying key (R6 above): this
+  job's own identity (which legacy files it reads, which scope it commits
+  to) does not depend on any watchlist or population, only on which
+  night's legacy store state it is reading, so `as_of` alone is a
+  sufficient and stable key — a resubmission for the SAME `as_of` (a
+  crash-then-resume tick) reads the SAME `expected_head_snapshot_id`/
+  `expected_head_generation` CAS pair (recomputed fresh from `data_
+  snapshot_heads` each call, per R2 above the existing job already makes
+  this a no-op) and, if the legacy store has not moved, produces byte-
+  identical `SnapshotImportRequest`/manifest content — `request_hash`
+  dedupes it exactly like every other job kind's own idempotent
+  resubmission in this package.
+
 ## Invariants
 
 Enforces or is bound by, from the root doc §5: missing-input typed
@@ -2415,7 +2839,8 @@ commit happens until the combined kind list is clean.
 
 ```mermaid
 flowchart LR
-    ET[events_table] --> BR[board_requests]
+    SS[("shadow scope snapshot\n(Cutover PR-7b design:\n_ensure_shadow_snapshot)")] -.->|"Repository.scan\n(earnings_events)"| ET[events_table]
+    ET --> BR[board_requests]
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
@@ -2427,4 +2852,8 @@ flowchart LR
 session's `BoardRequest`s from it to build `events.json`'s per-event rows.
 Until that PR's code lands, the dashed edge is still aspirational, not a
 pre-existing fact — see "Dependencies" → "Callers" above and "Primary
-contracts" above for the full account.
+contracts" above for the full account. The dashed `events_table` edge is
+Cutover PR-7b's own design (above): before PR-7b, nothing commits the
+`shadow`-scope snapshot `events_table` would need to be scanned from at
+all — `computed_moves_store._scan_once`'s identical `earnings_events` scan
+is the precedent this edge follows, not a new read path.
