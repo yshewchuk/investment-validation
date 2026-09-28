@@ -240,7 +240,8 @@ flowchart LR
 ```
 
 `compare_dimension` is the one entry point every caller in the diagram
-uses; `checks/phase4_real.py` calls it in production today, while
+uses; `checks/phase4_real.py`, the Phase 4 gate's own
+verification/check tooling, calls it today, while
 `engine/v2/ops/native_parity_report.py` imports it too but currently has
 only test callers of its own, not a production one — see
 `engine/v2/ops/ARCHITECTURE.md` for that detail. `compare_records`
