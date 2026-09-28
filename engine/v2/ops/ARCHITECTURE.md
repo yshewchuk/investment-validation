@@ -824,7 +824,11 @@ network, or database access.
   or an `int >= 1` — each refused before any I/O the moment it is
   malformed. `None`/`None` is a valid, meaningful request (a manual/ad-hoc
   invocation with no live job attempt behind it), not merely an omitted
-  default, and both set is the other valid shape. The two fields ARE then
+  default — but only for a DIRECT, standalone, non-job call into
+  `run_forward_calendar_refresh` that is never reached through the job
+  scheduler; the job-dispatched path refuses that same pair instead (see
+  the staged-document paragraph at the end of this item). Both set is the
+  other valid shape. The two fields ARE then
   cross-checked against each other
   (`engine.v2.ops.lifecycle.validated_attempt_fence_pair`,
   Opus gate finding on #55): exactly one set is refused up front, before
@@ -860,6 +864,21 @@ network, or database access.
   function (its own call site and tests are unchanged)
   (`tests/test_v2_ops_computed_moves_store.py::test_run_computed_moves_refresh_refuses_fence_set_without_attempt_id`/
   `::test_run_computed_moves_refresh_refuses_attempt_id_set_without_fence`).
+
+  The job-dispatched path — `incremental_data._staged_forward_calendar_attempt`,
+  the staged-document reader called only from the `forward_calendar_refresh`
+  loader callback (never by a direct, standalone caller) — always fails
+  closed instead: a missing or unreadable staged document, malformed JSON, a
+  document that is not a JSON object, a missing or explicitly null
+  `attempt_id` or `fence`, a blank or non-string `attempt_id`, or an invalid
+  `fence` (a `bool`, a non-`int`, or an `int` less than 1) is each refused
+  as `INVALID_REQUEST` before the store is ever called.
+  `Claim.attempt_id`/`Claim.fence` are always real values for a real
+  scheduled job, so a staged document lacking either one indicates a broken
+  or tampered staging step, not a legitimate manual request — which is why
+  only the DIRECT, non-job call described above may pass
+  `attempt_id=None, fence=None` as its deliberate, meaningful "skip the
+  fence check" request.
 - **`nightly.submit_computed_moves_refresh_if_ready`'s own failure semantics
   for `computed_moves_refresh` (Part 4, revised after Opus BLOCK(3))** —
   R1 missing input: no open catalog connection, no native `"refresh"` job
