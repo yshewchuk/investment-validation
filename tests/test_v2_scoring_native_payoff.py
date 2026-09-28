@@ -13,6 +13,8 @@ only this test file does.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -29,6 +31,7 @@ from engine.payoff import (
 )
 from engine.payoff import runup_payoff_design as legacy_runup_payoff_design
 from engine.v2.contracts import ScoreRequest
+from engine.v2.models import MODEL_READY, ArtifactMember, ModelBinding
 from engine.v2.scoring import application, native_payoff, stages
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
 
@@ -1554,3 +1557,174 @@ def test_surface_payoff_document_rounds_coefficients_to_8dp():
         name: round(value, 8)
         for name, value in zip(native_payoff.RUNUP_TERMS, raw)
     }
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-28 issue #94: the forecast and model stages must use the RAW D14
+# move, and the published move must carry exactly one days/14 scale.
+# ---------------------------------------------------------------------------
+
+
+def test_str_runup_days_before_print_7_scales_once_and_agrees_across_paths():
+    """The local (non-frozen) STR-RUNUP path must publish the forecast
+    model's raw D14 move scaled by days_before_print/14 exactly once, while
+    the model stage consumes the unscaled raw D14 value -- never a value
+    that was already scaled (the issue #94 double-scale defect).
+
+    ``_runup_bundle``'s default runup-move point is 0.0, which cannot tell a
+    single scale from a double scale (0.0 * 0.5 == 0.0 * 0.5 * 0.5), so this
+    test overrides ONLY that point to 8.0 -- the same raw D14 the frozen-path
+    fixture carries in tests/test_v2_scoring_runup_frozen.py -- and supplies
+    the runup-move slot's zero-residual rows in the same shape as
+    ``_ZERO_MODEL_RESIDUAL_ROWS``, with ``"prediction"`` matching that 8.0
+    point estimate (no sibling runup-move zero-residual constant exists in
+    this file; the driver slot's own constant keeps its 7.0 prediction).
+    """
+    bundle = _runup_bundle(
+        forecast_recipes={
+            "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+            "runup_move_prediction": {"intercept": 8.0, "coefficients": {}},
+        },
+        runup_move_residual_rows=[{"prediction": 8.0, "residual": 0.0}],
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    # The raw D14 companion is published under its own name, unscaled.
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    # The published move is 8.0 * (7 / 14) == 4.0: scaled exactly once.
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
+    # The model-stage bands come from the zero-variance runup-move draws:
+    # the raw D14 point (8.0) plus a zero residual draw, horizon-scaled once
+    # by days/14 == 0.5 -> 4.0. The double-scale defect would yield 2.0.
+    assert record.resolved_request["runup_move_p10"] == pytest.approx(4.0)
+    assert record.resolved_request["runup_move_p90"] == pytest.approx(4.0)
+
+
+def test_str_runup_days_before_print_from_feature_vector_scales_once():
+    """The local (non-frozen) STR-RUNUP path must source
+    ``days_before_print`` through the facts merge, not from ``values``
+    alone: this reproduces the Opus gate round-3 finding that the real
+    nightly builder supplies ``days_before_print`` only via a SourceBundle's
+    ``feature_vector`` (landing in ``inputs.features["model_inputs"]``),
+    never in ``context``, so the guard's own lookup must see it there.
+
+    Identical to ``test_str_runup_days_before_print_7_scales_once_and_agrees_across_paths``
+    except the day count is supplied ONLY through the feature vector, with a
+    context override that explicitly deletes ``days_before_print`` so the
+    guard cannot pass via ``inputs.context`` and defeat the regression.
+    """
+    bundle = _runup_bundle(
+        context={
+            "ticker": "AAA", "event_date": "2026-09-16", "entry_date": "2026-09-16",
+            "exit_date": "2026-09-17", "expiry": "2026-09-18", "spot": 100.0,
+            "strike": 100.0,
+        },
+        feature_vector={"days_before_print": 7.0},
+        forecast_recipes={
+            "driver_prediction": {"intercept": 7.0, "coefficients": {}},
+            "runup_move_prediction": {"intercept": 8.0, "coefficients": {}},
+        },
+        runup_move_residual_rows=[{"prediction": 8.0, "residual": 0.0}],
+    )
+    inputs = build_native_score_inputs(bundle)
+    record = application.score_one(_runup_request(), inputs)
+
+    # The raw D14 companion is published under its own name, unscaled.
+    assert record.forecasts["runup_move_raw_d14"] == pytest.approx(8.0)
+    # The published move is 8.0 * (7 / 14) == 4.0: scaled exactly once.
+    assert record.forecasts["runup_move_prediction"] == pytest.approx(4.0)
+    # The model-stage bands come from the zero-variance runup-move draws:
+    # the raw D14 point (8.0) plus a zero residual draw, horizon-scaled once
+    # by days/14 == 0.5 -> 4.0. The double-scale defect would yield 2.0.
+    assert record.resolved_request["runup_move_p10"] == pytest.approx(4.0)
+    assert record.resolved_request["runup_move_p90"] == pytest.approx(4.0)
+
+
+def test_str_runup_live_executor_produces_raw_d14_and_scaled_move_once():
+    """The live Tier-4/frozen-model executor path
+    (``application._frozen_stage_executors``) backing the ``runup_move``
+    role must register the raw D14 target and the published scaled target as
+    two separate executors over one artifact output (8.0): the raw target
+    stays 8.0, the published one is scaled by days/14 == 7/14 exactly once
+    -> 4.0, never a relabeled 8.0 and never a second 0.5 factor (2.0)."""
+    binding = ModelBinding(
+        binding_id="b-runup", model_id="runup_move_synthetic",
+        role="runup_move", strategy_id="*",
+        decision_clock_id="legacy.decision_offset.0",
+        adapter="joblib-estimator.v1",
+        feature_order=("or_implied", "iv30"),
+        output_names=("prediction",),
+        members=(ArtifactMember(
+            name="estimator", path="b-runup.joblib",
+            content_hash="sha256:deadbeef"),),
+    )
+    release = SimpleNamespace(release_id="rel-runup", bindings=(binding,))
+
+    # Adapted from tests/test_v2_scoring_frozen_tier4_adapter.py's calling
+    # convention: that file passes inference=None because it only exercises
+    # refusal paths, so this test supplies an `infer` double yielding 8.0.
+    def infer(release, request):
+        return SimpleNamespace(
+            status=MODEL_READY,
+            release_id=release.release_id,
+            binding_id=binding.binding_id,
+            model_id=binding.model_id,
+            output_names=binding.output_names,
+            predictions=((8.0,),),
+            artifact_hashes=tuple(m.content_hash for m in binding.members),
+            reason_codes=(),
+        )
+
+    executors, _ = application._frozen_stage_executors(
+        (binding,), SimpleNamespace(infer=infer), release, 7.0,
+    )
+
+    assert "runup_move_raw_d14" in executors
+    assert "runup_move_prediction" in executors
+
+    facts = {"or_implied": 1.0, "iv30": 1.0}
+    raw = executors["runup_move_raw_d14"].predict(facts)
+    scaled = executors["runup_move_prediction"].predict(facts)
+    assert raw["runup_move_raw_d14"] == pytest.approx(8.0)
+    assert scaled["runup_move_prediction"] == pytest.approx(4.0)
+
+
+def test_str_runup_live_executor_raw_d14_stays_negative_unclamped():
+    """The raw D14 target must never be clamped even though the published
+    target is; a negative model output makes this observable."""
+    binding = ModelBinding(
+        binding_id="b-runup", model_id="runup_move_synthetic",
+        role="runup_move", strategy_id="*",
+        decision_clock_id="legacy.decision_offset.0",
+        adapter="joblib-estimator.v1",
+        feature_order=("or_implied", "iv30"),
+        output_names=("prediction",),
+        members=(ArtifactMember(
+            name="estimator", path="b-runup.joblib",
+            content_hash="sha256:deadbeef"),),
+    )
+    release = SimpleNamespace(release_id="rel-runup", bindings=(binding,))
+
+    def infer(release, request):
+        return SimpleNamespace(
+            status=MODEL_READY,
+            release_id=release.release_id,
+            binding_id=binding.binding_id,
+            model_id=binding.model_id,
+            output_names=binding.output_names,
+            predictions=((-3.0,),),
+            artifact_hashes=tuple(m.content_hash for m in binding.members),
+            reason_codes=(),
+        )
+
+    executors, _ = application._frozen_stage_executors(
+        (binding,), SimpleNamespace(infer=infer), release, 7.0,
+    )
+
+    assert "runup_move_raw_d14" in executors
+    assert "runup_move_prediction" in executors
+
+    facts = {"or_implied": 1.0, "iv30": 1.0}
+    assert executors["runup_move_raw_d14"].predict(facts)["runup_move_raw_d14"] == pytest.approx(-3.0)
+    assert executors["runup_move_prediction"].predict(facts)["runup_move_prediction"] == pytest.approx(0.0)
