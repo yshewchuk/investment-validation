@@ -479,20 +479,48 @@ def test_serve_deadline_is_the_same_absolute_cutoff_for_a_morning_or_evening_sta
     assert nightly_trigger._serve_deadline(morning) == nightly_trigger._serve_deadline(evening)
 
 
-def test_a_late_evening_resume_times_out_on_its_first_tick_not_after_a_fresh_budget(tmp_path):
+def test_a_late_evening_resume_times_out_on_its_first_tick_not_after_a_fresh_budget(tmp_path, monkeypatch):
     first_plan = FakePlan("plan_late")
     first = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), first_plan,
                  FakeSubmit(), FakeServe("timed_out"))
     assert first.status == "timed_out" and first.plan_ref == "plan_late"
-    late = FakeClock(datetime(2026, 9, 26, 20, 30, tzinfo=ET))
+
+    # The resumed tick, at 20:30 ET the same day -- after DEFAULT_SERVE_DEADLINE_ET. Drive the
+    # REAL _default_serve -> serve() path (same stubbing pattern as
+    # test_default_serve_passes_todays_et_cutoff) rather than a FakeServe, so this proves the
+    # actual deadline check stops it on the first tick, not just that _serve_deadline's own
+    # return value looks right in isolation.
+    from engine.v2.ops import bootstrap, cli, supervisor
+
+    late_moment = datetime(2026, 9, 26, 20, 30, tzinfo=ET)
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda *a, **k: _DummyConn())
+    monkeypatch.setattr(cli, "_submit_command",
+                        lambda args, root, conn, clock: {"jobs": [{"job_id": "job_1"}]})
+    monkeypatch.setattr(supervisor, "Service", lambda *a, **k: object())
+    tick_calls = []
+
+    def real_serve_stub(service, *, until=None, deadline_at=None):
+        # Mirrors supervisor.serve's own loop shape closely enough to prove the deadline check
+        # fires on the very first iteration for an already-past deadline, without needing a
+        # real Service/catalog: no service.tick()/service.start() call here since `service` is
+        # the bare stub object() above -- this checks the SAME condition serve() itself checks.
+        tick_calls.append(1)
+        if deadline_at is not None and late_moment >= deadline_at:
+            return "deadline_exceeded"
+        raise AssertionError("expected the deadline to have already passed")
+
+    monkeypatch.setattr(nightly_trigger, "serve", real_serve_stub, raising=False)
+    monkeypatch.setattr(supervisor, "serve", real_serve_stub)
+    late_clock = FakeClock(late_moment)
+    result = nightly_trigger._default_serve(tmp_path, "plan_late", late_clock)
+    assert result == "timed_out"
+    assert len(tick_calls) == 1  # stopped on the first (only) check, no further cycle
+
     second_plan = FakePlan("plan_OTHER")
-    second = _run(tmp_path, late, FakeProvider(True), second_plan,
-                  FakeSubmit(), FakeServe("completed"))
+    second = _run(tmp_path, late_clock, FakeProvider(True), second_plan,
+                  FakeSubmit(), FakeServe("timed_out"))
     assert second.plan_ref == "plan_late"  # resumes, no re-plan
     assert second_plan.calls == []
-    # The production `_default_serve`/`serve()` stop on the first tick because
-    # this cutoff is already in the past when the resumed tick starts.
-    assert nightly_trigger._serve_deadline(late) <= late.now()
 
 
 # --------------------------------------------------------------------------

@@ -1582,40 +1582,54 @@ retry, transaction, partial write, idempotency).
   `nightly_trigger._default_serve` now computes
   `deadline_at = _serve_deadline(clock)`, a new helper returning an
   ABSOLUTE ET wall-clock cutoff on TODAY's calendar date (`clock.now()`'s
-  own ET date, not the as-of or a duration from when this particular call
-  started): `datetime.combine(clock.now(ET).date(),
-  DEFAULT_SERVE_DEADLINE_ET, tzinfo=ET)` (`DEFAULT_SERVE_DEADLINE_ET =
-  "20:00"`, a new module-level constant next to `DEFAULT_DEADLINE_ET` —
-  **this repo's own judgment call, not a measured or externally specified
-  bound**, the same kind of call `_COMPUTED_MOVES_BACKOFF_SECONDS` already
-  documents this way: 1.5 hours of margin before the legacy cron's 21:30
-  ET start). Deliberately an ABSOLUTE same-day cutoff, not a duration from
-  when `serve` happened to start: a duration-based deadline (this PR's
-  first draft used `clock.now() + timedelta(hours=12)`) still let a
-  RESUMED `"timed_out"` serve starting late in the day (say, an
-  18:30 ET timer tick after an earlier timeout) claim a fresh 12-hour
-  budget of its own, reaching past 21:30 ET — the exact hole a CodeRabbit
-  review on this PR found. Because `_serve_deadline` reads `clock.now()`'s
-  OWN date every time it is called, not the plan's `as_of`, every same-day
-  call to `_default_serve` — the first one and every resumed one — computes
-  the IDENTICAL 20:00 ET cutoff, so no number of same-day resumes can ever
-  push the lock-holding past that cutoff (a resume ticking at 20:30, after
-  the cutoff has already passed, computes a `deadline_at` already in the
-  past, so `serve` returns `"deadline_exceeded"` after its very first tick
-  rather than doing another cycle of real work — still resumable, never a
-  wedge). This still assumes the resumed call happens on the SAME calendar
-  day the retry window opened on, which is the only day `main`'s own
-  `default_as_of` will ever ask about this `as_of` again (§ the
-  `run_trigger` docstring's own window description) — a manually-invoked
-  `run_trigger` call for a stale `as_of` on a LATER calendar day is outside
-  the trigger's own normal (`main`-driven) call path and is not covered by
-  this same-day reasoning. `serve`'s own `until=lambda:
-  _jobs_terminal(...)` argument is unchanged. A `"deadline_exceeded"`
-  outcome makes `_default_serve` return the new sentinel `"timed_out"`
-  instead of `"completed"`/`"failed"` — the in-process jobs are left
-  exactly where the supervisor's own recovery already leaves an
-  interrupted attempt (`recovery.py`, unchanged by this PR); nothing here
-  cancels or force-fails them.
+  own ET date, not the as-of, and not a duration from when this particular
+  call started): `datetime.combine(clock.now().astimezone(ET).date(),
+  _boundary(DEFAULT_SERVE_DEADLINE_ET), tzinfo=ET)` — `_boundary` (already
+  used to parse `DEFAULT_WINDOW_START_ET`/`DEFAULT_DEADLINE_ET`) turns the
+  `"HH:MM"` string constant `DEFAULT_SERVE_DEADLINE_ET` into a
+  `datetime.time` before `datetime.combine`. `DEFAULT_SERVE_DEADLINE_ET`
+  is a new module-level constant next to `DEFAULT_DEADLINE_ET`, set with a
+  deliberate margin before the legacy cron's own evening start (this
+  repo's own judgment call, not a measured or externally specified bound
+  — the same kind of call `_COMPUTED_MOVES_BACKOFF_SECONDS` already
+  documents this way; the exact clock times live in the constant itself
+  and in `ops/systemd/native-nightly-trigger.service`'s own
+  `TimeoutStartSec`, not repeated here). Deliberately an ABSOLUTE same-day
+  cutoff, not a duration from when `serve` happened to start: a
+  duration-based deadline (this PR's first draft used `clock.now() +
+  timedelta(hours=12)`) still let a RESUMED `"timed_out"` serve starting
+  late in the day claim a fresh full budget of its own, reaching into the
+  legacy cron's own window — the exact hole a CodeRabbit review on this PR
+  found. Because `_serve_deadline` reads `clock.now()`'s OWN date every
+  time it is called, not the plan's `as_of`, every call to `_default_serve`
+  on the same calendar date — the first one and every resumed one —
+  computes the IDENTICAL cutoff, so no number of resumes on that date can
+  push the lock-holding past it: a resume ticking after the cutoff has
+  already passed computes a `deadline_at` already in the past, and
+  `serve`'s own deadline check only runs right after `service.tick()`
+  returns (before the next tick, never mid-tick) — so such a resume stops
+  at the very next post-tick check rather than running a further cycle of
+  real work, still resumable, never a wedge. A tick already in flight when
+  the cutoff arrives is NOT interrupted mid-tick — `serve` cannot guarantee
+  the lock is released AT the cutoff itself, only at the next check after
+  the CURRENT tick returns; a tick that never returns at all is exactly
+  what the systemd `TimeoutStartSec` backstop below exists for. This
+  reasoning does not depend on the resume happening on the SAME calendar
+  day the retry window originally opened on: `default_as_of` skips
+  non-trading days (weekends, holidays), so `main`'s own normal call path
+  CAN legitimately ask about the same `as_of` again several calendar days
+  later (e.g. a Friday `as_of` whose Saturday window went unresolved is
+  still the answer `default_as_of` gives on the following Monday, since no
+  trading day falls between them) — `run_trigger`'s resume branch (below)
+  does not recheck the original retry window in that case either, and
+  `_serve_deadline` simply computes THAT later day's own cutoff, which is
+  still always ahead of that same day's own legacy cron start. `serve`'s
+  own `until=lambda: _jobs_terminal(...)` argument is unchanged. A
+  `"deadline_exceeded"` outcome makes `_default_serve` return the new
+  sentinel `"timed_out"` instead of `"completed"`/`"failed"` — the
+  in-process jobs are left exactly where the supervisor's own recovery
+  already leaves an interrupted attempt (`recovery.py`, unchanged by this
+  PR); nothing here cancels or force-fails them.
 - **R6, idempotency — a timeout resumes the SAME plan, it never re-plans.**
   `"timed_out"` is a new member of `STATUSES` and of `RESUME_STATUSES`
   (alongside `"submitting"`/`"submitted"`/`"error"`): a receipt recorded
@@ -1648,8 +1662,9 @@ retry, transaction, partial write, idempotency).
   counts consecutive `"error"` outcomes (a separate counter namespace:
   a `"timed_out"` streak and an `"error"` streak never accumulate into
   each other's count, since they are only ever incremented from a prior
-  receipt of the SAME status). At `MAX_CONSECUTIVE_ERRORS` (3) consecutive
-  timeouts the receipt becomes `"failed"` (terminal) instead of another
+  receipt of the SAME status). At `MAX_CONSECUTIVE_ERRORS` consecutive
+  timeouts (the same small, fixed constant `_failure` already uses for
+  consecutive `"error"`s) the receipt becomes `"failed"` (terminal) instead of another
   `"timed_out"` — `error_count` carries the streak length onto that
   terminal receipt, same as `_failure`'s own `"failed_setup"` transition.
   `error_count` is state internal to this module's own idempotency record;
@@ -1705,11 +1720,10 @@ retry, transaction, partial write, idempotency).
   forever.
 - **Backstop, outside this process.** `ops/systemd/native-nightly-trigger.service`
   (not installed or enabled by this PR — this unit has no production
-  caller yet) gains `TimeoutStartSec=21h`, set comfortably above the worst
+  caller yet) gains a `TimeoutStartSec`, set comfortably above the worst
   case a single `Type=oneshot` invocation can ever legitimately run: the
-  retry window's earliest possible open (00:00 ET) through
-  `DEFAULT_SERVE_DEADLINE_ET` (20:00 ET) is 20 hours, plus room for
-  probe/plan/submit overhead, as a backstop for the case the in-process
+  retry window's earliest possible open through `DEFAULT_SERVE_DEADLINE_ET`,
+  plus room for probe/plan/submit overhead, as a backstop for the case the in-process
   deadline itself never gets checked at all (the process wedged somewhere
   `serve`'s own tick loop never resumes,
   e.g. inside a blocking call the deadline check never regains control
