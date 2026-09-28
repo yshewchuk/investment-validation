@@ -343,6 +343,41 @@ through `read_chains_for_years`, not directly) keep their existing
 interfaces — only the underlying scan is now bounded and split, so each
 keeps working, rather than raising, against a production-size snapshot.
 
+Routing `trades` through `_scan.read_table` for the first time (it was
+previously read with one unbounded `DataQuery`, so `_scan.py`'s splitting
+never applied to it) exposed two defects in `_scan.py` itself that this PR
+also fixes, since they are reachable only because of this delegation, not
+pre-existing for any table this PR's diff does not touch (`option_chains`/
+`earnings_events`, whose partition column and observation-time column are
+the same column, so neither defect can arise for them):
+
+- **Cross-partition duplicate rows.** `_scan_partition`'s month/day scans
+  used to carry only the caller's `key_filter` and a time-interval bound
+  derived from ONE partition's own fragment records — no predicate
+  restricted a scan to that partition's own key. A `trades` row's
+  `entry_date` can fall in a different calendar year than its own `year`
+  partition (a trade entered just after its earnings event crossed a year
+  boundary); two partitions whose derived time bounds straddle that
+  boundary could each return the same row, and `read_table`'s `pd.concat`
+  across partitions then duplicated it. `_scan_partition` now builds a
+  `KeyPredicate` from `contract.partition_columns` and the partition's own
+  key (`_partition_filter`) and carries it into every scan alongside the
+  caller's `key_filter`.
+- **Null observation-column rows silently dropped.** A `TimeInterval` can
+  never match a NULL value, and `trades.entry_date` (the contract's
+  `observation_time_column`) is nullable — a normal state for a trade with
+  no entry. The old code always split by calendar month/day regardless of
+  whether a partition actually needed it, so even a small, well-under-cap
+  partition lost its null-`entry_date` rows. `_scan_partition` now attempts
+  ONE full-partition scan first (scoped by the partition-key predicate, no
+  time interval), which returns every row including null-valued ones; only
+  on `RESULT_LIMIT_EXCEEDED` does it fall back to the month/day split, and
+  only when the observation column is NOT nullable (`_observation_column_
+  is_nullable`) — a nullable column that still needs splitting refuses
+  `RESULT_LIMIT_EXCEEDED` instead of silently dropping its null rows (that
+  table needs a different split strategy before it can exceed the cap,
+  tracked as a future concern, not solved here).
+
 ## Invariants
 
 - One `resolve`/`resolve_pinned` call per run; the resulting `snapshot_id`
