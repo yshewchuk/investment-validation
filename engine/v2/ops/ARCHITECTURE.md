@@ -2227,6 +2227,57 @@ attempt, and give `engineering_gate_effect` a renewal point to call:**
   `running`, `starting` and the rest are exactly as documented above; this
   fix only adds renewal CALLS at points that previously had none.
 
+**Round 2 (CodeRabbit, five gaps in the above, all fixed):**
+
+- **Renewal only ran BETWEEN files, not DURING one.** `manifest_files`'s
+  hash pass and `copy_read_set`'s copy pass each called `keepalive()` once
+  before starting a file, but a SINGLE file large enough to make either
+  `_digest` or the copy itself exceed `LEASE_SECONDS` alone got no renewal
+  call at all during that one operation. `_digest` and `fingerprints.
+  file_hash` (a second, identical chunked-sha256 implementation used by
+  `store_barrier.pin_files`) now call `keepalive` once per 1MB chunk, the
+  same chunk size their `hashlib.sha256().update()` loop already reads in.
+  `copy_read_set`'s `shutil.copyfile` (an opaque, single C-level call with
+  no per-chunk hook) is replaced with a manual chunked read/write loop at
+  the same 1MB granularity, calling `keepalive` once per chunk — the
+  surrounding symlink/ancestor checks, the post-copy `_digest` verification
+  and the final `chmod(0o444)` are unchanged.
+- **`_pin_read_set`'s OWN hashing pass had no renewal hook at all.**
+  `Service._launch` calls `_pin_read_set` (→ `store_barrier.pin_read_set` →
+  `store_barrier.pin_files` → `fingerprints.file_hash`) BEFORE
+  `_populate_legacy_staging`/`copy_read_set` even starts — a second,
+  separate hash pass over the same declared read set that round 1 never
+  touched. `pin_files`/`pin_read_set` now accept the same optional
+  `keepalive` parameter (forwarded into `file_hash`, and called once per
+  file in `pin_files`'s own loop); `Service._pin_read_set` passes
+  `keepalive=self._renew_other_leases` into its `pin_read_set` call.
+- **`run_engineering_gate`'s poll loop ignored the remaining deadline.**
+  Each `proc.communicate(timeout=poll_interval)` waited the FULL
+  `poll_interval` regardless of how much of the overall `timeout` was left,
+  so a child that exited just past the deadline but within one
+  `poll_interval` window returned normally instead of timing out — a
+  regression from the original blocking `subprocess.run(timeout=timeout)`,
+  which enforced the exact deadline. Each poll now waits at most
+  `min(poll_interval, deadline - now)`, going straight to the
+  kill-and-raise branch once that remainder is non-positive, so the
+  overall deadline is enforced to the same precision as before.
+- **A `keepalive()` failure orphaned the gate subprocess.** If `keepalive()`
+  raised (e.g. `LEASE_LOST`, because THIS attempt itself lost its lease
+  mid-gate-run) partway through the poll loop, that exception escaped
+  `run_engineering_gate` without killing or reaping `proc` —
+  `Popen.communicate()` never terminates the child for the caller. The poll
+  loop now kills and reaps the subprocess in a cleanup path that also runs
+  when `keepalive()` raises, before that exception propagates; a normal
+  exit or a genuine timeout are unaffected.
+- **The shared renewal throttle advanced even on a failed pass.**
+  `_renew_other_leases` set its shared `_other_leases_renewed_at` timer
+  BEFORE attempting any renewal, so a transient `heartbeat()` failure for a
+  sibling with almost no lease left still suppressed the NEXT renewal
+  attempt for a full `LEASE_SECONDS / 4` — potentially past that sibling's
+  real expiry. The timer now advances only when every renewal in the pass
+  succeeds; any failure leaves it unchanged, so the very next call retries
+  the whole batch immediately instead of waiting out the throttle window.
+
 ### `nightly_trigger.py` (issue #103: a bounded `serve`, never an unbounded hold on the legacy lock)
 
 `nightly_trigger.py`'s own module docstring already describes its
