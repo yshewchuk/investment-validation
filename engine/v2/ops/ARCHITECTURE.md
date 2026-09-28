@@ -474,23 +474,23 @@ this doc's own Diagrams section already names (see below).
 `submit_native_score_batch_shadow_if_ready` gathers three things before it
 ever builds a `JobSpec`:
 
-- **The release binding (`#59`/PR-1).** A cheap, uncached existence check:
-  `engine.v2.models.deployment.production_release_root()`
-  (`deployment.py:142`), which
+- **The release binding (`#59`/PR-1).** Two cheap, uncached calls, both run
+  before anything expensive: `engine.v2.models.deployment.production_release_root()`
+  (`deployment.py:142`) for the configured path, and
   `engine.v2.scoring.release_bindings.resolve_production_release_binding()`
-  (`release_bindings.py:195`) wraps and hash-verifies. `MissingReleaseRoot`/
-  `NoCurrentRelease`/`ModelNotReady` here is R1 (missing input): the tick
-  returns without submitting anything (see "Failure semantics" below),
-  exactly like `_computed_moves_identity_or_none`'s own cheap checks. Only
-  the resolved root's path, `str(production_release_root())`, crosses into
-  `parameters["release_root"]` — never the `ScoringReleaseBinding` object
-  itself, which `run_native_score_batch_worker` (`native_score_batch.py:430`)
-  independently re-resolves via
+  (`release_bindings.py:195`) to verify that path actually has something
+  `DEPLOYED` and hash-verified — the sidecar keeps only the path string,
+  `str(production_release_root())`, for `parameters["release_root"]`, and
+  discards the `ScoringReleaseBinding` object `resolve_production_release_binding()`
+  returns (it carries no root path of its own; only resolved catalog
+  state). `run_native_score_batch_worker` (`native_score_batch.py:430`)
+  never receives that object either — it independently re-resolves via
   `resolve_release_binding(parameters["release_root"])`
   (`release_bindings.py:148`, called at `native_score_batch.py:447`),
   matching `ScoringReleaseBinding`'s own documented contract that a second
   `resolve_release_binding` call always re-verifies fresh, never reuses a
   cached instance across a process boundary.
+
   `production_release_root()` reads the `MODEL_RELEASE_ROOT` environment
   variable directly, fresh on every call (`deployment.py:85`, `:161`) —
   never from `.env`, a config file, or any cached value. The nightly
@@ -498,17 +498,27 @@ ever builds a `JobSpec`:
   `Service.tick` runs in) must have `MODEL_RELEASE_ROOT` set in ITS OWN
   process environment before it starts; this design adds no second way to
   configure it. Left unset or blank, `production_release_root()` itself
-  raises `MissingReleaseRoot` (`deployment.py:110`) before any release is
-  even looked up — a pure environment-configuration failure, one layer
-  below release resolution. A `MODEL_RELEASE_ROOT` that IS set but names a
-  root with nothing `DEPLOYED` there is a DIFFERENT failure, one layer up:
-  `resolve_production_release_binding()`/`resolve_release_binding()`
-  raises `NoCurrentRelease` instead (`release_bindings.py:64-65`, "R1(a):
-  nothing has ever been promoted at this release root") — a configured but
-  empty release store, not a missing/blank env var. Both are R1 above,
-  caught the same way by this sidecar, and legacy scoring, which never
-  calls `production_release_root`/`resolve_release_binding` at all, is
-  completely unaffected either way.
+  raises `MissingReleaseRoot` (`deployment.py:110`) — the sidecar's own
+  call to it sees this directly. `resolve_production_release_binding()`
+  catches that SAME exception from its own internal call to
+  `production_release_root()` and re-raises it as
+  `ModelNotReady("release_root", ...)` (`release_bindings.py:206-208`); a
+  root that IS configured but names nothing `DEPLOYED` is a different,
+  un-wrapped failure one layer up, raised by the internal
+  `resolve_release_binding()` call `resolve_production_release_binding()`
+  makes once it has a root (`release_bindings.py:64-65`, `:148`, `:209`,
+  `NoCurrentRelease`, "R1(a): nothing has ever been promoted at this
+  release root") — a configured but empty release store, not a
+  missing/blank env var.
+
+  All three (`MissingReleaseRoot`, `ModelNotReady`, `NoCurrentRelease`) are
+  R1 below, and — CodeRabbit round 3, real finding — all three are checked
+  BEFORE the identity memo/backoff below is ever touched, so a release
+  promoted mid-session is picked up on the very next tick, never locked out
+  by an attempt count exhausted earlier for an unrelated reason (see
+  "Failure semantics" below, R2, for the full account). Legacy scoring,
+  which never calls `production_release_root`/`resolve_release_binding` at
+  all, is completely unaffected either way.
 - **Per-event raw rows (`#48`/PR-2, `#67`).** The builder enumerates
   `native_board_universe.board_requests(as_of, horizon_days, tickers,
   events_table)` (`native_board_universe.py:198`) against the SAME pinned
@@ -912,16 +922,26 @@ addressed as `job_<id>#score` via `_job_output`, `nightly.py:180-188`).
   `events.json` by POSITION once any row has refused — the two arrays are
   then different lengths with no fixed offset between them (CodeRabbit
   round 1, real finding — a prior draft of this design recommended exactly
-  that positional zip; it is wrong and is corrected here). **Left for the
-  parity job's own re-plan, not designed here, but a real correctness gap,
-  not an optional nicety**: `run_native_score_batch_worker` must carry each
-  row's `BoardRequest` key through to its own output — either a keyed
-  mapping (`{"<board request key>": <ScoreRecord document>}`) in place of
-  `records.json`'s current bare list, or the key folded directly into each
-  `ScoreRecord` document — never a positional zip against `events.json`.
-  That is a change to `native_score_batch.py`'s own output contract
-  (`native_score_batch_records.v1.0`) and belongs to the PR that builds the
-  parity job, not this one.
+  that positional zip; it is wrong and is corrected here).
+
+  **Left for the parity job's own PR to implement, but specified here
+  precisely enough to build against without a second design pass**:
+  `run_native_score_batch_worker` changes `records.json`'s `records` field
+  from a bare array to a JSON object keyed by a canonical string form of
+  each row's `BoardRequest` — `f"{ticker}|{strategy}|{event_date.isoformat()}|{session}"`,
+  the SAME four fields, in the SAME order, `NightlyEventInputs.key`/
+  `NativeScoreBatchRowRefusal.as_document()`'s own `"key"` dict already
+  carries (`native_score_batch.py:56`, `:84-89`), just flattened into one
+  string because a JSON object's keys must be strings, never nested. (This
+  is a change to `native_score_batch.py`'s own output contract,
+  `native_score_batch_records.v1.0` — a new schema version — and to
+  `refusals.json` too, for the same key, so both files use one consistent
+  join key.) The parity job then reads `records.json` as `{board_request_key:
+  ScoreRecord document}` directly — no positional logic, no separate
+  `events.json` read needed to recover the key — and joins it against
+  whatever key legacy's own rows use by projecting THAT key down to the
+  same four fields (ticker, strategy, event_date, session), which every
+  legacy board row already carries under those or equivalent names.
 - **Namespace/authority.** Every one of these jobs is submitted under a
   `NamespacePolicy` scoped to `{"shadow"}` only, mirroring
   `_reconcile_computed_moves_refresh`'s own inline policy
@@ -1765,19 +1785,35 @@ function is never part of.
 
 - **R1 missing input.** No succeeded legacy `"score"` job for any session
   yet (`_native_score_batch_identity` returns `None`), no configured
-  production release (`deployment.production_release_root()` raising
-  `MissingReleaseRoot`, caught the same way `resolve_production_release_binding`
-  wraps it as `ModelNotReady("release_root", ...)`), or `board_requests`
-  returning empty for that session's pinned snapshot — each case returns
-  without submitting anything; there is no partial or synthetic-empty job.
+  production release (`resolve_production_release_binding()` raising
+  `ModelNotReady("release_root", ...)` for a missing/blank
+  `MODEL_RELEASE_ROOT`, or `NoCurrentRelease` for a configured root with
+  nothing `DEPLOYED`), or `board_requests` returning empty for that
+  session's pinned snapshot — each case returns without submitting
+  anything; there is no partial or synthetic-empty job.
 - **R2 cache.** Once a job exists under today's session's idempotency key,
   in any state, it is never rebuilt or resubmitted — the existence check
-  runs before any raw row is read or `events.json` is built. The release
-  binding itself is never cached across ticks: each tick that reaches that
-  point calls `resolve_production_release_binding`/`resolve_release_binding`
-  fresh, matching `ScoringReleaseBinding`'s own "no caching beyond this one
-  object" contract — a release promoted mid-session is picked up by the very
-  next tick's attempt, never a stale cached binding.
+  runs before any raw row is read or `events.json` is built. **A
+  release-unavailable outcome (`ModelNotReady`/`NoCurrentRelease`) is
+  checked BEFORE the identity memo/backoff below is touched at all, and
+  NEVER counts as one of its spent attempts** (CodeRabbit round 3, real
+  finding — a prior draft of this design inherited `computed_moves_refresh`'s
+  memo wholesale, which would have let release-unavailable outcomes exhaust
+  the same backoff schedule as a genuine build failure, silently locking an
+  unchanged `(as_of, scope_hash)` identity out for the rest of the session
+  even after a later promotion). This ordering is deliberate: release
+  resolution is cheap — one `os.environ` read plus a hash-verify, no
+  pandas, no `board_requests` enumeration — cheaper even than
+  `_native_score_batch_identity`'s own two `SELECT`s, so checking it every
+  tick, unconditionally, costs nothing the memo below exists to protect
+  against. The memo/backoff (mirroring `computed_moves_refresh`'s own,
+  `_COMPUTED_MOVES_MAX_ATTEMPTS`/`_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped)
+  engages ONLY once release resolution has already succeeded and the build
+  reaches the expensive `board_requests`/raw-row-staging step — the actual
+  work that schedule exists to bound. A release promoted mid-session is
+  therefore picked up on the VERY NEXT tick, unconditionally, never blocked
+  by an attempt count exhausted earlier in the session for an unrelated
+  reason.
 - **R3 retry.** This function retries nothing itself; the submitted job's
   own `RetryPolicy("bounded", 2, (5, 30))` (`stages.py:283`) covers worker
   attempts, and a session whose key already exists — succeeded OR failed —
