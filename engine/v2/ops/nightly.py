@@ -72,11 +72,16 @@ def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:
             raise fail("VALIDATION_FAILED", "legacy parity row is not a mapping",
                        details={"index": index, "type": type(row).__name__})
     required = ("ticker", "strategy", "event_date")
+    delimiter_checked = ("ticker", "strategy")
     for index, row in enumerate(rows):
         for field_name in required:
             value = row.get(field_name)
             if not isinstance(value, str) or not value:
                 raise fail("VALIDATION_FAILED", "legacy parity row missing required field",
+                           details={"index": index, "field": field_name})
+            if field_name in delimiter_checked and "|" in value:
+                raise fail("VALIDATION_FAILED",
+                           "legacy parity row field contains the population key delimiter",
                            details={"index": index, "field": field_name})
     keys = [population_key(row) for row in rows]
     seen: dict[str, int] = {}

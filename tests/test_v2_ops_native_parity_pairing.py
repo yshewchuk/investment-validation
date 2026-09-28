@@ -70,6 +70,22 @@ def test_legacy_parity_rows_rejects_non_string_field():
     assert exc.value.problem.details["field"] == "ticker"
 
 
+def test_legacy_parity_rows_rejects_delimiter_in_ticker():
+    with pytest.raises(OpsError) as exc:
+        legacy_parity_rows({"rows": [{"ticker": "A|B", "strategy": "S",
+                                      "event_date": "2026-01-01"}]})
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.problem.details["field"] == "ticker"
+
+
+def test_legacy_parity_rows_rejects_delimiter_in_strategy():
+    with pytest.raises(OpsError) as exc:
+        legacy_parity_rows({"rows": [{"ticker": "A", "strategy": "S|T",
+                                      "event_date": "2026-01-01"}]})
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.problem.details["field"] == "strategy"
+
+
 def test_legacy_parity_rows_rejects_duplicate_key():
     with pytest.raises(OpsError) as exc:
         legacy_parity_rows({"rows": [
