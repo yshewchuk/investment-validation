@@ -4327,7 +4327,7 @@ this design adds no new auto-retry-past-a-failure logic).
   `deployment.current_pointer`'s own `release_id` starts with the literal
   prefix `"nightly-<as_of>-"`, AND the job catalog holds a `succeeded`
   `phase5_state_stage` job whose OWN `new_release_id` parameter equals that
-  exact `release_id` AND whose own `input_refs` are EXACTLY the six job ids
+  exact `release_id` AND whose own `dependency_job_ids` are EXACTLY the six job ids
   `submit_pool_nightly_training_if_ready` derives for this SAME `as_of` (the
   canonical `"nightly:<as_of>:pool_train:<state>"`-keyed jobs, looked up by
   those dedup keys — not merely present in the catalog, but matching, and
@@ -4347,18 +4347,18 @@ this design adds no new auto-retry-past-a-failure logic).
   because `new_release_id` is a function of `as_of` and `prior_release_id`
   ALONE, never of `training_job_ids` (see `new_release_id`'s own definition
   below), a manually submitted `phase5_state_stage` job that reused stale or
-  substituted `input_refs` — training outputs from a DIFFERENT cycle, never
+  substituted `dependency_job_ids` — training outputs from a DIFFERENT cycle, never
   this `as_of`'s own six jobs — could still mint the identical
   `new_release_id` and succeed, so a `new_release_id`-match alone would
   wrongly treat THAT as this cycle's genuine completion too, even though the
   automatic sidecar's own six `training` jobs for this `as_of` were never
   the ones actually used. Requiring the JOB's own `succeeded` checkpoint
-  AND its own recorded `input_refs` to equal this `as_of`'s canonical six,
+  AND its own recorded `dependency_job_ids` to equal this `as_of`'s canonical six,
   not merely an artifact's presence or an id string match, closes all three
   gaps with no new marker or mechanism: `phase5_state_stage` already reports
   failed/refused on any light-check failure (step 4's own text) and already
-  records its `input_refs` (this step's own text, next paragraph), so a
-  `succeeded` checkpoint with matching `input_refs` already means every
+  records its `dependency_job_ids` (this step's own text, next paragraph), so a
+  `succeeded` checkpoint with matching `dependency_job_ids` already means every
   light check passed against THIS `as_of`'s own training outputs, not
   someone else's.
 
@@ -4366,7 +4366,7 @@ this design adds no new auto-retry-past-a-failure logic).
   keyed to this `as_of` have `succeeded`; then submits ONE new job kind,
   `phase5_state_stage` (below), keyed
   `"nightly:<as_of>:pool_stage:<prior_release_id>"`, naming the six jobs'
-  own ids as its `input_refs` (their checkpointed outputs are what it
+  own ids as its `dependency_job_ids` (their checkpointed outputs are what it
   reads — see "Inputs" for the new kind) and `prior_release_id = `
   **whatever `deployment.current_pointer` names at THIS submission
   instant (already checked above to NOT be one of this `as_of`'s own
