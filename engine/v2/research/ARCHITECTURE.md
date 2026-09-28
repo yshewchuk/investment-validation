@@ -131,20 +131,28 @@ package). `polygon_fills.option_ticker` is likewise a verbatim copy of
 same reason: a v2 package may not import legacy code without a declared
 adapter.
 
-**Known duplication (pre-existing, not touched by this doc's change):**
-two independent snapshot-resolution modules exist side by side —
-`_scan.py` (used by `fill_quality.py`, `polygon_fills.py`,
-`signal_screen.py`) splits a bounded read into calendar-month/day intervals
-so a multi-million-row year partition (e.g. `option_chains`) never exceeds
-`maximum_result_rows` in one scan; `_snapshot.py` (used by `_chains.py`'s
-replay reads and `_trades_publish.py`'s build/reconcile reads) bounds a read
-by partition-key predicates only, with no time-interval splitting. Both
-were kept, under the same names, because a sibling in-flight branch
-(`worktree-agent-aa49bb24e5d746918`) already owned the name `_scan.py` for
-its own version when `_snapshot.py`'s functionality was needed — a
-naming collision avoidance, not a design intent to have two mechanisms.
-Tracked as a follow-up (issue #69); not fixed here because neither module
-changed in this PR.
+**Known duplication (narrowed by issue #107; issue #69 tracks the rest):**
+two independent snapshot-resolution modules still exist side by side —
+`_scan.py` (used directly by `fill_quality.py`, `polygon_fills.py`,
+`signal_screen.py`) and `_snapshot.py` (used by `_chains.py`'s replay reads
+and `_trades_publish.py`'s build/reconcile reads) — but they no longer
+duplicate the bounded-scan splitting itself: `_snapshot.read_table` used to
+bound a read by partition-key predicates only, with no time-interval
+splitting, which meant a multi-million-row year partition (e.g.
+`option_chains`) always raised `RESULT_LIMIT_EXCEEDED` against a
+production-size snapshot (issue #107). It now delegates the actual scan to
+`_scan.read_table`, which already splits a partition into calendar
+months/days on overflow — see "`_snapshot.read_table` splits like
+`_scan.py` (issue #107)" below for the exact delegation and what
+`_snapshot.py` still keeps of its own (partition-key resolution, its own
+no-partition refusal, its own empty-result frame shape). The two modules
+were originally kept under separate names because a sibling in-flight
+branch (`worktree-agent-aa49bb24e5d746918`) already owned the name
+`_scan.py` for its own version when `_snapshot.py`'s functionality was
+needed — a naming collision avoidance, not a design intent to have two
+mechanisms. Merging them into one module remains issue #69; not done here
+because doing so would change both modules' callers, well past this PR's
+one concern.
 
 Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The only consumers are the CLI
