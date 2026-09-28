@@ -761,7 +761,8 @@ def test_str_runup_dte_anchor_prefers_quote_date_over_entry_date():
         # entry_date alone is only 24 DTE from 2025-05-09 (too short), but
         # quote_date is 7 days earlier, making 2025-05-09 exactly 31 DTE --
         # long enough. If the code wrongly anchored on entry_date, this
-        # would refuse NO_EXPIRY_DTE_AT_LEAST instead of resolving.
+        # would silently pick 2025-05-16 instead (also >=30 DTE from
+        # entry_date), not refuse.
         "entry_date": "2025-04-15",
         "quote_date": "2025-04-08",
         "event_date": "2025-05-09",

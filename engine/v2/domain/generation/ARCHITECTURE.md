@@ -144,12 +144,13 @@ Raised exceptions:
   `first_post_event`: no listed expiry survives the event-date/session
   filter), `NO_CHAIN`/`COARSE_LADDER` (a put-ladder leg has no listed
   strike, or two legs collide on one contract), and, for STR-RUNUP only
-  (issue #95): `MISSING_ENTRY_DATE` (no `entry_date` captured),
-  `INVALID_ENTRY_DATE:<value>` (`entry_date` present but not an ISO date),
-  and `NO_EXPIRY_DTE_AT_LEAST:<threshold>` (no listed expiry reaches
-  STR-RUNUP's own minimum-DTE threshold, counted from `entry_date`; the
-  threshold itself is a strategy parameter, not documented here — see
-  `_resolve_first_dte_at_least` and legacy's `straddle_runup` factory).
+  (issue #95): `MISSING_ENTRY_DATE` (neither `quote_date` nor `entry_date`
+  captured), `INVALID_ENTRY_DATE:<value>` (an anchor date is captured but
+  not an ISO date), and `NO_EXPIRY_DTE_AT_LEAST:<threshold>` (no listed
+  expiry reaches STR-RUNUP's own minimum-DTE threshold, counted from
+  `quote_date` when captured, else `entry_date`; the threshold itself is a
+  strategy parameter, not documented here — see `_resolve_first_dte_at_least`
+  and legacy's `straddle_runup` factory).
   `GeometryRefusal` also surfaces from `price()` for a non-numeric/non-finite
   `fill_alpha` (via the shared `_finite_float` helper, same message shape as
   the sizing fields above) — a DIFFERENT exception type than the next bullet
