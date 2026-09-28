@@ -622,7 +622,11 @@ class Service:
         self._native_score_batch_memo's own real-identity attempt
         count), "no identity
         yet", and "already submitted" (a job exists under that key); the
-        last two clear self._native_score_batch_memo themselves."""
+        last two clear self._native_score_batch_memo themselves. A
+        successful lookup -- whatever it returns -- always resets
+        self._native_score_batch_lookup_memo to None, so a later failure
+        starts a fresh backoff sequence rather than resuming an old
+        one."""
         from engine.v2.ops.nightly import _native_score_batch_identity, _native_score_batch_key
         from engine.v2.ops.submission import job_id_for
 
@@ -644,6 +648,7 @@ class Service:
             self._report_native_score_batch_problem(exc)
             return None
         self._last_native_score_batch_problem = None
+        self._native_score_batch_lookup_memo = None
         if identity is None or exists:
             self._native_score_batch_memo = None
             return None
@@ -662,8 +667,9 @@ class Service:
         returns immediately and NEVER touches self._native_score_batch_memo's
         own attempt count. _native_score_batch_identity_or_none runs next,
         with its OWN dedicated identity: None memo bucket for a lookup
-        failure (CodeRabbit round 6: never conflated with a real identity's
-        build-attempt count). Only past both does this method reach the
+        failure, in self._native_score_batch_lookup_memo (CodeRabbit
+        round 6/7: never conflated with a real identity's build-attempt
+        count in self._native_score_batch_memo). Only past both does this method reach the
         SAME bounded backoff schedule _reconcile_computed_moves_refresh
         uses (_COMPUTED_MOVES_MAX_ATTEMPTS/_COMPUTED_MOVES_BACKOFF_SECONDS)
         to decide whether to attempt a build+submit this tick. Every

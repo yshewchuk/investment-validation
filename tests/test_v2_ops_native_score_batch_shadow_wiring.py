@@ -289,6 +289,34 @@ def test_submit_raises_when_snapshot_pinned_and_producer_missing(tmp_path, monke
             code_source=ROOT, clock=clock)
 
 
+def test_service_backs_off_one_attempt_when_snapshot_pinned_and_producer_missing(tmp_path, monkeypatch):
+    """CodeRabbit round 8: B2's own raise (above) must surface through
+    ``Service._reconcile_native_score_batch_shadow``'s catch/backoff, not
+    just through a direct ``submit_native_score_batch_shadow_if_ready``
+    call -- exactly one spent attempt, and ``not_before`` pushed into the
+    future, so the very next tick does not immediately retry and re-raise."""
+    conn, clock, _ = catalog(tmp_path)
+    score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
+    session, scope_hash = nightly._session_scope_from_score_key(score_key)
+    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+                        lambda conn: (session, scope_hash, True))
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-root")
+
+    service._reconcile_native_score_batch_shadow()  # must not raise
+
+    assert _native_score_batch_job_count(conn) == 0
+    memo = service._native_score_batch_memo
+    assert memo is not None
+    assert memo["identity"] == (session, scope_hash, True)
+    assert memo["attempts"] == 1
+    assert memo["not_before"] > 0
+    # the identity lookup itself succeeded this tick -- its own failure
+    # memo must be untouched (None), never conflated with this backoff.
+    assert service._native_score_batch_lookup_memo is None
+
+
 # --------------------------------------------------------------------------
 # Service's release-root gate
 # --------------------------------------------------------------------------
