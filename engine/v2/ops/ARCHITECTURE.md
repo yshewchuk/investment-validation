@@ -789,7 +789,8 @@ if plan_ref is None:
     try:
         readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
     except _HANDLED_FAILURES as exc:
-        return _failure(root, clock, as_of, None, exc, prior, snapshot_attempt=snapshot_attempt + 1)
+        bump = 1 if isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED" else 0
+        return _failure(root, clock, as_of, None, exc, prior, snapshot_attempt=snapshot_attempt + bump)
     if readiness == "not_yet":
         return _record(root, _receipt(
             clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet",
@@ -861,16 +862,24 @@ status transition:
   what they carry; they still carry the SAME value, for a caller
   inspecting the returned receipt, not because it changes anything
   persisted.)
-- **Bumped in exactly one place.** The `except _HANDLED_FAILURES` branch
-  above, `_ensure_shadow_snapshot`'s own raised terminal failure
-  (R1(b)/R1(c) below), passes `_failure` an explicit `snapshot_attempt=
-  snapshot_attempt + 1` — a NEW keyword-only parameter on `_failure`
-  (`=None`; every OTHER existing call site of `_failure` — the generic
-  `plan_fn`/`submit_fn`/`serve_fn` exception handling — omits it, so
-  `_failure` falls back to its own `prior.snapshot_attempt if prior is not
-  None else 0`, i.e. carried, not bumped: a `plan_fn`/`submit_fn` failure
-  says nothing about whether the shadow snapshot import job itself needs a
-  new identity).
+- **Bumped in exactly one place, and only for a terminal `INPUT_CHANGED`
+  refusal (round-1 CodeRabbit finding on PR-7b-2, real, Major).** The
+  `except _HANDLED_FAILURES` branch above passes `_failure` an explicit
+  `snapshot_attempt=snapshot_attempt + bump`, where `bump` is `1` only when
+  the caught exception is an `OpsError` with `code == "INPUT_CHANGED"` —
+  `_ensure_shadow_snapshot`'s own raised terminal failure (R1(b)/R1(c)
+  below) — and `0` for anything else `_HANDLED_FAILURES` also catches (a
+  transient `OSError`, say, from a catalog I/O hiccup). A transient failure
+  must not mint a new idempotency key: the import job already submitted
+  under the OLD `attempt`'s key (if any) may still be running or may have
+  already succeeded there, and bumping regardless would risk a duplicate
+  submission under a needless new key. `snapshot_attempt` is a NEW
+  keyword-only parameter on `_failure` (`=None`; every OTHER existing call
+  site of `_failure` — the generic `plan_fn`/`submit_fn`/`serve_fn`
+  exception handling — omits it, so `_failure` falls back to its own
+  `prior.snapshot_attempt if prior is not None else 0`, i.e. carried, not
+  bumped: a `plan_fn`/`submit_fn` failure says nothing about whether the
+  shadow snapshot import job itself needs a new identity).
 - **Its own give-up bound, closing gate finding 2 directly.** `_failure`'s
   give-up decision (`"failed_setup"` vs `"error"`) becomes an OR of two
   independent checks, not one: the EXISTING `count >= MAX_CONSECUTIVE_
@@ -1082,7 +1091,9 @@ status transition:
    the typed `INPUT_CHANGED` `OpsError` (non-retryable under THIS key only)
    `_submit_plan`'s existing `except _HANDLED_FAILURES` catches, routing
    into `_failure`
-   with `snapshot_attempt=snapshot_attempt + 1` (the `TriggerReceipt` fix
+   with `snapshot_attempt=snapshot_attempt + 1` — this IS the `INPUT_CHANGED`
+   case the mechanical bump rule above singles out, the only exception this
+   `except` block ever bumps for (the `TriggerReceipt` fix
    above) — which bumps `error_count` too (the ordinary give-up count, for
    `MAX_CONSECUTIVE_ERRORS`) AND the dedicated `snapshot_attempt`, so the
    NEXT `_submit_plan` entry for this `as_of` (if any, before `MAX_

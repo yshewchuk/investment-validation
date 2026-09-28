@@ -648,8 +648,11 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     ``cli._plan_command``/``pin_snapshot_inputs`` (PR-7b-3 adds that CAS check;
     this slice only threads the value through). ``expected_population`` is the
     operator's population document when present (``full_population`` derived
-    the universe from the same file); absent, the plan still carries the
-    full-run declaration and the refusal is ``ops submit``'s to make.
+    the universe from the same file); absent, ``universe``/``context`` are
+    both empty, and ``cli._snapshot_inputs``/``pin_snapshot_inputs`` now
+    refuse at PLAN time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
+    ``input_mode="snapshot"`` flip, this same absent-population case built a
+    plan successfully and the refusal was ``ops submit``'s to make instead).
     ``input_manifest`` and ``year_start``/``year_end`` are derived fresh from
     ``as_of`` on every call (the manifest is captured and written per-``as_of``
     rather than read from one fixed filename, and the year span mirrors
