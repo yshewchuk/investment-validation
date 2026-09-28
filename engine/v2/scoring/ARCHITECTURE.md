@@ -385,15 +385,8 @@ number. Before this fix, a frozen-sourced value was scaled once at capture
 and a second time by the model stage's own `native_payoff.scale_runup_move`;
 a live-local value was never scaled for publication at all.
 
-**`score_frozen`'s release-binding scope (issue #93, proposed design).**
-This section describes the design this PR proposes; as of this design
-commit, `score_frozen` still passes `release.bindings` (the WHOLE release,
-unfiltered) as `executor_bindings` — the defect issue #93 describes is
-still live. `_frozen_scoped_bindings` and `FrozenBindingConflict` (below)
-do not exist yet; the implementation commit that follows this one in the
-same PR adds them.
-
-A `ModelRelease` binds every strategy's models together (a release
+**`score_frozen`'s release-binding scope (issue #93).** A `ModelRelease`
+binds every strategy's models together (a release
 normally carries, e.g., STR-THRU's `driver`/`gate` bindings and STR-RUNUP's
 `implied_t1`/`gate` bindings side by side, alongside a `forecast`-role
 binding some releases share across every strategy — see the wildcard note
@@ -403,8 +396,8 @@ decision_clock_id)` pair; it must never let another strategy's or clock's
 OWN binding answer that request. Before building the canonical forecast
 executors (`_frozen_stage_executors`), stripping a bundle's own local
 recipe for an output a release binding owns (`_without_frozen_recipes`),
-or picking the gate binding (`_frozen_gate_inputs`), `score_frozen` will
-filter `release.bindings` down to `_frozen_scoped_bindings(release,
+or picking the gate binding (`_frozen_gate_inputs`), `score_frozen` filters
+`release.bindings` down to `_frozen_scoped_bindings(release,
 request)` — every binding whose `decision_clock_id` equals the request's
 own AND whose `strategy_id` is EITHER the request's own `strategy_version`
 OR the literal wildcard `"*"` — and pass only that scoped tuple through as
@@ -432,7 +425,7 @@ both `driver` and `implied_t1` to the SAME strategy, which both map to
 `driver_prediction`), or on the gate role (two `gate` bindings whose scoped
 `(strategy, decision_clock)` match — including a `"*"`-strategy gate
 alongside a strategy-specific one). This is a release defect, not a
-per-request condition: `_frozen_scoped_bindings` will refuse it with
+per-request condition: `_frozen_scoped_bindings` refuses it with
 `FrozenBindingConflict(target, binding_ids)` (a `ValueError` subclass, the
 same "nothing was inferred" call-level refusal shape
 `frozen_batch.FrozenBatchPreflightError` already uses) rather than
@@ -440,14 +433,13 @@ resolving it by binding order — no request is ever scored against an
 ambiguous release. This is a distinct refusal from `FrozenStageRefusal`:
 the latter is a per-record MODEL_NOT_READY outcome carried on the
 `ScoreRecord` for one missing/hash-mismatched artifact, raised while
-inferring; `FrozenBindingConflict` will be raised before any inference,
-over the release's own shape, and always fails the whole call (and,
-through it, the whole `score_frozen_batch` batch — batch preflight does
-not re-check this, so the first affected request's `score_frozen` call
-raises it).
+inferring; `FrozenBindingConflict` is raised before any inference, over
+the release's own shape, and always fails the whole call (and, through it,
+the whole `score_frozen_batch` batch — batch preflight does not re-check
+this, so the first affected request's `score_frozen` call raises it).
 
 Reachability: `frozen_batch.score_frozen_batch` is the Phase 6 production
-frozen batch boundary this scoping will protect (it has no `engine/v2/ops`
+frozen batch boundary this scoping protects (it has no `engine/v2/ops`
 caller yet). `checks/phase4_real.py`, `tools/phase4_targeted_replay.py` and
 `checks/phase5_phase4_replay.py` validate request-compatible bindings
 before calling `score_frozen` (their own binding-selection path rejects a

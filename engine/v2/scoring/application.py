@@ -17,7 +17,7 @@ from .frozen_executor import FrozenStageExecutor, FrozenStageRefusal
 from .identity import dependency_hash, request_hash, with_score_id
 from .stages import NativeScoreInputs, StageObserver, assemble_native_values, flags_refuse
 
-__all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
+__all__ = ["FrozenBindingConflict", "replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
 
 _FEATURE_REGISTRY = default_feature_registry()
 _FROZEN_ROLE_OUTPUTS = {
@@ -49,6 +49,25 @@ _RUNUP_DERIVED_FIELDS = frozenset({
     "runup_move_sd", "runup_move_days", "runup_move_scale",
     "runup_move_provenance",
 })
+
+
+class FrozenBindingConflict(ValueError):
+    """More than one release binding, once scoped to this request's
+    ``(strategy, decision_clock)``, would answer the same canonical
+    forecast target, or more than one claims the gate role. A release-
+    authoring defect, never a per-request condition: ``score_frozen``
+    refuses with this instead of letting binding order decide silently
+    (issue #93)."""
+
+    def __init__(self, target: str, binding_ids: tuple[str, ...]) -> None:
+        self.target = target
+        self.binding_ids = tuple(binding_ids)
+        super().__init__(
+            f"release binds {len(self.binding_ids)} bindings "
+            f"{self.binding_ids!r} to canonical target {target!r} for this "
+            "request's (strategy, decision_clock); refusing rather than "
+            "letting the last one win"
+        )
 
 
 class _CanonicalFrozenExecutor:
@@ -474,6 +493,45 @@ def _frozen_role_outputs(binding) -> frozenset[str]:
         if name in _FROZEN_OUTPUTS
     )
     return frozenset(outputs)
+
+
+def _frozen_scoped_bindings(release, request: ScoreRequest) -> tuple[Any, ...]:
+    """Every ``release`` binding visible to ``request``: its own
+    ``(strategy_id, decision_clock_id)``, or a ``strategy_id="*"`` binding
+    shared across every strategy -- the same convention ``checks/
+    phase4_frozen_bridge.py`` already resolves a binding's strategy match
+    with (``strategy_id not in {request.strategy_version, "*"}`` there). A
+    release's OTHER strategies' own bindings never reach this request's
+    canonical forecast targets or gate slot (issue #93)."""
+    strategy = getattr(request, "strategy_version", None)
+    clock = getattr(request, "decision_clock_id", None)
+    scoped = tuple(
+        binding for binding in getattr(release, "bindings", ())
+        if getattr(binding, "decision_clock_id", None) == clock
+        and getattr(binding, "strategy_id", None) in (strategy, "*")
+    )
+    _refuse_ambiguous_frozen_bindings(scoped)
+    return scoped
+
+
+def _refuse_ambiguous_frozen_bindings(bindings) -> None:
+    """Raise ``FrozenBindingConflict`` if two of ``bindings`` (already
+    scoped to one request) would own the same canonical forecast target, or
+    if more than one claims the gate role."""
+    owners: dict[str, list[str]] = {}
+    for binding in bindings:
+        for target in _frozen_role_outputs(binding):
+            owners.setdefault(target, []).append(str(getattr(binding, "binding_id", "")))
+    for target, binding_ids in owners.items():
+        if len(binding_ids) > 1:
+            raise FrozenBindingConflict(target, tuple(binding_ids))
+    gate_ids = tuple(
+        str(getattr(binding, "binding_id", ""))
+        for binding in bindings
+        if str(getattr(binding, "role", "")).split(":", 1)[0] == "gate"
+    )
+    if len(gate_ids) > 1:
+        raise FrozenBindingConflict("gate", gate_ids)
 
 
 def _gate_forecast_producer_ids(gate) -> frozenset[str]:
@@ -1082,7 +1140,7 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     )
     inputs, frozen_runup_interval = _frozen_native_inputs(
         fields, results, bindings, requests, request, release, inference,
-        executor_bindings=getattr(release, "bindings", ()),
+        executor_bindings=_frozen_scoped_bindings(release, request),
     )
     record = score_one(request, inputs, observer=observer)
     missing_runup = {
