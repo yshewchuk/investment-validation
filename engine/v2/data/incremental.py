@@ -809,18 +809,19 @@ def _load_retained_revisions(conn: Any, store: ArtifactStore) \
                               "revision audit row is absent from normalization artifact")
         revision = dataclasses.replace(
             revision, raw_receipt_id=row["raw_receipt_id"],
-            normalization_id=normalization_id)
+            normalization_id=normalization_id,
+            candidate=dataclasses.replace(
+                revision.candidate, revision_ordinal=row["revision_number"]))
         expected = (
             revision.ticker, revision.session_date, revision.candidate.source,
             revision.candidate.source_priority,
             1 if revision.candidate.finality == "final" else 0,
-            revision.candidate.revision_ordinal, int(revision.deleted),
-            revision.candidate.content_hash,
+            int(revision.deleted), revision.candidate.content_hash,
         )
         actual = (
             row["ticker"], row["session_date"], row["source"],
             row["source_priority"], row["finality_rank"],
-            row["revision_number"], row["deleted"], row["row_hash"],
+            row["deleted"], row["row_hash"],
         )
         if actual != expected:
             raise errors.fail("MANIFEST_CORRUPT",

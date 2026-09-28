@@ -363,7 +363,7 @@ def test_run_daily_market_refresh_reingests_a_session_when_only_one_ticker_chang
     assert rows["BBB"]["mcap_usd"] == pytest.approx(5e8)
 
 
-def _refresh_attempt(tmp_path, head_row, plan_hash, fetcher):
+def _refresh_attempt(tmp_path, head_row, plan_hash, fetcher, *, fault_point=None):
     root = tmp_path / ("attempt-" + plan_hash.removeprefix("sha256:")[:8])
     root.mkdir()
     document = {
@@ -374,6 +374,8 @@ def _refresh_attempt(tmp_path, head_row, plan_hash, fetcher):
         "expected_head_snapshot_id": head_row["snapshot_id"],
         "table_name": "daily_market",
     }
+    if fault_point is not None:
+        document["fault_point"] = fault_point
     (root / "incremental_refresh_input.json").write_text(canonical_json(document))
     (root / "refresh_plan.json").write_text(canonical_json({"fetch_units": [dict(UNIT)]}))
     parameters = RefreshParameters(
@@ -456,6 +458,22 @@ def test_run_daily_market_refresh_a_reverted_ticker_with_new_provenance_is_recom
         "SELECT manifest_hash FROM data_dataset_versions WHERE dataset_version_id = ?",
         (ref["dataset_version_id"],)).fetchone()
     assert stored_version["manifest_hash"] == ref["manifest_hash"]
+
+
+def test_run_daily_market_refresh_retry_after_a_failed_commit_keeps_the_normalization_in_sync(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+
+    with pytest.raises(RuntimeError, match="injected incremental fault: before_commit"):
+        _refresh_attempt(tmp_path, _head(conn), "sha256:" + "1" * 64, _ok_fetcher(),
+                         fault_point="before_commit")
+
+    retried = _refresh_attempt(tmp_path, _head(conn), "sha256:" + "2" * 64, _ok_fetcher())
+
+    assert retried["status"] == "complete"
+    retained = data_incremental._load_retained_revisions(conn, store)
+    assert [revision.ticker for revision in retained] == ["AAA"]
 
 
 def test_refresh_plan_table_name_mismatch_is_contract_mismatch(tmp_path):
