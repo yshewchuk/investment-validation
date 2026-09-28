@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
-from engine.v2.ops.calendar_moves_jobs import computed_moves_job_kind
+from engine.v2.ops.calendar_moves_jobs import (
+    computed_moves_job_kind,
+    forward_calendar_job_kind,
+)
 from engine.v2.ops.errors import fail
 from engine.v2.ops.incremental_data import refresh_job_kind
 from engine.v2.ops.submission import JobKind, KindRegistry, RetryPolicy
@@ -255,17 +258,19 @@ def _decisions_supersede_kind():
 
 
 def _calendar_moves_kinds() -> list:
-    """S4C Part 3: the natively-owned computed_moves refresh job kind. It
-    reads only the immutable object store and a read-only catalog connection,
-    so it carries no legacy-store lease. nightly.py's GRAPH/OPTIONAL do carry
-    this stage (Part 4), but it is submitted only by supervisor.Service's own
-    tick loop, never by build_legacy_job_requests -- see ARCHITECTURE.md
-    "Outputs". forward_calendar_refresh
-    is not registered here: issue #52's prerequisite (an attempt-fence check
-    in forward_calendar_store's commit path) has landed (#55) -- registering
-    the kind itself (worker dispatch, loader callback, parameter validation)
-    is a separate, pending follow-up; see ARCHITECTURE.md."""
-    return [computed_moves_job_kind()]
+    """S4C Part 3: the TWO natively-owned calendar/moves refresh job kinds.
+    Both read only the immutable object store and a read-only catalog
+    connection, so neither carries a legacy-store lease. nightly.py's
+    GRAPH/OPTIONAL do carry computed_moves_refresh (Part 4), but no nightly
+    submission path builds a job for it -- it is submitted only by
+    supervisor.Service's own tick loop, never by build_legacy_job_requests.
+    forward_calendar_refresh has neither a GRAPH/OPTIONAL entry nor a
+    supervisor.Service submitter yet: that wiring is a separate, later PR,
+    mirroring computed_moves_refresh's own Part 4. Issue #52 (no attempt-fence
+    check in forward_calendar_store's commit path) was the prerequisite for
+    registering forward_calendar_refresh as a job, and it landed in #55. See
+    ARCHITECTURE.md "Outputs"."""
+    return [computed_moves_job_kind(), forward_calendar_job_kind()]
 
 
 def _native_score_batch_kind() -> JobKind:

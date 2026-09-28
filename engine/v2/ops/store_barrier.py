@@ -15,6 +15,7 @@ verify the attempt fence first.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 from engine.v2.contracts import LegacyInputManifest, QueueReason
 from engine.v2.foundation import from_document, safe_relative_path
@@ -95,14 +96,21 @@ def verified_write(conn, claim, domain, *, clock):
         verified_write_in(conn, claim.attempt_id, domain)
 
 
-def pin_files(root, paths):
+def pin_files(root, paths, *, keepalive: Callable[[], None] | None = None):
+    """Hash every declared file. ``keepalive`` (issue #106 round 3): called
+    once per file AND forwarded into each chunked ``file_hash``, so a slow
+    pinning pass renews sibling leases during its own hashing, not just
+    between files."""
     result = {}
     for rel in paths:
+        if keepalive is not None:
+            keepalive()
         safe_relative_path(rel)
         path = root / rel
         if path.is_symlink() or not path.is_file():
             raise fail("INPUT_CHANGED", "legacy input is missing or indirect")
-        result[rel] = {"content_hash": file_hash(path), "byte_size": path.stat().st_size}
+        result[rel] = {"content_hash": file_hash(path, keepalive=keepalive),
+                       "byte_size": path.stat().st_size}
     return result
 
 
@@ -111,14 +119,20 @@ def verify_files(root, manifest):
         raise fail("INPUT_CHANGED", "pinned legacy inputs changed")
 
 
-def pin_read_set(conn, attempt_id, manifest, root):
-    """Pin the declared legacy read set under this attempt; bytes must match."""
+def pin_read_set(conn, attempt_id, manifest, root, *,
+                 keepalive: Callable[[], None] | None = None):
+    """Pin the declared legacy read set under this attempt; bytes must match.
+
+    ``keepalive`` (issue #106 round 3): forwarded into the ``pin_files``
+    hashing pass so a slow pin renews sibling leases mid-hash. ``None`` keeps
+    today's exact behavior.
+    """
     parsed = from_document(LegacyInputManifest, manifest)
     expected = {ref.path: {"content_hash": ref.content_hash, "byte_size": ref.byte_size}
                 for ref in parsed.file_refs}
     if len(expected) != len(parsed.file_refs):
         raise fail("INVALID_REQUEST", "manifest names one path twice")
-    if pin_files(root, sorted(expected)) != expected:
+    if pin_files(root, sorted(expected), keepalive=keepalive) != expected:
         raise fail("INPUT_CHANGED", "legacy inputs differ from the declared manifest")
     with transaction(conn):
         conn.execute("INSERT INTO store_read_pins(attempt_id,manifest_json,read_set_complete) "

@@ -153,10 +153,18 @@ standard library only (`dataclasses`, `datetime`, `fnmatch`, `math`,
 ### Cutover PR-4: the tolerance policy is now pluggable, exact by default
 
 **Real code, landed independently of every other cutover-PR-4 piece**
-(the rest of that work — `legacy_parity_rows`, the "explained" bucket,
-`tools/native_parity_run.py` — is still documentation-only in
-`engine/v2/ops/ARCHITECTURE.md`, gated on cutover PR-3/`#66` merging
-first; this piece needed neither). Before this change,
+(`legacy_parity_rows`, `native_parity_report._empty_native_report` and
+`native_parity_report.apply_native_refusals` are now implemented too, in
+`engine/v2/ops/nightly.py`/`engine/v2/ops/native_parity_report.py` — pure
+functions with no dependency on cutover PR-7a/`#88`; only the
+`native_parity` job kind's production submission (`run_native_parity_worker`
+and its supervisor/nightly wiring) remains documentation-only in
+`engine/v2/ops/ARCHITECTURE.md`, gated on PR-7a's still-unmerged native
+input schema; redo, 2026-09-27: the original design's
+`tools/native_parity_run.py` production caller and its "explained" bucket
+are both dropped — see that doc's "Cutover PR-4 (redo)" section for why;
+this piece needed neither).
+Before this change,
 `compare_dimension` hardcoded `tolerance_policy=SCORE_RECORD_V1` inside
 its own `compare_records(...)` call — the ONE numeric tolerance every
 caller got, with no way to plug in a different one without editing this
@@ -242,9 +250,12 @@ flowchart LR
 `compare_dimension` is the one entry point every caller in the diagram
 uses; `checks/phase4_real.py`, the Phase 4 gate's own
 verification/check tooling, calls it today, while
-`engine/v2/ops/native_parity_report.py` imports it too but currently has
-only test callers of its own, not a production one — see
-`engine/v2/ops/ARCHITECTURE.md` for that detail. `compare_records`
+`engine/v2/ops/native_parity_report.py` imports it too but today has
+only test callers of its own — a real production caller,
+`run_native_parity_worker` (a job kind's worker entrypoint, submitted by
+`supervisor.Service`'s own tick loop, never `run_shadow_nightly`), is
+designed in `engine/v2/ops/ARCHITECTURE.md`'s "Cutover PR-4 (redo)"
+section and lands with that PR's own Phase 2. `compare_records`
 underneath it is the actual comparator, and
 `tolerance_policy` (the new pluggable seam) flows from the caller, through
 `compare_dimension`, into `compare_records`, never resolved or defaulted

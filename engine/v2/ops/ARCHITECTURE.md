@@ -57,20 +57,23 @@ alongside the nightly stage kinds, not in
 (`native_board_universe.py`) — a pure key `(ticker, strategy, event_date,
 session)` and the function that enumerates one per event × native-covered
 strategy, plus one `DYN-SV` meta-request per event; `calendar_moves_jobs.py`'s
-`computed_moves_job_kind` (registered in `stages.py::_core_kinds`, the same
-ordinary-job-kind pattern as `training`/`promote_job_kind` above, not a
-coordinator effect), `CalendarMovesParameters`/`calendar_moves_parameter_problems`/
-`calendar_moves_job_spec`, and `run_computed_moves_worker` (dispatched by
-`worker.py` for worker `"computed_moves_refresh"`) — see "Primary contracts"
-below for what this adapts; "Outputs" below now covers its nightly caller
-(Part 4). `calendar_moves_jobs.py` registers only `computed_moves_refresh`:
-`forward_calendar_refresh` still has no `JobKind` — issue #52's prerequisite
-(an attempt-fence check in the store's own commit path, so a
-cancelled/expired attempt can never commit — see below) is now in place
-(#55), but registering the kind itself (worker dispatch, loader callback,
-parameter validation) is a separate, later change, and Part 4 wires only
-`computed_moves_refresh` into the nightly graph for the same reason —
-`forward_calendar_refresh` gets neither a `JobKind` nor a `GRAPH` node.
+`computed_moves_job_kind`/`forward_calendar_job_kind` (both registered in
+`stages.py::_core_kinds`, the same ordinary-job-kind pattern as
+`training`/`promote_job_kind` above, not a coordinator effect),
+`CalendarMovesParameters`/`calendar_moves_parameter_problems`/
+`calendar_moves_job_spec`, and `run_computed_moves_worker`/
+`run_forward_calendar_worker` (dispatched by `worker.py` for worker
+`"computed_moves_refresh"`/`"forward_calendar_refresh"` respectively) — see
+"Primary contracts" below for what each adapts; "Outputs" below now covers
+`computed_moves_refresh`'s nightly caller (Part 4). Issue #52's prerequisite
+(an attempt-fence check in `forward_calendar_store`'s own commit path, so a
+cancelled/expired attempt can never commit — see below) landed in #55;
+`forward_calendar_refresh` now has a `JobKind` too (worker dispatch, a
+loader callback, parameter validation — a separate, later change from #55
+itself), but it still has neither a `nightly.py` `GRAPH`/`OPTIONAL` node nor
+a `supervisor.Service` submitter: that wiring is a separate, later PR,
+mirroring how `computed_moves_refresh`'s own Part 4 nightly wiring (#54)
+followed its Part 3 registration (#50).
 
 A small number of natively-fetched data stores live directly in this
 package rather than delegating computation to another v2 layer — like
@@ -118,15 +121,38 @@ head-conflict detection active on that shortcut path too). Omitting
 `fence_check` (the default) keeps this function's previous, unchanged
 behavior for its other two callers, `engine/v2/data/incremental.py`'s
 generic-refresh path and `engine/v2/research/_trades_publish.py`, neither
-of which is touched by this change. This runner still has no job-layer
-bridge: registering
-`forward_calendar_refresh` as a `JobKind` (worker dispatch, a loader
-callback, parameter validation) is a separate, later change — see "Primary
-contracts" above. Its pure helpers (`horizon_dates`, `date_units`,
-`ticker_units`, `plan_forward_calendar`, `resolve_session_claims`,
-`nasdaq_rows_from_payload`, `nasdaq_claims_from_rows`, `pending_tickers`)
-are unit-testable without a catalog or a network. Today this runner has no
-production caller, only its own test module.
+of which is touched by this change. `calendar_moves_jobs.run_forward_calendar_worker` (dispatched by `worker.py`
+for worker `"forward_calendar_refresh"`) is this runner's job-layer bridge:
+it decodes the job's own `CalendarMovesParameters` (which now carries
+`tickers`/`horizon_days` again — see "Primary contracts" above) and calls
+`incremental_data._load_forward_calendar_refresh_callback()` to get a
+`(parameters, root)`-shaped closure with the two injected network edges
+pre-bound, the same lazy-construction shape
+`_load_computed_moves_refresh_callback` already has. Unlike
+`computed_moves_refresh`, whose staged document restates several fields
+`computed_moves_store` reads back from it, `forward_calendar_refresh`'s own
+staged document (`refresh_staging.py`,
+`REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]`) carries ONLY
+`attempt_id`/`fence` — every other value this runner needs already lives on
+the job's own immutable `CalendarMovesParameters`, so restating it could
+only drift. `attempt_id`/`fence` vary per attempt (a retried attempt gets a
+new fence), so they cannot be pre-bound the way the fetchers are: the
+closure reads the staged document at call time, from the attempt's own
+`root`, after first format-checking `parameters.expected_head_snapshot_id`
+(the same bounded-1..128-char-or-`None` one-line shape check
+`computed_moves_store._validate_document_head` uses, mirrored not imported)
+— before that file read or any other I/O — then passes
+`attempt_id`/`fence` straight through to `run_forward_calendar_refresh`,
+which is what actually makes the #55 fence check live for a supervised,
+leased, retried, cancellable attempt rather than the permanent `None`/`None`
+no-op it would otherwise stay. Its pure helpers (`horizon_dates`,
+`date_units`, `ticker_units`, `plan_forward_calendar`,
+`resolve_session_claims`, `nasdaq_rows_from_payload`,
+`nasdaq_claims_from_rows`, `pending_tickers`) are unit-testable without a
+catalog or a network. This runner's only production-shaped caller today is
+`run_forward_calendar_worker`; nothing yet submits a
+`forward_calendar_refresh` job (no nightly `GRAPH` node, no
+`supervisor.Service` submitter — a separate, later PR).
 
 `native_score_batch.py` (this PR adds this module, its `stages.py` job kind
 and its `worker.py` dispatch branch together — this doc describes the
@@ -169,30 +195,111 @@ PR-6, per `scratchpad/cutover_wiring_plan.md`) builds the caller that
 enumerates `BoardRequest`s, stages their per-event inputs, and submits this
 job kind from the nightly graph. `nightly.py` is not touched by this PR.
 
-**Cutover PR-4 (this doc describes the design as this PR's Phase 2 will
-leave it, not a pre-existing fact — Phase 1 of this PR is documentation
-only for `legacy_parity_rows`, the "explained" bucket and
-`tools/native_parity_run.py`, each gated on cutover PR-3
-(`native_score_batch.py`, `#66`) merging before its own code is written.
-One piece is NOT gated on `#66` and IS real code already in this push,
-independent of everything `#66` supplies: making
-`native_parity_report.py`'s tolerance policy pluggable — see "the
-tolerance policy is now pluggable" below).** Three additions close the gap the
-root doc §4 and this doc's own "Diagrams" section both name today:
-`run_shadow_nightly` "has no production caller, only tests ... call it,"
-so in production `native_parity` never actually compares anything — a
-production run supplies no `parity_rows`, `_registered_handlers` defaults
-both sides to `{}`, and `compare_native_vs_legacy`'s own
-`_refuse_empty_inputs` raises `VALIDATION_FAILED` before any comparison
-runs, which `_run_stage` turns into a `"degraded"` receipt for this
-`OPTIONAL` stage (see "Outputs" below for why this is NOT the same claim
-as "writes an empty-input report" — no report is ever written either).
-None of the three
-changes `run_shadow_nightly`'s own stage-walk or `native_parity_handler`'s
-signature contract (both already correctly consume real
+**Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
+REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
+a manual/operator-invoked script, as `native_parity`'s production caller.
+The previous owner proved that script can never be more than manual: it
+calls `run_shadow_nightly`, which "has no production caller [and] needs
+14 caller-supplied stage handlers nothing builds" — a manual script
+outside any schedule is not what "the REAL nightly" means. This doc
+describes the design Phase 2 of this redo will leave it, not a
+pre-existing fact: Phase 1 (cutover PR-4 redo slice 1, `#132`) has
+landed the pure functions this section documents — `legacy_parity_rows`,
+`native_parity_report._empty_native_report`, and
+`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` bumped
+`v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. The new
+`native_parity` job kind (its `dispatch` branch, and any submission path
+that enumerates `BoardRequest`s and stages this job) stays deferred,
+gated on cutover PR-7a (`#88`) merging first — `native_parity`'s
+native-side input is the `native_score_batch` job's staged
+`records.json`/`refusals.json` output PR-7a's design places there, so
+that wiring cannot be implemented before that one lands. Cutover PR-3
+(`native_score_batch.py`, `#66`) is already merged, unlike when the
+original PR-4 was written. One piece is
+untouched by this redo, real code already on `main`, independent of
+everything `#66`/`#88` supply: `native_parity_report.py`'s tolerance
+policy is already pluggable — see "the tolerance policy is now pluggable"
+below, unchanged.**
+
+`native_parity` closes the gap the root doc §4 and this doc's own
+"Diagrams" section both name: `run_shadow_nightly` "has no production
+caller, only tests ... call it," so in production `native_parity` today
+never actually compares anything — a production run supplies no
+`parity_rows`, `_registered_handlers` defaults both sides to `{}`, and
+`compare_native_vs_legacy`'s own `_refuse_empty_inputs` raises
+`VALIDATION_FAILED` before any comparison runs, which `_run_stage` turns
+into a `"degraded"` receipt for this `OPTIONAL` stage (see "Outputs"
+below for why this is NOT the same claim as "writes an empty-input
+report" — no report is ever written either). **This redo does not close
+that gap through `run_shadow_nightly` at all.** That function keeps its
+existing stage-walk and `native_parity_handler`'s existing signature
+contract completely unchanged (both already correctly consume real
 `legacy_rows`/`native_rows` dicts today — proven by
-`tests/test_v2_ops_native_shadow_render.py`); the gap is purely that
-nothing before this PR builds real dicts to hand them.
+`tests/test_v2_ops_native_shadow_render.py` — and stay exactly the
+test-only path they always were; nothing before this redo, or in it,
+builds real dicts to hand `run_shadow_nightly` in production). The gap
+closes through a SEPARATE production path: a new `native_parity` job
+kind, submitted by `supervisor.Service`'s own tick-loop sidecar —
+mirroring `computed_moves_refresh` (Part 4, `#54`) and `native_score_batch`'s
+own shadow submission (`#88`) byte-for-byte in shape — never through
+`build_legacy_job_requests`, so a broken parity submission can never
+abort a required legacy stage. That job's worker calls the exact same
+`compare_native_vs_legacy`/`native_parity_handler` functions
+`run_shadow_nightly` already calls, so the two paths — one test-only, one
+production — can never silently diverge in comparison logic: root doc
+§5's "one shared parity comparator" invariant, restated one level up as
+one shared CALLER of that comparator, reached two ways.
+
+Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
+
+- `supervisor.Service._reconcile_native_parity` — a new tick-loop sidecar
+  method, called from `Service.tick` (`supervisor.py:227`) right after
+  `self._reconcile_native_score_batch_shadow()` (`#88`, itself called
+  right after `self._reconcile_computed_moves_refresh()`,
+  `supervisor.py:241`) — so the tick's native-shadow sidecar chain reads
+  computed_moves_refresh → native_score_batch (shadow) → native_parity,
+  each stage's identity check a strict superset of what the one before it
+  already confirmed.
+- `nightly.submit_native_parity_if_ready` — the builder the sidecar calls,
+  mirroring `submit_computed_moves_refresh_if_ready` (`nightly.py:858`)/
+  `submit_native_score_batch_shadow_if_ready` (`#88`) in signature shape.
+- `nightly._native_parity_identity` — a cheap catalog-only identity check
+  mirroring `_computed_moves_identity` (`nightly.py:830`): finds the
+  latest succeeded `native_score_batch` job by its own idempotency key
+  (`"nightly:<as_of>:<scope_hash>:native_score_batch"`, `#88`'s own R6),
+  parses `(as_of, scope_hash)` out of it, and recovers the paired
+  succeeded `"score"` job's id with the SAME query `#88`'s own
+  `_native_score_batch_identity` already runs to find a session's
+  `"score"` job (`"nightly:<as_of>:<scope_hash>:score"`) — reused here
+  with `(as_of, scope_hash)` already known rather than searched for,
+  never a second, independently written lookup. Returns `(as_of,
+  scope_hash, score_job_id, native_score_batch_job_id)`, or `None` when
+  no succeeded `native_score_batch` job exists yet.
+- `stages.py::_native_parity_kind()` — a new `JobKind`, mirroring
+  `_native_score_batch_kind()` (`stages.py:271`) in shape:
+  `name="native_parity"`, `worker="native_parity"`,
+  `parameters=NativeParityParameters` (new, `RescoreParameters`-shaped —
+  only `expected_ids` and `input_bindings`; this job carries no scalar
+  data of its own, since every input it reads is job-bound),
+  `resource_classes=frozenset({"validation"})` (a pure comparison, no
+  provider fetch — the same classification `decision_evidence` already
+  has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
+  `checkpoint_contract="native_parity_report.v1.1"` (matching
+  `native_parity_report.SCHEMA_VERSION`, which Phase 1 (`#132`) already
+  bumped from `v1.0` — see "Outputs" below for the two additive fields
+  this contract already covers), `namespaces=frozenset({"shadow", "smoke"})`.
+  `worker.py::dispatch` gains a `"native_parity"` branch routing to
+  `native_parity_report.run_native_parity_worker` (below), the same
+  lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
+  already uses (`worker.py:167-168`, `:198-200`).
+
+`nightly.GRAPH` gains a `"native_score_batch": ("score",)` node (`#88`),
+and `"native_parity"`'s own existing node (`nightly.py:58`) widens from
+`("score",)` to `("score", "native_score_batch")` — topological
+documentation only, for `run_shadow_nightly`'s whole-graph test-only
+walk; no submission path reads either edge (the same "documentation, not
+a submission source" rule Part 4 already established for
+`computed_moves_refresh`'s own node).
 
 - **`nightly.legacy_parity_rows(score_document: Mapping[str, Any]) ->
   dict[str, dict]`** (new, this package). Keys the legacy `score.json`
@@ -235,11 +342,14 @@ nothing before this PR builds real dicts to hand them.
   agree — a plain `{key: row for row in rows}` comprehension in
   `legacy_parity_rows` would then silently keep whichever row iterated
   last and drop the other with no trace. `legacy_parity_rows` therefore
-  validates every row before keying any of them: a missing/empty
-  `ticker`/`strategy`/`event_date`, OR two rows sharing one
-  `population_key` value, each raises `OpsError` — matching
+  validates every row before keying any of them: a missing, non-string,
+  or empty `ticker`/`strategy`/`event_date`; a `ticker` or `strategy`
+  containing the `"|"` `population_key` delimiter (CodeRabbit round 3 —
+  `population_key` joins on `"|"`, so an unescaped delimiter inside a
+  field would let two distinct rows collide under one key); OR two rows
+  sharing one `population_key` value — each raises `OpsError` — matching
   `decision_population`'s own code, `VALIDATION_FAILED` (detail naming
-  the row index/missing field, or the repeated key and both rows'
+  the row index/offending field, or the repeated key and both rows'
   indices) — for the WHOLE call, before any dict is constructed: a
   batch-level refusal, never a per-row skip or a last-write-wins
   collision, so a malformed or duplicate-keyed `score.json` is never
@@ -252,71 +362,244 @@ nothing before this PR builds real dicts to hand them.
   malformed element.
   `population_key`, `_population_key`, and `_action_score`'s own
   set-based check are all unchanged by this PR.
-- **`native_parity_report.py` gains a caller-supplied "explained" bucket**,
-  the mechanism for classifying a known structural difference (legacy's
-  stale-px rule; legacy finality drift — a prior D14 Phase 2 gate
-  investigation measured 212 stale-archive rows and 124 finality-drift
-  rows) as accepted rather than a defect, without
-  hiding the finding or touching `engine/v2/parity`'s comparator. New
-  `ROW_EXPLANATION_CODES = frozenset({"LEGACY_STALE_PX",
-  "LEGACY_FINALITY_DRIFT"})` and a new keyword-only parameter on both
-  `compare_native_vs_legacy` and `native_parity_handler`:
-  `row_explanations: Mapping[tuple[str, str], str] = {}`, keyed by
-  `(row_key, dimension)` — never by `row_key` alone, so explaining one
-  dimension of a row (say, `financial_diagnostics`, because legacy priced
-  it off a stale quote) can never silently swallow a genuine, unrelated
-  mismatch the SAME row has on another dimension (say, `verdicts`). A
-  `(row_key, dimension)` pair whose `dimension` was not itself compared,
-  whose `row_key` is not in `compared`, or whose pair did not actually
-  produce a mismatch (agreement needs no explaining, and accepting one
-  would hide a caller classifier that is itself wrong) is refused
-  `INVALID_REQUEST` — never a silent no-op annotation. A reason code
-  outside `ROW_EXPLANATION_CODES` is refused the same way: this is a
-  closed, named vocabulary, not a free-text field a caller can widen
-  without a doc change. The returned document gains `"explained": [...]`,
-  each entry the same shape as a `mismatches` entry
-  (`row_key`/`dimension`/`finding_fields`/`receipt`) plus `"reason"`; an
-  explained `(row_key, dimension)` is removed from `mismatches` and moved
-  to `explained`, never counted in both. `native_parity_handler`'s summary
-  gains `"explained": len(report["explained"])` alongside its existing
-  `"mismatches"` count. **The classifier itself — deciding which rows are
-  actually stale-px vs. finality-drift — is explicitly out of scope for
-  this PR, and not invented here**: no reusable stale-px/finality-drift
-  detector exists in production code today (`engine/v2/data/price_history.py`
-  has finality/staleness primitives but no per-row classifier over a scored
-  record; the D14 corpus's 212/124 counts were a one-off manual
-  classification during a Phase 2 gate investigation, never a callable
-  function). Until a follow-up PR builds one, `row_explanations` defaults
-  to `{}` and every real mismatch reports as a mismatch — this PR adds the
-  plumbing so a future classifier has somewhere correct to plug in, not a
-  guess at what that classifier should decide today. Tracked as a
-  follow-up issue, filed alongside this PR's Phase 2 push.
-- **`tools/native_parity_run.py`** (new, tools-composing layer — the one
-  place allowed to import both `engine.v2.ops` and `engine.v2.serving` in
-  one process, per `engine/v2/ops/native_shadow_render.py`'s own docstring
-  and the working precedent `tools/v2_dashboard_project.py` already sets
-  for composing `engine.v2.ops.bootstrap` with `engine.v2.serving`). This
-  is the real (manual, operator-invoked; not yet wired into any job graph
-  or the supervisor's tick loop — see "out of scope" below) production
-  caller that finally builds a non-empty `parity_rows` and calls
-  `run_shadow_nightly` with it: reads a session's already-written legacy
-  `score.json` (`nightly.legacy_parity_rows`, above); resolves the current
-  release (`engine.v2.scoring.release_bindings.resolve_release_binding`,
-  PR-1, already on `main`); reads one already-staged `events.json` of
-  `native_score_batch.NightlyEventInputs` (PR-3/`#66`'s own shape — this
-  PR does not build the per-night enumeration/staging of those events; it
-  accepts them as an explicit input file, exactly as
-  `run_native_score_batch_worker` itself does, and leaves "who stages
-  `events.json` for every `BoardRequest`" to cutover PR-6, a later PR in
-  this same cutover sequence); calls
-  `native_score_batch.assemble_score_batch_inputs` (PR-3) to get
-  `requests_by_key`; calls
-  `engine.v2.serving.native_shadow_render.build_native_bundle_rows`
-  (already on `main`) to get `native_rows`; and calls
-  `nightly.run_shadow_nightly(..., plan=..., parity_rows=(legacy_rows,
-  native_rows))`. It writes nothing to `source_root` and nothing to the
-  legacy board — see "Failure semantics" below for why a failure anywhere
-  in this script cannot touch the legacy nightly.
+- **`native_parity_report.run_native_parity_worker(parameters, root)`**
+  (new) — the `native_parity` job kind's worker entrypoint (dispatched
+  from `worker.py`, registered in `stages.py::_core_kinds`). Reads its two
+  job-bound inputs (`score.json` from the paired `"score"` job;
+  `records.json`/`refusals.json` from the paired `native_score_batch` job
+  — see "Inputs" below for exactly how `_native_parity_identity` finds
+  both). By the time this worker runs, `submit_native_parity_if_ready`
+  has ALREADY confirmed both documents carry the CURRENT `v2.0`
+  `schema_version` tags before ever submitting the job (a deliberate,
+  documented exception to `_native_parity_identity`'s own catalog-only
+  lookup — see "Cutover PR-4 (redo)'s own input sourcing" above for
+  exactly where that check runs and why it belongs there, not here, and
+  "R1, missing input" below for the wait-state outcome on a mismatch), so
+  this worker trusts the schema without re-checking it: an already-submitted `native_parity` job's
+  `records.json`/`refusals.json` are guaranteed `v2.0`-shaped by
+  construction, never a retained `v1.0` artifact. It builds
+  `legacy_rows`/`native_rows`/`native_refusals`/`unkeyable_refusals` (via
+  `_native_rows_and_refusals`, below), and branches on whether `legacy_rows` and
+  `native_rows` share any key (below, `_empty_native_report`) before
+  calling the SAME `compare_native_vs_legacy` (unchanged) and the new
+  `apply_native_refusals` (below) — see "Outputs" for what it writes.
+  This is the real (only) production caller `tools/native_parity_run.py`
+  was originally designed to be. **That script is dropped from this redo
+  entirely — no code for it was ever written** (`tools/native_parity_run.py`
+  and `row_explanations` never existed and still don't; `legacy_parity_rows`
+  now exists on `main` as of Phase 1, `#132`, but only as the pure function
+  this section documents — nothing calls it in production yet, so nothing
+  needs migrating away from the dropped script), never built as a parallel
+  manual path alongside the job. There is exactly one way a real
+  `native_parity_report.json` gets produced in this codebase once Phase 2
+  lands, not two.
+- **`native_parity_report._empty_native_report(legacy_rows, native_rows,
+  dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
+  gap `compare_native_vs_legacy`'s own row-sharing checks would otherwise
+  cause (CodeRabbit round 3; widened by an Opus gate finding, both real).
+  Two EXISTING, UNCHANGED checks inside `compare_native_vs_legacy` can both
+  fire even though a refusal fully explains the gap: `_refuse_empty_inputs`
+  (`not native_rows` → `VALIDATION_FAILED`) when native produced nothing at
+  all, and the function's own `if not compared: raise fail("VALIDATION_FAILED",
+  "native parity report shares no row key", ...)` (`native_parity_report.py:178`,
+  pre-existing, unchanged by this redo) whenever `legacy_rows` and
+  `native_rows` share NO key — which happens not only when `native_rows`
+  is empty, but also when `native_rows` is non-empty yet none of its keys
+  overlap `legacy_rows`'s (every row that would have overlapped was
+  instead refused). `run_native_parity_worker` therefore checks
+  `legacy_rows` is non-empty FIRST — an empty `legacy_rows` is a genuinely
+  missing legacy input, never something a native refusal can explain, so
+  it ALWAYS falls through to `compare_native_vs_legacy`'s existing checks
+  and fails `VALIDATION_FAILED`, exactly as before this redo, regardless
+  of how many native refusals exist. Only once `legacy_rows` is confirmed
+  non-empty does it compute `shared = set(legacy_rows) & set(native_rows)`
+  BEFORE calling `compare_native_vs_legacy` at all, and take this path
+  whenever `shared` is empty AND EITHER `native_refusals` (keyed) OR
+  `unkeyable_refusals` (above) is non-empty — "some refusal exists to
+  explain why nothing matched," not "native_rows is empty," and ONLY once
+  a legacy input actually exists to explain. This covers every case the
+  narrower "`native_rows` empty" check alone would miss:
+  - **All refused, none keyable.** Every row refused `INVALID_KEY_FIELD`
+    (above): `native_rows` and the keyed `native_refusals` are BOTH empty,
+    but `unkeyable_refusals` is fully populated. The narrower check (only
+    testing keyed `native_refusals`) would wrongly fall through to a
+    normal `compare_native_vs_legacy` call and hit `_refuse_empty_inputs`.
+  - **Disjoint keys, native_rows non-empty.** Every legacy row's native
+    counterpart was refused (keyed or unkeyable), while `native_rows`
+    itself holds OTHER rows entirely (different tickers/strategies,
+    genuinely `only_native`) that share no key with `legacy_rows`. Because
+    `native_rows` is non-empty, `_refuse_empty_inputs` would not fire, but
+    `shared` is still empty, so the pre-existing "no shared key" check
+    (`native_parity_report.py:178`, above) would — even though every legacy row's absence IS
+    explained by a refusal, exactly `native_refused`/`native_refused_unmatched`'s
+    (below) reportable outcome, not a missing-input failure.
+  - **All refused, keyable.** The ORIGINAL narrower case (`native_rows`
+    empty, keyed `native_refusals` fully populated): still covered, since
+    `shared` is trivially empty when `native_rows` is.
+
+  In every covered case, `_empty_native_report` builds the SAME dict shape
+  `compare_native_vs_legacy` would return for a would-be comparison with no
+  shared keys — `{"schema_version": SCHEMA_VERSION, "tolerance_policy_id":
+  tolerance_policy.policy_id, "compared": [], "only_legacy":
+  sorted(legacy_rows), "only_native": sorted(native_rows), "mismatches":
+  []}` (unlike the original narrower version, `only_native` is NOT
+  hardcoded `[]`: because `shared` is empty by construction on this path,
+  EVERY key of `native_rows` is, by definition, `only_native` — never
+  `compared`, since nothing shared) — WITHOUT calling
+  `compare_native_vs_legacy` (there is no numeric comparison to make:
+  nothing shared was scored against anything), and `apply_native_refusals`
+  runs on it exactly as it would on a real comparison's output, narrowing
+  `only_legacy` by `native_refused`/`native_refused_unmatched` the
+  identical way. If `shared` is empty and BOTH `native_refusals` and
+  `unkeyable_refusals` are empty (native_score_batch produced nothing at
+  all AND refused nothing — a genuinely missing native input, nothing to
+  explain the gap), or if `legacy_rows` is empty, `run_native_parity_worker`
+  calls `compare_native_vs_legacy` normally and lets its EXISTING checks
+  raise `VALIDATION_FAILED` — the correct outcome for THAT case is
+  unchanged. `compare_native_vs_legacy` itself gains no new parameter and
+  no new branch for this: the decision of which path to take is
+  `run_native_parity_worker`'s own (still unbuilt — Phase 2), so
+  `run_shadow_nightly`'s test-only path, which calls `native_parity_handler`
+  directly and never `run_native_parity_worker`, never reaches this
+  `_empty_native_report` branch at all — see the next bullet,
+  `apply_native_refusals`, for the one behavior change that DOES already
+  reach that existing test-only path today.
+- **`native_parity_report.apply_native_refusals(report, native_refusals,
+  unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
+  refused native rows are counted separately" (user decision, option (c)).
+  `compare_native_vs_legacy` itself is UNCHANGED — pure, refusal-blind,
+  unaware `native_score_batch` can refuse a row at all. **But
+  `native_parity_handler` — the EXISTING function `run_shadow_nightly`
+  already calls, unchanged in signature — now calls
+  `apply_native_refusals(report, {}, ())` unconditionally right after
+  `compare_native_vs_legacy`, on every `"compared"` report it writes (Phase
+  1, `#132`, already on `main`): with no refusals to apply this changes no
+  row's classification, but every report that test-only path writes now
+  also carries the two new, always-present, empty fields
+  `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
+  `SCHEMA_VERSION` `native_parity_report.v1.1`, not the pre-redo `v1.0` — a
+  real, already-shipped change to this existing artifact's shape, not a
+  no-op reserved for `run_native_parity_worker`.** Once Phase 2 builds it,
+  `run_native_parity_worker` calls this the SAME way, this time with real
+  `native_refusals`/`unkeyable_refusals`, AFTER
+  `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
+  key in the report's own `only_legacy` list that is ALSO a key of
+  `native_refusals` (population-key → refusal code, built from
+  `records.json`'s paired `refusals.json`) moves from `only_legacy` into a
+  NEW `"native_refused"` list (each entry `{"row_key": ..., "refusal_code":
+  ...}`), and is removed from `only_legacy` — never counted in both. A
+  `native_refusals` key that is NOT in `only_legacy` (the row was actually
+  compared, or was `only_native`) is left untouched:
+  `assemble_score_batch_inputs`'s own per-row either/or contract (PR-3)
+  already makes one row both scored and refused impossible within one
+  `records.json`/`refusals.json` pair, so this function trusts that
+  pairing rather than re-validating it, exactly as `legacy_parity_rows`
+  trusts `score.json`'s own shape once its own up-front validation
+  passes. `only_legacy` therefore narrows to its real meaning under this
+  redo: a legacy row `native_board_universe.board_requests` never even
+  enumerated as a `BoardRequest` (an unsupported strategy, the `DYN-SV`
+  wildcard) — never a row native attempted and explicitly refused, which
+  `native_refused` names instead.
+  **A refusal with no legacy counterpart is reported, never dropped
+  (CodeRabbit round 5, real finding).** A `native_refusals` key that is
+  NOT in `only_legacy` cannot be in `compared`/`only_native` either (a
+  refused `BoardRequest` is by construction absent from `native_rows`,
+  and both those buckets are built only from `native_rows`) — so the ONE
+  remaining possibility, silently ignored by the original design, is a
+  refusal whose projected `population_key` is not in `legacy_rows` at
+  all: `native_score_batch`'s own board universe found and refused a row
+  legacy's own `score.json` never carried in the first place. That case
+  is now appended to a second NEW list, `"native_refused_unmatched"`
+  (same `{"row_key": ..., "refusal_code": ...}` shape as `native_refused`,
+  kept separate rather than merged so a reader can tell "legacy scored it,
+  native refused it" apart from "native refused a row legacy never had").
+  Every entry of `unkeyable_refusals` (the third, optional argument —
+  `_native_rows_and_refusals`'s own pass-through of `refusals.json`'s
+  `"unkeyable_refusals"` array, below) is appended to the SAME
+  `"native_refused_unmatched"` list unconditionally, using its raw
+  structured `{"ticker":..., "strategy":..., "event_date":...,
+  "session":...}` key instead of a `row_key` string (below) — an
+  `INVALID_KEY_FIELD` refusal never attempts the keyed join at all (its
+  own source fields are exactly what made a safe key impossible to
+  construct), so it is reported this way regardless of whether a
+  same-identity legacy row exists, rather than trying to prove a negative
+  match first. Every native refusal — keyed or not, legacy-matched or
+  not — therefore lands in exactly one of `native_refused` or
+  `native_refused_unmatched`; none is ever silently absent from the
+  report.
+- **`native_parity_report._population_key_from_board_request_key(key) ->
+  str`** (new, private) — projects one `records.json`/`refusals.json` key
+  (the 4-field canonical `BoardRequest` string `#88` specifies,
+  `f"{ticker}|{strategy}|{event_date.isoformat()}|{session}"`) down to the
+  3-field `population_key` format `legacy_parity_rows` already uses, by
+  splitting on `"|"` into exactly 4 parts and calling
+  `engine.v2.ops.decision_validation.population_key({"ticker": ticker,
+  "strategy": strategy, "event_date": event_date})` — REUSING
+  `population_key`'s own join format rather than string-concatenating a
+  fourth time, so the two sides can never silently drift onto two
+  different separators or field orders. `session` is validated as present
+  (exactly 4 parts) but never folded into the key: legacy rows carry no
+  `session` field to join against. A key that does not split into exactly
+  4 parts is a batch-level `OpsError` (`VALIDATION_FAILED`) — matching
+  `legacy_parity_rows`'s own all-or-nothing malformed-input discipline —
+  raised before `run_native_parity_worker` builds `native_rows`/
+  `native_refusals` at all, never a per-row skip.
+- **`native_parity_report._native_rows_and_refusals(records_document,
+  refusals_document) -> tuple[dict[str, dict], dict[str, str], tuple[dict,
+  ...]]`** (new, private) — the ONLY caller of `_population_key_from_board_request_key`
+  (above), and the place a duplicate collision is caught: the projection
+  from a 4-field `BoardRequest` key down to a 3-field `population_key` is
+  LOSSY (it drops `session`), so two DISTINCT `records.json`/`refusals.json`
+  keys — the same `(ticker, strategy, event_date)` under two different
+  `session` values, a genuinely possible events-table shape this design
+  does not assume away — can project to the SAME `population_key`
+  (CodeRabbit round 1, real finding). Silently keeping whichever one a
+  dict comprehension iterates last would be exactly the last-write-wins
+  collision `legacy_parity_rows` already refuses to allow for
+  `score.json`'s own rows (above) — so this function applies the IDENTICAL
+  discipline to the native side: every key in `records_document["records"]`
+  and every key in `refusals_document["refusals"]`, TOGETHER (one row can
+  never be both a record and a refusal, but two DIFFERENT rows — one a
+  record, one a refusal, or both records, or both refusals — can still
+  collide after projection, and this check catches all three shapes), is
+  projected, and any `population_key` value produced by more than one
+  distinct source key raises `OpsError` (`VALIDATION_FAILED`, detail naming
+  the colliding `population_key` and both source `BoardRequest` keys) for
+  the WHOLE call, before `native_rows`/`native_refusals` are built — never
+  a per-row skip or a silent overwrite. No collision has ever been observed
+  in practice (native's own board universe enumerates one `BoardRequest`
+  per `(ticker, strategy, event_date, session)` combination the events
+  table actually carries); this guard exists because the projection makes
+  a collision POSSIBLE, not because one has occurred. **This function
+  REQUIRES the key — `refusals_document["unkeyable_refusals"]`, never
+  `.get("unkeyable_refusals", ())` (CodeRabbit round 6, real finding).**
+  This function's only caller, `run_native_parity_worker` (below), is only
+  ever reached for a job `submit_native_parity_if_ready` ("R2, cache",
+  below) already confirmed carries `refusals_document["schema_version"]
+  == "native_score_batch_refusals.v2.0"` before submission, and the v2.0
+  writer ALWAYS emits this key, even as `[]` for a batch with no unkeyable refusals (the
+  "refusals.json" bullet, above) — so its absence on a document already
+  confirmed v2.0 means the file is malformed (truncated, hand-edited, or
+  written by a defective producer), never a legitimate "this batch has
+  none" case a silent default could paper over. A `KeyError` here is
+  caught by `run_native_parity_worker` alongside its other
+  `records.json`/`refusals.json` decode failures (below, "R1, missing
+  input") and fails the WHOLE job attempt, exactly like a document that
+  fails to decode at all — never a per-row skip, and never a silently
+  empty `unkeyable_refusals`. The (now guaranteed-present) value is passed
+  through completely unchanged — `INVALID_KEY_FIELD` rows (below) never
+  had a `population_key` computed for them at all (that is exactly what
+  makes them "unkeyable"), so there is nothing for this function to
+  project, decode, or collision-check; it is `apply_native_refusals`
+  (above), not this function, that consumes them.
+
+**The original PR-4 design's "explained" bucket (`ROW_EXPLANATION_CODES`,
+`row_explanations`) is dropped from this redo, not carried forward** —
+see "Out of scope" below: no reusable stale-px/finality-drift classifier
+exists today, so there is nothing for it to plug into yet, and this redo
+does not invent one. A future PR can add it exactly as originally
+specified, against `compare_native_vs_legacy`'s unchanged signature,
+whenever a real classifier exists.
 
 **The tolerance policy is now pluggable, not hardcoded — this part of the
 PR is real code, already merged into this push, independent of `#66`.**
@@ -346,15 +629,34 @@ none of those values belong in this doc, the PR body, or an issue; only a
 adds the SEAM a ratified policy plugs into, not a guess at what it should
 contain.
 
-**Out of scope for this PR** (each a real gap, named rather than silently
-left implicit): the per-night enumeration of every `BoardRequest` and the
-staging of its `events.json` inputs (cutover PR-6); flipping
-`native_parity` or anything else onto a schedule, a job kind, or the
-supervisor's tick loop (no PR before Phase 7 changes legacy authority);
-the stale-px/finality-drift classifier itself (above); and building the
-actual user-approved, per-field `TolerancePolicy` object itself (the
-pluggable seam above takes it as a parameter — this PR does not construct
-one).
+**Out of scope for this redo** (each a real gap, named rather than
+silently left implicit): the stale-px/finality-drift classifier and the
+"explained" bucket mechanism the original PR-4 design specified (above —
+still no reusable classifier exists; a future PR adds it once one does,
+against `compare_native_vs_legacy`'s unchanged signature); a
+dashboard-facing "latest report" pointer path (this design's only durable
+location is the catalog-addressed `job_<id>#report` binding — see
+"Outputs" below); and building the actual user-approved, per-field
+`TolerancePolicy` object itself (the pluggable seam already in place
+takes it as a parameter — this redo does not construct one, and no
+tolerance value appears in this doc, a PR body, or an issue).
+
+**Corrected, not merely superseded: the original PR-4 design's own
+out-of-scope line said flipping `native_parity` "onto a schedule, a job
+kind, or the supervisor's tick loop" needed to wait for "Phase 7
+[to change] legacy authority" first.** That reasoning was wrong even at
+the time it was written, and two precedents that shipped since prove it:
+`computed_moves_refresh` (Part 4, `#54`) and `native_score_batch`'s own
+shadow submission (`#88`) both flip an OPTIONAL, shadow-only stage onto
+the supervisor's tick loop without touching legacy authority, because
+neither carries `store_domains` or any effect beyond `"staged"` — the
+same is true of `native_parity` here (`effects=("staged",)`, no
+`store_domains`, no scheduler edge from any required legacy stage to it).
+A job kind reaching the tick loop is not itself a legacy-authority
+change; only a `store_domains` write against a legacy-owned table, or a
+`GRAPH`/`_DAG_STAGES` edge a REQUIRED legacy stage depends on, would be —
+neither is true of `native_parity`, which is exactly why this redo can
+schedule it now, well before Phase 7.
 
 **Cutover PR-7a (design — this PR adds no code; the next PR in this
 sequence implements what this section describes).** `native_score_batch`
@@ -394,6 +696,702 @@ path reads this edge) and `OPTIONAL` gains `"native_score_batch"`.
 gets its first real caller here, closing the "no caller yet" dashed edge
 this doc's own Diagrams section already names (see below).
 
+**Cutover PR-7b (design — this design PR itself added no code; the
+implementing sequence below is now under way).** PR-7a's own text above
+named the gap precisely and refused to close it: "PR-7a's shadow batch does
+not submit at all, full stop, until either (a) a future PR changes the
+production input mode to one that pins a snapshot, or (b) the still-missing
+raw-row producer... is given its own, separately-designed way to source
+`snapshot_id`/`calendar_revision`/`events_table`/`horizon_days`." This
+section is (a). It does not attempt (b): the per-event raw-row producer
+(`calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` staging
+for `NightlyEventInputs`) stays exactly as out of scope as PR-7a already
+declared it — a later PR, mirroring PR-7a's own boundary.
+
+**Status:** PR-7b-1 (#145) adds `_ensure_shadow_snapshot` and its
+production-default seams to `nightly_trigger.py`, added unused — see the
+"Split into small code PRs" list below. `_submit_plan` still calls neither
+it nor anything downstream of it: PR-7b-2 is what wires it in and flips
+`_default_plan`'s `input_mode`/`snapshot_scope` literals, together, in one
+slice (see that bullet below for why the two changes cannot ship
+separately). Until PR-7b-2 merges, this section still describes running
+production behavior accurately: every shadow-nightly plan still pins no
+`SnapshotRef`, exactly as "The concrete gap in running code today" states
+next.
+
+**The concrete gap in running code today.** `nightly_trigger._default_plan`
+(`nightly_trigger.py:~518-528`, both line numbers approximate — issue #104/
+PR #117, in flight, renumbers this function's body; see the coordination
+note below) hardcodes `input_mode="legacy"`, `snapshot_scope=None`,
+`refresh_mode="legacy"`, `refresh_plan=None` in the `argparse.Namespace` it
+builds for every call, unconditionally — there is no branch, no flag, and
+no caller-supplied override for any of the four. In `input_mode="legacy"`,
+`cli._plan_command`'s own `_snapshot_inputs` (`cli.py:454-467`) returns
+`None` before `snapshot_planning.pin_snapshot_inputs` is ever called, so
+the plan `nightly_trigger` submits every night pins no `SnapshotRef` at
+all — verified against current `main`, matching PR-7a's own verification of
+the identical fact. **Supervisor decision, option A**: the shadow nightly
+runs in `input_mode="snapshot"` — not narrowly scoped to feed only
+`native_score_batch`, but the WHOLE shadow plan `nightly_trigger` submits,
+so legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
+`"model_evidence"` (`SNAPSHOT_STAGES`, `nightly.py:379-380`) read through
+the SAME pinned, frozen materialization
+`native_score_batch` will read through, once its own producer exists. This
+is a real, intentional behavior change to how the SHADOW comparison itself
+reads data (never to the real production legacy nightly — see point 4
+below, "How `nightly_trigger` switches to snapshot mode"), chosen because a
+side-by-side comparison where legacy and native can read the legacy store
+at two different moments is exactly the kind of noise this cutover effort
+has already spent real cost chasing down elsewhere (D14 corpus parity,
+the analog context-width defect) — freezing both sides to one snapshot
+removes that variable, not just for `native_score_batch` but for the whole
+comparison.
+
+**1. What creates and promotes each night's v2 snapshot — today, nothing
+does.** `ops snapshot plan-import`/`submit`/`promote`/`rollback`
+(`cli.py:926-956`, dispatching to `engine.v2.data.import_snapshot`/
+`engine.v2.ops.snapshot_import`/`engine.v2.ops.snapshot_promotion`) is a
+complete, tested, operator-invoked pipeline — but it has no scheduled
+caller anywhere in `engine/v2/ops` or `engine/v2/data`. Every "shadow"-scope
+snapshot committed to date was a manual `ops snapshot plan-import` +
+`submit` pair an operator ran by hand (Phase 2 sign-off/D14 corpus work);
+nothing re-runs it nightly. `computed_moves_store.py` and
+`forward_calendar_store.py` both already take a `parent_snapshot_id` and
+read through it (`_scan_once`/`daily_market` sessions respectively) — both
+silently assume SOME snapshot exists at whatever scope their own caller
+resolved; neither one is the producer either.
+
+Closing this needs a genuinely new nightly step, and it must run — and
+fully commit — BEFORE `nightly_trigger._default_plan` ever calls
+`cli._plan_command`, because `pin_snapshot_inputs` resolves the scope's
+head SYNCHRONOUSLY at plan-BUILD time (`snapshots.resolve_snapshot_head`,
+one `SELECT ... FROM data_snapshot_heads`): a plan cannot be built
+referencing a snapshot that has not committed yet. This rules out the
+`supervisor.Service` tick-loop sidecar shape `computed_moves_refresh`/
+PR-7a's own `native_score_batch` sidecar both use — those sidecars tick
+inside `Service.tick()`, which `nightly_trigger._default_serve`
+(`nightly_trigger.py:561-600`) only starts driving AFTER `_default_plan`
+has already built and `_default_submit` has already submitted that same
+night's plan (`_submit_plan`'s own order: `plan_fn` → write `"submitting"`
+→ `submit_fn` → `serve_fn`). A sidecar that only runs during `serve_fn`'s
+loop is structurally too late for this one input.
+
+**Where this phase is called from, precisely — not inside `_default_plan`
+(round-1 CodeRabbit finding, real: an earlier draft of this design called
+it from inside `_default_plan`, whose own contract is "return a `plan_ref`
+`str`"; there is no existing slot in that contract for a `"not_yet"`
+outcome, so a caller could not tell a real `plan_ref` from a stalled
+snapshot without a type-unsafe sentinel).** `nightly_trigger._ensure_
+shadow_snapshot(root, as_of, clock, attempt, *, plan_import_fn=None,
+submit_import_fn=None, serve_fn=None) -> tuple[Literal["ready", "not_yet",
+"timed_out"], str | None]` (raises the usual `_HANDLED_FAILURES` on a
+terminal problem, exactly like `plan_fn`/`submit_fn`/`serve_fn` already
+do — never returns a fourth, silent-failure value) is instead a NEW,
+separate step inside `_submit_plan` itself, called immediately before its
+existing `plan_ref = plan_fn(...)` call, inside the SAME `if plan_ref is
+None:` guard (so, like `plan_fn`, it never runs on the resume branch — a
+resumed run's plan already references an already-committed snapshot from
+whichever earlier attempt built it, so there is nothing left to ensure).
+The second tuple element is the exact `snapshot_id` this call verified is
+fresh for `as_of`, present only for `"ready"` (`None` for `"not_yet"`/
+`"timed_out"`) — see round-2's own "Bind resumed plans to the committed
+snapshot" fix, below, for why this cannot be a bare status string.
+Concretely, `_submit_plan`'s own body gains, right before its existing
+`plan_ref = plan_fn(...)` line:
+
+```python
+if plan_ref is None:
+    snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
+    try:
+        readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
+    except _HANDLED_FAILURES as exc:
+        return _failure(root, clock, as_of, None, exc, prior, snapshot_attempt=snapshot_attempt + 1)
+    if readiness == "not_yet":
+        return _record(root, _receipt(
+            clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet",
+            snapshot_attempt=snapshot_attempt))
+    if readiness == "timed_out":
+        previous = prior.error_count if prior is not None and prior.status == "timed_out" else 0
+        count = previous + 1
+        if count >= MAX_CONSECUTIVE_ERRORS:
+            return _record(root, _receipt(
+                clock, as_of, "failed",
+                f"the shadow snapshot import exceeded its deadline {count} consecutive "
+                "times; giving up", error_count=count, snapshot_attempt=snapshot_attempt))
+        return _record(root, _receipt(
+            clock, as_of, "timed_out",
+            "the shadow snapshot import has not finished; the legacy lock is released, "
+            "resuming next tick", error_count=count, snapshot_attempt=snapshot_attempt))
+    try:
+        plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
+                           full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
+    ...  # unchanged from here
+```
+
+`ensure_snapshot_fn` is a new keyword parameter on `_submit_plan`
+(`=None`, defaulting to `_ensure_shadow_snapshot`, the same injection-seam
+style `plan_fn`/`submit_fn`/`serve_fn` already use). `_default_plan`'s own
+CONTRACT is otherwise unchanged (still exactly "build and return a
+`plan_ref` `str`, or raise") — it only gains one new, purely pass-through
+keyword, `expected_shadow_snapshot_id=None` (round-2 fix, below) — so
+#117's own edits to `_default_plan`'s body (manifest capture, year
+derivation) are untouched by this design at the call-site level; only
+`_default_plan`'s two trailing literal kwargs and this one new keyword
+change (point 4 below).
+
+**`TriggerReceipt` gains a new field, `snapshot_attempt: int = 0`,
+additive, carried on EVERY receipt written for a given `as_of` and
+bumped in exactly ONE place (Opus-gate findings on `e900074`/`fb7d31e`,
+both real, both Major — see below for each).** An earlier draft reused
+`error_count` for the retry key's own job-identity number. That breaks
+the moment `prior.status` stops being `"error"` for any reason — which
+`nightly_trigger.py` already has several of for a single `as_of` in
+progress: `busy_legacy` (`:401`, another heavy run holds the legacy
+lock), the probe-finality `"not_yet"` (`:425`), `"missed"` (`:422`),
+`"submitting"`/`"submitted"` (`_submit_plan`), and the terminal `"com
+pleted"`/`"failed"` receipt after `serve_fn` returns (`:467-469`) — NONE
+of these represent a resolution of the shadow-snapshot-import job's own
+state one way or the other, so none may reset (or otherwise touch) its
+identity counter, yet `error_count`-keyed logic resets exactly there
+(gate finding 1 on `e900074`), and even a same-status streak has no
+`MAX_CONSECUTIVE_ERRORS`-style cap of its own once other statuses can
+interleave (gate finding 2 on `fb7d31e`: an alternating `"error"`/
+`"timed_out"` sequence keeps BOTH of the existing, status-gated counters
+at `1` forever). `snapshot_attempt` fixes both by being a single,
+monotonic counter for the WHOLE `as_of` run, independent of every OTHER
+status transition:
+
+- **Carried forward, unchanged, by construction.** `_receipt()` gains the
+  parameter `snapshot_attempt: int = 0`; EVERY call site that writes (or
+  returns) a receipt for an `as_of` already in progress passes `snapshot_
+  attempt=prior.snapshot_attempt if prior is not None else 0` — this is
+  now a mechanical, blanket rule applied at every `_receipt(...)` call in
+  the module (`busy_legacy`, `_decide`'s `"missed"` and probe-finality
+  `"not_yet"`, `_submit_plan`'s `"submitting"`/`"submitted"` and its final
+  `"completed"`/`"failed"`, and this block's own `"not_yet"`/`"timed_out"`
+  receipts), not a per-site judgment call — so nothing can silently forget
+  it the way the `e900074` draft forgot every site but one. (`_decide`'s
+  pre-window `"not_yet"` at `:419` and `_idle` at `:347` never reach
+  `_record`/`write_state` at all — purely-returned, never-persisted
+  receipts — so they cannot desynchronize the STORED counter regardless of
+  what they carry; they still carry the SAME value, for a caller
+  inspecting the returned receipt, not because it changes anything
+  persisted.)
+- **Bumped in exactly one place.** The `except _HANDLED_FAILURES` branch
+  above, `_ensure_shadow_snapshot`'s own raised terminal failure
+  (R1(b)/R1(c) below), passes `_failure` an explicit `snapshot_attempt=
+  snapshot_attempt + 1` — a NEW keyword-only parameter on `_failure`
+  (`=None`; every OTHER existing call site of `_failure` — the generic
+  `plan_fn`/`submit_fn`/`serve_fn` exception handling — omits it, so
+  `_failure` falls back to its own `prior.snapshot_attempt if prior is not
+  None else 0`, i.e. carried, not bumped: a `plan_fn`/`submit_fn` failure
+  says nothing about whether the shadow snapshot import job itself needs a
+  new identity).
+- **Its own give-up bound, closing gate finding 2 directly.** `_failure`'s
+  give-up decision (`"failed_setup"` vs `"error"`) becomes an OR of two
+  independent checks, not one: the EXISTING `count >= MAX_CONSECUTIVE_
+  ERRORS` (unchanged: `prior.error_count if prior is not None and prior.
+  status == "error" else 0`, plus one — still resets on any non-`"error"`
+  status, exactly as it always has, for every OTHER failure cause) OR the
+  NEW `resolved_snapshot_attempt >= MAX_CONSECUTIVE_ERRORS` (where
+  `resolved_snapshot_attempt` is the `snapshot_attempt` kwarg when given,
+  else the carried `prior.snapshot_attempt if prior is not None else 0`).
+  Because `snapshot_attempt` is now carried on every receipt regardless of
+  status (the blanket rule above), it is genuinely monotonic across the
+  WHOLE `as_of` run — an alternating `"error"`/`"timed_out"` sequence
+  still resets the OLD `error_count`-based check the same as before, but
+  can no longer defeat the bound entirely, because `snapshot_attempt`
+  itself never resets and trips its OWN `MAX_CONSECUTIVE_ERRORS` cap the
+  SAME number of terminal snapshot-import failures a non-interleaved
+  sequence would have. The receipt this produces still uses the SAME
+  `error_count` field for its own, unchanged meaning (observability: "how
+  many consecutive `"error"`-status ticks in a row") — `snapshot_attempt`
+  is reported alongside it, not instead of it. **A `"timed_out"` readiness
+  deliberately reuses the SAME status string, the SAME `MAX_CONSECUTIVE_
+  ERRORS`-bounded counter convention, and the SAME `error_count`-selection
+  expression `_submit_plan`'s existing POST-plan `serve_fn`-timeout
+  handling already uses further down in this same function (round-2
+  CodeRabbit finding, real — "specify the snapshot-import deadline
+  outcome": an earlier draft bounded `_ensure_shadow_snapshot`'s own
+  drive-to-terminal by `_serve_deadline` but never said what happens if
+  that deadline fires). This PRE-plan timeout's OWN give-up count is a
+  separate, THIRD status-gated counter (`prior.error_count if prior.
+  status == "timed_out" else 0`, unchanged) — it is not bumped by, and
+  does not itself bump, `snapshot_attempt` (a timeout is not a terminal
+  job failure; the job may still succeed), but repeated PRE-plan timeouts
+  for the SAME never-yet-terminal job are bounded the SAME way a repeated
+  terminal failure is: the two counters can both independently reach
+  `MAX_CONSECUTIVE_ERRORS` and either one ends the run. The two
+  `"timed_out"` causes (this PRE-plan snapshot-import wait, and the
+  EXISTING POST-plan `serve_fn` wait) are told apart by whether `plan_ref`
+  is set on the receipt (`None` here, always set there) and by the
+  receipt's own `detail` text — never by a fourth status string, which
+  would only fragment one "this run for `as_of` is taking too long"
+  concept into two. Because this receipt carries no `plan_ref`, `run_
+  trigger`'s resume branch (`prior.plan_ref and prior.status in RESUME_
+  STATUSES`) does NOT engage on the next tick — it falls through to the
+  ordinary `_decide` path instead, which re-enters `_submit_plan` with
+  `plan_ref=None` and calls `ensure_snapshot_fn` again with the SAME
+  `snapshot_attempt` (a `"timed_out"` outcome is not the one bump site, so
+  `snapshot_attempt` is carried, not bumped, per the blanket rule above —
+  this is now mechanically true at every call site, not merely asserted
+  at one): the SAME idempotency key's R2 catalog lookup then finds the
+  `snapshot_import` job either `succeeded` by now (`"ready"`, immediately,
+  no re-submission) or still running (`"timed_out"` again, consuming one
+  more tick of the SEPARATE consecutive-timeout counter) — self-healing
+  across ticks with no new state needed, exactly the shape `_ensure_
+  shadow_snapshot`'s own `supervisor.serve`/`_drive_jobs_to_terminal` call
+  already reports (`"deadline_exceeded"`, mapped here to `"timed_out"`,
+  never `"failed"` or cancelled — "the in-process jobs are left exactly
+  where the supervisor's own recovery already leaves an interrupted
+  attempt... nothing here cancels or force-fails them", per the `nightly_
+  trigger.py` issue #103 section above, unchanged and reused as-is for
+  this job too).**
+
+`_ensure_shadow_snapshot(root, as_of, clock, attempt, ...)` itself:
+
+1. Cheaply checks whether a `snapshot_import` job already exists (any
+   state) under the idempotency key `f"shadow_snapshot_import:{as_of}:
+   {attempt}"` — a plain catalog job lookup, the same "cheap, catalog-only
+   identity check" pattern `nightly._native_score_batch_identity` already
+   establishes for a different job kind. **The `attempt` suffix, not a
+   bare `f"...{as_of}"` key (round-1 CodeRabbit finding, real — see
+   "Failure semantics" R3/R6 below for the full account): `submission
+   ._insert_or_match` (`submission.py:296-322`) treats an EXISTING row
+   under a namespace+key pair as an unconditional match regardless of that
+   row's OWN state — even a TERMINALLY `failed` `snapshot_import` job
+   under an unchanged key is matched and returned as-is, never replaced;
+   `snapshot_import`'s own `RetryPolicy("bounded", 2, (5, 30))`
+   (`stages.py:336`) governs retries WITHIN one job row's own attempt
+   history (the scheduler leasing and re-launching the SAME row up to
+   `max_attempts`), not a caller minting a fresh submission after that
+   row goes terminal. A bare `as_of`-only key would therefore make a
+   terminally failed import PERMANENT for the rest of that `as_of`'s
+   retry window with no way to try again — using the DEDICATED
+   `snapshot_attempt` counter (above; NOT `error_count`, which a
+   `"timed_out"` tick in between would otherwise reset the wrong value
+   against) as the key's own attempt suffix means a NEW `_submit_plan`
+   entry after a prior TERMINAL failure of this specific job mints a
+   genuinely NEW idempotency key, so
+   `_insert_or_match` inserts a fresh row rather than matching the old
+   terminal one — while a same-attempt-number RE-ENTRY (the
+   crash-immediately-after-submit case) finds this SAME row already
+   sitting under the key on the very next tick and is handled by THIS
+   step's own lookup below, not by a second call into `_insert_or_match`:
+   no resubmission is attempted at all for a key that already has a row
+   (see the branches immediately below).** This lookup's own row, if any, is what decides everything
+   below — steps 2 and 3 (reading the head, then calling `plan_import`)
+   run ONLY when NO row exists yet under this exact key; a key that
+   already has a row, in ANY state, never reaches them (the same "checked
+   first, before anything expensive runs" shape PR-7a's own R2 already
+   uses for `native_score_batch`'s different job kind, and the SAME claim
+   R2 below now makes explicit for this job too):
+   - **No row.** Falls through to step 2.
+   - **`succeeded`.** Returns `("ready", snapshot_id)` immediately, reading
+     `snapshot_id` off the succeeded job's OWN committed
+     `SnapshotImportReceipt` (`resulting_head_snapshot_id`,
+     `contracts/data.py:663`) — never by re-reading `data_snapshot_heads`'
+     mutable current head, which by the time this branch runs may already
+     differ (the crash-then-resume-before-`_record` case this branch
+     exists for: a prior `_submit_plan` call for the SAME `as_of`/`attempt`
+     already finished this step but crashed before recording state — the
+     snapshot THAT attempt committed, not whatever is head NOW, is what
+     its plan must pin).
+   - **Not yet terminal** (`queued`, `running`, `retry_wait`, or any other
+     state `TERMINAL_JOB_STATES` (`nightly_trigger.py:95`) does not list)
+     **(Opus-gate finding on `a30c624`, real: an earlier draft returned
+     early ONLY for `succeeded` and fell through to steps 2–4 for
+     anything else, re-planning and resubmitting under the SAME key while
+     the FIRST submission was still live. If the legacy store or the
+     implementation changed between ticks, the resubmitted request's
+     digest differs from the still-open row's, so `submission._insert_
+     or_match` raises `IDEMPOTENCY_CONFLICT` for a job that is not even
+     dead yet; the caller's resulting `_failure` bump then mints a SECOND
+     live job under a NEW key on the next tick while the FIRST keeps
+     running toward the same expected snapshot head — two imports racing
+     the same CAS precondition. This is the exact failure the doc's own
+     R3 account below always assumed could not happen.)** Reattaches to
+     that EXISTING job id directly: jumps straight to step 4's
+     `_drive_jobs_to_terminal` call and outcome handling below, WITHOUT
+     re-reading the head (step 2) or calling `plan_import`/`submit_import`
+     again (step 3 and the submit half of step 4) — so this key's own
+     request is submitted exactly once, ever, and a tick that resumes
+     after a `"timed_out"` outcome waits on the SAME row instead of
+     risking a second one.
+   - **Terminal but not `succeeded`** (`failed`, `cancelled`, or `blocked`
+     — `TERMINAL_JOB_STATES` minus `succeeded`). Raises the SAME typed
+     `INPUT_CHANGED` `OpsError` step 4's own terminal-failure case raises
+     (non-retryable under THIS key only — a later `_submit_plan` entry
+     still retries under a NEW key, per below), immediately, WITHOUT
+     calling `plan_import`/`submit_
+     import` first: resubmitting under this SAME key could only ever
+     re-match this SAME dead row (`_insert_or_match`'s existing-row-wins-
+     regardless-of-state semantics, above), so a resubmission attempt
+     buys nothing and, if the legacy store moved since this row was
+     submitted, only invites a needless `IDEMPOTENCY_CONFLICT`.
+     `_submit_plan`'s existing `except _HANDLED_FAILURES` catches it and
+     routes into `_failure` with `snapshot_attempt=snapshot_attempt + 1`,
+     exactly as step 4's own terminal-failure case does, so the NEXT
+     `_submit_plan` entry mints a genuinely NEW key (this step, above)
+     rather than looking at this dead row again.
+2. Reached only when step 1 found no row at all under this key: reads the
+   CURRENT `shadow` scope head
+   (`SELECT snapshot_id, generation FROM data_snapshot_heads WHERE
+   scope='shadow'`; absent on a fresh catalog maps to `None`/`0`, the same
+   defaults `plan_import`'s own signature already accepts) as the
+   `expected_head_snapshot_id`/`expected_head_generation` CAS pair, and
+   calls `import_snapshot.plan_import(source_root=root, scope="shadow",
+   expected_head_snapshot_id=..., expected_head_generation=...)` — `root`
+   is the SAME checkout `nightly_trigger` already runs from (matching
+   `ops price-history capture --source-root`'s own precedent: the legacy
+   checkout IS this repo's own data tree, not a second clone).
+3. `plan_import`'s own `_check_snapshot_shape` derives `session` (surfaced
+   as `plan.legacy_input_manifest.selected_session`) from the legacy
+   store's OWN current state — never from `as_of` — exactly like
+   `capture_inputs.capture`'s identically-named field (issue #104/PR #117's
+   own precedent). `_ensure_shadow_snapshot` checks
+   `plan.legacy_input_manifest.selected_session == as_of` BEFORE
+   submitting anything: `probe_finality` having already said `as_of` is
+   final (checked one step earlier, in `_decide`) does not guarantee the
+   full legacy store snapshot-import reads (`daily_market`,
+   `earnings_events`, `feature_panel`, `tier4_forecasts` — a wider read set
+   than the single ORATS probe `probe_finality` itself makes) have
+   ALSO caught up. On a mismatch, this phase submits nothing and returns
+   `("not_yet", None)` (never raises) — the caller's `snapshot_attempt` is
+   NOT bumped for this outcome (only the except-branch around THIS call,
+   on a raised `_HANDLED_FAILURES`, ever increments it — see the `Trigger
+   Receipt` fix above), so a `"not_yet"` tick costs nothing against
+   either the `snapshot_attempt` identity or the `error_count` give-up
+   budget; the next tick calls `_ensure_shadow_snapshot` again with the
+   SAME `attempt` value and retries `plan_import` fresh.
+4. **On a match** (step 3 found `session == as_of`), submits the plan
+   through the REAL path — `snapshot_import.save_import_plan` then
+   `snapshot_import.submit_import(..., idempotency_key=
+   f"shadow_snapshot_import:{as_of}:{attempt}")`, precisely `ops snapshot
+   plan-import` + `ops snapshot submit`'s own two calls
+   (`cli.snapshot_command`, `cli.py:926-956`), never a bespoke coordinator
+   call and never `run_shadow_nightly`. **This drive-to-terminal-and-
+   interpret step is also where step 1's REATTACH branch above lands
+   directly, skipping the submit call**: either way, exactly ONE job id
+   for this `as_of`/`attempt` key is being tracked — the one just
+   submitted here, or the one already in flight that step 1 found — and
+   the rest of this step applies identically to both. It drives that ONE
+   job to terminal with the SAME `supervisor.Service`/`supervisor.serve`
+   helper `_default_serve` already uses (factored so both share one small
+   `_drive_jobs_to_terminal(service, job_ids, deadline_at)` helper instead
+   of two copies of the same polling loop), bounded by the SAME
+   `_serve_deadline` the whole run already respects, and held under the
+   SAME `_LegacyLock` the whole run already holds — a slow import extends
+   the run the same way a slow `"score"`/`"decision_replay"` job already
+   can today; this design adds no new locking or scheduling primitive. On
+   a SUCCEEDED outcome, this phase reads the job's own committed
+   `SnapshotImportReceipt.resulting_head_snapshot_id` (the SAME field
+   point 1's `("ready", snapshot_id)` case above reads on a cache hit) and
+   returns `("ready", snapshot_id)`. `_drive_jobs_to_terminal` reporting
+   `"deadline_exceeded"` (round-2 CodeRabbit finding, real — see "Where
+   this phase is called from" above for the full account) returns
+   `("timed_out", None)`, never raises and never treats the job as failed:
+   the job itself keeps running under its own lease past this call's own
+   wait, exactly as `_default_serve`'s own `"timed_out"` already leaves an
+   in-flight job alone (issue #103 section above, R5, unchanged, reused
+   as-is here). A terminal `failed`/`conflict` outcome for this job raises
+   the typed `INPUT_CHANGED` `OpsError` (non-retryable under THIS key only)
+   `_submit_plan`'s existing `except _HANDLED_FAILURES` catches, routing
+   into `_failure`
+   with `snapshot_attempt=snapshot_attempt + 1` (the `TriggerReceipt` fix
+   above) — which bumps `error_count` too (the ordinary give-up count, for
+   `MAX_CONSECUTIVE_ERRORS`) AND the dedicated `snapshot_attempt`, so the
+   NEXT `_submit_plan` entry for this `as_of` (if any, before `MAX_
+   CONSECUTIVE_ERRORS` is reached) calls this function again with a
+   genuinely NEW `attempt` value, per point 1 above.
+5. Directly committing into scope `"shadow"` (via `commit_snapshot_for_
+   attempt(..., scope=request.scope, ...)`, `snapshot_promotion.py:208`)
+   rather than importing into a candidate scope and calling `ops snapshot
+   promote` afterward: `"shadow"` is already the scope
+   `nightly_trigger`'s OWN plan reads (`--snapshot-scope shadow`, point 4
+   below) and the scope `computed_moves_refresh`/`forward_calendar_refresh`
+   already read a `parent_snapshot_id` from — there is no second,
+   stricter-gated scope downstream of it a promotion step would be
+   protecting. `promote`'s candidate/comparison machinery stays exactly
+   what it already is: the mechanism for advancing a scope that DOES have
+   a downstream consumer needing pre-advance validation (a future
+   production cutover scope, not this shadow-only one).
+6. **Bind the plan to the EXACT snapshot this call verified — never the
+   mutable head again (round-2 CodeRabbit finding, real, Major: "bind
+   resumed plans to the committed snapshot").** An earlier draft of this
+   design had `plan_fn`/`cli._plan_command` re-resolve `scope='shadow'`'s
+   CURRENT head via `pin_snapshot_inputs`/`resolve_snapshot_head` moments
+   after this phase already verified a DIFFERENT read of that same mutable
+   row — a genuine TOCTOU gap: `_LegacyLock` guards only `nightly_
+   trigger`'s OWN process for the duration of ITS OWN run; it does not, and
+   cannot, block a human operator from running `ops snapshot submit`/
+   `promote` against `scope='shadow'` by hand in between (nothing in this
+   design, or in `snapshot_import`/`snapshot_promotion`, serializes THAT
+   against `nightly_trigger`'s own read). A `plan_fn` call that re-resolves
+   the head instead of reusing the exact `snapshot_id` this call just
+   confirmed matches `as_of` could therefore pin a snapshot NOBODY
+   validated against tonight's session. The `snapshot_id` this function
+   returns on `"ready"` is the fix: `_submit_plan` passes it to `plan_fn`
+   as `expected_shadow_snapshot_id` (point 1's code snippet, above), and
+   `_default_plan` threads it straight through as a new CLI arg,
+   `args.expected_snapshot_id`, to a small extension of `snapshot_planning
+   .pin_snapshot_inputs`: matching the function's ACTUAL resolution path
+   (round-3 CodeRabbit finding, real — an earlier draft of this paragraph
+   named a `Repository.resolve` call that does not exist here), after
+   `resolve_snapshot_head` returns `head` and `store.read_verified(head)`
+   is deserialized into the (still separately, necessarily re-read — a
+   plan needs the artifact, not just the id) `SnapshotRef` (`snapshot_
+   planning.py:143-144`), if `expected_snapshot_id` is given and differs
+   from that ALREADY-LOADED `snapshot.snapshot_id` — no second resolve
+   call, just a comparison against the ref this call just deserialized —
+   `pin_snapshot_inputs` raises `fail("INPUT_CHANGED",
+   "the shadow snapshot head moved since it was verified for this
+   session")` — the SAME `INPUT_CHANGED` code this whole design already
+   uses for every other "a precondition this call needed did not hold"
+   case — rather than silently proceeding. `expected_snapshot_id` is
+   `None` whenever `_ensure_shadow_snapshot` is not in the call path at
+   all (legacy `input_mode`, or `nightly` plans built through `ops plan`
+   directly by an operator, unaffected callers of `pin_snapshot_inputs`
+   today), so every EXISTING caller keeps its current, unchecked behavior
+   — this is an additive, opt-in CAS check, not a new universal
+   requirement on `pin_snapshot_inputs` itself.
+
+**2. `events_table` and per-event row loading for `board_requests` — where
+it comes from, and where the line is drawn.** `board_requests`
+(`native_board_universe.py:198`) itself is already pure and I/O-free: it
+takes an already-loaded `events_table` (`ticker`/`event_date`/`session`
+columns), `as_of`, `horizon_days`, and an optional ticker filter, and
+performs no I/O of its own (see "Inputs" above — unchanged by this PR).
+What this design adds is a name for where a caller gets that
+`events_table` once a `shadow`-scope snapshot exists to read it from:
+`computed_moves_store.py`'s own `_scan_once`/`_scan_rows`
+(`computed_moves_store.py:130-166`) already demonstrate the exact read —
+`Repository.scan` over the pinned snapshot's `earnings_events` table
+(`ticker`, `event_date`, `session`, `src_orats` columns), returned as a
+`pd.DataFrame` with `event_date` parsed to `datetime64[ns]`. A future
+caller building `native_score_batch`'s still-missing raw-row producer (or
+this PR's own code slice, if it turns out small enough to fold in — see
+"Split into small code PRs" below) reads `earnings_events` off the SAME
+pinned `SnapshotRef` `_ensure_shadow_snapshot` just committed and
+`pin_snapshot_inputs` resolves at plan time, the same way, through the
+same `Repository`, never a second read path.
+
+**Deliberately left open here, staying inside PR-7a's own stated
+boundary**: whether that caller pre-filters to `src_orats &
+session.notna()` before calling `board_requests` (as `computed_moves_
+store._scan_once` already does for ITS OWN, differently-scoped purpose),
+and the full per-event row staging (`calendar_row`/`panel_row`/
+`panel_anchor`/`tier4_row`/`quote_rows`) `NightlyEventInputs` needs — both
+are exactly the "still-missing producer" PR-7a already named as its own
+out-of-scope, separately-designed prerequisite (cutover PR-6). This PR
+closes only the snapshot-existence half of that gap (point 1) and names
+where the raw `events_table` scan itself belongs (this point); it does not
+design the producer.
+
+**3. A `calendar_revision` source for the ops layer — recommendation:
+the pinned snapshot's own `SnapshotRef.calendar_version`, NOT
+`forward_calendar_refresh`.** `EventRef.calendar_revision`
+(`contracts/data.py:436-441`) and `ScoreRequest.calendar_revision`
+(`contracts/scoring.py:31-36`) are both plain, required `str` fields in
+`engine.v2.contracts` — a package `engine/v2/ops` already imports from
+freely (`snapshot_planning.py` already imports `SnapshotRef` from it). The
+brief's finding that "it exists only as `EventRef.calendar_revision` in
+contracts/serving, and ops can't import serving" is about a DIFFERENT,
+narrower mechanism: `engine.v2.serving.projections`/`bridge`'s own
+event-revision resolution (`dvr.dataset_version_id`, a Phase-3
+`EventStream`/DVR concept) — that machinery is real, genuinely
+serving-layer, and genuinely unreachable from `ops` by the existing layer
+boundary (`ops` sits below `serving`; importing it backward would be a
+layering violation this doc's own layer map already forbids elsewhere).
+That machinery is not, however, the only thing that can fill a
+`calendar_revision: str` field — it is one possible SOURCE of a value for
+it, not the type's only legal producer.
+
+`SnapshotRef.calendar_version` (`contracts/data.py:356-368`) is already a real,
+computed, per-snapshot value: `manifests.snapshot_ref`
+(`snapshot_promotion.py:198`, inside `_commit_snapshot_import`) sets
+`calendar_version = "legacy_calendar:" + table_manifests["earnings_events"]
+.logical_content_hash` — a deterministic digest of exactly the
+`earnings_events` table version that snapshot pins. PR-7a's own text
+already establishes `calendar_revision` as ONE value shared across the
+WHOLE batch, never per-row ("`as_of`/`snapshot_id`/`calendar_revision` are
+batch-level, shared... fields", this file's own PR-7a section above) —
+which is exactly the granularity `SnapshotRef.calendar_version` already
+has: one value per pinned snapshot, not one per event. Recommendation:
+`calendar_revision` for a snapshot-mode batch IS that pinned snapshot's
+own `calendar_version` — "the calendar under which this batch's events
+were known" reads, honestly, as "the earnings_events table version this
+batch's pinned snapshot carries," which is precisely what `calendar_
+version` already names. Concretely, this needs one small addition, in
+scope for a later small code PR (not this design PR):
+`pin_snapshot_inputs`'s own returned dict (`snapshot_planning.py:168-170`)
+adds `"calendar_version": snapshot.calendar_version` alongside the fields
+it already returns (`snapshot_id`, `snapshot_manifest_hash`, ...), so a
+caller building `native_score_batch`'s batch-level `calendar_revision`
+argument reads it straight off `pin_snapshot_inputs`'s result rather than
+re-fetching and re-parsing the published `SnapshotRef` artifact a second
+time.
+
+`forward_calendar_refresh` (`#83`) is a poor fit for this and this design
+recommends against it: its own store (`forward_calendar_store.py`, see
+"Diagrams" below) exists to forecast FUTURE trading-day calendars for
+horizon math (Nasdaq/yfinance-confirmed session dates ahead of `as_of`,
+fed by the SAME parent snapshot's `daily_market` sessions) — a materially
+different concept from "which version of the `earnings_events` schedule
+this event's date was fixed under," which is what `calendar_revision`'s
+own name and `EarningsEvent`'s docstring ("a date move updates
+`event_ref.calendar_revision`... rather than renaming the event",
+`contracts/data.py:449`) both describe. `forward_calendar_refresh` also has
+no scheduled production caller today (`#83`'s own PR body: "not included
+in nightly runs or submitted automatically" — that wiring is explicitly
+its own later PR, "PR B"), so it could not supply a value every night even
+if the concepts matched. **Flagging for the user**: this is this design's
+own interpretation of an ambiguous, previously-undocumented field mapping
+(no prior PR states what `calendar_revision` should resolve to for a
+snapshot-pinned native batch) — worth a look before the implementing PR
+starts, even though nothing here blocks on it.
+
+**4. How `nightly_trigger` switches to snapshot mode, without touching the
+real legacy nightly — and coordination with #117.** `nightly_trigger.py`'s
+own module docstring already states the invariant this relies on: "the
+legacy nightly keeps its own crontab line and this module never touches
+it; what is scheduled here is the parallel shadow-mode qualification DAG."
+`nightly_trigger.py` has never had any code path into the real legacy
+nightly process — it is a wholly separate script on a separate crontab
+line. Flipping `_default_plan`'s two literals,
+`input_mode="legacy"` → `input_mode="snapshot"` and `snapshot_scope=None`
+→ `snapshot_scope="shadow"`, therefore changes ONLY what THIS module's own
+shadow-DAG plan looks like; there is no code path by which it could reach
+the separate legacy process, changed or not.
+
+**Coordination with #117 (issue #104, in flight).** #117 also edits
+`_default_plan`'s body — it adds its own new phase (`_capture_input_
+manifest`, deriving `year_start`/`year_end` fresh from `as_of`) immediately
+before the SAME `plan_args = argparse.Namespace(...)` call this design's
+`input_mode`/`snapshot_scope` literals live in, and both PRs branch from
+the same `main` commit (`ff8c398`). Because `_ensure_shadow_snapshot` is
+called from `_submit_plan`, not from inside `_default_plan` (see point 1
+above — this call site moved after a round-1 CodeRabbit finding), the
+overlap with #117 is now narrow and purely textual: both PRs' diffs touch
+the SAME `plan_args = argparse.Namespace(...)` call inside `_default_plan`
+— #117 changes `input_manifest`/`year_start`/`year_end`, this design
+changes `input_mode`/`snapshot_scope` — with no shared line, no shared
+logic, and no new phase inserted into `_default_plan`'s body by this PR at
+all. Whichever of the two merges second needs an ordinary `git merge
+origin/main` (never a rebase, per the standard PR-owner conflict flow) to
+combine the two kwarg edits on that one call; this is a mechanical textual
+merge, not a design conflict, but it is real enough that whichever PR
+lands second should say so explicitly in its own "conflict-only merge"
+note to the Opus gate, per the standard flow.
+
+**5. Failure semantics.** See the new `nightly_trigger.py` (Cutover PR-7b)
+subsection below, in this doc's "Failure semantics" chapter, for the full
+4c R1–R6 account. Restated here, briefly, per the brief's own framing: a
+missing or not-yet-fresh `shadow` snapshot makes `_ensure_shadow_snapshot`
+either report `"not_yet"` or raise — these are NOT the same outcome and
+are not recorded the same way (round-3 CodeRabbit finding, real: an
+earlier draft of this paragraph conflated them). `"not_yet"` (a session
+mismatch — the legacy store has not caught up to `as_of` yet) is `_submit_
+plan` returning its existing `"not_yet"` receipt DIRECTLY, before ever
+writing `"submitting"` — it consumes no attempt and does not touch
+`MAX_CONSECUTIVE_ERRORS`, exactly like a `probe_finality` miss in
+`_decide` already does not today; a later tick simply re-enters `_decide`
+and tries again, with no error budget spent. Raising is different: only a
+raised `_HANDLED_FAILURES` (a terminal `snapshot_import` failure, or the
+`INPUT_CHANGED` head-moved-since-verification case, point 6 above; issue
+#104/PR #117's own `INPUT_CHANGED` for a session mismatch is the direct
+precedent for the EXCEPTION shape, not for `"not_yet"`) enters `_failure`
+and produces the existing `"error"`/terminal-after-`MAX_CONSECUTIVE_ERRORS`
+receipt — no new receipt status either way, but only the raised path
+spends error budget. In both cases `plan_fn` — and therefore `cli.
+_plan_command` — is never called for that tick, and — because this whole
+module has no code path into the real legacy nightly, changed or not —
+legacy scoring for that session proceeds completely independently, on its
+own separate crontab line, oblivious to whether the shadow snapshot import
+happened at all.
+
+**6. Split into small code PRs.** This design PR adds no code. The
+implementing sequence, each independently mergeable and each with its own
+tests:
+
+- **PR-7b-1 (shadow snapshot import producer, added unused — this slice, #145).**
+  `_ensure_shadow_snapshot` plus the `_drive_jobs_to_terminal` extraction
+  shared with `_default_serve` — the function and its tests only, NOT yet
+  called from `_submit_plan` (per the Small PRs guidance: "add the new
+  code first, unused... then wire it in"), so this slice ships with
+  exactly zero behavior change to what `ops submit` does each night. Test
+  plan: the seven `_ensure_shadow_snapshot` branches
+  (already-succeeded-under-the-current-`attempt` no-op,
+  attempt-budget-exhausted terminal failure, `selected_session` mismatch →
+  `"not_yet"`, a clean plan-import→submit→serve→committed-head round trip
+  against a fake catalog/store returning `("ready", snapshot_id)`, a
+  terminal-failure-then-fresh-attempt round trip proving the
+  `attempt`-suffixed key lets a second submission through where a bare
+  `as_of`-only key would have matched the dead row, a `"deadline_exceeded"`
+  drive-to-terminal outcome mapping to `("timed_out", None)` without
+  touching the still-running job, and the cache-hit branch reading
+  `resulting_head_snapshot_id` off an already-`succeeded` job rather than
+  re-resolving the mutable head), each isolated with injected `plan_
+  import_fn`/`submit_import_fn`/`serve_fn` seams, matching this module's
+  existing testing style throughout.
+- **PR-7b-2 (wire it in and flip the literals, together).** `TriggerReceipt`
+  gains `snapshot_attempt: int = 0` (additive); `_receipt()` gains the
+  matching parameter, passed EXPLICITLY at every call site in the module
+  as `prior.snapshot_attempt if prior is not None else 0` (a blanket,
+  mechanical rule — `busy_legacy`, `_decide`'s `"missed"` and
+  probe-finality `"not_yet"`, `_submit_plan`'s `"submitting"`/`"submitted"`
+  and its final `"completed"`/`"failed"`, and this design's own `"not_
+  yet"`/`"timed_out"` — see "`TriggerReceipt` gains a new field" above for
+  why each one needed it); `_failure` gains the matching optional
+  `snapshot_attempt=None` keyword AND an added `OR snapshot_attempt >=
+  MAX_CONSECUTIVE_ERRORS` arm in its give-up check (every EXISTING call
+  site of `_failure` omits the keyword, so it falls back to the SAME
+  carried, unbumped value); and `_submit_plan`'s new `ensure_snapshot_fn`
+  parameter and call site (see point 1 above) reads/threads `snapshot_
+  attempt` rather than `error_count` — plus `_default_plan`'s `input_
+  mode="snapshot"`/`snapshot_scope="shadow"` literals and its new
+  pass-through `expected_shadow_snapshot_id` keyword — shipped in the SAME
+  slice, since calling `_ensure_shadow_snapshot` while `_default_plan`
+  still requests `"legacy"` would gate on a snapshot the resulting plan
+  would not even use, an incoherent halfway state worth avoiding rather
+  than a real second increment. Test plan: `test_default_plan_passes_
+  full_run_and_the_full_population` and its siblings updated for the new
+  `input_mode`/`snapshot_scope` values; new `_submit_plan` tests proving a
+  `"not_yet"` readiness returns the `"not_yet"` receipt WITHOUT calling
+  `plan_fn` or writing `"submitting"`, a `"timed_out"` readiness returns
+  the `"timed_out"`/`"failed"` receipts per the SAME consecutive-timeout
+  counter `serve_fn`'s own timeout already uses while leaving `snapshot_
+  attempt` unchanged, and a `"ready"` readiness calls `plan_fn` with the
+  verified `snapshot_id` exactly as before; the regression test for the
+  Opus-gate finding on `e900074` — a fail-then-timeout-then-retry sequence
+  (a raised terminal failure bumps `snapshot_attempt` to `1`, a subsequent
+  `"timed_out"` tick leaves it at `1`, and the NEXT tick's `ensure_
+  snapshot_fn` call is asserted to receive `1`, not a reset `0`); a test
+  that a `busy_legacy` tick sandwiched between two `_submit_plan` entries
+  leaves `snapshot_attempt` unchanged (`e900074`'s finding 1 on
+  `fb7d31e`); and the regression test for the Opus-gate finding on
+  `fb7d31e` — an alternating terminal-failure/`"timed_out"` sequence for
+  the SAME `as_of` is asserted to reach `"failed_setup"` after exactly
+  `MAX_CONSECUTIVE_ERRORS` terminal failures, regardless of how many
+  `"timed_out"` ticks are interleaved between them. Branches from `main`
+  after PR-7b-1 (and after #117, if that has not merged first) merges,
+  per the no-stacked-bases rule.
+- **PR-7b-3 (`pin_snapshot_inputs` gains `calendar_version` and the
+  `expected_snapshot_id` CAS check).** Both are small, additive changes to
+  the SAME function's return value and signature (point 3's `calendar_
+  version` addition, and point 1/6's `expected_snapshot_id` refusal),
+  landed together since both touch `snapshot_planning.py` in the same
+  place; a test asserting the returned dict's `calendar_version` matches
+  the resolved `SnapshotRef`'s own field, and a test asserting `pin_
+  snapshot_inputs` raises `INPUT_CHANGED` when `expected_snapshot_id` is
+  given and the resolved head's `snapshot_id` differs, plus one proving
+  every EXISTING caller (which never passes `expected_snapshot_id`) is
+  unaffected. Independent of PR-7b-1/2; can land in parallel.
+- **Events_table scan helper (out of scope for this sequence).** Left to
+  the still-missing raw-row producer's own PR (cutover PR-6), per point 2
+  above — not split out here because it has no caller until that producer
+  exists.
+
 ## Inputs
 
 - Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan`
@@ -426,11 +1424,15 @@ this doc's own Diagrams section already names (see below).
   weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
   (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
   `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
-  `expected_head_snapshot_id`, `attempt_id`, `fence`) — there is no staged
-  input-document file for this runner: it has no `JobKind` (see "Primary
-  contracts" above), so there is no admitted job to stage one from, and
-  `refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES` has no
-  `"forward_calendar_refresh"` entry; and the two injected network edges,
+  `expected_head_snapshot_id`, `attempt_id`, `fence`) — most of these now
+  come straight off the job's own `CalendarMovesParameters` (see "Primary
+  contracts" above); `attempt_id`/`fence` come from
+  `forward_calendar_refresh`'s own small staged document
+  (`refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]`
+  → `forward_calendar_refresh_input.json`, `{"attempt_id": claim.attempt_id,
+  "fence": claim.fence}` only — every other field would only drift from the
+  immutable job parameters, so this document is deliberately smaller than
+  `computed_moves_refresh`'s own); and the two injected network edges,
   `providers.nasdaq_calendar.
   nasdaq_calendar_fetcher` (one call per discovery date) and
   `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
@@ -679,6 +1681,260 @@ reference (`input_bindings.py:70-73`), since no prior job produces it.
 `parameters["input_bindings"] = {"events.json": <that artifact id>}`; no
 `dependency_job_ids` entry is needed for it.
 
+**Cutover PR-4 (redo)'s own input sourcing (design).**
+`submit_native_parity_if_ready` gathers nothing beyond what
+`_native_parity_identity` already found, WITH ONE DELIBERATE EXCEPTION
+(CodeRabbit round 6; refined by an Opus gate finding on where it belongs,
+both real) — unlike `native_score_batch`'s own sidecar, this job's body
+has no board-universe enumeration or release resolution of its own, since
+every value it needs is already a committed job output:
+
+- **The one exception: a `schema_version` pre-submission check, not a
+  content read.** `_native_parity_identity` (above) is a cheap
+  CATALOG-only lookup — it finds the latest succeeded `native_score_batch`
+  job by idempotency key alone, never opening that job's own staged
+  `records.json`/`refusals.json`. But `native_score_batch`'s own worker
+  changing schema (`v1.0` → `v2.0`, this redo, above) means a shadow
+  deployment window where the "latest succeeded" `native_score_batch` job
+  `_native_parity_identity` finds predates this redo's rollout and is
+  still `v1.0`-shaped is a real, transient state, not a defect — and once
+  `submit_native_parity_if_ready` submits a `native_parity` job for THAT
+  identity, "R2, cache" (below) means that `(as_of, scope_hash)` key is
+  NEVER retried: the existence check alone gates every future tick, so a
+  job that would only ever fail (or worse, misread a `v1.0` array as
+  `v2.0`) can never be corrected by a LATER `native_score_batch` re-run.
+  `submit_native_parity_if_ready` therefore reads just the two documents'
+  `"schema_version"` field (`records_document["schema_version"] ==
+  "native_score_batch_records.v2.0"` AND `refusals_document[
+  "schema_version"] == "native_score_batch_refusals.v2.0"`) — the SAME
+  `job_<native_score_batch_job_id>#records`/`#refusals` artifacts the
+  worker later reads in full, opened here ONLY far enough to check one
+  field, never parsed for rows — BEFORE calling `stages.submit_job` at
+  all.
+
+  **A confirmed mismatch is a permanent wait state for THIS
+  `native_score_batch_job_id`, not a retried one (Opus gate finding,
+  correcting an earlier, unreachable claim here).** A mismatch on EITHER
+  tag is treated EXACTLY like `_native_parity_identity` returning `None`
+  on the tick it is first found: `submit_native_parity_if_ready` submits
+  NOTHING, so no job — and no `(as_of, scope_hash)` key — is ever created
+  for this identity. But unlike a true `None`, this identity's
+  `native_score_batch_job_id` names a real, already-succeeded job whose
+  staged `records.json`/`refusals.json` are fixed for good, and
+  `native_score_batch`'s own R2 (`#88`) never resubmits a job for an
+  `(as_of, scope_hash)` key that already has one — so `_native_parity_identity`
+  will keep finding THIS SAME job id, tick after tick, for as long as this
+  `(as_of, scope_hash)` stays current, and re-opening and re-decoding both
+  files against that unchanging outcome, roughly once a second, buys
+  nothing. The sidecar therefore memoizes a confirmed mismatch by
+  `native_score_batch_job_id` (`self._native_parity_schema_mismatch_job_id`,
+  a single-slot field alongside `self._native_parity_memo`; see "R1,
+  missing input" and "R2, cache" below for the full mechanics) and skips
+  the file reads entirely on every later tick whose identity carries the
+  SAME job id — no exception, no attempt against `self._native_parity_memo`,
+  just a cheap `==` check. What actually resolves the memoized mismatch is
+  a DIFFERENT identity: a new `as_of` (the next session), or the same
+  `as_of` under a NEWER succeeded `native_score_batch` job's `scope_hash`
+  (a release swap mid-session, "R2, cache" below) — either carries a
+  different `native_score_batch_job_id`, which misses the memo and
+  triggers one fresh check. A `native_score_batch` re-run for the SAME
+  `(as_of, scope_hash)` key, which the earlier draft's "re-checked … once
+  a `native_score_batch` run … produces a `v2.0` artifact for that
+  session" wording depended on, cannot happen: that key already has a
+  job, so `native_score_batch`'s own sidecar never resubmits it — there is
+  no later run "for that session" to ever land.
+
+  A read or decode failure on either file — a missing artifact, invalid
+  JSON, a non-dict document, or a document missing the `schema_version`
+  key entirely — is a DISTINCT outcome from a clean mismatch: it is an
+  exception, not a checked value, so it is never written to
+  `self._native_parity_schema_mismatch_job_id` (only a cleanly-decoded,
+  confirmed-wrong tag counts as a mismatch worth memoizing). Instead it
+  propagates out of `submit_native_parity_if_ready` exactly like a
+  `submission.submit` failure would, to `_reconcile_native_parity`'s own
+  try/except — the SAME inline backoff `computed_moves_refresh` already
+  uses (`supervisor.py:450`; see "R2, cache" below) — so it counts as one
+  spent attempt against `self._native_parity_memo`, is reported the same
+  redacted, deduped way, and never crashes the tick.
+
+  This is a wait state exactly like the missing-job case, never a refusal
+  and never a job failure — because, unlike every other input this
+  sidecar reads, `native_parity`'s own worker has no way to retry a
+  session whose job already exists.
+
+- **Legacy source.** `job_<score_job_id>#score` — the SAME `score.json`
+  `attempt_outputs` binding every other legacy-dependent job already reads
+  (`_job_output("score", keys)`, `nightly.py:180`), decoded into
+  `legacy_rows` via `nightly.legacy_parity_rows` (above), unchanged from
+  the original PR-4 design.
+- **Native source, per `#88`.** `job_<native_score_batch_job_id>#records`
+  and `job_<native_score_batch_job_id>#refusals` — the `native_score_batch`
+  job's own staged outputs. Both bindings resolve through the same
+  `input_bindings.resolve_bindings`/`_resolve_job_binding` mechanism
+  `score.json` uses — no new binding mechanism. The `native_parity`
+  `JobSpec`'s `dependency_job_ids` carries BOTH `score_job_id` and
+  `native_score_batch_job_id`, since `_resolve_job_binding` refuses any
+  binding whose dependency is not declared (`input_bindings.py:34-36`) —
+  each binding is checked against `spec.dependency_job_ids` independently,
+  so a spec that named only one of the two jobs would fail to resolve the
+  other's binding.
+- **`tolerance_policy`.** Unchanged pluggable seam from `#72`: defaults to
+  `SCORE_RECORD_V1` (exact for every field). `NativeParityParameters`
+  carries no tolerance data of its own — a future, user-ratified
+  `TolerancePolicy` is instantiated in code wherever that ratification
+  lives and passed to `compare_native_vs_legacy` directly, never
+  round-tripped through a job parameter (matching `#72`'s own stance that
+  no tolerance value belongs in a doc, a PR body, an issue, or — this
+  redo adds — a job's persisted parameters row).
+
+**`records.json`/`refusals.json`'s own key schema — designed HERE, not by
+`#88`.** `#88`'s final text (above, "Row keys") deliberately does NOT
+prescribe a fix: an earlier draft of that bullet proposed a concrete
+canonical-string-keyed schema, and the Opus gate on `#88` struck it —
+"acceptance criterion 4 of this same design states the row-key/join gap
+is 'not designed here'... choosing `records.json`'s own future output
+schema is a change to `native_score_batch.py`'s output contract... which
+belongs to whichever PR builds `native_parity`, reviewed on its own
+terms." `#88` names only the HAZARD (a refused row breaks positional
+`events.json`/`records.json` pairing) and points at the "starting
+material": `BoardRequest`'s own fields and
+`NativeScoreBatchRowRefusal.as_document()`'s existing `"key"` dict
+(`native_score_batch.py:56`, `:82-91`). This redo makes that choice:
+
+- **The key.** One canonical string per row,
+  `f"{ticker}|{strategy}|{event_date_iso}|{session}"`, where
+  `event_date_iso = str(pd.Timestamp(event_date).date())` — the IDENTICAL
+  four fields, in the identical ISO-date form,
+  `NativeScoreBatchRowRefusal.as_document()`'s own `"key"` dict already
+  uses (`native_score_batch.py:87`); this redo flattens that dict into one
+  string, rather than inventing a new field set or date format, because a
+  JSON object's own keys must be strings. `BoardRequest` is `frozen`/`slots`
+  (`native_board_universe.py:56`, `:62-65`) and hashable, so `assembled` (a
+  `dict[BoardRequest, ...]`, `native_score_batch.py:332`'s own return
+  type) already carries this exact identity per successful row; no new
+  identity is derived, only re-formatted for JSON.
+  **The join character is validated out of every source field before
+  encoding, not merely tolerated after (CodeRabbit round 3, real
+  finding).** `event_date_iso` can never contain `"|"` (a fixed
+  `YYYY-MM-DD` form), but `ticker`/`strategy`/`session` are free-text-shaped
+  inputs this design does not control at the source. A NEW per-row check,
+  `native_score_batch._board_request_key(key: BoardRequest) -> str`, raises
+  a `NativeScoreBatchRowRefusal` (new code `INVALID_KEY_FIELD`, the same
+  collected-never-raised per-row mechanism `UNSUPPORTED_STRATEGY` already
+  uses) the moment `"|"` appears in `key.ticker`, `key.strategy`, or
+  `key.session` — BEFORE that row is ever encoded into `records.json`'s
+  own keys (which route through this one function).
+  **This check runs FIRST among `_assemble_one_event`'s per-row checks,
+  before `_calendar_row_problem`/`CALENDAR_ROW_INVALID` and every other
+  existing check in the "R1, missing input — per row" list below (Opus
+  gate finding, real gap).** `_board_request_key` reads only `key`
+  (`BoardRequest`'s own `ticker`/`strategy`/`session` fields, fixed at row
+  construction, never the staged `calendar_row`/`panel_row`), so it needs
+  no staged input to evaluate and has no ordering dependency on anything
+  that check list resolves; placing it first means a row whose key is
+  unsafe to encode is ALWAYS refused `INVALID_KEY_FIELD`, never one of the
+  other codes, even when that same row would independently also fail a
+  later check (a malformed `calendar_row`, an unsupported strategy, and so
+  on) — a row can be refused only once, so the FIRST check that trips
+  decides its code, and this ordering guarantees that code is always
+  `INVALID_KEY_FIELD` whenever the key itself is unsafe. Every check AFTER
+  this one — `_calendar_row_problem` included — can therefore assume
+  `key.ticker`/`key.strategy`/`key.session` are already known "|"-free and
+  need not re-validate them before their own encoding or comparisons. This
+  makes the
+  `records.json` join a true bijection BY CONSTRUCTION for every row that
+  DOES get a canonical key (none of the four source values feeding it can
+  ever contain the separator, so encoding and
+  `_population_key_from_board_request_key`'s own decode are exact
+  inverses) rather than merely "safe because a malformed encoding would
+  also fail to re-parse as exactly 4 parts," which was this design's
+  original, weaker argument and is not enough on its own: two DISTINCT
+  malformed rows sharing an embedded `"|"` could still encode to the
+  IDENTICAL 5-or-more-part string and be silently indistinguishable to a
+  reader, even though each individually fails `_population_key_from_board_request_key`'s
+  own 4-part check.
+  **An `INVALID_KEY_FIELD` refusal is never given a canonical key at all
+  (CodeRabbit round 5, real finding).** `_board_request_key` raising is
+  precisely the statement "no safe string exists for this row" — inventing
+  a SECOND, reversible escaping scheme just for this one code would add a
+  new format this design would then have to prove correct too, for a
+  refusal-only edge case. Instead `refusals.json` (below) puts these rows
+  in a SEPARATE array, `"unkeyable_refusals"`, each entry carrying the raw
+  STRUCTURED key `NativeScoreBatchRowRefusal.as_document()` already
+  produces unjoined — `{"key": {"ticker": ..., "strategy": ...,
+  "event_date": ..., "session": ...}, "code": "INVALID_KEY_FIELD",
+  "detail": ...}` — never a string, so there is nothing to collide or to
+  fail re-parsing `_population_key_from_board_request_key`'s 4-part check.
+  `_native_rows_and_refusals` (below) passes this array straight through
+  uninspected; `apply_native_refusals` (above) reports every one of its
+  entries in `native_parity_report.json`'s new `native_refused_unmatched`
+  list unconditionally, never attempting to match it against `legacy_rows`
+  by any key. One row refusing this way is a normal, reportable per-row
+  outcome for `native_score_batch` itself — same job-success semantics as
+  any other refusal, never a batch-level `OpsError` there. Phase 2's test
+  plan adds a case for each of `ticker`/`session` (the two genuinely
+  free-text fields) carrying an embedded `"|"`, asserting the row refuses
+  `INVALID_KEY_FIELD` into `unkeyable_refusals`, every OTHER row in the
+  same batch still assembles normally, and `native_parity`'s own
+  acceptance test asserts it surfaces in `native_refused_unmatched`.
+- **`records.json`.** `"records"` changes from a bare array (today) to a
+  JSON object: `{canonical_key: to_document(record), ...}`. Built inside
+  `run_native_score_batch_worker` by zipping `assembled.keys()` (the
+  `BoardRequest`s, in `assembled`'s own dict order) against `records` (the
+  `tuple[ScoreRecord, ...]` `score_batch` returns) — valid because
+  `batch.requests = tuple(r for r, _ in assembled.values())`
+  (`native_score_batch.py:463`, unchanged) is built from that SAME
+  `assembled.values()` iteration, and `score_batch` preserves
+  `batch.requests` order (existing R6 invariant, unchanged) — never a
+  reconstruction from `events.json`'s own order, which is exactly the
+  positional pairing `#88` names as broken once any row has refused. New
+  schema version: `native_score_batch_records.v1.0` → `v2.0`.
+- **`refusals.json`.** Every refusal EXCEPT `INVALID_KEY_FIELD` is rekeyed
+  the identical way `records.json` is, for symmetry and so `native_parity`
+  needs exactly ONE join key format for both files, never two:
+  `"refusals": {canonical_key: {"code": ..., "detail": ...}, ...}` — the
+  same `code`/`detail` fields `NativeScoreBatchRowRefusal.as_document()`
+  already carries, minus the now-redundant nested `"key"` dict (the
+  object's own key IS the row identity; carrying it twice invites the two
+  copies drifting apart). A NEW sibling array, `"unkeyable_refusals":
+  [{"key": {...}, "code": "INVALID_KEY_FIELD", "detail": ...}, ...]`
+  (above), holds exactly the rows that cannot be safely rekeyed at all —
+  its entries keep the nested structured `"key"` dict UNCHANGED from
+  `NativeScoreBatchRowRefusal.as_document()`'s own shape, since there is
+  no canonical string to make it redundant. The worker's own return-value
+  output tag moves `"native_score_batch_refusals.v1.0"` →
+  `"native_score_batch_refusals.v2.0"` alongside both changes.
+  `assembled`/`refusals`'s own row-level SET is unchanged —
+  `assemble_score_batch_inputs`'s per-row either/or contract (PR-3: a key
+  is either in `assembled` with a complete pair, or in `refusals`, never
+  both) is exactly what lets `apply_native_refusals` (above) trust the two
+  files never claim the SAME key twice.
+- **What does NOT change.** `run_native_score_batch_worker`'s assembly and
+  the no-fit guard are unchanged by this redo; every EXISTING per-row
+  refusal code (`UNSUPPORTED_STRATEGY` and the rest) keeps its exact prior
+  meaning — this redo adds exactly one NEW code, `INVALID_KEY_FIELD`
+  (above), for the one new failure mode the keyed schema itself introduces
+  (an embedded `"|"`), and changes the two output files' own top-level
+  shape. A caller that reads `records.json`'s OLD array shape (none exists
+  in production today — see "Cutover PR-4 (redo)" above) would break; no
+  such caller exists to migrate.
+
+**Cited, not solved here: `native_score_batch` does not submit at all under
+today's production default.** `#88`'s own R1 (above, "Per-event raw
+rows") found that in the production default `"legacy"` input mode, the
+selected `"score"` job pins no snapshot, so PR-7a's shadow batch "does not
+submit at all, full stop" until either a future PR changes the production
+input mode or the still-missing raw-row producer gets its own way to
+source its inputs — named there as cutover PR-6/PR-7b (snapshot-mode
+inputs), NOT designed here or by `#88`. This redo does not solve that gap
+either: `_native_parity_identity` (above) simply keeps returning `None`
+(R1, "Failure semantics" below) for as long as no `native_score_batch` job
+ever succeeds — the SAME graceful "nothing to do yet" outcome it already
+has for the ordinary case of a night that has not reached that point yet,
+not a distinct failure mode this redo needs to handle specially. Once
+PR-7b unblocks `native_score_batch`'s own submission, `native_parity`
+starts working with no change of its own.
+
 ## Outputs
 
 - **`orats_daily_market_fetcher`'s rows (`providers/orats_daily_market.py`,
@@ -708,18 +1964,35 @@ reference (`input_bindings.py:70-73`), since no prior job produces it.
   — the assembled map (never partial per row: a key is present only with a
   complete, buildable pair) plus every row that could not be assembled, each
   a typed `.code`/`.detail`/`.key` refusal object. `run_native_score_batch_worker`
-  writes this as two staged files: `records.json` (an envelope document,
-  `{"schema_version": "native_score_batch_records.v1.0", "authoritative":
-  false, "known_gaps": [], "records": [...]}` — see "Failure semantics" for
-  `authoritative`/`known_gaps` — whose `records` array is the `tuple[
-  ScoreRecord, ...]` `score_batch` returns, each `to_document`-serialized,
-  in `ScoreBatch.requests` order, never reordered to match `events.json`)
-  and `refusals.json` (one document per row refusal, `{"key": ..., "code":
-  ..., "detail": ...}`, in the order `events.json` declared them). A batch
-  whose every row refuses still completes the job successfully with an
-  empty `records` array and a full `refusals.json` — refusing every row is
-  a valid, reportable outcome, not a worker failure (see "Failure
-  semantics").
+  writes this as two staged files, BOTH keyed by the same canonical
+  `_board_request_key(key: BoardRequest) -> str` string (Cutover PR-4
+  redo's v2.0 schema — see "Cutover PR-4 (redo)" above for the full key
+  design and the `INVALID_KEY_FIELD` per-row refusal that makes it a true
+  bijection): `records.json` (an envelope document,
+  `{"schema_version": "native_score_batch_records.v2.0", "authoritative":
+  false, "known_gaps": [], "records": {canonical_key: to_document(record),
+  ...}}` — see "Failure semantics" for `authoritative`/`known_gaps` —
+  whose `records` object pairs `assembled.keys()` (the `BoardRequest`s, in
+  `assembled`'s own dict order) against the `tuple[ScoreRecord, ...]`
+  `score_batch` returns, each `to_document`-serialized; keying by
+  `canonical_key` rather than array position is exactly what makes the
+  pairing correct once any row has refused, never a reconstruction from
+  `events.json`'s own order) and `refusals.json` (`{"schema_version":
+  "native_score_batch_refusals.v2.0", "refusals": {canonical_key: {"code":
+  ..., "detail": ...}, ...}, "unkeyable_refusals": [{"key": {"ticker":
+  ..., "strategy": ..., "event_date": ..., "session": ...}, "code":
+  "INVALID_KEY_FIELD", "detail": ...}, ...]}` — `unkeyable_refusals` is
+  ALWAYS present, `[]` for a batch with none, never omitted (`native_parity_
+  report._native_rows_and_refusals`, above, requires the key rather than
+  defaulting it), the same `code`/`detail` fields
+  `NativeScoreBatchRowRefusal.as_document()` already carries, minus the
+  now-redundant nested `"key"` dict). A batch whose every row refuses
+  still completes the job successfully with an empty `records` object and
+  a full `refusals` object — refusing every row is a valid, reportable
+  outcome, not a worker failure (see "Failure semantics"), and (Cutover
+  PR-4 redo) is exactly the case `native_parity_report._empty_native_report`
+  (above) exists to turn into a real report rather than a refused
+  comparison.
 - `computed_moves_store.py` commits one new snapshot generation per run,
   carrying every other table forward unchanged alongside a fresh
   `computed_moves` table version (`engine/v2/data/computed_moves_table.py`;
@@ -758,25 +2031,47 @@ reference (`input_bindings.py:70-73`), since no prior job produces it.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
-- Cutover PR-4 (design; see "Primary contracts" above): `native_parity_report.json`
-  is NOT written in production today, and this correction matters, not
-  only the file it is written to — `compare_native_vs_legacy`'s own
+- Cutover PR-4 (redo; see "Primary contracts" above): `native_parity_report.json`
+  is NOT written in production today — `run_shadow_nightly`'s own
   `_refuse_empty_inputs` raises `VALIDATION_FAILED` on an empty
-  `legacy_rows`/`native_rows`/no shared key, `native_parity_handler`
-  propagates that raise, and `_run_stage` catches it for the `OPTIONAL`
-  `native_parity` stage as a `"degraded"` receipt — `write_parity_report`
-  is never reached, so no file lands on disk. That is consistent with,
-  not in tension with, "`run_shadow_nightly` has no production caller,
-  only tests ... call it": today's only callers hand it real dicts (the
-  tests) or nothing at all (nobody in production), never an empty
-  `parity_rows` that reaches `compare_native_vs_legacy` and then writes a
-  report anyway. Once `tools/native_parity_run.py` supplies real rows,
-  `native_parity_report.json` will, for the first time in production,
-  carry a real `"compared"`/`"only_legacy"`/`"only_native"`/`"mismatches"`
-  split, plus the new `"explained"` list (each entry `mismatches`-shaped
-  plus `"reason"`) for a caller-classified known structural difference.
-  Still private-shadow-only, same as every other artifact in this bullet
-  list; nothing here writes to the legacy board.
+  `legacy_rows`/`native_rows`/no shared key, and nothing in production
+  ever calls `run_shadow_nightly` at all ("`run_shadow_nightly` has no
+  production caller, only tests ... call it" — still true, unchanged by
+  this redo). Once the `native_parity` job kind lands (Phase 2 of this
+  redo), its worker (`run_native_parity_worker`) writes the report as an
+  ORDINARY staged attempt output, `name="report"`, durably addressed
+  `job_<native_parity job id>#report` — resolvable through
+  `input_bindings.resolve_bindings` exactly like `score.json`'s own
+  `job_<id>#score` binding, and reusable by a future caller the same way
+  (`dependency_job_ids` plus `input_bindings={"native_parity_report.json":
+  "job_<id>#report"}`). This CLOSES the non-atomic-write risk the original
+  PR-4 design named for `write_parity_report`'s bare `Path.write_text`
+  call: the new report is written through the same executor-owned
+  staged-attempt-output mechanism `records.json`/`score.json` already
+  use, which stages privately and only becomes visible as a committed
+  output once the attempt is recorded `succeeded` — a killed worker
+  leaves no output row at all, never a half-written file a caller could
+  read. `write_parity_report` itself is unchanged and still used only by
+  `run_shadow_nightly`'s own test-only path (its non-atomic-write shape is
+  immaterial there: nothing in production reads a file that function
+  writes). No dashboard-facing "latest" pointer path is added by this
+  redo (out of scope, above) — a reader finds the report by job id (`ops
+  get`/`ops logs`/`ops explain <job_id>`), the same way every other
+  shadow-only artifact in this package is read today. The report's own
+  schema gains TWO additive fields, `"native_refused": [...]` (a
+  `population_key`-matched legacy row moved out of `only_legacy`) and
+  `"native_refused_unmatched": [...]` (a native refusal — keyed or, for
+  `INVALID_KEY_FIELD`, structured — with no legacy row to move; CodeRabbit
+  round 5, real finding, above) (both `apply_native_refusals`, above) —
+  `SCHEMA_VERSION` bumps `native_parity_report.v1.0` → `v1.1` for this
+  reason; every existing field (`compared`/`only_legacy`/`only_native`/
+  `mismatches`/`tolerance_policy_id`) keeps its exact prior meaning,
+  except that `only_legacy` now excludes rows `native_refused` claims
+  instead of including them — a meaning NARROWING, not a breaking
+  removal: no production caller has ever populated `only_legacy` with
+  real refusal data before this redo. Still private-shadow-only, same as
+  every other artifact in this bullet list; nothing here writes to the
+  legacy board.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the EXISTING `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never
@@ -805,11 +2100,16 @@ reference (`input_bindings.py:70-73`), since no prior job produces it.
 
 **`computed_moves_refresh` is registered as an ordinary job kind (Part 3) and
 now has a nightly `GRAPH`/`OPTIONAL` node and a SUPERVISED submitter (Part 4,
-revised after Opus BLOCK(3)); `forward_calendar_refresh` still has no
-`JobKind` at all.** `stages.py::_core_kinds` includes
-`calendar_moves_jobs.computed_moves_job_kind()`, and `worker.py::dispatch`
+revised after Opus BLOCK(3)); `forward_calendar_refresh` now has a `JobKind`
+too (issue #52's prerequisite landed in #55; this is a separate, later
+change from #55 itself), but still has neither a `GRAPH`/`OPTIONAL` node nor
+a submitter — that wiring is a separate, later PR.** `stages.py::_core_kinds`
+includes `calendar_moves_jobs.computed_moves_job_kind()` and
+`calendar_moves_jobs.forward_calendar_job_kind()`; `worker.py::dispatch`
 routes worker `"computed_moves_refresh"` to
-`calendar_moves_jobs.run_computed_moves_worker`. `nightly.py`'s `GRAPH` still
+`calendar_moves_jobs.run_computed_moves_worker` and worker
+`"forward_calendar_refresh"` to
+`calendar_moves_jobs.run_forward_calendar_worker`. `nightly.py`'s `GRAPH` still
 carries a `"computed_moves_refresh": ("refresh",)` node, and `OPTIONAL`
 still includes it, but ONLY for `run_shadow_nightly`'s own whole-graph walk
 (see "Diagrams" below) — no *submission* path builds a job for it from that
@@ -916,13 +2216,17 @@ note below) — so a caller's coverage denominator never disagrees with what
 the worker independently recomputes; it now takes `as_of` directly rather
 than a nightly `plan`/`context_tickers` (neither was ever read by its body).
 `forward_calendar_refresh` was registered, and briefly wired into a draft of
-this same nightly stage, in an earlier draft of this PR too, but that
+this same nightly stage, in an earlier draft of PR #50 too, but that
 registration (and its `run_forward_calendar_worker` job-layer adapter) was
 pulled before merge: see "Primary contracts" above and issue #52 (no
 attempt-fence check in `forward_calendar_store`'s commit path — a gap the
 job registration would have made newly reachable as a supervised, leased,
-retried, cancellable attempt) — Part 4 wires only `computed_moves_refresh`
-for the same reason; `forward_calendar_refresh` gets no `GRAPH` node either.
+retried, cancellable attempt) — Part 4 wired only `computed_moves_refresh`
+for the same reason. Issue #52's prerequisite landed in #55, and
+`forward_calendar_refresh` was re-registered as a `JobKind` in a later PR
+(worker dispatch, loader callback, parameter validation, and a small staged
+`attempt_id`/`fence` document — see "Primary contracts"/"Inputs" above) —
+but it still has no `GRAPH`/`OPTIONAL` node and no submitter of its own.
 `run_computed_moves_refresh` is also still not itself a bare
 `engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
 `parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
@@ -955,12 +2259,19 @@ legitimately finds has no committable rows (`_capture_targets`'s "too_few"
 outcome — a real business finding, not a failure) still counts as covered:
 the run genuinely finished considering it. A caller building `expected_ids`
 before submission must derive it the same way, from
-`target_tickers_from_snapshot` against the same pinned inputs — there is no
-`tickers` field on `CalendarMovesParameters` to disagree with (removed, see
-"Primary contracts" above and "Failure semantics" below): `computed_moves_refresh`
-has never read one, unlike the now-removed `forward_calendar_refresh` job
-wrapper, whose own now-moot `tickers=()` "whole market" denominator this
-fix's design deliberately does not reuse.
+`target_tickers_from_snapshot` against the same pinned inputs — `CalendarMovesParameters.tickers` (restored, see "Primary contracts" above)
+is `forward_calendar_refresh`'s own field, never read by
+`computed_moves_refresh`: this fix's `target_tickers_from_snapshot`-derived
+denominator design is specific to `computed_moves_refresh` and is not reused
+by `forward_calendar_refresh`, whose own `expected_ids` must instead equal
+`set(tickers)` — `run_forward_calendar_refresh` always reports
+`completed_ids=tuple(sorted(set(tickers)))` (see its own module docstring),
+so a `tickers=()` ("whole market") submission can never satisfy this job
+kind's own coverage check, which requires a non-empty `expected_ids`
+(`_expected_ids_problems`): submitting a whole-market forward-calendar
+refresh as a job is not yet supported end-to-end (only a ticker-scoped
+request is); the standalone runner itself still accepts `tickers=()` for a
+direct, non-job invocation.
 Every field of the staged input document, and
 `parameters`' own `parent_snapshot_id`/`refresh_plan_hash`, are validated up
 front (`_validate_input_document`, split into `_validate_document_identity`/
@@ -1238,6 +2549,28 @@ network, or database access.
 
 ## Failure semantics
 
+- **Backup retry after the effect already delivered (`backup.run_backup`, fixed for #98)** —
+  `run_backup` claims the `backup` outbox row for its `key`
+  (`outbox.claim`, only `pending` or an expired `running` row matches) then
+  copies artifacts and calls `outbox.complete`, which sets the row
+  `delivered`. `effects_graph.backup_effect` writes this stage's `watermark`
+  in a SEPARATE transaction right after `run_backup` returns, and the job's
+  attempt commit follows that. A crash between the `delivered` write and the
+  watermark/attempt commit means a retry re-invokes `run_backup` with the
+  SAME `key` while the row is already `delivered` — `claim`'s predicate
+  matches neither `pending` nor an expired `running` row, so it returned
+  `None` and `run_backup` raised `STALE_EXPECTATION` permanently (the job,
+  and every stage depending on it, could never succeed). **Fixed:**
+  `run_backup` now checks, before raising, whether an outbox row for this
+  exact `(kind="backup", key)` is already `delivered`; if so it returns that
+  row's stored `receipt_json` (the manifest `complete` recorded) as-is —
+  no re-copy, no re-claim, no second backup — so `backup_effect` proceeds to
+  write the watermark normally, exactly as if this call had just completed
+  the work itself. A `pending` row is unaffected by this fix: `claim()`
+  already accepts it normally, so it is claimed and backed up as before.
+  Only a row that is `running` with an unexpired lease (or one lost to a
+  concurrent claim) still refuses `STALE_EXPECTATION` exactly as before;
+  an ALREADY-`delivered` row for the identical key short-circuits instead.
 - **Worker exit vs. process-family aliveness (`executor.poll`)** — `poll()`
   samples `running.process.poll()` for the worker's own exit code, then
   scans the watched process family (`executor_watchdog.observe`, the
@@ -1354,7 +2687,11 @@ network, or database access.
   or an `int >= 1` — each refused before any I/O the moment it is
   malformed. `None`/`None` is a valid, meaningful request (a manual/ad-hoc
   invocation with no live job attempt behind it), not merely an omitted
-  default, and both set is the other valid shape. The two fields ARE then
+  default — but only for a DIRECT, standalone, non-job call into
+  `run_forward_calendar_refresh` that is never reached through the job
+  scheduler; the job-dispatched path refuses that same pair instead (see
+  the staged-document paragraph at the end of this item). Both set is the
+  other valid shape. The two fields ARE then
   cross-checked against each other
   (`engine.v2.ops.lifecycle.validated_attempt_fence_pair`,
   Opus gate finding on #55): exactly one set is refused up front, before
@@ -1390,6 +2727,21 @@ network, or database access.
   function (its own call site and tests are unchanged)
   (`tests/test_v2_ops_computed_moves_store.py::test_run_computed_moves_refresh_refuses_fence_set_without_attempt_id`/
   `::test_run_computed_moves_refresh_refuses_attempt_id_set_without_fence`).
+
+  The job-dispatched path — `incremental_data._staged_forward_calendar_attempt`,
+  the staged-document reader called only from the `forward_calendar_refresh`
+  loader callback (never by a direct, standalone caller) — always fails
+  closed instead: a missing or unreadable staged document, malformed JSON, a
+  document that is not a JSON object, a missing or explicitly null
+  `attempt_id` or `fence`, a blank or non-string `attempt_id`, or an invalid
+  `fence` (a `bool`, a non-`int`, or an `int` less than 1) is each refused
+  as `INVALID_REQUEST` before the store is ever called.
+  `Claim.attempt_id`/`Claim.fence` are always real values for a real
+  scheduled job, so a staged document lacking either one indicates a broken
+  or tampered staging step, not a legitimate manual request — which is why
+  only the DIRECT, non-job call described above may pass
+  `attempt_id=None, fence=None` as its deliberate, meaningful "skip the
+  fence check" request.
 - **`nightly.submit_computed_moves_refresh_if_ready`'s own failure semantics
   for `computed_moves_refresh` (Part 4, revised after Opus BLOCK(3))** —
   R1 missing input: no open catalog connection, no native `"refresh"` job
@@ -1472,12 +2824,24 @@ network, or database access.
   `computed_moves_store._validate_input_document`'s own revalidation of the
   same fields (below) is a second, defense-in-depth layer, not the only
   place they are checked — again, the same relationship
-  `run_refresh_worker` has to its own sibling check. `tickers`/`horizon_days`/
-  `table_name` are no longer fields on `CalendarMovesParameters` at all
-  (Round 3): the first two were read only by the now-removed
-  `forward_calendar_refresh` job wrapper, and `table_name` was never read by
-  either store — there is nothing left to validate-or-refuse for them, so
-  they were deleted rather than defended.
+  `run_refresh_worker` has to its own sibling check. `horizon_days`/`tickers`
+  are fields on `CalendarMovesParameters` again (restored by this PR): both
+  are read only by `forward_calendar_refresh` (`computed_moves_refresh` never
+  reads either), and `calendar_moves_parameter_problems` validates both for
+  BOTH job kinds — harmless for `computed_moves_refresh`, whose defaults for
+  both fields already pass. `horizon_days` must be an `int` inside
+  `[1, MAX_HORIZON_DAYS]`, inclusive; `tickers` must be a tuple/list of
+  unique bounded non-empty strings, and whenever it is non-empty it must also
+  match `expected_ids` as a set (a ticker-scoped forward calendar refresh
+  cannot commit a different ticker set than the coverage denominator its job
+  reports); an EMPTY `tickers` is additionally refused for a
+  `forward_calendar_refresh` job specifically (the standalone runner's
+  "empty means the whole market" behavior is intentional for direct callers,
+  but a whole-market run must never be submitted as this job kind) — never
+  for `computed_moves_refresh`, which never reads the field and always leaves
+  it at its empty default. `table_name`, by contrast, is still not a field on
+  `CalendarMovesParameters` at all: it was never read by either store, so
+  there is nothing to validate-or-refuse for it.
 - **Training/promote refusal** — `run_training_worker` maps every refusal
   the underlying tool can raise to a typed `OpsError` rather than an
   untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
@@ -1634,6 +2998,14 @@ network, or database access.
   batch).** Once a release is in hand, every OTHER failure is scoped to one
   `BoardRequest` and collected as a `NativeScoreBatchRowRefusal` in the
   returned tuple, not raised:
+  - `INVALID_KEY_FIELD` (this redo, above) — `_board_request_key(key)`
+    raises the moment `"|"` appears in `key.ticker`/`key.strategy`/
+    `key.session`. This check runs FIRST, before every check below
+    INCLUDING `_calendar_row_problem` (below): it reads only `key`, needs
+    no staged `calendar_row`/`panel_row`, and a row that would also fail a
+    later check is refused `INVALID_KEY_FIELD` and only that, never the
+    later code, because the first check that trips is the one that
+    decides a row's refusal code.
   - `CALENDAR_ROW_INVALID` — the staged `calendar_row` itself is malformed:
     not a mapping at all (CodeRabbit round 5, PR #66 — a null/wrong-typed
     `calendar_row` in `events.json` would otherwise raise `AttributeError`
@@ -1645,8 +3017,11 @@ network, or database access.
     and which was previously unchecked before that point).
   - `CALENDAR_ROW_KEY_MISMATCH` — `calendar_row["ticker"]`/`calendar_row[
     "event_date"]` does not match the row's own `NightlyEventInputs.key`.
-    Both checks live in one helper (`_calendar_row_problem`) run first,
-    before every other per-row check: nothing else in this module or in
+    Both checks live in one helper (`_calendar_row_problem`) run first
+    among this module's PRE-EXISTING per-row checks — this redo's own
+    `INVALID_KEY_FIELD` (above) runs before even this one, since it does
+    not touch `calendar_row` at all — before every other per-row check:
+    nothing else in this module or in
     `assemble_nightly_source_bundle` (which only checks `panel_row` against
     `calendar_row`, never against the caller's `BoardRequest`) verifies
     that a staged `calendar_row` actually belongs to the key it was paired
@@ -1746,10 +3121,14 @@ network, or database access.
   `NativeScoreBatchRowRefusal` for that row exactly like every other
   re-wrapped `NightlySourceBundleRefusal`, never a batch-level failure.
   `records.json`'s envelope still carries `known_gaps` (now empty for a
-  normal batch: `{"schema_version": "native_score_batch_records.v1.0",
-  "authoritative": false, "known_gaps": [], "records": [...]}`) — the key
-  stays in the schema for a future gap this module might need to flag, but
-  nothing populates it today. `authoritative` stays `false` regardless:
+  normal batch — shown here in this PR-7a design's original `v1.0` array
+  shape; Cutover PR-4 (redo, above) supersedes the envelope's `records`
+  value with the keyed `v2.0` object, `known_gaps` and `authoritative`
+  unchanged: `{"schema_version": "native_score_batch_records.v2.0",
+  "authoritative": false, "known_gaps": [], "records": {canonical_key:
+  ...}}`) — the key stays in the schema for a future gap this module
+  might need to flag, but nothing populates it today. `authoritative`
+  stays `false` regardless:
   that flag is this PR's own shadow-only design decision (per the user's
   cutover-wiring decision), independent of the panel-anchor gap, and no
   caller may treat `authoritative: false` output as a board-serving input.
@@ -1824,108 +3203,238 @@ network, or database access.
   the correct, by-design outcome, not a violation of this idempotency
   guarantee.
 
-### Cutover PR-4: real `parity_rows` (the 4c R1–R6 template)
+### `run_native_parity_worker`'s own failure semantics (Cutover PR-4 redo, the 4c R1–R6 template)
 
-**A `native_parity` failure never fails or alters the legacy nightly, at
-any layer this PR touches.** This restates and extends an existing
-invariant (`native_parity` is `OPTIONAL` in `GRAPH`; `_run_stage` degrades
-rather than raises for an `OPTIONAL` stage), not a new one: `nightly.py`'s
-own stage-walk is unchanged by this PR. What is new is the composing
-script sitting entirely outside that walk — `tools/native_parity_run.py`
-reads the legacy `score.json` (never writes to `source_root`), and
-everything it writes lands under `private_root`, exactly like
-`run_shadow_nightly`'s existing shadow-only contract. A crash anywhere in
-this script — a bad release, a malformed `events.json`, a `score_one`
-exception `build_native_bundle_rows` deliberately lets propagate — stops
-before `run_shadow_nightly` is even called, or stops `run_shadow_nightly`
-partway through a `NightlyReceipt` that is itself private and never
-consumed by the legacy board. There is no code path from this script back
-into `engine.dashboard.nightly`.
+**A `native_parity` failure never fails, blocks, or slows the legacy
+board, at any layer this redo touches — stronger even than `OPTIONAL`'s
+usual `run_shadow_nightly`-report-walk meaning, which this job is never
+part of.** Reached only through the tick sidecar, `native_parity` carries
+no `store_domains` and no scheduler edge FROM any required legacy stage TO
+it (`dependency_job_ids` runs the other direction: `native_parity` depends
+on `score`/`native_score_batch`, never the reverse), so a failed or wedged
+`native_parity` attempt can never block, degrade, or delay `"score"`,
+`"decision_commit"`, or publication — the SAME invariant
+`computed_moves_refresh` (Part 4) and `native_score_batch` (`#88`) already
+hold, extended here rather than re-argued from scratch.
 
-- **R1, missing input.** `legacy_parity_rows` raises `OpsError`
-  (`VALIDATION_FAILED`, matching `decision_population`'s own sibling
-  refusal code — see "Primary contracts" above) for the whole call —
-  never a per-row skip, and never `population_key`'s own `.get(key, "")`
-  substitution reused here — the moment any row is missing a non-empty
-  `ticker`/`strategy`/`event_date`, two rows share one `population_key`
-  value, or `"rows"` is present but is not a list of mappings (a non-list
-  value, or any non-mapping element, before `population_key` is ever
-  called on it — never a bare `TypeError`/`AttributeError` from that
-  call). A `score_document` missing `"rows"` entirely still returns `{}`,
-  not a refusal: there is no row to be malformed or to collide. This is a
-  REAL join-format risk stated explicitly, not a defensive-only note:
-  `population_key` and
-  `native_row_key` must format `event_date` identically (e.g. both an ISO
-  date string, never one side a `pandas.Timestamp.__str__()` and the other
-  a plain date string) or a legitimately-shared event silently lands in
-  `only_legacy`/`only_native` instead of `compared` — the acceptance test
-  for this PR asserts the two functions produce the SAME key string for
-  one real event's row pair, not merely that each behaves consistently on
-  its own side. `compare_native_vs_legacy`'s own existing
-  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty side or no shared
-  key at all) is unchanged and still the backstop when the join produces
-  nothing. `row_explanations` validation (above) is itself a missing/
-  invalid-input refusal, raised before any row is reclassified: an unknown
-  reason code, an unmatched `(row_key, dimension)`, or a pair that never
-  mismatched is `INVALID_REQUEST`, exactly the same typed shape
-  `native_parity_report.py` already raises elsewhere in this module.
-  `tools/native_parity_run.py` raises (never refuses per-row) on a missing
-  `score.json`/`events.json`/unresolvable release — the whole run has
-  nothing to compare without them; a per-row `assemble_score_batch_inputs`
-  refusal (PR-3) is logged and excluded from `requests_by_key`, never
-  raised, matching that function's own per-row-refusal contract.
-- **R2, cache.** None of this PR's own. `legacy_parity_rows` and
-  `compare_native_vs_legacy`'s `row_explanations` handling are both pure,
-  no I/O. `tools/native_parity_run.py` resolves the release binding once
-  per run (PR-1's own cached member resolution inside that one call, not
-  re-cached here) and reads `score.json`/`events.json` once each; a rerun
-  re-reads both from disk rather than reusing a prior in-process result.
-- **R3, retry.** This script has no retry of its own and is not a job
-  kind (`native_parity` stays in `NO_JOB_STAGES`, unchanged): a failed
-  manual run is simply re-invoked by the operator, exactly like
-  `forward_calendar_store.run_forward_calendar_refresh`'s own "no
-  production caller, only its own test module" runners before they gained
-  a `JobKind`.
-- **R4, transaction.** Not applicable: no catalog writes. `write_parity_report`
-  (unchanged by this PR) writes one JSON file after
-  `compare_native_vs_legacy` fully returns; there is no multi-step commit
-  to make atomic.
-- **R5, partial write.** `write_parity_report` calls `comparison` fully
-  before writing, and calls `Path.write_text` exactly once — but that call
-  is a plain, non-atomic write (no temp-file-plus-rename, unlike
-  `ArtifactStore`'s atomic publication elsewhere in this package), and
-  this PR does not change that. A process killed mid-`write_text` can
-  leave a truncated or invalid-JSON `native_parity_report.json` on disk;
-  this PR names that risk rather than silently inheriting it, and does
-  not widen it — `write_parity_report`'s call site and body are both
-  unchanged by this PR. Recovery is by rerun, not atomicity: a truncated
-  report has no attempt/lease state of its own to reconcile (this is a
-  manual, operator-invoked script, not a supervised job — see "R3, retry"
-  above), so the operator re-invokes `tools/native_parity_run.py`, which
-  overwrites the file with a fresh, complete write. `run_shadow_nightly`'s
-  own `receipt_path` write (if given) has the identical non-atomic shape
-  and the identical rerun-to-recover story, both pre-existing and both
-  unchanged by this PR.
-- **R6, idempotency.** Same `score.json` + same `events.json` + same
-  resolved release + same `row_explanations` + same `tolerance_policy` →
-  the same `native_parity_report.json`, byte-for-byte: `legacy_parity_rows`
-  is a pure function of `score_document`, `assemble_score_batch_inputs`/
-  `build_native_bundle_rows` are pure functions of their inputs (PR-3's
-  own R6; `build_native_bundle_rows`'s `score_one` calls are
-  content-addressed), and `compare_native_vs_legacy` is a pure function of
-  `(legacy_rows, native_rows, dimensions, row_explanations, tolerance_policy)`.
-  `tolerance_policy` defaults to `SCORE_RECORD_V1` and the report records
-  only `tolerance_policy_id`, never the policy's own rules, so a change
-  is guaranteed a different report only when it changes the resulting
-  comparison outcome or changes `policy_id` itself; a policy object
-  swapped for a different one that happens to keep the same `policy_id`
-  and produce the same comparison result yields the same report. A
-  deliberate policy change producing a different comparison is the
-  correct, by-design outcome, not a violation of this invariant.
-  Promoting a new release between two runs changes the resolved bindings
-  and therefore the native side's values — a different release genuinely
-  producing a different report is the correct, by-design outcome,
-  matching PR-3's own R6 note for the identical reason.
+- **R1, missing input.** `_native_parity_identity` returning `None` (no
+  succeeded `native_score_batch` job yet) is not a refusal — the sidecar
+  submits nothing and tries again next tick, exactly like
+  `computed_moves_refresh`/`native_score_batch` waiting on their own
+  prerequisites. **A `schema_version` mismatch on either `records.json` or
+  `refusals.json` (CodeRabbit round 6; refined by an Opus gate finding,
+  both real) is treated the SAME way, not as a job failure — but the check
+  runs in `submit_native_parity_if_ready` BEFORE submission ("Cutover
+  PR-4 (redo)'s own input sourcing", above), never inside this worker:**
+  a job that already exists under `(as_of, scope_hash)` is never
+  resubmitted ("R2, cache", below), so if the WORKER were the one
+  detecting a stale `v1.0` artifact, that session's `native_parity` could
+  never be retried once a fresh, correctly-shaped `native_score_batch` run
+  landed — the sidecar catches it first instead, submitting nothing so no
+  job (and no blocking `(as_of, scope_hash)` key) is ever created for that
+  identity. **This mismatch is memoized by `native_score_batch_job_id`
+  once confirmed, not re-checked against the SAME job id on a later tick**
+  ("Cutover PR-4 (redo)'s own input sourcing", above, has the full
+  mechanics and corrects an earlier, unreachable claim that it was
+  "re-checked … for that session"; "R2, cache", below, has the memo
+  field). A read or decode failure on either file — as opposed to a
+  clean, confirmed mismatch — is a distinct outcome: it is an exception,
+  caught by `_reconcile_native_parity`'s own try/except exactly like a
+  `submission.submit` failure ("R2, cache", below), never left to crash
+  the tick and never memoized as a mismatch. By the time this worker
+  actually runs, both tags are ALREADY confirmed `v2.0`. Inside
+  the worker: an unparseable `BoardRequest` key (not
+  exactly 4 `"|"`-separated fields), two distinct `records.json`/
+  `refusals.json` keys colliding on the same projected `population_key`
+  (`_native_rows_and_refusals`, above), a `records.json`/`refusals.json`
+  that fails to decode, or `compare_native_vs_legacy`'s own existing
+  `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty `legacy_rows`) OR
+  its own existing "no shared key" check (`native_parity_report.py:178`,
+  `if not compared: raise fail(...)`) each fail the job's OWN attempt —
+  never a partial or synthetic-empty report, EXCEPT in the cases named
+  below, and NEVER when `legacy_rows` itself is empty: a missing legacy
+  input is never something a native refusal can explain, so
+  `run_native_parity_worker` checks `legacy_rows` is non-empty FIRST, and
+  an empty `legacy_rows` always falls through to `_refuse_empty_inputs`
+  and fails `VALIDATION_FAILED`, unconditionally, regardless of how many
+  native refusals exist. **Only once `legacy_rows` is confirmed non-empty,
+  `shared = set(legacy_rows) & set(native_rows)` being empty is explicitly
+  NOT this refusal whenever a refusal explains it (CodeRabbit round 3;
+  widened by an Opus gate finding, both real):** an empty `shared` with
+  either the keyed `native_refusals` or the new `unkeyable_refusals`
+  (above) non-empty covers three cases — `native_rows` empty while
+  `native_refusals` is non-empty (every attempted row refused, not simply
+  absent); `native_rows` and keyed `native_refusals` BOTH empty while
+  `unkeyable_refusals` is fully populated (every row refused
+  `INVALID_KEY_FIELD`, so nothing was ever keyable to begin with); and
+  `native_rows` non-empty but sharing no key with `legacy_rows` because
+  every legacy-side counterpart was refused while native's other rows
+  belong to different tickers/strategies entirely — each a legitimate
+  reportable outcome, not a missing-input failure. `run_native_parity_worker`
+  checks for `legacy_rows` non-empty, then for `shared` being empty (with
+  a refusal to explain it) BEFORE calling `compare_native_vs_legacy` and
+  routes it through `_empty_native_report` (above) instead in all three
+  cases, so a batch with a real legacy input that shares nothing but has a
+  refusal on record still produces a
+  `native_parity_report.json` (with every explained legacy row falling out
+  of `only_legacy` into `native_refused`/`native_refused_unmatched` via
+  `apply_native_refusals`) rather than failing the attempt. An empty
+  `shared` with BOTH `native_refusals` and `unkeyable_refusals` empty (a
+  genuinely missing native input, nothing on record to explain the gap)
+  still falls through to `compare_native_vs_legacy`'s existing checks and
+  fails the attempt, unchanged. This is a REAL
+  join-format risk stated explicitly, not a defensive-only note:
+  `population_key` and `_population_key_from_board_request_key` must
+  format `event_date` identically (e.g. both an ISO date string, never one
+  side a `pandas.Timestamp.__str__()` and the other a plain date string)
+  or a legitimately-shared event silently lands in `only_legacy`/
+  `only_native` instead of `compared` — the acceptance test for this
+  redo's implementation PR asserts the two functions produce the SAME key
+  string for one real event's row pair, not merely that each behaves
+  consistently on its own side. A failed `native_parity` attempt has no
+  descendant job (nothing declares it in `dependency_job_ids`), so
+  `block_descendants` never reaches anything the legacy board needs.
+- **R2, cache — one memo, not two, reusing the SAME shared constants.**
+  Once a job exists under today's `(as_of, scope_hash)` key, in any state,
+  `submit_native_parity_if_ready` never rebuilds or resubmits it — the
+  existence check runs FIRST, before any input is read, including the
+  `schema_version` pre-submission check ("Cutover PR-4 (redo)'s own input
+  sourcing", above): that check only ever runs for an identity with NO
+  existing job yet, exactly where reading `schema_version` is safe to gate
+  submission on, never after a job already exists (an existing job's own
+  artifacts are fixed by whatever was true when IT was submitted; the
+  schema check cannot and does not retroactively affect it). Unlike `native_score_batch`
+  (`#88`'s own R2: a SEPARATE release-identity memo plus a build-attempt
+  memo, because it gates an expensive release re-verification independently
+  of an expensive board-enumeration build), `native_parity` needs only ONE
+  memo, `self._native_parity_memo`, and it is never even consulted until
+  `_native_parity_identity` returns a real identity: a `None` identity (no
+  succeeded `native_score_batch` job yet) costs two indexed `SELECT`s, no
+  pandas, no provider call, and is not memoized at all — there is nothing
+  yet to key a memo entry by. Should THOSE two `SELECT`s themselves raise
+  (a locked database, for instance) rather than cleanly returning `None`
+  or a real identity, there is likewise no identity yet to key
+  `self._native_parity_memo` by — `_reconcile_native_parity` records that
+  against a dedicated `identity: None` bucket instead, mirroring
+  `_computed_moves_identity_or_none`'s own already-fixed handling of the
+  identical problem (`supervisor.py:371-375`): the SAME backoff arithmetic
+  applies, but UNCAPPED (never stops retrying), since with no identity
+  known there is no "new identity" signal to ever reset a permanent
+  give-up on — exactly `_computed_moves_identity_or_none`'s own stated
+  rationale, reused rather than re-argued. Once a real `(as_of, scope_hash,
+  score_job_id, native_score_batch_job_id)` identity IS found, this design
+  reuses `Service`'s own `_COMPUTED_MOVES_MAX_ATTEMPTS = 5`
+  (`supervisor.py:290`) and `_COMPUTED_MOVES_BACKOFF_SECONDS = (30.0, 120.0,
+  600.0, 1800.0, 3600.0)` (`supervisor.py:296`; 30s, 2m, 10m, 30m, 1h)
+  directly — `_reconcile_native_parity` is a method of the SAME `Service`
+  class these are already class attributes of, so `self._COMPUTED_MOVES_MAX_ATTEMPTS`/
+  `self._COMPUTED_MOVES_BACKOFF_SECONDS` need no import or redefinition,
+  only a second memo SLOT, `self._native_parity_memo`, alongside
+  `self._computed_moves_memo`; a second copy of the same five numbers
+  would invite silent drift between the two schedules, and nothing about
+  them is `native_parity`-specific (unlike `native_score_batch`, this job
+  has no expensive board-enumeration build of its own to bound; the memo
+  here exists purely to throttle repeated SUBMISSION attempts against one
+  identity, the same purpose the shared schedule already serves).
+  Concretely: a tick whose current identity does not match the memo's
+  stored one (a different `as_of`, or the same `as_of` under a NEWER
+  succeeded `native_score_batch` job's `scope_hash`) resets the attempt
+  count to zero with no backoff — a new identity always gets an immediate
+  first try, exactly like `computed_moves_refresh`'s own memo
+  (`supervisor.py:383-456`). **The two CONSTANTS are reused; the existing
+  `_computed_moves_backoff` HELPER is not** (CodeRabbit round 2, real
+  finding): that method (`supervisor.py:298-309`) unconditionally ends with
+  `self._computed_moves_memo = memo` — it hardcodes ITS OWN slot regardless
+  of which `memo` dict is passed in, so calling it with
+  `self._native_parity_memo` would silently overwrite
+  `self._computed_moves_memo` with `native_parity`'s own state, corrupting
+  `computed_moves_refresh`'s independent retry tracking. `_reconcile_native_parity`
+  therefore applies the IDENTICAL increment/clamp arithmetic
+  (`memo["attempts"] += 1; memo["not_before"] = now +
+  self._COMPUTED_MOVES_BACKOFF_SECONDS[min(memo["attempts"] - 1,
+  len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]`, `supervisor.py:306-308`'s
+  own expression, copied not called) inline against
+  `self._native_parity_memo` on its own — reusing the two NUMBERS, never
+  the helper that writes to the wrong slot, so the two sidecars' retry
+  state can never cross-contaminate. Every outcome against the CURRENT
+  identity that is NOT a submitted job — `submission.submit` raising or
+  being rejected (e.g. an `IDEMPOTENCY_CONFLICT` on a race with another
+  submitter), AND, the same way, a read or decode failure on either
+  `schema_version` pre-check file (a missing artifact, invalid JSON, a
+  non-dict document, or a missing `schema_version` key — "Cutover PR-4
+  (redo)'s own input sourcing", above) — runs this inline step: none of
+  these is distinguished from the others once an identity is known, they
+  are simply whatever exception `submit_native_parity_if_ready` raised.
+  After 5 attempts against the same identity, the sidecar stops trying
+  that identity at all until it changes (a later attempt count clamps to
+  the schedule's last entry, 1h, exactly like `computed_moves_refresh`'s
+  own clamp, `supervisor.py:440`). A successful submission (a
+  `JobReceipt` returned) clears `self._native_parity_memo` entirely
+  (never `self._computed_moves_memo`), so the next distinct identity
+  starts from zero rather than inheriting a stale attempt count.
+
+  **A confirmed `schema_version` mismatch is a SEPARATE, second field,
+  `self._native_parity_schema_mismatch_job_id` — this does not reopen the
+  "one memo, not two" claim above, which is about THROTTLING (an
+  attempt/backoff schedule); this second field is not one.** It holds
+  nothing but the `native_score_batch_job_id` of the last confirmed
+  mismatch, or `None`, and is consulted with a single `==` check, before
+  the two files are ever opened, at zero I/O cost — unlike
+  `self._native_parity_memo`, it is never incremented, never backed off,
+  and never counts an attempt: a clean, decoded, confirmed-wrong tag is
+  not a failure to retry, it is a fact about an immutable artifact that
+  will never become true. `_reconcile_native_parity` only ever WRITES this
+  field once a check for a NEW `native_score_batch_job_id` (one that does
+  not already equal the field's current value) actually runs to a clean,
+  decoded result — never before the check, and never on a read/decode
+  exception, which goes through `self._native_parity_memo` above instead
+  and leaves this field exactly as it was: a job whose schema could not be
+  read this tick is neither confirmed a mismatch nor confirmed `v2.0`, so
+  nothing here should change on its account. A clean result sets the
+  field to that `native_score_batch_job_id` on a MISMATCH, or resets it to
+  `None` on a MATCH (the check passed; there is nothing left to skip, and
+  this job id must never be mistaken for a still-mismatched one on some
+  later tick) — the two clean outcomes always disagree on what the field
+  becomes, never both writing the same job id into it.
+- **R3, retry.** The job's own `RetryPolicy("bounded", 2, (5, 30))` covers
+  a transient worker crash (a disk error reading a bound input, for
+  example); a session whose key already exists — succeeded OR failed — is
+  never resubmitted by the sidecar again (R2).
+- **R4, transaction.** Submitted alone through `submission.submit` (never
+  `submit_graph`), exactly like `computed_moves_refresh`/`native_score_batch`,
+  so a broken parity submission can never make a REQUIRED job's admission
+  all-or-nothing with it. No head-commit race applies either
+  (`effects=("staged",)`, no `store_domains` — `native_parity` commits no
+  snapshot head and cannot race `"score"`'s own commit or anyone else's).
+- **R5, partial write.** None, by construction: the report is written
+  through the job executor's own staged-attempt-output mechanism (see
+  "Outputs" above) — a killed worker leaves an attempt with no recorded
+  `"report"` output at all, never a truncated file. This CLOSES the
+  specific risk the original PR-4 design named for `write_parity_report`'s
+  bare, non-atomic `Path.write_text` call; that function is unchanged and
+  still used only by `run_shadow_nightly`'s own test-only path, where the
+  risk was always immaterial (nothing in production reads its output).
+- **R6, idempotency.** Same `score.json` + same `records.json`/
+  `refusals.json` + same `tolerance_policy` (code-selected, not job data —
+  see "Inputs" above) → the same `native_parity_report.json`, byte for
+  byte: `legacy_parity_rows`, `_population_key_from_board_request_key`,
+  `_native_rows_and_refusals`, `compare_native_vs_legacy`, and
+  `apply_native_refusals` are all pure functions of their arguments (no
+  wall-clock read, no random draw). The
+  idempotency key, `"nightly:<as_of>:<scope_hash>:native_parity"`, ties a
+  re-run to the SPECIFIC `native_score_batch` identity
+  `_native_parity_identity` selected, never session alone — the same
+  reasoning `#88`'s own R6 gives for `native_score_batch`'s key: a newer
+  succeeded `native_score_batch` job for the same session under a
+  DIFFERENT `scope_hash` is a genuinely different comparison and gets a
+  distinct key; a retry that reproduces the identical `scope_hash` still
+  dedupes. Promoting a new release between two `native_score_batch` runs
+  changes the resolved bindings and therefore the native side's values —
+  a different release genuinely producing a different report is the
+  correct, by-design outcome, matching PR-3's own R6 note for the
+  identical reason; because that changes `native_score_batch`'s own
+  `scope_hash`-keyed identity, it also changes which `native_score_batch`
+  job `native_parity` reads, not merely what it reads there.
 
 ### `submit_native_score_batch_shadow_if_ready`'s own failure semantics for `native_score_batch` shadow submission (Cutover PR-7a design, the 4c R1–R6 template)
 
@@ -1942,7 +3451,14 @@ function is never part of.
 - **R1 missing input.** No succeeded legacy `"score"` job for any session
   yet (`_native_score_batch_identity` returns `None`); that job pinning no
   snapshot (`nightly._snapshot_inputs` returns `None` for it — the
-  production default under `"legacy"` input mode, per "Inputs" above); no
+  production default under `"legacy"` input mode, per "Inputs" above —
+  **Cutover PR-7b's own design, above, closes this specific sub-case: once
+  `nightly_trigger` runs in `input_mode="snapshot"`, the selected `"score"`
+  job always pins a snapshot when one was committed for that night, and
+  `_ensure_shadow_snapshot`'s own R1 (its dedicated subsection below) is
+  what can still make no snapshot exist at all — this bullet's "no pinned
+  snapshot" case then only recurs if a caller runs the legacy-mode CLI path
+  directly, bypassing `nightly_trigger`**); no
   configured production release — and here the cheap and expensive paths
   raise DIFFERENT, both-R1 outcomes that must not be confused (Opus gate
   finding, this round: an earlier draft named only the expensive path's
@@ -2041,6 +3557,165 @@ no snapshot head (`effects=("staged",)`, `stages.py:282`), so it cannot
 race `"score"`'s own commit or anyone else's — the sidecar pattern is still
 the right choice for scheduling/transaction independence, not for a
 head-commit race.
+
+### `supervisor.py` (issue #106: a long single-attempt effect must not starve every other live attempt's lease)
+
+`Service.tick()` (`supervisor.py:227`) is fully synchronous: `expire_leases`,
+`reconcile()`, then one Python `for` loop over `self.running.items()`
+(`supervisor.py:231`) calling `_poll` on each entry in turn, then
+`claim_next`/`_launch` for a new attempt. There is no background thread —
+`lifecycle.Keepalive`'s own docstring is explicit about why ("the catalog
+connection is not shared across threads") — so any ONE entry's `_poll` that
+blocks for longer than `LEASE_SECONDS` (120s) delays every OTHER entry's own
+`_poll`/`heartbeat` call until it returns. Two concrete ways a single tick
+already reaches that duration, both pre-existing and both now fixed by the
+same mechanism:
+
+- `_poll` → `_finish` → `_commit_success` → `_coordinator_effect`, for any
+  of the 14 `_COORDINATOR_EFFECT_KINDS` (see "Primary contracts" above) that
+  runs a genuinely long, single-attempt effect. `engineering_gate_effect`
+  (`effects_graph.py:189`) was the sharpest case: it called
+  `legacy_adapter.run_engineering_gate`, a single blocking
+  `subprocess.run(..., timeout=600)` (`legacy_adapter.py:1156-1167`) with NO
+  `keepalive` parameter anywhere in the chain — up to 600s with zero
+  renewal calls for ANY attempt, not even its own.
+- `Service._launch`'s pre-work (`supervisor.py:483-509`): hashing the
+  worker's read set (`legacy_adapter.manifest_files`) and copying it into
+  private legacy staging (`legacy_adapter.copy_read_set`) run inline,
+  before the attempt is added to `self.running` at all, so no `_poll` for
+  ANY attempt happens until this returns. The existing comment at
+  `supervisor.py:513-520` already documents that THIS attempt's own lease
+  expiring here is handled (handed to recovery, not crashed) — but nothing
+  renewed every OTHER already-running attempt's lease while this ran.
+
+**The consequence issue #106 reports**: a live, healthy attempt's
+`lease_expires_at` (last set by a PRIOR tick's `heartbeat`, `lifecycle.py:
+151-154`) passes while a DIFFERENT attempt's single long effect or launch
+pre-work occupies the entire tick. The NEXT tick's `expire_leases`
+(`recovery.py:113-122`) fences it off (`_fence_off`, `recovery.py:106-110`
+— an unconditional write, no liveness check of its own) purely because
+nobody renewed it in time, and that SAME tick's `reconcile()`
+(`supervisor.py:217-225`) then SIGKILLs its still-live process tree
+(`signal_owned(proof.alive, self.boot, hard=True)`) — a healthy worker
+killed for being heartbeat-starved, not for actually being dead.
+
+**Fix — extend the existing `Keepalive` renewal points to cover every live
+attempt, and give `engineering_gate_effect` a renewal point to call:**
+
+- `Keepalive` (`lifecycle.py:168-199`) itself is UNCHANGED: it still
+  renews exactly the one `(attempt_id, fence)` pair it was built for, and
+  still raises `LEASE_LOST` only for that pair, so every existing caller
+  that already threads a `Keepalive` through an effect (import publish,
+  export, backup, materialization verification) keeps its current
+  single-attempt failure semantics exactly as before.
+- `Service._finish` (`supervisor.py:773-785`) now wraps that per-attempt
+  `Keepalive` in a small closure before handing it to `_commit_success`:
+  the wrapper calls the original `Keepalive` first (unchanged: raises
+  `LEASE_LOST` for the CURRENT attempt on its own renewal failure, exactly
+  as before), then best-effort renews every OTHER `attempt_id` currently
+  in `self.running` via the same `heartbeat()` primitive `_poll` already
+  uses, throttled together at the same `LEASE_SECONDS / 4` interval
+  `Keepalive` already uses (one shared timer, not one per attempt) so a
+  coordinator effect that calls its keepalive often does not multiply
+  writes. A failed renewal for one of those OTHER attempts is swallowed,
+  not raised: that attempt's own `_poll`/`heartbeat` or `expire_leases`
+  already owns deciding whether IT is still live — this wrapper's job is
+  only to make sure a slow neighbor does not cost it a lease it never
+  actually lost, never to make a correctness decision on its behalf. Any
+  attempt not yet added to `self.running` (mid-`_launch`, before its own
+  first `_poll`) is not in the dict yet and is therefore not renewed by
+  this mechanism either — that gap is `_launch`'s own pre-work, below.
+- `Service._launch`'s pre-work (`supervisor.py:483-509`) now takes the
+  SAME "renew every other running attempt" closure and passes it down
+  through `legacy_adapter.manifest_files`/`copy_read_set`'s existing `for`
+  loops (one call point per file, throttled the same way) instead of
+  running the whole hash-and-copy pass with no renewal calls at all.
+  `manifest_files`/`copy_read_set` gain an optional `keepalive` parameter
+  (default `None`, a no-op) — every other caller/test that does not pass
+  one keeps today's exact behavior.
+- `engineering_gate_effect` (`effects_graph.py:189`) gains the same
+  optional `keepalive` parameter every OTHER coordinator effect in this
+  file already accepts, and `_coordinator_effect`'s existing call site
+  (`supervisor.py:1058-1060`) now passes its own. `legacy_adapter.
+  run_engineering_gate` (`legacy_adapter.py:1156`) replaces its single
+  blocking `subprocess.run(timeout=600)` with a `subprocess.Popen` polled
+  on a short interval (`proc.communicate(timeout=poll_interval)`, catching
+  `subprocess.TimeoutExpired` to call `keepalive()` and check the ORIGINAL
+  600s deadline) — the same poll-instead-of-block shape `tools/
+  bounded_run.py` already uses for its own long subprocess wait. Reaching
+  the 600s deadline still kills the subprocess and refuses exactly as
+  before (`WORKER_FAILED`/a typed `OpsError`); the only change is that a
+  RUN inside that window no longer goes 600s without a single renewal call
+  for any attempt.
+
+**Failure semantics (unchanged unless noted):**
+
+- The CURRENT attempt's own lease loss during its coordinator effect: still
+  `LEASE_LOST`, still raised by the wrapped `Keepalive` exactly as before —
+  this fix adds a renewal side-effect, it does not touch that raise.
+- Another attempt's lease loss, discovered while THIS attempt's keepalive
+  best-effort-renews it: never raised here. That attempt's own next
+  `_poll`/`heartbeat` (if it is still in `self.running`) or the next tick's
+  `expire_leases`/`reconcile` (if `_fence_off` already ran) is the only
+  place that failure is acted on — unchanged from before this fix, since
+  before this fix nothing renewed it here at all.
+- `engineering_gate_effect` exceeding its 600s deadline: unchanged —
+  refused as a worker/attempt failure, same as a `subprocess.run` timeout
+  raised before.
+- No new attempt `state` value and no new transition: `recovery_pending`,
+  `running`, `starting` and the rest are exactly as documented above; this
+  fix only adds renewal CALLS at points that previously had none.
+
+**Round 2 (CodeRabbit, five gaps in the above, all fixed):**
+
+- **Renewal only ran BETWEEN files, not DURING one.** `manifest_files`'s
+  hash pass and `copy_read_set`'s copy pass each called `keepalive()` once
+  before starting a file, but a SINGLE file large enough to make either
+  `_digest` or the copy itself exceed `LEASE_SECONDS` alone got no renewal
+  call at all during that one operation. `_digest` and `fingerprints.
+  file_hash` (a second, identical chunked-sha256 implementation used by
+  `store_barrier.pin_files`) now call `keepalive` once per 1MB chunk, the
+  same chunk size their `hashlib.sha256().update()` loop already reads in.
+  `copy_read_set`'s `shutil.copyfile` (an opaque, single C-level call with
+  no per-chunk hook) is replaced with a manual chunked read/write loop at
+  the same 1MB granularity, calling `keepalive` once per chunk — the
+  surrounding symlink/ancestor checks, the post-copy `_digest` verification
+  and the final `chmod(0o444)` are unchanged.
+- **`_pin_read_set`'s OWN hashing pass had no renewal hook at all.**
+  `Service._launch` calls `_pin_read_set` (→ `store_barrier.pin_read_set` →
+  `store_barrier.pin_files` → `fingerprints.file_hash`) BEFORE
+  `_populate_legacy_staging`/`copy_read_set` even starts — a second,
+  separate hash pass over the same declared read set that round 1 never
+  touched. `pin_files`/`pin_read_set` now accept the same optional
+  `keepalive` parameter (forwarded into `file_hash`, and called once per
+  file in `pin_files`'s own loop); `Service._pin_read_set` passes
+  `keepalive=self._renew_other_leases` into its `pin_read_set` call.
+- **`run_engineering_gate`'s poll loop ignored the remaining deadline.**
+  Each `proc.communicate(timeout=poll_interval)` waited the FULL
+  `poll_interval` regardless of how much of the overall `timeout` was left,
+  so a child that exited just past the deadline but within one
+  `poll_interval` window returned normally instead of timing out — a
+  regression from the original blocking `subprocess.run(timeout=timeout)`,
+  which enforced the exact deadline. Each poll now waits at most
+  `min(poll_interval, deadline - now)`, going straight to the
+  kill-and-raise branch once that remainder is non-positive, so the
+  overall deadline is enforced to the same precision as before.
+- **A `keepalive()` failure orphaned the gate subprocess.** If `keepalive()`
+  raised (e.g. `LEASE_LOST`, because THIS attempt itself lost its lease
+  mid-gate-run) partway through the poll loop, that exception escaped
+  `run_engineering_gate` without killing or reaping `proc` —
+  `Popen.communicate()` never terminates the child for the caller. The poll
+  loop now kills and reaps the subprocess in a cleanup path that also runs
+  when `keepalive()` raises, before that exception propagates; a normal
+  exit or a genuine timeout are unaffected.
+- **The shared renewal throttle advanced even on a failed pass.**
+  `_renew_other_leases` set its shared `_other_leases_renewed_at` timer
+  BEFORE attempting any renewal, so a transient `heartbeat()` failure for a
+  sibling with almost no lease left still suppressed the NEXT renewal
+  attempt for a full `LEASE_SECONDS / 4` — potentially past that sibling's
+  real expiry. The timer now advances only when every renewal in the pass
+  succeeds; any failure leaves it unchanged, so the very next call retries
+  the whole batch immediately instead of waiting out the throttle window.
 
 ### `nightly_trigger.py` (issue #103: a bounded `serve`, never an unbounded hold on the legacy lock)
 
@@ -2227,6 +3902,230 @@ retry, transaction, partial write, idempotency).
   in-process deadline above is the primary mechanism and this is only the
   backstop for its own failure.
 
+### `nightly_trigger.py` (Cutover PR-7b design: `_ensure_shadow_snapshot`, the 4c R1–R6 template)
+
+**Design only — no code lands with this PR; a later PR in this sequence
+implements what this subsection describes** (see the main narrative above,
+"Cutover PR-7b"). `_ensure_shadow_snapshot` is a new step inside
+`_submit_plan`, called before its existing `plan_fn(...)` call and
+returning `("ready", snapshot_id)`/`("not_yet", None)`/`("timed_out",
+None)` or raising (never returning anything `_submit_plan` could mistake
+for a `plan_ref`) — see point 1's own "Where this phase is called from,
+precisely" above for why it is NOT inside `_default_plan`, and point 6's
+"Bind the plan to the EXACT snapshot" for why the second tuple element
+exists at all. Every outcome below is one `_submit_plan` itself returns
+from or raises out of — there is no separate receipt STATUS for any of
+them (a `"timed_out"` outcome reuses the existing status string and its
+existing consecutive-timeout counter, per point 4 above). `TriggerReceipt`
+DOES gain one new FIELD for this design, the dedicated `snapshot_attempt`
+counter — see "`TriggerReceipt` gains a new field" above for the full
+account of why a field, carried on every receipt regardless of status,
+was needed where a separate status was not.
+
+- **R1, missing input.** No committed `shadow`-scope head at all (`data_
+  snapshot_heads` has no row for `scope='shadow'`) is not itself a
+  refusal — it is the expected FIRST-EVER-NIGHT state, handled the same as
+  a stale one: `plan_import`'s own `expected_head_snapshot_id=None,
+  expected_head_generation=0` defaults already express "no prior head" as
+  a valid CAS precondition, so the first successful import commits one.
+  The actual R1 cases are: (a) `plan_import`'s own `session` (`plan.
+  legacy_input_manifest.selected_session`) does not equal `as_of` — the
+  legacy store's snapshot-import read set has not caught up to `as_of` yet
+  even though `probe_finality` already said `as_of` is final — returned as
+  `"not_yet"`, no attempt consumed, exactly like a `probe_finality` miss in
+  `_decide`; and (b) the submitted `snapshot_import` job itself reaches a
+  terminal `failed`/`conflict` state (a legacy read error, a `CAS`
+  mismatch from a concurrent writer to `scope='shadow'` this design does
+  not otherwise expect but does not assume impossible either) — raised as
+  the same typed `OpsError` (`INPUT_CHANGED`, mirroring issue #104/PR
+  #117's own `_capture_input_manifest` precedent for "a precondition this
+  call needed did not hold"), non-retryable ONLY against the SAME
+  idempotency key (CodeRabbit finding on `f4abc4b`, real — "non-retryable"
+  unqualified reads as "never retried again", which conflicts with R3's
+  own per-`snapshot_attempt` retry: a terminal failure under THIS key is
+  never retried under THIS key, but R3 above still retries the underlying
+  import as a later `snapshot_attempt` under a genuinely NEW key) that
+  `_submit_plan`'s
+  existing `except _HANDLED_FAILURES` (now wrapping the new `ensure_
+  snapshot_fn(...)` call too, alongside its existing `plan_fn(...)` call)
+  already catches — no new exception-handling MECHANISM in `_submit_plan`,
+  only a new call wrapped by the one it already has. Once raised or once
+  `"not_yet"` is returned, `plan_fn` — and therefore `cli._plan_command` —
+  is never called: the plan for `as_of` is not merely refused at submit
+  time, it is never built, so no `input_manifest`/`snapshot_scope`-carrying
+  plan document exists for this `as_of` at all. **This is the case the
+  brief's own framing names directly: a missing (or not-yet-fresh)
+  snapshot means native — and, under option A, the WHOLE shadow comparison
+  — is refused for that night, while legacy is unaffected**, because
+  `nightly_trigger.py` has no code path into the real legacy nightly
+  process regardless of why or whether it itself failed (see the main
+  narrative's point 4). A third, narrower R1 case (round-2 CodeRabbit
+  finding, real; point 6 above): the `shadow` head moving between this
+  phase's own verification and `plan_fn`'s later, separate resolution of
+  it (an operator running `ops snapshot submit`/`promote` by hand in
+  between — `_LegacyLock` does not and cannot serialize against that) is
+  ALSO `INPUT_CHANGED`, raised by `pin_snapshot_inputs`'s new `expected_
+  snapshot_id` CAS check rather than silently pinning an unvalidated
+  snapshot — the same refuse-rather-than-guess treatment as the other two
+  cases, at a different call site.
+- **R2, cache.** The idempotency-key job lookup (`f"shadow_snapshot_
+  import:{as_of}:{attempt}"`, `attempt` per R6 below) IS this phase's own
+  cache check, and it is checked FIRST, before `plan_import` ever
+  enumerates the legacy store: once a row exists under the CURRENT
+  `attempt` key, in ANY state, it is never rebuilt or resubmitted — the
+  SAME "once a job exists under this key, in any state, it is never
+  rebuilt or resubmitted" cache rule PR-7a's own R2 above states for
+  `native_score_batch` (round-3 Opus-gate finding on `a30c624`, real: an
+  earlier draft of this bullet, and of step 1 itself, only guaranteed this
+  for a `succeeded` row and let anything else fall through to a fresh
+  `plan_import`/`submit_import` call — see step 1 above for the full
+  account of the double-submission that let through). A `succeeded` job
+  under the CURRENT `attempt` key makes this phase return `("ready",
+  snapshot_id)` immediately (reading `snapshot_id` off that job's own
+  committed receipt, per point 1 above — never a fresh head read); a
+  NON-terminal job under that same key (`queued`, `running`, `retry_wait`,
+  ...) is reattached to and waited on, never resubmitted; a job that is
+  terminal but not `succeeded` raises immediately instead of resubmitting.
+  All three cover the SAME crash-between-commit-and-plan-build case: a
+  prior `_submit_plan` call was interrupted after `_ensure_shadow_snapshot`
+  committed (or merely submitted) but before `plan_fn`/`cli._plan_command`
+  returned. This is the SAME shape as `nightly_trigger`'s own
+  `"submitting"`-before-submit-call idempotency record (module docstring)
+  and as PR-7a's own `native_score_batch` sidecar's "existence check runs
+  before any raw row is read" (R2 above) — a third instance of the same
+  pattern in this same doc, not a new one.
+- **R3, retry — bounded, and each retry gets a FRESH idempotency key,
+  from a counter dedicated to THIS phase (round-1 CodeRabbit finding,
+  real; the counter itself fixed by the Opus-gate findings on `e900074`
+  and `fb7d31e`, both real, both Major — see "`TriggerReceipt` gains a new
+  field" above for the full account).** A non-`succeeded` prior attempt
+  under the CURRENT `attempt` key is never resubmitted — step 1 above
+  reattaches to (a non-terminal row) or raises on (a terminal, failed one)
+  an EXISTING row under this key WITHOUT calling `plan_import`/`submit_
+  import` again at all, so `submission._insert_or_match`
+  (`submission.py:296-322`) is never even asked to arbitrate a same-key
+  resubmission against a row this phase already knows about (Opus-gate
+  finding on `a30c624`, real — see step 1 above; an earlier draft relied on
+  `_insert_or_match`'s OWN "matches an EXISTING row under an unchanged
+  namespace+key pair regardless of that row's own state" behavior as the
+  ONLY safety net here, by actually calling `plan_import`/`submit_import`
+  again for a non-`succeeded` row — which is safe ONLY when the resubmitted
+  request's digest happens to still match the existing row's, and raises
+  `IDEMPOTENCY_CONFLICT` the moment it does not, for a job that may still
+  be running). Step 1 calls `submit_import` at all ONLY when it found NO
+  row under the current key (its own "No row" branch above), so by
+  construction `_insert_or_match` only ever INSERTS for this key, never
+  matches — the cross-tick "a job already exists under this key" case is
+  fully handled by step 1's own lookup, before `_insert_or_match` is ever
+  reached. `_insert_or_match`'s matching-regardless-of-state behavior
+  remains the reason a bare `as_of`-only key would still be dangerous even
+  with step 1's fix: it would make step 1's OWN "no row yet" branch never
+  true again after the first terminal failure (every later tick would find
+  that SAME `failed` row under the SAME key and raise forever, rather than
+  minting a fresh attempt), permanently wedging that `as_of` for the rest
+  of its retry window. Retrying instead means minting a GENUINELY NEW key:
+  `attempt`
+  is `TriggerReceipt.snapshot_attempt`, a counter DEDICATED to this phase
+  and touched ONLY by a raised `_HANDLED_FAILURES` out of THIS call (never
+  by `error_count`, which a `"timed_out"` tick from THIS SAME phase's own
+  drive-to-terminal wait — R1's point 4 above — would otherwise reset the
+  wrong value against, since `error_count` is shared with that unrelated
+  consecutive-timeout give-up count; an earlier draft of this design used
+  `prior.error_count if prior.status == "error" else 0` directly and broke
+  exactly there: a fail-then-timeout sequence for the SAME `as_of` made the
+  next tick recompute `attempt=0`, re-deriving a live or since-succeeded
+  job under the WRONG, already-superseded key). A `_submit_plan` entry
+  that follows a prior TERMINAL failure of this specific job therefore
+  computes a NEW `snapshot_attempt` value and a NEW key, so `_insert_or_
+  match` inserts a fresh `snapshot_import` row rather than matching the
+  dead one; a `_submit_plan` entry that follows a `"not_yet"` or a
+  `"timed_out"` FROM THIS PHASE instead reuses the SAME `snapshot_attempt`
+  value and the SAME key, correctly finding that job's own current state
+  (still running, or by now `succeeded`) rather than minting a spurious
+  duplicate. Bounded by `MAX_CONSECUTIVE_ERRORS` against `snapshot_
+  attempt` ITSELF, not merely against `error_count` (gate finding 2 on
+  `fb7d31e`, real: because `error_count` resets on any non-`"error"`
+  status, an alternating `"error"`/`"timed_out"` sequence for the SAME
+  `as_of` kept it at `1` forever and never gave up, even though a genuinely
+  NEW `snapshot_import` row was minted every terminal failure). Since
+  `snapshot_attempt` is carried on EVERY receipt for this `as_of`
+  regardless of status (the blanket rule above), it is monotonic across
+  the whole run: `_failure`'s give-up check is now `error_count >= MAX_
+  CONSECUTIVE_ERRORS OR snapshot_attempt >= MAX_CONSECUTIVE_ERRORS`, so a
+  run that alternates terminal failures with intervening `busy_legacy`/
+  `"timed_out"`/`"not_yet"` ticks still gives up after the SAME number of
+  genuine terminal failures a non-interleaved sequence would have — the
+  PRE-plan `"timed_out"` give-up count (R1's point 4 above) remains a
+  separate, THIRD, status-gated counter, independently bounded by the SAME
+  constant, exactly as already described there. Once EITHER bound is
+  reached, the run for `as_of` is `"failed"`/`"failed_setup"` exactly as it
+  already would be today for any other exhausted precondition, not a new
+  terminal state. The submitted `snapshot_import`
+  job's OWN retry policy (`stages.py:336`'s existing `RetryPolicy
+  ("bounded", 2, (5, 30))`, unchanged by this PR) covers a single
+  ATTEMPT's own worker-level lease/relaunch retries WITHIN one job row;
+  this budget covers `_ensure_shadow_snapshot` deciding whether to submit
+  a NEW row at all on a later tick — the same two-layer distinction PR-7a's
+  own "R3, retry" bullet above already draws for `native_score_batch`, now
+  made to actually work against `submission.py`'s real matching semantics
+  AND against a retry counter that survives an interleaved timeout,
+  rather than assuming a bare key (or a shared, resettable counter) would
+  let a retry through.
+- **R4, transaction.** `commit_snapshot_for_attempt` (unchanged by this
+  PR) already opens its own short transaction inside the coordinator
+  effect that runs when the submitted `snapshot_import` job's attempt
+  finishes (`snapshot_import_effect`, `snapshot_promotion.py`) — this
+  phase adds no transaction of its own; it only decides whether to call
+  `plan_import`/`submit_import` and then waits for that existing machinery
+  to finish. A crash between `_ensure_shadow_snapshot` submitting the job
+  and that job's own coordinator effect committing leaves the job in a
+  resumable, leased state the standing recovery pass
+  (`supervisor.py`, unchanged) already handles — not a torn write this
+  phase introduces.
+- **R5, partial write.** None of this phase's own: it writes nothing to
+  the filesystem or catalog directly; every write happens inside
+  `snapshot_import_effect`'s existing, already-audited commit path
+  (`snapshot_promotion.py`'s own module docstring: "No file copy, Arrow
+  scan, hash calculation... runs inside the transaction" — unchanged).
+- **R6, idempotency.** The idempotency key is `f"shadow_snapshot_import:
+  {as_of}:{attempt}"` — `as_of` alone (mirroring `native_score_batch`'s own
+  simpler R6 discussion of why a job's identity need only track what it
+  reads, not a watchlist) would be sufficient for what this job's content
+  depends on, but is not sufficient as a SUBMISSION key once R3's retry
+  requirement is added — see R3 above for why `attempt` must be part of
+  the key, not merely a nice-to-have. A tick that RE-ENTERS for the SAME
+  `as_of`/`attempt` after a crash-then-resume that has not yet failed
+  never re-reads `expected_head_snapshot_id`/`expected_head_generation` or
+  calls `submit_import` again at all (round-4 Opus-gate finding on
+  `1148b46`, real — an earlier draft of this bullet described the
+  resubmission as reaching `submit_import` and being deduped there by a
+  fresh CAS read and `request_hash`, which contradicts step 1/R3 above:
+  step 1's own lookup finds THIS row already sitting under the key and
+  reattaches to it directly, so `_insert_or_match` is never called a
+  second time for this key at all — there is no "byte-identical request"
+  to compare, because no second request is ever built). A resubmission
+  under a NEW `attempt` value (a genuine retry after a prior terminal
+  failure, per R3) is, by construction, a DIFFERENT namespace+key pair
+  that step 1 finds NO row under, so it reaches `submit_import` and
+  `_insert_or_match` fresh, inserting rather than matching — a different
+  key is not a conflicting use of the SAME key, it is a distinct
+  submission, and `_insert_or_match`'s same-key/different-digest
+  `IDEMPOTENCY_CONFLICT` check is therefore never even reached by this
+  phase's own retry path (it remains a real submission-layer invariant
+  for OTHER callers that do resubmit under an unchanged key; this phase
+  simply never does).
+- **Coordination with #104/#117 (merged, `d080b0d`).** That PR's own
+  `_default_plan` change (below) derives `input_manifest`/`year_start`/
+  `year_end` and is unrelated in mechanism to this design's `_submit_plan`
+  step — `_ensure_shadow_snapshot` never touches `_default_plan`'s body,
+  precisely so the two land without one PR's code needing to know the
+  other exists. The only shared surface is the literal `argparse.
+  Namespace(...)` call both PRs' follow-up code edits construct kwargs
+  for (this design adds `input_mode="snapshot"`, `snapshot_scope=
+  "shadow"`; #117 added `input_manifest`, `year_start`, `year_end`) — an
+  ordinary textual merge, not a behavioral one, since neither PR's kwargs
+  read or depend on the other's.
+
 ### `nightly_trigger.py` (issue #104: a per-`as_of` input manifest, not one static file; years derived like legacy) — the 4c R1–R6 template
 
 - **R1, missing input.** `_qualification_path(root, QUALIFICATION_INPUT_MANIFEST)`
@@ -2275,12 +4174,20 @@ retry, transaction, partial write, idempotency).
   bytes, the resulting plan document's `input_manifest_ref` points at that
   immutable, content-addressed artifact — never back at the mutable
   per-`as_of` file path.
-- **R3, retry.** If no `plan_ref` was ever saved for this `as_of` (a prior
-  attempt only reached `"error"` before a plan was built — `"timed_out"` is
-  never a pre-plan status: `_submit_plan` only records it after a plan was
-  already submitted and served, always with `plan_ref` set), a later
-  eligible attempt calls `_default_plan` again and captures
-  inputs fresh, same as the first attempt. Once a `plan_ref` IS saved,
+- **R3, retry.** In this issue-#104 flow, BEFORE Cutover PR-7b's own
+  `_ensure_shadow_snapshot` step exists: if no `plan_ref` was ever saved
+  for this `as_of` (a prior attempt only reached `"error"` before a plan
+  was built — `"timed_out"` is never a pre-plan status here: `_submit_plan`
+  only records it after a plan was already submitted and served, always
+  with `plan_ref` set), a later eligible attempt calls `_default_plan`
+  again and captures inputs fresh, same as the first attempt. **Cutover
+  PR-7b (CodeRabbit finding on `423ee21`, real) adds a genuinely NEW
+  pre-plan case this statement does not cover**: `_ensure_shadow_snapshot`
+  can itself report `"timed_out"` with `plan_ref=None` BEFORE `_default_
+  plan`/`plan_fn` ever runs — see the Cutover PR-7b design section below
+  for that outcome's own retry/resume behavior (it is driven by
+  `_ensure_shadow_snapshot`'s own idempotency-key job lookup, not by this
+  section's `plan_ref`-set resume branch below). Once a `plan_ref` IS saved,
   `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
   RESUME_STATUSES`) calls `_submit_plan` directly with that existing
   `plan_ref` and never reaches `_default_plan`/`_capture_input_manifest`
@@ -2456,27 +4363,36 @@ flowchart TD
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
 blocks the graph. This diagram is the *shadow* graph: `build_nightly_plan`
 stamps `graph_order()`'s output into every plan's `"order"` field, and
-`run_shadow_nightly` is the only function that walks it whole, inline,
-including `native_parity` — it has no production caller, only
-`tests/test_v2_ops_legacy_workflows.py` and
-`tests/test_v2_ops_native_shadow_render.py` call it. `computed_moves_refresh`
-(Part 4) is a real submittable job kind, unlike `native_parity` — see below
-for how production submission reaches it.
+`run_shadow_nightly` is the only function that walks it whole, inline — it
+has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and
+`tests/test_v2_ops_native_shadow_render.py` call it, for every stage
+including `native_parity`. `computed_moves_refresh` (Part 4) is a real
+submittable job kind reached a DIFFERENT way — through its own tick-loop
+sidecar (`Service._reconcile_computed_moves_refresh`), never through this
+graph's own walk.
 
-`native_score_batch` (Cutover PR-7a, design — this diagram deliberately
-omits it, see below) is designed here to become a real submittable job
-kind reached through the tick sidecar, unlike `native_parity` — see
-"Outputs"/"Failure semantics" above for `submit_native_score_batch_shadow_if_ready`
+`native_score_batch` (Cutover PR-7a, `#88`, design) and `native_parity`
+(Cutover PR-4 redo, this design) are each designed to become real
+submittable job kinds reached the SAME way, through their own tick-loop
+sidecars (`_reconcile_native_score_batch_shadow`/`_reconcile_native_parity`)
+— see "Outputs"/"Failure semantics" above for
+`submit_native_score_batch_shadow_if_ready`/`submit_native_parity_if_ready`
 and the identical race/all-or-nothing rationale `computed_moves_refresh`
-already establishes for why it will never be folded into this graph's
+already establishes for why neither will ever be folded into this graph's
 submission path once it exists. **This diagram is `nightly.py::GRAPH`/
-`OPTIONAL` as they exist today (CodeRabbit, this round, real finding — an
-earlier draft added a `score -.-> native_score_batch` edge and dashed
-`native_score_batch` node directly into this diagram, which is wrong:
-PR-7a ships no code, so neither dict contains it yet).** The implementation
-PR that follows this design adds that edge and node for real, the same way
-`#54` added `computed_moves_refresh`'s own edge/node to this same diagram
-when IT shipped code, not before.
+`OPTIONAL` as they exist TODAY** — matching the discipline `#88`'s own
+CodeRabbit review established for this exact diagram (an earlier draft of
+that design added a `score -.-> native_score_batch` edge and dashed
+`native_score_batch` node directly into it, which was wrong: PR-7a ships
+no code, so `GRAPH` does not contain it yet). This redo applies the same
+discipline to itself: `native_parity`'s existing node
+(`"native_parity": ("score",)`, `nightly.py:58`) is left exactly as it
+appears above, even though "Primary contracts" above describes Phase 2
+widening it to `("score", "native_score_batch")` — this doc-only PR ships
+no code either, so this diagram does not get ahead of it. The
+implementation PRs that follow both designs add their own real edges and
+nodes to this diagram when they ship code, not before — the same way `#54`
+added `computed_moves_refresh`'s own edge/node here when IT shipped code.
 
 Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
 only production caller, `cli.py`, always passes `include_prerequisites=False`,
@@ -2486,23 +4402,30 @@ so `_stage_sequence` returns a second, separately hand-maintained tuple,
 has `decision_validation`/`decision_commit`; `ledger_export` for `export`;
 `engineering_gate` for `engineering`) — and which never contains
 `native_parity` at all: in production `native_parity` is simply absent
-from the submitted stage list, not removed by a filter. `NO_JOB_STAGES`
-(currently `{"native_parity"}`) only does work on the other branch,
-`include_prerequisites=True` (test-only), where `_stage_sequence` instead
-returns `plan["order"]` (this diagram's order) and strips `NO_JOB_STAGES`
-from it before returning. `computed_moves_refresh` is not in `_DAG_STAGES`
+from the submitted stage list, not removed by a filter. **Corrected by
+this redo:** `NO_JOB_STAGES` used to read `frozenset({"native_parity"})` —
+true only while `native_parity` had no job kind at all. Now that it does
+(Cutover PR-4 redo, above), `NO_JOB_STAGES` is empty, and `_stage_sequence`'s
+own by-name filter (the one already excluding `computed_moves_refresh`
+from a prerequisite-inclusive, test-only `plan["order"]` walk, below)
+gains `"native_parity"` alongside it, for the identical reason: a real job
+kind that is nonetheless never submitted through
+`_DAG_STAGES`/`build_legacy_job_requests` must still be excluded from the
+test-only walk's OUTPUT by name, since it is no longer excluded for free
+by having "no job" at all. `computed_moves_refresh` is not in `_DAG_STAGES`
 either, and — unlike in the first cut of Part 4 — `_stage_sequence` never
 prepends it in native mode any more: `refresh_mode="native"` prepends only
 `("refresh",)` now, exactly as before this stage existed, and
 `_NATIVE_ACTION_STAGES` maps only `"refresh"`. In legacy mode,
-`_stage_sequence` still filters `"computed_moves_refresh"` out of a
-prerequisite-inclusive `plan["order"]` walk explicitly, by name, since it is
-no longer a member of `_NATIVE_ACTION_STAGES` to fall out of that check for
-free. The stage reaches production submission through a FOURTH path
-entirely, outside `_stage_sequence`/`build_legacy_job_requests` altogether:
+`_stage_sequence` filters both `"computed_moves_refresh"` and, from this
+redo on, `"native_parity"` out of a prerequisite-inclusive `plan["order"]`
+walk explicitly, by name, since neither is a member of
+`_NATIVE_ACTION_STAGES` to fall out of that check for free. Both stages
+reach production submission through a FOURTH path entirely, outside
+`_stage_sequence`/`build_legacy_job_requests` altogether:
 `supervisor.Service`'s own tick loop. See "Outputs"/"Failure semantics"
-above for `submit_computed_moves_refresh_if_ready` and why it was pulled out
-of the graph-submission path (Opus BLOCK(3)).
+above for `submit_computed_moves_refresh_if_ready`/`submit_native_parity_if_ready`
+and why each was pulled out of the graph-submission path.
 
 ### CLI → catalog → coordinator effect
 
@@ -2575,7 +4498,8 @@ commit happens until the combined kind list is clean.
 
 ```mermaid
 flowchart LR
-    ET[events_table] --> BR[board_requests]
+    SS[("shadow scope snapshot\n(Cutover PR-7b design:\n_ensure_shadow_snapshot)")] -.->|"Repository.scan\n(earnings_events)"| ET[events_table]
+    ET --> BR[board_requests]
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
@@ -2587,4 +4511,8 @@ flowchart LR
 session's `BoardRequest`s from it to build `events.json`'s per-event rows.
 Until that PR's code lands, the dashed edge is still aspirational, not a
 pre-existing fact — see "Dependencies" → "Callers" above and "Primary
-contracts" above for the full account.
+contracts" above for the full account. The dashed `events_table` edge is
+Cutover PR-7b's own design (above): before PR-7b, nothing commits the
+`shadow`-scope snapshot `events_table` would need to be scanned from at
+all — `computed_moves_store._scan_once`'s identical `earnings_events` scan
+is the precedent this edge follows, not a new read path.
