@@ -14,11 +14,13 @@ S4C Part 3: ``computed_moves_refresh`` gets its own staged document too --
 read and cross-validate one, including the ``attempt_id``/``fence`` pair its
 own commit's fence check needs (``engine.v2.ops.lifecycle.verify_fence``, the
 real production signature -- no ``check_lease_time`` parameter to disable the
-wall-clock lease-expiry check with). ``forward_calendar_refresh`` gets no
-entry here: every value ``run_forward_calendar_refresh`` needs already lives
-on the job's own ``CalendarMovesParameters``, so a second, staged copy could
-only drift from it, never add anything (``engine/v2/ops/ARCHITECTURE.md``
-"Inputs").
+wall-clock lease-expiry check with). ``forward_calendar_refresh`` gets its own
+staged document too, but a much smaller one than ``computed_moves_refresh``'s:
+only ``attempt_id``/``fence``, which vary per attempt and so cannot live on
+the job's own immutable ``CalendarMovesParameters`` -- every other value
+``run_forward_calendar_refresh`` needs already lives there, so restating it
+here could only drift, never add anything
+(``engine/v2/ops/ARCHITECTURE.md`` "Inputs").
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ from engine.v2.ops.incremental_data import RefreshParameters
 REFRESH_INPUT_DOCUMENT_NAMES = {
     "incremental_refresh": "incremental_refresh_input.json",
     "computed_moves_refresh": "computed_moves_refresh_input.json",
+    "forward_calendar_refresh": "forward_calendar_refresh_input.json",
 }
 
 
@@ -46,8 +49,12 @@ def stage_refresh_input(claim, staging: Path) -> None:
     name = REFRESH_INPUT_DOCUMENT_NAMES.get(kind)
     if name is None:
         return
-    document = (_daily_document(claim, staging) if kind == "incremental_refresh"
-                else _computed_moves_document(claim))
+    if kind == "incremental_refresh":
+        document = _daily_document(claim, staging)
+    elif kind == "computed_moves_refresh":
+        document = _computed_moves_document(claim)
+    else:
+        document = _forward_calendar_document(claim)
     (staging / name).write_text(canonical_json(document))
 
 
@@ -86,3 +93,18 @@ def _computed_moves_document(claim) -> dict:
         "attempt_id": claim.attempt_id,
         "fence": claim.fence,
     }
+
+
+def _forward_calendar_document(claim) -> dict:
+    """The ``forward_calendar_refresh`` identity document.
+
+    It carries ONLY the two per-attempt values
+    ``run_forward_calendar_refresh`` cannot get from the job's own immutable
+    ``CalendarMovesParameters`` -- ``attempt_id``/``fence`` vary per attempt
+    (a retried attempt gets a new fence), so they must be written fresh at
+    claim time, the same as ``_computed_moves_document`` writes them; every
+    other value this runner needs is read directly off the decoded
+    ``CalendarMovesParameters`` by
+    ``incremental_data._load_forward_calendar_refresh_callback``.
+    """
+    return {"attempt_id": claim.attempt_id, "fence": claim.fence}
