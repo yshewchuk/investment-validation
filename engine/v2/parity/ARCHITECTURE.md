@@ -153,12 +153,17 @@ standard library only (`dataclasses`, `datetime`, `fnmatch`, `math`,
 ### Cutover PR-4: the tolerance policy is now pluggable, exact by default
 
 **Real code, landed independently of every other cutover-PR-4 piece**
-(the rest of that work — `legacy_parity_rows` and the `native_parity` job
-kind's production submission — is still documentation-only in
-`engine/v2/ops/ARCHITECTURE.md`, gated on cutover PR-7a/`#88` merging
-first; redo, 2026-09-27: the original design's `tools/native_parity_run.py`
-production caller and its "explained" bucket are both dropped — see that
-doc's "Cutover PR-4 (redo)" section for why; this piece needed neither).
+(`legacy_parity_rows`, `native_parity_report._empty_native_report` and
+`native_parity_report.apply_native_refusals` are now implemented too, in
+`engine/v2/ops/nightly.py`/`engine/v2/ops/native_parity_report.py` — pure
+functions with no dependency on cutover PR-7a/`#88`; only the
+`native_parity` job kind's production submission (`run_native_parity_worker`
+and its supervisor/nightly wiring) remains documentation-only in
+`engine/v2/ops/ARCHITECTURE.md`, gated on PR-7a's still-unmerged native
+input schema; redo, 2026-09-27: the original design's
+`tools/native_parity_run.py` production caller and its "explained" bucket
+are both dropped — see that doc's "Cutover PR-4 (redo)" section for why;
+this piece needed neither).
 Before this change,
 `compare_dimension` hardcoded `tolerance_policy=SCORE_RECORD_V1` inside
 its own `compare_records(...)` call — the ONE numeric tolerance every

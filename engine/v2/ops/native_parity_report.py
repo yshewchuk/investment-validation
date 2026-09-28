@@ -53,12 +53,13 @@ from engine.v2.parity.tolerance import SCORE_RECORD_V1, TolerancePolicy
 __all__ = [
     "PARITY_DIMENSIONS",
     "SCHEMA_VERSION",
+    "apply_native_refusals",
     "compare_native_vs_legacy",
     "native_parity_handler",
     "write_parity_report",
 ]
 
-SCHEMA_VERSION = "native_parity_report.v1.0"
+SCHEMA_VERSION = "native_parity_report.v1.1"
 
 #: The checker's own numeric field groups, reused by name -- see
 #: ``checks/phase4_real._compare_numeric_outputs``, whose dimension names and
@@ -188,6 +189,89 @@ def compare_native_vs_legacy(
     }
 
 
+def _empty_native_report(
+    legacy_rows: Mapping[str, dict],
+    native_rows: Mapping[str, dict],
+    dimensions: tuple[str, ...],
+    tolerance_policy: TolerancePolicy,
+) -> dict:
+    """The report ``compare_native_vs_legacy`` would return for a
+    would-be comparison that shares no key, built WITHOUT calling
+    ``compare_native_vs_legacy`` (there is no numeric comparison to make:
+    nothing shared was scored against anything). Every key of
+    ``legacy_rows`` is ``only_legacy`` and every key of ``native_rows`` is
+    ``only_native`` -- by construction, on the path this function is used
+    for, the two sets share no key.
+
+    ``dimensions`` is accepted for signature symmetry with
+    ``compare_native_vs_legacy`` (a caller can pass the same arguments to
+    either) and is not otherwise used: no dimension comparison happens
+    when nothing is shared.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "tolerance_policy_id": tolerance_policy.policy_id,
+        "compared": [],
+        "only_legacy": sorted(legacy_rows),
+        "only_native": sorted(native_rows),
+        "mismatches": [],
+    }
+
+
+def apply_native_refusals(
+    report: dict,
+    native_refusals: Mapping[str, str],
+    unkeyable_refusals: tuple[Mapping[str, Any], ...] = (),
+) -> dict:
+    """Move refused native rows out of ``report["only_legacy"]`` into two
+    new, additive report fields -- never mutates ``report`` in place;
+    returns a new dict.
+
+    ``native_refusals`` maps a ``population_key`` string to a refusal code
+    string. Any key that is also present in ``report["only_legacy"]``
+    moves there (removed from ``only_legacy``, appended to a new
+    ``"native_refused"`` list as ``{"row_key": key, "refusal_code": code}``).
+    A ``native_refusals`` key that is NOT in ``only_legacy`` is appended
+    instead to a new ``"native_refused_unmatched"`` list, same
+    ``{"row_key": key, "refusal_code": code}`` shape -- a native refusal
+    with no legacy counterpart to explain (a row native's own board
+    universe found and refused that legacy's ``score.json`` never carried).
+    Iterates ``native_refusals`` in ``sorted()`` key order, so the output
+    order is deterministic regardless of the input mapping's own order.
+
+    Every entry of ``unkeyable_refusals`` (each already shaped
+    ``{"key": {...raw ticker/strategy/event_date/session fields...},
+    "code": ..., "detail": ...}``) is appended unconditionally to the SAME
+    ``"native_refused_unmatched"`` list, in the given order, as
+    ``{"row_key": entry["key"], "refusal_code": entry["code"]}`` -- using
+    its raw structured key instead of a population-key string, since an
+    unkeyable refusal has no ``population_key`` to project.
+
+    Every native refusal -- keyed or not, legacy-matched or not -- lands
+    in exactly one of ``native_refused``/``native_refused_unmatched``;
+    none is ever silently dropped.
+    """
+    only_legacy = list(report["only_legacy"])
+    only_legacy_set = set(only_legacy)
+    native_refused: list[dict[str, Any]] = []
+    native_refused_unmatched: list[dict[str, Any]] = []
+    for key in sorted(native_refusals):
+        code = native_refusals[key]
+        if key in only_legacy_set:
+            only_legacy.remove(key)
+            native_refused.append({"row_key": key, "refusal_code": code})
+        else:
+            native_refused_unmatched.append({"row_key": key, "refusal_code": code})
+    for entry in unkeyable_refusals:
+        native_refused_unmatched.append(
+            {"row_key": entry["key"], "refusal_code": entry["code"]})
+    updated = dict(report)
+    updated["only_legacy"] = only_legacy
+    updated["native_refused"] = native_refused
+    updated["native_refused_unmatched"] = native_refused_unmatched
+    return updated
+
+
 def write_parity_report(report: dict, path: Path | str) -> Path:
     """Write ``report`` as deterministic JSON; any filesystem error propagates.
 
@@ -230,6 +314,7 @@ def native_parity_handler(
             return {**value, "native_parity": {"status": "not_applicable"}}
         report = compare_native_vs_legacy(
             legacy_rows, native_rows, dimensions, tolerance_policy=tolerance_policy)
+        report = apply_native_refusals(report, {}, ())
         write_parity_report(report, path)
         return {**value, "native_parity": {
             "status": "compared",

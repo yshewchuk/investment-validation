@@ -203,13 +203,19 @@ calls `run_shadow_nightly`, which "has no production caller [and] needs
 14 caller-supplied stage handlers nothing builds" — a manual script
 outside any schedule is not what "the REAL nightly" means. This doc
 describes the design Phase 2 of this redo will leave it, not a
-pre-existing fact: Phase 1 (this push) is documentation only, for
-`legacy_parity_rows` and the new `native_parity` job kind together, both
-gated on cutover PR-7a (`#88`) merging first — `native_parity`'s native-side
-input is the `native_score_batch` job's staged `records.json`/`refusals.json`
-output PR-7a's design places there, so this redo cannot be implemented
-before that one lands. Cutover PR-3 (`native_score_batch.py`, `#66`) is
-already merged, unlike when the original PR-4 was written. One piece is
+pre-existing fact: Phase 1 (cutover PR-4 redo slice 1, `#132`) has
+landed the pure functions this section documents — `legacy_parity_rows`,
+`native_parity_report._empty_native_report`, and
+`native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` bumped
+`v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. The new
+`native_parity` job kind (its `dispatch` branch, and any submission path
+that enumerates `BoardRequest`s and stages this job) stays deferred,
+gated on cutover PR-7a (`#88`) merging first — `native_parity`'s
+native-side input is the `native_score_batch` job's staged
+`records.json`/`refusals.json` output PR-7a's design places there, so
+that wiring cannot be implemented before that one lands. Cutover PR-3
+(`native_score_batch.py`, `#66`) is already merged, unlike when the
+original PR-4 was written. One piece is
 untouched by this redo, real code already on `main`, independent of
 everything `#66`/`#88` supply: `native_parity_report.py`'s tolerance
 policy is already pluggable — see "the tolerance policy is now pluggable"
@@ -278,9 +284,10 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   `resource_classes=frozenset({"validation"})` (a pure comparison, no
   provider fetch — the same classification `decision_evidence` already
   has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
-  `checkpoint_contract="native_parity_report.v1.1"` (a minor version bump
-  from today's `native_parity_report.v1.0` — see "Outputs" below for the
-  one additive field), `namespaces=frozenset({"shadow", "smoke"})`.
+  `checkpoint_contract="native_parity_report.v1.1"` (matching
+  `native_parity_report.SCHEMA_VERSION`, which Phase 1 (`#132`) already
+  bumped from `v1.0` — see "Outputs" below for the two additive fields
+  this contract already covers), `namespaces=frozenset({"shadow", "smoke"})`.
   `worker.py::dispatch` gains a `"native_parity"` branch routing to
   `native_parity_report.run_native_parity_worker` (below), the same
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
@@ -335,11 +342,14 @@ a submission source" rule Part 4 already established for
   agree — a plain `{key: row for row in rows}` comprehension in
   `legacy_parity_rows` would then silently keep whichever row iterated
   last and drop the other with no trace. `legacy_parity_rows` therefore
-  validates every row before keying any of them: a missing/empty
-  `ticker`/`strategy`/`event_date`, OR two rows sharing one
-  `population_key` value, each raises `OpsError` — matching
+  validates every row before keying any of them: a missing, non-string,
+  or empty `ticker`/`strategy`/`event_date`; a `ticker` or `strategy`
+  containing the `"|"` `population_key` delimiter (CodeRabbit round 3 —
+  `population_key` joins on `"|"`, so an unescaped delimiter inside a
+  field would let two distinct rows collide under one key); OR two rows
+  sharing one `population_key` value — each raises `OpsError` — matching
   `decision_population`'s own code, `VALIDATION_FAILED` (detail naming
-  the row index/missing field, or the repeated key and both rows'
+  the row index/offending field, or the repeated key and both rows'
   indices) — for the WHOLE call, before any dict is constructed: a
   batch-level refusal, never a per-row skip or a last-write-wins
   collision, so a malformed or duplicate-keyed `score.json` is never
@@ -375,10 +385,12 @@ a submission source" rule Part 4 already established for
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
   This is the real (only) production caller `tools/native_parity_run.py`
   was originally designed to be. **That script is dropped from this redo
-  entirely — no code for it was ever written** (confirmed against `main`:
-  neither the file nor `legacy_parity_rows`/`row_explanations` exist
-  today, so nothing needs migrating away from it), never built as a
-  parallel manual path alongside the job. There is exactly one way a real
+  entirely — no code for it was ever written** (`tools/native_parity_run.py`
+  and `row_explanations` never existed and still don't; `legacy_parity_rows`
+  now exists on `main` as of Phase 1, `#132`, but only as the pure function
+  this section documents — nothing calls it in production yet, so nothing
+  needs migrating away from the dropped script), never built as a parallel
+  manual path alongside the job. There is exactly one way a real
   `native_parity_report.json` gets produced in this codebase once Phase 2
   lands, not two.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
@@ -446,15 +458,30 @@ a submission source" rule Part 4 already established for
   raise `VALIDATION_FAILED` — the correct outcome for THAT case is
   unchanged. `compare_native_vs_legacy` itself gains no new parameter and
   no new branch for this: the decision of which path to take is
-  `run_native_parity_worker`'s own, so `run_shadow_nightly`'s test-only
-  path (which never has refusals to give it) is unaffected either way.
+  `run_native_parity_worker`'s own (still unbuilt — Phase 2), so
+  `run_shadow_nightly`'s test-only path, which calls `native_parity_handler`
+  directly and never `run_native_parity_worker`, never reaches this
+  `_empty_native_report` branch at all — see the next bullet,
+  `apply_native_refusals`, for the one behavior change that DOES already
+  reach that existing test-only path today.
 - **`native_parity_report.apply_native_refusals(report, native_refusals,
   unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
   refused native rows are counted separately" (user decision, option (c)).
   `compare_native_vs_legacy` itself is UNCHANGED — pure, refusal-blind,
-  unaware `native_score_batch` can refuse a row at all — so
-  `run_shadow_nightly`'s own test-only path (which has no refusals to give
-  it) sees no behavior change. `run_native_parity_worker` calls this AFTER
+  unaware `native_score_batch` can refuse a row at all. **But
+  `native_parity_handler` — the EXISTING function `run_shadow_nightly`
+  already calls, unchanged in signature — now calls
+  `apply_native_refusals(report, {}, ())` unconditionally right after
+  `compare_native_vs_legacy`, on every `"compared"` report it writes (Phase
+  1, `#132`, already on `main`): with no refusals to apply this changes no
+  row's classification, but every report that test-only path writes now
+  also carries the two new, always-present, empty fields
+  `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
+  `SCHEMA_VERSION` `native_parity_report.v1.1`, not the pre-redo `v1.0` — a
+  real, already-shipped change to this existing artifact's shape, not a
+  no-op reserved for `run_native_parity_worker`.** Once Phase 2 builds it,
+  `run_native_parity_worker` calls this the SAME way, this time with real
+  `native_refusals`/`unkeyable_refusals`, AFTER
   `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
   key in the report's own `only_legacy` list that is ALSO a key of
   `native_refusals` (population-key → refusal code, built from
