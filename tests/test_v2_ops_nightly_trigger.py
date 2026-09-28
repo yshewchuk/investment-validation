@@ -338,6 +338,63 @@ def test_busy_legacy_with_a_real_flock_records_retry_and_never_probes(tmp_path):
     assert receipt.status == "completed" and submit.calls == [(AS_OF, "plan_after_release")]
 
 
+def test_busy_legacy_does_not_overwrite_a_resumable_submitted_state(tmp_path):
+    # Tick 1: a normal run reaches "submitted" with a plan_ref and the process
+    # dies before serving -- the durable state on disk is "submitted".
+    plan, submit = FakePlan("plan_resume"), FakeSubmit()
+
+    def die_after_submit(root, plan_ref, clock):
+        raise RuntimeError("simulated process death after submit")
+
+    with pytest.raises(RuntimeError):
+        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit,
+             die_after_submit)
+    first = load_state(tmp_path, AS_OF)
+    assert first is not None and first.status == "submitted"
+    assert first.plan_ref == "plan_resume"
+    assert len(plan.calls) == 1
+
+    # Tick 2: the test holds the legacy lock, so _LegacyLock returns held=False.
+    lock = tmp_path / "reports" / ".nightly.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = lock.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        busy = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit,
+                    die_after_submit)
+    finally:
+        holder.close()
+    assert busy.status == "busy_legacy"
+    assert busy.plan_ref == "plan_resume"  # carried forward, never None
+    assert len(plan.calls) == 1  # the busy tick never re-planned
+    unchanged = load_state(tmp_path, AS_OF)
+    assert unchanged == first  # nothing was persisted by the busy tick
+
+    # Tick 3: the lock is free -> resume the SAME plan_ref, no new plan.
+    serve = FakeServe("completed")
+    resumed = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert resumed.status == "completed" and resumed.plan_ref == "plan_resume"
+    assert len(plan.calls) == 1  # the plan was built exactly once, on tick 1
+    assert submit.calls == [(AS_OF, "plan_resume"), (AS_OF, "plan_resume")]
+    assert serve.calls == [("plan_resume", tmp_path)]
+
+
+def test_busy_legacy_with_no_resumable_state_still_persists_as_before(tmp_path):
+    lock = tmp_path / "reports" / ".nightly.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = lock.open("a+")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), FakePlan(),
+                       FakeSubmit(), FakeServe())
+    finally:
+        holder.close()
+    assert receipt.status == "busy_legacy"
+    assert receipt.plan_ref is None and receipt.error_count == 0
+    stored = load_state(tmp_path, AS_OF)
+    assert stored == receipt  # the ordinary busy path still writes to disk
+
+
 def test_the_lock_is_held_for_the_whole_run_and_released_after(tmp_path):
     # FakeSubmit/FakeServe assert the lock is held during their calls; the
     # busy-tick check below proves it is released when the run returns.
