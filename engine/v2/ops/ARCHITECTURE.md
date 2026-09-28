@@ -378,16 +378,16 @@ a submission source" rule Part 4 already established for
   branch for this: the decision of which path to take is
   `run_native_parity_worker`'s own, so `run_shadow_nightly`'s test-only
   path (which never has refusals to give it) is unaffected either way.
-- **`native_parity_report.apply_native_refusals(report, native_refusals) ->
-  dict`** (new) — the mechanism for "missing or refused native rows are
-  counted separately" (user decision, option (c)). `compare_native_vs_legacy`
-  itself is UNCHANGED — pure, refusal-blind, unaware `native_score_batch`
-  can refuse a row at all — so `run_shadow_nightly`'s own test-only path
-  (which has no refusals to give it) sees no behavior change.
-  `run_native_parity_worker` calls this AFTER `compare_native_vs_legacy`
-  or `_empty_native_report` (above) returns: any key in the report's own
-  `only_legacy` list that is ALSO a
-  key of `native_refusals` (population-key → refusal code, built from
+- **`native_parity_report.apply_native_refusals(report, native_refusals,
+  unkeyable_refusals=()) -> dict`** (new) — the mechanism for "missing or
+  refused native rows are counted separately" (user decision, option (c)).
+  `compare_native_vs_legacy` itself is UNCHANGED — pure, refusal-blind,
+  unaware `native_score_batch` can refuse a row at all — so
+  `run_shadow_nightly`'s own test-only path (which has no refusals to give
+  it) sees no behavior change. `run_native_parity_worker` calls this AFTER
+  `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
+  key in the report's own `only_legacy` list that is ALSO a key of
+  `native_refusals` (population-key → refusal code, built from
   `records.json`'s paired `refusals.json`) moves from `only_legacy` into a
   NEW `"native_refused"` list (each entry `{"row_key": ..., "refusal_code":
   ...}`), and is removed from `only_legacy` — never counted in both. A
@@ -403,6 +403,33 @@ a submission source" rule Part 4 already established for
   enumerated as a `BoardRequest` (an unsupported strategy, the `DYN-SV`
   wildcard) — never a row native attempted and explicitly refused, which
   `native_refused` names instead.
+  **A refusal with no legacy counterpart is reported, never dropped
+  (CodeRabbit round 5, real finding).** A `native_refusals` key that is
+  NOT in `only_legacy` cannot be in `compared`/`only_native` either (a
+  refused `BoardRequest` is by construction absent from `native_rows`,
+  and both those buckets are built only from `native_rows`) — so the ONE
+  remaining possibility, silently ignored by the original design, is a
+  refusal whose projected `population_key` is not in `legacy_rows` at
+  all: `native_score_batch`'s own board universe found and refused a row
+  legacy's own `score.json` never carried in the first place. That case
+  is now appended to a second NEW list, `"native_refused_unmatched"`
+  (same `{"row_key": ..., "refusal_code": ...}` shape as `native_refused`,
+  kept separate rather than merged so a reader can tell "legacy scored it,
+  native refused it" apart from "native refused a row legacy never had").
+  Every entry of `unkeyable_refusals` (the third, optional argument —
+  `_native_rows_and_refusals`'s own pass-through of `refusals.json`'s
+  `"unkeyable_refusals"` array, below) is appended to the SAME
+  `"native_refused_unmatched"` list unconditionally, using its raw
+  structured `{"ticker":..., "strategy":..., "event_date":...,
+  "session":...}` key instead of a `row_key` string (below) — an
+  `INVALID_KEY_FIELD` refusal never attempts the keyed join at all (its
+  own source fields are exactly what made a safe key impossible to
+  construct), so it is reported this way regardless of whether a
+  same-identity legacy row exists, rather than trying to prove a negative
+  match first. Every native refusal — keyed or not, legacy-matched or
+  not — therefore lands in exactly one of `native_refused` or
+  `native_refused_unmatched`; none is ever silently absent from the
+  report.
 - **`native_parity_report._population_key_from_board_request_key(key) ->
   str`** (new, private) — projects one `records.json`/`refusals.json` key
   (the 4-field canonical `BoardRequest` string `#88` specifies,
@@ -421,8 +448,8 @@ a submission source" rule Part 4 already established for
   raised before `run_native_parity_worker` builds `native_rows`/
   `native_refusals` at all, never a per-row skip.
 - **`native_parity_report._native_rows_and_refusals(records_document,
-  refusals_document) -> tuple[dict[str, dict], dict[str, str]]`** (new,
-  private) — the ONLY caller of `_population_key_from_board_request_key`
+  refusals_document) -> tuple[dict[str, dict], dict[str, str], tuple[dict,
+  ...]]`** (new, private) — the ONLY caller of `_population_key_from_board_request_key`
   (above), and the place a duplicate collision is caught: the projection
   from a 4-field `BoardRequest` key down to a 3-field `population_key` is
   LOSSY (it drops `session`), so two DISTINCT `records.json`/`refusals.json`
@@ -446,7 +473,13 @@ a submission source" rule Part 4 already established for
   in practice (native's own board universe enumerates one `BoardRequest`
   per `(ticker, strategy, event_date, session)` combination the events
   table actually carries); this guard exists because the projection makes
-  a collision POSSIBLE, not because one has occurred.
+  a collision POSSIBLE, not because one has occurred. The third return
+  value is `refusals_document.get("unkeyable_refusals", ())`, passed
+  through completely unchanged — `INVALID_KEY_FIELD` rows (below) never
+  had a `population_key` computed for them at all (that is exactly what
+  makes them "unkeyable"), so there is nothing for this function to
+  project, decode, or collision-check; it is `apply_native_refusals`
+  (above), not this function, that consumes them.
 
 **The original PR-4 design's "explained" bucket (`ROW_EXPLANATION_CODES`,
 `row_explanations`) is dropped from this redo, not carried forward** —
@@ -903,10 +936,11 @@ material": `BoardRequest`'s own fields and
   a `NativeScoreBatchRowRefusal` (new code `INVALID_KEY_FIELD`, the same
   collected-never-raised per-row mechanism `UNSUPPORTED_STRATEGY` already
   uses) the moment `"|"` appears in `key.ticker`, `key.strategy`, or
-  `key.session` — BEFORE that row is ever encoded into `records.json`'s or
-  `refusals.json`'s own keys, both of which route through this one
-  function. This makes the join a true bijection BY CONSTRUCTION (none of
-  the four source values can ever contain the separator, so encoding and
+  `key.session` — BEFORE that row is ever encoded into `records.json`'s
+  own keys (which route through this one function). This makes the
+  `records.json` join a true bijection BY CONSTRUCTION for every row that
+  DOES get a canonical key (none of the four source values feeding it can
+  ever contain the separator, so encoding and
   `_population_key_from_board_request_key`'s own decode are exact
   inverses) rather than merely "safe because a malformed encoding would
   also fail to re-parse as exactly 4 parts," which was this design's
@@ -914,12 +948,31 @@ material": `BoardRequest`'s own fields and
   malformed rows sharing an embedded `"|"` could still encode to the
   IDENTICAL 5-or-more-part string and be silently indistinguishable to a
   reader, even though each individually fails `_population_key_from_board_request_key`'s
-  own 4-part check. One row refusing this way is a normal, reportable
-  per-row outcome — same `records.json`/`refusals.json` shape as any other
-  refusal — never a batch-level `OpsError`. Phase 2's test plan adds a
-  case for each of `ticker`/`session` (the two genuinely free-text fields)
-  carrying an embedded `"|"`, asserting the row refuses `INVALID_KEY_FIELD`
-  and every OTHER row in the same batch still assembles normally.
+  own 4-part check.
+  **An `INVALID_KEY_FIELD` refusal is never given a canonical key at all
+  (CodeRabbit round 5, real finding).** `_board_request_key` raising is
+  precisely the statement "no safe string exists for this row" — inventing
+  a SECOND, reversible escaping scheme just for this one code would add a
+  new format this design would then have to prove correct too, for a
+  refusal-only edge case. Instead `refusals.json` (below) puts these rows
+  in a SEPARATE array, `"unkeyable_refusals"`, each entry carrying the raw
+  STRUCTURED key `NativeScoreBatchRowRefusal.as_document()` already
+  produces unjoined — `{"key": {"ticker": ..., "strategy": ...,
+  "event_date": ..., "session": ...}, "code": "INVALID_KEY_FIELD",
+  "detail": ...}` — never a string, so there is nothing to collide or to
+  fail re-parsing `_population_key_from_board_request_key`'s 4-part check.
+  `_native_rows_and_refusals` (below) passes this array straight through
+  uninspected; `apply_native_refusals` (above) reports every one of its
+  entries in `native_parity_report.json`'s new `native_refused_unmatched`
+  list unconditionally, never attempting to match it against `legacy_rows`
+  by any key. One row refusing this way is a normal, reportable per-row
+  outcome for `native_score_batch` itself — same job-success semantics as
+  any other refusal, never a batch-level `OpsError` there. Phase 2's test
+  plan adds a case for each of `ticker`/`session` (the two genuinely
+  free-text fields) carrying an embedded `"|"`, asserting the row refuses
+  `INVALID_KEY_FIELD` into `unkeyable_refusals`, every OTHER row in the
+  same batch still assembles normally, and `native_parity`'s own
+  acceptance test asserts it surfaces in `native_refused_unmatched`.
 - **`records.json`.** `"records"` changes from a bare array (today) to a
   JSON object: `{canonical_key: to_document(record), ...}`. Built inside
   `run_native_score_batch_worker` by zipping `assembled.keys()` (the
@@ -932,15 +985,22 @@ material": `BoardRequest`'s own fields and
   reconstruction from `events.json`'s own order, which is exactly the
   positional pairing `#88` names as broken once any row has refused. New
   schema version: `native_score_batch_records.v1.0` → `v2.0`.
-- **`refusals.json`.** Rekeyed the identical way, for symmetry and so
-  `native_parity` needs exactly ONE join key format for both files, never
-  two: `{canonical_key: {"code": ..., "detail": ...}, ...}` — the same
-  `code`/`detail` fields `NativeScoreBatchRowRefusal.as_document()`
+- **`refusals.json`.** Every refusal EXCEPT `INVALID_KEY_FIELD` is rekeyed
+  the identical way `records.json` is, for symmetry and so `native_parity`
+  needs exactly ONE join key format for both files, never two:
+  `"refusals": {canonical_key: {"code": ..., "detail": ...}, ...}` — the
+  same `code`/`detail` fields `NativeScoreBatchRowRefusal.as_document()`
   already carries, minus the now-redundant nested `"key"` dict (the
   object's own key IS the row identity; carrying it twice invites the two
-  copies drifting apart). The worker's own return-value output tag moves
-  `"native_score_batch_refusals.v1.0"` → `"native_score_batch_refusals.v2.0"`
-  alongside it. `assembled`/`refusals`'s own row-level SET is unchanged —
+  copies drifting apart). A NEW sibling array, `"unkeyable_refusals":
+  [{"key": {...}, "code": "INVALID_KEY_FIELD", "detail": ...}, ...]`
+  (above), holds exactly the rows that cannot be safely rekeyed at all —
+  its entries keep the nested structured `"key"` dict UNCHANGED from
+  `NativeScoreBatchRowRefusal.as_document()`'s own shape, since there is
+  no canonical string to make it redundant. The worker's own return-value
+  output tag moves `"native_score_batch_refusals.v1.0"` →
+  `"native_score_batch_refusals.v2.0"` alongside both changes.
+  `assembled`/`refusals`'s own row-level SET is unchanged —
   `assemble_score_batch_inputs`'s per-row either/or contract (PR-3: a key
   is either in `assembled` with a complete pair, or in `refusals`, never
   both) is exactly what lets `apply_native_refusals` (above) trust the two
@@ -1070,16 +1130,20 @@ starts working with no change of its own.
   redo (out of scope, above) — a reader finds the report by job id (`ops
   get`/`ops logs`/`ops explain <job_id>`), the same way every other
   shadow-only artifact in this package is read today. The report's own
-  schema gains one additive field, `"native_refused": [...]`
-  (`apply_native_refusals`, above) — `SCHEMA_VERSION` bumps
-  `native_parity_report.v1.0` → `v1.1` for this reason; every existing
-  field (`compared`/`only_legacy`/`only_native`/`mismatches`/
-  `tolerance_policy_id`) keeps its exact prior meaning, except that
-  `only_legacy` now excludes rows `native_refused` claims instead of
-  including them — a meaning NARROWING, not a breaking removal: no
-  production caller has ever populated `only_legacy` with real refusal
-  data before this redo. Still private-shadow-only, same as every other
-  artifact in this bullet list; nothing here writes to the legacy board.
+  schema gains TWO additive fields, `"native_refused": [...]` (a
+  `population_key`-matched legacy row moved out of `only_legacy`) and
+  `"native_refused_unmatched": [...]` (a native refusal — keyed or, for
+  `INVALID_KEY_FIELD`, structured — with no legacy row to move; CodeRabbit
+  round 5, real finding, above) (both `apply_native_refusals`, above) —
+  `SCHEMA_VERSION` bumps `native_parity_report.v1.0` → `v1.1` for this
+  reason; every existing field (`compared`/`only_legacy`/`only_native`/
+  `mismatches`/`tolerance_policy_id`) keeps its exact prior meaning,
+  except that `only_legacy` now excludes rows `native_refused` claims
+  instead of including them — a meaning NARROWING, not a breaking
+  removal: no production caller has ever populated `only_legacy` with
+  real refusal data before this redo. Still private-shadow-only, same as
+  every other artifact in this bullet list; nothing here writes to the
+  legacy board.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the EXISTING `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never
