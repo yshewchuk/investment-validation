@@ -39,12 +39,20 @@ the root doc's Layer 1 row. It owns:
   resolution and re-verification, bounded Arrow scans, typed event/chain/
   price lookups, and dependency explanation (`repository.py`, `query.py`,
   `events.py`, `chains.py`, `price_history_query.py`);
-- the one legacy-touching seam (`legacy_adapter.py`) and everything built on
+- the one legacy-touching seam (`legacy_adapter.py`) and what is built on
   top of it read-only: the legacy→v2 table mapping (`legacy_mapping.py`),
-  pinned reference-input resolution and publication (`reference_inputs.py`,
-  `reference_catalog.py`), snapshot-import planning (`import_snapshot.py`),
-  and legacy-tree materialization for a nightly's barrier-only legacy stages
-  (`legacy_materialization.py`, `legacy_nightly_read_plan.py`);
+  pinned reference-input resolution (`reference_inputs.py`), and
+  snapshot-import planning (`import_snapshot.py`, built on both of those).
+  `reference_catalog.py` publishes those same pinned reference inputs into
+  the catalog but is itself legacy-free — its own docstring: it never
+  imports `reference_inputs`, so `catalog.commit_snapshot` never loads a
+  legacy module inside its transaction;
+- legacy-tree materialization for a nightly's barrier-only legacy stages
+  (`legacy_materialization.py`, `legacy_nightly_read_plan.py`) — also
+  legacy-free itself (no `engine.*` legacy import); the dependency here runs
+  the other way, `legacy_adapter.py`'s own `materialize` and row-comparison
+  accessors are built on top of `legacy_materialization.py`, not the
+  reverse;
 - two natively-computed, legacy-free table families that have no legacy
   Tier-2 backing of their own: `computed_moves`/`computed_moves_table.py`
   (pure close-to-close move math, moved verbatim from the untouched legacy
@@ -53,7 +61,13 @@ the root doc's Layer 1 row. It owns:
 - the data-owner catalog schema (`schema.py`), colocated with the ops/ledger
   schemas in one SQLite file under migration owner `"data"`;
 - pure completeness/coverage checks used by incremental planning
-  (`eod_inventory.py`, `tier4_coverage.py`, `event_revisions.py`).
+  (`eod_inventory.py`, `event_revisions.py`);
+- a Tier-4 serving-cache coverage check (`tier4_coverage.py`) that is
+  neither pure nor legacy-free — it imports `legacy_adapter`/
+  `reference_inputs`, and `missing_triples` reads serving-cache headers off
+  the store — gating a snapshot-backed scoring launch
+  (`engine.v2.ops.snapshot_stages`'s `_check_tier4_coverage`), not
+  incremental refresh.
 
 Per `engine/v2/data/README.md`'s "Non-responsibilities": this package never
 computes a trading verdict (`engine/v2/scoring` does) and never changes a
@@ -371,8 +385,9 @@ resolved head; `snapshot_import.py`/`snapshot_promotion.py`/`cli.py` call
 `computed_moves_table.*`, but only `forward_calendar_store.py` passes a
 `fence_check` into `generic_incremental.commit_generic_table_candidate`;
 `computed_moves_store.py` calls `catalog.commit_snapshot` directly with its
-own `_fence_check_for` (`verify_fence` only, no head-fence composition —
-see "Failure semantics"); `unit_receipts.py` calls `incremental.cache_raw_receipt`/
+own `_fence_check_for` (`verify_fence` when an attempt is staged, otherwise
+a no-op; no head-fence composition either way — see "Failure semantics");
+`unit_receipts.py` calls `incremental.cache_raw_receipt`/
 `RawPayload`/`load_raw_receipt`/`_jsonable` (the last a private name, legally
 reachable — see "Primary contracts"); `incremental_data.py`/`nightly.py`
 call `incremental.run_daily_market_refresh`/`FETCH_SOURCE`. `engine.v2.serving`
@@ -758,15 +773,17 @@ flowchart TB
         repository --> price_history_query
     end
 
-    subgraph legacy["Legacy-touching seam & everything built on it"]
-        legacy_adapter["legacy_adapter.py"]
+    subgraph legacy["Legacy-touching seam, its own foundation, and what is built on it"]
+        legacy_materialization["legacy_materialization.py (legacy-free)"]
+        legacy_adapter["legacy_adapter.py"] --> legacy_materialization
         legacy_mapping["legacy_mapping.py"] --> legacy_adapter
         reference_inputs["reference_inputs.py"] --> legacy_adapter
-        reference_catalog["reference_catalog.py"]
+        reference_catalog["reference_catalog.py (legacy-free)"] --> legacy_materialization
         import_snapshot["import_snapshot.py"] --> legacy_mapping
         import_snapshot --> reference_inputs
-        legacy_materialization["legacy_materialization.py"] --> legacy_adapter
-        legacy_nightly_read_plan["legacy_nightly_read_plan.py"]
+        legacy_nightly_read_plan["legacy_nightly_read_plan.py (legacy-free)"] --> legacy_materialization
+        tier4_coverage["tier4_coverage.py (store-reading, not pure)"] --> legacy_adapter
+        tier4_coverage --> reference_inputs
     end
 
     subgraph native["Legacy-free native table families"]
@@ -779,7 +796,6 @@ flowchart TB
     subgraph coverage["Pure coverage/completeness"]
         eod_inventory["eod_inventory.py"]
         event_revisions["event_revisions.py"]
-        tier4_coverage["tier4_coverage.py"]
     end
 
     schema["schema.py (standalone: contracts+foundation only)"]
