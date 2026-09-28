@@ -27,6 +27,7 @@ def _valid_kwargs(**overrides):
             "calendar_observed_through": "2026-01-09",
         },
         panel_row={"date": "2026-01-15", "signal": 1.5},
+        panel_anchor="2026-01-10",
         tier4_row={"pred_abs_move": 0.05, "pred_abs_move_fold_start": "2026-01-01"},
         quote_rows=[
             {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
@@ -610,3 +611,91 @@ def test_quote_domain_map_matches_capture_call_site():
 # synthetic StrictTraceCaptureError built directly in this test file (as a
 # prior version of this test did) never executes that call site's own
 # exception translation, so it cannot catch a regression there.
+
+
+def test_missing_panel_anchor_refuses():
+    with pytest.raises(NightlySourceBundleRefusal) as exc:
+        assemble_nightly_source_bundle(**_valid_kwargs(panel_anchor=None))
+    assert exc.value.code == "MISSING_STAGED_INPUT"
+    assert "panel_row.anchor" in exc.value.detail
+
+
+def test_planted_post_as_of_panel_anchor_is_rejected():
+    # The exact leak issue #53 reports: a forward/upcoming event (event_date
+    # after as_of, a legitimate board-looking request) whose panel_row was
+    # staged with a decision anchor that postdates as_of -- e.g. a
+    # persisted panel.parquet row whose market-state features were computed
+    # using data observed after this score's as_of. Before this fix, this
+    # call silently succeeded.
+    kwargs = _valid_kwargs(
+        as_of="2026-01-02",
+        calendar_row={
+            "ticker": "TEST", "event_date": "2026-01-15",
+            "entry_date": "2026-01-15", "exit_date": "2026-01-16",
+            "expiry": "2026-01-16", "spot": 100.0,
+            "calendar_observed_through": "2026-01-01",
+        },
+        panel_row={"date": "2026-01-15", "signal": 1.5},
+        panel_anchor="2026-01-10",  # after as_of (2026-01-02)
+        quote_rows=[
+            {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
+             "bid": 1.0, "ask": 1.2, "observed_at": "2026-01-01"},
+        ],
+    )
+    with pytest.raises(NightlySourceBundleRefusal) as exc:
+        assemble_nightly_source_bundle(**kwargs)
+    assert exc.value.code == "POST_AS_OF_ROW"
+    assert "panel_row.anchor" in exc.value.detail
+
+
+def test_forward_event_with_panel_anchor_at_as_of_is_allowed():
+    # The correct live_features(as_of=...) shape for a genuine forward
+    # event: the decision anchor equals the score's own as_of, strictly
+    # before the future event_date. Proves the fix does not regress the
+    # legitimate forward-scoring path.
+    kwargs = _valid_kwargs(
+        as_of="2026-01-02",
+        calendar_row={
+            "ticker": "TEST", "event_date": "2026-01-15",
+            "entry_date": "2026-01-15", "exit_date": "2026-01-16",
+            "expiry": "2026-01-16", "spot": 100.0,
+            "calendar_observed_through": "2026-01-01",
+        },
+        panel_row={"date": "2026-01-15", "signal": 1.5},
+        panel_anchor="2026-01-02",  # == as_of
+        quote_rows=[
+            {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
+             "bid": 1.0, "ask": 1.2, "observed_at": "2026-01-01"},
+        ],
+    )
+    bundle = assemble_nightly_source_bundle(**kwargs)
+    assert bundle.feature_vector["signal"] == 1.5
+
+
+def test_panel_anchor_before_as_of_is_allowed():
+    kwargs = _valid_kwargs(panel_anchor="2026-01-09")  # before as_of (2026-01-10)
+    bundle = assemble_nightly_source_bundle(**kwargs)
+    assert bundle.feature_vector["signal"] == 1.5
+
+
+def test_historical_row_panel_anchor_equal_event_date_is_allowed():
+    # The historical/realized-event shape: panel_anchor is panel_row["date"]
+    # itself (ANCHOR_COLUMNS all equal date for a historical row), and
+    # as_of is on/after the already-realized event.
+    kwargs = _valid_kwargs(
+        as_of="2026-01-20",
+        calendar_row={
+            "ticker": "TEST", "event_date": "2026-01-15",
+            "entry_date": "2026-01-15", "exit_date": "2026-01-16",
+            "expiry": "2026-01-16", "spot": 100.0,
+            "calendar_observed_through": "2026-01-20",
+        },
+        panel_row={"date": "2026-01-15", "signal": 1.5},
+        panel_anchor="2026-01-15",  # == panel_row["date"] == event_date
+        quote_rows=[
+            {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
+             "bid": 1.0, "ask": 1.2, "observed_at": "2026-01-20"},
+        ],
+    )
+    bundle = assemble_nightly_source_bundle(**kwargs)
+    assert bundle.feature_vector["signal"] == 1.5

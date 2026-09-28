@@ -219,41 +219,49 @@ def _checked_panel_row_event(
 def _checked_against_as_of(
     calendar_row: Mapping[str, Any],
     observed: Sequence[tuple[int, Any]],
+    panel_anchor: Any,
     as_of_ts: pd.Timestamp,
 ) -> None:
     """Refuse any staged observation dated strictly after ``as_of``.
 
-    Only ``calendar_row.calendar_observed_through`` and each quote row's
-    own ``observed_at`` are checked here. The legacy panel's own
-    ``_PANEL_DATE_COLUMN`` ("date") is the EVENT date, not an observation
-    date (see ``_checked_panel_row_event``); Tier-4 carries no row-level
-    date at all -- each metric column stamps its own "<metric>_fold_start"
-    instead, checked per used feature in ``_project_features``, not here.
-    Neither belongs in an "as of this moment" comparison against ``as_of``.
+    ``calendar_row.calendar_observed_through``, the caller-declared
+    ``panel_anchor``, and each quote row's own ``observed_at`` are checked
+    here. The legacy panel's own ``_PANEL_DATE_COLUMN`` ("date") is the
+    EVENT date, not an observation date (see ``_checked_panel_row_event``);
+    Tier-4 carries no row-level date at all -- each metric column stamps
+    its own "<metric>_fold_start" instead, checked per used feature in
+    ``_project_features``, not here. Neither belongs in an "as of this
+    moment" comparison against ``as_of``.
 
-    KNOWN GAP, escalated rather than invented: a panel row's market-derived
-    FEATURE values are computed as of a decision anchor that can differ
-    from the row's own ``date`` -- ``engine/features.py::live_features``
-    computes a local ``_as_of`` column (line ~778) for exactly this reason
-    (its synthetic row's market-state blocks read as of ``_as_of``, which
-    precedes ``event_date``/``date`` for a genuine upcoming-event score),
-    but that anchor is never written into the row values
-    ``live_features`` returns (it is not one of ``PANEL_FEATURE_COLUMNS``),
-    and the persisted-panel equivalent
+    ``panel_anchor`` (issue #53) is the caller-declared upper bound on when
+    every one of ``panel_row``'s market-state feature values was actually
+    observed -- distinct from ``panel_row["date"]``, which is the EVENT
+    date (see ``_checked_panel_row_event``), and from ``as_of`` itself.
+    ``panel_row`` (a plain ``name -> value`` mapping) never carries this
+    anchor as one of its own columns: for a row built by
+    ``engine/features.py::live_features``, the real per-feature anchor
+    (``FeatureVector.feature_as_of``, ``engine/audit.py``) lives on the
+    ``FeatureVector`` wrapper the caller flattens into ``panel_row``, not
+    inside the flattened values themselves -- the caller passes
+    ``FeatureVector.as_of`` instead, the decision date ``live_features``
+    already validated (via its own ``assert_causal(vector)`` call) as
+    ``>=`` every one of that vector's per-feature stamps. For a persisted
+    ``panel.parquet`` row, the true anchor
     (``regime_asof``/``runup_asof``/``orats_asof``, ``ANCHOR_COLUMNS``) is
-    explicitly dropped before ``panel.parquet`` is written
-    (``engine/data/features/panel.py:912-918`` -- for a HISTORICAL row
-    those all equal ``date`` by construction, which is why dropping them
-    is byte-identical, but that equivalence does not hold for a live
-    per-event row). No column survives to a ``panel_row`` this function
-    can read that records that anchor. This function cannot verify "as of
-    when were these features computed" without a caller-supplied anchor
-    this signature does not accept today; adding one is a separate,
-    deliberate interface change for a future PR, not something to invent
-    silently here.
+    dropped before the file is written (safe only because those all equal
+    ``date`` for a HISTORICAL row); the caller passes ``panel_row["date"]``
+    itself instead -- a safe, if looser, upper bound. This module cannot
+    derive the anchor from ``panel_row`` alone, so it is a required,
+    caller-declared argument, checked here the same way
+    ``calendar_observed_through`` and quote ``observed_at`` already are --
+    never inferred or recomputed, and never compared against
+    ``panel_row["date"]``/the event date (that causal ordering is
+    ``live_features``'s own ``assert_decision_causal``, not a second check
+    here that could disagree with it).
     """
     staged = [
         ("calendar_row.calendar_observed_through", calendar_row["calendar_observed_through"]),
+        ("panel_row.anchor", panel_anchor),
         *((f"quote_rows[{index}].observed_at", value) for index, value in observed),
     ]
     for label, value in staged:
@@ -475,6 +483,7 @@ def assemble_nightly_source_bundle(
     as_of: Any,
     calendar_row: Mapping[str, Any],
     panel_row: Mapping[str, Any],
+    panel_anchor: Any,
     tier4_row: Mapping[str, Any],
     quote_rows: Sequence[Mapping[str, Any]],
     quote_status: Any = None,
@@ -493,7 +502,7 @@ def assemble_nightly_source_bundle(
     Builds context, raw_quotes, feature_vector and feature_missing_mask from
     the calendar/panel/Tier-4/quote rows, refusing a missing staged input, a
     malformed quote, a leaked feature name, a non-finite/non-positive spot,
-    or any observation after as_of. model_identity, model_artifact_refs and
+    a panel_anchor after as_of, or any observation after as_of. model_identity, model_artifact_refs and
     every recipe are caller-supplied pass-through (the {} default means "not
     yet declared"). No I/O is done.
     """
@@ -504,7 +513,7 @@ def assemble_nightly_source_bundle(
     _checked_panel_row_event(calendar_row, panel_row)
     observed = _staged_observed_at(quote_rows)
     as_of_ts = validated_as_of(as_of, label="as_of")
-    _checked_against_as_of(calendar_row, observed, as_of_ts)
+    _checked_against_as_of(calendar_row, observed, panel_anchor, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
     feature_vector, feature_missing_mask = _project_features(

@@ -889,7 +889,8 @@ network, or database access.
   malformed. `None`/`None` is a valid, meaningful request (a manual/ad-hoc
   invocation with no live job attempt behind it), not merely an omitted
   default, and both set is the other valid shape. The two fields ARE then
-  cross-checked against each other (`_validated_attempt_fence_pair`,
+  cross-checked against each other
+  (`engine.v2.ops.lifecycle.validated_attempt_fence_pair`,
   Opus gate finding on #55): exactly one set is refused up front, before
   any I/O, as `INVALID_REQUEST` — a bare `fence` with no `attempt_id`
   would otherwise make `_fence_check_for` a no-op, committing unfenced
@@ -906,6 +907,23 @@ network, or database access.
   after a successful commit
   (`tests/test_v2_ops_forward_calendar_store.py::test_fence_check_for_matches_the_real_verify_fence_and_keeps_the_lease_check`/
   `::test_fence_check_for_refuses_a_cancelled_attempt`).
+  `validated_attempt_fence_pair` itself lives in `engine.v2.ops.lifecycle`,
+  not in this module, because `computed_moves_store` needed the identical
+  cross-check for its own staged `attempt_id`/`fence` document fields
+  (issue #58, closed by this change): those two fields were each validated
+  for shape but never cross-checked against each other, so a bare `fence`
+  with no `attempt_id` made `computed_moves_store`'s own `_fence_check_for`
+  a no-op — an unfenced, fail-open commit — and a bare `attempt_id` with no
+  `fence` was refused only later, inside `verify_fence`, after the sqlite
+  connection had already opened and any provider fetch had already run.
+  `computed_moves_store._validate_document_attempt` now calls the same
+  shared `validated_attempt_fence_pair` after its own per-field format
+  checks, refusing the mismatched pair as `INVALID_REQUEST` before any I/O,
+  exactly like this module's own check above. `forward_calendar_store`
+  keeps a private `_validated_attempt_fence_pair` name bound to the shared
+  function (its own call site and tests are unchanged)
+  (`tests/test_v2_ops_computed_moves_store.py::test_run_computed_moves_refresh_refuses_fence_set_without_attempt_id`/
+  `::test_run_computed_moves_refresh_refuses_attempt_id_set_without_fence`).
 - **`nightly.submit_computed_moves_refresh_if_ready`'s own failure semantics
   for `computed_moves_refresh` (Part 4, revised after Opus BLOCK(3))** —
   R1 missing input: no open catalog connection, no native `"refresh"` job
@@ -999,8 +1017,17 @@ network, or database access.
   untyped `WORKER_FAILED`: `TrainingRefused` -> `CHECKPOINT_INCOMPATIBLE`,
   `RuntimeFitForbidden` -> `VALIDATION_FAILED`, any other `SystemExit` ->
   `_tool_failure`'s mapping. `run_promote_worker` maps
-  `deployment.DeploymentError` (including an unstaged `release_id`) to
-  `VALIDATION_FAILED`. A `training` plan with no bound legacy input manifest
+  `deployment.DeploymentError` (including an unstaged `release_id`, or
+  (new) a release staged under a superseded hash version --
+  `deployment.StaleReleaseHash`) to `VALIDATION_FAILED`. `promote_plan`
+  (new, this PR) resolves an omitted `--release-root` from
+  `engine.v2.models.deployment.production_deployment_root()` (config key
+  `MODEL_RELEASE_ROOT`, one level below the value that key itself names —
+  `engine/v2/models/ARCHITECTURE.md` §7.4) at PLAN time, before submission:
+  a missing key is `INVALID_REQUEST` there, so it never reaches the worker
+  with an empty `release_root`. `nightly.py`,
+  `worker.py` and `stages.py` do not read this config key — out of this
+  PR's scope. A `training` plan with no bound legacy input manifest
   carries `blocked_prerequisites` and can never be submitted, exactly like a
   manifest-less nightly plan. A recipe job's `pairs_path`
   (`ops plan training --pairs`) is validated twice: a malformed one
