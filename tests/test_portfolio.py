@@ -121,6 +121,18 @@ class TestStates:
         assert list(book["ticker"]) == ["AAA"]
         assert book["state"].iloc[0] == "awaiting_exit"
 
+    def test_a_nan_score_does_not_crash_canonical_selection(self, ledger_stub):
+        """CodeRabbit round 2 on #65: canonical_predictions/_priced in the
+        ledger module did `row.get("score") or {}` on the raw row before
+        build_book's own NaN guard ever ran. A bare float NaN `score` (the
+        same NaN-for-a-missing/blank-field shape as issue #65) raised the
+        same AttributeError one call frame earlier."""
+        row = _pred(ticker="AAA")
+        row["score"] = float("nan")
+        ledger_stub([row])
+        book = portfolio.build_book()
+        assert book.empty
+
     def test_equal_dollars_is_the_default_not_equal_contracts(self, ledger_stub):
         """One contract each is not equal sizing. Premiums in a single week ran
         $2.40 to $69.00, so a one-contract book puts 29x more capital behind the
