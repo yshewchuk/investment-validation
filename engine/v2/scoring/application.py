@@ -1133,6 +1133,7 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     """Run verified inference through the canonical native scoring graph."""
     requests = (tuple(inference_request) if isinstance(inference_request, (tuple, list))
                 else (inference_request,))
+    scoped_bindings = _frozen_scoped_bindings(release, request)
     results = tuple(inference.infer(release, item) for item in requests)
     bindings = tuple(
         _frozen_binding(release, result, item)
@@ -1140,7 +1141,7 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     )
     inputs, frozen_runup_interval = _frozen_native_inputs(
         fields, results, bindings, requests, request, release, inference,
-        executor_bindings=_frozen_scoped_bindings(release, request),
+        executor_bindings=scoped_bindings,
     )
     record = score_one(request, inputs, observer=observer)
     missing_runup = {

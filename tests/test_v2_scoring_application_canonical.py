@@ -138,11 +138,13 @@ def _release():
             SimpleNamespace(
                 binding_id="driver-binding",
                 role="implied_t1",
+                strategy_id="STR-THRU", decision_clock_id="entry-close",
                 output_names=("prediction",),
             ),
             SimpleNamespace(
                 binding_id="size-binding",
                 role="size",
+                strategy_id="STR-THRU", decision_clock_id="entry-close",
                 output_names=("prediction",),
             ),
         ),
@@ -197,6 +199,7 @@ def test_str_thru_frozen_driver_role_publishes_driver_prediction():
         bindings=(SimpleNamespace(
             binding_id="driver-binding",
             role="driver",
+            strategy_id="STR-THRU", decision_clock_id="entry-close",
             output_names=("driver_prediction",),
         ),),
     )
@@ -260,6 +263,7 @@ def test_typed_frozen_gate_uses_calculated_price_and_existing_threshold():
         binding_id="gate-binding",
         model_id="gate-model",
         role="gate",
+        strategy_id="STR-THRU", decision_clock_id="entry-close",
         feature_order=("entry_cost",),
         output_names=("prediction",),
         members=(member,),
@@ -315,6 +319,7 @@ def test_score_frozen_str_thru_empty_forecast_publishes_abs_move_driver_name():
         release_id="release-1",
         bindings=(SimpleNamespace(
             binding_id="driver-binding", role="driver",
+            strategy_id="STR-THRU", decision_clock_id="entry-close",
             output_names=("driver_prediction",),
         ),),
     )
@@ -355,6 +360,7 @@ def test_typed_frozen_gate_ignores_caller_supplied_gate_threshold():
         binding_id="gate-binding",
         model_id="gate-model",
         role="gate",
+        strategy_id="STR-THRU", decision_clock_id="entry-close",
         feature_order=("entry_cost",),
         output_names=("prediction",),
         members=(member,),

@@ -186,6 +186,26 @@ def test_conflict_same_strategy_collision(tmp_path):
     assert set(excinfo.value.binding_ids) == {"b-driver", "b-implied"}
 
 
+def test_conflict_detected_before_any_inference(tmp_path):
+    """FrozenBindingConflict is raised before inference.infer ever runs."""
+    driver = _binding(tmp_path, "b-driver", "driver", STRATEGY,
+                      output="driver_prediction", intercept=6.0)
+    implied = _binding(tmp_path, "b-implied", "implied_t1", STRATEGY,
+                       output="driver_prediction", intercept=100.0)
+    release = _release((driver, implied))
+
+    class _NeverCalledInference:
+        def infer(self, release, item):
+            raise AssertionError(
+                "inference.infer must not run before the binding-conflict check"
+            )
+
+    with pytest.raises(application.FrozenBindingConflict):
+        application.score_frozen(
+            _request(), _NeverCalledInference(), release, (),
+            {"_native_inputs": _native_inputs()})
+
+
 def test_conflict_duplicate_gate_same_scope(tmp_path):
     """A strategy's own gate plus the shared ``"*"`` gate claim the same
     scoped slot: a release-authoring defect, refused by name."""
