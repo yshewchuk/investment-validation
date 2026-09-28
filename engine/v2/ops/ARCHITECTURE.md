@@ -531,8 +531,12 @@ one).
   (worker `"models_promote"`) calls `engine.v2.models.deployment.promote`'s
   release-store pointer swap and writes `pointer_state.json`
   (`promote_pointer_state.v1.0`). Neither ever runs inside the nightly DAG —
-  both are submitted by an operator's own `ops plan training|promote` +
-  `ops submit`.
+  today, both are submitted only by an operator's own
+  `ops plan training|promote` + `ops submit`. **(Design, cutover PR-13, not
+  yet implemented)** a second caller is planned for both, following the
+  computed_moves_refresh shape below rather than a `GRAPH`/`_DAG_STAGES`
+  node — see "Native model refresh cycle (design, cutover PR-13)" further
+  down this section.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
@@ -738,6 +742,220 @@ wall clock, so a same-`as_of` rerun over identical inputs produces
 byte-identical fragment content (same `fragment_id`, same object content
 hash) and the commit resolves back to the parent snapshot instead of a fresh
 generation.
+
+### Native model refresh cycle (design, cutover PR-13 — not yet implemented)
+
+**The gap.** `engine/v2/models/deployment.py`'s release/promote machinery
+(see `engine/v2/models/ARCHITECTURE.md` §7) exists, but nothing submits the
+jobs that keep a release current. `training_job_kind()`/`promote_job_kind()`
+are ordinary job kinds an operator submits by hand ("Outputs" above); no
+`Service` reconcile, no `nightly.py` `GRAPH`/`_DAG_STAGES` node, and no cron
+touches either one. Legacy, by contrast, refits its champion feature models,
+rebuilds the analog/residual pools, the payoff/recalibration calibration,
+and the trailing PnL cutoff live, every scoring run.
+
+**Split cadence (user decision, 2026-09-28).** The champion feature-role and
+gate models (`inventory.py`'s `FEATURE_ROLES` plus `"gate"`) retrain and
+repromote **monthly**, on a schedule. A **nightly** job appends newly-
+settled events into the analog/residual pools and advances the trailing
+cutoff, producing a new release that is gated (below) before an automatic
+promote. Whether the payoff/recalibration calibration members join the
+nightly append or the monthly retrain is **not yet decided** — see
+"Calibration cadence" below.
+
+**Not in scope: tier-4 forecasts.** See `engine/v2/models/ARCHITECTURE.md`'s
+"Finding — tier-4 forecasts are NOT part of this refresh cycle": the live
+`pred_abs_move`/`pred_im_t1_d14`/`pred_runup_abs_move_d14`/
+`pred_iv_crush_30` columns `engine/v2/scoring/nightly_source_bundle.py`
+reads come from an imported snapshot of legacy's own nightly-rebuilt
+`tier4_forecasts.parquet`, never from a release member. Closing that gap
+needs a native forecasts-table producer (a monthly fit plus a nightly
+current-month refit), which is a different and larger design than this
+refresh cycle and is called out as its own follow-up, not solved here.
+
+**Entry point — follow the computed_moves_refresh shape (#54), never
+`run_shadow_nightly`.** `run_shadow_nightly` (`nightly.py`) has no
+production caller (only `tests/test_v2_ops_legacy_workflows.py` and
+`tests/test_v2_ops_native_shadow_render.py` call it — root doc §4). The real
+production chain, exactly like `computed_moves_refresh`'s Part 4 above, is
+`nightly_trigger.run_trigger` → `_default_serve` (`nightly_trigger.py:532`)
+→ `supervisor.serve` (`supervisor.py:1154`) → `service.tick()`
+(`supervisor.py:1164`) → a new per-tick reconcile method on `Service`. Opus
+already blocked the alternative shape for `computed_moves_refresh` at
+BLOCK(3) (see above, "why it moved out of `build_legacy_job_requests`"):
+building the job as a static `GRAPH`/`_DAG_STAGES` node pins a stale head at
+plan-build time. This design adds two more tick-time reconciles, not two
+more graph nodes:
+
+- `Service._reconcile_tier4_monthly_refresh` — a cheap identity check (the
+  current calendar month, plus whether a monthly release already exists for
+  it — two indexed lookups, no pandas scan, mirroring
+  `_computed_moves_identity_or_none`'s shape) delegates to a new
+  `nightly.submit_tier4_monthly_refresh_if_ready`, which builds a
+  `training_plan(mode="recipe", recipe=<champion recipe id>, ...)`
+  (`training.py`'s existing `training_plan`/`training_job_kind` — no new job
+  kind) for each `FEATURE_ROLES`/`"gate"` champion, submits it, and — only
+  once every one lands staged AND the nightly gate (below) passes — submits
+  a `models_promote` (`promote_job_kind()`, existing `PromoteParameters`).
+- `Service._reconcile_pool_nightly_refresh` — the same shape, keyed by the
+  current trading day's `as_of` (mirroring `_computed_moves_identity`'s
+  session+head key), delegates to a new
+  `nightly.submit_pool_nightly_refresh_if_ready`, which builds
+  `training_plan(mode="board_analog", ...)` and
+  `training_plan(mode="trailing_cutoff", ...)` against the currently-
+  DEPLOYED release's already-staged members, then calls
+  `engine.v2.models.deployment.derive_release` (new, see the models doc
+  §2/§7.6) with the freshly-built pool/cutoff members as `changed_members`
+  and every other binding carried over unchanged, stages it, gates it
+  (below), and — on a pass — submits `models_promote` for the new release.
+
+Both reconciles are wrapped in the same try/except
+`_reconcile_publication_status`/`_reconcile_computed_moves_refresh` already
+use (a reporting sidecar, never the pipeline): a broken build degrades only
+this optional stage, never `tick()` itself. Both use the SAME memoized-
+with-backoff shape as `_computed_moves_memo`/`_COMPUTED_MOVES_BACKOFF_SECONDS`
+(own in-memory memo per reconcile, keyed by its own identity, reset on a new
+identity, cleared on a successful submission) — no new backoff mechanism,
+the existing one generalized to two more identities.
+
+**Which members change, which are carried over, and the manifest (#71).** A
+`ModelRelease`'s bindings are each independently content-hashed
+(`BoardAnalogPoolArtifact`, `DriverResidualPoolArtifact`/
+`PairedResidualPoolArtifact`, `TrailingCutoffArtifact`, `PayoffArtifact`,
+`RecalibrationArtifact` each compute their own `content_hash` over their own
+`payload()` — `analog_artifact.py`/`residual_artifact.py`/
+`trailing_cutoff_artifact.py`). A nightly append rebuilds ONLY the pool and
+cutoff members (and, if the calibration decision below lands nightly, the
+payoff/recalibration members); `derive_release` copies every other binding
+— including every `FEATURE_ROLES`/`"gate"` champion — from the prior release
+UNCHANGED, by `content_hash`, into the new manifest. Because
+`stage_release`'s object store is content-addressed and write-once
+(`<root>/objects/<hash>`, models doc §4), a carried-over binding costs no
+new I/O: only the changed members' bytes are written as new objects. The
+release still gets a brand-new `release_id` every night (releases are
+immutable once staged — a nightly append is never a mutation of the prior
+release), and `release_hash`/`release_hash_version`
+(`RELEASE_HASH_SEMANTIC_V2`) is recomputed over the FULL new
+`ModelReleaseInventory` — the mix of newly-written and carried-over
+bindings — so the manifest hash changes every night even though most of the
+object store is shared with the previous release, exactly the same
+"recompute the hash, not the bytes" shape `restage_semantic_hash` (models
+doc §7.5) already uses for a different reason.
+
+**Gate before an automatic promote (lighter than `phase5_acceptance`).**
+`checks/phase5_acceptance.py` shadow-scores a population — a heavy job, and
+the right bar for the monthly champion retrain (or an operator-triggered
+run), because refitting the champions can change scoring outcomes. The
+nightly append changes no model, so the nightly gate never re-scores
+anything; it verifies the STAGED ARTIFACTS are internally consistent and
+causally sound:
+
+- **Structural completeness and hash verification** — reuse, not new logic:
+  the same completeness check `stage_release` already runs, and the same
+  member-by-member `content_hash` verification `resolve_release`/
+  `_manifest_hash_matches` already perform, run once against the new
+  manifest before it is eligible for promote.
+- **Causality** — every newly-appended pool/residual/cutoff member's own
+  recorded bound is strictly before the run's `as_of` (models doc §8's new
+  causality invariant), checked against the frozen artifact's own recorded
+  value, never recomputed from raw data.
+- **Carried-over-member check** — every binding `derive_release` did NOT
+  touch still names the identical `content_hash` the currently-DEPLOYED
+  release has staged — the append changed only what it meant to change.
+- **A consistency check, not a magnitude cutoff** — a qualitative shape
+  check (e.g. the pool only grew; the cutoff moved in the causally
+  consistent direction), never a numeric threshold: this doc carries no
+  strategy numbers, and the promotion-evidence standard this programme
+  already follows elsewhere prefers a consistency test over a magnitude cutoff.
+
+None of these re-run scoring, so the nightly gate is cheap relative to
+`phase5_acceptance`; the judgement that scoring OUTCOMES are still good stays
+with the monthly heavier cycle (or an operator-triggered `phase5_acceptance`
+run), not with this gate.
+
+**Calibration cadence — needs the user's decision.** The payoff/
+recalibration members are named, in `engine/v2/models/inventory.py`'s own
+"What is NOT in the release" note, in the SAME sentence as the analog/
+residual pools — legacy recomputes all of them live, with no distinction
+there between "needs nightly freshness" and "needs monthly freshness". My
+recommendation is nightly, alongside the pool append: the payoff/
+recalibration surface is a function of the same trailing settled-event
+history as the residual pools and trailing cutoff, and deferring it to
+monthly would leave native's calibration stale against legacy for up to a
+month — reopening exactly the drift this design exists to close. This is my
+judgement call, not a settled decision; it needs the user's sign-off before
+implementation, and the code PR that wires calibration either way should
+name which cadence it picked and why.
+
+**Failure semantics (the 4c R1–R6 template).**
+
+- **R1, missing input.** No settled event since the last nightly append, or
+  no calendar-month rollover since the last monthly retrain, is a no-op —
+  not a failure — exactly like `_reconcile_computed_moves_refresh`'s own
+  "nothing to (re)build" path. A gate failure is a typed refusal, not an
+  exception: the newly-staged release is left staged, unpromoted.
+- **R2, cache.** None: both reconciles re-derive their identity (current
+  month; current `as_of`) fresh on every tick, the same as
+  `_computed_moves_identity_or_none`.
+- **R3, retry.** Memoized with backoff per identity (above); a repeated tick
+  before a build/gate/promote sequence completes never double-submits the
+  same month's or day's job. A `models_promote` retry against an
+  already-live release is the existing no-op (models doc §7.2 R3).
+- **R4, transaction.** Build → gate → promote are three separate steps, each
+  its own attempt. A crash between staging and gating leaves a staged-but-
+  unpromoted release — harmless, since `stage_release` never touches
+  `DEPLOYED` (models doc §4). A crash between a gate pass and the promote
+  submission leaves `DEPLOYED` unchanged until the next tick's reconcile
+  retries the promote step.
+- **R5, partial write.** Inherits `deployment.py`'s existing atomic-write
+  primitives (temp + fsync + rename) for staging and for the pointer swap;
+  this design introduces no new I/O primitive.
+- **R6, idempotency.** The same month's/day's identity always resolves to
+  the same target release; promoting an already-live release twice is the
+  existing single no-op.
+
+**Rollback story.** A refusal at ANY stage — build, gate, or promote — leaves
+the previously-DEPLOYED release's pointer untouched, and scoring is
+unaffected: `current_release`/`resolve_release` only ever follow the live
+pointer (models doc §7.3, unaffected by this design). **First deploy has no
+prior release**: `deployment.rollback` already refuses `NoPriorRelease`
+(models doc §7.2 R3) when there is nothing earlier to return to, so a
+gate-failed FIRST release cannot "roll back" — it simply stays undeployed,
+and scoring continues in whatever state it was in before this cycle ran
+(nothing, for a true first deploy). This design adds no new rollback
+mechanism; it only adds more callers that can fail before ever reaching
+`promote`.
+
+**Memory: one heavy job, hard cap.** Both reconciles themselves are cheap
+identity checks inside the existing ~1s tick loop — not heavy jobs. The
+`training` job they submit is (`resource_classes=frozenset({
+"experiment_heavy"})`, `training_job_kind()`), so the existing resource-class
+accounting — not new code — keeps it from overlapping any other heavy job (a
+capture, a `phase5_acceptance` run) already in flight; this design adds no
+new locking. Any bounded run of the underlying training/evaluation tooling
+still goes through `tools/bounded_run.py`'s existing caps (poll interval,
+box floor) — this PR introduces no new heavy-job runner and no new caps.
+
+**Proposed split into small code PRs.**
+
+1. `nightly.submit_tier4_monthly_refresh_if_ready` /
+   `nightly.submit_pool_nightly_refresh_if_ready` as pure functions (no
+   `Service` wiring), with tests — reuses `training_plan`/`training_job_kind`
+   /`promote_job_kind` unchanged.
+2. `deployment.derive_release` in `engine/v2/models` (models doc §2/§7.6),
+   with tests for the carried-over-by-hash behavior.
+3. The nightly gate (a new, small checker module) implementing the four
+   checks above, consumed by (1)'s submit function before it ever builds a
+   `models_promote` plan.
+4. `Service._reconcile_tier4_monthly_refresh` /
+   `Service._reconcile_pool_nightly_refresh` wired into `tick()`, shipped
+   default-OFF behind the same kind of policy/config flag
+   `_reconcile_computed_moves_refresh` uses, so it can be enabled once (1)-(3)
+   are independently reviewed.
+5. Flip the flag on, once the calibration-cadence decision above is made —
+   kept as its own PR so that undecided piece never blocks (1)-(4).
+6. (Tracked separately, not part of this split) the native tier-4 forecasts
+   producer — see "Not in scope: tier-4 forecasts" above.
 
 ## Dependencies
 

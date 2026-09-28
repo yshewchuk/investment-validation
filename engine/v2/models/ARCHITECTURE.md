@@ -44,6 +44,63 @@ gets fit — see its own package doc reference in the root index. Nothing in
 `engine/v2/models` reads a live panel, calls `.fit()`, or writes
 `registry.json`.
 
+**Refresh cadence (design, cutover PR-13 — not yet implemented).** Legacy
+keeps every one of the six pieces of state listed above current every
+night: the champion feature-role models (`FEATURE_ROLES = ("size",
+"implied_t1", "runup_move", "iv_crush")`, `inventory.py:96`) refit as part
+of legacy's own nightly rebuild, and the frozen-state families
+(`analog_artifact.py`, `residual_artifact.py`, `trailing_cutoff_artifact.py`,
+`payoff_artifact.py`, `recalibration_artifact.py`) all have a live legacy
+equivalent legacy recomputes in-process on every scoring run
+(`engine/v2/models/inventory.py`'s "What is NOT in the release" note). A
+frozen release, once staged, does neither: nothing resubmits a `training`
+job or a `models_promote` job on any cadence today (`engine/v2/ops/
+training.py` — both job kinds exist, but "the only path that creates one is
+a `submit` an operator ran by hand", `run_promote_worker`'s own docstring).
+This PR designs a split cadence: the champion feature-role and gate models
+retrain and repromote **monthly**, on a schedule; a **nightly** job appends
+newly-settled events into the analog/residual pools and advances the
+trailing cutoff, producing a new, gated release. See `engine/v2/ops/
+ARCHITECTURE.md`'s "Native model refresh cycle" for the job-submission
+wiring (this package changes only by gaining `deployment.derive_release`,
+§2/§7.6 below).
+
+**Finding — tier-4 forecasts are NOT part of this refresh cycle (flagged,
+out of scope for PR-13).** The four `FEATURE_ROLES` champions above are
+whole-history, full-refit artifacts (`FoldScheme(..., full_refit=True)`,
+`engine/v2/models/training/recipes.py`'s `(role, "*", "champion")` recipe
+key) — this is the only tier-4-related artifact `ModelReleaseInventory`
+actually binds. Live scoring's per-event tier-4 forecast COLUMNS
+(`pred_abs_move`, `pred_im_t1_d14`, `pred_runup_abs_move_d14`,
+`pred_iv_crush_30`, and their `_fold_start`/`_model_id` stamps) are read by
+`engine/v2/scoring/nightly_source_bundle.py:43-60,382-433` directly off the
+imported `tier4_forecasts.parquet` snapshot table — never through this
+package's `FrozenInference`/`ModelReleaseInventory`, and never by calling
+`engine.data.features.tier4.serving_model`/`fit_fold` at score time. This
+package's own `tier4_fold_coverage` (`inventory.py:309`) is an explicit,
+documented **non-binding** report for exactly this reason: "a static (role,
+strategy, clock) binding cannot name 'whichever month is current'"
+(`inventory.py:22-26`). A native `tier4_monthly` recipe family DOES exist
+(`recipes.py`'s `(role, "*", "tier4_monthly")` keys, `FoldScheme(
+"monthly_cutoff", ...)`), but its fitter, `engine/v2/models/training/job.py`,
+"is never reachable from scoring" by its own module docstring and writes one
+`predictions.parquet` per fold under the training job's own output
+directory — never into `tier4_forecasts.parquet`. Today that live table is
+produced only by legacy's nightly `rebuild_tables(("panel","tier4"))`
+(`engine/dashboard/nightly.py:1376` → `engine/data/features/tier4.py`'s
+`build_table`/`write_forecasts`) and reaches native only through the v2
+snapshot import (`engine/v2/data/import_snapshot.py`,
+`legacy_mapping.TIER4_RELATIVE_PATH`). **Conclusion:** tier-4 is not stale
+in native today in the sense of a stale loaded estimator — its freshness is
+entirely inherited from legacy's own nightly rebuild via that import. The
+real cutover gap is that once legacy retires, nothing native produces this
+table at all, on any cadence; that needs its own producer design (a native
+monthly fit plus a nightly current-month refit that write a table the
+import path can pick up) — materially different from, and larger than,
+"retrain a `ModelReleaseInventory` member," and out of this PR's scope.
+Recommend a tracked follow-up rather than folding it into this refresh
+cycle.
+
 ## 2. Primary contracts and public interfaces
 
 The full list is `README.md`'s `<!-- public-interface: ... -->` directive
@@ -66,6 +123,19 @@ this PR:
 - `deployment.restage_semantic_hash(root, release_id) -> StagedManifest`
   **(new, this PR)** — rewrite an already-staged manifest's hash to the
   current semantic version, in place, with no retraining; see §7.5.
+- `deployment.derive_release(root, prior_release_id, changed_members, *,
+  clock) -> ModelRelease` **(proposed, cutover PR-13 design, not yet
+  implemented)** — build a new `ModelRelease`/`ModelReleaseInventory` that
+  carries over every binding from the already-staged `prior_release_id`
+  UNCHANGED except the ones named in `changed_members` (a `{binding_key:
+  ArtifactMember}` map for the pool/cutoff — and, pending the calibration
+  decision in the ops doc, the payoff/recalibration — members a nightly
+  append rebuilds), assigns a new `release_id`, and stages the result
+  through the existing `stage_release`. No member's bytes or content hash
+  are ever recomputed by this function; it only decides which bindings a
+  new manifest points at. This is the mechanism behind "which members
+  change, which are carried over by content hash" in the ops doc's nightly
+  design.
 - `release_bindings.resolve_release_binding(release_root) -> ScoringReleaseBinding`
   and `release_bindings.resolve_production_release_binding() -> ScoringReleaseBinding`
   **(new, this PR)** live in `engine/v2/scoring/` (layer 5.0, below `models`
@@ -156,6 +226,12 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   the `deployment/` directory itself as `root`). Neither `nightly.py`,
   `worker.py` nor `stages.py` import this package's deployment surface
   directly — `stages.py` only registers `training.py`'s `JobKind`s.
+  **(Proposed, cutover PR-13 design)** the new `derive_release` (§2/§7.6)
+  gains a caller from `engine/v2/ops/nightly.py`'s planned
+  `submit_pool_nightly_refresh_if_ready`/`submit_tier4_monthly_refresh_if_ready`
+  (see the ops doc's "Native model refresh cycle") — the first automatic
+  callers `deployment.promote` will have, alongside the existing manual
+  `ops plan|submit`.
 - `engine.v2.serving` — `engine/v2/serving/operations.py` reads the
   deployment pointer read-only (`current_pointer`, `resolve_release`) to
   serve `/models/release.json`; never promotes.
@@ -344,6 +420,39 @@ below; `production_deployment_root` is `production_release_root() /
   rewritten manifest; calling it twice in a row is the second call's R3
   no-op.
 
+### 7.6 `derive_release` (proposed, cutover PR-13 design, not yet
+implemented)
+
+- **R1, missing input.** Refuses `ReleaseNotStaged(prior_release_id)` if the
+  prior release is not staged (same refusal `resolve_release` already uses).
+  Refuses a typed error if any key in `changed_members` does not name a
+  binding the prior release's `ModelReleaseInventory` (or this package's
+  completeness contract) recognizes — a nightly append can replace an
+  existing binding's target, never invent a new one. Refuses if any carried-
+  over binding's declared `content_hash` cannot be found in `<root>/objects/`
+  — a prior release is content-addressed and immutable (§4), so this can
+  only mean the store was tampered with or corrupted, never a normal state.
+- **R2, cache.** None: reads the prior manifest fresh, same as every other
+  read in this module.
+- **R3, retry.** Calling this twice with the same `(prior_release_id,
+  changed_members)` produces two DIFFERENT `release_id`s (each call is a new
+  release, not idempotent by design — unlike `restage_semantic_hash`, this
+  function's job is to mint a new release, not repair an existing one); the
+  caller (the nightly reconcile, §"Native model refresh cycle" in the ops
+  doc) is responsible for not calling it twice for the same `as_of` — see
+  that section's own R3.
+- **R4, transaction.** Delegates the actual write entirely to
+  `stage_release`'s existing atomic staging; `derive_release` itself performs
+  no I/O beyond reading the prior manifest and the new members' bytes.
+- **R5, partial write.** Inherits `stage_release`'s existing guarantee: a
+  crash mid-stage leaves no partially-written manifest, and any object
+  already durably written (including a carried-over one, since its bytes are
+  unchanged and already exist) is never rewritten.
+- **R6, idempotency.** Not idempotent by identity (R3), but every carried-
+  over member's `content_hash` is byte-identical to the prior release's —
+  `derive_release` never re-hashes, re-serializes, or otherwise perturbs a
+  binding it did not change.
+
 ## 8. Invariants
 
 - **Missing input → typed refusal, never a silent default** (root doc
@@ -372,6 +481,21 @@ below; `production_deployment_root` is `production_release_root() /
   These are deliberately different rules for deliberately different
   questions ("is this safe to make live" vs. "is this the release a past
   score actually used").
+- **Causality: no event settled after `as_of` enters a pool, residual set,
+  cutoff, or calibration member used to score `as_of`.** (proposed, cutover
+  PR-13 design) Every frozen-state builder that a nightly append calls
+  inherits the same strictly-before bound `engine.pnl_sim.trailing_cutoff`
+  already enforces at construction (`[as_of - window, as_of)`, never
+  inclusive of `as_of` itself); `derive_release` does not itself check this
+  — it trusts the members it is given — so the nightly gate (ops doc) checks
+  it independently against each new member's own recorded bound before an
+  automatic promote.
+- **A carried-over member's bytes and hash are never recomputed.**
+  (proposed, cutover PR-13 design) `derive_release` only ever mints new
+  objects for the bindings named in `changed_members`; every other binding
+  in the new release's manifest names the SAME `content_hash` the prior
+  release already had staged, so a nightly append writes only the objects
+  that actually changed.
 
 ## 9. Diagrams
 
