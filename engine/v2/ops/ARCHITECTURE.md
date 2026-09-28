@@ -3163,12 +3163,20 @@ was needed where a separate status was not.
   bytes, the resulting plan document's `input_manifest_ref` points at that
   immutable, content-addressed artifact — never back at the mutable
   per-`as_of` file path.
-- **R3, retry.** If no `plan_ref` was ever saved for this `as_of` (a prior
-  attempt only reached `"error"` before a plan was built — `"timed_out"` is
-  never a pre-plan status: `_submit_plan` only records it after a plan was
-  already submitted and served, always with `plan_ref` set), a later
-  eligible attempt calls `_default_plan` again and captures
-  inputs fresh, same as the first attempt. Once a `plan_ref` IS saved,
+- **R3, retry.** In this issue-#104 flow, BEFORE Cutover PR-7b's own
+  `_ensure_shadow_snapshot` step exists: if no `plan_ref` was ever saved
+  for this `as_of` (a prior attempt only reached `"error"` before a plan
+  was built — `"timed_out"` is never a pre-plan status here: `_submit_plan`
+  only records it after a plan was already submitted and served, always
+  with `plan_ref` set), a later eligible attempt calls `_default_plan`
+  again and captures inputs fresh, same as the first attempt. **Cutover
+  PR-7b (CodeRabbit finding on `423ee21`, real) adds a genuinely NEW
+  pre-plan case this statement does not cover**: `_ensure_shadow_snapshot`
+  can itself report `"timed_out"` with `plan_ref=None` BEFORE `_default_
+  plan`/`plan_fn` ever runs — see the Cutover PR-7b design section below
+  for that outcome's own retry/resume behavior (it is driven by
+  `_ensure_shadow_snapshot`'s own idempotency-key job lookup, not by this
+  section's `plan_ref`-set resume branch below). Once a `plan_ref` IS saved,
   `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
   RESUME_STATUSES`) calls `_submit_plan` directly with that existing
   `plan_ref` and never reaches `_default_plan`/`_capture_input_manifest`
