@@ -162,8 +162,17 @@ def trade_key(row: Mapping[str, Any]) -> tuple[str, ...]:
     return key
 
 
+def _score_dict(row: Mapping[str, Any]) -> dict:
+    """`row["score"]` if it is a dict, else `{}` — treats a bare float NaN
+    (or None, or a missing key) as an absent score. `row.get("score") or {}`
+    is wrong here because NaN is truthy in Python, so it would pass through
+    unchanged and crash the next `.get()`."""
+    score = row.get("score")
+    return score if isinstance(score, dict) else {}
+
+
 def _priced(row: Mapping[str, Any]) -> bool:
-    score = row.get("score") or {}
+    score = _score_dict(row)
     return score.get("entry_cost") is not None or score.get("gate_pass") is not None
 
 
@@ -189,7 +198,7 @@ def canonical_predictions(rows: Sequence[Mapping[str, Any]] | None = None) -> li
         key = trade_key(row)
         if not key[2]:
             continue
-        entry = (row.get("score") or {}).get("entry_date")
+        entry = _score_dict(row).get("entry_date")
         as_of = str(row.get("as_of") or "")
         # Sort so the winner is the last usable view before the entry.
         rank = (

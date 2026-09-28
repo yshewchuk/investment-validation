@@ -58,6 +58,15 @@ import pandas as pd
 
 from engine import ledger
 
+
+def _as_dict(value):
+    """`value` if it is a dict, else `{}` — treats NaN/None/anything else
+    as absent. `value or {}` is wrong here because a bare float NaN
+    (arriving via a left-merge or a missing JSON key) is truthy in Python,
+    so it would pass through unchanged and crash the next `.get()`."""
+    return value if isinstance(value, dict) else {}
+
+
 __all__ = ["build_book", "empty_book", "BOOK_COLUMNS", "summarize", "render", "CONTRACT_MULTIPLIER"]
 
 #: Shares per option contract. One straddle contract costs 100x the quoted
@@ -152,17 +161,17 @@ def build_book(contracts: int | None = None,
     preds = pd.DataFrame(ledger.canonical_predictions(predictions))
     if preds.empty:
         return empty_book()
-    score = preds["score"].apply(lambda s: s or {})
+    score = preds["score"].apply(_as_dict)
     preds["gate_pass"] = score.apply(lambda s: s.get("gate_pass"))
     preds["exp_pnl_model"] = score.apply(lambda s: s.get("exp_pnl_model"))
     preds["win_model"] = score.apply(lambda s: s.get("win_model"))
-    prices = preds["intended_prices"].apply(lambda p: p or {})
+    prices = preds["intended_prices"].apply(_as_dict)
     preds["entry_cost"] = pd.to_numeric(prices.apply(lambda p: p.get("entry_cost")),
                                         errors="coerce")
     preds["quote_date"] = pd.to_datetime(prices.apply(lambda p: p.get("quote_date")),
                                          errors="coerce")
     structure = (
-        preds["structure"].apply(lambda s: s or {})
+        preds["structure"].apply(_as_dict)
         if "structure" in preds.columns
         else pd.Series([{} for _ in range(len(preds))], index=preds.index)
     )
@@ -215,7 +224,7 @@ def build_book(contracts: int | None = None,
                 return "awaiting_entry"
             if pd.isna(row.get("exit_date")) or today <= pd.Timestamp(row["exit_date"]).normalize():
                 return "open"
-            receipt = row.get("exit_finality") or {}
+            receipt = _as_dict(row.get("exit_finality"))
             return "unresolvable" if receipt.get("is_final") else "awaiting_exit"
         settle_window = today - pd.Timedelta(days=3)
         if pd.Timestamp(row["event_date"]).normalize() >= today:
