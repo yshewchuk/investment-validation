@@ -56,9 +56,14 @@ GRAPH = {
     # The stage stays in the fixed graph in every mode; its handler returns
     # {"status": "not_applicable"} when the plan serves legacy rows.
     "native_parity": ("score",),
+    # Cutover PR-7a: topological documentation only, exactly like
+    # "computed_moves_refresh": ("refresh",) above -- no submission path
+    # reads this edge; supervisor.Service._reconcile_native_score_batch_shadow
+    # is the ONLY submitter (see ARCHITECTURE.md "Outputs").
+    "native_score_batch": ("score",),
 }
 OPTIONAL = frozenset({"settlement", "model_evidence", "engineering", "backup",
-                      "computed_moves_refresh", "native_parity"})
+                      "computed_moves_refresh", "native_parity", "native_score_batch"})
 
 
 @dataclass(frozen=True)
@@ -737,6 +742,12 @@ def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
     # submission path builds a kind for it any more -- supervisor.Service's
     # own tick loop is the only submitter (see ARCHITECTURE.md "Outputs").
     stages = tuple(stage for stage in stages if stage != COMPUTED_MOVES_REFRESH_ACTION)
+    # Cutover PR-7a: same treatment -- native_score_batch is a real GRAPH
+    # node (so a prereq-inclusive plan["order"] walk names it) but no
+    # submission path here ever builds a kind for it; only
+    # supervisor.Service's own tick sidecar does (see ARCHITECTURE.md
+    # "Outputs").
+    stages = tuple(stage for stage in stages if stage != "native_score_batch")
     return stages
 
 
@@ -910,6 +921,137 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
     if request is None:
         return None
     return submit(conn, registry, policy, request, clock=clock)
+
+
+#: Cutover PR-7a: the legacy "score" stage's own job kind
+#: (``_legacy_action("score")``).
+_LEGACY_SCORE_KIND = "legacy_score"
+
+
+def _native_score_batch_key(session, scope_hash):
+    """Cutover PR-7a: the standard 4-part ``_DAG_STAGES`` idempotency-key
+    shape (``nightly.py:996``), keyed to the SPECIFIC succeeded "score" job's
+    own ``scope_hash`` -- never session alone, unlike
+    ``_computed_moves_refresh_key`` (see ARCHITECTURE.md's R6 account for
+    why the two stages' keying differs: this stage's inputs ARE the
+    specific "score" job's specific pinned rows)."""
+    return "nightly:" + session + ":" + scope_hash + ":native_score_batch"
+
+
+def _session_scope_from_score_key(idempotency_key):
+    """Recover ``(session, scope_hash)`` from a legacy "score" job's own
+    idempotency key (``"nightly:<session>:<scope_hash>:score"``) -- mirrors
+    ``_session_from_refresh_key``'s exact-prefix/suffix check, but via
+    partition rather than a fixed ``split(":")`` count: ``scope_hash``
+    itself is a content-hash string (``_scope_hash`` -> ``content_hash(...)
+    [:24]``) that already contains its own colon (``"sha256:<hex>"``), so a
+    real key has FIVE colon-separated segments, not four -- only the
+    ``"nightly"`` prefix, the session field, and the trailing ``"score"``
+    suffix are structural; everything between the session and the trailing
+    ``:score`` is the scope_hash, colons and all. Returns ``None`` for
+    anything that does not match this exact prefix/suffix shape (a
+    different namespace prefix, no session field, or a trailing stage that
+    is not literally ``"score"``)."""
+    prefix, sep1, rest = idempotency_key.partition(":")
+    if prefix != "nightly" or not sep1:
+        return None
+    session, sep2, remainder = rest.partition(":")
+    if not sep2 or not session:
+        return None
+    scope_hash, sep3, stage = remainder.rpartition(":")
+    if not sep3 or stage != "score" or not scope_hash:
+        return None
+    return session, scope_hash
+
+
+def _native_score_batch_identity(conn):
+    """Cutover PR-7a: cheap (indexed SELECT plus one small JSON decode per
+    succeeded "score" job -- no pandas scan) identity for the supervisor's
+    own sidecar (``supervisor.Service._reconcile_native_score_batch_shadow``):
+    the ``(session, scope_hash)`` of the LATEST succeeded legacy "score" job
+    (by session, then by scope_hash -- the same "chronologically latest
+    session, never latest-UPDATED row" reasoning ``_computed_moves_identity``
+    already documents), and whether that SPECIFIC job pinned a snapshot
+    (``_stage_parameters`` only sets ``snapshot_generation_id`` when a
+    plan's ``input_mode="snapshot"``; production's own default,
+    ``"legacy"``, never does).
+
+    Returns ``None`` when no legacy "score" job has ever succeeded.
+    """
+    rows = conn.execute(
+        "SELECT idempotency_key, spec_json FROM jobs WHERE kind = ? AND state = 'succeeded'",
+        (_LEGACY_SCORE_KIND,)).fetchall()
+    candidates = []
+    for row in rows:
+        parsed = _session_scope_from_score_key(row["idempotency_key"])
+        if parsed is not None:
+            candidates.append((parsed[0], parsed[1], row["spec_json"]))
+    if not candidates:
+        return None
+    session, scope_hash, spec_json = max(candidates, key=lambda item: (item[0], item[1]))
+    parameters = json.loads(spec_json).get("parameters") or {}
+    snapshot_pinned = bool(parameters.get("snapshot_generation_id"))
+    return session, scope_hash, snapshot_pinned
+
+
+def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, release_root, *,
+                                              catalog_path, objects_root, code_source, clock):
+    """Cutover PR-7a: the ONLY place ``native_score_batch`` is ever
+    submitted -- called every ``supervisor.Service.tick()``
+    (``Service._reconcile_native_score_batch_shadow``), never by
+    ``build_legacy_job_requests``. Mirrors
+    ``submit_computed_moves_refresh_if_ready`` in shape; see
+    ARCHITECTURE.md "Outputs"/"Failure semantics" for the full R1-R6
+    account.
+
+    ``release_root``: the caller's ALREADY cheap-checked-and-memo-verified
+    production release root (a plain path string) --
+    ``Service._reconcile_native_score_batch_shadow`` runs the
+    ``deployment.production_release_root()`` / ``deployment.current_pointer()``
+    / memo-gated ``release_bindings.resolve_production_release_binding()``
+    gate described in ARCHITECTURE.md's "Inputs" section BEFORE ever calling
+    this function, so a release-unavailable outcome never reaches here and
+    never spends one of the caller's own build-attempt-memo attempts (R2).
+    ``registry``/``policy``/``store``/``catalog_path``/``objects_root``/
+    ``code_source``/``clock`` are unused today -- kept in this signature,
+    matching ``submit_computed_moves_refresh_if_ready``'s own parameter
+    list, so cutover PR-6's still-missing raw-row producer can add the
+    real build+submit call without changing this function's call site in
+    ``supervisor.py``.
+
+    Returns ``None`` when there is nothing to do yet (no catalog, no
+    succeeded "score" job to key a session off, that job pinning no
+    snapshot -- production's default "legacy" input mode, per
+    ARCHITECTURE.md "Inputs" -- or today's session already has a job under
+    this key, in any state). Any exception past that point is the caller's
+    ``Service`` to catch, exactly like ``submit_computed_moves_refresh_if_ready``.
+    """
+    from engine.v2.ops.submission import job_id_for
+
+    if conn is None:
+        return None
+    identity = _native_score_batch_identity(conn)
+    if identity is None:
+        return None
+    session, scope_hash, snapshot_pinned = identity
+    if not snapshot_pinned:
+        # R1: production's default "legacy" input mode pins no snapshot for
+        # "score" -- there is no BoardRequest universe to enumerate against.
+        # See ARCHITECTURE.md "Cutover PR-7a's input sourcing".
+        return None
+    key = _native_score_batch_key(session, scope_hash)
+    job_id = job_id_for("shadow", key)
+    exists = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    if exists is not None:
+        return None
+    # The still-missing raw-row producer (cutover PR-6) would enumerate
+    # native_board_universe.board_requests against this session's pinned
+    # snapshot and stage per-event events.json rows here. Not built by this
+    # PR (explicitly out of scope; see ARCHITECTURE.md) -- unreachable
+    # under today's production default, since snapshot_pinned is always
+    # False above. Left as a documented gap, never a guess at PR-6's own
+    # design.
+    return None
 
 
 def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, year_end,
