@@ -1017,15 +1017,25 @@ def _record_candidate_references(c: Any, committed_receipt_id: str,
 
 
 def _candidate_head_fence(c: Any, scope: str, expected_snapshot: str | None,
-                          expected_generation: int) -> None:
+                          expected_generation: int, *,
+                          resulting_snapshot_id: str | None = None) -> None:
     row = c.execute(
         "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
         (scope,)).fetchone()
     actual = None if row is None else (row["snapshot_id"], row["generation"])
-    if actual != (expected_snapshot, expected_generation):
-        raise errors.fail(
-            "SNAPSHOT_CONFLICT", "incremental refresh lost its parent head",
-            details={"scope": scope, "expected_generation": expected_generation})
+    if actual == (expected_snapshot, expected_generation):
+        return
+    if (resulting_snapshot_id is not None
+            and actual == (resulting_snapshot_id, expected_generation + 1)):
+        # #98: the head is already exactly where THIS candidate's own commit
+        # would leave it -- a same-attempt retry of an already-applied
+        # effect, not a genuine conflict. A DIFFERENT candidate's retry
+        # still fails this check (its own resulting_snapshot_id would not
+        # match what is actually at head).
+        return
+    raise errors.fail(
+        "SNAPSHOT_CONFLICT", "incremental refresh lost its parent head",
+        details={"scope": scope, "expected_generation": expected_generation})
 
 
 def commit_daily_market_candidate(conn: Any, store: ArtifactStore,
@@ -1042,7 +1052,8 @@ def commit_daily_market_candidate(conn: Any, store: ArtifactStore,
     attempt_id = attempt_id or "attempt_" + request_hash.removeprefix(CONTENT_HASH_PREFIX)[:32]
 
     def _combined_fence_check(c: Any) -> None:
-        _candidate_head_fence(c, scope, expected_head_snapshot_id, expected_head_generation)
+        _candidate_head_fence(c, scope, expected_head_snapshot_id, expected_head_generation,
+                              resulting_snapshot_id=candidate.snapshot.snapshot_id)
         if fence_check is not None:
             fence_check(c)
 
