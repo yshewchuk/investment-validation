@@ -384,6 +384,33 @@ a submission source" rule Part 4 already established for
   `legacy_parity_rows`'s own all-or-nothing malformed-input discipline —
   raised before `run_native_parity_worker` builds `native_rows`/
   `native_refusals` at all, never a per-row skip.
+- **`native_parity_report._native_rows_and_refusals(records_document,
+  refusals_document) -> tuple[dict[str, dict], dict[str, str]]`** (new,
+  private) — the ONLY caller of `_population_key_from_board_request_key`
+  (above), and the place a duplicate collision is caught: the projection
+  from a 4-field `BoardRequest` key down to a 3-field `population_key` is
+  LOSSY (it drops `session`), so two DISTINCT `records.json`/`refusals.json`
+  keys — the same `(ticker, strategy, event_date)` under two different
+  `session` values, a genuinely possible events-table shape this design
+  does not assume away — can project to the SAME `population_key`
+  (CodeRabbit round 1, real finding). Silently keeping whichever one a
+  dict comprehension iterates last would be exactly the last-write-wins
+  collision `legacy_parity_rows` already refuses to allow for
+  `score.json`'s own rows (above) — so this function applies the IDENTICAL
+  discipline to the native side: every key in `records_document["records"]`
+  and every key in `refusals_document["refusals"]`, TOGETHER (one row can
+  never be both a record and a refusal, but two DIFFERENT rows — one a
+  record, one a refusal, or both records, or both refusals — can still
+  collide after projection, and this check catches all three shapes), is
+  projected, and any `population_key` value produced by more than one
+  distinct source key raises `OpsError` (`VALIDATION_FAILED`, detail naming
+  the colliding `population_key` and both source `BoardRequest` keys) for
+  the WHOLE call, before `native_rows`/`native_refusals` are built — never
+  a per-row skip or a silent overwrite. No collision has ever been observed
+  in practice (native's own board universe enumerates one `BoardRequest`
+  per `(ticker, strategy, event_date, session)` combination the events
+  table actually carries); this guard exists because the projection makes
+  a collision POSSIBLE, not because one has occurred.
 
 **The original PR-4 design's "explained" bucket (`ROW_EXPLANATION_CODES`,
 `row_explanations`) is dropped from this redo, not carried forward** —
@@ -2042,8 +2069,10 @@ hold, extended here rather than re-argued from scratch.
   submits nothing and tries again next tick, exactly like
   `computed_moves_refresh`/`native_score_batch` waiting on their own
   prerequisites. Inside the worker: an unparseable `BoardRequest` key (not
-  exactly 4 `"|"`-separated fields), a `records.json`/`refusals.json` that
-  fails to decode, or `compare_native_vs_legacy`'s own existing
+  exactly 4 `"|"`-separated fields), two distinct `records.json`/
+  `refusals.json` keys colliding on the same projected `population_key`
+  (`_native_rows_and_refusals`, above), a `records.json`/`refusals.json`
+  that fails to decode, or `compare_native_vs_legacy`'s own existing
   `_refuse_empty_inputs` (`VALIDATION_FAILED` on an empty
   `legacy_rows`/`native_rows`/no shared key) each fail the job's OWN
   attempt — never a partial or synthetic-empty report. This is a REAL
@@ -2058,25 +2087,52 @@ hold, extended here rather than re-argued from scratch.
   consistently on its own side. A failed `native_parity` attempt has no
   descendant job (nothing declares it in `dependency_job_ids`), so
   `block_descendants` never reaches anything the legacy board needs.
-- **R2, cache — one memo, not two.** Once a job exists under today's
-  `(as_of, scope_hash)` key, in any state, `submit_native_parity_if_ready`
-  never rebuilds or resubmits it — the existence check runs before any
-  input is read. Unlike `native_score_batch` (`#88`'s own R2: a SEPARATE
-  release-identity memo plus a build-attempt memo, because it gates an
-  expensive release re-verification independently of an expensive
-  board-enumeration build), `native_parity` needs only ONE memo,
-  `self._native_parity_memo`, mirroring the SHAPE of
-  `native_score_batch`'s own build-attempt memo/backoff
-  (`_COMPUTED_MOVES_MAX_ATTEMPTS`/`_COMPUTED_MOVES_BACKOFF_SECONDS`) —
-  there is no analogous release call here to gate separately, since this
-  job reads only already-committed job outputs. Cheap even without a
-  memo for the common case: `_native_parity_identity` is two indexed
-  `SELECT`s, no pandas, no provider call, so a `None` identity costs
-  nothing the memo
-  needs to protect against; the memo only matters once a
-  `native_score_batch` job HAS succeeded and a submission attempt (not the
-  comparison itself, which only ever runs inside one attempt) needs
-  throttling against repeat failure.
+- **R2, cache — one memo, not two, reusing the SAME shared constants.**
+  Once a job exists under today's `(as_of, scope_hash)` key, in any state,
+  `submit_native_parity_if_ready` never rebuilds or resubmits it — the
+  existence check runs before any input is read. Unlike `native_score_batch`
+  (`#88`'s own R2: a SEPARATE release-identity memo plus a build-attempt
+  memo, because it gates an expensive release re-verification independently
+  of an expensive board-enumeration build), `native_parity` needs only ONE
+  memo, `self._native_parity_memo`, and it is never even consulted until
+  `_native_parity_identity` returns a real identity: a `None` identity (no
+  succeeded `native_score_batch` job yet) costs two indexed `SELECT`s, no
+  pandas, no provider call, and is not memoized at all — there is nothing
+  yet to key a memo entry by. Once a real `(as_of, scope_hash,
+  score_job_id, native_score_batch_job_id)` identity IS found, this design
+  reuses `Service`'s own `_COMPUTED_MOVES_MAX_ATTEMPTS = 5`
+  (`supervisor.py:290`) and `_COMPUTED_MOVES_BACKOFF_SECONDS = (30.0, 120.0,
+  600.0, 1800.0, 3600.0)` (`supervisor.py:296`; 30s, 2m, 10m, 30m, 1h)
+  directly — `_reconcile_native_parity` is a method of the SAME `Service`
+  class these are already class attributes of, so `self._COMPUTED_MOVES_MAX_ATTEMPTS`/
+  `self._COMPUTED_MOVES_BACKOFF_SECONDS` need no import or redefinition,
+  only a second memo SLOT, `self._native_parity_memo`, alongside
+  `self._computed_moves_memo`; a second copy of the same five numbers
+  would invite silent drift between the two schedules, and nothing about
+  them is `native_parity`-specific (unlike `native_score_batch`, this job
+  has no expensive board-enumeration build of its own to bound; the memo
+  here exists purely to throttle repeated SUBMISSION attempts against one
+  identity, the same purpose the shared schedule already serves).
+  Concretely: a tick whose current identity does not match the memo's
+  stored one (a different `as_of`, or the same `as_of` under a NEWER
+  succeeded `native_score_batch` job's `scope_hash`) resets the attempt
+  count to zero with no backoff — a new identity always gets an immediate
+  first try, exactly like `computed_moves_refresh`'s own memo
+  (`supervisor.py:383-456`). Every outcome against the CURRENT identity
+  that is NOT a submitted job — `submission.submit` raising, or being
+  rejected (e.g. an `IDEMPOTENCY_CONFLICT` on a race with another
+  submitter) — calls `Service`'s own existing `_computed_moves_backoff(memo,
+  now)` helper (`supervisor.py:298`, already generic over its `memo`
+  argument — called today from three `computed_moves_refresh` call sites,
+  `supervisor.py:374`, `:451`, `:458`) with `self._native_parity_memo`,
+  reusing the increment/clamp logic itself, not only the two constants, so
+  there is exactly one place either schedule's indexing math lives. After 5
+  attempts against the same identity, the sidecar stops trying that
+  identity at all until it changes (a later attempt count clamps to the
+  schedule's last entry, 1h, exactly like `computed_moves_refresh`'s own
+  clamp, `supervisor.py:440`). A successful submission (a `JobReceipt`
+  returned) clears the memo entirely, so the next distinct identity starts
+  from zero rather than inheriting a stale attempt count.
 - **R3, retry.** The job's own `RetryPolicy("bounded", 2, (5, 30))` covers
   a transient worker crash (a disk error reading a bound input, for
   example); a session whose key already exists — succeeded OR failed — is
@@ -2099,8 +2155,9 @@ hold, extended here rather than re-argued from scratch.
   `refusals.json` + same `tolerance_policy` (code-selected, not job data —
   see "Inputs" above) → the same `native_parity_report.json`, byte for
   byte: `legacy_parity_rows`, `_population_key_from_board_request_key`,
-  `compare_native_vs_legacy`, and `apply_native_refusals` are all pure
-  functions of their arguments (no wall-clock read, no random draw). The
+  `_native_rows_and_refusals`, `compare_native_vs_legacy`, and
+  `apply_native_refusals` are all pure functions of their arguments (no
+  wall-clock read, no random draw). The
   idempotency key, `"nightly:<as_of>:<scope_hash>:native_parity"`, ties a
   re-run to the SPECIFIC `native_score_batch` identity
   `_native_parity_identity` selected, never session alone — the same
