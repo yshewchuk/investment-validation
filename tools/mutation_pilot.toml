@@ -66,6 +66,13 @@ inert = [
     "TECH_DEBT.md",
     "docs/*",
     "guides/*",
+    # The root and every per-component ARCHITECTURE.md (docs/COMPONENT_
+    # ARCHITECTURE_TEMPLATE.md's design docs, e.g. engine/v2/scoring/
+    # ARCHITECTURE.md) -- pure documentation like the rest of this list,
+    # never read at runtime or loaded as a test fixture. `*` matches `/`
+    # (fnmatch, same as every other pattern here), so this one pattern
+    # covers the root file and every nested one.
+    "*ARCHITECTURE.md",
 ]
 # Patterns carved back OUT of `inert` above: a path matching one of these is
 # never inert even though it also matches `inert`. `engine/dashboard/static/`
