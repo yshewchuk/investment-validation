@@ -267,3 +267,28 @@ def test_mcap_carries_into_a_retained_row_with_no_cap_of_its_own():
     assert row["mcap_usd"] == earlier["mcap_usd"]
     assert row["mcap_asof"] == datetime(2024, 1, 2)
     assert row["src_mcap"] == "orats.cores"
+
+
+def test_mcap_carry_never_rewrites_a_row_with_no_winner_this_build():
+    # An already-committed row with no cap of its own (DDD, 2024-01-05) sits in `prior`
+    # alongside an eligible earlier observation (DDD, 2024-01-02) with a real cap. Nothing
+    # in this build's incoming/retained revisions touches DDD at all -- only an unrelated
+    # ticker (EEE) is being appended. DDD 2024-01-05 must come out of the merge byte-for-byte
+    # unchanged: no carried cap, and it must not appear in `merged.changes`.
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]
+    earlier = dict(base, ticker="DDD", date=datetime(2024, 1, 2))
+    untouched = dict(
+        base, ticker="DDD", date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    unrelated_append = dict(base, ticker="EEE", date=datetime(2024, 1, 2))
+    unrelated = _revision(unrelated_append, revision_id="unrelated-eee")
+
+    merged = merge_daily_market(contract, [earlier, untouched], (), (unrelated,))
+
+    row = next(r for r in merged.rows if r["ticker"] == "DDD"
+               and r["date"] == datetime(2024, 1, 5))
+    assert row == untouched
+    assert all(change.revision_id != "unrelated-eee" or "DDD" not in str(change)
+               for change in merged.changes)
+    assert {change.revision_id for change in merged.changes} == {"unrelated-eee"}

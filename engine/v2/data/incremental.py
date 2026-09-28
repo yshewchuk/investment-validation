@@ -266,9 +266,28 @@ def _merge_changes(
     return tuple(changes)
 
 
+def _latest_prior_observation(
+    prior: Mapping[tuple[str, str], dict[str, Any]], ticker: str,
+) -> tuple[str | None, Any, Any, Any]:
+    candidate_date = None
+    candidate_usd = None
+    candidate_log = None
+    candidate_asof = None
+    for existing_key, existing_row in prior.items():
+        if existing_key[0] != ticker or existing_row.get("mcap_usd") is None:
+            continue
+        if candidate_date is None or existing_key[1] > candidate_date:
+            candidate_date = existing_key[1]
+            candidate_usd = existing_row["mcap_usd"]
+            candidate_log = existing_row.get("mcap_log")
+            candidate_asof = existing_row.get("mcap_asof") or existing_row["date"]
+    return candidate_date, candidate_usd, candidate_log, candidate_asof
+
+
 def _carry_forward_mcap(
     prior: Mapping[tuple[str, str], dict[str, Any]],
     result: Mapping[tuple[str, str], dict[str, Any]],
+    winner_by_key: Mapping[str, "DailyMarketRevision"],
 ) -> None:
     """Mutate `result` in place: backward-fill `mcap_usd` for every row in this build's
     final per-key winner set (`result` -- already resolved by `_apply_revision_winners`,
@@ -279,26 +298,22 @@ def _carry_forward_mcap(
     ticker's dates in ascending order). `mcap_asof` always ends up the ORIGINAL observation
     date (never an intermediate carried row's own session date), by threading it forward
     explicitly rather than re-deriving it from a row's own key. Bounded to what `prior` and
-    this build's own `result` already hold; never scans beyond them.
+    this build's own `result` already hold; never scans beyond them. Only ever writes into
+    a row this build produced a winner for (`winner_by_key`); an untouched row's own value
+    may still be read as a candidate, but is never mutated -- `result` shares row objects
+    with `prior` by reference for any key without a winner, so writing one would silently
+    rewrite a partition row with no `RowChange` and corrupt `prior`'s own before-hash.
     """
+    winner_keys = {(revision.ticker, revision.session_date)
+                   for revision in winner_by_key.values() if not revision.deleted}
     by_ticker: dict[str, list[str]] = {}
     for ticker, session_date in result:
         by_ticker.setdefault(ticker, []).append(session_date)
 
     for ticker, dates in by_ticker.items():
         dates.sort()
-        candidate_date = None
-        candidate_usd = None
-        candidate_log = None
-        candidate_asof = None
-        for existing_key, existing_row in prior.items():
-            if existing_key[0] != ticker or existing_row.get("mcap_usd") is None:
-                continue
-            if candidate_date is None or existing_key[1] > candidate_date:
-                candidate_date = existing_key[1]
-                candidate_usd = existing_row["mcap_usd"]
-                candidate_log = existing_row.get("mcap_log")
-                candidate_asof = existing_row.get("mcap_asof") or existing_row["date"]
+        candidate_date, candidate_usd, candidate_log, candidate_asof = (
+            _latest_prior_observation(prior, ticker))
 
         for session_date in dates:
             row = result[(ticker, session_date)]
@@ -309,6 +324,8 @@ def _carry_forward_mcap(
                 candidate_asof = row.get("mcap_asof") or row["date"]
                 continue
             if candidate_date is None or candidate_date >= session_date:
+                continue
+            if (ticker, session_date) not in winner_keys:
                 continue
             row["mcap_usd"] = candidate_usd
             row["mcap_log"] = candidate_log
@@ -333,7 +350,7 @@ def merge_daily_market(
     incoming = tuple(_validate_revision(contract, item) for item in incoming_revisions)
     winners = select_revision_winners((*retained, *incoming))
     result, winner_by_key = _apply_revision_winners(prior, winners)
-    _carry_forward_mcap(prior, result)
+    _carry_forward_mcap(prior, result, winner_by_key)
     changes = _merge_changes(contract, prior, result, winner_by_key)
 
     changed_partitions = tuple(sorted({change.partition_key for change in changes}))
