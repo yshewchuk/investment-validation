@@ -148,6 +148,38 @@ def test_local_recipe_not_stripped_for_other_strategy_binding(tmp_path):
     assert "MISSING_FORECAST_OUTPUT:driver" not in record.reason_codes
 
 
+def test_confirmed_empty_scope_does_not_fall_back_to_unscoped(tmp_path):
+    """A REAL release whose only binding belongs to another strategy has a
+    CONFIRMED empty scope for this STR-THRU request -- it must not fall
+    back to treating every submitted binding as in-scope. The out-of-scope
+    binding's result must not populate driver_prediction; the caller's own
+    local recipe (declared through the native inputs, intercept 7.0) must
+    decide instead, exactly like a release with NO matching binding at all
+    should behave."""
+    other = _binding(tmp_path, "b-other", "implied_t1", OTHER_STRATEGY,
+                     output="driver_prediction", intercept=100.0)
+    release = _release((other,))
+    requests = (_inference_request(release, other),)
+    record = _score(tmp_path, release, (other,), requests=requests)
+    assert record.forecasts["driver_prediction"] == 7.0
+
+
+def test_confirmed_empty_scope_result_does_not_leak_into_frozen_outputs(tmp_path):
+    """The leak the test above cannot observe: a local recipe only masks
+    the unscoped fold for the target it overwrites (the frozen fallback
+    executes before the local models). With the release's only binding out
+    of scope, its submitted result must not populate a target no local
+    recipe declares -- here the out-of-scope ``forecast_abs_move`` (999.0)
+    -- while the local ``driver_prediction`` recipe (7.0) still decides."""
+    other = _binding(tmp_path, "b-other", "size", OTHER_STRATEGY,
+                     output="forecast_abs_move", intercept=999.0)
+    release = _release((other,))
+    requests = (_inference_request(release, other),)
+    record = _score(tmp_path, release, (other,), requests=requests)
+    assert record.forecasts["driver_prediction"] == 7.0
+    assert record.forecasts["forecast_abs_move"] is None
+
+
 def test_wildcard_strategy_binding_is_not_scoped_out(tmp_path):
     """A shared ``strategy_id="*"`` binding owns its target for every
     strategy: the local ``forecast_abs_move`` recipe is stripped and the
