@@ -957,12 +957,53 @@ every value it needs is already a committed job output:
   `job_<native_score_batch_job_id>#records`/`#refusals` artifacts the
   worker later reads in full, opened here ONLY far enough to check one
   field, never parsed for rows — BEFORE calling `stages.submit_job` at
-  all. A mismatch on EITHER tag is treated EXACTLY like
-  `_native_parity_identity` returning `None`: `submit_native_parity_if_ready`
-  submits NOTHING this tick, so no job — and no `(as_of, scope_hash)` key
-  — is ever created for this identity, and the SAME identity is
-  re-checked, fresh, on the very next tick once a `native_score_batch` run
-  under the CURRENT worker produces a `v2.0` artifact for that session.
+  all.
+
+  **A confirmed mismatch is a permanent wait state for THIS
+  `native_score_batch_job_id`, not a retried one (Opus gate finding,
+  correcting an earlier, unreachable claim here).** A mismatch on EITHER
+  tag is treated EXACTLY like `_native_parity_identity` returning `None`
+  on the tick it is first found: `submit_native_parity_if_ready` submits
+  NOTHING, so no job — and no `(as_of, scope_hash)` key — is ever created
+  for this identity. But unlike a true `None`, this identity's
+  `native_score_batch_job_id` names a real, already-succeeded job whose
+  staged `records.json`/`refusals.json` are fixed for good, and
+  `native_score_batch`'s own R2 (`#88`) never resubmits a job for an
+  `(as_of, scope_hash)` key that already has one — so `_native_parity_identity`
+  will keep finding THIS SAME job id, tick after tick, for as long as this
+  `(as_of, scope_hash)` stays current, and re-opening and re-decoding both
+  files against that unchanging outcome, roughly once a second, buys
+  nothing. The sidecar therefore memoizes a confirmed mismatch by
+  `native_score_batch_job_id` (`self._native_parity_schema_mismatch_job_id`,
+  a single-slot field alongside `self._native_parity_memo`; see "R1,
+  missing input" and "R2, cache" below for the full mechanics) and skips
+  the file reads entirely on every later tick whose identity carries the
+  SAME job id — no exception, no attempt against `self._native_parity_memo`,
+  just a cheap `==` check. What actually resolves the memoized mismatch is
+  a DIFFERENT identity: a new `as_of` (the next session), or the same
+  `as_of` under a NEWER succeeded `native_score_batch` job's `scope_hash`
+  (a release swap mid-session, "R2, cache" below) — either carries a
+  different `native_score_batch_job_id`, which misses the memo and
+  triggers one fresh check. A `native_score_batch` re-run for the SAME
+  `(as_of, scope_hash)` key, which the earlier draft's "re-checked … once
+  a `native_score_batch` run … produces a `v2.0` artifact for that
+  session" wording depended on, cannot happen: that key already has a
+  job, so `native_score_batch`'s own sidecar never resubmits it — there is
+  no later run "for that session" to ever land.
+
+  A read or decode failure on either file — a missing artifact, invalid
+  JSON, a non-dict document, or a document missing the `schema_version`
+  key entirely — is a DISTINCT outcome from a clean mismatch: it is an
+  exception, not a checked value, so it is never written to
+  `self._native_parity_schema_mismatch_job_id` (only a cleanly-decoded,
+  confirmed-wrong tag counts as a mismatch worth memoizing). Instead it
+  propagates out of `submit_native_parity_if_ready` exactly like a
+  `submission.submit` failure would, to `_reconcile_native_parity`'s own
+  try/except — the SAME inline backoff `computed_moves_refresh` already
+  uses (`supervisor.py:450`; see "R2, cache" below) — so it counts as one
+  spent attempt against `self._native_parity_memo`, is reported the same
+  redacted, deduped way, and never crashes the tick.
+
   This is a wait state exactly like the missing-job case, never a refusal
   and never a job failure — because, unlike every other input this
   sidecar reads, `native_parity`'s own worker has no way to retry a
@@ -2350,8 +2391,17 @@ hold, extended here rather than re-argued from scratch.
   never be retried once a fresh, correctly-shaped `native_score_batch` run
   landed — the sidecar catches it first instead, submitting nothing so no
   job (and no blocking `(as_of, scope_hash)` key) is ever created for that
-  identity, and the same identity is checked fresh next tick. By the time
-  this worker actually runs, both tags are ALREADY confirmed `v2.0`. Inside
+  identity. **This mismatch is memoized by `native_score_batch_job_id`
+  once confirmed, not re-checked against the SAME job id on a later tick**
+  ("Cutover PR-4 (redo)'s own input sourcing", above, has the full
+  mechanics and corrects an earlier, unreachable claim that it was
+  "re-checked … for that session"; "R2, cache", below, has the memo
+  field). A read or decode failure on either file — as opposed to a
+  clean, confirmed mismatch — is a distinct outcome: it is an exception,
+  caught by `_reconcile_native_parity`'s own try/except exactly like a
+  `submission.submit` failure ("R2, cache", below), never left to crash
+  the tick and never memoized as a mismatch. By the time this worker
+  actually runs, both tags are ALREADY confirmed `v2.0`. Inside
   the worker: an unparseable `BoardRequest` key (not
   exactly 4 `"|"`-separated fields), two distinct `records.json`/
   `refusals.json` keys colliding on the same projected `population_key`
@@ -2420,7 +2470,17 @@ hold, extended here rather than re-argued from scratch.
   `_native_parity_identity` returns a real identity: a `None` identity (no
   succeeded `native_score_batch` job yet) costs two indexed `SELECT`s, no
   pandas, no provider call, and is not memoized at all — there is nothing
-  yet to key a memo entry by. Once a real `(as_of, scope_hash,
+  yet to key a memo entry by. Should THOSE two `SELECT`s themselves raise
+  (a locked database, for instance) rather than cleanly returning `None`
+  or a real identity, there is likewise no identity yet to key
+  `self._native_parity_memo` by — `_reconcile_native_parity` records that
+  against a dedicated `identity: None` bucket instead, mirroring
+  `_computed_moves_identity_or_none`'s own already-fixed handling of the
+  identical problem (`supervisor.py:371-375`): the SAME backoff arithmetic
+  applies, but UNCAPPED (never stops retrying), since with no identity
+  known there is no "new identity" signal to ever reset a permanent
+  give-up on — exactly `_computed_moves_identity_or_none`'s own stated
+  rationale, reused rather than re-argued. Once a real `(as_of, scope_hash,
   score_job_id, native_score_batch_job_id)` identity IS found, this design
   reuses `Service`'s own `_COMPUTED_MOVES_MAX_ATTEMPTS = 5`
   (`supervisor.py:290`) and `_COMPUTED_MOVES_BACKOFF_SECONDS = (30.0, 120.0,
@@ -2456,16 +2516,38 @@ hold, extended here rather than re-argued from scratch.
   `self._native_parity_memo` on its own — reusing the two NUMBERS, never
   the helper that writes to the wrong slot, so the two sidecars' retry
   state can never cross-contaminate. Every outcome against the CURRENT
-  identity that is NOT a submitted job — `submission.submit` raising, or
+  identity that is NOT a submitted job — `submission.submit` raising or
   being rejected (e.g. an `IDEMPOTENCY_CONFLICT` on a race with another
-  submitter) — runs this inline step. After 5 attempts against the same
-  identity, the sidecar stops trying that identity at all until it changes
-  (a later attempt count clamps to the schedule's last entry, 1h, exactly
-  like `computed_moves_refresh`'s own clamp, `supervisor.py:440`). A
-  successful submission (a `JobReceipt` returned) clears
-  `self._native_parity_memo` entirely (never `self._computed_moves_memo`),
-  so the next distinct identity starts from zero rather than inheriting a
-  stale attempt count.
+  submitter), AND, the same way, a read or decode failure on either
+  `schema_version` pre-check file (a missing artifact, invalid JSON, a
+  non-dict document, or a missing `schema_version` key — "Cutover PR-4
+  (redo)'s own input sourcing", above) — runs this inline step: none of
+  these is distinguished from the others once an identity is known, they
+  are simply whatever exception `submit_native_parity_if_ready` raised.
+  After 5 attempts against the same identity, the sidecar stops trying
+  that identity at all until it changes (a later attempt count clamps to
+  the schedule's last entry, 1h, exactly like `computed_moves_refresh`'s
+  own clamp, `supervisor.py:440`). A successful submission (a
+  `JobReceipt` returned) clears `self._native_parity_memo` entirely
+  (never `self._computed_moves_memo`), so the next distinct identity
+  starts from zero rather than inheriting a stale attempt count.
+
+  **A confirmed `schema_version` mismatch is a SEPARATE, second field,
+  `self._native_parity_schema_mismatch_job_id` — this does not reopen the
+  "one memo, not two" claim above, which is about THROTTLING (an
+  attempt/backoff schedule); this second field is not one.** It holds
+  nothing but the `native_score_batch_job_id` of the last confirmed
+  mismatch, or `None`, and is consulted with a single `==` check, before
+  the two files are ever opened, at zero I/O cost — unlike
+  `self._native_parity_memo`, it is never incremented, never backed off,
+  and never counts an attempt: a clean, decoded, confirmed-wrong tag is
+  not a failure to retry, it is a fact about an immutable artifact that
+  will never become true. It is set only on a clean mismatch (never on a
+  read/decode exception, which goes through `self._native_parity_memo`
+  above instead) and is overwritten — never merely cleared — the next
+  time `_native_parity_identity` returns a DIFFERENT
+  `native_score_batch_job_id`, whether or not that new identity's own
+  check turns out to match `v2.0`.
 - **R3, retry.** The job's own `RetryPolicy("bounded", 2, (5, 30))` covers
   a transient worker crash (a disk error reading a bound input, for
   example); a session whose key already exists — succeeded OR failed — is
