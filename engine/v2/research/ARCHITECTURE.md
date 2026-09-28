@@ -365,9 +365,19 @@ Routing `trades` through `_scan.read_table` for the first time (it was
 previously read with one unbounded `DataQuery`, so `_scan.py`'s splitting
 never applied to it) exposed two defects in `_scan.py` itself that this PR
 also fixes, since they are reachable only because of this delegation, not
-pre-existing for any table this PR's diff does not touch (`option_chains`/
-`earnings_events`, whose partition column and observation-time column are
-the same column, so neither defect can arise for them):
+pre-existing for any table this PR's diff does not touch. `option_chains`
+(partition column `year`, observation-time column `obs_date`) and
+`earnings_events` (`year`, `event_date`) use different columns for the
+two roles, but `legacy_annotations.json` documents each one's `year` as
+literally "partition year of `obs_date`"/"partition year of `event_date`"
+— every row's own partition year is derived from its own observation
+column, so a row can never land in a partition whose year differs from
+its observation time's year, and neither defect below can arise for them.
+`trades`' `year` is documented only as "partition year" (of the earnings
+event, not of `entry_date`, its observation-time column) — a trade
+entered just after its event crossed a year boundary can have an
+`entry_date` in a different calendar year than its own `year` partition,
+which is exactly what exposes both defects below:
 
 - **Cross-partition duplicate rows.** `_scan_partition`'s month/day scans
   used to carry only the caller's `key_filter` and a time-interval bound
