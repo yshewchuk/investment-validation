@@ -625,13 +625,17 @@ def _staged_forward_calendar_attempt(root: Path, document_name: str) \
     if not isinstance(document, Mapping):
         raise fail("INVALID_REQUEST",
                    "forward calendar refresh staged input document is malformed")
-    attempt_id = document.get("attempt_id")
-    if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id):
-        raise fail("INVALID_REQUEST", "attempt_id must be a non-empty string when present")
-    fence = document.get("fence")
-    if fence is not None and (isinstance(fence, bool) or not isinstance(fence, int)
-                              or fence < 1):
-        raise fail("INVALID_REQUEST", "fence must be an int of at least 1 when present")
+    if "attempt_id" not in document or document["attempt_id"] is None \
+            or "fence" not in document or document["fence"] is None:
+        raise fail("INVALID_REQUEST",
+                   "the staged document must include both attempt_id and fence for a "
+                   "job-scheduled forward calendar refresh")
+    attempt_id = document["attempt_id"]
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise fail("INVALID_REQUEST", "attempt_id must be a non-empty string")
+    fence = document["fence"]
+    if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
+        raise fail("INVALID_REQUEST", "fence must be an int of at least 1")
     return attempt_id, fence
 
 
