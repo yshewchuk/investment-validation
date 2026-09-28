@@ -2119,6 +2119,114 @@ race `"score"`'s own commit or anyone else's — the sidecar pattern is still
 the right choice for scheduling/transaction independence, not for a
 head-commit race.
 
+### `supervisor.py` (issue #106: a long single-attempt effect must not starve every other live attempt's lease)
+
+`Service.tick()` (`supervisor.py:227`) is fully synchronous: `expire_leases`,
+`reconcile()`, then one Python `for` loop over `self.running.items()`
+(`supervisor.py:231`) calling `_poll` on each entry in turn, then
+`claim_next`/`_launch` for a new attempt. There is no background thread —
+`lifecycle.Keepalive`'s own docstring is explicit about why ("the catalog
+connection is not shared across threads") — so any ONE entry's `_poll` that
+blocks for longer than `LEASE_SECONDS` (120s) delays every OTHER entry's own
+`_poll`/`heartbeat` call until it returns. Two concrete ways a single tick
+already reaches that duration, both pre-existing and both now fixed by the
+same mechanism:
+
+- `_poll` → `_finish` → `_commit_success` → `_coordinator_effect`, for any
+  of the 14 `_COORDINATOR_EFFECT_KINDS` (see "Primary contracts" above) that
+  runs a genuinely long, single-attempt effect. `engineering_gate_effect`
+  (`effects_graph.py:189`) was the sharpest case: it called
+  `legacy_adapter.run_engineering_gate`, a single blocking
+  `subprocess.run(..., timeout=600)` (`legacy_adapter.py:1156-1167`) with NO
+  `keepalive` parameter anywhere in the chain — up to 600s with zero
+  renewal calls for ANY attempt, not even its own.
+- `Service._launch`'s pre-work (`supervisor.py:483-509`): hashing the
+  worker's read set (`legacy_adapter.manifest_files`) and copying it into
+  private legacy staging (`legacy_adapter.copy_read_set`) run inline,
+  before the attempt is added to `self.running` at all, so no `_poll` for
+  ANY attempt happens until this returns. The existing comment at
+  `supervisor.py:513-520` already documents that THIS attempt's own lease
+  expiring here is handled (handed to recovery, not crashed) — but nothing
+  renewed every OTHER already-running attempt's lease while this ran.
+
+**The consequence issue #106 reports**: a live, healthy attempt's
+`lease_expires_at` (last set by a PRIOR tick's `heartbeat`, `lifecycle.py:
+151-154`) passes while a DIFFERENT attempt's single long effect or launch
+pre-work occupies the entire tick. The NEXT tick's `expire_leases`
+(`recovery.py:113-122`) fences it off (`_fence_off`, `recovery.py:106-110`
+— an unconditional write, no liveness check of its own) purely because
+nobody renewed it in time, and that SAME tick's `reconcile()`
+(`supervisor.py:217-225`) then SIGKILLs its still-live process tree
+(`signal_owned(proof.alive, self.boot, hard=True)`) — a healthy worker
+killed for being heartbeat-starved, not for actually being dead.
+
+**Fix — extend the existing `Keepalive` renewal points to cover every live
+attempt, and give `engineering_gate_effect` a renewal point to call:**
+
+- `Keepalive` (`lifecycle.py:168-199`) itself is UNCHANGED: it still
+  renews exactly the one `(attempt_id, fence)` pair it was built for, and
+  still raises `LEASE_LOST` only for that pair, so every existing caller
+  that already threads a `Keepalive` through an effect (import publish,
+  export, backup, materialization verification) keeps its current
+  single-attempt failure semantics exactly as before.
+- `Service._finish` (`supervisor.py:773-785`) now wraps that per-attempt
+  `Keepalive` in a small closure before handing it to `_commit_success`:
+  the wrapper calls the original `Keepalive` first (unchanged: raises
+  `LEASE_LOST` for the CURRENT attempt on its own renewal failure, exactly
+  as before), then best-effort renews every OTHER `attempt_id` currently
+  in `self.running` via the same `heartbeat()` primitive `_poll` already
+  uses, throttled together at the same `LEASE_SECONDS / 4` interval
+  `Keepalive` already uses (one shared timer, not one per attempt) so a
+  coordinator effect that calls its keepalive often does not multiply
+  writes. A failed renewal for one of those OTHER attempts is swallowed,
+  not raised: that attempt's own `_poll`/`heartbeat` or `expire_leases`
+  already owns deciding whether IT is still live — this wrapper's job is
+  only to make sure a slow neighbor does not cost it a lease it never
+  actually lost, never to make a correctness decision on its behalf. Any
+  attempt not yet added to `self.running` (mid-`_launch`, before its own
+  first `_poll`) is not in the dict yet and is therefore not renewed by
+  this mechanism either — that gap is `_launch`'s own pre-work, below.
+- `Service._launch`'s pre-work (`supervisor.py:483-509`) now takes the
+  SAME "renew every other running attempt" closure and passes it down
+  through `legacy_adapter.manifest_files`/`copy_read_set`'s existing `for`
+  loops (one call point per file, throttled the same way) instead of
+  running the whole hash-and-copy pass with no renewal calls at all.
+  `manifest_files`/`copy_read_set` gain an optional `keepalive` parameter
+  (default `None`, a no-op) — every other caller/test that does not pass
+  one keeps today's exact behavior.
+- `engineering_gate_effect` (`effects_graph.py:189`) gains the same
+  optional `keepalive` parameter every OTHER coordinator effect in this
+  file already accepts, and `_coordinator_effect`'s existing call site
+  (`supervisor.py:1058-1060`) now passes its own. `legacy_adapter.
+  run_engineering_gate` (`legacy_adapter.py:1156`) replaces its single
+  blocking `subprocess.run(timeout=600)` with a `subprocess.Popen` polled
+  on a short interval (`proc.communicate(timeout=poll_interval)`, catching
+  `subprocess.TimeoutExpired` to call `keepalive()` and check the ORIGINAL
+  600s deadline) — the same poll-instead-of-block shape `tools/
+  bounded_run.py` already uses for its own long subprocess wait. Reaching
+  the 600s deadline still kills the subprocess and refuses exactly as
+  before (`WORKER_FAILED`/a typed `OpsError`); the only change is that a
+  RUN inside that window no longer goes 600s without a single renewal call
+  for any attempt.
+
+**Failure semantics (unchanged unless noted):**
+
+- The CURRENT attempt's own lease loss during its coordinator effect: still
+  `LEASE_LOST`, still raised by the wrapped `Keepalive` exactly as before —
+  this fix adds a renewal side-effect, it does not touch that raise.
+- Another attempt's lease loss, discovered while THIS attempt's keepalive
+  best-effort-renews it: never raised here. That attempt's own next
+  `_poll`/`heartbeat` (if it is still in `self.running`) or the next tick's
+  `expire_leases`/`reconcile` (if `_fence_off` already ran) is the only
+  place that failure is acted on — unchanged from before this fix, since
+  before this fix nothing renewed it here at all.
+- `engineering_gate_effect` exceeding its 600s deadline: unchanged —
+  refused as a worker/attempt failure, same as a `subprocess.run` timeout
+  raised before.
+- No new attempt `state` value and no new transition: `recovery_pending`,
+  `running`, `starting` and the rest are exactly as documented above; this
+  fix only adds renewal CALLS at points that previously had none.
+
 ### `nightly_trigger.py` (issue #103: a bounded `serve`, never an unbounded hold on the legacy lock)
 
 `nightly_trigger.py`'s own module docstring already describes its
