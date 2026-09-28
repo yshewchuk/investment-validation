@@ -983,6 +983,11 @@ def commit_daily_market_candidate(conn: Any, store: ArtifactStore,
     receipt_id = receipt_id or "receipt_" + request_hash.removeprefix(CONTENT_HASH_PREFIX)[:32]
     attempt_id = attempt_id or "attempt_" + request_hash.removeprefix(CONTENT_HASH_PREFIX)[:32]
 
+    def _combined_fence_check(c: Any) -> None:
+        _candidate_head_fence(c, scope, expected_head_snapshot_id, expected_head_generation)
+        if fence_check is not None:
+            fence_check(c)
+
     manifests_to_commit = tuple(
         candidate.parent.table_manifests[name] if name != TABLE_NAME
         else candidate.table_manifest for name in candidate.parent.table_manifests)
@@ -992,9 +997,7 @@ def commit_daily_market_candidate(conn: Any, store: ArtifactStore,
         snapshot=candidate.snapshot, expected_head_snapshot_id=expected_head_snapshot_id,
         expected_head_generation=expected_head_generation, receipt_id=receipt_id,
         attempt_id=attempt_id, fence=fence,
-        fence_check=fence_check or (
-            lambda c: _candidate_head_fence(
-                c, scope, expected_head_snapshot_id, expected_head_generation)),
+        fence_check=_combined_fence_check,
         clock=clock, fault=fault, store=store,
         record_references=lambda c, rid: _record_candidate_references(
             c, rid, candidate, clock),

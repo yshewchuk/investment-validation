@@ -21,6 +21,10 @@ from engine.v2.foundation import ArtifactStore, content_hash, to_document
 from engine.v2.ops.incremental_data import RefreshParameters
 from tests.ops_support import catalog
 from tests.test_v2_data_manifests import _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF
+from engine.v2.data.errors import DataError
+from tests.test_v2_data_objects import _contract as _obj_contract
+from tests.test_v2_data_objects import _daily_market_rows as _obj_daily_market_rows
+from tests.test_v2_data_objects import _table_from_rows, _to_bytes
 
 
 def test_raw_receipt_is_cache_first_and_idempotent(tmp_path):
@@ -254,3 +258,78 @@ def test_frozen_curated_append_correction_tombstone_and_noop_replay(tmp_path):
     conn_count = clock_conn.execute(
         "SELECT COUNT(*) FROM data_changesets").fetchone()[0]
     assert conn_count == 3
+
+
+def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path):
+    """#81: a caller-supplied ``fence_check`` must be COMPOSED with
+    ``commit_daily_market_candidate``'s own head fence, never replace it. A
+    same-receipt replay after the head has already moved must still refuse
+    ``SNAPSHOT_CONFLICT`` even when the caller's own ``fence_check`` is a
+    no-op that would, by itself, allow the call (mirrors an attempt-lease
+    check on an attempt that is still live) -- this is the exact scenario the
+    bug let through silently."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    contract = _obj_contract("daily_market")
+    rows = _obj_daily_market_rows()
+    table = _table_from_rows(contract, rows)
+    ref = store.publish_bytes(_to_bytes(table), schema_ref="parquet_fragment.v1")
+    object_ref = data_incremental.ObjectRef(
+        kind="parquet_fragment", object_id=ref.artifact_id,
+        content_hash=ref.content_hash, byte_size=ref.byte_size)
+    inspection = inspect_fragment(store, object_ref, contract, _DAILY_MARKET_REF, "2024")
+    receipt_ref = content_hash({"synthetic-base": True})
+    record = data_incremental.manifests.fragment_record(
+        inspection, _DAILY_MARKET_REF, input_receipt_refs=(receipt_ref,),
+        import_request_hash=receipt_ref)
+    manifest = dataset_manifest(
+        _DAILY_MARKET_REF, (record,), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent_ref = snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal.v1",
+        source_priority_version="synthetic", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="shadow", request_hash=content_hash({"base": "r0"}),
+        contracts=(contract,), objects=(object_ref,), records=(record,), manifests=(manifest,),
+        snapshot=parent_ref, expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="base-receipt", attempt_id="base-attempt", fence=1,
+        fence_check=lambda _c: None, clock=clock, store=store)
+    parent = Repository(conn).resolve_full(parent_ref.snapshot_id)
+
+    append_row = dict(rows[0], ticker="ZZZ")
+    append_raw = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"kind":"synthetic-append"}', response_kind="complete",
+            response_meta={}),
+        source="synthetic", endpoint="daily_market",
+        request={"ticker": "ZZZ"}, received_at=clock.now().isoformat())
+    revision = _frozen_revision(append_row, append_raw.raw_receipt_id, "revision-1")
+    (revision,), _ = data_incremental._stage_normalizations(
+        conn, store, {append_raw.raw_receipt_id: append_raw}, (revision,),
+        contract.contract_id, clock)
+    coverage = _coverage(revision, append_raw.raw_receipt_id)
+    candidate = data_incremental.build_daily_market_candidate(
+        parent, store, (revision,), coverage=coverage,
+        parent_snapshot_id=parent_ref.snapshot_id)
+
+    request_hash = "sha256:" + "1" * 64
+    receipt1 = data_incremental.commit_daily_market_candidate(
+        conn, store, candidate, scope="shadow",
+        expected_head_snapshot_id=parent_ref.snapshot_id, expected_head_generation=1,
+        clock=clock, request_hash=request_hash, receipt_id="receipt-1",
+        attempt_id="attempt-1", fence=1)
+    assert receipt1.resulting_head_snapshot_id != parent_ref.snapshot_id
+
+    # Same receipt/request/attempt/fence/scope/resulting-snapshot as above,
+    # but still claiming the OLD (now-stale) expected head, with a
+    # caller-supplied fence_check that is itself a permissive no-op. The
+    # composed head fence must still catch the stale expectation and refuse
+    # SNAPSHOT_CONFLICT -- the bug let the no-op fence_check replace the head
+    # fence outright and silently return the prior receipt instead.
+    with pytest.raises(DataError) as err:
+        data_incremental.commit_daily_market_candidate(
+            conn, store, candidate, scope="shadow",
+            expected_head_snapshot_id=parent_ref.snapshot_id, expected_head_generation=1,
+            clock=clock, request_hash=request_hash, receipt_id="receipt-1",
+            attempt_id="attempt-1", fence=1, fence_check=lambda _c: None)
+    assert err.value.code == "SNAPSHOT_CONFLICT"
