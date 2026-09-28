@@ -4,6 +4,7 @@ A: a coordinator effect keeps its lease only through explicit ``keepalive``
 calls. B: a lost lease inside ``Service._finish`` never escapes ``serve`` and
 is settled by the recovery state machine. D: heartbeat rows are throttled.
 E: ``ops cancel`` on a never-started job needs no expected attempt.
+F: issue #106 — ``_finish``'s wrapped keepalive also renews SIBLING leases.
 
 Real SQLite, a real ``Service`` and a real ``artifact_check`` worker subprocess
 under ``TEST_POLICY``; only the coordinator effect is synthetic, and the fake
@@ -21,7 +22,7 @@ from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 from engine.v2.ops.lifecycle import request_cancel
-from engine.v2.ops.recovery import begin_epoch, fence_foreign_epochs
+from engine.v2.ops.recovery import begin_epoch, expire_leases, fence_foreign_epochs
 from engine.v2.ops.scheduler import Supervisor
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import submit
@@ -258,3 +259,133 @@ def test_cancel_with_stale_or_omitted_expectation_still_refuses(tmp_path, capsys
     assert _row(conn, "SELECT state FROM jobs WHERE job_id = ?", claim.job_id)[0] == "running"
     receipt = _cancel(root, capsys, claim.job_id, "--expected-attempt", claim.attempt_id)
     assert receipt["state"] == "cancelling"
+
+
+# --------------------------------------------------------------------------
+# F: issue #106 -- one attempt's long coordinator stretch must not starve
+# every OTHER live attempt of the lease its own ``_poll`` heartbeat would give it
+# --------------------------------------------------------------------------
+
+
+def _running_entry(service, clock, claim):
+    """A ``service.running`` entry with no real subprocess (the D tests' shape)."""
+    running = executor.Running(claim=claim, process=None, result_fd=-1, identities=(),
+                               started=clock.monotonic())
+    service.running[claim.attempt_id] = running
+    return running
+
+
+def _stub_commit_success(monkeypatch):
+    """``_commit_success`` reduced to running the injected ``keepalive`` once
+    and recording the success: the unit under test here is only the wrapper
+    ``_finish`` builds around the own ``Keepalive``, never what any particular
+    coordinator effect does."""
+    finished = []
+
+    def commit_success(self, running, status, launch, keepalive):
+        keepalive()
+        finished.append(running.claim.attempt_id)
+
+    monkeypatch.setattr(Service, "_commit_success", commit_success)
+    return finished
+
+
+def _lease_row(conn, attempt_id):
+    return _row(conn, "SELECT lease_expires_at FROM attempts WHERE attempt_id = ?", attempt_id)[0]
+
+
+def test_finish_keepalive_renews_a_sibling_attempt_lease(tmp_path, monkeypatch):
+    conn, clock, supervisor = catalog(tmp_path)
+    claim_a = enqueue_claim(conn, clock, supervisor, key="a")
+    claim_b = enqueue_claim(conn, clock, supervisor, key="b")
+    service = Service(conn, tmp_path, REGISTRY, TEST_POLICY, clock=clock, code_source=ROOT)
+    running_a = _running_entry(service, clock, claim_a)
+    _running_entry(service, clock, claim_b)
+    # B's claim-time 120 s lease now has one second left -- exactly the point
+    # where A's single-attempt ``_finish`` stretch used to starve it (pre-fix
+    # this test fails: B keeps its original expiry and gets fenced below).
+    clock.advance(LEASE_SECONDS - 1)
+
+    finished = _stub_commit_success(monkeypatch)
+    service._finish(running_a, {"done": True, "exit_code": 0, "memory": 0})
+
+    renewed = format_timestamp(clock.now() + timedelta(seconds=LEASE_SECONDS))
+    assert finished == [claim_a.attempt_id]
+    assert _lease_row(conn, claim_a.attempt_id) == renewed  # the own Keepalive still renews A
+    assert _lease_row(conn, claim_b.attempt_id) == renewed  # and _finish's wrapper renewed B
+
+    clock.advance(10)  # past B's ORIGINAL (un-renewed) expiry point
+    fenced = expire_leases(conn, clock=clock)
+    assert claim_b.attempt_id not in fenced
+    assert _row(conn, "SELECT state FROM attempts WHERE attempt_id = ?",
+                claim_b.attempt_id)[0] in ("starting", "running")
+
+
+def test_sibling_lease_renewal_failure_is_swallowed(tmp_path, monkeypatch):
+    import engine.v2.ops.supervisor as supervisor_module
+
+    conn, clock, supervisor = catalog(tmp_path)
+    claim_a = enqueue_claim(conn, clock, supervisor, key="a")
+    claim_b = enqueue_claim(conn, clock, supervisor, key="b")
+    service = Service(conn, tmp_path, REGISTRY, TEST_POLICY, clock=clock, code_source=ROOT)
+    running_a = _running_entry(service, clock, claim_a)
+    _running_entry(service, clock, claim_b)
+    clock.advance(LEASE_SECONDS - 1)
+    b_lease_before = _lease_row(conn, claim_b.attempt_id)
+
+    # Only the heartbeat name ``_renew_other_leases`` resolves is flaky: the
+    # own ``Keepalive`` renews through ``lifecycle``'s own reference, untouched.
+    original = supervisor_module.heartbeat
+    attempted = []
+
+    def flaky_heartbeat(conn_arg, attempt_id, fence, *, clock, lease_seconds):
+        attempted.append(attempt_id)
+        if attempt_id == claim_b.attempt_id:
+            raise RuntimeError("simulated sibling renewal failure")
+        return original(conn_arg, attempt_id, fence, clock=clock, lease_seconds=lease_seconds)
+
+    monkeypatch.setattr(supervisor_module, "heartbeat", flaky_heartbeat)
+    finished = _stub_commit_success(monkeypatch)
+    service._finish(running_a, {"done": True, "exit_code": 0, "memory": 0})  # must not raise
+
+    # pre-fix this test fails: the renewal of B was never even attempted.
+    assert claim_b.attempt_id in attempted
+    assert finished == [claim_a.attempt_id]  # A's own success is unaffected
+    assert _lease_row(conn, claim_b.attempt_id) == b_lease_before  # B was NOT renewed
+    assert _lease_row(conn, claim_a.attempt_id) == format_timestamp(
+        clock.now() + timedelta(seconds=LEASE_SECONDS))  # A still renewed normally
+
+
+def test_a_failed_renewal_pass_does_not_throttle_the_next_call(tmp_path, monkeypatch):
+    """Round-3 fix: the shared throttle timer advances only after an
+    ALL-SUCCEEDED pass. One sibling failing must leave it unset, so the very
+    next call -- with no clock time elapsed, where an all-succeeded first pass
+    would have thrown it away -- runs a full second pass over both attempts."""
+    import engine.v2.ops.supervisor as supervisor_module
+
+    conn, clock, supervisor = catalog(tmp_path)
+    claim_a = enqueue_claim(conn, clock, supervisor, key="a")
+    claim_b = enqueue_claim(conn, clock, supervisor, key="b")
+    service = Service(conn, tmp_path, REGISTRY, TEST_POLICY, clock=clock, code_source=ROOT)
+    _running_entry(service, clock, claim_a)
+    _running_entry(service, clock, claim_b)
+
+    original = supervisor_module.heartbeat
+    attempted = []
+
+    def flaky_heartbeat(conn_arg, attempt_id, fence, *, clock, lease_seconds):
+        attempted.append(attempt_id)
+        if len(attempted) == 1:  # A's renewal in the first pass only
+            raise RuntimeError("simulated first-pass renewal failure")
+        return original(conn_arg, attempt_id, fence, clock=clock, lease_seconds=lease_seconds)
+
+    monkeypatch.setattr(supervisor_module, "heartbeat", flaky_heartbeat)
+    service._renew_other_leases()
+    assert attempted == [claim_a.attempt_id, claim_b.attempt_id]
+    assert service._other_leases_renewed_at is None  # the failed pass armed nothing
+
+    service._renew_other_leases()  # not throttled: a second FULL pass over both
+    assert attempted == [claim_a.attempt_id, claim_b.attempt_id] * 2
+
+    service._renew_other_leases()  # the all-succeeded second pass DID arm the throttle
+    assert attempted == [claim_a.attempt_id, claim_b.attempt_id] * 2

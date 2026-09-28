@@ -6,6 +6,7 @@ import hashlib
 import importlib.metadata
 import platform
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import joblib.numpy_pickle as _joblib_numpy_pickle
@@ -15,11 +16,17 @@ from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.errors import fail
 
 
-def file_hash(path):
+def file_hash(path, *, keepalive: Callable[[], None] | None = None):
+    """SHA-256 of ``path``. ``keepalive`` (issue #106 round 3): optional
+    zero-arg renewal callable invoked once per 1MB chunk -- the same seam as
+    ``legacy_adapter._digest`` -- so pinning ONE huge file renews during its
+    hash, not only between files. ``None`` keeps today's exact behavior."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
             digest.update(chunk)
+            if keepalive is not None:
+                keepalive()
     return "sha256:" + digest.hexdigest()
 
 
