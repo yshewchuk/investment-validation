@@ -57,7 +57,7 @@ def run(repository, *, strategies: Sequence[str], years=None,
         engine_rows["provenance"] = PROVENANCE
         engine_rows["snapshot_id"] = snapshot.snapshot_id
     existing = read_existing_trades(repository, snapshot)
-    revisions = revisions_for_rebuild(existing, engine_rows, set(strategies))
+    revisions = revisions_for_rebuild(existing, engine_rows, set(strategies), years=years)
     published = publish(
         repository, snapshot, revisions=revisions, rows=engine_rows,
         scope=scope, dry_run=dry_run,
