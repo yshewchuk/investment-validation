@@ -1778,10 +1778,12 @@ retry, transaction, partial write, idempotency).
   per-`as_of` path (`reports/phase6/nightly_trigger/<as_of>.input_manifest.json`)
   rather than the one shared name — a stale prior night's manifest is never
   read for a different night, because there is no shared name left to
-  collide on. This only runs when a `universe` is actually declared (the
-  population document resolves to at least one ticker); with none,
-  `input_manifest` stays `None`, unchanged from before — a plan with no
-  tickers has nothing for `capture` to enumerate against. Separately,
+  collide on. This only runs when the resolved `universe` is nonempty
+  (explicit `tickers`, when given, take precedence over the population
+  document — `tuple(tickers) or _population_tickers(population)` — so
+  either source alone is enough to trigger capture); with neither source
+  providing tickers, `input_manifest` stays `None`, unchanged from before —
+  a plan with no tickers has nothing for `capture` to enumerate against. Separately,
   `cli._read_input_manifest_ref` (unchanged by this PR) already refuses
   `INPUT_CHANGED` at plan time if the path this PR hands it is missing or a
   symlink, before publishing its bytes.
@@ -1807,9 +1809,11 @@ retry, transaction, partial write, idempotency).
   bytes, the resulting plan document's `input_manifest_ref` points at that
   immutable, content-addressed artifact — never back at the mutable
   per-`as_of` file path.
-- **R3, retry.** If no `plan_ref` was ever saved for this `as_of` (or a
-  prior attempt only reached `"error"`/`"timed_out"` before a plan was
-  built), a later eligible attempt calls `_default_plan` again and captures
+- **R3, retry.** If no `plan_ref` was ever saved for this `as_of` (a prior
+  attempt only reached `"error"` before a plan was built — `"timed_out"` is
+  never a pre-plan status: `_submit_plan` only records it after a plan was
+  already submitted and served, always with `plan_ref` set), a later
+  eligible attempt calls `_default_plan` again and captures
   inputs fresh, same as the first attempt. Once a `plan_ref` IS saved,
   `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
   RESUME_STATUSES`) calls `_submit_plan` directly with that existing
@@ -1827,12 +1831,16 @@ retry, transaction, partial write, idempotency).
   overwrites it with a fresh capture regardless.
 - **R5, partial write.** `capture_inputs.write_manifest` is a plain
   `Path.write_text`, not a tmp-file-plus-rename: a process killed mid-write
-  can leave a truncated, invalid-JSON file at the per-`as_of` path. Nothing
-  in this PR reads that file back for its own sake — `cli._read_input_manifest_ref`
-  reads it once, at the SAME plan-building call that just wrote it (there is
-  no separate later reader) — so a partial write here surfaces immediately,
-  as that same call's own JSON-parse or hash-check failure, not as a
-  silently wrong manifest picked up by some future attempt.
+  can leave a truncated, invalid-JSON file at the per-`as_of` path — that
+  SAME call never reaches `cli._read_input_manifest_ref` either, since it
+  died before returning from `_capture_input_manifest`. `_read_input_manifest_ref`
+  only ever reads the file after a successful write in the same
+  plan-building call that produced it; a process killed mid-write leaves
+  nothing for that call to read at all. A later eligible attempt (per R3)
+  captures fresh and overwrites the per-`as_of` path — including a
+  truncated one left by a killed prior attempt — before that later call's
+  own `_read_input_manifest_ref` ever reads it, so a partial file is
+  overwritten, not read, by whatever comes next.
 - **R6, idempotency.** A second capture for the same `as_of` (e.g. a
   same-day re-plan after a first attempt never reached `_plan_command`, or
   an operator re-running `ops plan` by hand) overwrites the same per-`as_of`
