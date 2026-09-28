@@ -192,3 +192,33 @@ def test_mcap_stays_none_when_no_prior_value_is_loaded():
     row = next(r for r in merged.rows if r["ticker"] == "ZZZ")
     assert row["mcap_usd"] is None
     assert row["mcap_asof"] is None
+
+
+def test_mcap_carry_preserves_original_observation_date_across_two_hops():
+    contract = _contract("daily_market")
+    base = _daily_market_rows()[0]  # ticker AAA, date 2024-01-02, mcap_usd=1e9
+
+    # First hop: 2024-01-05 has no cores data; carries from 2024-01-02.
+    first_incoming_row = dict(
+        base, date=datetime(2024, 1, 5), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    first_incoming = _revision(first_incoming_row, revision_id="hop-1")
+    first_merge = merge_daily_market(contract, [base], (), (first_incoming,))
+    hop1_row = next(r for r in first_merge.rows if r["date"] == datetime(2024, 1, 5))
+    assert hop1_row["mcap_asof"] == datetime(2024, 1, 2)
+
+    # Second hop: 2024-01-09 also has no cores data. `prior` for this refresh is
+    # `first_merge.rows` -- it only contains the 2024-01-02 original and the
+    # 2024-01-05 carried row (no fresh 2024-01-02 row separately). The carried
+    # asof must still be 2024-01-02, and the age must be measured from there
+    # (7 days), not from 2024-01-05 (which would wrongly give 4 days).
+    second_incoming_row = dict(
+        base, date=datetime(2024, 1, 9), mcap_usd=None, mcap_log=None,
+        mcap_asof=None, mcap_age_days=None, src_mcap=None)
+    second_incoming = _revision(second_incoming_row, revision_id="hop-2")
+    second_merge = merge_daily_market(
+        contract, list(first_merge.rows), (), (second_incoming,))
+    hop2_row = next(r for r in second_merge.rows if r["date"] == datetime(2024, 1, 9))
+
+    assert hop2_row["mcap_asof"] == datetime(2024, 1, 2)
+    assert hop2_row["mcap_age_days"] == 7.0

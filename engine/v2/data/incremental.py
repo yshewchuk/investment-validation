@@ -300,9 +300,12 @@ def _carry_forward_mcap(
         carried_date, carried_row = max(candidates, key=lambda item: item[0])
         row["mcap_usd"] = carried_row["mcap_usd"]
         row["mcap_log"] = carried_row.get("mcap_log")
-        row["mcap_asof"] = carried_row["date"]
+        observed_at = carried_row.get("mcap_asof") or carried_row["date"]
+        row["mcap_asof"] = observed_at
+        observed_date = observed_at.date() if hasattr(observed_at, "date") else \
+            date.fromisoformat(str(observed_at)[:10])
         row["mcap_age_days"] = float(
-            (date.fromisoformat(revision.session_date) - date.fromisoformat(carried_date)).days
+            (date.fromisoformat(revision.session_date) - observed_date).days
         )
 
 

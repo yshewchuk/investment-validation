@@ -434,6 +434,25 @@ one).
 
 ## Outputs
 
+- **`orats_daily_market_fetcher`'s rows (`providers/orats_daily_market.py`,
+  #96).** `fetcher(unit)`'s fourth return value, `ticker_rows`, are plain
+  dicts keyed by the `daily_market` contract's columns. A value this
+  provider maps from ORATS is `None` (never a raw sentinel, never silently
+  dropped) in two cases: the field, once scaled, falls outside its column's
+  entry in this module's `PLAUSIBLE_RANGES` (a local, test-verified mirror
+  of `engine.data.normalize.common.PLAUSIBLE_RANGES` — a value outside
+  range is not a real quote); or the column is `implied_move` and the
+  scaled, in-range value is `<= 0` (ORATS's own "no quote" sentinel for
+  that field, distinct from a genuine implausible value). `mcap_usd` is
+  `None` whenever the day's `cores` payload has no `mktCap` for that ticker
+  — this module never looks back at other sessions to fill it; the
+  backward-looking as-of carry is `engine.v2.data.incremental.merge_daily_market`'s
+  job, documented in that package's own `ARCHITECTURE.md` (bounded to the
+  partitions a refresh already loaded, not an unbounded historical scan).
+  None of this raises: masking a value is normal-path behavior for this
+  provider, not a failure (see "Failure semantics" for what does raise:
+  `SOURCE_NOT_FINAL`/`TRANSIENT_SOURCE`/etc. for a genuinely bad response,
+  never for a masked field).
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
