@@ -10,7 +10,7 @@ etc.), never as an import. ``engine/v2/data/legacy_adapter.py`` — the
 package's one legacy-importing module — imports *from* this module at
 module level (``from . import errors, legacy_materialization``), never the
 other way, so there is no module-level import cycle between the two.
-``materialize_tree`` (around :835) and ``_tier4_cache_dir`` (around :1055)
+``materialize_tree`` (around :844) and ``_tier4_cache_dir`` (around :1064)
 each import ``engine.v2.data.reference_inputs`` at call time instead —
 ``reference_inputs`` imports ``legacy_adapter`` at module level and takes
 its path constants from it, so a module-level import here would close a

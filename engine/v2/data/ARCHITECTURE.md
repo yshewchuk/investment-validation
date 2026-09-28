@@ -57,7 +57,7 @@ the root doc's Layer 1 row. It owns:
   which imports `legacy_materialization.py`, so neither of the two can
   import the other back at module level without one): `legacy_materialization
   .materialize_tree`/`_tier4_cache_dir` import `reference_inputs` lazily
-  (`legacy_materialization.py:835,1055` — `:1051-1053`'s own comment names
+  (`legacy_materialization.py:844,1064` — `:1060-1062`'s own comment names
   the cycle), and `reference_inputs.manifest_pins` imports
   `legacy_materialization.format_pinned_ref` lazily right back
   (`reference_inputs.py:288`);
@@ -530,14 +530,14 @@ idempotent-replay shortcut too.
   `MANIFEST_CORRUPT` here means nothing has been written yet.
 - **R1 (continued), the fence itself.** `commit_generic_table_candidate`
   builds a single `_combined_fence_check(conn_)` closure
-  (`generic_incremental.py:169-172`) that *always* calls this module's own
+  (`generic_incremental.py:187-190`) that *always* calls this module's own
   `_head_fence(conn_, scope, expected_head_snapshot_id, expected_head_generation)`
   first — refusing `SNAPSHOT_CONFLICT` if the scope's current
   `(snapshot_id, generation)` in `data_snapshot_heads` disagrees with what
-  the caller expected (`generic_incremental.py:465-471`) — and *then*, only
+  the caller expected (`generic_incremental.py:483-489`) — and *then*, only
   if the caller supplied one, calls the caller's own `fence_check(conn_)`.
   That combined closure is what gets passed to `catalog.commit_snapshot` as
-  *its* `fence_check` parameter (`generic_incremental.py:174-186`).
+  *its* `fence_check` parameter (`generic_incremental.py:192-204`).
   `catalog.commit_snapshot` invokes whatever `fence_check` it was given as
   the very first statement inside its own transaction
   (`catalog.py:500-501`, `fence_check(conn)`), **before** looking up the
@@ -574,7 +574,7 @@ idempotent-replay shortcut too.
   closure that always calls this module's own `_candidate_head_fence(c, scope,
   expected_head_snapshot_id, expected_head_generation)` first, then, only if
   the caller supplied one, the caller's own `fence_check(c)`
-  (`incremental.py`, mirroring `generic_incremental.py:169-172`'s own
+  (`incremental.py`, mirroring `generic_incremental.py:187-190`'s own
   `_combined_fence_check`). Fixed for #81: the previous code passed
   `fence_check or (lambda c: _candidate_head_fence(...))` to
   `catalog.commit_snapshot`, so a supplied `fence_check` replaced
@@ -631,14 +631,14 @@ idempotent-replay shortcut too.
   looked up, so the shortcut is refused, not returned. This is the
   documented purpose of composing `_head_fence` in front of a caller's own
   `fence_check` (`commit_generic_table_candidate`'s own docstring,
-  `generic_incremental.py:141-163`): it is what keeps head-conflict
+  `generic_incremental.py:141-181`): it is what keeps head-conflict
   detection active on the replay-shortcut path too, for every caller, not
   only when no custom `fence_check` is supplied — a stale, already-
   superseded attempt cannot silently replay a commit that has since moved
-  on. (That same docstring also names `computed_moves_store.py` as
-  following this pattern; per the corrected "Dependencies" section above,
-  it does not — that is the pre-existing, unchanged-code inaccuracy tracked
-  as #76.)
+  on. (That docstring used to also name `computed_moves_store.py` as
+  following this pattern; #76 corrected it, so it now says what the
+  "Dependencies" section above already did — `computed_moves_store.py`
+  never calls this function at all.)
   `engine.v2.ops.snapshots.commit_snapshot_for_attempt` is a third caller of
   the *plain* `catalog.commit_snapshot` path described above (alongside
   `computed_moves_store.py`/`price_history_store.py`): it too calls

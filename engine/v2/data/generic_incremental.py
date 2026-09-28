@@ -171,13 +171,13 @@ def commit_generic_table_candidate(
     idempotent-replay shortcut, a replay here is idempotent only when the
     original commit did NOT advance the head (``candidate.snapshot`` already
     equalled the expected head): ``_head_fence`` still matches and the shortcut
-    returns a receipt, though ``resulting_head_generation`` is derived from
-    ``expected_head_generation + 1``, not the unchanged value the original
-    receipt stored. If the commit DID advance the head, a replay's head
-    expectation no longer matches, so ``_head_fence`` raises
-    ``SNAPSHOT_CONFLICT`` first -- itself AMBIGUOUS, since another writer could
-    cause the same conflict. Either way, reconcile against the stored receipt,
-    not the fence result, before treating a retry as applied.
+    returns the prior receipt, with ``resulting_head_generation`` correctly
+    unchanged (``catalog._existing_receipt``'s #77/#82 fix). If the commit DID
+    advance the head, a replay's head expectation no longer matches, so
+    ``_head_fence`` raises ``SNAPSHOT_CONFLICT`` first -- itself AMBIGUOUS,
+    since another writer could cause the same conflict. Either way, reconcile
+    against the stored receipt, not the fence result, before treating a retry
+    as applied.
     """
     clock = clock or SystemClock()
     request_hash = request_hash or content_hash({"changeset": candidate.changeset_hash})
