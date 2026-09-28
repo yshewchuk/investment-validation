@@ -631,9 +631,23 @@ ever builds a `JobSpec`:
   runs (`_build_native_computed_moves_plan`, `nightly.py:614`) — the same
   tick-blocking trade-off that precedent already accepts, not a new one
   (CodeRabbit round 1: flagged as a real risk if left unbounded). One bound
-  this design DOES commit to: the build-attempt memo (Failure semantics,
-  R2 below) runs this build AT MOST ONCE per newly-selected `(as_of,
-  scope_hash)` identity, never every ~1s tick. This design does NOT,
+  this design DOES commit to, precisely (CodeRabbit, this round, real
+  finding — "AT MOST ONCE, never every tick" was ambiguous about whether a
+  FAILED build gets retried at all): the build-attempt memo (Failure
+  semantics, R2 below) gates this build against the SAME bounded,
+  backoff-scheduled retry contract as `computed_moves_refresh`'s own memo
+  — a newly-selected `(as_of, scope_hash)` identity gets up to
+  `_COMPUTED_MOVES_MAX_ATTEMPTS`-many build attempts, each separated by
+  `_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped delay, NOT one attempt per tick
+  and NOT unboundedly either; once that identity's attempts are exhausted,
+  the memo stops retrying it for the rest of the session (a NEW identity —
+  a different `as_of` or a different `scope_hash` — gets its own fresh
+  attempt budget). This is the pre-submission build/staging retry contract
+  ONLY. It is separate from, and must not be confused with, the submitted
+  job's own POST-submission `RetryPolicy("bounded", 2, (5, 30))`
+  (`stages.py:283`, R3 below) — that policy covers the WORKER retrying an
+  already-admitted job attempt; this memo covers the SIDECAR deciding
+  whether to build and submit a job attempt at all.
   however, additionally claim the resulting I/O is bounded by rows legacy
   `"score"` already read this session — it is not, for the reason above:
   legacy `"score"` reads through a different path and produces none of
@@ -1001,15 +1015,18 @@ addressed as `job_<id>#score` via `_job_output`, `nightly.py:180-188`).
   is watchlist-independent, this one's is not). A later job finds that
   night's attempt the same way `_native_score_batch_identity` does:
   `SELECT ... FROM jobs WHERE state='succeeded' AND idempotency_key LIKE
-  'nightly:<as_of>:%:native_score_batch'`, then the latest succeeded
-  `attempts` row for it (`input_bindings.py:43-45`'s own query is the same
-  shape).
-  (Nit, CodeRabbit: `LIKE` treats a bare `_` as a single-character wildcard,
-  and `<as_of>` is an ISO date with none, so this specific pattern is safe
-  today — but the SAME query shape used with a value that could ever
-  contain `_` or `%` should escape them, e.g. `LIKE ... ESCAPE '\'` with
-  `_`/`%` backslash-escaped in the literal, matching whatever escaping
-  convention `input_bindings.py:43-45`'s own query already uses, if any.)
+  'nightly:<as_of>:%:native_score_batch' ESCAPE '\'`, with any literal `_`
+  or `%` inside the substituted `<as_of>` value backslash-escaped before
+  the query is built (CodeRabbit, this round, real finding, escalated from
+  a "nit" in an earlier round to an actual fix here: a bare `LIKE` treats
+  `_` as a single-character wildcard, and today's `<as_of>` is a plain ISO
+  date with neither character — but writing the query defensively, with an
+  explicit `ESCAPE` clause, costs nothing and stops a future change to
+  `as_of`'s own format from silently turning this into a wildcard match
+  against the wrong session). Then the latest succeeded `attempts` row for
+  it (`input_bindings.py:43-45`'s own query is the same shape — that
+  query's own escaping convention, if it has one, should be matched here
+  too).
 - **Row keys.** Each successful row's own `BoardRequest` (ticker, strategy,
   ISO `event_date`, `session`) is exactly what `assemble_score_batch_inputs`
   already keys its `dict[BoardRequest, tuple[ScoreRequest,
@@ -2058,7 +2075,6 @@ flowchart TD
     features --> model_evidence
     score --> decision_validation
     score -.-> native_parity
-    score -.-> native_score_batch
     decision_validation --> decision_commit
     decision_commit --> export
     decision_commit --> backup
@@ -2070,7 +2086,7 @@ flowchart TD
     publication --> delivery
 
     classDef optional stroke-dasharray: 4 3
-    class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh,native_score_batch optional
+    class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh optional
 ```
 
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
@@ -2083,12 +2099,20 @@ including `native_parity` — it has no production caller, only
 (Part 4) is a real submittable job kind, unlike `native_parity` — see below
 for how production submission reaches it.
 
-`native_score_batch` (Cutover PR-7a, design) is a real submittable job kind
-reached through the tick sidecar, unlike `native_parity` — see
+`native_score_batch` (Cutover PR-7a, design — this diagram deliberately
+omits it, see below) is designed here to become a real submittable job
+kind reached through the tick sidecar, unlike `native_parity` — see
 "Outputs"/"Failure semantics" above for `submit_native_score_batch_shadow_if_ready`
 and the identical race/all-or-nothing rationale `computed_moves_refresh`
-already establishes for why it is never folded into this graph's submission
-path.
+already establishes for why it will never be folded into this graph's
+submission path once it exists. **This diagram is `nightly.py::GRAPH`/
+`OPTIONAL` as they exist today (CodeRabbit, this round, real finding — an
+earlier draft added a `score -.-> native_score_batch` edge and dashed
+`native_score_batch` node directly into this diagram, which is wrong:
+PR-7a ships no code, so neither dict contains it yet).** The implementation
+PR that follows this design adds that edge and node for real, the same way
+`#54` added `computed_moves_refresh`'s own edge/node to this same diagram
+when IT shipped code, not before.
 
 Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
 only production caller, `cli.py`, always passes `include_prerequisites=False`,
