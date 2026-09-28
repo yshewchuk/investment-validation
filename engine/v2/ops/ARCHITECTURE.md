@@ -663,17 +663,61 @@ status transition:
    `_insert_or_match` inserts a fresh row rather than matching the old
    terminal one — while a same-attempt-number resubmission (the
    crash-immediately-after-submit case) still dedupes exactly as
-   intended.** If `succeeded` under the CURRENT `attempt` value, this
-   phase returns `("ready", snapshot_id)`, reading `snapshot_id` off the
-   succeeded job's OWN committed `SnapshotImportReceipt`
-   (`resulting_head_snapshot_id`, `contracts/data.py:663`) — never by
-   re-reading `data_snapshot_heads`' mutable current head, which by the
-   time this branch runs may already differ (the crash-then-resume-
-   before-`_record` case this branch exists for: a prior `_submit_plan`
-   call for the SAME `as_of`/`attempt` already finished this step but
-   crashed before recording state — the snapshot THAT attempt committed,
-   not whatever is head NOW, is what its plan must pin).
-2. Otherwise, reads the CURRENT `shadow` scope head
+   intended.** This lookup's own row, if any, is what decides everything
+   below — steps 2 and 3 (reading the head, then calling `plan_import`)
+   run ONLY when NO row exists yet under this exact key; a key that
+   already has a row, in ANY state, never reaches them (the same "checked
+   first, before anything expensive runs" shape PR-7a's own R2 already
+   uses for `native_score_batch`'s different job kind, and the SAME claim
+   R2 below now makes explicit for this job too):
+   - **No row.** Falls through to step 2.
+   - **`succeeded`.** Returns `("ready", snapshot_id)` immediately, reading
+     `snapshot_id` off the succeeded job's OWN committed
+     `SnapshotImportReceipt` (`resulting_head_snapshot_id`,
+     `contracts/data.py:663`) — never by re-reading `data_snapshot_heads`'
+     mutable current head, which by the time this branch runs may already
+     differ (the crash-then-resume-before-`_record` case this branch
+     exists for: a prior `_submit_plan` call for the SAME `as_of`/`attempt`
+     already finished this step but crashed before recording state — the
+     snapshot THAT attempt committed, not whatever is head NOW, is what
+     its plan must pin).
+   - **Not yet terminal** (`queued`, `running`, `retry_wait`, or any other
+     state `TERMINAL_JOB_STATES` (`nightly_trigger.py:95`) does not list)
+     **(Opus-gate finding on `a30c624`, real: an earlier draft returned
+     early ONLY for `succeeded` and fell through to steps 2–4 for
+     anything else, re-planning and resubmitting under the SAME key while
+     the FIRST submission was still live. If the legacy store or the
+     implementation changed between ticks, the resubmitted request's
+     digest differs from the still-open row's, so `submission._insert_
+     or_match` raises `IDEMPOTENCY_CONFLICT` for a job that is not even
+     dead yet; the caller's resulting `_failure` bump then mints a SECOND
+     live job under a NEW key on the next tick while the FIRST keeps
+     running toward the same expected snapshot head — two imports racing
+     the same CAS precondition. This is the exact failure the doc's own
+     R3 account below always assumed could not happen.)** Reattaches to
+     that EXISTING job id directly: jumps straight to step 4's
+     `_drive_jobs_to_terminal` call and outcome handling below, WITHOUT
+     re-reading the head (step 2) or calling `plan_import`/`submit_import`
+     again (step 3 and the submit half of step 4) — so this key's own
+     request is submitted exactly once, ever, and a tick that resumes
+     after a `"timed_out"` outcome waits on the SAME row instead of
+     risking a second one.
+   - **Terminal but not `succeeded`** (`failed`, `cancelled`, or `blocked`
+     — `TERMINAL_JOB_STATES` minus `succeeded`). Raises the SAME typed,
+     non-retryable `INPUT_CHANGED` `OpsError` step 4's own terminal-failure
+     case raises, immediately, WITHOUT calling `plan_import`/`submit_
+     import` first: resubmitting under this SAME key could only ever
+     re-match this SAME dead row (`_insert_or_match`'s existing-row-wins-
+     regardless-of-state semantics, above), so a resubmission attempt
+     buys nothing and, if the legacy store moved since this row was
+     submitted, only invites a needless `IDEMPOTENCY_CONFLICT`.
+     `_submit_plan`'s existing `except _HANDLED_FAILURES` catches it and
+     routes into `_failure` with `snapshot_attempt=snapshot_attempt + 1`,
+     exactly as step 4's own terminal-failure case does, so the NEXT
+     `_submit_plan` entry mints a genuinely NEW key (this step, above)
+     rather than looking at this dead row again.
+2. Reached only when step 1 found no row at all under this key: reads the
+   CURRENT `shadow` scope head
    (`SELECT snapshot_id, generation FROM data_snapshot_heads WHERE
    scope='shadow'`; absent on a fresh catalog maps to `None`/`0`, the same
    defaults `plan_import`'s own signature already accepts) as the
@@ -702,15 +746,20 @@ status transition:
    either the `snapshot_attempt` identity or the `error_count` give-up
    budget; the next tick calls `_ensure_shadow_snapshot` again with the
    SAME `attempt` value and retries `plan_import` fresh.
-4. On a match, submits the plan through the REAL path —
-   `snapshot_import.save_import_plan` then
+4. **On a match** (step 3 found `session == as_of`), submits the plan
+   through the REAL path — `snapshot_import.save_import_plan` then
    `snapshot_import.submit_import(..., idempotency_key=
    f"shadow_snapshot_import:{as_of}:{attempt}")`, precisely `ops snapshot
    plan-import` + `ops snapshot submit`'s own two calls
    (`cli.snapshot_command`, `cli.py:926-956`), never a bespoke coordinator
-   call and never `run_shadow_nightly` — then drives that ONE job to
-   terminal with the SAME `supervisor.Service`/`supervisor.serve` helper
-   `_default_serve` already uses (factored so both share one small
+   call and never `run_shadow_nightly`. **This drive-to-terminal-and-
+   interpret step is also where step 1's REATTACH branch above lands
+   directly, skipping the submit call**: either way, exactly ONE job id
+   for this `as_of`/`attempt` key is being tracked — the one just
+   submitted here, or the one already in flight that step 1 found — and
+   the rest of this step applies identically to both. It drives that ONE
+   job to terminal with the SAME `supervisor.Service`/`supervisor.serve`
+   helper `_default_serve` already uses (factored so both share one small
    `_drive_jobs_to_terminal(service, job_ids, deadline_at)` helper instead
    of two copies of the same polling loop), bounded by the SAME
    `_serve_deadline` the whole run already respects, and held under the
@@ -2857,9 +2906,13 @@ for a `plan_ref`) — see point 1's own "Where this phase is called from,
 precisely" above for why it is NOT inside `_default_plan`, and point 6's
 "Bind the plan to the EXACT snapshot" for why the second tuple element
 exists at all. Every outcome below is one `_submit_plan` itself returns
-from or raises out of — there is no separate receipt status and no new
-field on `TriggerReceipt` (a `"timed_out"` outcome reuses the existing
-status and its existing consecutive-timeout counter, per point 4 above).
+from or raises out of — there is no separate receipt STATUS for any of
+them (a `"timed_out"` outcome reuses the existing status string and its
+existing consecutive-timeout counter, per point 4 above). `TriggerReceipt`
+DOES gain one new FIELD for this design, the dedicated `snapshot_attempt`
+counter — see "`TriggerReceipt` gains a new field" above for the full
+account of why a field, carried on every receipt regardless of status,
+was needed where a separate status was not.
 
 - **R1, missing input.** No committed `shadow`-scope head at all (`data_
   snapshot_heads` has no row for `scope='shadow'`) is not itself a
@@ -2904,14 +2957,25 @@ status and its existing consecutive-timeout counter, per point 4 above).
 - **R2, cache.** The idempotency-key job lookup (`f"shadow_snapshot_
   import:{as_of}:{attempt}"`, `attempt` per R6 below) IS this phase's own
   cache check, and it is checked FIRST, before `plan_import` ever
-  enumerates the legacy store: a `succeeded` job under the CURRENT
-  `attempt` key makes this phase return `("ready", snapshot_id)`
-  immediately (reading `snapshot_id` off that job's own committed receipt,
-  per point 1 above — never a fresh head read) on any later tick for the
-  same `as_of`/`attempt` (the crash-between-commit-and-
-  plan-build case: a prior `_submit_plan` call was interrupted after
-  `_ensure_shadow_snapshot` committed but before `plan_fn`/`cli._plan_
-  command` returned). This is the SAME shape as `nightly_trigger`'s own
+  enumerates the legacy store: once a row exists under the CURRENT
+  `attempt` key, in ANY state, it is never rebuilt or resubmitted — the
+  SAME "once a job exists under this key, in any state, it is never
+  rebuilt or resubmitted" cache rule PR-7a's own R2 above states for
+  `native_score_batch` (round-3 Opus-gate finding on `a30c624`, real: an
+  earlier draft of this bullet, and of step 1 itself, only guaranteed this
+  for a `succeeded` row and let anything else fall through to a fresh
+  `plan_import`/`submit_import` call — see step 1 above for the full
+  account of the double-submission that let through). A `succeeded` job
+  under the CURRENT `attempt` key makes this phase return `("ready",
+  snapshot_id)` immediately (reading `snapshot_id` off that job's own
+  committed receipt, per point 1 above — never a fresh head read); a
+  NON-terminal job under that same key (`queued`, `running`, `retry_wait`,
+  ...) is reattached to and waited on, never resubmitted; a job that is
+  terminal but not `succeeded` raises immediately instead of resubmitting.
+  All three cover the SAME crash-between-commit-and-plan-build case: a
+  prior `_submit_plan` call was interrupted after `_ensure_shadow_snapshot`
+  committed (or merely submitted) but before `plan_fn`/`cli._plan_command`
+  returned. This is the SAME shape as `nightly_trigger`'s own
   `"submitting"`-before-submit-call idempotency record (module docstring)
   and as PR-7a's own `native_score_batch` sidecar's "existence check runs
   before any raw row is read" (R2 above) — a third instance of the same
@@ -2921,13 +2985,32 @@ status and its existing consecutive-timeout counter, per point 4 above).
   real; the counter itself fixed by the Opus-gate findings on `e900074`
   and `fb7d31e`, both real, both Major — see "`TriggerReceipt` gains a new
   field" above for the full account).** A non-`succeeded` prior attempt
-  under the CURRENT
-  `attempt` key is not itself resubmitted — `submission._insert_or_match`
-  (`submission.py:296-322`) matches an EXISTING row under an unchanged
-  namespace+key pair regardless of that row's own state, so a bare
-  `as_of`-only key would make a terminally `failed` import PERMANENT for
-  the rest of that `as_of`'s retry window, with no way for a later tick to
-  try again. Retrying instead means minting a GENUINELY NEW key: `attempt`
+  under the CURRENT `attempt` key is never resubmitted — step 1 above
+  reattaches to (a non-terminal row) or raises on (a terminal, failed one)
+  an EXISTING row under this key WITHOUT calling `plan_import`/`submit_
+  import` again at all, so `submission._insert_or_match`
+  (`submission.py:296-322`) is never even asked to arbitrate a same-key
+  resubmission against a row this phase already knows about (Opus-gate
+  finding on `a30c624`, real — see step 1 above; an earlier draft relied on
+  `_insert_or_match`'s OWN "matches an EXISTING row under an unchanged
+  namespace+key pair regardless of that row's own state" behavior as the
+  ONLY safety net here, by actually calling `plan_import`/`submit_import`
+  again for a non-`succeeded` row — which is safe ONLY when the resubmitted
+  request's digest happens to still match the existing row's, and raises
+  `IDEMPOTENCY_CONFLICT` the moment it does not, for a job that may still
+  be running). Step 1 calls `submit_import` at all ONLY when it found NO
+  row under the current key (its own "No row" branch above), so by
+  construction `_insert_or_match` only ever INSERTS for this key, never
+  matches — the cross-tick "a job already exists under this key" case is
+  fully handled by step 1's own lookup, before `_insert_or_match` is ever
+  reached. `_insert_or_match`'s matching-regardless-of-state behavior
+  remains the reason a bare `as_of`-only key would still be dangerous even
+  with step 1's fix: it would make step 1's OWN "no row yet" branch never
+  true again after the first terminal failure (every later tick would find
+  that SAME `failed` row under the SAME key and raise forever, rather than
+  minting a fresh attempt), permanently wedging that `as_of` for the rest
+  of its retry window. Retrying instead means minting a GENUINELY NEW key:
+  `attempt`
   is `TriggerReceipt.snapshot_attempt`, a counter DEDICATED to this phase
   and touched ONLY by a raised `_HANDLED_FAILURES` out of THIS call (never
   by `error_count`, which a `"timed_out"` tick from THIS SAME phase's own
