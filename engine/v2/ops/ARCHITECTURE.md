@@ -913,27 +913,32 @@ name which cadence it picked and why.
   `_computed_moves_identity_or_none`.
 - **R3, retry.** Two SEPARATE mechanisms, not one, mirroring
   `computed_moves_refresh` exactly. (a) A durable, catalog-checked
-  deterministic job id, but ONE PER PHASE, not one for the whole build →
-  gate → promote sequence — a single cycle-wide key would make a completed
-  training/gate phase block its own promote retry: `job_id_for("shadow",
-  f"tier4_monthly_train:{month}")` / `job_id_for("shadow",
-  f"pool_nightly_train:{as_of}")` dedups the TRAINING submission, and a
-  separate `job_id_for("shadow", f"models_promote:{release_id}")` (keyed by
-  the release the build phase actually produced, known only once staging
-  completes) dedups the PROMOTE submission — mirroring `job_id_for("shadow",
-  _computed_moves_refresh_key(...))`'s shape, generalized to two keys per
-  cadence instead of one. Each submit function checks its OWN phase's key
-  before acting; a phase whose key already has a job, in any state, is
-  skipped without rebuilding, while a later, not-yet-keyed phase (e.g.
-  promote, once the release is staged and gated) still proceeds — this
-  durable state survives a `Service` restart because it is backed by the
-  catalog, not memory, so an incomplete phase always stays retryable and a
-  completed one is never resubmitted. (b) the in-memory
-  `_computed_moves_memo`-shaped backoff (above), which only throttles
-  repeated EMPTY/FAILING attempts against the same identity between
-  successes — it is not itself a correctness guard and does not survive a
-  restart. A `models_promote` retry against an already-live release is the
-  existing no-op (models doc §7.2 R3).
+  deterministic job id, one PER JOB, not one per cadence and not one for the
+  whole build → gate → promote sequence — a single shared key would make one
+  completed training job block another distinct one, or block its own
+  cycle's promote retry. The monthly reconcile submits one `training_plan`
+  per `FEATURE_ROLES`/`"gate"` champion recipe, so each gets its own key,
+  e.g. `job_id_for("shadow", f"tier4_monthly_train:{month}:{recipe_id}")`;
+  the nightly reconcile submits one for `mode="board_analog"` and one for
+  `mode="trailing_cutoff"`, e.g. `job_id_for("shadow",
+  f"pool_nightly_train:{as_of}:{mode}")`. Promotion is gated on ALL of a
+  cycle's training keys having a STAGED result, not just one. A separate
+  `job_id_for("shadow", f"models_promote:{release_id}")` (keyed by the
+  release the build phase actually produced, known only once every training
+  job in the cycle is staged) dedups the PROMOTE submission — mirroring
+  `job_id_for("shadow", _computed_moves_refresh_key(...))`'s shape,
+  generalized to one key per job instead of one key per cadence. Each submit
+  function checks its OWN job's key before acting; a job whose key already
+  exists, in any state, is skipped without rebuilding, while a sibling job
+  under a DIFFERENT key, or a later phase (promote, once every sibling is
+  staged and the cycle is gated), still proceeds — this durable state
+  survives a `Service` restart because it is backed by the catalog, not
+  memory, so an incomplete job always stays retryable and a completed one is
+  never resubmitted. (b) the in-memory `_computed_moves_memo`-shaped backoff
+  (above), which only throttles repeated EMPTY/FAILING attempts against the
+  same identity between successes — it is not itself a correctness guard and
+  does not survive a restart. A `models_promote` retry against an
+  already-live release is the existing no-op (models doc §7.2 R3).
 - **R4, transaction.** Build → gate → promote are three separate steps, each
   its own attempt, each its own durable key (R3). A crash between staging
   and gating leaves a staged-but-unpromoted release — harmless, since
