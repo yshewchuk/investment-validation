@@ -492,10 +492,17 @@ def test_poll_reaps_a_real_surviving_straggler_after_a_clean_exit(tmp_path):
     claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock),
                        supervisor=supervisor, clock=clock)
 
+    ready = tmp_path / "ready"
     straggler = subprocess.Popen(
-        [sys.executable, "-c", "import signal,time; "
-         "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
+        [sys.executable, "-c",
+         "import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+         "pathlib.Path(%r).write_text('ready'); time.sleep(30)" % str(ready)],
         start_new_session=True)
+    for _ in range(50):
+        if ready.exists():
+            break
+        time.sleep(0.01)
+    assert ready.exists(), "straggler never installed its SIGTERM handler"
     parent = subprocess.Popen([sys.executable, "-c", "pass"])
     parent_identity = process_info(parent.pid, "boot")[0]
     straggler_identity = process_info(straggler.pid, "boot")[0]
