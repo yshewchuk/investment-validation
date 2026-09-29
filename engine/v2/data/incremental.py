@@ -1320,12 +1320,28 @@ def _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at):
         receipt_id=record.raw_receipt_id, received_at=record.received_at)
 
 
+_revision_ordinal_high_water_mark = 0
+
+
 def _received_at_ordinal(received_at: str) -> int:
     """Microsecond-resolution ordinal from a received_at wire timestamp, so a
     later fetch of the same logical key outranks an earlier one even within
     the same second. Matches engine.v2.ops.forward_calendar_store._revision's
-    revision_ordinal=int(pd.Timestamp(received_at).timestamp() * 1_000_000)."""
-    return int(parse_timestamp(received_at).timestamp() * 1_000_000)
+    revision_ordinal=int(pd.Timestamp(received_at).timestamp() * 1_000_000)
+    as a FLOOR, not as the exact value: the clock's real resolution is
+    coarser than this microsecond string format implies, so two calls in
+    the same process can compute the identical floor even for genuinely
+    different revisions. A module-level high-water mark makes the
+    returned ordinal strictly increase across every call in this process,
+    so two revisions built here never tie -- `received_at` itself is
+    unaffected and still reflects the real observation time.
+    """
+    global _revision_ordinal_high_water_mark
+    floor = int(parse_timestamp(received_at).timestamp() * 1_000_000)
+    ordinal = floor if floor > _revision_ordinal_high_water_mark \
+        else _revision_ordinal_high_water_mark + 1
+    _revision_ordinal_high_water_mark = ordinal
+    return ordinal
 
 
 def _fetched_revision(contract, unit, row, raw_receipt_id, received_at):

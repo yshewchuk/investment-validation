@@ -258,6 +258,42 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 
 
+def test_a_missing_expected_ticker_refuses_the_refresh_without_committing(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+
+    _plan, requests = _build_requests(conn, store, clock, tmp_path,
+                                      context_tickers=(TICKER, "BBB"))
+    request = requests[0]
+    receipt = submit(conn, registry(), POLICY, request, clock=clock)
+
+    monkeypatch.setenv("ORATS_API_KEY", "test-key")
+    _install_fake_http_fetcher(monkeypatch, explode=False)
+
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock, code_source=ROOT)
+    service.start()
+    try:
+        states = ("succeeded", "failed", "retry_wait")
+        state = run_until(service, conn, receipt.job_id, timeout=60, states=states)
+        for _ in range(4):
+            if state != "retry_wait":
+                break
+            clock.advance(70)
+            state = run_until(service, conn, receipt.job_id, timeout=60, states=states)
+    finally:
+        service.close()
+
+    assert state != "succeeded"
+    assert state == "failed"
+    unchanged = _head(conn)
+    assert (unchanged["snapshot_id"], unchanged["generation"]) == (
+        head["snapshot_id"], head["generation"])
+    assert conn.execute("SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 0
+
+
 def test_second_native_refresh_for_the_same_session_is_cache_only(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
