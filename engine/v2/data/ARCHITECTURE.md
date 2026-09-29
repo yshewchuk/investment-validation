@@ -52,8 +52,12 @@ interface section; this names only the load-bearing entry points.
   exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
   Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
   `get_close`, and `explain_dependencies`.
-- **Pure primitives, no I/O** — `query.py`, `manifests.py`, `objects.py`,
-  `documents.py`.
+- **Pure primitives, no I/O** — `query.py` and `documents.py` (`manifests.py`
+  and `objects.py` are identity builders, not pure: `manifests.
+  verify_partition_hashes` calls `objects.partition_logical_hash`, which
+  opens and streams object bytes through an `ArtifactStore`, and `objects.py`
+  also holds `publish_legacy_file`/`inspect_fragment`, which do filesystem
+  I/O).
 - **Legacy-touching seam** — `legacy_adapter.py`, the package's only module
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
