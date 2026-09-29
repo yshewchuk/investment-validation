@@ -2696,6 +2696,77 @@ def test_select_pr_tests_loader_helper_taints_its_importer(tmp_path, monkeypatch
     tracked = ["engine/b.py", "tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
+    # Note: this helper's `importlib.util.spec_from_file_location` usage is
+    # ALSO already caught by the pre-existing "any non-import_module
+    # importlib.* attribute" rule (the `importlib.util` attribute access
+    # alone trips it) -- there is no way to reference
+    # spec_from_file_location/SourceFileLoader without an importlib import
+    # that already trips that older rule. This test still proves the
+    # end-to-end taint path works; it does not isolate the
+    # spec_from_file_location/SourceFileLoader additions specifically (see
+    # the two runpy/exec tests below for constructs that ARE only caught by
+    # this round's additions).
+    assert "tests/helper.py" in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected
+
+
+def test_select_pr_tests_runpy_helper_taints_its_importer(tmp_path, monkeypatch):
+    # runpy is unrelated to importlib, so this is NOT already caught by the
+    # pre-existing "importlib misuse" rule -- it only works because of this
+    # round's addition of runpy to _has_unresolved_import_attempt.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("VALUE = 2\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helper.py").write_text(
+        "import runpy\n"
+        "\n"
+        "def load(path):\n"
+        "    return runpy.run_path(path)\n")
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "from tests.helper import load\n"
+        "\n"
+        "def test_load():\n"
+        "    assert load('engine/b.py') is not None\n")
+    (tmp_path / "tests" / "test_b.py").write_text(
+        "import engine.b\n"
+        "\n"
+        "def test_import():\n"
+        "    assert engine.b is not None\n")
+    tracked = ["engine/b.py", "tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "tests/helper.py" in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected
+
+
+def test_select_pr_tests_bare_exec_helper_taints_its_importer(tmp_path, monkeypatch):
+    # A bare exec() is unrelated to importlib, so this is NOT already caught
+    # by the pre-existing "importlib misuse" rule -- it only works because
+    # of this round's addition of bare `exec` to
+    # _has_unresolved_import_attempt.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("VALUE = 2\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helper.py").write_text(
+        "def load(code):\n"
+        "    exec(code)\n")
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "from tests.helper import load\n"
+        "\n"
+        "def test_load():\n"
+        "    load('x = 1')\n")
+    (tmp_path / "tests" / "test_b.py").write_text(
+        "import engine.b\n"
+        "\n"
+        "def test_import():\n"
+        "    assert engine.b is not None\n")
+    tracked = ["engine/b.py", "tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
     assert "tests/helper.py" in pilot.unresolved_import_files(tracked)
     selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
     assert selected is not None
