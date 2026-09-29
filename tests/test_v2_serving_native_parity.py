@@ -8,6 +8,7 @@ against the same shapes the nightly job writes.
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from http import HTTPStatus
 
@@ -255,6 +256,72 @@ def test_malformed_native_refused_unmatched_wrong_type_returns_unavailable(tmp_p
     path, report = _full_report(tmp_path)
     report = json.loads(path.read_text())
     report["native_refused_unmatched"] = "not-a-list"
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_open_permission_error_returns_unavailable(tmp_path, monkeypatch):
+    path, _ = _full_report(tmp_path)
+
+    def _raise_permission_error(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("os.open", _raise_permission_error)
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo unsupported")
+def test_fifo_report_path_does_not_hang_and_is_not_available(tmp_path):
+    fifo_path = tmp_path / "report.fifo"
+    import os
+    os.mkfifo(fifo_path)
+
+    status, body = native_parity_summary(fifo_path)
+
+    assert status in (HTTPStatus.OK, HTTPStatus.SERVICE_UNAVAILABLE)
+    assert body["status"] in ("no_report", "unavailable")
+
+
+def test_malformed_mismatch_null_row_key_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["mismatches"][0]["row_key"] = None
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_mismatch_null_dimension_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["mismatches"][0]["dimension"] = None
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_refusal_code_null_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["native_refused"][0]["refusal_code"] = None
     path.write_text(json.dumps(report))
 
     status, body = native_parity_summary(path)

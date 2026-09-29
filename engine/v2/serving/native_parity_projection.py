@@ -85,7 +85,7 @@ def _open_regular_no_follow(path: Path):
     symlink between the check and the read can never be followed
     (TOCTOU-safe).
     """
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | os.O_NONBLOCK
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -103,6 +103,29 @@ def _open_regular_no_follow(path: Path):
     return os.fdopen(fd, "r")
 
 
+def _validate_mismatches(mismatches: list[Any]) -> None:
+    for entry in mismatches:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("row_key"), str)
+            or not isinstance(entry.get("dimension"), str)
+            or not isinstance(entry.get("finding_fields"), list)
+            or not all(isinstance(field, str) for field in entry["finding_fields"])
+        ):
+            raise ValueError("native parity mismatch entry is malformed")
+
+
+def _validate_optional_lists(report: dict[str, Any]) -> None:
+    for field in _OPTIONAL_LIST_FIELDS:
+        if field in report:
+            value = report[field]
+            if not isinstance(value, list):
+                raise ValueError(f"native parity report field {field!r} is present but not a list")
+            for entry in value:
+                if not isinstance(entry, dict) or not isinstance(entry.get("refusal_code"), str):
+                    raise ValueError(f"native parity report field {field!r} entry is malformed")
+
+
 def _load_report(handle) -> dict[str, Any]:
     """Parse and shape-check the report; raises on anything malformed."""
     report = json.load(handle)
@@ -113,16 +136,8 @@ def _load_report(handle) -> dict[str, Any]:
     for field in _REQUIRED_LIST_FIELDS:
         if not isinstance(report.get(field), list):
             raise ValueError(f"native parity report field {field!r} is missing or not a list")
-    for entry in report["mismatches"]:
-        if (
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("finding_fields"), list)
-            or not all(isinstance(field, str) for field in entry["finding_fields"])
-        ):
-            raise ValueError("native parity mismatch finding_fields is not a list of strings")
-    for field in _OPTIONAL_LIST_FIELDS:
-        if field in report and not isinstance(report[field], list):
-            raise ValueError(f"native parity report field {field!r} is present but not a list")
+    _validate_mismatches(report["mismatches"])
+    _validate_optional_lists(report)
     return report
 
 
@@ -146,6 +161,12 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
         return HTTPStatus.OK, {
             "schema_version": NATIVE_PARITY_SUMMARY_V1,
             "status": "no_report",
+        }
+    except OSError:
+        return HTTPStatus.SERVICE_UNAVAILABLE, {
+            "schema_version": NATIVE_PARITY_SUMMARY_V1,
+            "status": "unavailable",
+            "reason_code": NATIVE_PARITY_REPORT_MALFORMED,
         }
     try:
         with handle:
