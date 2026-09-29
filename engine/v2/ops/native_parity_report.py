@@ -399,8 +399,15 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[
     legacy_rows = legacy_parity_rows(score_document)
     native_rows, native_refusals, unkeyable_refusals = _native_rows_and_refusals(
         records_document, refusals_document)
-    if legacy_rows and not (set(legacy_rows) & set(native_rows)) and (
-            native_refusals or unkeyable_refusals):
+    shared = set(legacy_rows) & set(native_rows)
+    if legacy_rows and not shared:
+        fully_refused = set(legacy_rows) <= set(native_refusals)
+        nothing_keyable_at_all = (
+            not native_rows and not native_refusals and bool(unkeyable_refusals))
+        refusal_explains_absence = fully_refused or nothing_keyable_at_all
+    else:
+        refusal_explains_absence = False
+    if refusal_explains_absence:
         report = _empty_native_report(
             legacy_rows, native_rows, PARITY_DIMENSIONS, SCORE_RECORD_V1)
     else:

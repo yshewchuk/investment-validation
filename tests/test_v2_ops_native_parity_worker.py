@@ -79,6 +79,23 @@ def test_run_native_parity_worker_happy_path(tmp_path):
     assert report["native_refused_unmatched"] == []
 
 
+def test_run_native_parity_worker_reports_a_planted_mismatch(tmp_path):
+    legacy_row = _legacy_row(ticker="AAA", gate_score=0.5, gate_pass=True)
+    native_record = {"gate_score": 0.5, "gate_pass": False}
+    key = _canonical_key("AAA", "STR-THRU", "2026-01-15")
+    _write_inputs(tmp_path, rows=[legacy_row], records={key: native_record})
+
+    run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["compared"] == [_row_key(legacy_row)]
+    assert len(report["mismatches"]) == 1
+    mismatch = report["mismatches"][0]
+    assert mismatch["row_key"] == _row_key(legacy_row)
+    assert mismatch["dimension"] == "verdicts"
+    assert "gate_pass" in mismatch["finding_fields"]
+
+
 def test_run_native_parity_worker_empty_legacy_rows_raises(tmp_path):
     _write_inputs(tmp_path, rows=[], records={_canonical_key(): {}})
 
@@ -136,6 +153,17 @@ def test_run_native_parity_worker_disjoint_native_rows_with_keyed_refusal(tmp_pa
     assert report["only_native"] == ["ZZZ|STR-THRU|2026-01-15"]
     assert report["native_refused"] == [
         {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE"}]
+
+
+def test_run_native_parity_worker_unrelated_refusal_does_not_justify_empty_report(tmp_path):
+    row = _legacy_row(ticker="AAA")
+    unrelated_key = _canonical_key("ZZZ", "STR-THRU", "2026-01-15", session="am")
+    _write_inputs(tmp_path, rows=[row], records={},
+                  refusals={unrelated_key: {"code": "RELEASE_MISSING_ROLE", "detail": "..."}})
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
 
 
 def test_run_native_parity_worker_genuinely_missing_native_rows_raises(tmp_path):

@@ -441,18 +441,27 @@ a submission source" rule Part 4 already established for
   of how many native refusals exist. Only once `legacy_rows` is confirmed
   non-empty does it compute `shared = set(legacy_rows) & set(native_rows)`
   BEFORE calling `compare_native_vs_legacy` at all, and take this path
-  whenever `shared` is empty AND EITHER `native_refusals` (keyed) OR
-  `unkeyable_refusals` (above) is non-empty — "some refusal exists to
-  explain why nothing matched," not "native_rows is empty," and ONLY once
-  a legacy input actually exists to explain. This covers every case the
-  narrower "`native_rows` empty" check alone would miss:
+  whenever `shared` is empty AND EITHER (a) `set(legacy_rows) <=
+  set(native_refusals)` — every legacy key specifically named by a keyed
+  refusal, not merely "some refusal exists somewhere" (CodeRabbit gate
+  round 1, real finding: an unrelated refusal for a DIFFERENT population
+  key must never explain a DIFFERENT legacy row's absence — that case
+  still falls through and fails) — OR (b) `native_rows` and
+  `native_refusals` are BOTH empty while `unkeyable_refusals` is non-empty
+  (nothing was ever keyable at all, so nothing could have matched
+  anything, which vacuously explains every legacy key's absence). This
+  covers every case the narrower "`native_rows` empty" check alone would
+  miss:
   - **All refused, none keyable.** Every row refused `INVALID_KEY_FIELD`
     (above): `native_rows` and the keyed `native_refusals` are BOTH empty,
     but `unkeyable_refusals` is fully populated. The narrower check (only
     testing keyed `native_refusals`) would wrongly fall through to a
     normal `compare_native_vs_legacy` call and hit `_refuse_empty_inputs`.
   - **Disjoint keys, native_rows non-empty.** Every legacy row's native
-    counterpart was refused (keyed or unkeyable), while `native_rows`
+    counterpart was refused BY ITS OWN matching population key (case (a)
+    above — an unkeyable refusal carries no population key, so it can
+    never stand in for a specific legacy row's own counterpart here),
+    while `native_rows`
     itself holds OTHER rows entirely (different tickers/strategies,
     genuinely `only_native`) that share no key with `legacy_rows`. Because
     `native_rows` is non-empty, `_refuse_empty_inputs` would not fire, but
@@ -3424,17 +3433,25 @@ hold, extended here rather than re-argued from scratch.
   native refusals exist. **Only once `legacy_rows` is confirmed non-empty,
   `shared = set(legacy_rows) & set(native_rows)` being empty is explicitly
   NOT this refusal whenever a refusal explains it (CodeRabbit round 3;
-  widened by an Opus gate finding, both real):** an empty `shared` with
-  either the keyed `native_refusals` or the new `unkeyable_refusals`
-  (above) non-empty covers three cases — `native_rows` empty while
-  `native_refusals` is non-empty (every attempted row refused, not simply
-  absent); `native_rows` and keyed `native_refusals` BOTH empty while
+  widened by an Opus gate finding; tightened again by a CodeRabbit gate
+  round-1 finding on `#191`, all real):** an empty `shared` with EITHER
+  every key of `legacy_rows` specifically covered by a matching keyed
+  `native_refusals` entry (never merely "some unrelated refusal exists
+  somewhere" — a refusal naming a DIFFERENT population key can never
+  explain THIS legacy row's absence) OR `native_rows` and
+  `native_refusals` both empty while `unkeyable_refusals` (above) is
+  non-empty (nothing was ever keyable at all, so nothing could have
+  matched anything, which vacuously explains every legacy key) covers
+  three cases — `native_rows` empty while every legacy key is covered by
+  a keyed refusal (every attempted row refused, not simply absent);
+  `native_rows` and keyed `native_refusals` BOTH empty while
   `unkeyable_refusals` is fully populated (every row refused
   `INVALID_KEY_FIELD`, so nothing was ever keyable to begin with); and
   `native_rows` non-empty but sharing no key with `legacy_rows` because
-  every legacy-side counterpart was refused while native's other rows
-  belong to different tickers/strategies entirely — each a legitimate
-  reportable outcome, not a missing-input failure. `run_native_parity_worker`
+  every legacy-side counterpart is covered by its OWN matching keyed
+  refusal while native's other rows belong to different tickers/strategies
+  entirely — each a legitimate reportable outcome, not a missing-input
+  failure. `run_native_parity_worker`
   checks for `legacy_rows` non-empty, then for `shared` being empty (with
   a refusal to explain it) BEFORE calling `compare_native_vs_legacy` and
   routes it through `_empty_native_report` (above) instead in all three
