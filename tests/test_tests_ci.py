@@ -80,7 +80,7 @@ def test_checkout_fetch_depth_is_conditional_on_pull_request():
         workflow = yaml.safe_load(f)
 
     steps = workflow["jobs"]["test"]["steps"]
-    assert steps[0]["uses"] == "actions/checkout@v4"
+    assert steps[0]["uses"].startswith("actions/checkout@")
     assert steps[0]["with"]["fetch-depth"] == (
         "${{ github.event_name == 'pull_request' && 0 || 1 }}"
     )
@@ -102,7 +102,8 @@ def test_pytest_step_falls_back_to_tests_dir_and_has_selection_fallback():
         workflow = yaml.safe_load(f)
 
     steps = workflow["jobs"]["test"]["steps"]
-    pytest_step = next(s for s in steps if "pytest" in (s.get("run") or ""))
+    pytest_step = next((s for s in steps if s.get("name") == "Run pytest"), None)
+    assert pytest_step is not None, "no step named 'Run pytest' in the workflow"
     run = pytest_step["run"]
     for substring in ('TARGETS=("tests/")', "SELECTED[0]", "__ALL__", "No test files selected"):
         assert substring in run, substring

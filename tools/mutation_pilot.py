@@ -951,33 +951,44 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     other than the one literal `importlib.import_module("<literal>")`
     shape (an aliased import, any `from importlib import ...`, any other
     `importlib.*` attribute, or a non-literal `import_module(...)` call);
-    the standalone name `__import__`, however bound; or, for a
-    conftest.py only, an ANNOTATED or non-literal top-level
-    `pytest_plugins` assignment. Deliberately narrower than
-    `_is_dynamic_file`: it excludes `sys.path`, `subprocess`,
-    `multiprocessing`, `site`, `runpy`, `pkgutil`, os-exec functions, and
-    the bare `exec`/`eval`/`compile`/`spec_from_file_location`/
-    `SourceFileLoader`/`syspath_prepend`/`addsitedir`/`PYTHONPATH` names --
-    none of those mean the file could load some OTHER, unknown TRACKED
-    module at runtime, which is the only thing that makes an importer's
-    own closure untrustworthy. Used only by select_pr_tests's taint rule."""
+    the standalone name `__import__`, however bound;
+    `spec_from_file_location` or `SourceFileLoader` as a bare name or an
+    attribute's `.attr`; any `import runpy` or `from runpy import ...`; a
+    bare `ast.Name` `exec`; or, for a conftest.py only, an ANNOTATED or
+    non-literal top-level `pytest_plugins` assignment. Deliberately
+    narrower than `_is_dynamic_file`: it excludes `sys.path`,
+    `subprocess`, `multiprocessing`, `site`, `pkgutil`, os-exec
+    functions, and the bare `eval`/`compile`/`syspath_prepend`/
+    `addsitedir`/`PYTHONPATH` names -- none of those mean the file could
+    load some OTHER, unknown TRACKED module at runtime, which is the only
+    thing that makes an importer's own closure untrustworthy. Those four
+    constructs ARE included here despite that narrowing, because each can
+    load an arbitrary tracked module by a non-statically-resolvable path,
+    unlike the others, which either only affect import machinery
+    (`sys.path`) or launch something outside this process (`subprocess`,
+    `multiprocessing`, os-exec) or don't by themselves load a module
+    (bare `eval`/`compile`). Used only by select_pr_tests's taint rule."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
+                if alias.name.split(".")[0] == "runpy":
+                    return True
                 if alias.name.split(".")[0] == "importlib" and alias.asname is not None:
                     return True
         elif isinstance(node, ast.ImportFrom):
             top = (node.module or "").split(".")[0] if node.module else ""
+            if top == "runpy":
+                return True
             if top == "importlib":
                 return True
         elif isinstance(node, ast.Attribute):
-            if node.attr == "__import__":
+            if node.attr in ("__import__", "spec_from_file_location", "SourceFileLoader"):
                 return True
             if isinstance(node.value, ast.Name) and node.value.id == "importlib" \
                     and node.attr != "import_module":
                 return True
         elif isinstance(node, ast.Name):
-            if node.id == "__import__":
+            if node.id in ("__import__", "spec_from_file_location", "SourceFileLoader", "exec"):
                 return True
         elif isinstance(node, ast.Call):
             if _looks_like_import_module_call(node.func) and _allowed_import_module_call(node) is None:
@@ -1040,7 +1051,8 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     """The pytest test files (tests/test_*.py) a pull_request `test` CI run
     should collect. Returns None for "run the full suite" (a path on the
     full_suite allowlist, an unrecognized/unreached path, or any failure
-    building the graph -- never a silent narrow selection on an error).
+    building the graph or scanning for unresolved imports -- never a
+    silent narrow selection on an error).
     An empty `changed` returns [] (no diff -> nothing to run), the one
     intentional zero-selection case, matching changed_modules.
 
@@ -1068,7 +1080,13 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     tracked_set = set(graph)
     tests = pytest_test_files(tracked_set)
     dyn = dynamic_files(graph)
-    unresolved = unresolved_import_files(sorted(tracked_set))
+    try:
+        unresolved = unresolved_import_files(sorted(tracked_set))
+    except Exception as exc:
+        print(f"[mutation_pilot] unresolved-import scan failed "
+              f"({type(exc).__name__}: {exc}); selecting the full test suite",
+              flush=True)
+        return None
     closures: dict[str, set[str]] = {}
     selected: set[str] = set()
     for t in tests:

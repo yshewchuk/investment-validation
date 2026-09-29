@@ -2670,6 +2670,38 @@ def test_select_pr_tests_helper_with_unresolved_dynamic_import_taints_its_import
     assert "tests/test_b.py" in selected
 
 
+def test_select_pr_tests_loader_helper_taints_its_importer(tmp_path, monkeypatch):
+    # CodeRabbit round-3 finding: a helper that loads an unknown tracked
+    # module via importlib.util.spec_from_file_location (not
+    # importlib.import_module) must also taint its importer.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("VALUE = 2\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helper.py").write_text(
+        "import importlib.util\n"
+        "\n"
+        "def load(path):\n"
+        "    spec = importlib.util.spec_from_file_location('x', path)\n"
+        "    return spec\n")
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "from tests.helper import load\n"
+        "\n"
+        "def test_load():\n"
+        "    assert load('engine/b.py') is not None\n")
+    (tmp_path / "tests" / "test_b.py").write_text(
+        "import engine.b\n"
+        "\n"
+        "def test_import():\n"
+        "    assert engine.b is not None\n")
+    tracked = ["engine/b.py", "tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "tests/helper.py" in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected
+
+
 def test_select_pr_tests_conftest_as_root_does_not_taint_every_test(tmp_path, monkeypatch):
     # Guards the fix above from regressing into the mass-collapse #153
     # already fixed at the module level: tests/conftest.py is DYNAMIC (its
@@ -2718,6 +2750,12 @@ def test_select_pr_tests_graph_build_failure_selects_none_sentinel(monkeypatch):
     assert pilot.select_pr_tests(_SELECT_CFG, ["anything.py"]) is None
 
 
+def test_select_pr_tests_unresolved_scan_failure_selects_none_sentinel(monkeypatch):
+    monkeypatch.setattr(pilot, "unresolved_import_files",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert pilot.select_pr_tests(_SELECT_CFG, ["anything.py"]) is None
+
+
 def test_select_pr_tests_real_pr156_diff_selects_its_own_test_and_reports_dynamic_leaf_count():
     changed = [
         "engine/v2/ops/ARCHITECTURE.md",
@@ -2735,8 +2773,6 @@ def test_select_pr_tests_real_pr156_diff_selects_its_own_test_and_reports_dynami
     # point of this PR): fail loudly if it ever stops narrowing anything.
     assert dyn_leaf <= set(selected)
     assert len(selected) < len(real_tests)
-    print(f"[measured] {len(dyn_leaf)} of {len(real_tests)} test files are "
-          f"permanently selected as DYNAMIC leaves")
 
 
 def test_artifacts_change_selects_every_module_whose_tests_transitively_import_foundation():
