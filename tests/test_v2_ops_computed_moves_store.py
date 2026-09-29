@@ -223,6 +223,216 @@ def test_run_computed_moves_refresh_captures_one_complete_unit(tmp_path, monkeyp
     assert row["outcome"] == "added"
 
 
+def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_after_as_of(
+        tmp_path, monkeypatch):
+    """Issue #99: a re-run of a past session fetches the ticker's FULL
+    history at the run's real wall-clock time, which extends past ``as_of``.
+    Nothing may reach ``build_rows`` beyond ``as_of``: not the closes series,
+    and not an event dated on/after it (which would be scored against real
+    future closes and committed stamped ``computed_at = as_of``, leaking
+    realized data).
+
+    Row-level read-back: ``_scan_rows`` -- the store's only generic scanner --
+    cannot read this table back (it assumes year-partitioned fragments;
+    ``computed_moves`` fragments are partitioned by ticker, so
+    ``int(partition_key)`` raises before any scan). So this test proves
+    committed content with a direct ``DataQuery``/``KeyPredicate`` scan below
+    -- the same mechanism ``tests/test_v2_ops_price_history.py`` uses for its
+    own ticker-partitioned table -- plus a ``build_rows`` spy for what was
+    proposed to the row builder: no event at/after ``as_of``, a series
+    truncated at ``as_of``, and the ordinary pre-``as_of`` event still
+    computing a real (non-skipped) move. The capture log's
+    ``outcome == "added"`` additionally shows a fragment WAS written (not a
+    skip).
+    """
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    extended = pd.bdate_range("2024-01-02", "2024-02-29")  # runs well past _AS_OF
+    csv_bytes = "\n".join(["Date,Close"] + [f"{d.date()},{100.0 + i}"
+                                            for i, d in enumerate(extended)]).encode()
+    events_rows = ([_event_row("AAAA", d) for d in _EVENT_DAYS]  # all before _AS_OF
+                   + [_event_row("AAAA", pd.Timestamp("2024-02-05")),  # exactly on _AS_OF
+                      _event_row("AAAA", pd.Timestamp("2024-02-08"))])  # after _AS_OF
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+
+    captured: dict = {}
+    real_build_rows = computed_moves_store.build_rows
+
+    def _spy_build_rows(ticker, events, sd, sc, daily, **kwargs):
+        captured["event_dates"] = [str(ts.date()) for ts in events["event_date"]]
+        captured["series_last"] = str(pd.Timestamp(sd[-1]).date())
+        captured["rows"] = real_build_rows(ticker, events, sd, sc, daily, **kwargs)
+        return captured["rows"]
+
+    monkeypatch.setattr(computed_moves_store, "build_rows", _spy_build_rows)
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    fetcher = _CountingFetcher(csv_bytes)
+    parameters = _parameters(head, expected_ids=("AAAA",),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)
+
+    assert result.status == "complete"
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("AAAA",)).fetchone()
+    assert row["outcome"] == "added"  # a fragment WAS written -- the ticker wasn't skipped
+
+    assert captured["event_dates"]  # the spy really fired
+    assert captured["series_last"] <= _AS_OF  # series truncated at as_of_day
+    assert all(d < _AS_OF for d in captured["event_dates"])
+    assert "2024-02-08" not in captured["event_dates"]  # the leaked event never got here
+    assert "2024-02-05" not in captured["event_dates"]  # the on-as_of event is excluded too
+
+    rows = captured["rows"]
+    assert rows
+    # Every committed row is dated strictly before _AS_OF -- not even a
+    # skipped=True placeholder exists for the post-as_of event.
+    assert all(r["event_date"] < _AS_OF for r in rows)
+    pre = [r for r in rows if r["event_date"] == str(_EVENT_DAYS[0].date())]
+    assert len(pre) == 1
+    assert pre[0]["skipped"] is False
+    assert pre[0]["realized_move_pct"] is not None  # ordinary case still computes
+
+    from engine.v2.contracts import DataQuery, KeyPredicate
+    from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(result.candidate_snapshot_id)
+    dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
+        columns=("event_date", "realized_move_pct", "skipped"),
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAAA",)),),
+        order_by=("ticker", "event_date"), max_batch_rows=100, max_result_rows=100)
+    committed_rows = [r for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
+                      for r in batch.to_pylist()]
+
+    assert committed_rows
+    assert all(str(r["event_date"]) < _AS_OF for r in committed_rows)  # no post-as_of row at all
+    assert "2024-02-05" not in [str(r["event_date"]) for r in committed_rows]  # on-as_of too
+    committed_pre = [r for r in committed_rows
+                     if str(r["event_date"]) == str(_EVENT_DAYS[0].date())]
+    assert len(committed_pre) == 1
+    assert committed_pre[0]["skipped"] is False
+    assert committed_pre[0]["realized_move_pct"] is not None
+
+
+def test_run_computed_moves_refresh_series_entirely_after_as_of_is_too_few(
+        tmp_path, monkeypatch):
+    """The issue #99 truncation branch of ``_capture_targets``: every fetched
+    close is dated AFTER ``as_of``, so the series truncates to empty before
+    hashing and the unit logs ``too_few`` -- a legitimate business finding
+    that does not fail the job, exactly like the "BBBB has no events"
+    ``too_few`` outcome two functions below.
+
+    AAAA keeps real pre-``as_of`` events, so the branch under test is
+    specifically the series-truncates-to-empty one (``sd.size == 0``), not
+    the earlier ``events is None`` branch. A second ticker, BBBB, carrying an
+    ordinary complete series, is what lets this run commit at all: a
+    zero-fragment run short-circuits to a true noop BEFORE
+    ``_insert_captures`` (reached only through the commit's
+    ``record_references``) logs anything, so a ``too_few`` outcome is only
+    observable in a run that writes at least one fragment -- the same shape
+    as the BBBB test below, with the roles mirrored.
+    """
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA", "BBBB"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = [_event_row(ticker, d) for ticker in ("AAAA", "BBBB")
+                   for d in _EVENT_DAYS]  # every event strictly before _AS_OF
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+
+    after_as_of = pd.bdate_range("2024-02-06", "2024-02-29")  # entirely after _AS_OF
+    truncated = "\n".join(["Date,Close"] + [f"{d.date()},{100.0 + i}"
+                                            for i, d in enumerate(after_as_of)]).encode()
+    series_by_ticker = {"AAAA": truncated, "BBBB": _closes_csv()}
+    calls: list[str] = []
+
+    def fetcher(ticker):  # same return shape as _CountingFetcher, per-ticker bytes
+        calls.append(ticker)
+        return series_by_ticker[ticker], "complete", {}, None
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA", "BBBB"),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)
+
+    assert result.status == "complete"  # a too_few outcome never fails the job
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("AAAA",)).fetchone()
+    assert row["outcome"] == "too_few"
+    other = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("BBBB",)).fetchone()
+    assert other["outcome"] == "added"  # the run really committed, not a noop
+
+
+def test_run_computed_moves_refresh_capture_id_is_stable_across_different_post_as_of_tails(
+        tmp_path_factory, monkeypatch):
+    """Issue #99: capture identity must be a pure function of the series
+    TRUNCATED to ``as_of``, never of the raw fetch. Two runs whose fetches
+    agree on every date ``<= as_of`` but disagree on what comes after it --
+    the same ticker pulled on two different wall-clock days, with different
+    post-``as_of`` closes -- must log the SAME ``capture_id``: ``source_hash``
+    (and so ``_capture_id_for``) is computed from the truncated closes, and
+    the post-``as_of`` tail is invisible to capture identity.
+
+    The two runs are fully independent -- separate sqlite catalogs and
+    separate ``ArtifactStore`` roots via ``tmp_path_factory`` -- so this
+    compares hashes across DIFFERENT raw fetches, not the same-catalog
+    rerun no-op/cache behavior already covered by
+    ``test_run_computed_moves_refresh_cached_rerun_refetches_nothing``.
+    """
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+
+    through_as_of = pd.bdate_range("2024-01-02", "2024-02-05")  # identical, incl. _AS_OF
+
+    def _series(tail):  # tail: (date, close) pairs strictly AFTER _AS_OF
+        lines = [f"{d.date()},{100.0 + i}" for i, d in enumerate(through_as_of)]
+        lines += [f"{d.date()},{close}" for d, close in tail]
+        return "\n".join(["Date,Close"] + lines).encode()
+
+    tail_a = [(d, 900.0 + i) for i, d in enumerate(pd.bdate_range("2024-02-06", "2024-02-08"))]
+    tail_b = [(d, 800.0 + 7 * i)
+              for i, d in enumerate(pd.bdate_range("2024-02-06", "2024-02-15"))]
+
+    def _run(directory, csv_bytes):
+        conn, clock, _ = catalog(directory)
+        store = ArtifactStore(directory)
+        events_rows = [_event_row("AAAA", d) for d in _EVENT_DAYS]  # all before _AS_OF
+        head = _build_parent(conn, clock, store, events_rows=events_rows)
+        root = directory / "attempt"
+        _write_input(root, catalog_path=directory / "ops.sqlite",
+                     objects_root=directory, head=head)
+        parameters = _parameters(head, expected_ids=("AAAA",),
+                                 catalog_path=directory / "ops.sqlite",
+                                 objects_root=directory)
+        result = computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(csv_bytes))
+        assert result.status == "complete"
+        logged = conn.execute(
+            "SELECT outcome, capture_id FROM data_computed_moves_captures WHERE ticker = ?",
+            ("AAAA",)).fetchone()
+        assert logged["outcome"] == "added"  # a real capture both times, not two no-ops
+        return logged["capture_id"]
+
+    capture_a = _run(tmp_path_factory.mktemp("a"), _series(tail_a))
+    capture_b = _run(tmp_path_factory.mktemp("b"), _series(tail_b))
+    assert capture_a == capture_b  # identity ignores the differing post-as_of tail
+
+
 def test_run_computed_moves_refresh_completed_ids_cover_every_target_even_when_one_has_no_committable_rows(
         tmp_path, monkeypatch):
     """Round 3 fix (Opus finding 2): completed_ids must report the full

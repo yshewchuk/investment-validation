@@ -5003,6 +5003,27 @@ beyond this PR's own scope.
   is the ordinary, correct path for every as-of's first few ticks before any
   plan exists.
 
+### `computed_moves_store.py` (issue #99: a captured ticker's rows must never carry realized data from after `as_of`)
+
+- **R1.** `_capture_targets` truncates the fetched `(dates, closes)` series to
+  `dates <= as_of` before computing `source_hash`, and filters `events` to
+  `sd[0] <= event_date < as_of`, before either reaches `build_rows`. This
+  bounds every ticker THIS RUN captures: a fragment `_commit_generation`
+  carries forward unchanged, for a ticker this run does not capture, is not
+  re-filtered — a separate, pre-existing gap, tracked as
+  [#179](https://github.com/yshewchuk/investment-validation/issues/179).
+- **R2.** A truncated-to-empty series (every fetched date was after `as_of`)
+  degrades to the existing `outcome="too_few"` case, never a raise.
+- **R3.** An event that survives the filter but whose session-aware exit
+  price still falls past the truncated series gets no special-cased
+  exclusion: `session_move`'s existing out-of-range guard already returns
+  `None` for it, and `build_rows` folds that into an ordinary
+  `skipped=True` row.
+- **R6.** `source_hash`/`capture_id` are computed from the truncated series,
+  so a same-`as_of` rerun with an unchanged provider fetch truncates to the
+  identical bound both times — the no-op/re-resolve behavior `#41`
+  established is unchanged.
+
 ## Invariants
 
 Enforces or is bound by, from the root doc §5: missing-input typed
