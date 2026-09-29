@@ -448,12 +448,13 @@ batch boundary this scoping protects. `checks/phase4_real.py`,
 `tools/phase4_targeted_replay.py` and `checks/phase5_phase4_replay.py`
 already validate request-compatible bindings before calling `score_frozen`,
 so scoping is close to a no-op for them once wildcard bindings are
-honored. `tools/capture_tier0_corpus.py::_frozen_runtime` submits an
-`InferenceRequest` for every binding in the release unconditionally,
-without comparing `strategy_id`/`decision_clock_id` against the request
-first — this is the production path that makes an out-of-scope inference
-request routine, which is why the `outputs`/`gate_result` leak-prevention
-above matters, not only the executor-selection filtering.
+honored. `tools/capture_tier0_corpus.py::_frozen_runtime` builds an
+`InferenceRequest` for each binding in the release that has a valid
+captured per-role feature row, without comparing that binding's
+`strategy_id`/`decision_clock_id` against the request first — it can
+supply an out-of-scope binding's request this way, which is why the
+`outputs`/`gate_result` leak-prevention above matters, not only the
+executor-selection filtering.
 `native_score_batch` goes through `score_one`, never `score_frozen`, and
 is unaffected.
 
