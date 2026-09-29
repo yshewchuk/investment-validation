@@ -199,3 +199,66 @@ def test_symlinked_report_path_is_treated_as_missing(tmp_path):
     status, body = native_parity_summary(link)
     assert status == HTTPStatus.OK
     assert body == {"schema_version": NATIVE_PARITY_SUMMARY_V1, "status": "no_report"}
+
+
+def _full_report(tmp_path):
+    report = _build_report(
+        *_fixture_rows(),
+        native_refusals={"TSLA-2026-01-04": "NO_INPUT"},
+        unkeyable_refusals=(_UNKEYABLE_REFUSAL,),
+    )
+    path = write_parity_report(report, tmp_path / "report.json")
+    return path, json.loads(path.read_text())
+
+
+def test_malformed_schema_version_null_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = dict(report)
+    report["schema_version"] = None
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_finding_fields_not_a_list_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    assert report["mismatches"], "fixture must have at least one mismatch"
+    report["mismatches"][0]["finding_fields"] = "gate_score"
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_native_refused_present_as_null_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["native_refused"] = None
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_native_refused_unmatched_wrong_type_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["native_refused_unmatched"] = "not-a-list"
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED

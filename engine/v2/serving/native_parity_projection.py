@@ -13,7 +13,10 @@ for the condition-to-outcome failure-semantics table this implements.
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
+import stat
 from collections import Counter
 from http import HTTPStatus
 from pathlib import Path
@@ -29,6 +32,7 @@ NATIVE_PARITY_SUMMARY_V1 = "native_parity_summary.v1.0"
 NATIVE_PARITY_REPORT_MALFORMED = "NATIVE_PARITY_REPORT_MALFORMED"
 
 _REQUIRED_LIST_FIELDS = ("compared", "only_legacy", "only_native", "mismatches")
+_OPTIONAL_LIST_FIELDS = ("native_refused", "native_refused_unmatched")
 
 
 def _field_mismatch_counts(mismatches: list[dict[str, Any]]) -> dict[str, int]:
@@ -70,16 +74,55 @@ def _reason_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _load_report(path: Path) -> dict[str, Any]:
+def _open_regular_no_follow(path: Path):
+    """Open ``path`` for reading without ever following a symlink.
+
+    Raises ``FileNotFoundError`` for a missing path, a symlink, or anything
+    that is not a plain regular file -- the caller's ``"no_report"``
+    outcome. Any other ``OSError`` propagates as the caller's
+    ``"unavailable"`` outcome. The symlink/regular-file check and the read
+    happen on the SAME open file descriptor, so a path swapped for a
+    symlink between the check and the read can never be followed
+    (TOCTOU-safe).
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+            raise FileNotFoundError(str(path)) from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FileNotFoundError(str(path))
+    except BaseException:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "r")
+
+
+def _load_report(handle) -> dict[str, Any]:
     """Parse and shape-check the report; raises on anything malformed."""
-    report = json.loads(path.read_text())
+    report = json.load(handle)
     if not isinstance(report, dict):
         raise ValueError("native parity report is not a JSON object")
-    if "schema_version" not in report:
-        raise ValueError("native parity report has no schema_version")
+    if not isinstance(report.get("schema_version"), str):
+        raise ValueError("native parity report has no string schema_version")
     for field in _REQUIRED_LIST_FIELDS:
         if not isinstance(report.get(field), list):
             raise ValueError(f"native parity report field {field!r} is missing or not a list")
+    for entry in report["mismatches"]:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("finding_fields"), list)
+            or not all(isinstance(field, str) for field in entry["finding_fields"])
+        ):
+            raise ValueError("native parity mismatch finding_fields is not a list of strings")
+    for field in _OPTIONAL_LIST_FIELDS:
+        if field in report and not isinstance(report[field], list):
+            raise ValueError(f"native parity report field {field!r} is present but not a list")
     return report
 
 
@@ -87,27 +130,36 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
     """Load ``report_path`` and return a compact, dashboard-ready summary.
 
     See the module docstring and root ``ARCHITECTURE.md`` section 4 for the
-    three-way failure semantics: missing file -> ``"no_report"`` (200, the
-    everyday state today, no production job writes this artifact yet);
-    malformed content -> ``"unavailable"`` (503); a valid but pre-refusal-
-    schema report -> ``"available"`` with ``partial: true``.
+    failure semantics: missing file, a symlink, or a non-regular path ->
+    ``"no_report"`` (200, the everyday state today, no production job
+    writes this artifact yet); malformed content, including a present but
+    non-list/wrongly-typed required or optional field -> ``"unavailable"``
+    (503); a valid report simply missing the optional
+    ``native_refused``/``native_refused_unmatched`` KEYS (pre-refusal
+    schema) -> ``"available"`` with ``partial: true``. A key present with a
+    null or otherwise non-list value is malformed, never treated as absent.
     """
     path = Path(report_path)
-    if path.is_symlink() or not path.is_file():
+    try:
+        handle = _open_regular_no_follow(path)
+    except FileNotFoundError:
         return HTTPStatus.OK, {
             "schema_version": NATIVE_PARITY_SUMMARY_V1,
             "status": "no_report",
         }
     try:
-        report = _load_report(path)
+        with handle:
+            report = _load_report(handle)
         mismatches = report["mismatches"]
         field_mismatch_counts = _field_mismatch_counts(mismatches)
         dimension_mismatch_counts = _dimension_mismatch_counts(mismatches)
         worst_rows = _worst_rows(mismatches, worst_limit)
-        native_refused = report.get("native_refused")
-        native_refused_unmatched = report.get("native_refused_unmatched")
-        partial = native_refused is None or native_refused_unmatched is None
-        reason_counts = _reason_counts((native_refused or []) + (native_refused_unmatched or []))
+        has_refused = "native_refused" in report
+        has_refused_unmatched = "native_refused_unmatched" in report
+        native_refused = report.get("native_refused", [])
+        native_refused_unmatched = report.get("native_refused_unmatched", [])
+        partial = not (has_refused and has_refused_unmatched)
+        reason_counts = _reason_counts(native_refused + native_refused_unmatched)
     except (OSError, json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError):
         return HTTPStatus.SERVICE_UNAVAILABLE, {
             "schema_version": NATIVE_PARITY_SUMMARY_V1,
@@ -125,7 +177,7 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
         "field_mismatch_counts": field_mismatch_counts,
         "dimension_mismatch_counts": dimension_mismatch_counts,
         "worst_rows": worst_rows,
-        "native_refused_count": len(native_refused or []),
-        "native_refused_unmatched_count": len(native_refused_unmatched or []),
+        "native_refused_count": len(native_refused),
+        "native_refused_unmatched_count": len(native_refused_unmatched),
         "native_refused_reasons": reason_counts,
     }
