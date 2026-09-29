@@ -59,13 +59,12 @@ load-bearing entrypoints:
 - `nightly_source_bundle.py` — `assemble_nightly_source_bundle()`,
   `quote_domain_map()`, `validated_as_of()`, `NightlySourceBundleRefusal` —
   the per-night, per-`(ticker, event)` `SourceBundle` field assembler (see
-  Inputs/Outputs/Failure semantics). Only `quote_domain_map` is in
-  `README.md`'s `<!-- public-interface: -->` directive today
-  (`checks/package_readmes.py` passes with just that one listed).
-  `engine.v2.ops.native_score_batch.py` (Cutover PR-3) already imports the
-  other three symbols too — a real `engine.v2.*` consumer exists for all
-  four today (see Dependencies for what that consumer actually runs in
-  production).
+  Inputs/Outputs/Failure semantics). All four names are in `README.md`'s
+  `<!-- public-interface: -->` directive: `checks/package_readmes.py`
+  requires an entry for any name a package imports, including via a
+  submodule-qualified import, and `engine.v2.ops.native_score_batch.py`
+  (Cutover PR-3) imports all but `quote_domain_map` (see Dependencies for
+  what that consumer actually runs in production).
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
   identity, model artifact refs, and analog/payoff/recalibration artifacts;
@@ -248,11 +247,12 @@ produces the same `ScoreRecord`, `identity.py`). Other typed refusals:
 
 **STR-RUNUP's `runup_move` forecast field (issue #94, resolved).** Every
 mechanism that produces this strategy's forecast populates two fields, never
-one conflated name: `runup_move_raw_d14` (the model's own D14-horizon
-magnitude) and `runup_move_prediction` (`runup_move_raw_d14` scaled by
-`days_before_print / 14`, exactly once — the published value). The model
-stage prefers `runup_move_raw_d14`, falling back to `runup_move_prediction`
-only when no raw value was produced (reachable only via an invalid/missing
+one conflated name: `runup_move_raw_d14` (the model's own native-horizon
+magnitude) and `runup_move_prediction` (a scaled, published value derived
+from it exactly once — the scaling formula itself is
+`native_payoff.scale_runup_move`, not restated here). The model stage
+prefers `runup_move_raw_d14`, falling back to `runup_move_prediction` only
+when no raw value was produced (reachable only via an invalid/missing
 `days_before_print`, before the model stage's own horizon check refuses
 `MISSING_MODEL_INPUT:days_before_print`); it refuses
 `MISSING_MODEL_INPUT:runup_move_prediction` when neither value is finite.
