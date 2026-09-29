@@ -43,9 +43,8 @@ gets fit — see its own package doc reference in the root index. Nothing in
 `engine/v2/models` reads a live panel, calls `.fit()`, or writes
 `registry.json`.
 
-An automated nightly append cycle for the pool/residual/cutoff artifacts
-(rather than the one-shot, operator-run staging this doc describes) is a
-proposed, not-yet-implemented design — see issue #192.
+An automated nightly append cycle for the pool/residual/cutoff artifacts:
+design only, not yet implemented — see #192.
 
 ## 2. Primary contracts and public interfaces
 
@@ -81,8 +80,8 @@ through the loader for its family (`FrozenInference` for models,
 non-model state) — never by opening a staged object file directly outside
 `deployment.py`'s own hash verification.
 
-Proposed additions (`carry_forward_release`, `derive_catalog`, and an
-optional staleness guard on `promote`), not yet implemented: issue #192.
+`carry_forward_release`, `derive_catalog`: design only, not yet
+implemented — see #192.
 
 ## 3. Inputs
 
@@ -126,9 +125,8 @@ optional staleness guard on `promote`), not yet implemented: issue #192.
 - Every non-model frozen-state builder (`training/residuals.py`,
   `training/chooser_pool.py`, …) returns an immutable dataclass; the
   release/state catalog file (`phase5_release.json`) is written and read
-  by `checks/phase5_release.py` today, one path per release ROOT (shared
-  across every `release_id` staged under it) — not by this package, and
-  not yet per-`release_id` (a known gap; issue #192).
+  by `checks/phase5_release.py` today, one path per release ROOT with one
+  catalog body for one `release_id` — not by this package.
 
 ## 5. Dependencies
 
@@ -207,10 +205,8 @@ independently of whatever staged it.
 | Crash after the pointer write but before its history entry is appended | Self-healing: the next call re-derives the missing entry from the live pointer before acting, so the undo stack is never shifted |
 | Repeated promote of the same id | Exactly one no-op, not two history entries |
 
-A proposed, not-yet-implemented extension adds an optional
-`expected_previous_release_id` staleness guard to `promote`, for a queued
-job that may run after a newer promotion landed — issue #192 (residual gap:
-issue #137).
+`promote`'s optional `expected_previous_release_id` guard: design only, not
+yet implemented — see #192, #137.
 
 ### 7.3 `resolve_release` / `current_release` (read-only)
 
