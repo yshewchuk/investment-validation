@@ -46,6 +46,7 @@ X = 5.0                    # the one finite feature every artifact reads
 CLOCK = "entry-close"
 STRATEGY = "STR-THRU"
 OTHER_STRATEGY = "STR-RUNUP"
+OTHER_CLOCK = "entry-open"
 
 
 def _linear(feature_order, name, intercept, coefficients):
@@ -64,12 +65,13 @@ def _member(root, filename, document) -> ArtifactMember:
                           + hashlib.sha256(path.read_bytes()).hexdigest())
 
 
-def _binding(root, binding_id, role, strategy_id, *, output, intercept):
+def _binding(root, binding_id, role, strategy_id, *, output, intercept,
+             clock=CLOCK):
     member = _member(root, f"{binding_id}.json",
                      _linear(("x",), output, intercept, (0.0,)))
     return ModelBinding(
         binding_id=binding_id, model_id=f"{binding_id}-linear", role=role,
-        strategy_id=strategy_id, decision_clock_id=CLOCK,
+        strategy_id=strategy_id, decision_clock_id=clock,
         adapter="json-linear.v1", feature_order=("x",),
         output_names=(output,), members=(member,),
     )
@@ -133,6 +135,34 @@ def test_gate_scoped_to_request_strategy(tmp_path):
     other = _binding(tmp_path, "b-gate-runup", "gate", OTHER_STRATEGY,
                      output="gate_score", intercept=-42.0)
     for bindings in ((gate, other), (other, gate)):
+        record = _score(tmp_path, _release(bindings), bindings)
+        assert record.gate_terms["gate_score"] == 1.0
+        assert record.gate_terms["gate_pass"] is True
+
+
+def test_forecast_target_scoped_to_request_clock_both_orders(tmp_path):
+    """A same-strategy binding on a DIFFERENT decision clock never answers
+    this request's ``driver_prediction``, whichever release order it
+    holds -- the clock half of the scoping predicate, not just strategy."""
+    driver = _binding(tmp_path, "b-driver", "driver", STRATEGY,
+                      output="driver_prediction", intercept=6.0)
+    other_clock = _binding(tmp_path, "b-other-clock", "driver", STRATEGY,
+                           output="driver_prediction", intercept=100.0,
+                           clock=OTHER_CLOCK)
+    for bindings in ((driver, other_clock), (other_clock, driver)):
+        record = _score(tmp_path, _release(bindings), bindings)
+        assert record.forecasts["driver_prediction"] == 6.0
+
+
+def test_gate_scoped_to_request_clock(tmp_path):
+    """A same-strategy gate binding on a DIFFERENT decision clock never
+    claims this request's gate slot, whichever release order it holds."""
+    gate = _binding(tmp_path, "b-gate-thru", "gate", STRATEGY,
+                    output="gate_score", intercept=1.0)
+    other_clock = _binding(tmp_path, "b-gate-other-clock", "gate", STRATEGY,
+                           output="gate_score", intercept=-42.0,
+                           clock=OTHER_CLOCK)
+    for bindings in ((gate, other_clock), (other_clock, gate)):
         record = _score(tmp_path, _release(bindings), bindings)
         assert record.gate_terms["gate_score"] == 1.0
         assert record.gate_terms["gate_pass"] is True

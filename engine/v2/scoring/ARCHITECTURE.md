@@ -385,108 +385,77 @@ number. Before this fix, a frozen-sourced value was scaled once at capture
 and a second time by the model stage's own `native_payoff.scale_runup_move`;
 a live-local value was never scaled for publication at all.
 
-**`score_frozen`'s release-binding scope (issue #93).** A `ModelRelease`
-binds every strategy's models together (a release
-normally carries, e.g., STR-THRU's `driver`/`gate` bindings and STR-RUNUP's
-`implied_t1`/`gate` bindings side by side, alongside a `forecast`-role
-binding some releases share across every strategy — see the wildcard note
-below). `score_frozen(request, inference, release, inference_request,
-fields)` scores exactly ONE `ScoreRequest`, for one `(strategy_version,
-decision_clock_id)` pair; it must never let another strategy's or clock's
-OWN binding answer that request. Before building the canonical forecast
-executors (`_frozen_stage_executors`), stripping a bundle's own local
-recipe for an output a release binding owns (`_without_frozen_recipes`),
-or picking the gate binding (`_frozen_gate_inputs`), `score_frozen` filters
-`release.bindings` down to `_frozen_scoped_bindings(release,
-request)` — every binding whose `decision_clock_id` equals the request's
-own AND whose `strategy_id` is EITHER the request's own `strategy_version`
-OR the literal wildcard `"*"` — and pass only that scoped tuple through as
-`executor_bindings`. The `"*"` wildcard is an existing, real convention,
-not new to this fix: `checks/phase4_frozen_bridge.py`'s own binding
-resolution already treats `strategy_id not in {request.strategy_version,
-"*"}` as the rejection test (line ~237), and `checks/phase4_real.py`'s own
-synthetic STR-THRU release binds a shared `role="forecast",
-strategy_id="*"` alongside a STR-THRU-only `role="driver",
-strategy_id="STR-THRU"` binding — a `"*"`-strategy binding is how a release
-shares one model (there, sizing/crush) across every strategy rather than
-duplicating it per strategy. Dropping `"*"` bindings during scoping would
-silently stop a real cross-strategy binding from covering its target,
-turning a currently-served output into a missing one. A release's OTHER,
-strategy-specific bindings for a different strategy (e.g. STR-RUNUP's own
-`implied_t1`/`gate` while scoring STR-THRU) stay invisible to these three
-functions for this request, so they can never own a canonical forecast
-target (`driver_prediction`, `forecast_abs_move`, `runup_move_prediction`,
-`pred_iv_crush`/`pred_iv_crush_30`, `model_fair_pct`) or occupy the gate
-slot meant for another strategy.
+**`score_frozen`'s release-binding scope.** A `ModelRelease` binds every
+strategy's models together (e.g. STR-THRU's `driver`/`gate` bindings and
+STR-RUNUP's `implied_t1`/`gate` bindings side by side, plus any
+`forecast`-role binding a release shares across every strategy). Each call
+to `score_frozen` scores exactly one `ScoreRequest`, for one
+`(strategy_version, decision_clock_id)` pair, and must never let another
+strategy's or another clock's own binding answer that request.
+
+Before building the canonical forecast executors, stripping a bundle's
+local recipe for an output a release binding owns, or picking the gate
+binding, `score_frozen` filters `release.bindings` to
+`_frozen_scoped_bindings(release, request)`: every binding whose
+`decision_clock_id` matches the request's own AND whose `strategy_id` is
+either the request's own `strategy_version` or the wildcard `"*"`. The
+`"*"` convention is shared with `checks/phase4_frozen_bridge.py`'s own
+binding resolution: a `"*"`-strategy binding is how a release shares one
+model across every strategy instead of duplicating it per strategy, and it
+is never dropped during scoping. A release's other, strategy-specific
+bindings for a different strategy stay invisible for this request, so they
+can never own a canonical forecast target or occupy the gate slot meant
+for another strategy or clock.
+
+Scoping is enforced at two points, not one: once when selecting which
+bindings build the canonical executors and strip local recipes, and again
+when folding inference results into `outputs`/`gate_result`
+(`_collect_frozen_results`) — an out-of-scope binding's raw result must
+never surface in the published record, even when its `InferenceRequest`
+was submitted alongside an in-scope one (a caller may legitimately submit
+every binding in a release without filtering first; see Reachability
+below). The same scoping also governs which bindings' state/reason codes
+can force the request's final not-READY status check to refuse.
 
 Within the scoped set (wildcard bindings included), two bindings can still
-collide on the same canonical target (e.g. a misconfigured release binding
-both `driver` and `implied_t1` to the SAME strategy, which both map to
-`driver_prediction`), or on the gate role (two `gate` bindings whose scoped
-`(strategy, decision_clock)` match — including a `"*"`-strategy gate
-alongside a strategy-specific one). This is a release defect, not a
-per-request condition: `_frozen_scoped_bindings` refuses it with
-`FrozenBindingConflict(target, binding_ids)` (a `ValueError` subclass, the
-same "nothing was inferred" call-level refusal shape
-`frozen_batch.FrozenBatchPreflightError` already uses) rather than
-resolving it by binding order — no request is ever scored against an
-ambiguous release. This is a distinct refusal from `FrozenStageRefusal`:
-the latter is a per-record MODEL_NOT_READY outcome carried on the
-`ScoreRecord` for one missing/hash-mismatched artifact, raised while
-inferring; `FrozenBindingConflict` is raised before any inference, over
-the release's own shape, and always fails the whole call (and, through it,
-the whole `score_frozen_batch` batch — batch preflight does not re-check
-this, so the first affected request's `score_frozen` call raises it).
+collide on the same canonical target, or on the gate role. This is a
+release-authoring defect, not a per-request condition:
+`_frozen_scoped_bindings` refuses it with `FrozenBindingConflict(target,
+binding_ids)` (a `ValueError` subclass) rather than resolving it by
+binding order — no request is ever scored against an ambiguous release.
+This is a distinct refusal from `FrozenStageRefusal`: the latter is a
+per-record MODEL_NOT_READY outcome carried on the `ScoreRecord` for one
+missing/hash-mismatched artifact, raised while inferring;
+`FrozenBindingConflict` is raised before any inference runs, over the
+release's own shape, and always fails the whole `score_frozen` call (and,
+through it, the whole `score_frozen_batch` batch — batch preflight does
+not re-check this).
 
-`score_frozen` scopes `results`/`inference_requests` themselves the same
-way, not only the executor/target-selection path: `_collect_frozen_results`
-takes `scoped_binding_ids` and only folds a binding's own result into
-`outputs` (the `frozen_outputs` fallback `_frozen_forecast_inputs` publishes
-for a target no scoped executor claims) or accepts it as `gate_result` (the
-`frozen_score` `_frozen_gate_inputs` publishes before its own scoped-gate
-executor lookup) when that binding's `binding_id` is in the scoped set.
-Without this, an out-of-scope binding whose own target/gate role no scoped
-binding ALSO claims would still leak its raw result into the published
-record even though `_frozen_scoped_bindings` had already excluded it from
-canonical executor selection — reachable in production because
-`tools/capture_tier0_corpus.py::_frozen_runtime` (see Reachability below)
-submits an `InferenceRequest` for every binding in the release
-unconditionally, so `score_frozen` routinely infers bindings outside this
-request's own scope. `_frozen_scoped_bindings` distinguishes "no scoping
-information available" from "confirmed zero matches": it returns `None`
-only when `release` declares no `bindings` attribute at all (true only for
-a degenerate, non-`ModelRelease` `release=object()`, as a few
-`test_v2_scoring_application.py` tests use — real callers never do this),
-in which case the historical UNSCOPED fold applies; any real release
-(every `ModelRelease`, and any test double that declares a `bindings`
-tuple) returns its filtered tuple as-is, including when that tuple is
-empty — a release with zero bindings matching this request's own
-`(strategy, decision_clock)` therefore folds NOTHING from the frozen path,
-never falling back to publishing another strategy's out-of-scope result.
-The same distinction applies one binding-attribute level down: a binding
-that does not itself declare both `decision_clock_id` and `strategy_id`
-(again, only a degenerate test double — every real `ModelBinding` declares
-both as mandatory dataclass fields) carries no scope information of its
-own and is always treated as in scope, since it cannot be confirmed a
-non-match either.
+`_frozen_scoped_bindings` distinguishes "no scoping information available"
+from "confirmed zero matches": it returns `None` only when `release`
+declares no `bindings` attribute at all, in which case the caller keeps
+the historical unscoped fold; any release that declares `bindings`
+(including one with none matching this request) returns its filtered
+tuple as-is, even when empty — an empty scope folds nothing from the
+frozen path and never falls back to an unscoped read. The same distinction
+applies one binding-attribute level down: a binding that does not itself
+declare both `decision_clock_id` and `strategy_id` carries no scope
+information of its own, so it cannot be confirmed out of scope and is
+always included.
 
-Reachability: `frozen_batch.score_frozen_batch` is the Phase 6 production
-frozen batch boundary this scoping protects (it has no `engine/v2/ops`
-caller yet). `checks/phase4_real.py`, `tools/phase4_targeted_replay.py` and
-`checks/phase5_phase4_replay.py` validate request-compatible bindings
-before calling `score_frozen` (their own binding-selection path rejects a
-selected binding whose `strategy_id` is neither the request's own nor
-`"*"`, or whose `decision_clock_id` differs), so scoping is a no-op for
-them once wildcard bindings are honored — the filtered set already equals
-the input set. `tools/capture_tier0_corpus.py::_frozen_runtime` also calls
-`score_frozen`, but it builds an `InferenceRequest` for EVERY binding in
-`_package_release(package, ...)`'s release unconditionally — it never
-compares a binding's `strategy_id`/`decision_clock_id` against the request
-being scored before submitting it. This is exactly the shape the
-`outputs`/`gate_result` scoping above protects against (capture is the
-real-production path that makes an out-of-scope inference request
-routine, not just a synthetic test scenario). `native_score_batch` goes through
-`score_one`, never `score_frozen`, and is unaffected.
+Reachability: `frozen_batch.score_frozen_batch` is the production frozen
+batch boundary this scoping protects. `checks/phase4_real.py`,
+`tools/phase4_targeted_replay.py` and `checks/phase5_phase4_replay.py`
+already validate request-compatible bindings before calling `score_frozen`,
+so scoping is close to a no-op for them once wildcard bindings are
+honored. `tools/capture_tier0_corpus.py::_frozen_runtime` submits an
+`InferenceRequest` for every binding in the release unconditionally,
+without comparing `strategy_id`/`decision_clock_id` against the request
+first — this is the production path that makes an out-of-scope inference
+request routine, which is why the `outputs`/`gate_result` leak-prevention
+above matters, not only the executor-selection filtering.
+`native_score_batch` goes through `score_one`, never `score_frozen`, and
+is unaffected.
 
 ### `release_bindings.py` (the 4c R1–R6 template)
 

@@ -498,10 +498,8 @@ def _frozen_role_outputs(binding) -> frozenset[str]:
 def _binding_declares_scope(binding) -> bool:
     """True when ``binding`` declares both fields a real ``ModelBinding``
     always has (``decision_clock_id`` and ``strategy_id``). False only for
-    a degenerate stand-in that predates the scoping feature (issue #93,
-    post-round-5 regression) -- such a binding carries no scope
-    information at all and must not be silently treated as a confirmed
-    non-match."""
+    a degenerate stand-in binding that carries no scope information at
+    all -- it must not be silently treated as a confirmed non-match."""
     return hasattr(binding, "decision_clock_id") and hasattr(binding, "strategy_id")
 
 
@@ -512,7 +510,7 @@ def _frozen_scoped_bindings(release, request: ScoreRequest) -> tuple[Any, ...] |
     phase4_frozen_bridge.py`` already resolves a binding's strategy match
     with (``strategy_id not in {request.strategy_version, "*"}`` there). A
     release's OTHER strategies' own bindings never reach this request's
-    canonical forecast targets or gate slot (issue #93).
+    canonical forecast targets or gate slot.
 
     ``None`` means ``release`` declares no ``bindings`` attribute at all:
     scoping is impossible, so the caller keeps the historical unscoped
@@ -521,8 +519,8 @@ def _frozen_scoped_bindings(release, request: ScoreRequest) -> tuple[Any, ...] |
     empty tuple is the different, meaningful answer: this release's own
     bindings were checked and NONE match this request's ``(strategy,
     decision_clock)`` -- a confirmed, deliberate result that must be
-    respected and never converted back to ``None`` downstream (issue #93
-    review, round 5). The same reasoning applies one level down: a
+    respected and never converted back to ``None`` downstream. The same
+    reasoning applies one level down: a
     binding that does not itself declare BOTH ``decision_clock_id`` and
     ``strategy_id`` carries no scope information at all, so it cannot be
     confirmed out of scope and is always included (``_binding_declares_
@@ -697,8 +695,8 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
                             scoped_binding_ids: frozenset[str] | None = None):
     """Fold the per-binding inference results into the canonical collections.
 
-    ``scoped_binding_ids`` (issue #93 review, extended by the CodeRabbit
-    follow-on) narrows every answer-bearing or refusal-affecting collection --
+    ``scoped_binding_ids`` narrows every answer-bearing or
+    refusal-affecting collection --
     ``outputs``, ``gate_result``, ``required_roles``, ``state`` and ``flags``
     -- to the bindings scoped to this request: an out-of-scope binding must
     not demand a role forecast validation would then refuse on, nor stamp a
@@ -727,24 +725,24 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
         # ``_forecast_for_gate``). Keep its provenance/refusal, hold the value
         # and the ``size`` role out of the top-level score output.
         if not _is_gate_only_size(binding, gate_only_forecast):
-            # issue #93 review: an out-of-scope binding's raw result must never
-            # populate ``frozen_outputs``, even when no scoped binding claims
-            # the same canonical target -- reachable in production because
+            # An out-of-scope binding's raw result must never populate
+            # ``frozen_outputs``, even when no scoped binding claims the
+            # same canonical target -- reachable in production because
             # capture submits every release binding's inference request
             # unconditionally, so a multi-strategy release routinely hands
             # ``score_frozen`` bindings outside its own (strategy, clock).
             if in_scope:
                 outputs.update(role_outputs)
-            # CodeRabbit follow-on (issue #93): scoping only the outputs still
-            # let an out-of-scope binding add its role here, so forecast
-            # validation demanded (and refused on) a target that was correctly
+            # Scoping only the outputs is not enough: an out-of-scope
+            # binding could still add its role here, so forecast validation
+            # would demand (and refuse on) a target that was correctly
             # filtered out of ``frozen_outputs``.
             if in_scope and role_name in {"driver", "size", "implied_t1",
                                           "runup_move", "iv_crush"}:
                 required_roles.append(role_name)
-        # CodeRabbit follow-on (issue #93): an out-of-scope not-READY result's
-        # state/refusal codes would otherwise force ``score_frozen``'s final
-        # status check to refuse an in-scope record.
+        # An out-of-scope not-READY result's state/refusal codes would
+        # otherwise force ``score_frozen``'s final status check to refuse
+        # an in-scope record.
         if in_scope:
             state.update(result_state)
             flags.extend(role_flags)
@@ -752,10 +750,10 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
         # ``artifact_hashes`` stays unscoped: pure provenance metadata.
         artifact_hashes.extend(hashes)
         if current_gate is not None:
-            # issue #93 review: an out-of-scope binding's gate result must
-            # never populate ``frozen_score`` either, even when this request
-            # has no scoped gate binding at all (the executor_bindings-based
-            # pop in ``_frozen_gate_inputs`` would then never run) -- same
+            # An out-of-scope binding's gate result must never populate
+            # ``frozen_score`` either, even when this request has no scoped
+            # gate binding at all (the executor_bindings-based pop in
+            # ``_frozen_gate_inputs`` would then never run) -- same
             # unconditional-capture reachability as above.
             if in_scope:
                 gate_result = current_gate
@@ -1268,16 +1266,16 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     }
     if missing_runup:
         record = replace(record, uncertainty={**record.uncertainty, **missing_runup})
-    # CodeRabbit follow-on (issue #93): scope the final not-READY check to this
-    # request's own bindings -- an out-of-scope binding's not-READY inference
-    # result and reason codes must never force a refusal on an in-scope record,
-    # mirroring the same scoping already applied inside ``_frozen_native_inputs``
-    # and ``_collect_frozen_results``. ``None`` (the release declares no
+    # Scope the final not-READY check to this request's own bindings -- an
+    # out-of-scope binding's not-READY inference result and reason codes
+    # must never force a refusal on an in-scope record, mirroring the same
+    # scoping already applied inside ``_frozen_native_inputs`` and
+    # ``_collect_frozen_results``. ``None`` (the release declares no
     # ``bindings`` at all) keeps the historical unscoped behavior; an empty
     # scoped tuple is a confirmed zero-match scope and considers nothing. A
-    # binding id absent from ``release``'s own known bindings entirely is never
-    # excluded here, since it can only be an unresolved/refused request, never a
-    # legitimate out-of-scope answer.
+    # binding id absent from ``release``'s own known bindings entirely is
+    # never excluded here, since it can only be an unresolved/refused
+    # request, never a legitimate out-of-scope answer.
     scoped_binding_ids = _frozen_scoped_binding_ids(scoped_bindings)
     status_results = _frozen_status_results(results, bindings, release,
                                             scoped_binding_ids)
