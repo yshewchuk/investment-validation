@@ -834,9 +834,11 @@ PR-7b-2): the pre-plan timeout could not actually resume in production.**
 (`bool(prior.plan_ref) and prior.status in RESUME_STATUSES`), so a pre-plan
 `"timed_out"` receipt (`plan_ref=None` always, since no plan exists yet)
 never took the resume branch; it fell through to `_decide`, whose window
-check (closes 06:00 ET + grace) had ALWAYS already closed by the time a
-pre-plan timeout could even be produced (bounded by the LATER, absolute
-20:00 ET `_serve_deadline`) — so every occurrence became a terminal
+check (closes at `DEFAULT_DEADLINE_ET` + `DEFAULT_DEADLINE_GRACE`) had
+ALWAYS already closed by the time a pre-plan timeout could even be produced
+(bounded by the LATER, absolute `_serve_deadline`, i.e. `DEFAULT_SERVE_
+DEADLINE_ET`, which falls later in the same calendar day than the window's
+own close) — so every occurrence became a terminal
 `"missed"` on the very next tick, never actually resumed, exactly as the
 "self-healing" design text below originally (incorrectly) assumed it would.
 Fixed by broadening `resuming` to `prior is not None and prior.status in
@@ -949,10 +951,12 @@ status transition:
   this text claimed that because this receipt carries no `plan_ref`, the
   next tick "falls through to the ordinary `_decide` path instead," which
   it called self-healing. That is wrong: `_decide` checks the retry window
-  (closes 06:00 ET + grace) BEFORE anything else, and `ensure_snapshot_fn`'s
-  own drive-to-terminal wait is bounded by the LATER, absolute 20:00 ET
-  `_serve_deadline` — so a pre-plan `"timed_out"` can only ever be produced
-  at a wall-clock time the window has already closed. Falling through to
+  (closes at `DEFAULT_DEADLINE_ET` + `DEFAULT_DEADLINE_GRACE`) BEFORE
+  anything else, and `ensure_snapshot_fn`'s own drive-to-terminal wait is
+  bounded by the LATER, absolute `_serve_deadline` (`DEFAULT_SERVE_
+  DEADLINE_ET`, later in the same calendar day) — so a pre-plan
+  `"timed_out"` can only ever be produced at a wall-clock time the window
+  has already closed. Falling through to
   `_decide` on the next tick therefore always hit the window check first and
   recorded a terminal `"missed"`, never resumed, making the receipt's own
   "resuming next tick" text false in production and this pre-plan timeout's
@@ -3889,8 +3893,9 @@ retry, transaction, partial write, idempotency).
   `"failed"`, a bare timeout must stay resumable rather than given up on
   immediately, since the resume path (this bullet's own first paragraph)
   never re-checks the retry window before serving again. Concretely, on
-  the SAME calendar day: the timer's next tick (it fires every 30 minutes,
-  all day) resumes the same `plan_ref` and calls `_default_serve` again;
+  the SAME calendar day: the timer's next tick (fired at its own configured
+  interval, all day) resumes the same `plan_ref` and calls `_default_serve`
+  again;
   `_serve_deadline` recomputes the identical, already-past cutoff for that
   same day, so this resumed serve also stops on its own first tick and is
   again recorded `"timed_out"`. This repeats, one timer tick apart, until
