@@ -945,22 +945,94 @@ def forces_full_suite(cfg: dict, path: str) -> bool:
                for pat in cfg.get("pr_selection", {}).get("full_suite", []))
 
 
-def _closure_from_roots(roots: set[str], graph: dict[str, set[str]]) -> set[str]:
+def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
+    """True if `tree` attempts to load some OTHER module by a construct
+    whose target cannot be statically resolved: `importlib` used any way
+    other than the one literal `importlib.import_module("<literal>")`
+    shape (an aliased import, any `from importlib import ...`, any other
+    `importlib.*` attribute, or a non-literal `import_module(...)` call);
+    the standalone name `__import__`, however bound; or, for a
+    conftest.py only, an ANNOTATED or non-literal top-level
+    `pytest_plugins` assignment. Deliberately narrower than
+    `_is_dynamic_file`: it excludes `sys.path`, `subprocess`,
+    `multiprocessing`, `site`, `runpy`, `pkgutil`, os-exec functions, and
+    the bare `exec`/`eval`/`compile`/`spec_from_file_location`/
+    `SourceFileLoader`/`syspath_prepend`/`addsitedir`/`PYTHONPATH` names --
+    none of those mean the file could load some OTHER, unknown TRACKED
+    module at runtime, which is the only thing that makes an importer's
+    own closure untrustworthy. Used only by select_pr_tests's taint rule."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "importlib" and alias.asname is not None:
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0] if node.module else ""
+            if top == "importlib":
+                return True
+        elif isinstance(node, ast.Attribute):
+            if node.attr == "__import__":
+                return True
+            if isinstance(node.value, ast.Name) and node.value.id == "importlib" \
+                    and node.attr != "import_module":
+                return True
+        elif isinstance(node, ast.Name):
+            if node.id == "__import__":
+                return True
+        elif isinstance(node, ast.Call):
+            if _looks_like_import_module_call(node.func) and _allowed_import_module_call(node) is None:
+                return True
+    if is_conftest:
+        found, dotted_names = _pytest_plugins_targets(tree)
+        if found and dotted_names is None:
+            return True
+    return False
+
+
+def unresolved_import_files(tracked: list[str]) -> set[str]:
+    """The subset of `tracked` with an unresolved import attempt -- see
+    `_has_unresolved_import_attempt`. Re-parses each file (a second AST
+    pass beyond `build_import_graph`'s), since this classification is not
+    otherwise exposed by the graph. Used only by select_pr_tests's taint
+    rule, never dynamic_files' broader leaf rule."""
+    out: set[str] = set()
+    for rel in tracked:
+        source = (REPO / rel).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=rel)
+        if _has_unresolved_import_attempt(tree, rel.rsplit("/", 1)[-1] == "conftest.py"):
+            out.add(rel)
+    return out
+
+
+def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
+                        dyn: set[str]) -> tuple[set[str], bool]:
     """BFS over graph's REAL edges only (graph.precise when present, else
-    graph itself), starting from `roots`. The same real-edges-only rule
-    module_dependency_closure documents and applies to a configured
-    module's glob-pattern roots; here the roots are a single test file's
-    own path plus its tests/conftest.py ancestors."""
+    graph itself), starting from `roots`. Returns (closure, tainted):
+    `tainted` is True iff some file reached via a real import edge -- never
+    one of `roots` themselves -- is itself in `dyn` (unresolved_import_files'
+    output). Such a file's own further edges are unresolvable (an
+    unresolved dynamic import could load literally anything), so anything
+    that transitively imports it cannot trust its own closure either.
+    Excluding `roots` from tainting is deliberate: tests/conftest.py is a
+    root for every test file (_conftest_ancestors) and is DYNAMIC only
+    because of its own sys.path.insert, not an unresolved import, and it
+    carries no real edges into the tracked tree today -- without this
+    exclusion, every test's closure would taint on conftest.py alone and
+    selection would collapse to the full suite for every PR."""
     precise = getattr(graph, "precise", None)
+    root_set = set(roots)
     seen: set[str] = set()
+    tainted = False
     stack = list(roots)
     while stack:
         f = stack.pop()
         if f in seen:
             continue
         seen.add(f)
+        if f in dyn and f not in root_set:
+            tainted = True
         stack.extend((precise if precise is not None else graph).get(f, ()))
-    return seen
+    return seen, tainted
 
 
 def select_pr_tests(cfg: dict, changed: list[str], *,
@@ -972,15 +1044,14 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     An empty `changed` returns [] (no diff -> nothing to run), the one
     intentional zero-selection case, matching changed_modules.
 
-    Known gap (#155): a file with an unresolved dynamic import can load
-    literally anything, so its own real edges cannot be trusted. Unlike
-    changed_modules (which only follows a DYNAMIC file's real edges), a
-    test file that is ITSELF classified DYNAMIC (_is_dynamic_file) is
-    always selected here, regardless of whether any changed path reaches
-    it -- narrower than treating every test that merely *reaches* a
-    DYNAMIC file (e.g. every test via tests/conftest.py) as unsafe, which
-    would collapse this into the full suite for every PR (the module-level
-    version of that measurement is in #155 itself)."""
+    #155 (unresolved dynamic import) handling: a test file that is ITSELF
+    classified DYNAMIC (_is_dynamic_file) is always selected, and so is a
+    test file that reaches, via a real import edge, some OTHER file that is
+    DYNAMIC (a "helper" with its own unresolved import) -- both via
+    _closure_from_roots's `tainted` return. Reaching tests/conftest.py is
+    exempted from this (it is a root for every test file, not something a
+    test file "imports"), which is what keeps this from collapsing every
+    PR into the full suite; see _closure_from_roots's own docstring."""
     changed_set = set(changed)
     if not changed_set:
         return []
@@ -997,9 +1068,15 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     tracked_set = set(graph)
     tests = pytest_test_files(tracked_set)
     dyn = dynamic_files(graph)
-    closures = {t: _closure_from_roots({t} | _conftest_ancestors(t, tracked_set), graph)
-                for t in tests}
-    selected = {t for t in tests if t in dyn}
+    unresolved = unresolved_import_files(sorted(tracked_set))
+    closures: dict[str, set[str]] = {}
+    selected: set[str] = set()
+    for t in tests:
+        closure, tainted = _closure_from_roots(
+            {t} | _conftest_ancestors(t, tracked_set), graph, unresolved)
+        closures[t] = closure
+        if t in dyn or tainted:
+            selected.add(t)
     for path in changed_set:
         hit = {t for t in tests if path in closures[t]}
         if hit:

@@ -2637,6 +2637,81 @@ def test_select_pr_tests_dynamic_test_file_is_always_selected(tmp_path, monkeypa
     assert selected == ["tests/test_a.py"]
 
 
+def test_select_pr_tests_helper_with_unresolved_dynamic_import_taints_its_importer(tmp_path, monkeypatch):
+    # Reproduces the Opus merge-gate's own probe on PR #183 (fb82011): a
+    # test file that reaches a changed module only through a HELPER with an
+    # unresolved dynamic import (not the test file itself) was silently
+    # omitted under leaf-only #155 handling.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("VALUE = 2\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helper.py").write_text(
+        "import importlib\n"
+        "\n"
+        "def value():\n"
+        "    module_name = 'engine.b'\n"
+        "    return importlib.import_module(module_name).VALUE\n")
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "from tests.helper import value\n"
+        "\n"
+        "def test_value():\n"
+        "    assert value() == 1\n")
+    (tmp_path / "tests" / "test_b.py").write_text(
+        "import engine.b\n"
+        "\n"
+        "def test_import():\n"
+        "    assert engine.b is not None\n")
+    tracked = ["engine/b.py", "tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected
+    assert "tests/test_b.py" in selected
+
+
+def test_select_pr_tests_conftest_as_root_does_not_taint_every_test(tmp_path, monkeypatch):
+    # Guards the fix above from regressing into the mass-collapse #153
+    # already fixed at the module level: tests/conftest.py is DYNAMIC (its
+    # own sys.path.insert) and a root for every test file, but must not, by
+    # itself, taint every test's selection -- only a DYNAMIC file reached
+    # via a real EDGE (not root membership) should.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text("import sys\nsys.path.insert(0, '.')\n")
+    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")
+    (tmp_path / "tests" / "test_b.py").write_text("Y = 1\n")
+    tracked = ["tests/conftest.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["NOTES.md"], graph=graph)
+    assert selected == []
+
+
+def test_select_pr_tests_re_compile_helper_does_not_taint_its_importer(tmp_path, monkeypatch):
+    # Guards the exact regression call3 found: a helper that is DYNAMIC only
+    # because `re.compile(...)` collides with `_is_dynamic_file`'s generic
+    # `compile` name check must NOT taint its importer -- it has no
+    # unresolved IMPORT attempt, so it should be selected only by the
+    # ordinary changed-path/closure intersection, same as any static file.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helper.py").write_text(
+        "import re\n"
+        "PATTERN = re.compile('x')\n")
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "from tests.helper import PATTERN\n"
+        "\n"
+        "def test_a():\n"
+        "    assert PATTERN\n")
+    (tmp_path / "tests" / "test_b.py").write_text("Y = 1\n")
+    tracked = ["tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "tests/helper.py" in pilot.dynamic_files(graph)  # sanity: still broadly DYNAMIC
+    assert "tests/helper.py" not in pilot.unresolved_import_files(tracked)  # but not an import attempt
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["NOTES.md"], graph=graph)
+    assert selected == []  # neither test tainted; NOTES.md is inert and reaches nothing
+
+
 def test_select_pr_tests_graph_build_failure_selects_none_sentinel(monkeypatch):
     monkeypatch.setattr(pilot, "build_import_graph",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
