@@ -720,305 +720,78 @@ consume that value, so the window is not closed today; that CAS check is
   declared adapter, for `price-history capture` and `price-refresh`.
 - `computed_moves_store.py`'s `run_computed_moves_refresh` (`parameters,
   root, *, as_of, fetcher=None`; not itself a bare `RefreshCallback` since
-  `as_of` cannot be pre-bound at module-import time — it varies per
-  dispatch. `calendar_moves_jobs.run_computed_moves_worker` (Part 3) adapts
-  it: it decodes the job's `CalendarMovesParameters`, then calls
-  `incremental_data._load_computed_moves_refresh_callback(params.as_of)` to
-  get a closure with `as_of` and the injected `yfinance_history_fetcher`
-  pre-bound — THAT closure is the `(parameters, root)`-shaped
-  `RefreshCallback`; see "Outputs" below for what still has no nightly
-  caller): reads `earnings_events`/`daily_market` off the pinned parent snapshot
-  through `Repository`, exactly once each per run (`_scan_once`), and calls
-  an injected yfinance history fetcher (never `legacy_adapter.new_fetcher`)
-  per target ticker. Target tickers are the ORATS-confirmed-session rule
-  `target_tickers_from_snapshot` re-implements from the legacy pull, read
-  through the v2 snapshot instead of the legacy store.
+  `as_of` varies per dispatch and cannot be pre-bound at import time —
+  `calendar_moves_jobs.run_computed_moves_worker` adapts it by decoding the
+  job's `CalendarMovesParameters` and binding a closure with `as_of` and the
+  injected yfinance fetcher; see "Outputs" for the nightly wiring): reads
+  `earnings_events`/`daily_market` off the pinned parent snapshot exactly
+  once per run, then calls the injected yfinance history fetcher (never
+  `legacy_adapter.new_fetcher`) per target ticker, where target tickers are
+  the ORATS-confirmed-session rule `target_tickers_from_snapshot`
+  re-implements from the legacy pull, read through the v2 snapshot instead.
 - `forward_calendar_store.py`'s own inputs: the pinned parent snapshot's
-  `daily_market` sessions (one scan, grouped by ticker, fed to
+  `daily_market` sessions (grouped by ticker, fed to
   `engine.v2.data.computed_moves.native_trading_calendar` for the horizon
-  calendar — a snapshot without a `daily_market` session falls back to plain
+  calendar — a snapshot with no `daily_market` session falls back to plain
   weekdays); `run_forward_calendar_refresh`'s own explicit keyword arguments
   (`catalog_path`, `objects_root`, `parent_snapshot_id`, `refresh_plan_hash`,
-  `as_of`, `tickers`, `horizon_days`, `scope`, `expected_head_generation`,
-  `expected_head_snapshot_id`, `attempt_id`, `fence`) — most of these now
-  come straight off the job's own `CalendarMovesParameters` (see "Primary
-  contracts" above); `attempt_id`/`fence` come from
-  `forward_calendar_refresh`'s own small staged document
-  (`refresh_staging.REFRESH_INPUT_DOCUMENT_NAMES["forward_calendar_refresh"]`
-  → `forward_calendar_refresh_input.json`, `{"attempt_id": claim.attempt_id,
-  "fence": claim.fence}` only — every other field would only drift from the
-  immutable job parameters, so this document is deliberately smaller than
-  `computed_moves_refresh`'s own); and the two injected network edges,
-  `providers.nasdaq_calendar.
-  nasdaq_calendar_fetcher` (one call per discovery date) and
-  `providers.yfinance_edge.yfinance_earnings_fetcher` (one call per ticker
-  still missing a session after the Nasdaq pass).
+  `as_of`, `tickers`, `horizon_days`, `scope`, head-expectation and
+  attempt-fence fields — most come off the job's own `CalendarMovesParameters`,
+  see "Primary contracts"); and two injected network edges, one Nasdaq
+  calendar fetch per discovery date and one yfinance earnings fetch per
+  ticker still missing a session after the Nasdaq pass.
 - `board_requests`: an already-loaded events table (`ticker`, `event_date`,
-  `session` columns — e.g. `engine.data.store`'s `earnings_events` Tier-2
-  table's shape, where `event_date` is schema-typed `datetime64[ns]`), an
-  `as_of` date, a horizon in days, and an optional ticker filter. It
-  performs no I/O itself — the caller loads the table. `event_date` may
-  also be given as ISO 8601 strings (date-only or full timestamp, mixed
-  within one column); numeric values are rejected rather than read as
-  epoch-relative offsets, whether the column's dtype is numeric or a mixed
-  `object` column holding Python `int`/`float` elements (see "Failure
-  semantics"). `as_of` must be a timezone-naive `datetime`/
-  `pandas.Timestamp` (`None`, `NaT`, and a timezone-aware value are
-  refused); `horizon_days` must be a non-negative `int` (`bool` is refused
-  despite being an `int` subtype in Python) — see "Failure semantics".
+  `session` columns), an `as_of` date, a horizon in days, and an optional
+  ticker filter. It performs no I/O itself — the caller loads the table; see
+  "Failure semantics" for its input-validation rules.
 - `assemble_score_batch_inputs`'s own arguments: `as_of` (the night's
   cutoff), `snapshot_id` and `calendar_revision` (caller-supplied identity
-  strings — this module resolves neither; a later caller derives them from
-  the pinned plan/read set, per "Primary contracts" above), one
-  `ScoringReleaseBinding` (PR-1, resolved once by the caller — never
-  re-resolved per row), a sequence of `NightlyEventInputs` (one
-  `BoardRequest` key plus its `calendar_row`/`panel_row`/required
-  `panel_anchor` (issue #53, fixed by #67 — threaded straight through to
-  `assemble_nightly_source_bundle`'s own required parameter of the same
-  name, unmodified)/`tier4_row`/`quote_rows`/optional `quote_status` — the
-  calendar row here additionally
-  carries the real `earnings_events` table's own `event_id` column, which
-  `nightly_source_bundle._CALENDAR_REQUIRED_FIELDS` does not itself
-  require), the batch's `feature_names`, and an optional `gate_policy:
-  Mapping[str, Mapping[str, Any]]` keyed by strategy (see "Failure
-  semantics" for why this is caller-supplied and optional). The worker's own
-  `NativeScoreBatchParameters` additionally carries `release_root` as a
-  plain string field (never through `input_bindings`, matching
-  `PromoteParameters.release_root`'s precedent in `training.py`) and
+  strings this module never resolves itself — a later caller derives them
+  from the pinned plan/read set), one `ScoringReleaseBinding` (resolved once
+  by the caller, never re-resolved per row), a sequence of
+  `NightlyEventInputs` (one `BoardRequest` key plus its staged
+  `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows`/optional
+  `quote_status` — the calendar row must carry a non-empty string
+  `event_id`, see "Failure semantics"), the batch's `feature_names`, and an
+  optional `gate_policy: Mapping[str, Mapping[str, Any]]` keyed by strategy
+  (see "Failure semantics" for why this is caller-supplied and optional). The
+  worker's own `NativeScoreBatchParameters` additionally carries
+  `release_root` as a plain string field and
   `input_bindings={"events.json": <artifact ref>}` for the one staged
   events array.
 
-**Cutover PR-7a's input sourcing (implemented).** Before a `JobSpec` is
-ever built, two things are gathered. First, the release binding — entirely
-by `supervisor.Service`'s own sidecar (`_native_release_root_or_none`,
-called from `_reconcile_native_score_batch_shadow` BEFORE it ever reaches
-`nightly.submit_native_score_batch_shadow_if_ready`), never inside that
-`nightly.py` function itself: the verified root is passed into
-`submit_native_score_batch_shadow_if_ready` as its own `release_root`
-argument (a plain string), so that function stays free of environment
-reads, memo state, and hash-verifying calls — it only ever sees an
-ALREADY-resolved root, or is not called at all this tick.
+**Cutover PR-7a's input sourcing.** Two things are gathered before a
+`JobSpec` is built, entirely inside `supervisor.Service`'s own sidecar
+(`_reconcile_native_score_batch_shadow`), never inside
+`nightly.submit_native_score_batch_shadow_if_ready` itself:
 
-- **The release binding (`#59`/PR-1) — a cheap identity gate in front of an
-  expensive verification, not two cheap calls.** An earlier draft of this
-  bullet called `resolve_production_release_binding()` cheap and ran it
-  unconditionally on every tick; that was wrong (Opus gate finding, this
-  round) — it hash-verifies every model file and loads every payoff,
-  recalibration, and analog artifact for the resolved release, which is
-  exactly the kind of per-tick cost `computed_moves_refresh`'s own memo
-  pattern exists to avoid paying redundantly. This design instead runs
-  three calls, gated in two stages, all inside
-  `Service._native_release_root_or_none`:
+- **The release binding.** `Service._native_release_root_or_none` resolves
+  the production release root, re-verifying it only when it may have
+  changed since last checked, and passes only the resolved root (a plain
+  string) to `submit_native_score_batch_shadow_if_ready`'s own
+  `release_root` argument. `run_native_score_batch_worker` never receives
+  the sidecar's `ScoringReleaseBinding` object; it independently re-resolves
+  and re-verifies the binding itself, matching that type's documented
+  contract. Every failure mode here (unset/blank env var, no pointer, or a
+  release that fails hash verification) is Failure semantics R1 below.
+- **Per-event raw rows** (`calendar_row`/`panel_row`/`panel_anchor`/
+  `tier4_row`/`quote_rows` per `BoardRequest`, in the shape
+  `NightlyEventInputs`/`assemble_nightly_source_bundle` require): the
+  producer that stages these from a pinned snapshot does not exist yet
+  ([#199](https://github.com/yshewchuk/investment-validation/issues/199)).
+  The scheduled trigger's `"score"` job now pins a snapshot (see "Primary
+  contracts" above), so the sidecar raises `VALIDATION_FAILED` rather than
+  silently returning nothing; only a `legacy`-input-mode plan built
+  directly (not the scheduled trigger) still gets a silent no-op — see
+  Failure semantics R1 for both outcomes.
 
-  1. `engine.v2.models.deployment.production_release_root()`
-     (`deployment.py:142`) — cheap, one `os.environ` read, fresh every
-     tick, never cached.
-  2. `engine.v2.models.deployment.current_pointer(root / "deployment")`
-     (`deployment.py:526`) — also cheap: one file-existence check plus one
-     small JSON decode of the pointer file (`_pointer_path`, `PointerState`
-     — `release_id`, `previous_release_id`), never a hash-verify or an
-     artifact load. The `"deployment"` subdirectory is structural, not
-     optional: `production_release_root()` returns the STORE root, and
-     `release_bindings.resolve_release_binding` navigates
-     `<release_root>/deployment/DEPLOYED` internally (its own private
-     `_DEPLOYMENT_DIR`) before ever calling `current_pointer` itself — this
-     cheap check must read the identical path or it would never agree with
-     step 3's own verification. `checks/phase5_release.py`'s own
-     `DEPLOYMENT_DIR` constant is the existing precedent for duplicating
-     this literal locally rather than importing the other module's private
-     symbol. Returns `None` if nothing has ever been promoted at that root.
-     This call runs on EVERY tick, unconditionally, and is what replaces
-     the earlier draft's unconditional expensive call.
-  3. `engine.v2.scoring.release_bindings.resolve_production_release_binding()`
-     (`release_bindings.py:195`) — the expensive, hash-verifying call —
-     runs ONLY when step 2's `root` or `release_id` differs from a
-     one-slot, root-keyed memo of the last root/`release_id` pair this
-     sidecar itself already fully verified (success OR failure; a release
-     that fails hash verification is memoized too, so a persistently-broken
-     release isn't re-hashed every tick either — only a CHANGED `root` OR
-     `release_id` forces a fresh check, on the very next tick after the
-     change, matching R2's existing "promoted mid-session, next tick"
-     guarantee below). On
-     success the sidecar keeps only the path string,
-     `str(production_release_root())`, returning it as
-     `_native_release_root_or_none`'s own result — the `release_root`
-     argument `_reconcile_native_score_batch_shadow` then passes straight
-     through to `submit_native_score_batch_shadow_if_ready`, for the
-     still-missing PR-6 build step to eventually place into
-     `NativeScoreBatchParameters.release_root` — and discards the
-     `ScoringReleaseBinding` object itself (it carries no root path of its
-     own; only resolved catalog state) — this memo is purely an internal
-     cost-control detail of the sidecar's OWN gate, not a change to
-     `ScoringReleaseBinding`'s contract. `run_native_score_batch_worker`
-     (`native_score_batch.py:430`) never receives that object either — it
-     independently re-resolves via `resolve_release_binding(parameters["release_root"])`
-     (`release_bindings.py:148`, called at `native_score_batch.py:447`),
-     matching `ScoringReleaseBinding`'s own documented contract that a
-     second `resolve_release_binding` call always re-verifies fresh, never
-     reuses a cached instance across a process boundary — the worker's own
-     verification is intentionally NOT covered by the sidecar's memo.
-
-  `production_release_root()` reads the `MODEL_RELEASE_ROOT` environment
-  variable directly, fresh on every call (`deployment.py:85`, `:161`) —
-  never from `.env`, a config file, or any cached value. The nightly
-  process that runs this sidecar (`ops serve`, the same OS process
-  `Service.tick` runs in) must have `MODEL_RELEASE_ROOT` set in ITS OWN
-  process environment before it starts; this design adds no second way to
-  configure it. Left unset or blank, `production_release_root()` itself
-  raises `MissingReleaseRoot` (`deployment.py:110`) — both the sidecar's
-  step 1 and `current_pointer`'s own caller see this directly, before step
-  2 even runs. `current_pointer(root / "deployment")` returning `None` (nothing ever
-  promoted at a configured root) is treated the same as the expensive
-  path's own `NoCurrentRelease` outcome, without needing to call the
-  expensive path at all — cutting straight to R1 below on the cheap check
-  alone. `resolve_production_release_binding()` (step 3, when it does run)
-  catches `MissingReleaseRoot` from its own internal call to
-  `production_release_root()` and re-raises it as
-  `ModelNotReady("release_root", ...)` (`release_bindings.py:206-208`); a
-  root that IS configured but names nothing `DEPLOYED` is a different,
-  un-wrapped failure one layer up, raised by the internal
-  `resolve_release_binding()` call `resolve_production_release_binding()`
-  makes once it has a root (`release_bindings.py:64-65`, `:148`, `:209`,
-  `NoCurrentRelease`, "R1(a): nothing has ever been promoted at this
-  release root") — a configured but empty release store, not a
-  missing/blank env var.
-
-  All three (`MissingReleaseRoot`, `ModelNotReady`, `NoCurrentRelease`,
-  whether reached via the cheap `current_pointer() is None` shortcut or via
-  a full step-3 verification) are R1 below, and — CodeRabbit round 3, real
-  finding — all three are checked BEFORE the SEPARATE build-attempt
-  memo/backoff below (the one guarding `board_requests`/raw-row-staging) is
-  ever touched, so a release promoted mid-session is picked up on the very
-  next tick, never locked out by an attempt count exhausted earlier for an
-  unrelated reason (see "Failure semantics" below, R2, for the full
-  account of BOTH memos). Legacy scoring, which never calls
-  `production_release_root`/`current_pointer`/`resolve_release_binding` at
-  all, is completely unaffected either way.
-- **Per-event raw rows — a still-missing producer (cutover PR-6), and a
-  self-contradiction in an earlier draft, now resolved.** An earlier draft
-  of this bullet's own opening sentence claimed the builder enumerates
-  `board_requests` "against the SAME pinned snapshot/session the succeeded
-  `"score"` job... itself found — recovered from that job's own recorded
-  request," while a later sentence in the SAME bullet already said legacy
-  `"score"`, in its default `"legacy"` input mode, "pins no snapshot in the
-  process." Both cannot be true at once (Opus gate finding, this round).
-  The second statement is the one that is correct and verified: in the
-  production default input mode, `nightly._snapshot_inputs` returns `None`
-  (verified against current `main`), so the selected `"score"` job pins NO
-  snapshot at all. There is therefore no pinned snapshot for this design to
-  recover, and — as a direct consequence, not stated in the earlier draft —
-  `board_requests(as_of, horizon_days, tickers, events_table)`
-  (`native_board_universe.py:198`)'s own `events_table`/`horizon_days`
-  arguments, and the worker's own required `snapshot_id`/`calendar_revision`
-  parameters (`native_score_batch.py:52-68`), have NO stated source in that
-  mode either.
-
-  This design does not resolve that gap by inventing a fresh-head fallback
-  (that would be a NEW, unreviewed mechanic, not something already
-  established elsewhere): instead, **R1 (Failure semantics, below) gains an
-  explicit case for it** — whenever the selected `"score"` job pinned no
-  snapshot (`_snapshot_inputs` returned `None` for it), the sidecar refuses
-  exactly like a missing release, and submits nothing. In concrete terms,
-  under today's production default (`"legacy"` input mode), this means
-  PR-7a's shadow batch does not submit at all, full stop, until either (a)
-  a future PR changes the production input mode to one that pins a
-  snapshot, or (b) the still-missing raw-row producer below is given its
-  own, separately-designed way to source `snapshot_id`/`calendar_revision`/
-  `events_table`/`horizon_days` without a pinned `"score"`-job snapshot.
-  Neither (a) nor (b) is designed here; this bullet's job is to name the
-  gap precisely, not close it.
-
-  Independent of which mode eventually supplies these fields: for each
-  `BoardRequest` the builder must then produce the staged
-  `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` a
-  `NightlyEventInputs` document needs (`native_score_batch.py:52-68`) —
-  and **no production code does this today**. An earlier draft of this
-  bullet claimed the builder "reads the same staged... rows the legacy
-  `"score"` action itself reads from that snapshot" and cited `#68` as "the
-  pinned v2 snapshot-read bridge UD-4 closed." Both claims are false (Opus
-  gate finding, verified against `56087a8`'s own diff): `#68` ("research:
-  close UD-4 — pinned v2 snapshot reads") is entirely about
-  `engine/v2/research/` tooling (fill_quality, polygon_fills, signal_screen,
-  replay, build_trades, reconcile_trades), not scoring inputs, and does not
-  touch this path; and legacy `"score"`, in its default `"legacy"` input
-  mode, does not read or produce any of these five row shapes at all — it
-  loads features through `FeatureContext.load`/`score_calendar`
-  (`legacy_adapter.py:547-601`) and pins no snapshot in the process. There
-  is no existing legacy read this design can piggy-back on.
-
-  Building this row producer — staging `calendar_row`/`panel_row`/
-  `panel_anchor`/`tier4_row`/`quote_rows` per `BoardRequest` from a pinned
-  snapshot (once one exists to pin), in the shape `NightlyEventInputs` and
-  `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479-508`)
-  both require — is a genuine, still-missing prerequisite, and now covers
-  BOTH the row-staging work AND the snapshot-identity gap named above. This
-  doc's own PR-3 section already names the row-staging half as such ("a
-  later cutover PR (PR-4/PR-6)... enumerates `BoardRequest`s, stages their
-  per-event inputs"); this doc's own PR-7a introduction (above) likewise
-  lists it under "cutover PR-6," left implicit. PR-7a's submission-side
-  design assumes that producer exists (snapshot identity included) and
-  packages its output as one `native_score_batch.NightlyEventInputs`
-  document per row, but building the producer itself is explicitly OUT OF
-  SCOPE for this design and must land first, as its own PR with its own
-  review — its failure modes (a symbol with no legacy-comparable row shape,
-  a stale or partial snapshot read, the cost of producing rows for a ticker
-  universe legacy never scores this way, and now also which input mode or
-  mechanism supplies a snapshot at all) are a separate design question, not
-  a tick-loop sidecar concern this bullet can settle.
-
-  This enumeration/staging step, once its producer exists, is expected to
-  run synchronously inside `Service.tick()`, exactly where
-  `computed_moves_refresh`'s own `target_tickers_from_snapshot` scan already
-  runs (`_build_native_computed_moves_plan`, `nightly.py:614`) — the same
-  tick-blocking trade-off that precedent already accepts, not a new one
-  (CodeRabbit round 1: flagged as a real risk if left unbounded). One bound
-  this design DOES commit to, precisely (CodeRabbit, this round, real
-  finding — "AT MOST ONCE, never every tick" was ambiguous about whether a
-  FAILED build gets retried at all): the build-attempt memo (Failure
-  semantics, R2 below) gates this build against the SAME bounded,
-  backoff-scheduled retry contract as `computed_moves_refresh`'s own memo
-  — a newly-selected `(as_of, scope_hash)` identity gets up to
-  `_COMPUTED_MOVES_MAX_ATTEMPTS`-many build attempts, each separated by
-  `_COMPUTED_MOVES_BACKOFF_SECONDS`-shaped delay, NOT one attempt per tick
-  and NOT unboundedly either; once that identity's attempts are exhausted,
-  the memo stops retrying it for the rest of the session (a NEW identity —
-  a different `as_of` or a different `scope_hash` — gets its own fresh
-  attempt budget). This is the pre-submission build/staging retry contract
-  ONLY. It is separate from, and must not be confused with, the submitted
-  job's own POST-submission `RetryPolicy("bounded", 2, (5, 30))`
-  (`stages.py:283`, R3 below) — that policy covers the WORKER retrying an
-  already-admitted job attempt; this memo covers the SIDECAR deciding
-  whether to build and submit a job attempt at all.
-  however, additionally claim the resulting I/O is bounded by rows legacy
-  `"score"` already read this session — it is not, for the reason above:
-  legacy `"score"` reads through a different path and produces none of
-  these five row shapes, so this build is a genuinely NEW read against the
-  snapshot store, not a reuse of one `"score"` already paid for (the
-  earlier draft's tick-cost bound made exactly this wrong assumption). The
-  still-missing producer's own PR must therefore measure and state its own
-  per-tick cost against the actual snapshot store, not assume it inherits
-  `"score"`'s existing budget; if that PR's implementation measures the
-  cost as not bounded in practice, it must move the build off `tick()`'s
-  synchronous path (e.g., a two-tick handoff: one tick marks a pending
-  build, an out-of-process step performs it, a later tick submits once its
-  output is ready) before it ships.
-- **`SourceBundle` (`#48`/PR-2, `#67`) is never built at submission time.**
-  `assemble_nightly_source_bundle` (`nightly_source_bundle.py:479`) and
-  `source_inputs.build_native_score_inputs` (`source_inputs.py:1034`) both
-  run INSIDE the worker, via `assemble_score_batch_inputs` (called from
-  `run_native_score_batch_worker`, `native_score_batch.py:451`), from the
-  raw rows staged in `events.json` — both are pure, I/O-free functions, so
-  building a `SourceBundle` belongs in the worker, consistent with
-  `NativeScoreBatchParameters`'s own doc comment that `events.json` is
-  "resolved into staging exactly like every other input-bound kind"
-  (`stages.py:39-41`). The submission side only gathers and serializes raw
-  rows; it never touches `engine.v2.scoring.source_inputs`.
-
-`events.json` itself is staged as one immutable, content-addressed
-artifact — admitted via `spec.input_refs`, never a `job_<id>#<name>`
-reference (`input_bindings.py:70-73`), since no prior job produces it.
-`parameters["input_bindings"] = {"events.json": <that artifact id>}`; no
-`dependency_job_ids` entry is needed for it.
+`SourceBundle` construction (`assemble_nightly_source_bundle`,
+`source_inputs.build_native_score_inputs`) happens inside the worker, not
+at submission time — both are pure, I/O-free functions run from the staged
+`events.json`, so the submission side never touches
+`engine.v2.scoring.source_inputs`. `events.json` is staged as one
+immutable, content-addressed artifact via `spec.input_refs`, never a
+`job_<id>#<name>` reference, since no prior job produces it.
 
 **Cutover PR-4 (redo)'s own input sourcing (design — slice 2B(c), still
 deferred; `submit_native_parity_if_ready`/`_native_parity_identity` do
@@ -1278,489 +1051,199 @@ starts working with no change of its own.
 
 ## Outputs
 
-- **`orats_daily_market_fetcher`'s rows (`providers/orats_daily_market.py`,
-  #96).** `fetcher(unit)`'s fourth return value, `ticker_rows`, are plain
-  dicts keyed by the `daily_market` contract's columns. A value this
-  provider maps from ORATS is `None` (never a raw sentinel, never silently
-  dropped) in two cases: the field, once scaled, falls outside its column's
-  entry in this module's `PLAUSIBLE_RANGES` (a local, test-verified mirror
-  of `engine.data.normalize.common.PLAUSIBLE_RANGES` — a value outside
-  range is not a real quote); or the column is `implied_move` and the
-  scaled, in-range value is `<= 0` (ORATS's own "no quote" sentinel for
-  that field, distinct from a genuine implausible value). `mcap_usd` is
-  `None` whenever the day's `cores` payload has no `mktCap` for that ticker
-  — this module never looks back at other sessions to fill it; the
-  backward-looking as-of carry is `engine.v2.data.incremental.merge_daily_market`'s
-  job, documented in that package's own `ARCHITECTURE.md` (bounded to the
-  partitions a refresh already loaded, not an unbounded historical scan).
-  None of this raises: masking a value is normal-path behavior for this
-  provider, not a failure (see "Failure semantics" for what does raise:
-  `SOURCE_NOT_FINAL`/`TRANSIENT_SOURCE`/etc. for a genuinely bad response,
-  never for a masked field). A missing ticker is different from a masked
-  field, though: `_classify` (`orats_daily_market.py`) classifies a
-  response that is still missing one of the unit's `expected_keys`
-  tickers as `partial`, not `complete`, via `classify_response`; that
-  ticker is never committed silently absent. `_overall_kind` then takes
-  the worse of the `summaries`/`cores` endpoints' two kinds, so `partial`
-  becomes a retryable `TRANSIENT_SOURCE` refusal only when neither
-  endpoint mapped to a higher-severity code — a `not_final` endpoint
-  (an empty or literal-404 response) outranks it and produces
-  `SOURCE_NOT_FINAL` instead, and `credential_invalid`/`rate_limited`
-  outrank both.
+- **`orats_daily_market_fetcher`'s rows** (`providers/orats_daily_market.py`).
+  `fetcher(unit)`'s `ticker_rows` are plain dicts keyed by the
+  `daily_market` contract's columns. A field is masked to `None` (never a
+  raw sentinel, never silently dropped) when its scaled value falls outside
+  `PLAUSIBLE_RANGES` (a local, test-verified mirror of
+  `engine.data.normalize.common.PLAUSIBLE_RANGES`), or when it is
+  `implied_move` and the scaled, in-range value is `<= 0` (ORATS's own
+  "no quote" sentinel). `mcap_usd` is `None` whenever the day's payload has
+  no market cap for that ticker; this module never looks back at other
+  sessions to fill it (the backward-looking as-of carry is
+  `engine.v2.data.incremental.merge_daily_market`'s job, documented in that
+  package's own `ARCHITECTURE.md`). None of this raises — masking is
+  normal-path behavior, not a failure (see "Failure semantics" for what
+  does raise). A final, successful response still missing one of the
+  unit's expected tickers is classified `partial` (never committed
+  silently absent); an empty or literal-404 response is `not_final`
+  instead, never `partial`. The two provider endpoints (`summaries`/
+  `cores`) are classified independently and the worse kind wins: a
+  `partial` endpoint becomes a retryable `TRANSIENT_SOURCE` refusal only
+  when the other endpoint is not itself `not_final`/`credential_invalid`/
+  `rate_limited`, any of which produces `SOURCE_NOT_FINAL` (or worse)
+  instead.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
-- `assemble_score_batch_inputs` returns `(dict[BoardRequest, tuple[
-  ScoreRequest, NativeScoreInputs]], tuple[NativeScoreBatchRowRefusal, ...])`
-  — the assembled map (never partial per row: a key is present only with a
-  complete, buildable pair) plus every row that could not be assembled, each
-  a typed `.code`/`.detail`/`.key` refusal object. `run_native_score_batch_worker`
-  writes this as two staged files, BOTH keyed by the same canonical
-  `_board_request_key(key: BoardRequest) -> str` string (Cutover PR-4
-  redo's v2.0 schema — see "Cutover PR-4 (redo)" above for the full key
-  design and the `INVALID_KEY_FIELD` per-row refusal that makes it a true
-  bijection): `records.json` (an envelope document,
-  `{"schema_version": "native_score_batch_records.v2.0", "authoritative":
-  false, "known_gaps": [], "records": {canonical_key: to_document(record),
-  ...}}` — see "Failure semantics" for `authoritative`/`known_gaps` —
-  whose `records` object pairs `assembled.keys()` (the `BoardRequest`s, in
-  `assembled`'s own dict order) against the `tuple[ScoreRecord, ...]`
-  `score_batch` returns, each `to_document`-serialized; keying by
-  `canonical_key` rather than array position is exactly what makes the
-  pairing correct once any row has refused, never a reconstruction from
-  `events.json`'s own order) and `refusals.json` (`{"schema_version":
-  "native_score_batch_refusals.v2.0", "refusals": {canonical_key: {"code":
-  ..., "detail": ...}, ...}, "unkeyable_refusals": [{"key": {"ticker":
-  ..., "strategy": ..., "event_date": ..., "session": ...}, "code":
-  "INVALID_KEY_FIELD", "detail": ...}, ...]}` — `unkeyable_refusals` is
-  ALWAYS present, `[]` for a batch with none, never omitted (`native_parity_
-  report._native_rows_and_refusals`, above, requires the key rather than
-  defaulting it), the same `code`/`detail` fields
-  `NativeScoreBatchRowRefusal.as_document()` already carries, minus the
-  now-redundant nested `"key"` dict). A batch whose every row refuses
-  still completes the job successfully with an empty `records` object and
-  a full `refusals` object — refusing every row is a valid, reportable
-  outcome, not a worker failure (see "Failure semantics"), and (Cutover
-  PR-4 redo) is exactly the case `native_parity_report._empty_native_report`
-  (above) exists to turn into a real report rather than a refused
-  comparison. Exception: this still fails the job if two of those refusals
-  (or a record and a refusal) collide on canonical key — two `BoardRequest`s
-  that differ only by time-of-day within the same `event_date` truncate to
-  the same key — `_native_score_batch_documents` raises `ValueError` before
-  either output file is written rather than silently dropping one row.
-- `computed_moves_store.py` commits one new snapshot generation per run,
-  carrying every other table forward unchanged alongside a fresh
-  `computed_moves` table version (`engine/v2/data/computed_moves_table.py`;
-  one fragment per ticker, via the same immutable-object/manifest/atomic-head
-  commit primitives `price_history_store` uses, never `generic_incremental` —
-  `computed_moves` has no manifest in the parent snapshot the way an
-  existing contracted table does). Alongside the snapshot commit it inserts
-  one append-only row per attempted ticker into `data_computed_moves_captures`
-  (schema v12, `engine/v2/data/schema.py`) — a capture already logged (same
-  content-derived `capture_id`) is never re-logged, so a rerun that rebuilds
-  a generation from durable receipts does not duplicate the log.
+- **`assemble_score_batch_inputs`** returns `(dict[BoardRequest,
+  tuple[ScoreRequest, NativeScoreInputs]], tuple[NativeScoreBatchRowRefusal,
+  ...])` — a key is present only with a complete, buildable pair, plus every
+  row that could not be assembled as a typed refusal. `run_native_score_batch_worker`
+  writes this as two staged files, both keyed by the same canonical
+  `_board_request_key(key: BoardRequest) -> str` string (see "Primary
+  contracts" for the key design and the `INVALID_KEY_FIELD` refusal that
+  makes it a bijection): `records.json` (`schema_version
+  native_score_batch_records.v2.0`, `authoritative: false`, `known_gaps: []`
+  — neither field is populated today; both stay in the schema for a future
+  gap this module might need to flag — and a `records` object mapping
+  canonical key to each succeeded, serialized `ScoreRecord`) and `refusals.json`
+  (`schema_version native_score_batch_refusals.v2.0`, a `refusals` object
+  keyed the same way, plus an always-present `unkeyable_refusals` array for
+  rows whose own key was unusable). Keying by canonical key, rather than
+  array position, is what keeps the pairing correct once any row has
+  refused. A batch whose every row refuses still completes the job
+  successfully with an empty `records` object — refusing every row is a
+  valid, reportable outcome, not a worker failure. Exception: the job fails
+  if two refusals, or a record and a refusal, collide on canonical key
+  (two `BoardRequest`s that differ only by time-of-day within the same
+  `event_date` truncate to the same key) — the worker raises before either
+  output file is written, rather than silently dropping one row.
+- `computed_moves_store.py` commits a new snapshot generation only when the
+  `computed_moves` table's content actually changes, carrying every other
+  table forward unchanged alongside the fresh `computed_moves` table version
+  (one fragment per ticker, via the same immutable-object/manifest/atomic-head
+  commit primitives `price_history_store` uses). Alongside the snapshot commit
+  it inserts one append-only row per attempted ticker into
+  `data_computed_moves_captures` — a capture already logged (same
+  content-derived `capture_id`) is never re-logged. Every committed row's
+  `computed_at` derives from `as_of`, never the run's own wall clock, so a
+  same-`as_of` rerun over identical inputs produces byte-identical fragment
+  content and resolves back to the parent snapshot rather than committing a
+  new generation.
 - Coordinator-side effects for every kind in
-  `supervisor._COORDINATOR_EFFECT_KINDS` (14 kinds, cited by name rather
-  than copied here since the list can drift: `legacy_decisions`,
-  `legacy_settlement`, `legacy_render`, `legacy_selfcheck`,
-  `decision_evidence`, `ledger_export`, `engineering_gate`, `publication`,
-  `backup`, `snapshot_import`, `legacy_rebuild_candidate`,
-  `legacy_materialize`, `experiment`, `decisions_supersede`) —
-  catalog/outbox/filesystem writes dispatched from
-  `supervisor.Service._coordinator_effect`; the worker subprocess for each
-  of these kinds is trivial, the real write happens on the coordinator
-  side. That dispatch calls into several modules, not only
-  `effects_graph.py`: `effects_graph.py` supplies `backup_effect`,
-  `engineering_gate_effect`, `experiment_effect`, `ledger_export_effect`
-  and `publication_effect` (5 of the 14); `decision_commit.py` supplies
-  `commit_decisions_in_transaction` (`legacy_decisions`, called from a
-  commit closure defined directly in `supervisor.py`, not in
-  `effects_graph.py`) and `commit_supersede` (`decisions_supersede`);
-  `snapshot_promotion.py` supplies `legacy_rebuild_candidate_effect` and
-  `snapshot_import_effect`; `snapshot_stages.py` supplies
-  `materialize_effect` (`legacy_materialize`); `legacy_settlement` and
-  `decision_evidence` are handled by `supervisor.py`'s own
-  `_settlement_effect`/`_verify_decision_evidence`. "All real state change
-  happens in `effects_graph.py`" is not accurate — treat it as one of
-  several coordinator-effect implementation modules, not the only one.
+  `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
+  here since the list can drift) — catalog/outbox/filesystem writes
+  dispatched from `supervisor.Service._coordinator_effect`; the worker
+  subprocess for each of these kinds is trivial, the real write happens on
+  the coordinator side, spread across `effects_graph.py`, `decision_commit.py`,
+  `snapshot_promotion.py`, `snapshot_stages.py`, and `supervisor.py` itself
+  — `effects_graph.py` is one of several implementation modules, not the
+  only one.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
   other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
   output never reaches the legacy board.
-- Cutover PR-4 (redo; see "Primary contracts" above): `native_parity_report.json`
-  is NOT written in production today — `run_shadow_nightly`'s own
-  `_refuse_empty_inputs` raises `VALIDATION_FAILED` on an empty
-  `legacy_rows`/`native_rows`/no shared key, and nothing in production
-  ever calls `run_shadow_nightly` at all ("`run_shadow_nightly` has no
-  production caller, only tests ... call it" — still true, unchanged by
-  this redo). Once the `native_parity` job kind lands (Phase 2 of this
-  redo), its worker (`run_native_parity_worker`) writes the report as an
-  ORDINARY staged attempt output, `name="report"`, durably addressed
-  `job_<native_parity job id>#report` — resolvable through
+- **`native_parity_report.json`.** `run_native_parity_worker` writes the
+  report as an ordinary staged attempt output, `name="report"`, durably
+  addressed `job_<native_parity job id>#report` — resolvable through
   `input_bindings.resolve_bindings` exactly like `score.json`'s own
-  `job_<id>#score` binding, and reusable by a future caller the same way
-  (`dependency_job_ids` plus `input_bindings={"native_parity_report.json":
-  "job_<id>#report"}`). This CLOSES the non-atomic-write risk the original
-  PR-4 design named for `write_parity_report`'s bare `Path.write_text`
-  call: the new report is written through the same executor-owned
-  staged-attempt-output mechanism `records.json`/`score.json` already
-  use, which stages privately and only becomes visible as a committed
-  output once the attempt is recorded `succeeded` — a killed worker
-  leaves no output row at all, never a half-written file a caller could
-  read. `write_parity_report` itself is unchanged and still used only by
-  `run_shadow_nightly`'s own test-only path (its non-atomic-write shape is
-  immaterial there: nothing in production reads a file that function
-  writes). No dashboard-facing "latest" pointer path is added by this
-  redo (out of scope, above) — a reader finds the report by job id (`ops
-  get`/`ops logs`/`ops explain <job_id>`), the same way every other
-  shadow-only artifact in this package is read today. The report's own
-  schema gains TWO additive fields, `"native_refused": [...]` (a
+  `job_<id>#score` binding, so a future job can bind
+  `{"native_parity_report.json": "job_<id>#report"}` the same way
+  `_decision_bindings`/`_render_bindings` already do. This is the same
+  staged-attempt-output mechanism `records.json`/`score.json` use: the
+  report stages privately and only becomes visible once the attempt is
+  recorded `succeeded` — a killed worker leaves no output row, never a
+  half-written file. No dashboard-facing "latest" pointer exists; a reader
+  finds the report by job id (`ops get`/`ops logs`/`ops explain <job_id>`).
+  Schema `native_parity_report.v1.1` adds `"native_refused"` (a
   `population_key`-matched legacy row moved out of `only_legacy`) and
-  `"native_refused_unmatched": [...]` (a native refusal — keyed or, for
-  `INVALID_KEY_FIELD`, structured — with no legacy row to move; CodeRabbit
-  round 5, real finding, above) (both `apply_native_refusals`, above) —
-  `SCHEMA_VERSION` bumps `native_parity_report.v1.0` → `v1.1` for this
-  reason; every existing field (`compared`/`only_legacy`/`only_native`/
-  `mismatches`/`tolerance_policy_id`) keeps its exact prior meaning,
-  except that `only_legacy` now excludes rows `native_refused` claims
-  instead of including them — a meaning NARROWING, not a breaking
-  removal: no production caller has ever populated `only_legacy` with
-  real refusal data before this redo. Still private-shadow-only, same as
-  every other artifact in this bullet list; nothing here writes to the
-  legacy board.
+  `"native_refused_unmatched"` (a native refusal with no legacy row to
+  move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/
+  `tolerance_policy_id` fields; `only_legacy` now excludes rows
+  `native_refused` claims. What still has no production caller — the
+  sidecar/nightly wiring that submits a `native_parity` job at all — is
+  slice 2B(b)/(c), described under "Primary contracts" above.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
-  into the EXISTING `earnings_events` contract through
-  `engine.v2.data.generic_incremental` — never
-  `engine.data.rebuild.rebuild` — and returns a `RefreshCallbackResult`
-  (`status` one of `complete`/`noop` — invalid input or an unconfigured
-  fetcher pair raises `OpsError` instead of returning a `"failed"` result;
-  `completed_ids`, `coverage_advanced`, and `warnings` carrying any
-  weekday-calendar-fallback degradation as evidence rather than only a log
-  line). A run whose merged claims equal the parent snapshot's own rows
-  resolves back to the parent (the commit layer's own equality check
-  decides this, never key presence in the parent), so it reports `noop`
-  rather than a spurious `complete`.
+  into the existing `earnings_events` contract through
+  `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild`
+  — and returns a `RefreshCallbackResult` (`status` one of `complete`/`noop`;
+  invalid input or an unconfigured fetcher pair raises `OpsError` instead of
+  returning a `"failed"` result). A run whose merged claims equal the parent
+  snapshot's own rows reports `noop` rather than a spurious `complete` (the
+  commit layer's own equality check decides this, never key presence in the
+  parent).
 - `training`/`models_promote` are ordinary `_core_kinds()` job kinds, not
   `supervisor._COORDINATOR_EFFECT_KINDS` members: the worker subprocess does
-  the real write itself. `run_training_worker` (worker `"training"`) calls
-  one of `tools/phase5_training_job.py`'s four job functions and writes
-  `training_result.json` (`training_job_result.v1.0`); `run_promote_worker`
-  (worker `"models_promote"`) calls `engine.v2.models.deployment.promote`'s
-  release-store pointer swap and writes `pointer_state.json`
-  (`promote_pointer_state.v1.0`). Neither ever runs inside the nightly DAG —
+  the real write itself. `run_training_worker` calls one of
+  `tools/phase5_training_job.py`'s four job functions and writes
+  `training_result.json`; `run_promote_worker` calls
+  `engine.v2.models.deployment.promote`'s release-store pointer swap and
+  writes `pointer_state.json`. Neither ever runs inside the nightly DAG —
   both are submitted by an operator's own `ops plan training|promote` +
   `ops submit`.
 - `board_requests`: a tuple of `BoardRequest`, ordered by
   `(event_date, ticker)` outer, native-covered strategies alphabetically
   then `DYN-SV` last inner. No side effect, no write.
 
-**`computed_moves_refresh` is registered as an ordinary job kind (Part 3) and
-now has a nightly `GRAPH`/`OPTIONAL` node and a SUPERVISED submitter (Part 4,
-revised after Opus BLOCK(3)); `forward_calendar_refresh` now has a `JobKind`
-too (issue #52's prerequisite landed in #55; this is a separate, later
-change from #55 itself), but still has neither a `GRAPH`/`OPTIONAL` node nor
-a submitter — that wiring is a separate, later PR.** `stages.py::_core_kinds`
-includes `calendar_moves_jobs.computed_moves_job_kind()` and
-`calendar_moves_jobs.forward_calendar_job_kind()`; `worker.py::dispatch`
-routes worker `"computed_moves_refresh"` to
-`calendar_moves_jobs.run_computed_moves_worker` and worker
-`"forward_calendar_refresh"` to
-`calendar_moves_jobs.run_forward_calendar_worker`. `nightly.py`'s `GRAPH` still
-carries a `"computed_moves_refresh": ("refresh",)` node, and `OPTIONAL`
-still includes it, but ONLY for `run_shadow_nightly`'s own whole-graph walk
-(see "Diagrams" below) — no *submission* path builds a job for it from that
-node, and `_NATIVE_ACTION_STAGES` maps only `"refresh"` now. (Before Part 4
-this stage was reachable only through the general job-submission pipeline,
-`ops submit` with a raw `JobSpec`, same as `training`/`models_promote`
-above; Part 4 below is what added the real caller.)
+**`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
+Both are registered `_core_kinds()` job kinds (`calendar_moves_jobs.
+computed_moves_job_kind()`/`forward_calendar_job_kind()`), dispatched by
+`worker.py::dispatch` to `run_computed_moves_worker`/`run_forward_calendar_worker`.
+Only `computed_moves_refresh` has a nightly `GRAPH`/`OPTIONAL` node and a
+submitter; `forward_calendar_refresh` has neither yet — building its
+nightly node and submitter is a separate, unbuilt piece
+([#206](https://github.com/yshewchuk/investment-validation/issues/206)),
+and until then it is reachable only through direct `ops submit`, same as
+`training`/`models_promote` above.
 
-**Why it moved out of `build_legacy_job_requests` (Opus BLOCK(3) on
-`dc7f9360`).** The first cut of Part 4 built both native jobs — `"refresh"`
-(daily_market) and `"computed_moves_refresh"` — inside the SAME
-`build_legacy_job_requests` call, both pinning the identical shadow head at
-plan-build time, and submitted them together through one
-`submission.submit_graph` call. Two defects followed directly from that:
-(1) `data_catalog.commit_snapshot`'s `_check_head_expectation` is strict —
-whichever of the two jobs commits its pinned `(snapshot_id, generation)`
-SECOND is rejected as stale, and `"refresh"` commits first on almost every
-real session (it is the one that actually adds daily_market rows), so
-`computed_moves_refresh` would fail on a stale head essentially always, or,
-with no ordering at all, could occasionally commit FIRST and fail the
-REQUIRED `"refresh"` instead — either way the optional stage could break the
-required one, which `OPTIONAL` must never do. (2) `submit_graph` validates
-every node then inserts all or none (`submission.py`'s own module
-docstring): a zero-provider-call rebuild, a same-session resubmission whose
-digest had drifted from cached-receipt changes, or a plain exception in the
-computed-moves plan builder each aborted the WHOLE graph — including the
-REQUIRED `"refresh"` and every downstream legacy stage — not just the
-optional one.
+`computed_moves_refresh` is submitted only by `supervisor.Service`'s own
+tick loop (`_reconcile_computed_moves_refresh`, wrapped in the same
+degrade-only-this-stage try/except `_reconcile_publication_status` uses),
+via `nightly.submit_computed_moves_refresh_if_ready`: it finds the latest
+(by session, not by last-updated) succeeded native `"refresh"` job,
+resolves the shadow head fresh, and keys the job purely by session — no
+`scope_hash`, since its target set is always every scoreable ticker on the
+pinned head, independent of which watchlist's `"refresh"` triggered the
+tick. It is submitted alone (`submission.submit`, never `submit_graph`),
+never sharing `build_legacy_job_requests`'s graph — bundling a REQUIRED and
+an OPTIONAL job into one all-or-nothing graph submission is exactly what
+R4 below forbids. If a job already exists under that key, in any state,
+nothing is rebuilt or resubmitted. Rebuild attempts against an identity
+that keeps coming back empty are memoized with a bounded retry budget
+(`Service._computed_moves_memo`), so a full target-ticker scan is not
+repeated every tick; a changed identity (new session, or the same session
+on a new head) always gets a fresh budget. `completed_ids` on a
+`"complete"`/`"noop"` result is the full whole-market target set the
+worker itself derives at run time, not only tickers that got a written
+fragment, so a caller's coverage denominator never disagrees with the
+worker. `forward_calendar_refresh` does not share this denominator design
+— its own `expected_ids` is always `set(tickers)`, so a whole-market
+(`tickers=()`) submission is not supported as a job today, only the
+standalone runner accepts it.
 
-**The revised design: a separate, later submission, never sharing
-`build_legacy_job_requests`'s graph.** `computed_moves_refresh` is submitted
-ONLY by `supervisor.Service`'s own tick loop —
-`Service._reconcile_computed_moves_refresh`, called every `tick()` right
-after `_reconcile_publication_status`, which calls
-`nightly.submit_computed_moves_refresh_if_ready`. That function: (a) calls
-`nightly._computed_moves_identity`, which looks at every `succeeded` native
-`"refresh"` job, recovers each one's session (`as_of`) by parsing that job's
-OWN idempotency key — `"nightly:<as_of>:<scope_hash>:refresh"`,
-`build_legacy_job_requests`'s own format; `RefreshParameters` carries no
-`as_of` field, so this is the only place a native refresh's session is
-recorded — and picks the MAX (chronologically latest) session, never the
-latest-UPDATED row (Opus re-gate finding, non-blocking, fixed alongside the
-memo/backoff below): an older session's `"refresh"` row can be touched again
-later than a newer session's (a backfill, a re-verify), and
-`ORDER BY updated_at DESC` would then wrongly pick the older session; does
-nothing if no `"refresh"` has succeeded yet; (b) resolves the shadow head
-FRESH, right now, never a head pinned by any earlier plan, so by
-construction it can only ever read the head `"refresh"` already committed;
-(c) keys the job purely by session —
-`"nightly:<as_of>:computed_moves_refresh"`, no `scope_hash` — because its
-target set is always every scoreable ticker on the pinned head
-(`all_scoreable=True`), independent of which watchlist's `"refresh"`
-triggered the tick that noticed it; (d) if a job already exists under that
-key, in ANY state, returns without rebuilding or resubmitting anything — so
-a same-session rerun, or cached-receipts changing between ticks, can never
-reach `submission.submit` at all, let alone hit `IDEMPOTENCY_CONFLICT`; (e)
-is submitted alone, through `submission.submit` (one node, not
-`submit_graph`), so it can never make a REQUIRED job's admission all-or-
-nothing with it. `Service._reconcile_computed_moves_refresh` wraps the whole
-call in the identical try/except `_reconcile_publication_status` already
-uses (a reporting sidecar, never the pipeline; see "Failure semantics"
-below) — a broken build (a resolve error, a target-selection error) degrades
-only this optional stage, never `tick()` itself and never a required job's
-dispatch.
+Both stores validate their own staged input document and `parameters`
+up front, before the sqlite connection opens (unknown keys, wrong types,
+non-existent `catalog_path`/`objects_root`, malformed identity/hash fields,
+a document value disagreeing with the job's own parameters) — see "Primary
+contracts and public interfaces" and the `forward_calendar_store.py` /
+`calendar_moves_jobs.py` Failure semantics table below for the exact refusal
+set. A stale `expected_head_snapshot_id`/`expected_head_generation` is
+deliberately not checked before fetching — only at commit time, as
+`SNAPSHOT_CONFLICT` — matching the store's optimistic design: a stale head
+costs only the fetches this run already made, staged durably and reused as
+cache on the next attempt.
 
-**Memoized per (session, head), with backoff (Opus re-gate blocking
-finding).** `_computed_moves_identity` itself is cheap — two indexed
-`SELECT`s, no pandas — but `submit_computed_moves_refresh_if_ready`'s own
-deeper work, when there IS something to (re)build, is not: it calls
-`_build_native_computed_moves_plan`, which calls
-`computed_moves_store.target_tickers_from_snapshot`, a full pandas scan.
-Without a memo, `tick()`'s ~1s cadence would repeat that scan every tick,
-all day, whenever the build keeps coming back with nothing to submit — an
-empty target list (`_build_native_computed_moves_plan` returns `None`), a
-build-time exception, or a `submit` rejection (which also re-hashes the
-source tree for `implementation_ref`/`environment_ref`). `Service` keys a
-single in-memory memo (`self._computed_moves_memo`) by
-`_computed_moves_identity`'s own return value (session, snapshot_id,
-generation) and tracks an attempt count and a monotonic `not_before` against
-it. A tick whose current identity does not match the memo's (a new session,
-or the same session on a new head) resets the memo to zero attempts with no
-backoff — a new identity always gets an immediate first try. Each outcome
-that is NOT a submitted job — the reconcile call raising, or
-`submit_computed_moves_refresh_if_ready` returning `None` because the build
-came back empty/there was nothing to do — increments the attempt count and
-sets `not_before` from a fixed backoff schedule indexed by attempt number:
-`_COMPUTED_MOVES_BACKOFF_SECONDS = (30.0, 120.0, 600.0, 1800.0, 3600.0)`
-(30s, 2m, 10m, 30m, 1h). After `_COMPUTED_MOVES_MAX_ATTEMPTS = 5` attempts
-against the same identity, the tick stops trying that identity at all until
-it changes (a later attempt count clamps to the schedule's last entry, 1h,
-so it never gets more aggressive than that even past 5 tries — the max just
-stops the loop from being live-patched by a fresh count on every tick past
-that point). A successful submission (a `JobReceipt` returned) clears the
-memo entirely, so the NEXT distinct identity — which can only be a new
-session or a new head, since a job now exists under the current key —
-starts from zero rather than inheriting a stale attempt count. Both numbers
-(5 attempts, the five-step schedule) are this PR's own judgment call, not a
-measured or externally specified bound; nothing before this fix throttled
-the rebuild at all. `_build_native_computed_moves_plan` still derives `expected_ids`
-from `computed_moves_store.target_tickers_from_snapshot`/`computed_moves_units`
-against the pinned (now current, post-refresh) shadow head — the SAME two
-functions the worker itself calls at run time (see the coverage-denominator
-note below) — so a caller's coverage denominator never disagrees with what
-the worker independently recomputes; it now takes `as_of` directly rather
-than a nightly `plan`/`context_tickers` (neither was ever read by its body).
-`forward_calendar_refresh` was registered, and briefly wired into a draft of
-this same nightly stage, in an earlier draft of PR #50 too, but that
-registration (and its `run_forward_calendar_worker` job-layer adapter) was
-pulled before merge: see "Primary contracts" above and issue #52 (no
-attempt-fence check in `forward_calendar_store`'s commit path — a gap the
-job registration would have made newly reachable as a supervised, leased,
-retried, cancellable attempt) — Part 4 wired only `computed_moves_refresh`
-for the same reason. Issue #52's prerequisite landed in #55, and
-`forward_calendar_refresh` was re-registered as a `JobKind` in a later PR
-(worker dispatch, loader callback, parameter validation, and a small staged
-`attempt_id`/`fence` document — see "Primary contracts"/"Inputs" above) —
-but it still has no `GRAPH`/`OPTIONAL` node and no submitter of its own.
-`run_computed_moves_refresh` is also still not itself a bare
-`engine.v2.ops.incremental_data.RefreshCallback`: that protocol's
-`parameters: RefreshParameters` has no `as_of` field on `main`, and `as_of`
-varies per job dispatch (a session date) so it cannot be pre-bound the way
-the fetcher is — it is an explicit, validated, required keyword instead.
-`run_computed_moves_worker` bridges this: it decodes the job's own
-`CalendarMovesParameters` (which DOES carry `as_of`) and calls
-`incremental_data._load_computed_moves_refresh_callback(as_of)` to build the
-closure that actually satisfies the protocol, then validates the closure's
-`RefreshCallbackResult` the same way `incremental_data.run_refresh_worker`
-does for `incremental_refresh` (`validate_refresh_result_document`,
-`_validate_refresh_binding`, `_validate_refresh_status` — reused directly,
-not reimplemented — plus `calendar_moves_jobs._validate_calendar_moves_coverage`,
-a set-based variant of `incremental_data._validate_refresh_coverage` written
-for this job kind specifically: `computed_moves_store` never promises
-`completed_ids` in the caller's `expected_ids` order, so the shared
-ordered-tuple comparison would fail an already-committed, fully-covered
-result on order alone) before writing `computed_moves_refresh_result.json`
-into the attempt's staging root itself: unlike `run_daily_market_refresh`,
-`run_computed_moves_refresh` writes no result artifact of its own, so the
-ops-layer worker writes it after validating, rather than writing it first
-and reading it back for an integrity cross-check the way
-`incremental_data._validate_callback_result` does. **The coverage
-denominator (Round 3 fix, Opus finding 2):** `completed_ids` on a
-`"complete"`/`"noop"` result is `tuple(sorted(targets))` — the FULL
-whole-market universe `target_tickers_from_snapshot` derives for the pinned
-`(parent_snapshot_id, as_of, all_scoreable, since)` — never only the
-tickers that happened to get a written fragment. A target ticker this run
-legitimately finds has no committable rows (`_capture_targets`'s "too_few"
-outcome — a real business finding, not a failure) still counts as covered:
-the run genuinely finished considering it. A caller building `expected_ids`
-before submission must derive it the same way, from
-`target_tickers_from_snapshot` against the same pinned inputs — `CalendarMovesParameters.tickers` (restored, see "Primary contracts" above)
-is `forward_calendar_refresh`'s own field, never read by
-`computed_moves_refresh`: this fix's `target_tickers_from_snapshot`-derived
-denominator design is specific to `computed_moves_refresh` and is not reused
-by `forward_calendar_refresh`, whose own `expected_ids` must instead equal
-`set(tickers)` — `run_forward_calendar_refresh` always reports
-`completed_ids=tuple(sorted(set(tickers)))` (see its own module docstring),
-so a `tickers=()` ("whole market") submission can never satisfy this job
-kind's own coverage check, which requires a non-empty `expected_ids`
-(`_expected_ids_problems`): submitting a whole-market forward-calendar
-refresh as a job is not yet supported end-to-end (only a ticker-scoped
-request is); the standalone runner itself still accepts `tickers=()` for a
-direct, non-job invocation.
-Every field of the staged input document, and
-`parameters`' own `parent_snapshot_id`/`refresh_plan_hash`, are validated up
-front (`_validate_input_document`, split into `_validate_document_identity`/
-`_validate_document_head`/`_validate_document_attempt`/
-`_validate_document_selection`/`_validate_document_matches_job`, plus
-`_validate_job_identity`, to stay under the complexity budget) before the
-sqlite connection even opens: unknown document keys; wrong types;
-`catalog_path` not already an existing file (the connection then opens on a
-`mode=rw` URI too, so a TOCTOU removal between the check and the connect
-raises instead of silently creating an empty database); `objects_root` not an
-existing directory; `parent_snapshot_id`/`refresh_plan_hash` not matching the
-same bounded-string/sha256-hex shapes `incremental_data.RefreshParameters`
-already enforces for these fields (mirrored, not imported — `forward_calendar_store.py`
-(#40, merged) carries the same mirrored copies: the two stores were built as
-independent, parallel PRs, so neither imports the other's private checks);
-`expected_head_snapshot_id`/`fence` failing their own
-format checks (a bounded string; an int >= 1); and any document value that
-disagrees with the job's own `RefreshParameters`
-(`catalog_path`/`objects_root`/`scope`/`expected_head_generation`) — all
-refused, never coerced. `scope` is checked against
-`refresh_job_kind().namespaces` — the sibling `incremental_refresh` job
-kind's own `{"shadow", "smoke"}` — since this store has no `JobKind` of its
-own yet to carry that allowlist. A STALE `expected_head_snapshot_id`/
-`expected_head_generation` (one that no longer matches the catalog's actual
-head) is deliberately NOT checked before fetching: it is only caught at
-commit time, inside `_commit_generation`/`data_catalog.commit_snapshot`, as
-`SNAPSHOT_CONFLICT` — an optimistic design, matching #40. A stale head costs
-only the fetches this run already made; their complete receipts are staged
-durably and reused as cache on the next attempt, not repeated.
-`tests/test_v2_ops_computed_moves_store.py` covers `_capture_id_for`'s
-stable, non-wall-clock, non-colliding capture identity, `_fence_check_for`'s
-real-`verify_fence` signature and its still-active production lease-expiry
-check, `as_of`'s pre-I/O validation, the input document's own field-by-field
-validation, and `run_computed_moves_refresh` end to end (one complete unit, a
-same-`as_of` rerun that re-fetches nothing AND now genuinely no-ops even at a
-different wall-clock time, and a provider failure mapped to its typed code).
-Fixed (was tracked as
-[#41](https://github.com/yshewchuk/investment-validation/issues/41)): every
-committed row's `computed_at` is now derived from `as_of`, not the run's own
-wall clock, so a same-`as_of` rerun over identical inputs produces
-byte-identical fragment content (same `fragment_id`, same object content
-hash) and the commit resolves back to the parent snapshot instead of a fresh
-generation.
-
-**Cutover PR-7a: where the native `ScoreRecord`s will land (deferred).**
-Today's production path never reaches a successful `native_score_batch`
-attempt (see "Failure semantics" below: the unpinned-snapshot branch
-returns before any job is built, and the pinned-snapshot branch raises
-because cutover PR-6's raw-row producer does not exist yet), so nothing
-below actually happens in production today. This section describes the
-destination once PR-6 lands. Once a
-`native_score_batch` attempt succeeds, `records.json`/`refusals.json`
-(already documented above) are recorded as ordinary `attempt_outputs` rows
-keyed `(attempt_id, name)` — `name="records"` / `name="refusals"` — the
-identical durable mechanism `score.json` already lands through for the
-legacy `"score"` stage today (`attempt_outputs` row named `"score"`,
-addressed as `job_<id>#score` via `_job_output`, `nightly.py:180-188`).
+**Cutover PR-7a: where the native `ScoreRecord`s will land.** Today's
+production path never reaches a successful `native_score_batch` attempt
+(the unpinned-snapshot branch returns before any job is built, and the
+pinned-snapshot branch raises `VALIDATION_FAILED` because
+[#199](https://github.com/yshewchuk/investment-validation/issues/199)'s
+raw-row producer does not exist), so nothing below happens in production
+today; this describes the destination once #199 lands.
 
 - **Durable address.** `job_<native_score_batch job_id>#records` (and
-  `#refusals`) — resolvable through
-  `engine.v2.ops.input_bindings.resolve_bindings`/`_resolve_job_binding`
-  (`input_bindings.py:31-55`, `:58-80`) exactly like `score.json`'s own
-  `job_<id>#score` binding; no new binding mechanism is needed. A future job
-  that declares the `native_score_batch` job_id in its own
-  `dependency_job_ids` can bind `{"records.json": "job_<id>#records"}`, the
-  identical shape `_decision_bindings`/`_render_bindings` already build for
-  `score.json` (`nightly.py:216`, `:225`).
-- **Per-night identity.** The job's idempotency key is
-  `"nightly:<as_of>:<scope_hash>:native_score_batch"` — keyed to the
-  SPECIFIC succeeded `"score"` job `_native_score_batch_identity` selected
-  (see "Failure semantics" below, R6), never session alone: a later
-  `"score"` job for the same session under a different `scope_hash` is a
-  genuinely different native batch and gets a distinct key, so a real
-  re-run is never silently treated as already covered (CodeRabbit round 1,
-  real finding — a prior draft of this design keyed session-only,
-  mirroring `computed_moves_refresh` for the wrong reason: ITS target set
-  is watchlist-independent, this one's is not). A later job finds that
-  night's attempt the same way `_native_score_batch_identity` does:
-  `SELECT ... FROM jobs WHERE state='succeeded' AND idempotency_key LIKE
-  'nightly:<as_of>:%:native_score_batch' ESCAPE '\'`, with any literal `_`
-  or `%` inside the substituted `<as_of>` value backslash-escaped before
-  the query is built (CodeRabbit, this round, real finding, escalated from
-  a "nit" in an earlier round to an actual fix here: a bare `LIKE` treats
-  `_` as a single-character wildcard, and today's `<as_of>` is a plain ISO
-  date with neither character — but writing the query defensively, with an
-  explicit `ESCAPE` clause, costs nothing and stops a future change to
-  `as_of`'s own format from silently turning this into a wildcard match
-  against the wrong session). Then the latest succeeded `attempts` row for
-  it (`input_bindings.py:43-45`'s own query is the same shape — that
-  query's own escaping convention, if it has one, should be matched here
-  too).
-- **Row keys.** Each successful row's own `BoardRequest` (ticker, strategy,
-  ISO `event_date`, `session`) is exactly what `assemble_score_batch_inputs`
-  already keys its `dict[BoardRequest, tuple[ScoreRequest,
-  NativeScoreInputs]]` by — but that key is NOT carried through to
-  `records.json` today: `ScoreBatch.requests` (and so the `records` array,
-  `native_score_batch.py:463-478`) is only the SUCCESSFUL subset, in
-  `assembled`'s own iteration order, with every refused row already
-  dropped. So a `records.json` row can NEVER be paired against
-  `events.json` by POSITION once any row has refused — the two arrays are
-  then different lengths with no fixed offset between them (CodeRabbit
-  round 1, real finding — a prior draft of this design recommended exactly
-  that positional zip; it is wrong and is corrected here).
-
-  **Left entirely to the `native_parity` job's own re-plan — not designed
-  here.** An earlier revision of this bullet prescribed a specific fix (a
-  `records.json` schema change to a canonical-string-keyed object) as
-  something built "precisely enough to build against without a second
-  design pass." That was wrong for this PR: acceptance criterion 4 of this
-  same design states the row-key/join gap is "not designed here," and
-  choosing `records.json`'s own future output schema is a change to
-  `native_score_batch.py`'s output contract — code, and a second component's
-  contract at that — which belongs to whichever PR builds `native_parity`,
-  reviewed on its own terms (a schema version bump, `refusals.json`
-  consistency, and how legacy's own row identity gets projected down to
-  match are all real decisions a single bullet here cannot make well).
-  What IS in scope for PR-7a, and stated above, is the hazard itself:
-  refused rows break positional pairing, so whatever `native_parity` does
-  must key on row identity, never array position. This bullet does not
-  choose that key's field set, string form, schema version, or how it
-  reaches `refusals.json`; the parity PR designs all of that against
-  `BoardRequest`'s existing fields and `NightlyEventInputs.key`/
-  `NativeScoreBatchRowRefusal.as_document()`'s existing `"key"` dict
-  (`native_score_batch.py:56`, `:84-89`) as its starting material.
+  `#refusals`) — resolvable through `input_bindings.resolve_bindings`
+  exactly like `score.json`'s own `job_<id>#score` binding; no new binding
+  mechanism is needed.
+- **Per-night identity.** The idempotency key is keyed to the specific
+  succeeded `"score"` job selected (Failure semantics R6), never session
+  alone — a later `"score"` job for the same session under a different
+  `scope_hash` is a genuinely different native batch and gets its own key.
+- **Row keys.** `records.json`/`refusals.json` are keyed by the same
+  canonical `_board_request_key` string described above, not by array
+  position, so a row is never paired against `events.json` positionally.
+  `native_parity_report._native_rows_and_refusals`/
+  `_population_key_from_board_request_key` already join on this key today
+  (built, not designed here). What is still slice 2B(b)/(c) work (see
+  "Primary contracts" above) is submitting and scheduling the `native_parity`
+  job itself, not the key format it joins on.
 - **Namespace/authority.** Every one of these jobs is submitted under a
-  `NamespacePolicy` scoped to `{"shadow"}` only, mirroring
-  `_reconcile_computed_moves_refresh`'s own inline policy
-  (`supervisor.py:444`); `native_score_batch`'s registered
-  `namespaces=frozenset({"shadow", "smoke"})` (`stages.py:285`) already
-  forbids anything else, and its `effects=("staged",)` with no
-  `store_domains` (`stages.py:282`) means it commits no legacy-store head
-  and holds no read/write lease the legacy board depends on. No code path
-  from this job reaches the legacy board, the decisions pipeline, or
-  publication — the invariant this whole design exists to hold.
+  `NamespacePolicy` scoped to `{"shadow"}` only; `native_score_batch`'s
+  registered `namespaces=frozenset({"shadow", "smoke"})` already forbids
+  anything else, and its `effects=("staged",)` with no `store_domains`
+  means it commits no legacy-store head and holds no read/write lease the
+  legacy board depends on. No code path from this job reaches the legacy
+  board, the decisions pipeline, or publication.
 
 ## Dependencies
 
@@ -1981,6 +1464,7 @@ Per row (collected as a refusal, never sinks the batch):
 | Refusal code | Condition |
 |---|---|
 | `INVALID_KEY_FIELD` | the row's own key contains a reserved separator |
+| `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
 | `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its dates don't parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
 | `UNSUPPORTED_STRATEGY` | the row's strategy is outside this assembler's supported set |

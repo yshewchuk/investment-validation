@@ -24,6 +24,7 @@ from engine.v2.contracts import LegacyFileRef, LegacyInputManifest
 from engine.v2.data import legacy_mapping
 from engine.v2.data import reference_inputs as ri
 from engine.v2.data import schema as data_schema
+from engine.v2.data.catalog import record_failed_import
 from engine.v2.data.errors import DataError
 from engine.v2.data.import_snapshot import plan_import
 from engine.v2.data.reference_catalog import (
@@ -39,11 +40,12 @@ from engine.v2.ops.cli import dispatch, parser
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.lifecycle import request_cancel
 from engine.v2.ops.migrations import Migration, migrate
+from engine.v2.ops.snapshot_promotion import _translate
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root
 from engine.v2.ops.stages import registry
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY
-from tests.test_v2_data_catalog import _assert_immutable, build_chain, catalog, insert_receipt
+from tests.test_v2_data_catalog import H, _assert_immutable, build_chain, catalog, insert_receipt
 from tests.test_v2_data_import import (
     REFERENCE_MODEL_ID,
     ROOT,
@@ -224,6 +226,65 @@ def test_bad_registry_or_artifact_is_a_contract_mismatch(tmp_path):
         assert _refused(tmp_path) == "CONTRACT_MISMATCH", artifact
     registry_path.write_text("[]")
     assert _refused(tmp_path) == "CONTRACT_MISMATCH"
+
+
+# --------------------------------------------------------------------------
+# coordinator publish_reference_inputs refusals (issue #217)
+# --------------------------------------------------------------------------
+
+
+def _required_exact_paths() -> dict[str, str]:
+    """Every REQUIRED ``exact`` reference path, keyed by kind -- the same
+    ``resolution == "exact"`` / ``required`` defaulting rule
+    :func:`_expected_paths` and ``publish_reference_inputs``'s own missing
+    check apply, so these tests carry no magic count."""
+    return {kind: spec["path"] for kind, spec in INPUTS.items()
+            if spec["resolution"] == "exact" and spec.get("required", True)}
+
+
+def test_publish_missing_reference_inputs_refusal_details_carry_only_a_count():
+    """issue #217: the "import manifest lacks required reference inputs" refusal
+    must not leak the raw legacy paths of the missing inputs into
+    ``Problem.details`` -- that dict survives verbatim into a durably persisted
+    receipt (``snapshot_promotion``'s translation / ``record_failed_import``),
+    the same leak #202 closed for ``reference_catalog``. An empty ``file_refs``
+    means the publish loop never runs, so ``store``, ``attempt_id`` and
+    ``legacy_root`` are never touched -- placeholders are enough."""
+    required = _required_exact_paths()
+    assert required
+    with pytest.raises(DataError) as excinfo:
+        ri.publish_reference_inputs(None, "attempt-217", None, ())
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    assert problem.details == {"count": len(required)}
+    assert not any(path in str(problem.details) for path in required.values())
+
+
+def test_publish_unfolded_reference_inputs_refusal_details_carry_only_a_count(tmp_path):
+    """issue #217, the sibling refusal: pinning EVERY required exact input but
+    with no snapshot decision session (``as_of=None``) trips the Tier-4-fold
+    check, whose details must likewise carry only a count -- here one per
+    ``_FOLD_KINDS`` required exact input. Driven through real staged files
+    (``build_legacy_store`` + ``import_snapshot``'s own hashing ``_file_ref``,
+    the enumerator ``resolve_reference_files`` is handed) and a real
+    ``ArtifactStore``, so the refusal is the fold one, not the missing-inputs
+    one."""
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.data.import_snapshot import _file_ref
+
+    legacy_root, store_root = tmp_path / "legacy_store", tmp_path / "ops_store"
+    build_legacy_store(legacy_root)
+    required = _required_exact_paths()
+    unfolded = sorted(path for kind, path in required.items() if kind in ri._FOLD_KINDS)
+    assert unfolded
+    file_refs = tuple(_file_ref(legacy_root, path) for path in sorted(required.values()))
+    store = ArtifactStore(store_root)
+    with pytest.raises(DataError) as excinfo:
+        ri.publish_reference_inputs(store, "attempt-217", legacy_root, file_refs, as_of=None)
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    assert problem.details == {"count": len(unfolded)}
+    assert not any(path in str(problem.details) for path in required.values())
 
 
 # --------------------------------------------------------------------------
@@ -423,6 +484,47 @@ def test_v5_v6_migrations_are_checksummed_idempotent_and_append_only(tmp_path):
         assert err.value.problem.details["reason"] == "checksum_mismatch"
     finally:
         raw.close()
+
+
+def test_unknown_kind_refusal_details_carries_no_legacy_path(tmp_path):
+    """issue #202: refusing an unknown reference-input kind must not leak the
+    raw legacy filesystem path into ``Problem.details`` — that dict survives
+    unchanged into a durably persisted receipt row (``snapshot_promotion`` /
+    ``catalog.record_failed_import``). Only the internal ``kind`` label stays."""
+    conn, clock = catalog(tmp_path)
+    ids = build_chain(conn, clock)
+    legacy_path = "engine/data/legacy_secret_dir/file.parquet"
+    with pytest.raises(DataError) as excinfo:
+        insert_reference_inputs(conn, ids["receipt_id"],
+                                [_reference(legacy_path, kind="unknown_kind_xyz")])
+    assert excinfo.value.problem.details == {"kind": "<unknown>"}
+    assert "legacy_secret_dir" not in str(excinfo.value.problem.details)
+    conn.close()
+
+
+def test_unknown_kind_refusal_persisted_receipt_carries_no_legacy_path(tmp_path):
+    """issue #202, transitively: the Problem that insert_reference_inputs
+    raises is forwarded through snapshot_promotion._translate (details
+    verbatim) and persisted by catalog.record_failed_import into
+    data_import_receipts.problem_json. That persisted JSON must not carry
+    the raw legacy path either."""
+    conn, clock = catalog(tmp_path)
+    ids = build_chain(conn, clock)
+    legacy_path = "engine/data/legacy_secret_dir/file.parquet"
+    with pytest.raises(DataError) as excinfo:
+        insert_reference_inputs(conn, ids["receipt_id"],
+                                [_reference(legacy_path, kind="unknown_kind_xyz")])
+    translated = _translate(excinfo.value.problem)
+    assert translated.details == {"kind": "<unknown>"}
+    record_failed_import(conn, receipt_id="recv-202-persisted", request_hash=H("recv-202-persisted"),
+                         attempt_id="attempt-202", fence=1, problem=translated, clock=clock)
+    row = conn.execute("SELECT problem_json FROM data_import_receipts WHERE receipt_id = ?",
+                       ("recv-202-persisted",)).fetchone()
+    assert row is not None
+    persisted = json.loads(row[0])
+    assert "legacy_secret_dir" not in row[0]
+    assert persisted["details"] == {"kind": "<unknown>"}
+    conn.close()
 
 
 # --------------------------------------------------------------------------
