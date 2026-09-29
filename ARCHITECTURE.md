@@ -351,11 +351,11 @@ or a new consumer must update that package's README in the same change.
   Output document (`native_parity_summary.v1.0`), when a report is found and
   parses: `status: "available"`; `partial` (`true` when the artifact predates
   the `native_refused`/`native_refused_unmatched` fields); `source_schema_version`;
-  `compared_count`/`only_legacy_count`/`only_native_count`; and, design here
-  — the code lands in this same PR's next commit — `matched_row_count`/
-  `mismatched_row_count` (distinct row keys with zero vs. at least one
-  dimension mismatch — `matched_row_count + mismatched_row_count ==
-  compared_count`); `field_mismatch_counts` (mismatch count per field name,
+  `compared_count`/`only_legacy_count`/`only_native_count`;
+  `matched_row_count`/`mismatched_row_count` (distinct row keys with zero
+  vs. at least one dimension mismatch — `matched_row_count +
+  mismatched_row_count == compared_count`); `field_mismatch_counts`
+  (mismatch count per field name,
   across every dimension); `dimension_mismatch_counts` (mismatch-entry count
   per dimension); `worst_rows` (the rows with the most mismatched fields,
   most first, ties broken by row key); and
@@ -369,13 +369,12 @@ or a new consumer must update that package's README in the same change.
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  No production consumer today. Design here, code in this same PR's next
-  commit: the read-only operations preview server's
+  The one consumer today is the read-only operations preview server's
   `GET /native_parity`/`GET /native_parity.json` routes
-  (`engine/v2/serving/operations.py`) will read this document unchanged,
-  wired through `engine/v2/dashboard/preview.py`'s new optional
+  (`engine/v2/serving/operations.py`), which read this document unchanged,
+  wired through `engine/v2/dashboard/preview.py`'s optional
   `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
-  for that route/CLI contract once it lands.
+  for that route/CLI contract.
   `engine/v2/serving` has no
   `ARCHITECTURE.md` of its own yet (this doc's "Component docs" table lists
   it `(pending)`); per that section's own rule a pending component is
