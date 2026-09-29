@@ -10,10 +10,10 @@ that keeps growing past that shape is the mechanical symptom this check
 catches: every ``ARCHITECTURE.md`` (root or component) must stay at or under
 BUDGET lines.
 
-Five docs already exceed BUDGET and predate this check. Rewriting them to
+Three docs already exceed BUDGET and predate this check. Rewriting them to
 contract level is real work this PR does not do by fiat, so each is pinned in
 EXEMPT at its line count when this check was added -- a cap, not a new
-allowance: none of the five may grow even one line past that number (see
+allowance: none of the three may grow even one line past that number (see
 ``_effective_cap``).
 
 Reads every tracked path's staged content by default (what would actually be
@@ -85,8 +85,6 @@ BUDGET = 500
 #: being free to keep growing.
 EXEMPT: dict[str, int] = {
     "engine/v2/ops/ARCHITECTURE.md": 5439,
-    "engine/v2/data/ARCHITECTURE.md": 1253,
-    "engine/v2/scoring/ARCHITECTURE.md": 1017,
     "engine/v2/models/ARCHITECTURE.md": 863,
     "ARCHITECTURE.md": 572,
 }
