@@ -121,6 +121,7 @@ def _release(runup_output="prediction"):
                 binding_id="implied-binding",
                 model_id="implied-model",
                 role="implied_t1",
+                strategy_id="STR-RUNUP", decision_clock_id="entry-close",
                 feature_order=("days_before_print",),
                 output_names=("prediction",),
                 members=(_member("model", "sha256:implied"),),
@@ -129,6 +130,7 @@ def _release(runup_output="prediction"):
                 binding_id="runup-binding",
                 model_id="runup-model",
                 role="runup_move",
+                strategy_id="STR-RUNUP", decision_clock_id="entry-close",
                 feature_order=("days_before_print",),
                 output_names=(runup_output,),
                 members=(
@@ -231,6 +233,7 @@ def test_frozen_runup_fallback_without_feature_order_scales_once():
                 binding_id="implied-binding",
                 model_id="implied-model",
                 role="implied_t1",
+                strategy_id="STR-RUNUP", decision_clock_id="entry-close",
                 feature_order=("days_before_print",),
                 output_names=("prediction",),
                 members=(_member("model", "sha256:implied"),),
@@ -239,6 +242,7 @@ def test_frozen_runup_fallback_without_feature_order_scales_once():
                 binding_id="runup-binding",
                 model_id="runup-model",
                 role="runup_move",
+                strategy_id="STR-RUNUP", decision_clock_id="entry-close",
                 output_names=("prediction",),
                 members=(
                     _member("model", "sha256:runup"),
