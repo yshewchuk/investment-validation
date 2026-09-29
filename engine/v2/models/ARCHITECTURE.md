@@ -175,7 +175,8 @@ for the pointer's crash-proof write.
 
 | Condition | Outcome |
 |---|---|
-| Inventory incomplete, or the inference release doesn't match it (role/strategy/clock binding, feature order, a required member kind missing) | Refuses `StagingRefused`, before any byte is written |
+| Inventory itself is incomplete (`releases.require_complete_release`) | Refuses `ModelReleaseRefusal`, before anything else runs |
+| Inventory is complete, but the inference release doesn't match it (role/strategy/clock binding, feature order, a required member kind missing) | Refuses `StagingRefused`, before any byte is written |
 | Missing payload for a declared member, or a payload whose sha256 disagrees with its declared `content_hash` | Refuses `StagingRefused` (`MISSING_MEMBER_PAYLOAD` / `PAYLOAD_HASH_MISMATCH`) |
 | Two inference bindings declare the same `(role, strategy_id)` | Refuses `StagingRefused` (`DUPLICATE_BINDING`) — the key is deliberately clock-independent, matching `scoring.release_bindings`'s own ambiguity key; without this a release could stage cleanly yet make every score for that role/strategy fail at read time |
 | Caching | None: every call re-derives the release hash and re-checks every member from the caller's arguments |
@@ -226,9 +227,9 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 | Condition | Outcome |
 |---|---|
 | `MODEL_RELEASE_ROOT` unset or blank | Refuses `MissingReleaseRoot` — no fallback to a repo-relative or other default path: this is the one config key naming "which release root is production" |
-| Set | Read fresh from the environment on every call (never cached) |
-| Caching, retry, transaction, partial write | None: no I/O beyond the environment read and one path join |
-| Idempotency | Same environment value always returns the same path |
+| Set | Read fresh from the environment on every call (never cached), then resolved via `Path.expanduser().resolve()` — this touches the filesystem to normalize the path (symlink resolution) and, for a relative `MODEL_RELEASE_ROOT` value, resolves it against the current working directory |
+| Retry, transaction, partial write | Not applicable: this is a read and a path computation, not a write |
+| Idempotency | Same environment value and working directory always resolve to the same path |
 
 ### 7.5 `restage_semantic_hash`
 
