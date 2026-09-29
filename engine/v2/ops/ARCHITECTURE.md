@@ -749,30 +749,45 @@ section is (a). It does not attempt (b): the per-event raw-row producer
 for `NightlyEventInputs`) stays exactly as out of scope as PR-7a already
 declared it — a later PR, mirroring PR-7a's own boundary.
 
-**Status:** PR-7b-1 (#145) adds `_ensure_shadow_snapshot` and its
-production-default seams to `nightly_trigger.py`, added unused — see the
-"Split into small code PRs" list below. `_submit_plan` still calls neither
-it nor anything downstream of it: PR-7b-2 is what wires it in and flips
-`_default_plan`'s `input_mode`/`snapshot_scope` literals, together, in one
-slice (see that bullet below for why the two changes cannot ship
-separately). Until PR-7b-2 merges, this section still describes running
-production behavior accurately: every shadow-nightly plan still pins no
-`SnapshotRef`, exactly as "The concrete gap in running code today" states
-next.
+**Status:** PR-7b-1 (#145) added `_ensure_shadow_snapshot` and its
+production-default seams to `nightly_trigger.py`, unused — see the "Split
+into small code PRs" list below. PR-7b-2 (#150) wires it into `_submit_plan`
+as the new `ensure_snapshot_fn` seam (called immediately before `plan_fn`,
+inside the same `if plan_ref is None:` guard), adds `TriggerReceipt.
+snapshot_attempt` as the job-identity counter `_ensure_shadow_snapshot`'s
+own `attempt` parameter needs (a single, monotonic per-`as_of` counter,
+carried on every receipt and bumped only on a terminal `INPUT_CHANGED`
+refusal — never reused from `error_count`, which resets on several statuses
+that say nothing about the snapshot-import job's own identity), and flips
+`_default_plan`'s `input_mode`/`snapshot_scope` literals from `"legacy"`/
+`None` to `"snapshot"`/`"shadow"`, together in one slice (see that bullet
+below for why the two changes cannot ship separately). `_default_plan` also
+gains a pass-through `expected_shadow_snapshot_id` keyword, threaded to
+`args.expected_snapshot_id` — not yet read by `cli._plan_command`/
+`pin_snapshot_inputs` (PR-7b-3, below, adds that CAS check). As of PR-7b-2,
+"The concrete gap in running code today" below is CLOSED: every scheduled
+shadow-nightly plan now pins a verified `shadow`-scope `SnapshotRef` before
+`_default_plan` runs, rather than reading the legacy store live. The
+narrative below is kept as the design rationale for why that gap existed and
+what closed it, not as a description of current behavior. A gate-round-4 fix
+(after the initial merge review) also broadened `run_trigger`'s `resuming`
+check so a pre-plan snapshot-import timeout (`plan_ref=None`) resumes past
+the retry window's close instead of being recorded `"missed"` on the next
+tick — see the "Gate-round-4 fix" callouts below for the full account.
 
-**The concrete gap in running code today.** `nightly_trigger._default_plan`
-(`nightly_trigger.py:~518-528`, both line numbers approximate — issue #104/
-PR #117, in flight, renumbers this function's body; see the coordination
-note below) hardcodes `input_mode="legacy"`, `snapshot_scope=None`,
-`refresh_mode="legacy"`, `refresh_plan=None` in the `argparse.Namespace` it
-builds for every call, unconditionally — there is no branch, no flag, and
-no caller-supplied override for any of the four. In `input_mode="legacy"`,
-`cli._plan_command`'s own `_snapshot_inputs` (`cli.py:454-467`) returns
-`None` before `snapshot_planning.pin_snapshot_inputs` is ever called, so
-the plan `nightly_trigger` submits every night pins no `SnapshotRef` at
-all — verified against current `main`, matching PR-7a's own verification of
-the identical fact. **Supervisor decision, option A**: the shadow nightly
-runs in `input_mode="snapshot"` — not narrowly scoped to feed only
+**The gap this section closed (historical — kept as the design rationale;
+see "Status" above for the current, closed state).** Before PR-7b-2,
+`nightly_trigger._default_plan` hardcoded `input_mode="legacy"`,
+`snapshot_scope=None`, `refresh_mode="legacy"`, `refresh_plan=None` in the
+`argparse.Namespace` it built for every call, unconditionally — there was no
+branch, no flag, and no caller-supplied override for any of the four. In
+`input_mode="legacy"`, `cli._plan_command`'s own `_snapshot_inputs`
+(`cli.py:454-467`) returned `None` before `snapshot_planning.
+pin_snapshot_inputs` was ever called, so the plan `nightly_trigger` submitted
+every night pinned no `SnapshotRef` at all — verified against `main` at the
+time, matching PR-7a's own verification of the identical fact.
+**Supervisor decision, option A**: the shadow nightly runs in
+`input_mode="snapshot"` — not narrowly scoped to feed only
 `native_score_batch`, but the WHOLE shadow plan `nightly_trigger` submits,
 so legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
 `"model_evidence"` (`SNAPSHOT_STAGES`, `nightly.py:379-380`) read through
@@ -828,46 +843,19 @@ submit_import_fn=None, serve_fn=None) -> tuple[Literal["ready", "not_yet",
 "timed_out"], str | None]` (raises the usual `_HANDLED_FAILURES` on a
 terminal problem, exactly like `plan_fn`/`submit_fn`/`serve_fn` already
 do — never returns a fourth, silent-failure value) is instead a NEW,
-separate step inside `_submit_plan` itself, called immediately before its
-existing `plan_ref = plan_fn(...)` call, inside the SAME `if plan_ref is
-None:` guard (so, like `plan_fn`, it never runs on the resume branch — a
-resumed run's plan already references an already-committed snapshot from
-whichever earlier attempt built it, so there is nothing left to ensure).
-The second tuple element is the exact `snapshot_id` this call verified is
+separate step inside `_submit_plan` (via its own `_ensure_plan_ref` helper)
+called immediately before its existing `plan_fn(...)` call, inside the
+SAME `if plan_ref is None:` guard — reached on EVERY pre-plan attempt,
+first-time or resumed (a resumed run only skips it once `plan_ref` is
+already set; see "R6, idempotency" above for the two resume cases). The
+second tuple element is the exact `snapshot_id` this call verified is
 fresh for `as_of`, present only for `"ready"` (`None` for `"not_yet"`/
 `"timed_out"`) — see round-2's own "Bind resumed plans to the committed
-snapshot" fix, below, for why this cannot be a bare status string.
-Concretely, `_submit_plan`'s own body gains, right before its existing
-`plan_ref = plan_fn(...)` line:
-
-```python
-if plan_ref is None:
-    snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
-    try:
-        readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
-    except _HANDLED_FAILURES as exc:
-        return _failure(root, clock, as_of, None, exc, prior, snapshot_attempt=snapshot_attempt + 1)
-    if readiness == "not_yet":
-        return _record(root, _receipt(
-            clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet",
-            snapshot_attempt=snapshot_attempt))
-    if readiness == "timed_out":
-        previous = prior.error_count if prior is not None and prior.status == "timed_out" else 0
-        count = previous + 1
-        if count >= MAX_CONSECUTIVE_ERRORS:
-            return _record(root, _receipt(
-                clock, as_of, "failed",
-                f"the shadow snapshot import exceeded its deadline {count} consecutive "
-                "times; giving up", error_count=count, snapshot_attempt=snapshot_attempt))
-        return _record(root, _receipt(
-            clock, as_of, "timed_out",
-            "the shadow snapshot import has not finished; the legacy lock is released, "
-            "resuming next tick", error_count=count, snapshot_attempt=snapshot_attempt))
-    try:
-        plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
-                           full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
-    ...  # unchanged from here
-```
+snapshot" fix, below, for why this cannot be a bare status string. The
+outcomes table further below (under "`_ensure_shadow_snapshot`" heading)
+gives the current, load-bearing contract for every return value; this is
+the design-time context for why the call exists here rather than inside
+`_default_plan`.
 
 `ensure_snapshot_fn` is a new keyword parameter on `_submit_plan`
 (`=None`, defaulting to `_ensure_shadow_snapshot`, the same injection-seam
@@ -879,6 +867,29 @@ keyword, `expected_shadow_snapshot_id=None` (round-2 fix, below) — so
 derivation) are untouched by this design at the call-site level; only
 `_default_plan`'s two trailing literal kwargs and this one new keyword
 change (point 4 below).
+
+**Gate-round-4 fix (BLOCK on `817b238`, real, the second Opus-gate finding on
+PR-7b-2): the pre-plan timeout could not actually resume in production.**
+`run_trigger`'s resume check originally required a truthy `plan_ref`
+(`bool(prior.plan_ref) and prior.status in RESUME_STATUSES`), so a pre-plan
+`"timed_out"` receipt (`plan_ref=None` always, since no plan exists yet)
+never took the resume branch; it fell through to `_decide`, whose window
+check (closes at `DEFAULT_DEADLINE_ET` + `DEFAULT_DEADLINE_GRACE`) had
+ALWAYS already closed by the time a pre-plan timeout could even be produced
+(bounded by the LATER, absolute `_serve_deadline`, i.e. `DEFAULT_SERVE_
+DEADLINE_ET`, which falls later in the same calendar day than the window's
+own close) — so every occurrence became a terminal
+`"missed"` on the very next tick, never actually resumed, exactly as the
+"self-healing" design text below originally (incorrectly) assumed it would.
+Fixed by broadening `resuming` to `prior is not None and prior.status in
+RESUME_STATUSES and (bool(prior.plan_ref) or prior.status == "timed_out")`
+— see "`TriggerReceipt` gains a new field" below for the full account and
+the two `run_trigger`-level tests that prove it. **Gate-round-5 then
+generalized this further: the same defect also applied to a pre-plan
+`"error"`, so the shipped line dropped the `plan_ref` condition entirely —
+`resuming = prior is not None and prior.status in RESUME_STATUSES` — see
+the "Gate-round-5 fix" callout in "`TriggerReceipt` gains a new field"
+below for the full account.**
 
 **`TriggerReceipt` gains a new field, `snapshot_attempt: int = 0`,
 additive, carried on EVERY receipt written for a given `as_of` and
@@ -918,16 +929,24 @@ status transition:
   what they carry; they still carry the SAME value, for a caller
   inspecting the returned receipt, not because it changes anything
   persisted.)
-- **Bumped in exactly one place.** The `except _HANDLED_FAILURES` branch
-  above, `_ensure_shadow_snapshot`'s own raised terminal failure
-  (R1(b)/R1(c) below), passes `_failure` an explicit `snapshot_attempt=
-  snapshot_attempt + 1` — a NEW keyword-only parameter on `_failure`
-  (`=None`; every OTHER existing call site of `_failure` — the generic
-  `plan_fn`/`submit_fn`/`serve_fn` exception handling — omits it, so
-  `_failure` falls back to its own `prior.snapshot_attempt if prior is not
-  None else 0`, i.e. carried, not bumped: a `plan_fn`/`submit_fn` failure
-  says nothing about whether the shadow snapshot import job itself needs a
-  new identity).
+- **Bumped in exactly one place, and only for a terminal `INPUT_CHANGED`
+  refusal (round-1 CodeRabbit finding on PR-7b-2, real, Major).** The
+  `except _HANDLED_FAILURES` branch above passes `_failure` an explicit
+  `snapshot_attempt=snapshot_attempt + bump`, where `bump` is `1` only when
+  the caught exception is an `OpsError` with `code == "INPUT_CHANGED"` —
+  `_ensure_shadow_snapshot`'s own raised terminal failure (R1(b)/R1(c)
+  below) — and `0` for anything else `_HANDLED_FAILURES` also catches (a
+  transient `OSError`, say, from a catalog I/O hiccup). A transient failure
+  must not mint a new idempotency key: the import job already submitted
+  under the OLD `attempt`'s key (if any) may still be running or may have
+  already succeeded there, and bumping regardless would risk a duplicate
+  submission under a needless new key. `snapshot_attempt` is a NEW
+  keyword-only parameter on `_failure` (`=None`; every OTHER existing call
+  site of `_failure` — the generic `plan_fn`/`submit_fn`/`serve_fn`
+  exception handling — omits it, so `_failure` falls back to its own
+  `prior.snapshot_attempt if prior is not None else 0`, i.e. carried, not
+  bumped: a `plan_fn`/`submit_fn` failure says nothing about whether the
+  shadow snapshot import job itself needs a new identity).
 - **Its own give-up bound, closing gate finding 2 directly.** `_failure`'s
   give-up decision (`"failed_setup"` vs `"error"`) becomes an OR of two
   independent checks, not one: the EXISTING `count >= MAX_CONSECUTIVE_
@@ -968,26 +987,81 @@ status transition:
   is set on the receipt (`None` here, always set there) and by the
   receipt's own `detail` text — never by a fourth status string, which
   would only fragment one "this run for `as_of` is taking too long"
-  concept into two. Because this receipt carries no `plan_ref`, `run_
-  trigger`'s resume branch (`prior.plan_ref and prior.status in RESUME_
-  STATUSES`) does NOT engage on the next tick — it falls through to the
-  ordinary `_decide` path instead, which re-enters `_submit_plan` with
-  `plan_ref=None` and calls `ensure_snapshot_fn` again with the SAME
-  `snapshot_attempt` (a `"timed_out"` outcome is not the one bump site, so
-  `snapshot_attempt` is carried, not bumped, per the blanket rule above —
-  this is now mechanically true at every call site, not merely asserted
-  at one): the SAME idempotency key's R2 catalog lookup then finds the
-  `snapshot_import` job either `succeeded` by now (`"ready"`, immediately,
-  no re-submission) or still running (`"timed_out"` again, consuming one
-  more tick of the SEPARATE consecutive-timeout counter) — self-healing
-  across ticks with no new state needed, exactly the shape `_ensure_
-  shadow_snapshot`'s own `supervisor.serve`/`_drive_jobs_to_terminal` call
-  already reports (`"deadline_exceeded"`, mapped here to `"timed_out"`,
-  never `"failed"` or cancelled — "the in-process jobs are left exactly
-  where the supervisor's own recovery already leaves an interrupted
-  attempt... nothing here cancels or force-fails them", per the `nightly_
-  trigger.py` issue #103 section above, unchanged and reused as-is for
-  this job too).**
+  concept into two. **Gate-round-4 fix (BLOCK, real): an earlier draft of
+  this text claimed that because this receipt carries no `plan_ref`, the
+  next tick "falls through to the ordinary `_decide` path instead," which
+  it called self-healing. That is wrong: `_decide` checks the retry window
+  (closes at `DEFAULT_DEADLINE_ET` + `DEFAULT_DEADLINE_GRACE`) BEFORE
+  anything else, and `ensure_snapshot_fn`'s own drive-to-terminal wait is
+  bounded by the LATER, absolute `_serve_deadline` (`DEFAULT_SERVE_
+  DEADLINE_ET`, later in the same calendar day) — so a pre-plan
+  `"timed_out"` can only ever be produced at a wall-clock time the window
+  has already closed. Falling through to
+  `_decide` on the next tick therefore always hit the window check first and
+  recorded a terminal `"missed"`, never resumed, making the receipt's own
+  "resuming next tick" text false in production and this pre-plan timeout's
+  consecutive-timeout counter unreachable.** The actual fix broadens `run_
+  trigger`'s `resuming` check instead of relying on `_decide`.
+  **Gate-round-5 fix (real, generalizing the round-4 fix below): the round-4
+  fix only widened `resuming` for `"timed_out"` specifically (`resuming =
+  prior is not None and prior.status in RESUME_STATUSES and (bool(prior.
+  plan_ref) or prior.status == "timed_out")`), but the SAME defect applies
+  to a pre-plan `"error"` too — a terminal `INPUT_CHANGED` failure from
+  `ensure_snapshot_fn`, or a `plan_fn` failure right after the snapshot
+  becomes ready, both also write `plan_ref=None` and can also occur after
+  the window has closed. The fix is now fully general: every status in
+  `RESUME_STATUSES` can only ever be written by code inside `_submit_plan`,
+  which `_decide` only reaches AFTER its window/probe checks already
+  passed once for this `as_of` — so `plan_ref` being set is irrelevant to
+  whether the window should be re-checked, for ANY of them. The shipped
+  line is simply `resuming = prior is not None and prior.status in
+  RESUME_STATUSES`, no `plan_ref` condition at all** — so a `"timed_out"`
+  (or now `"error"`) status resumes EVEN WITH `plan_ref=None`, the SAME as
+  the existing post-plan case, skipping `_decide`'s window/probe checks
+  entirely (finality, once true, cannot become false again, so skipping the
+  re-probe loses nothing).
+  `run_trigger`'s resume branch then calls `_submit_plan` with `plan_
+  ref=prior.plan_ref` (`None` here), which `_submit_plan`'s existing `if
+  plan_ref is None:` guard already handles correctly by calling `ensure_
+  snapshot_fn` again with the SAME `snapshot_attempt` (a `"timed_out"`
+  outcome is not the one bump site, so `snapshot_attempt` is carried, not
+  bumped, per the blanket rule above): the SAME idempotency key's R2
+  catalog lookup then finds the `snapshot_import` job either `succeeded` by
+  now (`"ready"`, immediately, no re-submission) or still running
+  (`"timed_out"` again, consuming one more tick of the SEPARATE
+  consecutive-timeout counter) — self-healing across ticks with no new
+  state needed, exactly the shape `_ensure_shadow_snapshot`'s own
+  `supervisor.serve`/`_drive_jobs_to_terminal` call already reports
+  (`"deadline_exceeded"`, mapped here to `"timed_out"`, never `"failed"` or
+  cancelled — "the in-process jobs are left exactly where the supervisor's
+  own recovery already leaves an interrupted attempt... nothing here
+  cancels or force-fails them", per the `nightly_trigger.py` issue #103
+  section above, unchanged and reused as-is for this job too). Broadening
+  `resuming` also fixes a second, related gap: under issue #102's busy-lock
+  preservation rule, a busy tick landing between two pre-plan-timeout ticks
+  must ALSO leave the pending `"timed_out"`/`plan_ref=None` state
+  untouched, or a later tick would lose the exemption and fall back into
+  `_decide`'s window check — `resuming` gates BOTH the busy-lock
+  preservation branch and the post-lock branch choice, so broadening it
+  once fixes both call sites together. Proven end-to-end through `run_
+  trigger` (not `_submit_plan` directly, per the gate's own ask) by
+  `test_a_pre_plan_timeout_resumes_past_the_window_close` and `test_busy_
+  legacy_does_not_overwrite_a_pending_pre_plan_timeout`.**
+
+  **Gate-round-7 fix (CodeRabbit finding, real): a resumed pre-plan check
+  landing back on `"not_yet"` (the legacy store still has not caught up on
+  a RETRIED attempt, e.g. right after a pre-plan `"error"` bumped
+  `snapshot_attempt`) used to write the plain `"not_yet"` status — not a
+  `RESUME_STATUSES` member — so the NEXT tick lost resumability and fell
+  back into `_decide`'s window check, which by then had usually already
+  closed. `STATUSES`/`RESUME_STATUSES` gain a new member, `"snapshot_
+  not_yet"` (never `TERMINAL_STATUSES`/`FAILURE_STATUSES` — it is a benign
+  wait, not a failure): `_submit_plan`'s `readiness == "not_yet"` branch now
+  writes `"snapshot_not_yet"` when `prior.status` was already in
+  `RESUME_STATUSES` (i.e. this call is itself a resume), and plain
+  `"not_yet"` otherwise (`_decide`'s own first-time/probe-miss path,
+  unchanged). `snapshot_attempt` is not bumped either way — a `"not_yet"`
+  outcome never consumes an attempt (unchanged from before this fix).**
 
 `_ensure_shadow_snapshot(root, as_of, clock, attempt, ...)` itself:
 
@@ -1100,8 +1174,10 @@ status transition:
    ALSO caught up. On a mismatch, this phase submits nothing and returns
    `("not_yet", None)` (never raises) — the caller's `snapshot_attempt` is
    NOT bumped for this outcome (only the except-branch around THIS call,
-   on a raised `_HANDLED_FAILURES`, ever increments it — see the `Trigger
-   Receipt` fix above), so a `"not_yet"` tick costs nothing against
+   and only on a terminal `INPUT_CHANGED` refusal out of a raised
+   `_HANDLED_FAILURES` — never a transient `OSError` — ever increments it;
+   gate-round-4 fix, CodeRabbit finding on `817b238`, real: see the
+   `TriggerReceipt` fix above), so a `"not_yet"` tick costs nothing against
    either the `snapshot_attempt` identity or the `error_count` give-up
    budget; the next tick calls `_ensure_shadow_snapshot` again with the
    SAME `attempt` value and retries `plan_import` fresh.
@@ -1139,7 +1215,9 @@ status transition:
    the typed `INPUT_CHANGED` `OpsError` (non-retryable under THIS key only)
    `_submit_plan`'s existing `except _HANDLED_FAILURES` catches, routing
    into `_failure`
-   with `snapshot_attempt=snapshot_attempt + 1` (the `TriggerReceipt` fix
+   with `snapshot_attempt=snapshot_attempt + 1` — this IS the `INPUT_CHANGED`
+   case the mechanical bump rule above singles out, the only exception this
+   `except` block ever bumps for (the `TriggerReceipt` fix
    above) — which bumps `error_count` too (the ordinary give-up count, for
    `MAX_CONSECUTIVE_ERRORS`) AND the dedicated `snapshot_attempt`, so the
    NEXT `_submit_plan` entry for this `as_of` (if any, before `MAX_
@@ -3917,41 +3995,33 @@ retry, transaction, partial write, idempotency).
   in-process jobs are left exactly where the supervisor's own recovery
   already leaves an interrupted attempt (`recovery.py`, unchanged by this
   PR); nothing here cancels or force-fails them.
-- **R6, idempotency — a timeout resumes the SAME plan, it never re-plans.**
-  `"timed_out"` is a new member of `STATUSES` and of `RESUME_STATUSES`
-  (alongside `"submitting"`/`"submitted"`/`"error"`): a receipt recorded
-  `"timed_out"` still carries `plan_ref`, so `run_trigger`'s resume branch
-  (`prior.plan_ref and prior.status in RESUME_STATUSES`) picks it up on
-  the next tick and calls `_submit_plan` again with the SAME `plan_ref` —
-  never `_decide`, so the retry window is not re-checked and no second
-  plan is ever built for this as-of while a resumable one already exists
-  (the window was already open the first time; the resume path's whole
-  point, shared with `"error"`/`"submitted"`, is that the decision is
-  already made). Resubmitting the same `plan_ref` is the existing
-  no-op-by-identity submit (`_default_submit`'s own docstring), and `serve`
-  is simply called again with a fresh `deadline_at`.
-  `"timed_out"` is also added to `FAILURE_STATUSES`, the same treatment
-  `"error"` already gets: `main`'s exit code is 1 (so a monitor sees a
-  problem) even though the state is not terminal and the trigger keeps
-  retrying it. It is deliberately NOT added to `TERMINAL_STATUSES` — unlike
-  `"failed"`, a bare timeout must stay resumable rather than given up on
-  immediately, since the resume path (this bullet's own first paragraph)
-  never re-checks the retry window before serving again. Concretely, on
-  the SAME calendar day: the timer's next tick (it fires every 30 minutes,
-  all day) resumes the same `plan_ref` and calls `_default_serve` again;
-  `_serve_deadline` recomputes the identical, already-past cutoff for that
-  same day, so this resumed serve also stops on its own first tick and is
-  again recorded `"timed_out"`. This repeats, one timer tick apart, until
-  R3's consecutive-timeout counter below reaches its terminal `"failed"`
-  state — ordinarily within an hour or two of the original timeout, the
-  same evening, never "the next day": there is no calendar-day check
-  anywhere in this path, only the counter.
+- **R6, idempotency.** `"timed_out"` is a member of `STATUSES`,
+  `RESUME_STATUSES` and `FAILURE_STATUSES`, never of `TERMINAL_STATUSES`
+  (same treatment as `"error"`: `main` exits 1, the trigger keeps
+  retrying). `run_trigger`'s resume check is `prior.status in
+  RESUME_STATUSES` (no `plan_ref` condition — see the "Gate-round-5 fix"
+  callout in "`TriggerReceipt` gains a new field" above), so it resumes a
+  pre-plan status the same way as a post-plan one. What a resumed tick
+  does next:
+
+  | Prior status (resumed) | `plan_ref` | What runs | Status written |
+  |---|---|---|---|
+  | `"timed_out"` / `"error"`, pre-plan | `None` | `_ensure_plan_ref`: re-runs the snapshot-readiness check | see the outcomes table below |
+  | `"timed_out"`, post-plan | set | resubmits the SAME `plan_ref` (`_default_submit`'s existing no-op-by-identity contract), calls `serve` again | `"submitted"`, then the serve outcome |
+
+  A crash between a freshly-built plan and the receipt recording its
+  `plan_ref` can leave a later resumed tick building a second plan while
+  the first goes unsubmitted — tracked as issue #186, not new to this PR.
+  `_serve_deadline` recomputes the SAME absolute cutoff every same-day
+  call, so a resumed `serve` also stops immediately and is recorded
+  `"timed_out"` again; see "R3, retry" below for the consecutive-timeout
+  give-up count this repeats against.
 - **R3, retry — bounded, like every other consecutive-failure case in this
   module.** Even with `_serve_deadline`'s same-day cutoff closing the
   cross-into-legacy-window hole above, an unbounded same-day resume-forever
-  would still let a genuinely wedged run reacquire the lock every 30
-  minutes right up against that cutoff, over and over, for the rest of the
-  day — the exact production risk this issue opened over, just bounded to
+  would still let a genuinely wedged run reacquire the lock at its own
+  configured interval right up against that cutoff, over and over, for the
+  rest of the day — the exact production risk this issue opened over, just bounded to
   one calendar day instead of unbounded. `_submit_plan` now counts consecutive
   `"timed_out"` outcomes for this as-of the same way `_failure` already
   counts consecutive `"error"` outcomes (a separate counter namespace:
@@ -4031,23 +4101,32 @@ retry, transaction, partial write, idempotency).
 
 ### `nightly_trigger.py` (Cutover PR-7b design: `_ensure_shadow_snapshot`, the 4c R1–R6 template)
 
-**Design only — no code lands with this PR; a later PR in this sequence
-implements what this subsection describes** (see the main narrative above,
-"Cutover PR-7b"). `_ensure_shadow_snapshot` is a new step inside
-`_submit_plan`, called before its existing `plan_fn(...)` call and
-returning `("ready", snapshot_id)`/`("not_yet", None)`/`("timed_out",
-None)` or raising (never returning anything `_submit_plan` could mistake
-for a `plan_ref`) — see point 1's own "Where this phase is called from,
+**Gate-round-4 fix (doc drift, CodeRabbit finding on `817b238`, real, left
+unanswered until now): this line originally read "Design only — no code
+lands with this PR; a later PR in this sequence implements what this
+subsection describes." That was accurate when PR-7b-1 first wrote this
+section, before PR-7b-1 itself had merged. It is stale now: PR-7b-1 (#145)
+already landed `_ensure_shadow_snapshot` exactly as this subsection
+describes, and PR-7b-2 (#150, this PR) wires it into `_submit_plan` as the
+default `ensure_snapshot_fn` — see "Status" in the main "Cutover PR-7b"
+narrative above for the current, landed state.** `_ensure_shadow_snapshot` is a new step inside
+`_submit_plan` (via `_ensure_plan_ref`), called before its existing
+`plan_fn(...)` call — see point 1's own "Where this phase is called from,
 precisely" above for why it is NOT inside `_default_plan`, and point 6's
-"Bind the plan to the EXACT snapshot" for why the second tuple element
-exists at all. Every outcome below is one `_submit_plan` itself returns
-from or raises out of — there is no separate receipt STATUS for any of
-them (a `"timed_out"` outcome reuses the existing status string and its
-existing consecutive-timeout counter, per point 4 above). `TriggerReceipt`
-DOES gain one new FIELD for this design, the dedicated `snapshot_attempt`
-counter — see "`TriggerReceipt` gains a new field" above for the full
-account of why a field, carried on every receipt regardless of status,
-was needed where a separate status was not.
+"Bind the plan to the EXACT snapshot" for why its `snapshot_id` return
+value exists at all. Its contract:
+
+  | `ensure_snapshot_fn` returns | Resumed tick? | Receipt status written |
+  |---|---|---|
+  | `("ready", snapshot_id)` | either | (none here — proceeds to `plan_fn`, then `"submitting"`) |
+  | `("not_yet", None)` | no (via `_decide`) | `"not_yet"` (non-resumable; window re-checked next tick) |
+  | `("not_yet", None)` | yes | `"snapshot_not_yet"` (gate-round-7; resumable, window not re-checked) |
+  | `("timed_out", None)` | either | `"timed_out"`, reused (→ `"failed"` at `MAX_CONSECUTIVE_ERRORS`) — see "R6, idempotency" above |
+  | raises (`_HANDLED_FAILURES`) | either | `"error"`, reused (→ `"failed_setup"` at `MAX_CONSECUTIVE_ERRORS`) — only `INPUT_CHANGED` bumps `snapshot_attempt` |
+
+`TriggerReceipt.snapshot_attempt` is this whole design's one new FIELD
+(see "`TriggerReceipt` gains a new field" above); `"snapshot_not_yet"` is
+its one new STATUS.
 
 - **R1, missing input.** No committed `shadow`-scope head at all (`data_
   snapshot_heads` has no row for `scope='shadow'`) is not itself a
@@ -4153,7 +4232,13 @@ was needed where a separate status was not.
   of its retry window. Retrying instead means minting a GENUINELY NEW key:
   `attempt`
   is `TriggerReceipt.snapshot_attempt`, a counter DEDICATED to this phase
-  and touched ONLY by a raised `_HANDLED_FAILURES` out of THIS call (never
+  and touched ONLY by a terminal `INPUT_CHANGED` refusal out of THIS call's
+  raised `_HANDLED_FAILURES` (gate-round-4 fix, CodeRabbit finding on
+  `817b238`, real: an earlier draft of this sentence said ANY raised
+  `_HANDLED_FAILURES` bumps it; the shipped code bumps only for
+  `INPUT_CHANGED` — see `_snapshot_attempt_bump` and "Bumped in exactly one
+  place" in the main "Cutover PR-7b" narrative above for why a transient
+  `OSError` must not) (never
   by `error_count`, which a `"timed_out"` tick from THIS SAME phase's own
   drive-to-terminal wait — R1's point 4 above — would otherwise reset the
   wrong value against, since `error_count` is shared with that unrelated
@@ -4309,17 +4394,21 @@ was needed where a separate status was not.
   with `plan_ref` set), a later eligible attempt calls `_default_plan`
   again and captures inputs fresh, same as the first attempt. **Cutover
   PR-7b (CodeRabbit finding on `423ee21`, real) adds a genuinely NEW
-  pre-plan case this statement does not cover**: `_ensure_shadow_snapshot`
-  can itself report `"timed_out"` with `plan_ref=None` BEFORE `_default_
-  plan`/`plan_fn` ever runs — see the Cutover PR-7b design section below
-  for that outcome's own retry/resume behavior (it is driven by
-  `_ensure_shadow_snapshot`'s own idempotency-key job lookup, not by this
-  section's `plan_ref`-set resume branch below). Once a `plan_ref` IS saved,
-  `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
-  RESUME_STATUSES`) calls `_submit_plan` directly with that existing
-  `plan_ref` and never reaches `_default_plan`/`_capture_input_manifest`
-  again — a resumed retry submits and serves the SAME already-pinned plan,
-  it does not recapture or replan.
+  pre-plan case this statement does not cover, since generalized by
+  gate-round-5 to cover a pre-plan `"error"` too**: `_ensure_shadow_snapshot`
+  can itself report `"timed_out"` (or raise into a pre-plan `"error"`) with
+  `plan_ref=None` BEFORE `_default_plan`/`plan_fn` ever runs — see the
+  Cutover PR-7b design section below for that outcome's own retry/resume
+  behavior (it is driven by `_ensure_shadow_snapshot`'s own idempotency-key
+  job lookup, not by this section's `plan_ref`-set resume branch below).
+  `run_trigger`'s resume branch is gated purely on `prior.status in
+  RESUME_STATUSES` (no `plan_ref` condition at all, as of gate-round-5 —
+  see the "Gate-round-5 fix" callout above), so a pre-plan `"error"`/
+  `"timed_out"` resumes the SAME way a post-plan one does. Once a `plan_ref`
+  IS already saved (the post-plan case), that same resume branch calls
+  `_submit_plan` directly with the existing `plan_ref` and never reaches
+  `_default_plan`/`_capture_input_manifest` again — a resumed retry submits
+  and serves the SAME already-pinned plan, it does not recapture or replan.
 - **R4, transaction.** The manifest file write (`write_manifest`, inside
   `_capture_input_manifest`) happens before `cli._plan_command` opens any
   catalog transaction, and is not itself part of one: it is a plain
@@ -5008,7 +5097,12 @@ beyond this PR's own scope.
   (`decision_commit._advance_decisions_watermark`,
   `effects_graph._decision_gate`).
   `run_trigger` now computes whether this tick is a resume (`prior is not
-  None and prior.plan_ref and prior.status in RESUME_STATUSES`) from the
+  None and prior.status in RESUME_STATUSES` — no `plan_ref` condition at
+  all, as of Cutover PR-7b-2's gate-round-5 fix, which generalized
+  round-4's `"timed_out"`-only widening to every `RESUME_STATUSES` status,
+  since a PRE-plan `"error"`/`"timed_out"` (no `plan_ref` yet) must resume
+  the same way a post-plan one does; see the "Cutover PR-7b's input
+  sourcing" design section above) from the
   ALREADY-LOADED `prior` state BEFORE attempting the legacy lock at all —
   the resume decision never depended on the lock outcome to begin with, only
   on the state file. A resuming tick that then finds the lock busy returns

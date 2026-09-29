@@ -83,13 +83,25 @@ STATE_DIR = ("reports", "phase6", "nightly_trigger")
 QUALIFICATION_INPUT_MANIFEST = "input_manifest.json"
 QUALIFICATION_POPULATION = "expected_population.json"
 
-STATUSES = ("submitted", "not_yet", "missed", "already_submitted", "busy_legacy", "error",
-            "submitting", "completed", "failed", "failed_setup", "idle", "timed_out")
+STATUSES = ("submitted", "not_yet", "snapshot_not_yet", "missed", "already_submitted",
+            "busy_legacy", "error", "submitting", "completed", "failed", "failed_setup", "idle",
+            "timed_out")
 #: A terminal as-of never probes, never writes and never submits again.
 TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "missed",
                                "failed_setup"})
-#: A recorded plan_ref means the decision is made: resume it, never re-plan.
-RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out"})
+#: Every one of these statuses can only be written by code _decide already
+#: gated once (its window and probe-finality checks): resuming never
+#: re-checks either one, REGARDLESS of whether plan_ref is set yet -- a
+#: pre-plan status (error, timed_out or snapshot_not_yet with plan_ref=None,
+#: e.g. a snapshot-import failure/timeout, gate-round-5 fix) is just as
+#: resumable as a post-plan one (plan_ref already set) -- see run_trigger's
+#: `resuming` computation. snapshot_not_yet belongs here for the same reason
+#: pre-plan error/timed_out do: a pre-plan resume whose retried
+#: ensure_snapshot_fn call comes back "not_yet" (the legacy store still has
+#: not caught up) is exactly as resumable as one that timed out or errored --
+#: _decide already gated this as_of once.
+RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out",
+                             "snapshot_not_yet"})
 FAILURE_STATUSES = frozenset({"error", "failed", "failed_setup", "missed", "timed_out"})
 SUCCESS_JOB_STATES = frozenset({"succeeded"})
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "cancelled", "blocked"})
@@ -99,6 +111,7 @@ FinalityProvider = Callable[[str, Iterable[str]], "tuple[bool, str]"]
 PlanCallable = Callable[..., str]
 SubmitCallable = Callable[..., object]
 ServeCallable = Callable[..., str]
+EnsureSnapshotCallable = Callable[..., "tuple[str, str | None]"]
 #: ``_drive_jobs_to_terminal``'s three-way outcome, shared by ``_default_serve``
 #: and ``_ensure_shadow_snapshot``'s snapshot-import drive (Cutover PR-7b).
 ServeOutcome = Literal["timed_out", "completed", "failed"]
@@ -113,6 +126,7 @@ class TriggerReceipt:
     checked_at: str = ""
     plan_ref: str | None = None
     error_count: int = 0
+    snapshot_attempt: int = 0
 
 
 class _LegacyLock:
@@ -186,12 +200,15 @@ def load_state(root: Path, as_of: str) -> TriggerReceipt | None:
     error_count = document.get("error_count", 0)
     if not isinstance(error_count, int) or error_count < 0:
         error_count = 0
+    snapshot_attempt = document.get("snapshot_attempt", 0)
+    if not isinstance(snapshot_attempt, int) or snapshot_attempt < 0:
+        snapshot_attempt = 0
     return TriggerReceipt(
         schema_version=str(document.get("schema_version", TriggerReceipt.schema_version)),
         as_of=as_of, status=status, detail=str(document.get("detail", "")),
         checked_at=str(document.get("checked_at", "")),
         plan_ref=plan_ref if isinstance(plan_ref, str) else None,
-        error_count=error_count)
+        error_count=error_count, snapshot_attempt=snapshot_attempt)
 
 
 def write_state(root: Path, receipt: TriggerReceipt) -> None:
@@ -336,10 +353,11 @@ def _serve_deadline(clock) -> datetime:
 
 
 def _receipt(clock, as_of: str, status: str, detail: str,
-             plan_ref: str | None = None, error_count: int = 0) -> TriggerReceipt:
+             plan_ref: str | None = None, error_count: int = 0,
+             snapshot_attempt: int = 0) -> TriggerReceipt:
     return TriggerReceipt(as_of=as_of, status=status, detail=detail,
                           checked_at=format_timestamp(clock.now()), plan_ref=plan_ref,
-                          error_count=error_count)
+                          error_count=error_count, snapshot_attempt=snapshot_attempt)
 
 
 def _record(root: Path, receipt: TriggerReceipt) -> TriggerReceipt:
@@ -351,7 +369,7 @@ def _idle(clock, as_of: str, prior: TriggerReceipt) -> TriggerReceipt:
     return TriggerReceipt(as_of=as_of, status="idle",
                           detail=f"no pending as-of: {prior.status}",
                           checked_at=format_timestamp(clock.now()), plan_ref=prior.plan_ref,
-                          error_count=prior.error_count)
+                          error_count=prior.error_count, snapshot_attempt=prior.snapshot_attempt)
 
 
 def _problem_detail(exc: BaseException) -> str:
@@ -361,17 +379,23 @@ def _problem_detail(exc: BaseException) -> str:
 
 
 def _failure(root: Path, clock, as_of: str, plan_ref: str | None,
-             exc: BaseException, prior: TriggerReceipt | None) -> TriggerReceipt:
+             exc: BaseException, prior: TriggerReceipt | None, *,
+             snapshot_attempt: int | None = None) -> TriggerReceipt:
     detail = _problem_detail(exc)
     previous = prior.error_count if prior is not None and prior.status == "error" else 0
     count = previous + 1
-    if count >= MAX_CONSECUTIVE_ERRORS:
+    resolved_snapshot_attempt = (
+        snapshot_attempt if snapshot_attempt is not None
+        else (prior.snapshot_attempt if prior is not None else 0))
+    if count >= MAX_CONSECUTIVE_ERRORS or resolved_snapshot_attempt >= MAX_CONSECUTIVE_ERRORS:
+        giving_up_count = count if count >= MAX_CONSECUTIVE_ERRORS else resolved_snapshot_attempt
         return _record(root, _receipt(
             clock, as_of, "failed_setup",
-            f"setup failed {count} consecutive times; giving up: {detail}",
-            plan_ref=plan_ref, error_count=count))
+            f"setup failed {giving_up_count} consecutive times; giving up: {detail}",
+            plan_ref=plan_ref, error_count=count, snapshot_attempt=resolved_snapshot_attempt))
     return _record(root, _receipt(clock, as_of, "error", detail,
-                                  plan_ref=plan_ref, error_count=count))
+                                  plan_ref=plan_ref, error_count=count,
+                                  snapshot_attempt=resolved_snapshot_attempt))
 
 
 def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
@@ -382,18 +406,25 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
                 plan_fn: PlanCallable | None = None,
                 submit_fn: SubmitCallable | None = None,
                 serve_fn: ServeCallable | None = None,
+                ensure_snapshot_fn: EnsureSnapshotCallable | None = None,
                 full_run: bool = True) -> TriggerReceipt:
     """The whole tick: terminal -> resume -> lock -> window -> probe -> submit -> serve.
 
     The resume check runs before the legacy lock is attempted, so a busy lock
-    can never overwrite a resumable state's plan_ref.
+    can never overwrite a resumable state's plan_ref. Any RESUME_STATUSES
+    status resumes the same way even with no plan_ref yet (a pre-plan
+    "error" or "timed_out", e.g. a snapshot-import failure or timeout),
+    skipping straight past `_decide`'s window check -- the decision to
+    proceed with this as_of was already made on an earlier tick, so a
+    later tick must not re-litigate the window (gate-round-5 fix,
+    generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
     ``tickers``/``context_tickers`` are the plan's watchlist and historical
     evidence universe (``full_population`` derives both from the native
     nightly plan's own population document in production). ``plan_fn``,
-    ``submit_fn``, ``serve_fn`` and ``provider`` are injected seams; the
-    production defaults are the real in-process plan/submit/serve and the
-    native ORATS probe.
+    ``submit_fn``, ``serve_fn``, ``ensure_snapshot_fn`` and ``provider`` are
+    injected seams; the production defaults are the real in-process
+    plan/submit/serve and the native ORATS probe.
     """
     clock = clock or SystemClock()
     root = Path(root)
@@ -401,7 +432,7 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     prior = load_state(root, as_of)
     if prior is not None and prior.status in TERMINAL_STATUSES:
         return _idle(clock, as_of, prior)
-    resuming = prior is not None and bool(prior.plan_ref) and prior.status in RESUME_STATUSES
+    resuming = prior is not None and prior.status in RESUME_STATUSES
     with _LegacyLock(legacy_lock_path(root)) as held:
         if not held:
             if resuming:
@@ -412,78 +443,157 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
                 return _receipt(
                     clock, as_of, "busy_legacy",
                     "another heavy run holds the legacy nightly lock; retrying the resume next tick",
-                    plan_ref=prior.plan_ref, error_count=prior.error_count)
+                    plan_ref=prior.plan_ref, error_count=prior.error_count,
+                    snapshot_attempt=prior.snapshot_attempt)
             return _record(root, _receipt(
                 clock, as_of, "busy_legacy",
-                "another heavy run holds the legacy nightly lock; retrying next tick"))
+                "another heavy run holds the legacy nightly lock; retrying next tick",
+                snapshot_attempt=prior.snapshot_attempt if prior is not None else 0))
         if resuming:
-            return _submit_plan(root, as_of, tickers=(), context_tickers=(), clock=clock,
-                                plan_fn=None, submit_fn=submit_fn, serve_fn=serve_fn,
+            # plan_fn is forwarded (not None) so a pre-plan timed_out resume (plan_ref None)
+            # re-plans through the SAME injected seam; production run_trigger callers pass
+            # plan_fn=None here, where _submit_plan resolves it to _default_plan unchanged.
+            # tickers/context_tickers are forwarded too (gate-round-6 fix): a pre-plan
+            # resume's plan_fn call needs the caller's ACTUAL selection, not an empty
+            # one -- harmless for a plan_ref-set resume, where plan_fn is never called.
+            return _submit_plan(root, as_of, tickers=tickers, context_tickers=context_tickers,
+                                clock=clock, plan_fn=plan_fn, submit_fn=submit_fn,
+                                serve_fn=serve_fn,
+                                ensure_snapshot_fn=ensure_snapshot_fn,
                                 full_run=full_run, prior=prior, plan_ref=prior.plan_ref)
         return _decide(root, as_of, tickers=tickers, context_tickers=context_tickers,
                        deadline_et=deadline_et, window_start_et=window_start_et,
                        provider=provider, clock=clock, plan_fn=plan_fn, submit_fn=submit_fn,
-                       serve_fn=serve_fn, full_run=full_run, prior=prior)
+                       serve_fn=serve_fn, ensure_snapshot_fn=ensure_snapshot_fn,
+                       full_run=full_run, prior=prior)
 
 
 def _decide(root: Path, as_of: str, *, tickers, context_tickers, deadline_et, window_start_et,
-            provider, clock, plan_fn, submit_fn, serve_fn, full_run,
+            provider, clock, plan_fn, submit_fn, serve_fn, ensure_snapshot_fn, full_run,
             prior: TriggerReceipt | None) -> TriggerReceipt:
     opened, deadline = _window(as_of, window_start_et, deadline_et)
     now_et = clock.now().astimezone(ET)
+    prior_snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
     if now_et < opened:
-        return _receipt(clock, as_of, "not_yet", "before the retry window opens")
+        return _receipt(clock, as_of, "not_yet", "before the retry window opens",
+                        snapshot_attempt=prior_snapshot_attempt)
     if now_et > deadline + DEFAULT_DEADLINE_GRACE:
         return _record(root, _receipt(
-            clock, as_of, "missed", "the retry window closed before the session was final"))
+            clock, as_of, "missed", "the retry window closed before the session was final",
+            snapshot_attempt=prior_snapshot_attempt))
     is_final, detail = probe_finality(as_of, tickers, provider=provider)
     if not is_final:
-        return _record(root, _receipt(clock, as_of, "not_yet", detail))
+        return _record(root, _receipt(clock, as_of, "not_yet", detail,
+                                      snapshot_attempt=prior_snapshot_attempt))
     return _submit_plan(root, as_of, tickers=tickers, context_tickers=context_tickers,
                         clock=clock, plan_fn=plan_fn, submit_fn=submit_fn, serve_fn=serve_fn,
+                        ensure_snapshot_fn=ensure_snapshot_fn,
                         full_run=full_run, prior=prior, plan_ref=None)
 
 
+def _timeout_receipt(clock, as_of: str, plan_ref: str | None, snapshot_attempt: int,
+                     prior: TriggerReceipt | None, *, timed_out_detail: str,
+                     give_up_detail: str) -> TriggerReceipt:
+    """The shared ``timed_out`` counting behind both of ``_submit_plan``'s
+    timeout arms (pre-plan snapshot import, post-plan serve): the same
+    consecutive-timeout give-up rule, differing only in its detail texts.
+    """
+    previous = prior.error_count if prior is not None and prior.status == "timed_out" else 0
+    count = previous + 1
+    if count >= MAX_CONSECUTIVE_ERRORS:
+        return _receipt(clock, as_of, "failed", give_up_detail.format(count=count),
+                        plan_ref=plan_ref, error_count=count,
+                        snapshot_attempt=snapshot_attempt)
+    return _receipt(clock, as_of, "timed_out", timed_out_detail,
+                    plan_ref=plan_ref, error_count=count, snapshot_attempt=snapshot_attempt)
+
+
+def _snapshot_attempt_bump(exc: BaseException) -> int:
+    """Only a terminal ``INPUT_CHANGED`` refusal from ``ensure_snapshot_fn``
+    mints a new idempotency key (CodeRabbit round 1); a transient failure
+    (e.g. a catalog-I/O ``OSError``) must not, since the import job already
+    submitted under the OLD attempt's key may still be running or already
+    have succeeded there."""
+    return 1 if isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED" else 0
+
+
+def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
+                     clock, plan_fn, ensure_snapshot_fn, full_run,
+                     prior: TriggerReceipt | None,
+                     snapshot_attempt: int) -> tuple[str | None, TriggerReceipt | None]:
+    try:
+        readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
+    except _HANDLED_FAILURES as exc:
+        return None, _failure(root, clock, as_of, None, exc, prior,
+                              snapshot_attempt=snapshot_attempt + _snapshot_attempt_bump(exc))
+    if readiness == "not_yet":
+        resuming = prior is not None and prior.status in RESUME_STATUSES
+        return None, _record(root, _receipt(
+            clock, as_of, "snapshot_not_yet" if resuming else "not_yet",
+            "the shadow snapshot has not caught up to as_of yet",
+            snapshot_attempt=snapshot_attempt))
+    if readiness == "timed_out":
+        return None, _record(root, _timeout_receipt(
+            clock, as_of, None, snapshot_attempt, prior,
+            timed_out_detail="the shadow snapshot import has not finished; the legacy lock "
+                             "is released, resuming next tick",
+            give_up_detail="the shadow snapshot import exceeded its deadline {count} "
+                           "consecutive times; giving up"))
+    try:
+        plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
+                           full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
+    except _HANDLED_FAILURES as exc:
+        return None, _failure(root, clock, as_of, None, exc, prior)
+    _record(root, _receipt(clock, as_of, "submitting",
+                           "the plan is saved; submitting it", plan_ref=plan_ref,
+                           snapshot_attempt=snapshot_attempt))
+    return plan_ref, None
+
+
 def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, plan_fn,
-                 submit_fn, serve_fn, full_run, prior: TriggerReceipt | None,
-                 plan_ref: str | None) -> TriggerReceipt:
-    """Plan (unless resuming), write ``submitting``, submit, then serve."""
+                 submit_fn, serve_fn, ensure_snapshot_fn, full_run,
+                 prior: TriggerReceipt | None, plan_ref: str | None) -> TriggerReceipt:
+    """Plan (unless resuming), write ``submitting``, submit, then serve.
+
+    ``snapshot_attempt`` (Cutover PR-7b) is a single, monotonic counter for the
+    WHOLE ``as_of`` run, carried on every receipt below regardless of status and
+    bumped in exactly one place -- the ``ensure_snapshot_fn`` failure branch --
+    never reused from ``error_count``, which resets on any non-``"error"``
+    status this function (and the rest of the module) already has several of.
+    """
     plan_fn = plan_fn or _default_plan
     submit_fn = submit_fn or _default_submit
     serve_fn = serve_fn or _default_serve
+    ensure_snapshot_fn = ensure_snapshot_fn or _ensure_shadow_snapshot
+    snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
     if plan_ref is None:
-        try:
-            plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
-                               full_run=full_run)
-        except _HANDLED_FAILURES as exc:
-            return _failure(root, clock, as_of, None, exc, prior)
-        _record(root, _receipt(clock, as_of, "submitting",
-                               "the plan is saved; submitting it", plan_ref=plan_ref))
+        plan_ref, early_receipt = _ensure_plan_ref(
+            root, as_of, tickers=tickers, context_tickers=context_tickers, clock=clock,
+            plan_fn=plan_fn, ensure_snapshot_fn=ensure_snapshot_fn, full_run=full_run,
+            prior=prior, snapshot_attempt=snapshot_attempt)
+        if early_receipt is not None:
+            return early_receipt
     try:
         submit_fn(root, as_of, plan_ref, clock)
     except _HANDLED_FAILURES as exc:
         return _failure(root, clock, as_of, plan_ref, exc, prior)
     _record(root, _receipt(clock, as_of, "submitted",
-                           "jobs submitted; running the plan to terminal", plan_ref=plan_ref))
+                           "jobs submitted; running the plan to terminal", plan_ref=plan_ref,
+                           snapshot_attempt=snapshot_attempt))
     try:
         final = serve_fn(root, plan_ref, clock)
     except _HANDLED_FAILURES as exc:
         return _failure(root, clock, as_of, plan_ref, exc, prior)
     if final == "timed_out":
-        previous = prior.error_count if prior is not None and prior.status == "timed_out" else 0
-        count = previous + 1
-        if count >= MAX_CONSECUTIVE_ERRORS:
-            return _record(root, _receipt(
-                clock, as_of, "failed",
-                f"serve exceeded its deadline {count} consecutive times; giving up",
-                plan_ref=plan_ref, error_count=count))
-        return _record(root, _receipt(
-            clock, as_of, "timed_out",
-            "serve exceeded its deadline; the legacy lock is released, resuming next tick",
-            plan_ref=plan_ref, error_count=count))
+        return _record(root, _timeout_receipt(
+            clock, as_of, plan_ref, snapshot_attempt, prior,
+            timed_out_detail="serve exceeded its deadline; the legacy lock is released, "
+                             "resuming next tick",
+            give_up_detail="serve exceeded its deadline {count} consecutive times; giving up"))
     status = "completed" if str(final) == "completed" else "failed"
     return _record(root, _receipt(clock, as_of, status,
-                                  f"the submitted plan finished {status}", plan_ref=plan_ref))
+                                  f"the submitted plan finished {status}", plan_ref=plan_ref,
+                                  snapshot_attempt=snapshot_attempt))
 
 
 def _read_document(path: Path | None):
@@ -518,9 +628,12 @@ def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     evidence context, and the document is passed to the plan unchanged as
     ``--expected-population``. The trigger takes no ticker-list argument, and
     the document is not required for the trigger to run: without it the plan
-    still declares ``full_run=True`` and ``ops submit`` records its own
-    planned-population refusal as an ``error`` receipt rather than the trigger
-    silently scoring nothing.
+    still declares ``full_run=True``, and ``universe``/``context`` are both
+    empty, so ``cli._snapshot_inputs``/``pin_snapshot_inputs`` refuse at PLAN
+    time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
+    ``input_mode="snapshot"`` flip, this same absent-population case built a
+    plan successfully and the refusal was ``ops submit``'s to make instead)
+    rather than the trigger silently scoring nothing.
     """
     tickers = _population_tickers(_qualification_path(root, QUALIFICATION_POPULATION))
     return tickers, tickers
@@ -561,15 +674,28 @@ def _capture_input_manifest(root: Path, as_of: str, tickers: tuple[str, ...],
 
 
 def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=None, *,
-                  full_run: bool = True) -> str:
+                  full_run: bool = True,
+                  expected_shadow_snapshot_id: str | None = None) -> str:
     """The production plan: the real ``cli._plan_command``, in-process.
 
     ``full_run=True`` is the native nightly plan's full-population option and
     is always declared for a scheduled run, so the plan's effect scope is the
-    global ``shadow`` scope, never a slice. ``expected_population`` is the
+    global ``shadow`` scope, never a slice. ``input_mode`` is always
+    ``"snapshot"`` and ``snapshot_scope`` is always ``"shadow"`` (Cutover
+    PR-7b): the shadow nightly's plan always reads a pinned snapshot of the
+    ``shadow`` scope, never the legacy live store directly.
+    ``expected_shadow_snapshot_id`` is the exact snapshot id ``_submit_plan``'s
+    ``ensure_snapshot_fn`` call just verified is fresh for ``as_of`` (``None``
+    for any caller outside that path, e.g. a direct `ops plan` invocation) --
+    threaded through as ``args.expected_snapshot_id``, not yet read by
+    ``cli._plan_command``/``pin_snapshot_inputs`` (PR-7b-3 adds that CAS check;
+    this slice only threads the value through). ``expected_population`` is the
     operator's population document when present (``full_population`` derived
-    the universe from the same file); absent, the plan still carries the
-    full-run declaration and the refusal is ``ops submit``'s to make.
+    the universe from the same file); absent, ``universe``/``context`` are
+    both empty, and ``cli._snapshot_inputs``/``pin_snapshot_inputs`` now
+    refuse at PLAN time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
+    ``input_mode="snapshot"`` flip, this same absent-population case built a
+    plan successfully and the refusal was ``ops submit``'s to make instead).
     ``input_manifest`` and ``year_start``/``year_end`` are derived fresh from
     ``as_of`` on every call (the manifest is captured and written per-``as_of``
     rather than read from one fixed filename, and the year span mirrors
@@ -597,8 +723,9 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
         input_manifest=manifest_path,
         expected_population=population,
         tickers=",".join(universe), context_tickers=",".join(context),
-        full_run=bool(full_run), year_start=year_start, year_end=year_end, input_mode="legacy",
-        snapshot_scope=None, refresh_mode="legacy", refresh_plan=None)
+        full_run=bool(full_run), year_start=year_start, year_end=year_end,
+        input_mode="snapshot", snapshot_scope="shadow", refresh_mode="legacy",
+        refresh_plan=None, expected_snapshot_id=expected_shadow_snapshot_id)
     conn = open_catalog(ops_root / "catalog.sqlite", clock=clock)
     try:
         planned = cli._plan_command(plan_args, ops_root, conn, clock)
@@ -860,10 +987,9 @@ def _ensure_shadow_snapshot(root: Path, as_of: str, clock, attempt: int, *,
     """Cutover PR-7b (design: ``ARCHITECTURE.md`` "Cutover PR-7b's input
     sourcing" / "``nightly_trigger.py`` (Cutover PR-7b design)"). Commits (or
     reattaches to) the ``as_of`` session's ``shadow``-scope snapshot BEFORE any
-    plan is built -- NOT YET called from ``_submit_plan`` in this slice (added
-    unused, per the small-PRs "add the new code first, unused... then wire it
-    in" split): a later PR wires it in behind ``_submit_plan``'s own
-    ``ensure_snapshot_fn`` seam, inside the same ``if plan_ref is None:`` guard.
+    plan is built -- this is ``_submit_plan``'s default ``ensure_snapshot_fn``,
+    called inside the same ``if plan_ref is None:`` guard, immediately before
+    ``plan_fn`` (Cutover PR-7b-2).
 
     Returns ``("ready", snapshot_id)`` once a ``shadow``-scope snapshot is
     confirmed fresh for ``as_of`` and committed (or was already committed by
