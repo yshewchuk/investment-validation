@@ -653,6 +653,20 @@ disposition = "native"
 owner = "P6-2"
 notes = "Legacy had only a lock and a run report; browser job buttons are post-cutover (8B)."
 
+[[row]]
+id = "operations-native-parity"
+evidence = "route:GET /native_parity.json"
+area = "operations"
+capability = "Native-vs-legacy parity summary: nightly match/mismatch/incomparable/refused counts, per-field breakdown, worst differing rows"
+old = []
+new = ["route:v2-ops GET /native_parity", "route:v2-ops GET /native_parity.json", "py:engine/v2/serving/native_parity_projection.py::native_parity_summary"]
+producer = "engine.v2.serving.native_parity_projection.native_parity_summary reads the native_parity_report.v1.1 artifact engine/v2/ops/native_parity_report.py writes (see the nightly-native-parity row above; no production job kind submits it yet, so this route's everyday state is its own explicit \"no_report\", not an error)"
+identity = "the report path is a preview-launcher root (--native-parity-report-path), never inferred from --release-root"
+tests = ["tests/test_v2_serving_native_parity.py", "tests/test_v2_dashboard_preview_native_parity.py", "tests/test_v2_route_probe.py"]
+disposition = "native"
+owner = "P6-4"
+notes = "No legacy equivalent (old = []): this is a brand-new operations page, not a migrated one. GET /native_parity is the small page that fetches GET /native_parity.json and renders it; omitting --native-parity-report-path keeps the route's explicit 503 'native parity not configured' refusal, distinct from that same route's 200 'no_report' when the flag is set but nothing has been written there yet."
+
 # ----------------------------------------------------------------- export
 
 [[row]]

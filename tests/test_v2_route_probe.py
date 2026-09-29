@@ -35,6 +35,7 @@ def _serve(tmp_path):
                                   "generated_at": "t1", "withheld_release": None}))
     calibration = tmp_path / "calibration-health.json"
     calibration.write_text(json.dumps({"generated_at": "t1", "n_scored": 0}))
+    native_parity_report_path = tmp_path / "native_parity_report.json"  # deliberately absent
     release_dir = tmp_path / "releases" / "r1"
     release_dir.mkdir(parents=True)
     (release_dir / "index.html").write_bytes(b"<!doctype html>board")
@@ -50,6 +51,7 @@ def _serve(tmp_path):
     server = create_server(("127.0.0.1", 0), token="secret", health_path=health,
                            release_root=tmp_path, frozen_at="t0",
                            calibration_health_path=calibration,
+                           native_parity_report_path=native_parity_report_path,
                            submit_refresh=_record("refresh", {"jobs": []}),
                            submit_whatif=_record("whatif", {"job_id": "job_probe"}),
                            fetch_whatif=lambda job_id: (200, {"job_id": job_id}))
