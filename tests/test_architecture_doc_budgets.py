@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -87,3 +89,13 @@ def test_non_architecture_markdown_is_not_checked():
     report = adb.check_files({"engine/v2/ops/README.md": huge})
     assert report.ok
     assert report.docs == 0
+
+
+def test_worktree_read_failure_raises_not_silently_empty():
+    with pytest.raises(OSError):
+        adb._read_worktree_strict(ROOT / "no-such-dir-xyz", "ARCHITECTURE.md")
+
+
+def test_staged_read_failure_raises_not_silently_empty():
+    with pytest.raises(subprocess.CalledProcessError):
+        adb._read_staged_strict(ROOT, "no/such/tracked/path/ARCHITECTURE.md")

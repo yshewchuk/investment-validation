@@ -16,9 +16,11 @@ EXEMPT at its line count when this check was added -- a cap, not a new
 allowance: none of the four may grow even one line past that number (see
 ``_effective_cap``).
 
-Reads tracked files with staged blobs layered over them, like
-:mod:`checks.package_readmes` -- a partial graph would flag every doc this
-branch has not yet touched.
+Reads every tracked path's staged content by default (what would actually be
+committed); ``--all`` reads worktree content instead. Either read failing
+raises rather than being scored as an empty, in-budget doc -- a budget check
+that can silently pass on a read error is not a check (see
+``_read_worktree_strict`` / ``_read_staged_strict``).
 
 Usage::
 
@@ -28,17 +30,14 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from checks.repo_hygiene import (  # noqa: E402
-    read_staged_blob,
-    read_worktree_blob,
-    tracked_paths,
-)
+from checks.repo_hygiene import tracked_paths  # noqa: E402
 
 __all__ = ["BUDGET", "EXEMPT", "Violation", "Report", "check_files", "main"]
 
@@ -106,17 +105,32 @@ def check_files(files: dict[str, bytes]) -> Report:
 # --------------------------------------------------------------------------
 
 
+def _read_worktree_strict(root: Path, rel: str) -> bytes:
+    """Raises OSError on a read failure -- never scored as an empty doc."""
+    return (root / rel).read_bytes()
+
+
+def _read_staged_strict(root: Path, rel: str) -> bytes:
+    """Raises CalledProcessError if ``rel`` cannot be read from the index --
+    see ``_read_worktree_strict``."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "show", f":{rel}"],
+        capture_output=True, check=True,
+    )
+    return proc.stdout
+
+
 def _sources(root: Path, use_worktree: bool) -> dict[str, bytes]:
     if use_worktree:
-        return {rel: read_worktree_blob(root, rel) for rel in tracked_paths(root)}
-    return {rel: read_staged_blob(root, rel) for rel in tracked_paths(root)}
+        return {rel: _read_worktree_strict(root, rel) for rel in tracked_paths(root)}
+    return {rel: _read_staged_strict(root, rel) for rel in tracked_paths(root)}
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     ap.add_argument("--all", action="store_true",
-                    help="read the worktree rather than layering staged blobs")
+                    help="read worktree content instead of staged content")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
