@@ -464,13 +464,16 @@ and nothing on this diagram writes to the legacy board.
   change lands in `engine/*`, `engine/dashboard/nightly.py` or the legacy
   ledger path to support v2 work. If legacy must change at all before
   cutover, that is itself a decision requiring sign-off, not a routine PR.
-- **Every `ARCHITECTURE.md` stays inside its line budget.**
+- **Every `ARCHITECTURE.md` stays under a growth ceiling.**
   `checks/architecture_doc_budgets.py` caps every `ARCHITECTURE.md` (root or
-  component) at a fixed line count, blocking in CI and the pre-commit hook,
-  so a doc cannot regrow the step-by-step procedure or history `AGENTS.md`
-  "Small PRs" keeps out of contract-level docs. A named exemption list pins
-  any doc already over budget at its size when the check was added, so
-  growth stops there rather than at zero.
+  component) at 1000 lines; below that, one PR may add at most 50 net lines
+  to any one doc, measured against its size on `origin/main` (CI's shallow
+  checkout has no real merge-base, so the branch tip is the fallback), so a
+  doc creeps up over many small PRs rather than jumping in one. A doc
+  already at or over the ceiling may shrink but may not grow at all -- it
+  needs a dedicated compression PR, or a code refactor, before it takes on
+  more content. An owner is never responsible for trimming a doc's
+  unrelated sections to make room for their own change.
 
 ## 6. Anti-patterns
 

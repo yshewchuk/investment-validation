@@ -1,8 +1,8 @@
-"""Negative controls for the ARCHITECTURE.md line budget.
+"""Growth-ceiling checks for ARCHITECTURE.md docs.
 
-Proved by planting what the check exists to catch, same style as
-tests/test_code_budgets.py: asserting only that the real tree is green would
-pass identically if the check did nothing.
+Proves what the check exists to catch, same style as tests/test_code_budgets.py:
+asserting only that the real tree passes would pass identically if the check
+did nothing.
 """
 from __future__ import annotations
 # land: always-run
@@ -20,143 +20,256 @@ sys.path.insert(0, str(ROOT))
 
 from checks import architecture_doc_budgets as adb  # noqa: E402
 
-
-def test_the_real_tree_is_within_budget():
-    proc = subprocess.run(
-        [sys.executable, str(ROOT / "checks" / "architecture_doc_budgets.py"), "--all"],
-        capture_output=True, text=True, cwd=ROOT,
-    )
-    assert proc.returncode == 0, proc.stderr
+_LEAK = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
 
 
-def test_default_mode_reads_staged_not_worktree(tmp_path, monkeypatch):
-    """No --all: a staged-only ARCHITECTURE.md change is what gets checked,
-    not whatever is sitting in the worktree."""
-    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
-        monkeypatch.delenv(var, raising=False)
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")}
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, env=env, check=True)
-    doc = repo / "ARCHITECTURE.md"
-    doc.write_text("x\n" * 5)
-    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, env=env, check=True)
-
-    # Stage an over-budget version, but leave the worktree file small.
-    doc.write_text("x\n" * (adb.EXEMPT["ARCHITECTURE.md"] + 1))
-    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, env=env, check=True)
-    doc.write_text("x\n" * 3)
-
-    default_report = adb.check_files(adb._sources(repo, use_worktree=False))
-    assert not default_report.ok
-
-    all_report = adb.check_files(adb._sources(repo, use_worktree=True))
-    assert all_report.ok
+def _clean_env():
+    return {k: v for k, v in os.environ.items() if k not in _LEAK}
 
 
-def test_a_new_doc_over_budget_fails():
-    big = ("x\n" * (adb.BUDGET + 1)).encode()
-    report = adb.check_files({"engine/v2/newpkg/ARCHITECTURE.md": big})
+def _git(args, cwd, env=None, check=True):
+    return subprocess.run(["git", *args], cwd=cwd, env=env or _clean_env(),
+                           capture_output=True, text=True, check=check)
+
+
+def _init_repo(path):
+    path.mkdir()
+    _git(["init", "-q"], path)
+    _git(["config", "user.email", "t@t"], path)
+    _git(["config", "user.name", "t"], path)
+
+
+def _lines(n):
+    return ("x\n" * n).encode()
+
+
+# --------------------------------------------------------------------------
+# check_files: pure, no git
+# --------------------------------------------------------------------------
+
+
+def test_growth_within_limit_passes():
+    base = {"a/ARCHITECTURE.md": _lines(500)}
+    new = {"a/ARCHITECTURE.md": _lines(500 + adb.MAX_PR_GROWTH)}
+    assert adb.check_files(base, new).ok
+
+
+def test_growth_over_limit_fails():
+    base = {"a/ARCHITECTURE.md": _lines(500)}
+    new = {"a/ARCHITECTURE.md": _lines(500 + adb.MAX_PR_GROWTH + 1)}
+    report = adb.check_files(base, new)
     assert not report.ok
-    assert report.violations[0].path == "engine/v2/newpkg/ARCHITECTURE.md"
+    assert report.violations[0].reason == "growth"
 
 
-def test_a_doc_at_exactly_budget_passes():
-    ok = ("x\n" * adb.BUDGET).encode()
-    assert adb.check_files({"engine/v2/newpkg/ARCHITECTURE.md": ok}).ok
+def test_growth_message_says_split_or_move_to_pr_body():
+    base = {"a/ARCHITECTURE.md": _lines(10)}
+    new = {"a/ARCHITECTURE.md": _lines(10 + adb.MAX_PR_GROWTH + 5)}
+    v = adb.check_files(base, new).violations[0]
+    assert "split it or move detail to the PR body" in str(v)
 
 
-def test_root_architecture_doc_is_in_scope():
-    cap = adb.EXEMPT["ARCHITECTURE.md"]
-    over = ("x\n" * (cap + 1)).encode()
-    at_cap = ("x\n" * cap).encode()
-    assert not adb.check_files({"ARCHITECTURE.md": over}).ok
-    assert adb.check_files({"ARCHITECTURE.md": at_cap}).ok
+def test_doc_at_ceiling_cannot_grow_at_all():
+    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING)}
+    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 1)}
+    report = adb.check_files(base, new)
+    assert not report.ok
+    assert report.violations[0].reason == "ceiling"
 
 
-def test_exempt_doc_is_capped_at_its_pinned_size_not_unlimited():
-    path = "engine/v2/ops/ARCHITECTURE.md"
-    cap = adb.EXEMPT[path]
-    over = ("x\n" * (cap + 1)).encode()
-    at_cap = ("x\n" * cap).encode()
-    assert not adb.check_files({path: over}).ok
-    assert adb.check_files({path: at_cap}).ok
+def test_ceiling_message_says_needs_a_compression_pr():
+    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 200)}
+    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 201)}
+    v = adb.check_files(base, new).violations[0]
+    assert "doc at ceiling, needs a compression PR" in str(v)
 
 
-def test_non_architecture_markdown_is_not_checked():
-    huge = ("x\n" * 5000).encode()
-    report = adb.check_files({"engine/v2/ops/README.md": huge})
+def test_doc_over_ceiling_can_shrink():
+    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 500)}
+    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 400)}
+    assert adb.check_files(base, new).ok
+
+
+def test_doc_over_ceiling_unchanged_passes():
+    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 50)}
+    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 50)}
+    assert adb.check_files(base, new).ok
+
+
+def test_new_doc_within_limit_passes():
+    new = {"a/ARCHITECTURE.md": _lines(adb.MAX_PR_GROWTH)}
+    assert adb.check_files({}, new).ok
+
+
+def test_new_doc_over_limit_fails():
+    new = {"a/ARCHITECTURE.md": _lines(adb.MAX_PR_GROWTH + 1)}
+    report = adb.check_files({}, new)
+    assert not report.ok
+    assert report.violations[0].base_lines == 0
+
+
+def test_removed_doc_is_not_scored():
+    base = {"a/ARCHITECTURE.md": _lines(2000)}
+    new = {}
+    report = adb.check_files(base, new)
     assert report.ok
     assert report.docs == 0
 
 
-def test_worktree_read_failure_raises_not_silently_empty():
-    with pytest.raises(OSError):
-        adb._read_worktree_strict(ROOT / "no-such-dir-xyz", "ARCHITECTURE.md")
+def test_non_architecture_markdown_is_ignored():
+    new = {"a/README.md": _lines(5000)}
+    report = adb.check_files({}, new)
+    assert report.ok
+    assert report.docs == 0
 
 
-def test_staged_read_failure_raises_not_silently_empty():
+def test_growth_can_cross_the_ceiling_within_one_pr_allowance():
+    """Deliberate: the growth check and the ceiling check are independent.
+    A doc just under the ceiling may cross it in one PR if the crossing is
+    itself within MAX_PR_GROWTH -- the freeze only starts applying to the
+    NEXT PR, once the doc's base size is at/over CEILING."""
+    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING - 10)}
+    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING - 10 + adb.MAX_PR_GROWTH)}
+    assert adb.check_files(base, new).ok
+
+
+# --------------------------------------------------------------------------
+# _read_base / _resolve_base_ref: real git, no network
+# --------------------------------------------------------------------------
+
+
+def test_read_base_missing_path_returns_none(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "f.txt").write_text("hi\n")
+    _git(["add", "f.txt"], repo)
+    _git(["commit", "-q", "-m", "init"], repo)
+    assert adb._read_base(repo, "no/such/ARCHITECTURE.md", "HEAD") is None
+
+
+def test_read_base_bad_ref_raises(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "ARCHITECTURE.md").write_text("x\n")
+    _git(["add", "ARCHITECTURE.md"], repo)
+    _git(["commit", "-q", "-m", "init"], repo)
     with pytest.raises(subprocess.CalledProcessError):
-        adb._read_staged_strict(ROOT, "no/such/tracked/path/ARCHITECTURE.md")
+        adb._read_base(repo, "ARCHITECTURE.md", "not-a-real-ref")
+
+
+def test_resolve_base_ref_uses_existing_local_ref_without_fetching(tmp_path, monkeypatch):
+    for v in _LEAK:
+        monkeypatch.delenv(v, raising=False)
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "f.txt").write_text("hi\n")
+    _git(["add", "f.txt"], repo)
+    _git(["commit", "-q", "-m", "init"], repo)
+    # An unreachable URL: if _resolve_base_ref tried to fetch, this would fail.
+    _git(["remote", "add", "origin", "https://example.invalid/nope.git"], repo)
+    _git(["update-ref", "refs/remotes/origin/main", "HEAD"], repo)
+    assert adb._resolve_base_ref(repo, "main") == "origin/main"
+
+
+def test_resolve_base_ref_fetches_from_a_local_remote_when_missing(tmp_path, monkeypatch):
+    for v in _LEAK:
+        monkeypatch.delenv(v, raising=False)
+    remote = tmp_path / "remote"
+    _init_repo(remote)
+    (remote / "ARCHITECTURE.md").write_text("x\n" * 7)
+    _git(["add", "ARCHITECTURE.md"], remote)
+    _git(["commit", "-q", "-m", "init"], remote)
+    _git(["branch", "-M", "main"], remote)
+
+    local = tmp_path / "local"
+    _git(["clone", "-q", "--no-local", str(remote), str(local)], tmp_path)
+    # A shallow PR checkout has no origin/main tracking ref yet.
+    _git(["update-ref", "-d", "refs/remotes/origin/main"], local, check=False)
+
+    ref = adb._resolve_base_ref(local, "main")
+    assert ref == "origin/main"
+    content = adb._read_base(local, "ARCHITECTURE.md", ref)
+    assert content == b"x\n" * 7
+
+
+# --------------------------------------------------------------------------
+# staged vs worktree, and the two hard-won git-env regressions from #181
+# --------------------------------------------------------------------------
+
+
+def test_default_mode_reads_staged_not_worktree(tmp_path, monkeypatch):
+    for v in _LEAK:
+        monkeypatch.delenv(v, raising=False)
+    env = _clean_env()
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    doc = repo / "ARCHITECTURE.md"
+    doc.write_text("x\n" * 100)
+    _git(["add", "ARCHITECTURE.md"], repo, env)
+    _git(["commit", "-q", "-m", "init"], repo, env)
+    _git(["branch", "-M", "main"], repo, env)
+    _git(["update-ref", "refs/remotes/origin/main", "HEAD"], repo, env)
+
+    # Stage an over-growth version, but leave the worktree file small.
+    doc.write_text("x\n" * (100 + adb.MAX_PR_GROWTH + 1))
+    _git(["add", "ARCHITECTURE.md"], repo, env)
+    doc.write_text("x\n" * (100 + 5))
+
+    staged_base, staged_new = adb._sources(repo, use_worktree=False, base_ref=None)
+    assert not adb.check_files(staged_base, staged_new).ok
+
+    all_base, all_new = adb._sources(repo, use_worktree=True, base_ref=None)
+    assert adb.check_files(all_base, all_new).ok
 
 
 def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monkeypatch):
-    """An inherited GIT_DIR/GIT_WORK_TREE pointing at an unrelated repo must
-    not make tracked_paths (and so _sources) silently see zero files for the
-    real root -- that would let the whole budget check pass with docs=0."""
-    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
-        monkeypatch.delenv(var, raising=False)
-    setup_env = {k: v for k, v in os.environ.items()
-                 if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")}
-
+    for v in _LEAK:
+        monkeypatch.delenv(v, raising=False)
+    env = _clean_env()
     other = tmp_path / "other_repo"
-    other.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=other, env=setup_env, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=other, env=setup_env, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=other, env=setup_env, check=True)
+    _init_repo(other)
     (other / "f.txt").write_text("hi\n")
-    subprocess.run(["git", "add", "f.txt"], cwd=other, env=setup_env, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=other, env=setup_env, check=True)
+    _git(["add", "f.txt"], other, env)
+    _git(["commit", "-q", "-m", "init"], other, env)
 
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
 
-    sources = adb._sources(ROOT, use_worktree=True)
-    assert "ARCHITECTURE.md" in sources
+    base, new = adb._sources(ROOT, use_worktree=True, base_ref="origin/main")
+    assert "ARCHITECTURE.md" in new
 
 
 def test_git_index_file_is_honored_not_stripped(tmp_path, monkeypatch):
-    """GIT_INDEX_FILE is git's own sanctioned mechanism for pointing a hook
-    at a temporary commit index (e.g. during `git commit --only`) -- unlike
-    GIT_DIR/GIT_WORK_TREE, it must be honored, not treated as a leak."""
-    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
-        monkeypatch.delenv(var, raising=False)
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")}
-
+    for v in _LEAK:
+        monkeypatch.delenv(v, raising=False)
+    env = _clean_env()
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, env=env, check=True)
+    _init_repo(repo)
     doc = repo / "ARCHITECTURE.md"
     doc.write_text("x\n" * 5)
-    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, env=env, check=True)
+    _git(["add", "ARCHITECTURE.md"], repo, env)
+    _git(["commit", "-q", "-m", "init"], repo, env)
 
-    # A temporary index, as git itself sets up for a hook, staging an
-    # over-budget version distinct from the real index.
     temp_index = tmp_path / "temp-index"
     shutil.copyfile(repo / ".git" / "index", temp_index)
     temp_env = {**env, "GIT_INDEX_FILE": str(temp_index)}
-    doc.write_text("x\n" * (adb.BUDGET + 1))
-    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, env=temp_env, check=True)
+    doc.write_text("x\n" * 90)
+    _git(["add", "ARCHITECTURE.md"], repo, temp_env)
 
     monkeypatch.setenv("GIT_INDEX_FILE", str(temp_index))
-    sources = adb._sources(repo, use_worktree=False)
-    assert len(sources["ARCHITECTURE.md"].splitlines()) == adb.BUDGET + 1
+    content = adb._read_staged_strict(repo, "ARCHITECTURE.md")
+    assert len(content.splitlines()) == 90
+
+
+# --------------------------------------------------------------------------
+# the real tree
+# --------------------------------------------------------------------------
+
+
+def test_the_real_tree_passes_against_main():
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "checks" / "architecture_doc_budgets.py"),
+         "--all", "--base-ref", "origin/main"],
+        capture_output=True, text=True, cwd=ROOT,
+    )
+    assert proc.returncode == 0, proc.stderr
