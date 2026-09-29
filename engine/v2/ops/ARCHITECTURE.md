@@ -1064,10 +1064,15 @@ starts working with no change of its own.
   `engine.v2.data.incremental.merge_daily_market`'s job, documented in that
   package's own `ARCHITECTURE.md`). None of this raises — masking is
   normal-path behavior, not a failure (see "Failure semantics" for what
-  does raise). A response still missing one of the unit's expected tickers
-  is classified `partial`, never committed silently absent, and ranks below
-  a `not_final`/`credential_invalid`/`rate_limited` endpoint when the two
-  provider endpoints' kinds disagree.
+  does raise). A final, successful response still missing one of the
+  unit's expected tickers is classified `partial` (never committed
+  silently absent); an empty or literal-404 response is `not_final`
+  instead, never `partial`. The two provider endpoints (`summaries`/
+  `cores`) are classified independently and the worse kind wins: a
+  `partial` endpoint becomes a retryable `TRANSIENT_SOURCE` refusal only
+  when the other endpoint is not itself `not_final`/`credential_invalid`/
+  `rate_limited`, any of which produces `SOURCE_NOT_FINAL` (or worse)
+  instead.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
