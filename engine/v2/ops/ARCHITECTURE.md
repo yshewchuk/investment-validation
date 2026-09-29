@@ -2844,7 +2844,7 @@ job.
 | `legacy_rows` is empty | `VALIDATION_FAILED`, unconditionally — a missing legacy input is never explained by a native refusal |
 | no shared key between native and legacy, but every legacy key is covered by its own matching keyed refusal (or nothing was ever keyable at all) | reported as a normal (degenerate) parity report, not a job failure — an unrelated refusal naming a different population key never counts |
 | no shared key and no refusal explains it | job fails, same as a genuinely missing native input |
-| the records/refusals schema tag is stale | the sidecar's own pre-submission check normally catches it first and submits nothing for that identity; `run_native_parity_worker` also checks independently and fails `VALIDATION_FAILED` if a job reaches it with a stale tag anyway (e.g. the generic job-submission API used directly, bypassing the sidecar) |
+| the records/refusals schema tag is stale | `run_native_parity_worker` is the only enforcement that exists today (slice 2B(a)) and fails `VALIDATION_FAILED` before reading any row, on every route including generic job submission; a sidecar pre-submission check that would additionally catch this before a job is even created is planned for slice 2B(c), not yet built |
 
 ### Tick-loop sidecars: submission identity
 

@@ -458,10 +458,18 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[
     score_document = json.loads((root / "score.json").read_text())
     records_document = json.loads((root / "records.json").read_text())
     refusals_document = json.loads((root / "refusals.json").read_text())
+    if not isinstance(records_document, dict):
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch records.json is not a JSON mapping",
+                   details={"schema_version": None})
     if records_document.get("schema_version") != _RECORDS_SCHEMA_VERSION:
         raise fail("VALIDATION_FAILED",
                    "native_score_batch records.json has an unsupported schema_version",
                    details={"schema_version": records_document.get("schema_version")})
+    if not isinstance(refusals_document, dict):
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch refusals.json is not a JSON mapping",
+                   details={"schema_version": None})
     if refusals_document.get("schema_version") != _REFUSALS_SCHEMA_VERSION:
         raise fail("VALIDATION_FAILED",
                    "native_score_batch refusals.json has an unsupported schema_version",

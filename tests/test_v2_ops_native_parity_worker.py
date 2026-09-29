@@ -211,6 +211,28 @@ def test_run_native_parity_worker_rejects_unsupported_refusals_schema_version(tm
         "schema_version": "native_score_batch_refusals.v1.0"}
 
 
+def test_run_native_parity_worker_rejects_non_mapping_records_document(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+    (tmp_path / "records.json").write_text(json.dumps(["not", "a", "mapping"]))
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.problem.details == {"schema_version": None}
+
+
+def test_run_native_parity_worker_rejects_non_mapping_refusals_document(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+    (tmp_path / "refusals.json").write_text(json.dumps(["not", "a", "mapping"]))
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.problem.details == {"schema_version": None}
+
+
 def test_run_native_parity_worker_empty_legacy_rows_raises(tmp_path):
     _write_inputs(tmp_path, rows=[], records={_canonical_key(): {}})
 
