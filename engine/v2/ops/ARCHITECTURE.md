@@ -1580,13 +1580,9 @@ production submission through `_stage_sequence`/`build_legacy_job_requests`
 at all; the only path is `supervisor.Service`'s own tick loop, and today
 that path's actual reach differs per stage: `computed_moves_refresh`'s
 sidecar (`Service._reconcile_computed_moves_refresh`) does reach
-`submission.submit`; `native_score_batch`'s sidecar exists but never
-reaches `submission.submit` today: it returns a normal no-op when there is
-nothing to do (no succeeded `"score"` job, that job pinning no snapshot, or
-today's session already has a job under this key) and raises
-`VALIDATION_FAILED` only in the one remaining reachable case — a new,
-eligible, snapshot-pinned job, where the missing raw-row producer (see
-above) blocks it before it can build one; `native_parity` has no automatic
+`submission.submit`; `native_score_batch` has a tick-loop sidecar but does
+not reach `submission.submit` today — see "Outputs"/"Failure semantics"
+for its no-op and `VALIDATION_FAILED` conditions; `native_parity` has no automatic
 production submission sidecar yet (see
 "`native_parity`" above) — nothing wires it into `submission.submit`/
 `submit_graph` from any operator command or tick-loop sidecar today. The
@@ -1666,8 +1662,7 @@ commit happens until the combined kind list is clean.
 
 ```mermaid
 flowchart LR
-    SS[("shadow scope snapshot\n(_ensure_shadow_snapshot)")] -->|"Repository.scan\n(earnings_events)"| ET[events_table]
-    ET --> BR[board_requests]
+    ET[events_table] --> BR[board_requests]
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
@@ -1675,21 +1670,23 @@ flowchart LR
 ```
 
 `board_requests` itself only consumes an `events_table` a caller passes
-in; it does no scanning of its own. The shadow-scope snapshot
-`_ensure_shadow_snapshot` commits is real and reachable today (the
-scheduled trigger's `"score"` job now pins one — see "Primary contracts"),
-so the solid `SS -> ET` scan edge is a precedent already established by
-`computed_moves_store._scan_once`'s identical `earnings_events` scan, not
-a new read path. What is still missing is the dashed edge: the raw-row
-producer ([#199](https://github.com/yshewchuk/investment-validation/issues/199))
+in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a
+real, reachable-today shadow-scope snapshot (the scheduled trigger's
+`"score"` job now pins one — see "Primary contracts"), but only via
+`import_snapshot.plan_import`/`submit_import`; it never itself scans
+`earnings_events` — that `Repository.scan("earnings_events")` precedent
+belongs to `computed_moves_store._scan_once`, a different boundary. What
+is still missing is the dashed edge: the raw-row producer
+([#199](https://github.com/yshewchuk/investment-validation/issues/199))
 that would enumerate a session's `BoardRequest`s from `board_requests` and
 stage each one's `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/
-`quote_rows` into `events.json` — until it lands,
-`submit_native_score_batch_shadow_if_ready` raises `VALIDATION_FAILED`
-before there is anything to enumerate (only a manually-built
-`legacy`-input-mode plan built directly, not the scheduled trigger, still
-gets a silent no-op instead). `board_requests` has no production caller
-today for the same reason (see "Dependencies" → "Callers").
+`quote_rows` into `events.json` — until it lands, the scheduled trigger's
+pinned-snapshot path has no `events_table` to build `board_requests` from
+at all, so `submit_native_score_batch_shadow_if_ready` raises
+`VALIDATION_FAILED` rather than reaching this diagram (only a
+manually-built `legacy`-input-mode plan built directly, not the scheduled
+trigger, gets a silent no-op instead). `board_requests` has no production
+caller today for the same reason (see "Dependencies" → "Callers").
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 
