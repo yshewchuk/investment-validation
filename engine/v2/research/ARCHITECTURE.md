@@ -25,7 +25,10 @@ the trade table that replay publishes — reading exactly one resolved,
 named snapshot per run instead of the legacy mutable Tier-2 store. It
 produces measured tables and reports for a person to read; it never decides
 a research conclusion, never fetches from a network provider, and never
-mutates the legacy trades ledger.
+mutates the legacy trades ledger. `experiment_trades.load_trades` extends
+this same one-snapshot-per-read contract to `experiments/` callers (decision
+2026-09-29, option A): read the committed `trades` version
+`tools/v2_build_trades.py` published, never the legacy mutable store.
 
 ## Primary contracts and public interfaces
 
@@ -52,6 +55,13 @@ one; the library entrypoints below are this package's real public interface:
 `_plan.plan_events`, `_chains.ChainIndex`, `_trades_table.to_trades_table`,
 `_build_run.run`, `reconcile_trades.run`, `_trades_publish.publish`,
 `build_trades.coverage`, `_pricing.STRUCTURES`.
+
+`experiment_trades.load_trades(repository, snapshot, strategy)` is a second
+kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
+for a caller — today only `experiments/common_v2.py` — that already holds a
+`Repository` and a resolved `SnapshotRef` and wants one strategy's committed
+`trades` rows, session-joined, in the same frame `experiments/common.py`'s
+legacy `load_engine_trades` returns.
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
@@ -145,8 +155,11 @@ shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
 
 Callers: nothing inside `engine/` imports this package (checked against
-`checks/import_layers.py`'s import graph). The only consumers are the CLI
-leaves listed above, which the layering hook does not parse.
+`checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
+listed above are one consumer; `experiments/common_v2.py` is the other, for
+`experiment_trades.load_trades` only — neither is parsed by the layering
+hook (it only parses `engine*` importers, and `experiments/` is outside it
+too).
 
 ## External systems and libraries
 
@@ -266,9 +279,16 @@ uncaught traceback instead.
     partitioning (or, for the nullable case, a different split strategy)
     than this rule can supply; it never truncates or drops rows silently.
   - **No overlap rows after a join/filter** (fill quality's
-    `since`-filtered join). `POPULATION_COLLAPSED`
-    (`category="validation"`, not retryable) — an empty report is refused
-    rather than published as a zero-row "result".
+    `since`-filtered join, or `experiment_trades.load_trades`'s
+    strategy/provenance filter on the read `trades` table).
+    `POPULATION_COLLAPSED` (`category="validation"`, not retryable) — an
+    empty report, or an empty trades frame, is refused rather than returned
+    as a zero-row "result".
+  - **A resolved snapshot with no `trades` table at all**
+    (`experiment_trades.load_trades`, via `_trades_publish.
+    read_existing_trades`). `CONTRACT_MISMATCH`, the same code and the same
+    helper `tools/v2_build_trades.py`'s own read-before-append already uses
+    for this condition.
 - **R2, cache.** None: every run resolves its snapshot and reads its tables
   fresh through `Repository.scan`; nothing is cached across runs or across
   processes. Within one run, the resolved `SnapshotRef` and, in the replay
