@@ -30,16 +30,29 @@ def load_trades(repository, snapshot, strategy: str) -> pd.DataFrame:
 
     Raises ``engine.v2.data.errors.DataError``:
     - ``CONTRACT_MISMATCH`` — the snapshot has no ``trades`` table at all
-      (raised by ``read_existing_trades`` itself).
+      (raised by ``read_existing_trades`` itself), or a surviving trade row's
+      ``event_id`` has no ``earnings_events`` row to join a ``session`` from.
     - ``POPULATION_COLLAPSED`` — the snapshot's ``trades`` table has no row
-      for this ``strategy``/``PROVENANCE`` pair.
+      for this ``strategy``/``PROVENANCE`` pair, or no fragments at all (the
+      latter is ``_snapshot.read_table``'s documented issue #70 bare
+      ``ValueError``, converted here so every ``load_trades`` failure stays
+      typed).
 
     Does not itself resolve a snapshot id and does not itself decide "missing
     snapshot" — that is ``Repository.resolve``'s ``SNAPSHOT_NOT_FOUND``,
     raised by the caller's own resolve call before this function is reached
     (see ``experiments/common_v2.py``).
     """
-    trades = read_existing_trades(repository, snapshot)
+    try:
+        trades = read_existing_trades(repository, snapshot)
+    except ValueError:
+        if repository.fragment_records(snapshot, "trades"):
+            raise
+        raise errors.fail(
+            "POPULATION_COLLAPSED",
+            "the trades table has no fragments in this snapshot",
+            details={"snapshot_id": snapshot.snapshot_id},
+        ) from None
     rows = trades[
         (trades["strategy"] == strategy) & (trades["provenance"] == PROVENANCE)
     ].reset_index(drop=True)
@@ -58,4 +71,10 @@ def load_trades(repository, snapshot, strategy: str) -> pd.DataFrame:
         events[["event_id", "session"]].drop_duplicates("event_id"),
         on="event_id", how="left",
     )
+    if rows["session"].isna().any():
+        raise errors.fail(
+            "CONTRACT_MISMATCH",
+            "a trades row has no matching earnings_events session",
+            details={"snapshot_id": snapshot.snapshot_id, "strategy": strategy},
+        )
     return rows

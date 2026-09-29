@@ -14,8 +14,8 @@ from engine.v2.research import experiment_trades
 __all__ = ["load_v2_trades"]
 
 
-def load_v2_trades(strategy: str, *, catalog: "Path | str", store_root: "Path | str",
-                   snapshot_id: str) -> "pd.DataFrame":
+def load_v2_trades(strategy: str, *, catalog: Path | str, store_root: Path | str,
+                   snapshot_id: str) -> pd.DataFrame:
     """The committed v2-replay trades for ``strategy``, one pinned snapshot.
     SNAPSHOT_NOT_FOUND -- unknown ``snapshot_id`` (``Repository.resolve``);
     CONTRACT_MISMATCH -- that snapshot carries no ``trades`` table;
