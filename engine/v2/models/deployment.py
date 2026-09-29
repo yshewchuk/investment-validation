@@ -446,6 +446,8 @@ def stage_release(
     feature-order-incompatible ``release`` refuses with :class:`StagingRefused`
     before anything is written. Staging the same ``release_id`` twice with the
     same content is a no-op; staging it twice with different content refuses.
+    Refuses :class:`StagingRefused` (``MANIFEST_UNREADABLE``) if an existing
+    manifest for this ``release_id`` cannot be read or parsed.
     """
     require_complete_release(inventory)
     issues = _compatibility_issues(release, inventory)
@@ -471,7 +473,13 @@ def stage_release(
         staged_at=format_timestamp(clock.now()),
         release_hash_version=RELEASE_HASH_SEMANTIC_V2,
     )
-    existing = _read_manifest(root, release.release_id)
+    try:
+        existing = _read_manifest(root, release.release_id)
+    except (OSError, ValueError) as exc:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release.release_id}]", code="MANIFEST_UNREADABLE",
+            detail="the existing staged manifest could not be read",
+        ),)) from exc
     if existing is not None:
         if not _manifest_hash_matches(existing):
             raise StagingRefused((ReleaseIssue(
@@ -557,9 +565,17 @@ def resolve_release(root: Path, release_id: str) -> ModelRelease:
 
     Independent of ``DEPLOYED``: a later promotion or rollback never changes
     what this returns for an already-staged id, which is what makes a
-    recorded score replayable after the deployment moves on.
+    recorded score replayable after the deployment moves on. Refuses
+    :class:`StagingRefused` (``MANIFEST_UNREADABLE``) if the staged manifest
+    cannot be read or parsed.
     """
-    manifest = _read_manifest(Path(root), release_id)
+    try:
+        manifest = _read_manifest(Path(root), release_id)
+    except (OSError, ValueError) as exc:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="MANIFEST_UNREADABLE",
+            detail="the staged manifest could not be read",
+        ),)) from exc
     if manifest is None:
         raise ReleaseNotStaged(release_id)
     return manifest.release
@@ -614,11 +630,18 @@ def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> Poi
 
     Shared by both :func:`promote` and :func:`rollback`. Refuses
     :class:`ReleaseNotStaged`, :class:`StaleReleaseHash`,
-    :class:`CorruptManifest`, or :class:`StagingRefused` (duplicate
-    bindings) before the pointer ever moves; a no-op if ``release_id`` is
+    :class:`CorruptManifest`, :class:`StagingRefused` (``MANIFEST_UNREADABLE``
+    when the target manifest cannot be read or parsed, duplicate bindings)
+    before the pointer ever moves; a no-op if ``release_id`` is
     already live.
     """
-    manifest = _read_manifest(root, release_id)
+    try:
+        manifest = _read_manifest(root, release_id)
+    except (OSError, ValueError) as exc:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="MANIFEST_UNREADABLE",
+            detail="the target staged manifest could not be read",
+        ),)) from exc
     if manifest is None:
         raise ReleaseNotStaged(release_id)
     if manifest.release_hash_version != RELEASE_HASH_SEMANTIC_V2:

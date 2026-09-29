@@ -831,3 +831,76 @@ def test_production_deployment_root_is_one_level_below_production_release_root(m
     monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
     assert deployment_module.production_deployment_root() == tmp_path / "deployment"
     assert deployment_module.production_deployment_root() == production_release_root() / "deployment"
+
+
+def test_resolve_release_refuses_an_unreadable_manifest(tmp_path):
+    """A manifest.json that fails to parse refuses
+    StagingRefused(MANIFEST_UNREADABLE) instead of raising a bare decode
+    error out of resolve_release (issue #207)."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    manifest_path.write_text("not json")
+    with pytest.raises(StagingRefused) as error:
+        resolve_release(tmp_path, "r1")
+    assert error.value.issues[0].code == "MANIFEST_UNREADABLE"
+
+
+def test_current_release_refuses_an_unreadable_manifest(tmp_path):
+    """current_release inherits resolve_release's typed refusal for a
+    manifest that fails to parse, instead of raising a bare decode error
+    (issue #207)."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    promote(tmp_path, "r1")
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    manifest_path.write_text("not json")
+    with pytest.raises(StagingRefused) as error:
+        current_release(tmp_path)
+    assert error.value.issues[0].code == "MANIFEST_UNREADABLE"
+
+
+def test_stage_release_refuses_an_unreadable_existing_manifest(tmp_path):
+    """Re-staging a release_id whose existing manifest.json fails to parse
+    refuses StagingRefused(MANIFEST_UNREADABLE) instead of raising a bare
+    decode error out of stage_release's own re-stage check (issue #207)."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    manifest_path.write_text("not json")
+    with pytest.raises(StagingRefused) as error:
+        stage_release(tmp_path, release, inventory, payloads)
+    assert error.value.issues[0].code == "MANIFEST_UNREADABLE"
+
+
+def test_promote_refuses_an_unreadable_target_manifest(tmp_path):
+    """A manifest.json that fails to parse refuses
+    StagingRefused(MANIFEST_UNREADABLE) instead of raising a bare decode
+    error out of promote (issue #207)."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    manifest_path.write_text("not json")
+    with pytest.raises(StagingRefused) as error:
+        promote(tmp_path, "r1")
+    assert error.value.issues[0].code == "MANIFEST_UNREADABLE"
+    assert deployment_module.current_pointer(tmp_path) is None
+
+
+def test_rollback_refuses_an_unreadable_target_manifest(tmp_path):
+    """A manifest.json that fails to parse refuses
+    StagingRefused(MANIFEST_UNREADABLE) instead of raising a bare decode
+    error out of rollback, when the rollback TARGET's manifest is the one
+    that is corrupt (issue #207)."""
+    r1, inv1, pay1 = _fixture("r1")
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    promote(tmp_path, "r1")
+    promote(tmp_path, "r2")
+    manifest_path = deployment_module._manifest_path(tmp_path, "r1")
+    manifest_path.write_text("not json")
+    with pytest.raises(StagingRefused) as error:
+        rollback(tmp_path)
+    assert error.value.issues[0].code == "MANIFEST_UNREADABLE"
+    assert deployment_module.current_pointer(tmp_path).release_id == "r2"

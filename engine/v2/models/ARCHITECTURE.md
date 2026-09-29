@@ -182,6 +182,7 @@ for the pointer's crash-proof write.
 | Caching | None: every call re-derives the release hash and re-checks every member from the caller's arguments |
 | Same `release_id`, identical content, restaged | Idempotent no-op: returns the existing manifest byte-for-byte, including its original hash version (never silently upgraded) |
 | Same `release_id`, different content | Refuses `RELEASE_ID_REUSED` |
+| Same `release_id` already staged, but its manifest cannot be read or parsed | Refuses `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207) |
 | Crash mid-staging | Some content-addressed objects may be left on disk (harmless — addressed by their own hash, reused or ignored later) and no manifest, so the release is not staged |
 | Every write | Atomic (temp + fsync + rename); never a half-written manifest or object |
 | Idempotency | Same `(release, inventory, payloads)` always produces the same staged manifest |
@@ -194,6 +195,7 @@ independently of whatever staged it.
 | Condition | Outcome |
 |---|---|
 | Unstaged `release_id` | Refuses `ReleaseNotStaged` |
+| Target manifest cannot be read or parsed | Refuses `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207), checked before the hash-version check below |
 | Target's staged `release_hash_version` is not the current semantic version | Refuses `StaleReleaseHash`, checked before anything else — including re-promoting the currently live release, if it is itself stale. `restage_semantic_hash` (§7.5) is the only way to clear this; never automatic |
 | Target manifest's recomputed content hash disagrees with its declared `release_hash` | Refuses `CorruptManifest`, before the pointer moves |
 | Target manifest declares two bindings for the same `(role, strategy_id)` | Refuses `StagingRefused` (`DUPLICATE_BINDING`) — re-verified independent of `stage_release`'s own check, in case a release predates it or was staged by another path |
@@ -214,6 +216,7 @@ yet implemented — see #192, #137.
 | Condition | Outcome |
 |---|---|
 | Unstaged `release_id` | `resolve_release` refuses `ReleaseNotStaged` |
+| Staged manifest cannot be read or parsed | Both refuse `StagingRefused` (`MANIFEST_UNREADABLE`) instead of a bare decode error (issue #207) — `current_release` inherits this from its own call to `resolve_release` |
 | Release staged under a superseded hash version (legacy) | Still resolves — replay of a score already recorded against it must never become unreplayable. Only the write path (§7.2) enforces the current hash version |
 | No live pointer | `current_release` returns `None` |
 | Caching, retry, transaction, partial write | None of these apply: read-only, no cache, nothing to retry, no write |
@@ -247,10 +250,16 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 
 - **A detected validation issue → typed refusal, never a silent default**
   (root doc §5), scoped to `deployment.py`'s own explicit checks: duplicate
-  bindings, payload hash mismatches, a stale or corrupt manifest hash, and
-  a broken pointer history each raise a `DeploymentError` subclass, never a
-  substituted value. An unparseable manifest can still escape untyped from
-  several deployment operations (issue #207); an incomplete inventory raises
+  bindings, payload hash mismatches, a stale or corrupt manifest hash, an
+  unparseable manifest, and a broken pointer history each raise a
+  `DeploymentError` subclass, never a substituted value. Every call to the
+  shared `_read_manifest` helper — from `stage_release`'s re-stage check,
+  `_swap_pointer` (`promote`/`rollback`), `resolve_release`, and
+  `restage_semantic_hash` — wraps the read in the same
+  `except (OSError, ValueError)` and refuses `StagingRefused`
+  (`MANIFEST_UNREADABLE`), so a corrupt or undecodable manifest.json on
+  disk can never leak a bare `json.JSONDecodeError`/`DocumentError` out of
+  any of them (issue #207, closed). An incomplete inventory raises
   `releases.require_complete_release`'s own `ModelReleaseRefusal`, not a
   `DeploymentError`; and `FrozenInference` (`loader.py`) reports every
   refusal it detects through a typed `InferenceResult` with
