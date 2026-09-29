@@ -253,7 +253,8 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     csv_bytes = "\n".join(["Date,Close"] + [f"{d.date()},{100.0 + i}"
                                             for i, d in enumerate(extended)]).encode()
     events_rows = ([_event_row("AAAA", d) for d in _EVENT_DAYS]  # all before _AS_OF
-                   + [_event_row("AAAA", pd.Timestamp("2024-02-08"))])  # after _AS_OF
+                   + [_event_row("AAAA", pd.Timestamp("2024-02-05")),  # exactly on _AS_OF
+                      _event_row("AAAA", pd.Timestamp("2024-02-08"))])  # after _AS_OF
     head = _build_parent(conn, clock, store, events_rows=events_rows)
 
     captured: dict = {}
@@ -286,6 +287,7 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     assert captured["series_last"] <= _AS_OF  # series truncated at as_of_day
     assert all(d < _AS_OF for d in captured["event_dates"])
     assert "2024-02-08" not in captured["event_dates"]  # the leaked event never got here
+    assert "2024-02-05" not in captured["event_dates"]  # the on-as_of event is excluded too
 
     rows = captured["rows"]
     assert rows
@@ -313,6 +315,7 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
 
     assert committed_rows
     assert all(str(r["event_date"]) < _AS_OF for r in committed_rows)  # no post-as_of row at all
+    assert "2024-02-05" not in [str(r["event_date"]) for r in committed_rows]  # on-as_of too
     committed_pre = [r for r in committed_rows
                      if str(r["event_date"]) == str(_EVENT_DAYS[0].date())]
     assert len(committed_pre) == 1
