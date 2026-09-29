@@ -229,6 +229,65 @@ def test_bad_registry_or_artifact_is_a_contract_mismatch(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# coordinator publish_reference_inputs refusals (issue #217)
+# --------------------------------------------------------------------------
+
+
+def _required_exact_paths() -> dict[str, str]:
+    """Every REQUIRED ``exact`` reference path, keyed by kind -- the same
+    ``resolution == "exact"`` / ``required`` defaulting rule
+    :func:`_expected_paths` and ``publish_reference_inputs``'s own missing
+    check apply, so these tests carry no magic count."""
+    return {kind: spec["path"] for kind, spec in INPUTS.items()
+            if spec["resolution"] == "exact" and spec.get("required", True)}
+
+
+def test_publish_missing_reference_inputs_refusal_details_carry_only_a_count():
+    """issue #217: the "import manifest lacks required reference inputs" refusal
+    must not leak the raw legacy paths of the missing inputs into
+    ``Problem.details`` -- that dict survives verbatim into a durably persisted
+    receipt (``snapshot_promotion``'s translation / ``record_failed_import``),
+    the same leak #202 closed for ``reference_catalog``. An empty ``file_refs``
+    means the publish loop never runs, so ``store``, ``attempt_id`` and
+    ``legacy_root`` are never touched -- placeholders are enough."""
+    required = _required_exact_paths()
+    assert required
+    with pytest.raises(DataError) as excinfo:
+        ri.publish_reference_inputs(None, "attempt-217", None, ())
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    assert problem.details == {"count": len(required)}
+    assert not any(path in str(problem.details) for path in required.values())
+
+
+def test_publish_unfolded_reference_inputs_refusal_details_carry_only_a_count(tmp_path):
+    """issue #217, the sibling refusal: pinning EVERY required exact input but
+    with no snapshot decision session (``as_of=None``) trips the Tier-4-fold
+    check, whose details must likewise carry only a count -- here one per
+    ``_FOLD_KINDS`` required exact input. Driven through real staged files
+    (``build_legacy_store`` + ``import_snapshot``'s own hashing ``_file_ref``,
+    the enumerator ``resolve_reference_files`` is handed) and a real
+    ``ArtifactStore``, so the refusal is the fold one, not the missing-inputs
+    one."""
+    from engine.v2.foundation import ArtifactStore
+    from engine.v2.data.import_snapshot import _file_ref
+
+    legacy_root, store_root = tmp_path / "legacy_store", tmp_path / "ops_store"
+    build_legacy_store(legacy_root)
+    required = _required_exact_paths()
+    unfolded = sorted(path for kind, path in required.items() if kind in ri._FOLD_KINDS)
+    assert unfolded
+    file_refs = tuple(_file_ref(legacy_root, path) for path in sorted(required.values()))
+    store = ArtifactStore(store_root)
+    with pytest.raises(DataError) as excinfo:
+        ri.publish_reference_inputs(store, "attempt-217", legacy_root, file_refs, as_of=None)
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    assert problem.details == {"count": len(unfolded)}
+    assert not any(path in str(problem.details) for path in required.values())
+
+
+# --------------------------------------------------------------------------
 # imports through a real Service
 # --------------------------------------------------------------------------
 

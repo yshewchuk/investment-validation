@@ -365,10 +365,10 @@ def publish_reference_inputs(store, attempt_id: str, legacy_root, file_refs, *,
     missing = sorted(set(_EXACT) - _OPTIONAL_EXACT - {item.legacy_path for item in published})
     if missing:
         raise errors.fail("CONTRACT_MISMATCH", "import manifest lacks required reference inputs",
-                          details={"paths": missing})
+                          details={"count": len(missing)})
     unfolded = sorted(item.legacy_path for item in published
                       if item.kind in _FOLD_KINDS and not item.fold)
     if unfolded:
         raise errors.fail("CONTRACT_MISMATCH", "a Tier-4-derived reference input was pinned with no "
-                          "snapshot decision session (as_of) to bind its fold", details={"paths": unfolded})
+                          "snapshot decision session (as_of) to bind its fold", details={"count": len(unfolded)})
     return tuple(published)
