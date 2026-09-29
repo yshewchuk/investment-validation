@@ -3889,9 +3889,16 @@ retry, transaction, partial write, idempotency).
   docstring) — and calls `serve` again with a fresh `deadline_at`; a
   PRE-plan receipt (`plan_ref=None`, e.g. `ensure_snapshot_fn` itself timed
   out) instead re-enters `_ensure_plan_ref`, re-runs the readiness check,
-  and — once it succeeds — calls `plan_fn` for the FIRST time, building the
-  one plan this `as_of` will ever get (not a re-plan: no earlier plan
-  existed to replace).
+  and — once it succeeds — calls `plan_fn` for the first time this resumed
+  attempt sees (not a re-plan against an existing `plan_ref`: none was
+  known yet), then writes the `"submitting"` receipt recording the new
+  `plan_ref`. A crash between `plan_fn` returning and that write landing is
+  the one window where this guarantee does not hold: the next resumed tick
+  still sees `plan_ref=None` and calls `plan_fn` again, building a SECOND
+  plan while the first (if `plan_fn` itself durably saved it before
+  crashing) sits unreferenced by any receipt and is never submitted — the
+  same plain crash-before-write gap `_submit_plan`'s other receipt writes
+  already carry, not a new one this design introduces.
   `"timed_out"` is also added to `FAILURE_STATUSES`, the same treatment
   `"error"` already gets: `main`'s exit code is 1 (so a monitor sees a
   problem) even though the state is not terminal and the trigger keeps
