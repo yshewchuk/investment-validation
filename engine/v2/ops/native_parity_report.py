@@ -63,6 +63,14 @@ __all__ = [
 
 SCHEMA_VERSION = "native_parity_report.v1.1"
 
+#: The exact ``schema_version`` tags
+#: ``native_score_batch._native_score_batch_documents`` writes for its v2.0
+#: ``records.json``/``refusals.json`` pair. A worker fed anything else refuses
+#: up front rather than silently misreading a pre-v2.0 document as if it were
+#: keyed.
+_RECORDS_SCHEMA_VERSION = "native_score_batch_records.v2.0"
+_REFUSALS_SCHEMA_VERSION = "native_score_batch_refusals.v2.0"
+
 #: The checker's own numeric field groups, reused by name -- see
 #: ``checks/phase4_real._compare_numeric_outputs``, whose dimension names and
 #: field tuples these are.  A dimension outside this map is refused, never
@@ -156,6 +164,53 @@ def _population_key_from_board_request_key(key: str) -> str:
                    details={"key": key, "parts": len(parts)})
     ticker, strategy, event_date, _session = parts
     return population_key({"ticker": ticker, "strategy": strategy, "event_date": event_date})
+
+
+def _native_comparison_row(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten one ``records.json`` entry into the checker's per-dimension
+    field shape.
+
+    ``record`` is ``native_score_batch``'s ``to_document(ScoreRecord)``
+    value, which PRESERVES :class:`~engine.v2.contracts.ScoreRecord`'s own
+    nested per-dimension dicts (``forecasts``, ``uncertainty``,
+    ``resolved_request``, ``financial_diagnostics``, ``gate_terms``), while
+    :func:`_dimension_view` looks every field up at the row's TOP level.
+    This projection reads each dimension's fields from the same nested
+    sources ``checks/phase4_real._numeric_views`` reads them from on the
+    native side -- ``forecasts`` first, then ``uncertainty``/
+    ``resolved_request``, in its exact fallback order -- so the nightly
+    report's view of a record can never drift from the checker's. It is a
+    DATA-SHAPE projection only: every comparison decision still comes from
+    ``compare_dimension``.
+
+    The never-ran groups follow
+    ``engine.v2.serving.native_render.native_display_row``'s convention: a
+    field the record does not carry reads as ``None`` here, and the
+    absent-vs-zero distinction for ``n_analogs`` is preserved (a record that
+    carries no ``n_analogs`` key never invents ``0``; memory
+    ``n-analogs-int-default-mismatch``).  ``engine.v2.serving`` is a layer
+    ABOVE ``engine.v2.ops`` and can never be imported here, so this narrow
+    projection is local to this module -- exactly as
+    :func:`_population_key_from_board_request_key` re-derives its own
+    serving-layer concept.
+    """
+    forecasts = record.get("forecasts") or {}
+    uncertainty = record.get("uncertainty") or {}
+    resolved = record.get("resolved_request") or {}
+    financial = record.get("financial_diagnostics") or {}
+    gate = record.get("gate_terms") or {}
+    row: dict[str, Any] = {}
+    for name in FORECAST_FIELDS:
+        row[name] = forecasts.get(name, uncertainty.get(name, resolved.get(name)))
+    for name in SIMULATION_FIELDS:
+        row[name] = forecasts.get(name, resolved.get(name))
+    for name in FINANCIAL_FIELDS:
+        row[name] = financial.get(name)
+    for name in GATE_FIELDS:
+        row[name] = gate.get(name)
+    for name in ANALOG_FIELDS:
+        row[name] = resolved.get(name)
+    return row
 
 
 def _native_rows_and_refusals(
@@ -381,10 +436,17 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[
     Reads three job-bound inputs already staged into ``root`` by the
     generic input-binding mechanism: ``score.json`` (the paired legacy
     "score" job's output), ``records.json``/``refusals.json`` (the paired
-    ``native_score_batch`` job's v2.0 outputs). Builds ``legacy_rows`` via
+    ``native_score_batch`` job's v2.0 outputs). Both native documents must
+    declare exactly the ``schema_version`` tags
+    ``native_score_batch._native_score_batch_documents`` writes -- anything
+    else is refused with ``VALIDATION_FAILED`` before a single row is read,
+    so the generic job-submission API can never route a pre-v2.0 pair past
+    this worker. Builds ``legacy_rows`` via
     :func:`engine.v2.ops.nightly.legacy_parity_rows` and
     ``native_rows``/``native_refusals``/``unkeyable_refusals`` via
-    :func:`_native_rows_and_refusals`, then classifies every row via
+    :func:`_native_rows_and_refusals`, projects every native record through
+    :func:`_native_comparison_row` (its nested per-dimension dicts flattened
+    to the shape ``_dimension_view`` reads), then classifies every row via
     :func:`compare_native_vs_legacy` -- or, when nothing shared but a
     refusal explains why, :func:`_empty_native_report` -- and layers
     :func:`apply_native_refusals` on top before writing
@@ -396,9 +458,19 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[
     score_document = json.loads((root / "score.json").read_text())
     records_document = json.loads((root / "records.json").read_text())
     refusals_document = json.loads((root / "refusals.json").read_text())
+    if records_document.get("schema_version") != _RECORDS_SCHEMA_VERSION:
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch records.json has an unsupported schema_version",
+                   details={"schema_version": records_document.get("schema_version")})
+    if refusals_document.get("schema_version") != _REFUSALS_SCHEMA_VERSION:
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch refusals.json has an unsupported schema_version",
+                   details={"schema_version": refusals_document.get("schema_version")})
     legacy_rows = legacy_parity_rows(score_document)
     native_rows, native_refusals, unkeyable_refusals = _native_rows_and_refusals(
         records_document, refusals_document)
+    native_rows = {key: _native_comparison_row(record)
+                   for key, record in native_rows.items()}
     shared = set(legacy_rows) & set(native_rows)
     if legacy_rows and not shared:
         fully_refused = set(legacy_rows) <= set(native_refusals)

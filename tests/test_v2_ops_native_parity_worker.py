@@ -13,6 +13,8 @@ import json
 
 import pytest
 
+from engine.v2.contracts import ScoreRecord
+from engine.v2.foundation import to_document
 from engine.v2.ops import worker
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_parity_report import (
@@ -37,11 +39,20 @@ def _row_key(row):
     return "|".join((row["ticker"], row["strategy"], row["event_date"]))
 
 
-def _write_inputs(root, *, rows=(), records=None, refusals=None, unkeyable=()):
+def _write_inputs(root, *, rows=(), records=None, refusals=None, unkeyable=(),
+                  records_schema_version="native_score_batch_records.v2.0",
+                  refusals_schema_version="native_score_batch_refusals.v2.0"):
     (root / "score.json").write_text(json.dumps({"rows": list(rows)}))
-    (root / "records.json").write_text(json.dumps({"records": records or {}}))
+    (root / "records.json").write_text(json.dumps(
+        {"schema_version": records_schema_version, "records": records or {}}))
     (root / "refusals.json").write_text(json.dumps(
-        {"refusals": refusals or {}, "unkeyable_refusals": list(unkeyable)}))
+        {"schema_version": refusals_schema_version,
+         "refusals": refusals or {}, "unkeyable_refusals": list(unkeyable)}))
+
+
+def _gate_record(gate_score=0.5, gate_pass=True):
+    return {"gate_terms": {"gate_score": gate_score,
+                           "gate_threshold": None, "gate_pass": gate_pass}}
 
 
 def _happy_rows_and_records():
@@ -50,10 +61,58 @@ def _happy_rows_and_records():
     second = _legacy_row(ticker="XYZ", strategy="MR-PRINT",
                          event_date="2026-01-16", **shared)
     records = {
-        _canonical_key("ABC", "STR-THRU", "2026-01-15"): dict(shared),
-        _canonical_key("XYZ", "MR-PRINT", "2026-01-16", session="pm"): dict(shared),
+        _canonical_key("ABC", "STR-THRU", "2026-01-15"): _gate_record(),
+        _canonical_key("XYZ", "MR-PRINT", "2026-01-16", session="pm"): _gate_record(),
     }
     return [first, second], records
+
+
+def _native_record_document(entry_cost_pct=None):
+    """One real ``to_document(ScoreRecord)`` -- the nested shape
+    ``native_score_batch`` writes into ``records.json``, rather than a
+    hand-written flat dict."""
+    return to_document(ScoreRecord(
+        score_id="native-score-1",
+        canonical_request={},
+        resolved_request={},
+        event_ref={},
+        clock_id="clock-1",
+        snapshot_ref="snapshot-1",
+        dependency_hash="dep-1",
+        model_artifact_ids=(),
+        selected_contracts=(),
+        legs=(),
+        entry_exit_plan={},
+        quote_provenance={},
+        forecasts={
+            "driver_prediction": None, "forecast_abs_move": None,
+            "runup_move_prediction": None, "exp_pnl_sim": None,
+            "chooser_score": None,
+        },
+        uncertainty={
+            "model_p10": None, "model_p90": None, "forecast_p10": None,
+            "forecast_p90": None, "forecast_sd": None,
+        },
+        residual_state_ref=None,
+        analog_state_ref=None,
+        payoff_state_ref=None,
+        feature_values={},
+        null_masks={},
+        feature_lineage_refs=(),
+        gate_terms={"gate_score": None, "gate_threshold": None, "gate_pass": None},
+        chooser_candidates=(),
+        chooser_selection=None,
+        financial_diagnostics={
+            "entry_cost_pct": entry_cost_pct, "model_vs_market": None,
+            "fair_premium_pct": None, "premium_vs_fair": None,
+            "cost_over_width": None,
+        },
+        requested_payoff_views=(),
+        validation_status="scored",
+        reason_codes=(),
+        warnings=(),
+        evidence_refs=(),
+    ))
 
 
 def _read_report(root):
@@ -81,7 +140,7 @@ def test_run_native_parity_worker_happy_path(tmp_path):
 
 def test_run_native_parity_worker_reports_a_planted_mismatch(tmp_path):
     legacy_row = _legacy_row(ticker="AAA", gate_score=0.5, gate_pass=True)
-    native_record = {"gate_score": 0.5, "gate_pass": False}
+    native_record = _gate_record(gate_score=0.5, gate_pass=False)
     key = _canonical_key("AAA", "STR-THRU", "2026-01-15")
     _write_inputs(tmp_path, rows=[legacy_row], records={key: native_record})
 
@@ -94,6 +153,62 @@ def test_run_native_parity_worker_reports_a_planted_mismatch(tmp_path):
     assert mismatch["row_key"] == _row_key(legacy_row)
     assert mismatch["dimension"] == "verdicts"
     assert "gate_pass" in mismatch["finding_fields"]
+
+
+def test_run_native_parity_worker_flattens_nested_agreeing_record(tmp_path):
+    """Fix A: a real nested ``to_document(ScoreRecord)`` must not read as
+    all-``None`` -- a genuinely agreeing ``financial_diagnostics`` field is
+    compared, not falsely reported."""
+    key = _canonical_key("AAA", "STR-THRU", "2026-01-15")
+    _write_inputs(tmp_path, rows=[_legacy_row(ticker="AAA", entry_cost_pct=1.23)],
+                  records={key: _native_record_document(entry_cost_pct=1.23)})
+
+    run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["compared"] == ["AAA|STR-THRU|2026-01-15"]
+    assert report["mismatches"] == []
+
+
+def test_run_native_parity_worker_detects_nested_record_difference(tmp_path):
+    """Fix A: a changed value inside the nested record must be found, not
+    masked by the flat lookup returning ``None``."""
+    key = _canonical_key("AAA", "STR-THRU", "2026-01-15")
+    _write_inputs(tmp_path, rows=[_legacy_row(ticker="AAA", entry_cost_pct=1.24)],
+                  records={key: _native_record_document(entry_cost_pct=1.23)})
+
+    run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["compared"] == ["AAA|STR-THRU|2026-01-15"]
+    assert len(report["mismatches"]) == 1
+    mismatch = report["mismatches"][0]
+    assert mismatch["dimension"] == "financial_diagnostics"
+    assert "entry_cost_pct" in mismatch["finding_fields"]
+
+
+def test_run_native_parity_worker_rejects_unsupported_records_schema_version(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records,
+                  records_schema_version="native_score_batch_records.v1.0")
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.problem.details == {
+        "schema_version": "native_score_batch_records.v1.0"}
+
+
+def test_run_native_parity_worker_rejects_unsupported_refusals_schema_version(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records,
+                  refusals_schema_version="native_score_batch_refusals.v1.0")
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+    assert exc.value.problem.details == {
+        "schema_version": "native_score_batch_refusals.v1.0"}
 
 
 def test_run_native_parity_worker_empty_legacy_rows_raises(tmp_path):

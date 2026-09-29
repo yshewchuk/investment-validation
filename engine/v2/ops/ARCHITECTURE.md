@@ -395,18 +395,33 @@ a submission source" rule Part 4 already established for
   job-bound inputs (`score.json` from the paired `"score"` job;
   `records.json`/`refusals.json` from the paired `native_score_batch` job
   — see "Inputs" below for exactly how `_native_parity_identity` finds
-  both). By the time this worker runs, `submit_native_parity_if_ready`
-  has ALREADY confirmed both documents carry the CURRENT `v2.0`
-  `schema_version` tags before ever submitting the job (a deliberate,
-  documented exception to `_native_parity_identity`'s own catalog-only
-  lookup — see "Cutover PR-4 (redo)'s own input sourcing" above for
-  exactly where that check runs and why it belongs there, not here, and
-  "R1, missing input" below for the wait-state outcome on a mismatch), so
-  this worker trusts the schema without re-checking it: an already-submitted `native_parity` job's
-  `records.json`/`refusals.json` are guaranteed `v2.0`-shaped by
-  construction, never a retained `v1.0` artifact. It builds
+  both). The worker ITSELF also refuses `VALIDATION_FAILED` up front,
+  before reading a single row, if either document's `schema_version` is
+  not exactly `native_score_batch_records.v2.0`/
+  `native_score_batch_refusals.v2.0` (gate finding on `#191`, real: the
+  generic job-submission API can submit a `native_parity` job against ANY
+  bound artifacts today, entirely independent of the not-yet-built
+  `submit_native_parity_if_ready` sidecar, so a worker-side check is the
+  ONLY enforcement point that exists before slice 2B(c) ships — and stays
+  as defense-in-depth afterward, since a generic submission always bypasses
+  any one caller's own pre-submission check). This does not replace
+  `submit_native_parity_if_ready`'s OWN future pre-submission check
+  (slice 2B(c), still deferred) — see "Cutover PR-4 (redo)'s own input
+  sourcing" above for why THAT check must additionally live at the
+  sidecar layer, for retry-semantics reasons this worker-side check does
+  not address (a directly-submitted job has no sidecar memo to protect;
+  it simply fails, correctly). It builds
   `legacy_rows`/`native_rows`/`native_refusals`/`unkeyable_refusals` (via
-  `_native_rows_and_refusals`, below), and branches on whether `legacy_rows` and
+  `_native_rows_and_refusals`, below), projects every native record
+  through `_native_comparison_row` (gate finding on `#191`, real: a raw
+  `to_document(ScoreRecord)` preserves `ScoreRecord`'s own nested
+  per-dimension dicts, while `_dimension_view` looks up every field at
+  the row's top level — an un-flattened record compares as all-`None`,
+  masking real native values and reporting false mismatches against
+  real legacy ones; this projection reads each dimension from the same
+  nested sources `checks/phase4_real._numeric_views` already reads them
+  from, a data-shape port only, never a new comparison rule), and
+  branches on whether `legacy_rows` and
   `native_rows` share any key (below, `_empty_native_report`) before
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
@@ -3414,8 +3429,12 @@ hold, extended here rather than re-argued from scratch.
   clean, confirmed mismatch — is a distinct outcome: it is an exception,
   caught by `_reconcile_native_parity`'s own try/except exactly like a
   `submission.submit` failure ("R2, cache", below), never left to crash
-  the tick and never memoized as a mismatch. By the time this worker
-  actually runs, both tags are ALREADY confirmed `v2.0`. Inside
+  the tick and never memoized as a mismatch. By the time a SIDECAR-SUBMITTED
+  job's worker runs, both tags are ALREADY confirmed `v2.0` by this check;
+  the worker's OWN independent `schema_version` check (`#191`, real gate
+  finding — see "Primary contracts" above) is what refuses a job the
+  generic submission API pointed at stale artifacts directly, bypassing
+  this sidecar entirely. Inside
   the worker: an unparseable `BoardRequest` key (not
   exactly 4 `"|"`-separated fields), two distinct `records.json`/
   `refusals.json` keys colliding on the same projected `population_key`
