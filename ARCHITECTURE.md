@@ -332,10 +332,9 @@ or a new consumer must update that package's README in the same change.
   is designed here. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
   pool/residual refresh" and `engine/v2/models/ARCHITECTURE.md` §§1, 2, 7.6,
   7.7, 8 for the full design.
-- **Native parity summary projection (serving; design here — the code lands
-  in this same PR's next commit).**
+- **Native parity summary projection (serving, read-only).**
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
-  will be a pure, read-only aggregate over the `native_parity` stage's own
+  is a pure, read-only aggregate over the `native_parity` stage's own
   report artifact (`engine/v2/ops/native_parity_report.py`'s
   `native_parity_report.v1.1` JSON). It reports exactly what that stored
   artifact's own `mismatches`/`only_legacy`/`only_native`/`native_refused*`
