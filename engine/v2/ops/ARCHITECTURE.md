@@ -1571,9 +1571,13 @@ that path's actual reach differs per stage: `computed_moves_refresh`'s
 sidecar (`Service._reconcile_computed_moves_refresh`) does reach
 `submission.submit`; `native_score_batch`'s sidecar exists but always
 refuses or raises before `submission.submit`, never reaching it (see
-above); `native_parity` has no production sidecar at all yet (see
-"`native_parity`" above), so it has no path to production submission
-today, only to `run_shadow_nightly`'s shadow walk.
+above); `native_parity` has no automatic production submission sidecar yet (see
+"`native_parity`" above) — nothing wires it into `submission.submit`/
+`submit_graph` from any operator command or tick-loop sidecar today. The
+generic `submission.submit` API could still enqueue a bound `native_parity`
+job if a caller built one directly, exactly as `board_requests` above is a
+library function nothing calls yet; `run_shadow_nightly`'s shadow walk is
+its only actual caller today.
 
 ### CLI → catalog → coordinator effect
 
