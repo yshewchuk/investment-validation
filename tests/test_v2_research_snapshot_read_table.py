@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +65,19 @@ def _capped_trades_contract(maximum_result_rows: int):
                                definition_hash=manifests.table_contract_hash(contract))
 
 
+def _capped_events_contract(maximum_result_rows: int):
+    """The real earnings_events contract with a small test result cap.
+
+    Same hash-recompute reason as :func:`_capped_contract`: ``event_date`` is
+    a ``timestamp[ns]`` observation column that is not restricted to midnight,
+    which is exactly what the case below exercises.
+    """
+    contract = dataclasses.replace(contract_for("earnings_events"),
+                                   maximum_result_rows=maximum_result_rows)
+    return dataclasses.replace(contract,
+                               definition_hash=manifests.table_contract_hash(contract))
+
+
 def _chain_rows(ticker: str, counts_by_date: dict[str, int], year: int) -> list[dict]:
     """Synthetic option_chains rows, ``counts_by_date`` rows per obs_date,
     already ordered by the table's full primary key."""
@@ -104,6 +118,26 @@ def _trades_rows(year: int, entries: dict[str, str | None]) -> list[dict]:
     return rows
 
 
+def _event_rows(year: int, entries: dict[str, datetime]) -> list[dict]:
+    """Synthetic earnings_events rows, one per ``event_id -> event_date``,
+    already ordered by the table's primary key. ``event_date`` is a
+    ``timestamp[ns]`` that may carry a non-midnight time-of-day.
+    """
+    rows = [
+        {
+            "event_id": event_id, "ticker": "TEST", "event_date": pd.Timestamp(event_date),
+            "year": year, "session": "BMO", "session_src": "orats", "annc_tod": None,
+            "src_orats": True, "src_oquants": True, "src_nasdaq": False,
+            "src_yfinance": False, "date_agree": True, "date_conflict": False,
+            "updated_at": None, "event_cluster_id": None, "claim_count": None,
+            "reconciliation": None,
+        }
+        for event_id, event_date in entries.items()
+    ]
+    rows.sort(key=lambda row: row["event_id"])
+    return rows
+
+
 def _commit_trades(tmp_path, fragments: dict[str, list[dict]], *, maximum_result_rows: int):
     conn, clock, store = catalog_and_store(tmp_path)
     contract = _capped_trades_contract(maximum_result_rows)
@@ -123,6 +157,17 @@ def _commit_chains(tmp_path, fragments: dict[str, list[dict]], *, maximum_result
                for partition_key, rows in fragments.items()]
     snap = commit_tables(conn, clock, {"option_chains": records},
                          {"option_chains": contract}, store=store)
+    return conn, store, snap
+
+
+def _commit_events(tmp_path, fragments: dict[str, list[dict]], *, maximum_result_rows: int):
+    conn, clock, store = catalog_and_store(tmp_path)
+    contract = _capped_events_contract(maximum_result_rows)
+    ref = contract_ref_for(contract)
+    records = [publish_and_inspect(store, contract, ref, rows, partition_key)
+               for partition_key, rows in fragments.items()]
+    snap = commit_tables(conn, clock, {"earnings_events": records},
+                         {"earnings_events": contract}, store=store)
     return conn, store, snap
 
 
@@ -318,4 +363,32 @@ def test_read_table_refuses_to_split_a_partition_with_a_nullable_observation(tmp
         read_table(repository, snap, "trades", ("trade_id", "entry_date"),
                    partition_keys=["2024"])
     assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    conn.close()
+
+
+# --------------------------------------------------------------------------
+# earnings_events: event_date is a timestamp[ns] observation column that is
+# NOT restricted to midnight, so the day split must step real midnights, not
+# 24-hour windows anchored to the partition's own first timestamp
+# --------------------------------------------------------------------------
+
+
+def test_read_table_day_split_does_not_falsely_refuse_across_a_non_midnight_boundary(tmp_path):
+    from datetime import datetime
+    conn, store, snap = _commit_events(
+        tmp_path,
+        {"2024": _event_rows(2024, {
+            "E1": datetime(2024, 1, 10, 23, 0),
+            "E2": datetime(2024, 1, 11, 8, 0),
+            "E3": datetime(2024, 1, 11, 20, 0),
+        })},
+        maximum_result_rows=2,
+    )
+    repository = Repository(conn, store)
+
+    frame = read_table(repository, snap, "earnings_events",
+                       ("event_id", "ticker", "event_date"),
+                       partition_keys=["2024"])
+    assert len(frame) == 3
+    assert set(frame["event_id"]) == {"E1", "E2", "E3"}
     conn.close()

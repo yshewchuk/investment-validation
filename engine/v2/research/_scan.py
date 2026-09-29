@@ -268,7 +268,8 @@ def _calendar_intervals(interval: TimeInterval, step: str) -> list[TimeInterval]
 def _next_boundary(value: datetime, step: str) -> datetime:
     """The next calendar boundary strictly after ``value`` for ``step``."""
     if step == "day":
-        return value + timedelta(days=1)
+        return (value + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
     return (value.replace(day=1) + timedelta(days=32)).replace(day=1)
 
 
