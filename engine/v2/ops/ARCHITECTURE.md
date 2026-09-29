@@ -3869,23 +3869,29 @@ retry, transaction, partial write, idempotency).
   in-process jobs are left exactly where the supervisor's own recovery
   already leaves an interrupted attempt (`recovery.py`, unchanged by this
   PR); nothing here cancels or force-fails them.
-- **R6, idempotency — a timeout resumes the SAME plan, it never re-plans.**
-  `"timed_out"` is a new member of `STATUSES` and of `RESUME_STATUSES`
-  (alongside `"submitting"`/`"submitted"`/`"error"`): a receipt recorded
-  `"timed_out"` still carries `plan_ref`, so `run_trigger`'s resume branch
+- **R6, idempotency — a POST-plan timeout resumes the SAME plan, it never
+  re-plans; a PRE-plan timeout resumes the readiness check and builds its
+  first plan once that succeeds.** `"timed_out"` is a new member of
+  `STATUSES` and of `RESUME_STATUSES` (alongside
+  `"submitting"`/`"submitted"`/`"error"`): `run_trigger`'s resume branch
   (at the time: `prior.plan_ref and prior.status in RESUME_STATUSES`; as of
   Cutover PR-7b-2's gate-round-5 fix, simply `prior.status in RESUME_
   STATUSES`, since a PRE-plan `"error"`/`"timed_out"` needs the SAME resume
   treatment despite having no `plan_ref` yet — see the "Cutover PR-7b's
-  input sourcing" design section) picks it up on
-  the next tick and calls `_submit_plan` again with the SAME `plan_ref` —
-  never `_decide`, so the retry window is not re-checked and no second
-  plan is ever built for this as-of while a resumable one already exists
-  (the window was already open the first time; the resume path's whole
-  point, shared with `"error"`/`"submitted"`, is that the decision is
-  already made). Resubmitting the same `plan_ref` is the existing
-  no-op-by-identity submit (`_default_submit`'s own docstring), and `serve`
-  is simply called again with a fresh `deadline_at`.
+  input sourcing" design section) picks it up on the next tick — never
+  `_decide`, so the retry window is not re-checked either way (the window
+  was already open the first time; the resume path's whole point, shared
+  with `"error"`/`"submitted"`, is that the decision is already made). The
+  TWO `"timed_out"` cases then diverge inside `_submit_plan`: a POST-plan
+  receipt (this bullet's original case — `plan_ref` already set, e.g. a
+  `serve_fn` deadline) skips straight to resubmitting that SAME `plan_ref`
+  — the existing no-op-by-identity submit (`_default_submit`'s own
+  docstring) — and calls `serve` again with a fresh `deadline_at`; a
+  PRE-plan receipt (`plan_ref=None`, e.g. `ensure_snapshot_fn` itself timed
+  out) instead re-enters `_ensure_plan_ref`, re-runs the readiness check,
+  and — once it succeeds — calls `plan_fn` for the FIRST time, building the
+  one plan this `as_of` will ever get (not a re-plan: no earlier plan
+  existed to replace).
   `"timed_out"` is also added to `FAILURE_STATUSES`, the same treatment
   `"error"` already gets: `main`'s exit code is 1 (so a monitor sees a
   problem) even though the state is not terminal and the trigger keeps
@@ -4003,14 +4009,22 @@ None)` or raising (never returning anything `_submit_plan` could mistake
 for a `plan_ref`) — see point 1's own "Where this phase is called from,
 precisely" above for why it is NOT inside `_default_plan`, and point 6's
 "Bind the plan to the EXACT snapshot" for why the second tuple element
-exists at all. Every outcome below is one `_submit_plan` itself returns
-from or raises out of — there is no separate receipt STATUS for any of
-them (a `"timed_out"` outcome reuses the existing status string and its
-existing consecutive-timeout counter, per point 4 above). `TriggerReceipt`
-DOES gain one new FIELD for this design, the dedicated `snapshot_attempt`
-counter — see "`TriggerReceipt` gains a new field" above for the full
-account of why a field, carried on every receipt regardless of status,
-was needed where a separate status was not.
+exists at all. Every outcome below is one `_submit_plan` (via its own
+`_ensure_plan_ref` helper) returns from or raises out of — `"ready"` and
+`"timed_out"` reuse existing receipt statuses (a `"timed_out"` outcome reuses the existing
+status string and its existing consecutive-timeout counter, per point 4
+above), and this design's own FIELD addition is `TriggerReceipt.
+snapshot_attempt` — see "`TriggerReceipt` gains a new field" above for the
+full account of why a field, carried on every receipt regardless of
+status, was needed where a separate status was not for those two outcomes.
+**`"not_yet"` is the one exception, added by gate-round-7 (CodeRabbit
+finding, real): a resumed pre-plan check (`prior.status` already in
+`RESUME_STATUSES`) that comes back `"not_yet"` records the NEW status
+`"snapshot_not_yet"` instead, so it stays resumable past the retry
+window's close on the next tick — an INITIAL `"not_yet"` (reached through
+`_decide`, not a resume) still records the plain, non-resumable
+`"not_yet"` unchanged. See the "Gate-round-7 fix" callout in "`Trigger
+Receipt` gains a new field" above for the full account.**
 
 - **R1, missing input.** No committed `shadow`-scope head at all (`data_
   snapshot_heads` has no row for `scope='shadow'`) is not itself a
