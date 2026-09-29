@@ -83,6 +83,21 @@ inert = [
 # engine/dashboard/static/ either.
 inert_skip = ["engine/dashboard/static/*.md"]
 
+# Changed paths a pull_request `test` CI run treats as affecting every
+# test file, never narrowed to a subset (tools/mutation_pilot.py's
+# select_pr_tests): inputs the import graph cannot see the effect of
+# (tools/* is invoked by subprocess from many tests, not only imported;
+# workflow files and dependency pins are not Python at all) or that
+# legitimately affect every test (tests/conftest.py). Same fnmatch
+# convention as `inert` above (`*` also matches `/`).
+full_suite = [
+    "tests/conftest.py",
+    "tools/*",
+    "requirements.txt",
+    "requirements-dev.txt",
+    ".github/workflows/*",
+]
+
 [defaults]
 # Per-mutant timeout. mutmut sets an RLIMIT_CPU of
 #   ceil((est_test_seconds + timeout_constant) * timeout_multiplier * 2)

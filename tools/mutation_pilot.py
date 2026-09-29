@@ -906,6 +906,245 @@ def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
     return [n for n in names if n in owned]
 
 
+# -- PR test selection: every test file's own real-edge closure -------------
+#
+# select_pr_tests generalizes changed_modules above from the hand-configured
+# [modules.<name>] partition (which covers only engine/v2/* + ops, not the
+# whole tests/ tree) to every tracked tests/test_*.py file's own closure, so
+# the `test` CI job's pull_request runs can narrow WHICH TEST FILES pytest
+# collects instead of always running all of them. It reuses
+# build_import_graph, .precise, _conftest_ancestors and
+# is_inert_changed_path unchanged; it does not touch changed_modules or
+# module_dependency_closure.
+
+def dynamic_files(graph: dict[str, set[str]]) -> set[str]:
+    """Tracked files build_import_graph classified DYNAMIC: their resolved
+    edge set (self) is a strict superset of their real ast-resolved edges
+    alone (.precise), because it also carries the catch-all
+    (tracked_set - {rel}). A graph with no .precise (e.g. a hand-built
+    plain dict) reports none."""
+    precise = getattr(graph, "precise", None)
+    if precise is None:
+        return set()
+    return {f for f, edges in graph.items() if edges - precise.get(f, set())}
+
+
+def pytest_test_files(tracked_set: set[str]) -> list[str]:
+    """Every tracked file the `test` CI job's pytest run collects: that
+    job's positional argument is the tests/ directory, and pytest's default
+    collection pattern is test_*.py."""
+    return sorted(p for p in tracked_set
+                  if p.startswith("tests/") and p.rsplit("/", 1)[-1].startswith("test_")
+                  and p.endswith(".py"))
+
+
+def forces_full_suite(cfg: dict, path: str) -> bool:
+    """True if `path` matches tools/mutation_pilot.toml's [pr_selection]
+    full_suite allowlist. Same fnmatch convention as is_inert_changed_path."""
+    return any(fnmatch.fnmatchcase(path, pat)
+               for pat in cfg.get("pr_selection", {}).get("full_suite", []))
+
+
+def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
+    """True if `tree` attempts to load some OTHER module by a construct
+    whose target cannot be statically resolved: `importlib` used any way
+    other than the one literal `importlib.import_module("<literal>")`
+    shape or a bare `importlib.reload(...)` call. `reload` is allowed
+    unconditionally (unlike `import_module`, there is no literal-argument
+    shape to check): it only re-executes a module that was already
+    obtained some other way, so it cannot by itself introduce a new,
+    otherwise-invisible dependency -- whatever obtained the module in the
+    first place is what would need checking, and a dynamic way of
+    obtaining it is already caught by the other rules here. Every other
+    `importlib` use is flagged: an aliased import, any `from importlib
+    import ...`, any other `importlib.*` attribute, or a non-literal
+    `import_module(...)` call;
+    the standalone name `__import__`, however bound;
+    `spec_from_file_location` or `SourceFileLoader` as a bare name or an
+    attribute's `.attr`; any `import runpy` or `from runpy import ...`; a
+    bare `ast.Name` `exec` or `eval`; or, for a conftest.py only, an
+    ANNOTATED or non-literal top-level `pytest_plugins` assignment. The
+    qualified `builtins.exec`/`builtins.eval` form is also caught, since
+    it is the exact same risk under a different spelling.
+    Deliberately narrower than `_is_dynamic_file`: this function checks
+    only for import-statement-shaped dynamic loading (the forms listed
+    above). `sys.path`, `site`, `pkgutil`, bare `compile`,
+    `syspath_prepend`, `addsitedir`, `PYTHONPATH`, `subprocess`,
+    `multiprocessing`, and the os-exec functions are all out of scope for
+    this taint scan -- not because any of them is known to be unable to
+    load or execute tracked repository code, but because this scan
+    targets import-statement-shaped dynamic loading specifically, and
+    none of these are that. Tracking every way code can run is out of
+    scope for a static analysis; this is a deliberate scope boundary
+    under the project's documented best-effort contract (see
+    ARCHITECTURE.md): a test that depends on repository code only
+    through one of these constructs, or any other runtime loading this
+    analysis doesn't track, may be omitted from a PR's narrowed
+    selection, and the full suite on every push to `main` is the
+    backstop. Used only by select_pr_tests's taint rule."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "runpy":
+                    return True
+                if alias.name.split(".")[0] == "importlib" and alias.asname is not None:
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0] if node.module else ""
+            if top == "runpy":
+                return True
+            if top == "importlib":
+                return True
+        elif isinstance(node, ast.Attribute):
+            if node.attr in ("__import__", "spec_from_file_location", "SourceFileLoader"):
+                return True
+            if isinstance(node.value, ast.Name) and node.value.id == "builtins" \
+                    and node.attr in ("exec", "eval"):
+                return True
+            if isinstance(node.value, ast.Name) and node.value.id == "importlib" \
+                    and node.attr not in ("import_module", "reload"):
+                return True
+        elif isinstance(node, ast.Name):
+            if node.id in ("__import__", "spec_from_file_location",
+                           "SourceFileLoader", "exec", "eval"):
+                return True
+        elif isinstance(node, ast.Call):
+            if _looks_like_import_module_call(node.func) and _allowed_import_module_call(node) is None:
+                return True
+    if is_conftest:
+        found, dotted_names = _pytest_plugins_targets(tree)
+        if found and dotted_names is None:
+            return True
+    return False
+
+
+def unresolved_import_files(tracked: list[str]) -> set[str]:
+    """The subset of `tracked` with an unresolved import attempt -- see
+    `_has_unresolved_import_attempt`. Re-parses each file (a second AST
+    pass beyond `build_import_graph`'s), since this classification is not
+    otherwise exposed by the graph. Used only by select_pr_tests's taint
+    rule, never dynamic_files' broader leaf rule."""
+    out: set[str] = set()
+    for rel in tracked:
+        source = (REPO / rel).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=rel)
+        if _has_unresolved_import_attempt(tree, rel.rsplit("/", 1)[-1] == "conftest.py"):
+            out.add(rel)
+    return out
+
+
+def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
+                        dyn: set[str], *, taint_exempt: set[str]) -> tuple[set[str], bool]:
+    """BFS over graph's REAL edges only (graph.precise when present, else
+    graph itself), starting from `roots`. Returns (closure, tainted):
+    `tainted` is True iff some file reached via a real import edge -- never
+    one of `taint_exempt` -- is itself in `dyn` (unresolved_import_files'
+    output). Such a file's own further edges are unresolvable (an
+    unresolved dynamic import could load literally anything), so anything
+    that transitively imports it cannot trust its own closure either.
+
+    `taint_exempt` is normally just `{t}` (the test file itself): its OWN
+    narrow-unresolved status is handled by the separate, broader leaf rule
+    in `select_pr_tests` (`t in dyn`, where `dyn` is the broad
+    `dynamic_files` set, a superset of `unresolved_import_files`), so
+    re-tainting it here would be redundant. It is NOT the test file's
+    conftest ancestors: a conftest ancestor with a genuine unresolved
+    import SHOULD taint its dependents, because a test using one of that
+    conftest's fixtures can have a real, invisible runtime dependency on
+    whatever the fixture loads -- fixture injection is a runtime name
+    lookup, not a static import edge, so the test's own closure never sees
+    that dependency (the gate's reproduced scenario: a conftest.py fixture
+    calls `importlib.import_module(name)` with a non-literal `name`, and
+    the test using the fixture has no static edge at all to the loaded
+    module).
+
+    `tests/conftest.py`'s OWN incidental broad-DYNAMIC-ness (e.g. its
+    `sys.path.insert`) never taints anything even though it is passed in
+    `roots` as every test's ancestor: this function is only ever called
+    with the NARROW `unresolved_import_files` set as `dyn`, never the
+    broad `dynamic_files` set -- a conftest.py that is dynamic only for
+    sys.path/subprocess/etc. reasons was never in the narrow set to begin
+    with, so no separate exemption for it is needed once you're only
+    checking the narrow set."""
+    precise = getattr(graph, "precise", None)
+    seen: set[str] = set()
+    tainted = False
+    stack = list(roots)
+    while stack:
+        f = stack.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        if f in dyn and f not in taint_exempt:
+            tainted = True
+        stack.extend((precise if precise is not None else graph).get(f, ()))
+    return seen, tainted
+
+
+def select_pr_tests(cfg: dict, changed: list[str], *,
+                    graph: dict[str, set[str]] | None = None) -> list[str] | None:
+    """The pytest test files (tests/test_*.py) a pull_request `test` CI run
+    should collect. Returns None for "run the full suite" (a path on the
+    full_suite allowlist, an unrecognized/unreached path, or any failure
+    building the graph or scanning for unresolved imports -- never a
+    silent narrow selection on an error).
+    An empty `changed` returns [] (no diff -> nothing to run), the one
+    intentional zero-selection case, matching changed_modules.
+
+    #155 (unresolved dynamic import) handling: a test file that is ITSELF
+    classified DYNAMIC (_is_dynamic_file) is always selected, and so is a
+    test file that reaches, via a real import edge, some OTHER file that
+    has a genuine unresolved import ATTEMPT (a "helper" with its own
+    unresolved import) -- both via _closure_from_roots's `tainted` return.
+    Only the test file's OWN narrow-unresolved status is exempted here
+    (handled separately by the `t in dyn` leaf rule, using the broader
+    dynamic_files set); a conftest ANCESTOR with a genuine unresolved
+    import DOES taint its dependents, because a test using one of its
+    fixtures can have a real, invisible runtime dependency on whatever
+    that fixture loads -- see _closure_from_roots's own docstring."""
+    changed_set = set(changed)
+    if not changed_set:
+        return []
+    if graph is None:
+        try:
+            graph = build_import_graph()
+        except Exception as exc:
+            print(f"[mutation_pilot] import graph build failed "
+                  f"({type(exc).__name__}: {exc}); selecting the full test suite",
+                  file=sys.stderr, flush=True)
+            return None
+    if any(forces_full_suite(cfg, p) for p in changed_set):
+        return None
+    tracked_set = set(graph)
+    tests = pytest_test_files(tracked_set)
+    dyn = dynamic_files(graph)
+    try:
+        unresolved = unresolved_import_files(sorted(tracked_set))
+    except Exception as exc:
+        print(f"[mutation_pilot] unresolved-import scan failed "
+              f"({type(exc).__name__}: {exc}); selecting the full test suite",
+              file=sys.stderr, flush=True)
+        return None
+    closures: dict[str, set[str]] = {}
+    selected: set[str] = set()
+    for t in tests:
+        closure, tainted = _closure_from_roots(
+            {t} | _conftest_ancestors(t, tracked_set), graph, unresolved,
+            taint_exempt={t})
+        closures[t] = closure
+        if t in dyn or tainted:
+            selected.add(t)
+    for path in changed_set:
+        hit = {t for t in tests if path in closures[t]}
+        if hit:
+            selected |= hit
+            continue
+        if is_inert_changed_path(cfg, path):
+            continue
+        return None
+    return sorted(selected)
+
+
 # -- work copy ---------------------------------------------------------------
 
 def _tracked(paths: list[str]) -> list[str]:
@@ -1026,6 +1265,18 @@ def cmd_matrix(cfg: dict, args) -> int:
     print(json.dumps(names))
     return 0
 
+def cmd_select_tests(cfg: dict, args) -> int:
+    """Print __ALL__ (run the full test suite) or the selected pytest test
+    file paths, one per line (possibly zero lines, never a trailing blank
+    line), for the `test` CI job's pull_request runs."""
+    changed = read_changed_files(args.changed_files)
+    selected = select_pr_tests(cfg, changed)
+    if selected is None:
+        print("__ALL__")
+    else:
+        for t in selected:
+            print(t)
+    return 0
 
 # Test-side changes mutmut cannot see: it re-tests a mutant only when the
 # mutated function's own source changes. A new or stronger test therefore
@@ -1298,6 +1549,11 @@ def main(argv: list[str] | None = None) -> int:
                         "cannot be built); a path that is not an existing file is a hard "
                         "failure, not a silent empty selection. Omitted/blank: unchanged "
                         "behavior.")
+    p = sub.add_parser("select-tests",
+                       help="test files (or __ALL__) a pull_request `test` CI run should run")
+    p.add_argument("--changed-files", required=True, metavar="PATH",
+                   help="path to a NUL-delimited changed-file list (git diff -z --no-renames "
+                        "--name-only); see select_pr_tests's docstring for the selection rule")
     p = sub.add_parser("count")
     p.add_argument("modules", nargs="*")
     p = sub.add_parser("run")
@@ -1316,7 +1572,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("module")
     args = parser.parse_args(argv)
     cfg = load_config()
-    return {"list": cmd_list, "matrix": cmd_matrix, "count": cmd_count, "run": cmd_run,
+    return {"list": cmd_list, "matrix": cmd_matrix, "select-tests": cmd_select_tests,
+            "count": cmd_count, "run": cmd_run,
             "report": cmd_report, "config-hash": cmd_config_hash}[args.cmd](cfg, args)
 
 

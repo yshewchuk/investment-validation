@@ -54,6 +54,17 @@ class NativeScoreBatchParameters:
 
 
 @dataclass(frozen=True)
+class NativeParityParameters:
+    """Cutover PR-4 redo, slice 2B(a): the job carries no scalar data of
+    its own -- ``score.json``/``records.json``/``refusals.json`` all live
+    in ``input_bindings``, resolved into staging exactly like
+    ``RescoreParameters``'s request pair."""
+
+    expected_ids: tuple[str, ...]
+    input_bindings: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class ExperimentParameters:
     """A supervised smoke-mode experiment run (P6 slice 10). ``spec.json`` —
     the ExperimentSpec document — is resolved into staging via
@@ -290,6 +301,23 @@ def _native_score_batch_kind() -> JobKind:
         namespaces=frozenset({"shadow", "smoke"}))
 
 
+def _native_parity_kind() -> JobKind:
+    """Cutover PR-4 redo, slice 2B(a): reads the paired legacy "score" job's
+    score.json and the native_score_batch job's records.json/refusals.json,
+    and writes native_parity_report.json comparing them via
+    native_parity_report.compare_native_vs_legacy. No production caller
+    submits this kind yet -- the supervisor tick-loop sidecar and nightly
+    wiring that would submit it are slice 2B(b)/(c), a later PR. See
+    engine/v2/ops/native_parity_report.py, ARCHITECTURE.md."""
+    return JobKind(
+        name="native_parity", worker="native_parity",
+        parameters=NativeParityParameters,
+        resource_classes=frozenset({"validation"}), effects=("staged",),
+        retry=RetryPolicy("bounded", 2, (5, 30)),
+        checkpoint_contract="native_parity_report.v1.1",
+        namespaces=frozenset({"shadow", "smoke"}))
+
+
 def _core_kinds():
     """The one-off ``JobKind`` entries with no generated sibling — every
     "loop over a small family" kind (the outbox effects, the legacy action
@@ -333,6 +361,7 @@ def _core_kinds():
             checkpoint_contract="adhoc_rescore_record.v1.0",
             namespaces=frozenset({"shadow", "smoke"})),
         _native_score_batch_kind(),
+        _native_parity_kind(),
         # P2-7/Task7b (§7): streams the pinned legacy read set into per-file
         # fragment inspections. Coordinator-validated, like decision_evidence
         # above — see engine.v2.ops.snapshot_promotion.snapshot_import_effect.

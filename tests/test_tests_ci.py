@@ -73,3 +73,53 @@ def test_readme_documents_all_markers():
         assert marker_name in readme_content, (
             f"Marker '{marker_name}' from LOCAL_ONLY_MARKERS is not mentioned in tests/README.md"
         )
+
+
+def test_checkout_fetch_depth_is_conditional_on_pull_request():
+    with open(WORKFLOW_PATH) as f:
+        workflow = yaml.safe_load(f)
+
+    steps = workflow["jobs"]["test"]["steps"]
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    # A bare, unquoted 0 is FALSY in GitHub Actions expressions, so
+    # `condition && 0 || 1` always evaluates to 1 regardless of `condition`
+    # (0 is falsy, so `0 || 1` falls through to 1). The 0 must be a quoted
+    # string ('0') to survive the || fallback -- matching the working
+    # pattern already used in .github/workflows/mutation.yml and
+    # mutation-mutmut.yml.
+    fetch_depth = steps[0]["with"]["fetch-depth"]
+    assert fetch_depth == "${{ github.event_name == 'pull_request' && '0' || 1 }}"
+    assert "&& '0'" in fetch_depth
+    assert "&& 0 " not in fetch_depth
+
+
+def test_select_step_only_runs_on_pull_request_and_diffs_against_base():
+    with open(WORKFLOW_PATH) as f:
+        workflow = yaml.safe_load(f)
+
+    steps = workflow["jobs"]["test"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Select PR test files")
+    assert step["if"] == "github.event_name == 'pull_request'"
+    assert "git diff -z --no-renames --name-only" in step["run"]
+    assert "tools/mutation_pilot.py select-tests --changed-files" in step["run"]
+
+
+def test_pytest_step_falls_back_to_tests_dir_and_has_selection_fallback():
+    with open(WORKFLOW_PATH) as f:
+        workflow = yaml.safe_load(f)
+
+    steps = workflow["jobs"]["test"]["steps"]
+    pytest_step = next((s for s in steps if s.get("name") == "Run pytest"), None)
+    assert pytest_step is not None, "no step named 'Run pytest' in the workflow"
+    run = pytest_step["run"]
+    for substring in ('TARGETS=("tests/")', "SELECTED[0]", "__ALL__", "No test files selected"):
+        assert substring in run, substring
+
+
+def test_upload_step_warns_instead_of_failing_on_no_junit():
+    with open(WORKFLOW_PATH) as f:
+        workflow = yaml.safe_load(f)
+
+    steps = workflow["jobs"]["test"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Upload test results")
+    assert step["with"]["if-no-files-found"] == "warn"
