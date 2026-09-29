@@ -136,6 +136,16 @@ request body and, if durable, in the operator guides instead — see
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
+  - **`test` CI PR selection** (`select_pr_tests` in `tools/mutation_pilot.py`, used by
+    `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
+    `tests/test_*.py` files pytest collects to the subset the diff can affect, falling
+    back to every test file when it can't prove a narrower subset is safe; push/
+    `workflow_dispatch`/schedule runs always run the unfiltered full suite. Selection is
+    best-effort: a test reachable only through runtime loading this static analysis
+    doesn't track may be omitted from a PR's narrowed run, backstopped by the full
+    suite on every push to `main`. [#184](https://github.com/yshewchuk/investment-validation/issues/184)
+    measures how often. The selection rule (leaf, taint, `full_suite`, conftest ancestors)
+    is documented in `select_pr_tests`'s and `_has_unresolved_import_attempt`'s docstrings, not here.
 
 ## 2. Layers and allowed dependency direction
 
@@ -464,13 +474,18 @@ and nothing on this diagram writes to the legacy board.
   change lands in `engine/*`, `engine/dashboard/nightly.py` or the legacy
   ledger path to support v2 work. If legacy must change at all before
   cutover, that is itself a decision requiring sign-off, not a routine PR.
-- **Every `ARCHITECTURE.md` stays inside its line budget.**
-  `checks/architecture_doc_budgets.py` caps every `ARCHITECTURE.md` (root or
-  component) at a fixed line count, blocking in CI and the pre-commit hook,
-  so a doc cannot regrow the step-by-step procedure or history `AGENTS.md`
-  "Small PRs" keeps out of contract-level docs. A named exemption list pins
-  any doc already over budget at its size when the check was added, so
-  growth stops there rather than at zero.
+- **Every `ARCHITECTURE.md` stays under a growth ceiling.**
+  `checks/architecture_doc_budgets.py` enforces a growth ceiling, not an
+  absolute cap: below 1000 lines, one PR may add at most 50 net lines to
+  any one `ARCHITECTURE.md` (root or component), measured against its size
+  on `origin/main` (CI's shallow checkout has no real merge-base, so the
+  branch tip is the fallback) -- so a doc creeps up over many small PRs,
+  and a single PR starting just under the ceiling can cross it by up to
+  that same 50-line allowance. A doc whose size at the START of a PR is
+  already at or over 1000 lines may shrink but may not grow at all -- it
+  needs a dedicated compression PR, or a code refactor, before it takes on
+  more content. An owner is never responsible for trimming a doc's
+  unrelated sections to make room for their own change.
 
 ## 6. Anti-patterns
 
