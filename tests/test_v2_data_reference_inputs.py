@@ -24,6 +24,7 @@ from engine.v2.contracts import LegacyFileRef, LegacyInputManifest
 from engine.v2.data import legacy_mapping
 from engine.v2.data import reference_inputs as ri
 from engine.v2.data import schema as data_schema
+from engine.v2.data.catalog import record_failed_import
 from engine.v2.data.errors import DataError
 from engine.v2.data.import_snapshot import plan_import
 from engine.v2.data.reference_catalog import (
@@ -39,11 +40,12 @@ from engine.v2.ops.cli import dispatch, parser
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.lifecycle import request_cancel
 from engine.v2.ops.migrations import Migration, migrate
+from engine.v2.ops.snapshot_promotion import _translate
 from engine.v2.ops.snapshot_roots import default_materialization_base, materialization_root
 from engine.v2.ops.stages import registry
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY
-from tests.test_v2_data_catalog import _assert_immutable, build_chain, catalog, insert_receipt
+from tests.test_v2_data_catalog import H, _assert_immutable, build_chain, catalog, insert_receipt
 from tests.test_v2_data_import import (
     REFERENCE_MODEL_ID,
     ROOT,
@@ -423,6 +425,47 @@ def test_v5_v6_migrations_are_checksummed_idempotent_and_append_only(tmp_path):
         assert err.value.problem.details["reason"] == "checksum_mismatch"
     finally:
         raw.close()
+
+
+def test_unknown_kind_refusal_details_carries_no_legacy_path(tmp_path):
+    """issue #202: refusing an unknown reference-input kind must not leak the
+    raw legacy filesystem path into ``Problem.details`` — that dict survives
+    unchanged into a durably persisted receipt row (``snapshot_promotion`` /
+    ``catalog.record_failed_import``). Only the internal ``kind`` label stays."""
+    conn, clock = catalog(tmp_path)
+    ids = build_chain(conn, clock)
+    legacy_path = "engine/data/legacy_secret_dir/file.parquet"
+    with pytest.raises(DataError) as excinfo:
+        insert_reference_inputs(conn, ids["receipt_id"],
+                                [_reference(legacy_path, kind="unknown_kind_xyz")])
+    assert excinfo.value.problem.details == {"kind": "<unknown>"}
+    assert "legacy_secret_dir" not in str(excinfo.value.problem.details)
+    conn.close()
+
+
+def test_unknown_kind_refusal_persisted_receipt_carries_no_legacy_path(tmp_path):
+    """issue #202, transitively: the Problem that insert_reference_inputs
+    raises is forwarded through snapshot_promotion._translate (details
+    verbatim) and persisted by catalog.record_failed_import into
+    data_import_receipts.problem_json. That persisted JSON must not carry
+    the raw legacy path either."""
+    conn, clock = catalog(tmp_path)
+    ids = build_chain(conn, clock)
+    legacy_path = "engine/data/legacy_secret_dir/file.parquet"
+    with pytest.raises(DataError) as excinfo:
+        insert_reference_inputs(conn, ids["receipt_id"],
+                                [_reference(legacy_path, kind="unknown_kind_xyz")])
+    translated = _translate(excinfo.value.problem)
+    assert translated.details == {"kind": "<unknown>"}
+    record_failed_import(conn, receipt_id="recv-202-persisted", request_hash=H("recv-202-persisted"),
+                         attempt_id="attempt-202", fence=1, problem=translated, clock=clock)
+    row = conn.execute("SELECT problem_json FROM data_import_receipts WHERE receipt_id = ?",
+                       ("recv-202-persisted",)).fetchone()
+    assert row is not None
+    persisted = json.loads(row[0])
+    assert "legacy_secret_dir" not in row[0]
+    assert persisted["details"] == {"kind": "<unknown>"}
+    conn.close()
 
 
 # --------------------------------------------------------------------------
