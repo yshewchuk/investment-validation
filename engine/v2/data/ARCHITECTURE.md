@@ -101,7 +101,8 @@ truly-stored dataset-version row — Invariants); a `computed_moves`/
 committed by `engine.v2.ops.computed_moves_store.py`/
 `.price_history_store.py` (this package supplies only the math and the
 `TableContract`); refusals as a `DataError`/`Problem` from
-`DATA_FAILURE_CODES`, carrying no local path or row value (Invariants).
+`DATA_FAILURE_CODES`, intended to carry no local path or row value — not
+fully enforced today (Invariants).
 
 ## Dependencies
 
@@ -210,12 +211,15 @@ Root doc §5 invariants this package is responsible for:
   `engine.paths`/`ArtifactStore`, never a locally computed project root
   (`legacy_mapping.py`'s one `Path(__file__)` use resolves a sibling
   package resource, not a project root).
-- **Nothing published carries a local path or raw exception text.**
-  `errors.py` performs no automatic redaction — each call site is
-  responsible for excluding legacy paths and row-derived values from a
-  `Problem`'s `details` itself (e.g. `reference_catalog.py`'s unknown-kind
-  refusal reports a fixed `"<unknown>"` marker, never the caller-controlled
-  `kind` or `legacy_path` values).
+- **Nothing published carries a local path or raw exception text — not
+  fully enforced.** `errors.py` performs no automatic redaction; each call
+  site is responsible for excluding legacy paths and row-derived values
+  from a `Problem`'s `details` itself. `reference_catalog.py`'s unknown-kind
+  refusal now reports a fixed `"<unknown>"` marker, never the
+  caller-controlled `kind` or `legacy_path` (issue #202).
+  `reference_inputs.py`'s `publish_reference_inputs` still puts raw legacy
+  paths in `details` for its two missing-input refusals — tracked as issue
+  [#217](https://github.com/yshewchuk/investment-validation/issues/217).
 - **Atomic snapshot commit, compare-and-swap head, never last-writer-wins.**
   Zero rows changed on the head update is `SNAPSHOT_CONFLICT`. Only
   `data_snapshot_heads` is mutable; every other `data_*` table is
