@@ -83,19 +83,25 @@ STATE_DIR = ("reports", "phase6", "nightly_trigger")
 QUALIFICATION_INPUT_MANIFEST = "input_manifest.json"
 QUALIFICATION_POPULATION = "expected_population.json"
 
-STATUSES = ("submitted", "not_yet", "missed", "already_submitted", "busy_legacy", "error",
-            "submitting", "completed", "failed", "failed_setup", "idle", "timed_out")
+STATUSES = ("submitted", "not_yet", "snapshot_not_yet", "missed", "already_submitted",
+            "busy_legacy", "error", "submitting", "completed", "failed", "failed_setup", "idle",
+            "timed_out")
 #: A terminal as-of never probes, never writes and never submits again.
 TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "missed",
                                "failed_setup"})
 #: Every one of these statuses can only be written by code _decide already
 #: gated once (its window and probe-finality checks): resuming never
 #: re-checks either one, REGARDLESS of whether plan_ref is set yet -- a
-#: pre-plan status (error or timed_out with plan_ref=None, e.g. a
-#: snapshot-import failure/timeout, gate-round-5 fix) is just as resumable
-#: as a post-plan one (plan_ref already set) -- see run_trigger's
-#: `resuming` computation.
-RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out"})
+#: pre-plan status (error, timed_out or snapshot_not_yet with plan_ref=None,
+#: e.g. a snapshot-import failure/timeout, gate-round-5 fix) is just as
+#: resumable as a post-plan one (plan_ref already set) -- see run_trigger's
+#: `resuming` computation. snapshot_not_yet belongs here for the same reason
+#: pre-plan error/timed_out do: a pre-plan resume whose retried
+#: ensure_snapshot_fn call comes back "not_yet" (the legacy store still has
+#: not caught up) is exactly as resumable as one that timed out or errored --
+#: _decide already gated this as_of once.
+RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out",
+                             "snapshot_not_yet"})
 FAILURE_STATUSES = frozenset({"error", "failed", "failed_setup", "missed", "timed_out"})
 SUCCESS_JOB_STATES = frozenset({"succeeded"})
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "cancelled", "blocked"})
@@ -447,8 +453,12 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
             # plan_fn is forwarded (not None) so a pre-plan timed_out resume (plan_ref None)
             # re-plans through the SAME injected seam; production run_trigger callers pass
             # plan_fn=None here, where _submit_plan resolves it to _default_plan unchanged.
-            return _submit_plan(root, as_of, tickers=(), context_tickers=(), clock=clock,
-                                plan_fn=plan_fn, submit_fn=submit_fn, serve_fn=serve_fn,
+            # tickers/context_tickers are forwarded too (gate-round-6 fix): a pre-plan
+            # resume's plan_fn call needs the caller's ACTUAL selection, not an empty
+            # one -- harmless for a plan_ref-set resume, where plan_fn is never called.
+            return _submit_plan(root, as_of, tickers=tickers, context_tickers=context_tickers,
+                                clock=clock, plan_fn=plan_fn, submit_fn=submit_fn,
+                                serve_fn=serve_fn,
                                 ensure_snapshot_fn=ensure_snapshot_fn,
                                 full_run=full_run, prior=prior, plan_ref=prior.plan_ref)
         return _decide(root, as_of, tickers=tickers, context_tickers=context_tickers,
@@ -507,6 +517,39 @@ def _snapshot_attempt_bump(exc: BaseException) -> int:
     return 1 if isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED" else 0
 
 
+def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
+                     clock, plan_fn, ensure_snapshot_fn, full_run,
+                     prior: TriggerReceipt | None,
+                     snapshot_attempt: int) -> tuple[str | None, TriggerReceipt | None]:
+    try:
+        readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
+    except _HANDLED_FAILURES as exc:
+        return None, _failure(root, clock, as_of, None, exc, prior,
+                              snapshot_attempt=snapshot_attempt + _snapshot_attempt_bump(exc))
+    if readiness == "not_yet":
+        resuming = prior is not None and prior.status in RESUME_STATUSES
+        return None, _record(root, _receipt(
+            clock, as_of, "snapshot_not_yet" if resuming else "not_yet",
+            "the shadow snapshot has not caught up to as_of yet",
+            snapshot_attempt=snapshot_attempt))
+    if readiness == "timed_out":
+        return None, _record(root, _timeout_receipt(
+            clock, as_of, None, snapshot_attempt, prior,
+            timed_out_detail="the shadow snapshot import has not finished; the legacy lock "
+                             "is released, resuming next tick",
+            give_up_detail="the shadow snapshot import exceeded its deadline {count} "
+                           "consecutive times; giving up"))
+    try:
+        plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
+                           full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
+    except _HANDLED_FAILURES as exc:
+        return None, _failure(root, clock, as_of, None, exc, prior)
+    _record(root, _receipt(clock, as_of, "submitting",
+                           "the plan is saved; submitting it", plan_ref=plan_ref,
+                           snapshot_attempt=snapshot_attempt))
+    return plan_ref, None
+
+
 def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, plan_fn,
                  submit_fn, serve_fn, ensure_snapshot_fn, full_run,
                  prior: TriggerReceipt | None, plan_ref: str | None) -> TriggerReceipt:
@@ -524,30 +567,12 @@ def _submit_plan(root: Path, as_of: str, *, tickers, context_tickers, clock, pla
     ensure_snapshot_fn = ensure_snapshot_fn or _ensure_shadow_snapshot
     snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
     if plan_ref is None:
-        try:
-            readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
-        except _HANDLED_FAILURES as exc:
-            return _failure(root, clock, as_of, None, exc, prior,
-                            snapshot_attempt=snapshot_attempt + _snapshot_attempt_bump(exc))
-        if readiness == "not_yet":
-            return _record(root, _receipt(
-                clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet",
-                snapshot_attempt=snapshot_attempt))
-        if readiness == "timed_out":
-            return _record(root, _timeout_receipt(
-                clock, as_of, None, snapshot_attempt, prior,
-                timed_out_detail="the shadow snapshot import has not finished; the legacy lock "
-                                 "is released, resuming next tick",
-                give_up_detail="the shadow snapshot import exceeded its deadline {count} "
-                               "consecutive times; giving up"))
-        try:
-            plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
-                               full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
-        except _HANDLED_FAILURES as exc:
-            return _failure(root, clock, as_of, None, exc, prior)
-        _record(root, _receipt(clock, as_of, "submitting",
-                               "the plan is saved; submitting it", plan_ref=plan_ref,
-                               snapshot_attempt=snapshot_attempt))
+        plan_ref, early_receipt = _ensure_plan_ref(
+            root, as_of, tickers=tickers, context_tickers=context_tickers, clock=clock,
+            plan_fn=plan_fn, ensure_snapshot_fn=ensure_snapshot_fn, full_run=full_run,
+            prior=prior, snapshot_attempt=snapshot_attempt)
+        if early_receipt is not None:
+            return early_receipt
     try:
         submit_fn(root, as_of, plan_ref, clock)
     except _HANDLED_FAILURES as exc:
@@ -603,9 +628,12 @@ def full_population(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     evidence context, and the document is passed to the plan unchanged as
     ``--expected-population``. The trigger takes no ticker-list argument, and
     the document is not required for the trigger to run: without it the plan
-    still declares ``full_run=True`` and ``ops submit`` records its own
-    planned-population refusal as an ``error`` receipt rather than the trigger
-    silently scoring nothing.
+    still declares ``full_run=True``, and ``universe``/``context`` are both
+    empty, so ``cli._snapshot_inputs``/``pin_snapshot_inputs`` refuse at PLAN
+    time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
+    ``input_mode="snapshot"`` flip, this same absent-population case built a
+    plan successfully and the refusal was ``ops submit``'s to make instead)
+    rather than the trigger silently scoring nothing.
     """
     tickers = _population_tickers(_qualification_path(root, QUALIFICATION_POPULATION))
     return tickers, tickers

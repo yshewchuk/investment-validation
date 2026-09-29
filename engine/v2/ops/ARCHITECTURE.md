@@ -842,7 +842,12 @@ pre-plan timeout could even be produced (bounded by the LATER, absolute
 Fixed by broadening `resuming` to `prior is not None and prior.status in
 RESUME_STATUSES and (bool(prior.plan_ref) or prior.status == "timed_out")`
 — see "`TriggerReceipt` gains a new field" below for the full account and
-the two `run_trigger`-level tests that prove it.
+the two `run_trigger`-level tests that prove it. **Gate-round-5 then
+generalized this further: the same defect also applied to a pre-plan
+`"error"`, so the shipped line dropped the `plan_ref` condition entirely —
+`resuming = prior is not None and prior.status in RESUME_STATUSES` — see
+the "Gate-round-5 fix" callout in "`TriggerReceipt` gains a new field"
+below for the full account.**
 
 **`TriggerReceipt` gains a new field, `snapshot_attempt: int = 0`,
 additive, carried on EVERY receipt written for a given `as_of` and
@@ -952,12 +957,25 @@ status transition:
   recorded a terminal `"missed"`, never resumed, making the receipt's own
   "resuming next tick" text false in production and this pre-plan timeout's
   consecutive-timeout counter unreachable.** The actual fix broadens `run_
-  trigger`'s `resuming` check instead of relying on `_decide`: `resuming =
+  trigger`'s `resuming` check instead of relying on `_decide`.
+  **Gate-round-5 fix (real, generalizing the round-4 fix below): the round-4
+  fix only widened `resuming` for `"timed_out"` specifically (`resuming =
   prior is not None and prior.status in RESUME_STATUSES and (bool(prior.
-  plan_ref) or prior.status == "timed_out")` — so a `"timed_out"` status
-  resumes EVEN WITH `plan_ref=None`, the SAME as the existing post-plan
-  case, skipping `_decide`'s window/probe checks entirely (finality, once
-  true, cannot become false again, so skipping the re-probe loses nothing).
+  plan_ref) or prior.status == "timed_out")`), but the SAME defect applies
+  to a pre-plan `"error"` too — a terminal `INPUT_CHANGED` failure from
+  `ensure_snapshot_fn`, or a `plan_fn` failure right after the snapshot
+  becomes ready, both also write `plan_ref=None` and can also occur after
+  the window has closed. The fix is now fully general: every status in
+  `RESUME_STATUSES` can only ever be written by code inside `_submit_plan`,
+  which `_decide` only reaches AFTER its window/probe checks already
+  passed once for this `as_of` — so `plan_ref` being set is irrelevant to
+  whether the window should be re-checked, for ANY of them. The shipped
+  line is simply `resuming = prior is not None and prior.status in
+  RESUME_STATUSES`, no `plan_ref` condition at all** — so a `"timed_out"`
+  (or now `"error"`) status resumes EVEN WITH `plan_ref=None`, the SAME as
+  the existing post-plan case, skipping `_decide`'s window/probe checks
+  entirely (finality, once true, cannot become false again, so skipping the
+  re-probe loses nothing).
   `run_trigger`'s resume branch then calls `_submit_plan` with `plan_
   ref=prior.plan_ref` (`None` here), which `_submit_plan`'s existing `if
   plan_ref is None:` guard already handles correctly by calling `ensure_
@@ -985,6 +1003,21 @@ status transition:
   trigger` (not `_submit_plan` directly, per the gate's own ask) by
   `test_a_pre_plan_timeout_resumes_past_the_window_close` and `test_busy_
   legacy_does_not_overwrite_a_pending_pre_plan_timeout`.**
+
+  **Gate-round-7 fix (CodeRabbit finding, real): a resumed pre-plan check
+  landing back on `"not_yet"` (the legacy store still has not caught up on
+  a RETRIED attempt, e.g. right after a pre-plan `"error"` bumped
+  `snapshot_attempt`) used to write the plain `"not_yet"` status — not a
+  `RESUME_STATUSES` member — so the NEXT tick lost resumability and fell
+  back into `_decide`'s window check, which by then had usually already
+  closed. `STATUSES`/`RESUME_STATUSES` gain a new member, `"snapshot_
+  not_yet"` (never `TERMINAL_STATUSES`/`FAILURE_STATUSES` — it is a benign
+  wait, not a failure): `_submit_plan`'s `readiness == "not_yet"` branch now
+  writes `"snapshot_not_yet"` when `prior.status` was already in
+  `RESUME_STATUSES` (i.e. this call is itself a resume), and plain
+  `"not_yet"` otherwise (`_decide`'s own first-time/probe-miss path,
+  unchanged). `snapshot_attempt` is not bumped either way — a `"not_yet"`
+  outcome never consumes an attempt (unchanged from before this fix).**
 
 `_ensure_shadow_snapshot(root, as_of, clock, attempt, ...)` itself:
 
@@ -3836,7 +3869,11 @@ retry, transaction, partial write, idempotency).
   `"timed_out"` is a new member of `STATUSES` and of `RESUME_STATUSES`
   (alongside `"submitting"`/`"submitted"`/`"error"`): a receipt recorded
   `"timed_out"` still carries `plan_ref`, so `run_trigger`'s resume branch
-  (`prior.plan_ref and prior.status in RESUME_STATUSES`) picks it up on
+  (at the time: `prior.plan_ref and prior.status in RESUME_STATUSES`; as of
+  Cutover PR-7b-2's gate-round-5 fix, simply `prior.status in RESUME_
+  STATUSES`, since a PRE-plan `"error"`/`"timed_out"` needs the SAME resume
+  treatment despite having no `plan_ref` yet — see the "Cutover PR-7b's
+  input sourcing" design section) picks it up on
   the next tick and calls `_submit_plan` again with the SAME `plan_ref` —
   never `_decide`, so the retry window is not re-checked and no second
   plan is ever built for this as-of while a resumable one already exists
@@ -4236,17 +4273,21 @@ was needed where a separate status was not.
   with `plan_ref` set), a later eligible attempt calls `_default_plan`
   again and captures inputs fresh, same as the first attempt. **Cutover
   PR-7b (CodeRabbit finding on `423ee21`, real) adds a genuinely NEW
-  pre-plan case this statement does not cover**: `_ensure_shadow_snapshot`
-  can itself report `"timed_out"` with `plan_ref=None` BEFORE `_default_
-  plan`/`plan_fn` ever runs — see the Cutover PR-7b design section below
-  for that outcome's own retry/resume behavior (it is driven by
-  `_ensure_shadow_snapshot`'s own idempotency-key job lookup, not by this
-  section's `plan_ref`-set resume branch below). Once a `plan_ref` IS saved,
-  `run_trigger`'s resume branch (`prior.plan_ref` set, `prior.status in
-  RESUME_STATUSES`) calls `_submit_plan` directly with that existing
-  `plan_ref` and never reaches `_default_plan`/`_capture_input_manifest`
-  again — a resumed retry submits and serves the SAME already-pinned plan,
-  it does not recapture or replan.
+  pre-plan case this statement does not cover, since generalized by
+  gate-round-5 to cover a pre-plan `"error"` too**: `_ensure_shadow_snapshot`
+  can itself report `"timed_out"` (or raise into a pre-plan `"error"`) with
+  `plan_ref=None` BEFORE `_default_plan`/`plan_fn` ever runs — see the
+  Cutover PR-7b design section below for that outcome's own retry/resume
+  behavior (it is driven by `_ensure_shadow_snapshot`'s own idempotency-key
+  job lookup, not by this section's `plan_ref`-set resume branch below).
+  `run_trigger`'s resume branch is gated purely on `prior.status in
+  RESUME_STATUSES` (no `plan_ref` condition at all, as of gate-round-5 —
+  see the "Gate-round-5 fix" callout above), so a pre-plan `"error"`/
+  `"timed_out"` resumes the SAME way a post-plan one does. Once a `plan_ref`
+  IS already saved (the post-plan case), that same resume branch calls
+  `_submit_plan` directly with the existing `plan_ref` and never reaches
+  `_default_plan`/`_capture_input_manifest` again — a resumed retry submits
+  and serves the SAME already-pinned plan, it does not recapture or replan.
 - **R4, transaction.** The manifest file write (`write_manifest`, inside
   `_capture_input_manifest`) happens before `cli._plan_command` opens any
   catalog transaction, and is not itself part of one: it is a plain
@@ -4313,11 +4354,12 @@ was needed where a separate status was not.
   (`decision_commit._advance_decisions_watermark`,
   `effects_graph._decision_gate`).
   `run_trigger` now computes whether this tick is a resume (`prior is not
-  None and prior.status in RESUME_STATUSES and (prior.plan_ref or prior.
-  status == "timed_out")` — the `or prior.status == "timed_out"` clause is
-  Cutover PR-7b-2's own gate-round-4 fix, letting a PRE-plan snapshot-import
-  timeout, which has no `plan_ref` yet, resume the same way; see the
-  "Cutover PR-7b's input sourcing" design section above) from the
+  None and prior.status in RESUME_STATUSES` — no `plan_ref` condition at
+  all, as of Cutover PR-7b-2's gate-round-5 fix, which generalized
+  round-4's `"timed_out"`-only widening to every `RESUME_STATUSES` status,
+  since a PRE-plan `"error"`/`"timed_out"` (no `plan_ref` yet) must resume
+  the same way a post-plan one does; see the "Cutover PR-7b's input
+  sourcing" design section above) from the
   ALREADY-LOADED `prior` state BEFORE attempting the legacy lock at all —
   the resume decision never depended on the lock outcome to begin with, only
   on the state file. A resuming tick that then finds the lock busy returns

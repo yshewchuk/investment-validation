@@ -623,6 +623,48 @@ def test_a_pre_plan_terminal_failure_resumes_past_the_window_close(tmp_path):
     assert provider.calls == [(AS_OF, ("AAA", "BBB"))]  # probed once, on tick 1, never again
 
 
+def test_a_pre_plan_not_yet_after_an_error_stays_resumable_past_the_deadline(tmp_path):
+    # CodeRabbit finding (round 7), the resume/not_yet gap: a PRE-plan resume
+    # whose retried ensure_snapshot_fn call comes back "not_yet" (the legacy
+    # store still has not caught up) used to write the plain, NON-resumable
+    # "not_yet" status, so the next tick fell through to _decide's window
+    # check -- already closed -- and recorded a terminal "missed", discarding
+    # the retry the round-5 fix exists to allow. Tick 1 fails terminally
+    # (INPUT_CHANGED bumps snapshot_attempt to 1); tick 2, past the deadline,
+    # hits "not_yet" on that SAME attempt and must record "snapshot_not_yet";
+    # tick 3, still past the deadline, resumes straight through to
+    # "completed" -- _decide's window check never re-gates this as_of.
+    provider = FakeProvider(True)
+
+    class ExplodingEnsure:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, root, as_of, clock, attempt):
+            self.calls.append(attempt)
+            raise fail("INPUT_CHANGED", "boom")
+
+    first = _run(tmp_path, FakeClock(IN_WINDOW), provider, FakePlan("plan_should_not_build"),
+                 FakeSubmit(), FakeServe(), ensure_snapshot_fn=ExplodingEnsure())
+    assert first.status == "error" and first.plan_ref is None
+    assert first.snapshot_attempt == 1  # INPUT_CHANGED bumps it
+
+    second_ensure = FakeEnsureSnapshot(readiness="not_yet")
+    second = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, FakePlan(), FakeSubmit(),
+                  FakeServe(), ensure_snapshot_fn=second_ensure)
+    assert second.status == "snapshot_not_yet"  # NOT "missed" -- still resumable
+    assert second_ensure.calls == [{"root": tmp_path, "as_of": AS_OF, "attempt": 1}]
+    assert second.snapshot_attempt == 1  # a "not_yet" outcome never bumps it
+
+    plan, submit, serve = (FakePlan("plan_after_snapshot_not_yet"), FakeSubmit(),
+                           FakeServe("completed"))
+    third_ensure = FakeEnsureSnapshot(readiness="ready", snapshot_id="snap_after_wait")
+    third = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, plan, submit, serve,
+                 ensure_snapshot_fn=third_ensure)
+    assert third.status == "completed" and third.plan_ref == "plan_after_snapshot_not_yet"
+    assert provider.calls == [(AS_OF, ("AAA", "BBB"))]  # probed once, on tick 1, never again
+
+
 def test_three_consecutive_pre_plan_terminal_failures_become_failed_setup(tmp_path):
     # Mirrors test_three_consecutive_setup_errors_become_failed_setup_once,
     # but for a PRE-plan ensure_snapshot_fn terminal failure (plan_ref=None
@@ -656,6 +698,30 @@ def test_three_consecutive_pre_plan_terminal_failures_become_failed_setup(tmp_pa
                     ensure_snapshot_fn=ensure)
     assert terminal.status == "idle"
     assert len(ensure.calls) == 3  # a terminal tick never re-checks the snapshot
+
+
+def test_a_pre_plan_resume_preserves_the_original_ticker_selection(tmp_path):
+    # Gate-round-6 fix: run_trigger's resume branch used to hardcode empty
+    # tickers/context_tickers, discarding whatever the caller explicitly
+    # passed. Since a pre-plan resume (plan_ref=None) now actually calls
+    # plan_fn for real, that selection must survive the resume.
+    explicit_tickers = ("XOM", "CVX")
+    explicit_context = ("XOM", "CVX", "SPY")
+    provider = FakeProvider(True)
+    first_ensure = FakeEnsureSnapshot(readiness="timed_out")
+    first = _run(tmp_path, FakeClock(IN_WINDOW), provider, FakePlan("plan_should_not_build"),
+                 FakeSubmit(), FakeServe(), tickers=explicit_tickers,
+                 context_tickers=explicit_context, ensure_snapshot_fn=first_ensure)
+    assert first.status == "timed_out" and first.plan_ref is None
+
+    plan, submit, serve = FakePlan("plan_kept_selection"), FakeSubmit(), FakeServe("completed")
+    second_ensure = FakeEnsureSnapshot(readiness="ready", snapshot_id="snap_kept")
+    second = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, plan, submit, serve,
+                  tickers=explicit_tickers, context_tickers=explicit_context,
+                  ensure_snapshot_fn=second_ensure)
+    assert second.status == "completed" and second.plan_ref == "plan_kept_selection"
+    assert plan.calls[0]["tickers"] == explicit_tickers
+    assert plan.calls[0]["context_tickers"] == explicit_context
 
 
 def test_three_consecutive_timeouts_become_failed(tmp_path):
