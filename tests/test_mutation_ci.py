@@ -660,6 +660,20 @@ def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(monkey
 # -- config and workflow shape ----------------------------------------------------------
 
 CFG = pilot.load_config()
+
+
+class _DynGraph(dict):
+    """Test-only: a plain ``dict[str, set[str]]`` graph that also marks
+    which files are DYNAMIC (their catch-all edge must not be expanded
+    further by ``module_dependency_closure``), explicitly via ``.dynamic``
+    -- never inferred from edge-set shape, which a small synthetic graph's
+    ordinary real edges can coincidentally match."""
+
+    def __init__(self, data, dynamic=()):
+        super().__init__(data)
+        self.dynamic = set(dynamic)
+
+
 WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "mutation.yml").read_text())
 JOBS = WORKFLOW["jobs"]
 
@@ -2440,12 +2454,12 @@ def test_module_dependency_closure_stops_at_a_dynamic_catch_all_boundary():
     # the defect this round fixes (see module_dependency_closure's
     # docstring). Reaching dynamic.py must still count (it is added to the
     # closure), but its catch-all edge must not be expanded further.
-    graph = {
+    graph = _DynGraph({
         "engine/a.py": set(),
         "tests/test_a.py": {"engine/a.py", "tests/dynamic.py"},
         "tests/dynamic.py": {"engine/a.py", "tests/test_a.py", "engine/unrelated.py"},
         "engine/unrelated.py": set(),
-    }
+    }, dynamic={"tests/dynamic.py"})
     cfg2 = _sel_cfg()  # alpha: mutate=[engine/a.py], tests=[tests/test_a.py]
     closure = pilot.module_dependency_closure(cfg2, "alpha", graph)
     assert "tests/dynamic.py" in closure
@@ -2458,12 +2472,12 @@ def test_changed_modules_a_dynamic_files_own_change_still_selects_its_reachers()
     # unrelated file its catch-all edge used to sweep in) must still select
     # every module that reaches it -- that is the deliberate
     # over-invalidation the fix must keep.
-    graph = {
+    graph = _DynGraph({
         "engine/a.py": set(),
         "tests/test_a.py": {"engine/a.py", "tests/dynamic.py"},
         "tests/dynamic.py": {"engine/a.py", "tests/test_a.py", "engine/unrelated.py"},
         "engine/unrelated.py": set(),
-    }
+    }, dynamic={"tests/dynamic.py"})
     cfg2 = _sel_cfg()
     assert pilot.changed_modules(
         cfg2, ["alpha", "beta"], ["tests/dynamic.py"], graph=graph,
@@ -2809,7 +2823,10 @@ def test_conftest_dynamic_classification_guards_static_analysis_holes():
     # (Reaching a DYNAMIC file no longer CASCADES into every other module's
     # dependency set as of this round -- see module_dependency_closure's own
     # docstring -- but tests/conftest.py's own catch-all edge, asserted
-    # below, is unaffected and still the backstop for these holes.) This is
+    # below, is unaffected and still the backstop for these holes IN
+    # tests/conftest.py ITSELF. The same holes in some OTHER test file, with
+    # no other real edge to the changed path, are NOT backstopped any more
+    # -- see issue #155.) This is
     # a dedicated guard, separate from
     # test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert
     # above, so a failure here points straight at issue #42 instead of only

@@ -111,11 +111,16 @@ request body and, if durable, in the operator guides instead — see
     (`build_import_graph` gives a file it cannot parse precisely — e.g. one
     referencing `sys.path`, `subprocess`, or a non-literal
     `importlib.import_module` — an edge to every other tracked file, never a
-    narrower guess): reaching a DYNAMIC file, or changing one directly (e.g.
-    `tests/conftest.py`, applied to every test by pytest and therefore a
-    closure root for every module), still selects broadly, deliberately, but
-    that no longer cascades into selecting every enabled module for an
-    unrelated single-module change. Known failure mode, tracked in
+    narrower guess): reaching a DYNAMIC file adds it to that module's own
+    closure without expanding further, and a DYNAMIC file changing directly
+    selects every module whose closure reaches it -- narrow for most DYNAMIC
+    files (just their own owners/reachers, e.g. `tests/dynamic.py` selecting
+    only the module whose test imports it), but still broad, deliberately,
+    for one that is ALSO a shared closure root, like `tests/conftest.py`
+    (applied to every test by pytest and therefore a closure root for every
+    module). Either way, that no longer cascades into selecting every
+    enabled module for an unrelated single-module change. Known failure
+    mode, tracked in
     [#155](https://github.com/yshewchuk/investment-validation/issues/155):
     a module whose own test file reaches a changed file *only* through one
     of the still-unresolvable constructs above (not through any other real,

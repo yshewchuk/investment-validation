@@ -830,17 +830,22 @@ def module_dependency_closure(cfg: dict, name: str, graph: dict[str, set[str]],
     to the whole ~932-file tracked tree, because `tests/conftest.py` is
     always DYNAMIC via its own `sys.path.insert`).
 
-    A synthetic test may instead pass a plain `dict` with no `.precise`
-    attribute (there is no other way for such a test to express "this node
-    is DYNAMIC" than by giving it the catch-all edge shape on purpose); for
-    that case only, `dynamic_boundary` falls back to detecting the catch-all
-    by its exact edge-set shape (`edges == tracked_set - {f}`) and stops the
-    walk there, same as a real DYNAMIC file's boundary."""
+    A synthetic test may instead pass a graph with an explicit `.dynamic`
+    attribute (a `set[str]` of file names whose catch-all edge must not be
+    expanded further) -- there is no other reliable way for such a test to
+    express "this node is DYNAMIC": inferring it from edge-set shape
+    (`edges == tracked_set - {f}`) is unsound, because a small synthetic
+    graph's ORDINARY real edge can coincidentally equal "every other tracked
+    file" (e.g. a 2-file graph where the only file imports the other). A
+    plain `dict` with no `.dynamic` attribute gets an empty
+    `dynamic_boundary` -- ordinary full-edge traversal, no cutoff -- so
+    existing synthetic graphs that never intended to exercise DYNAMIC
+    catch-all behavior are unaffected."""
     tracked_set = tracked_set if tracked_set is not None else set(graph)
     precise = getattr(graph, "precise", None)
     dynamic_boundary = (
         None if precise is not None
-        else {f for f, edges in graph.items() if edges == tracked_set - {f}}
+        else getattr(graph, "dynamic", set())
     )
     seen: set[str] = set()
     stack = list(_closure_roots(module_cfg(cfg, name), tracked_set))
