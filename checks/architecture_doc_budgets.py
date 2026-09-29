@@ -43,8 +43,13 @@ from checks.repo_hygiene import tracked_paths  # noqa: E402
 
 #: Environment variables that redirect git to a different repository than
 #: the one named by ``-C``; an inherited value from the caller's shell must
-#: not silently retarget a git call this module makes.
-_GIT_ENV_LEAK = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+#: not silently retarget a git call this module makes. ``GIT_INDEX_FILE`` is
+#: deliberately NOT here: git itself sets it to point a hook at a temporary
+#: commit index (e.g. during ``git commit --only``), and that is exactly
+#: the content "what would actually be committed" must read -- stripping it
+#: would make this checker silently read the wrong index during a real
+#: commit.
+_GIT_ENV_LEAK = ("GIT_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY")
 
 
 def _clean_git_env() -> dict[str, str]:

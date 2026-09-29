@@ -8,6 +8,7 @@ from __future__ import annotations
 # land: always-run
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -127,3 +128,35 @@ def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monke
 
     sources = adb._sources(ROOT, use_worktree=True)
     assert "ARCHITECTURE.md" in sources
+
+
+def test_git_index_file_is_honored_not_stripped(tmp_path, monkeypatch):
+    """GIT_INDEX_FILE is git's own sanctioned mechanism for pointing a hook
+    at a temporary commit index (e.g. during `git commit --only`) -- unlike
+    GIT_DIR/GIT_WORK_TREE, it must be honored, not treated as a leak."""
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
+        monkeypatch.delenv(var, raising=False)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")}
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, env=env, check=True)
+    doc = repo / "ARCHITECTURE.md"
+    doc.write_text("x\n" * 5)
+    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, env=env, check=True)
+
+    # A temporary index, as git itself sets up for a hook, staging an
+    # over-budget version distinct from the real index.
+    temp_index = tmp_path / "temp-index"
+    shutil.copyfile(repo / ".git" / "index", temp_index)
+    temp_env = {**env, "GIT_INDEX_FILE": str(temp_index)}
+    doc.write_text("x\n" * (adb.BUDGET + 1))
+    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, env=temp_env, check=True)
+
+    monkeypatch.setenv("GIT_INDEX_FILE", str(temp_index))
+    sources = adb._sources(repo, use_worktree=False)
+    assert len(sources["ARCHITECTURE.md"].splitlines()) == adb.BUDGET + 1
