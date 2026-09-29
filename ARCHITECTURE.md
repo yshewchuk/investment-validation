@@ -332,6 +332,28 @@ or a new consumer must update that package's README in the same change.
   is designed here. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
   pool/residual refresh" and `engine/v2/models/ARCHITECTURE.md` §§1, 2, 7.6,
   7.7, 8 for the full design.
+- **Native parity summary projection (serving, read-only).**
+  `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
+  is a pure, read-only aggregate over the `native_parity` stage's own report
+  artifact (`engine/v2/ops/native_parity_report.py`'s `native_parity_report.v1.1`
+  JSON). It never re-compares a record: every number it returns is derived
+  from that report's own `mismatches`/`only_legacy`/`only_native`/
+  `native_refused*` fields, so it can never disagree with the one comparator
+  (§5). No production job writes that report yet (this section's "Cutover
+  PR-4 (redo)" bullet — `native_parity` has no submitted job kind), so
+  `"no_report"` is today's everyday answer, not a degraded one.
+  `engine/v2/serving` (7.0) reads the artifact directly rather than importing
+  `engine/v2/ops` (a 7.0 peer the layer map forbids importing). Failure
+  semantics:
+
+  | Condition | Outcome |
+  |---|---|
+  | No file at `report_path` | `status: "no_report"` (200) |
+  | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
+  | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
+
+  No production caller yet — the dashboard page that renders this summary
+  (a later PR) is its first consumer.
 
 ### 4.1 Production flow
 
