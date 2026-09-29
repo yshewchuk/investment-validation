@@ -54,8 +54,12 @@ deployment pointer's model identity/artifact refs and the release's frozen
 payoff/recalibration/board-analog-matcher artifacts into one immutable
 `ScoringReleaseBinding`, raising `NoCurrentRelease`/`ModelNotReady` (never a
 legacy or cached fallback) when the pointer, catalog or a named member is
-not ready. No caller imports it yet; see `ARCHITECTURE.md` for the PR that
-wires it in.
+not ready. `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
+worker calls `resolve_release_binding`, but that job is never submitted in
+production yet; `engine.v2.ops.supervisor.py`'s tick loop separately calls
+`resolve_production_release_binding()` live, every tick, as a
+release-readiness gate — see `ARCHITECTURE.md` for what runs in production
+today versus only in tests.
 
 `nightly_source_bundle` is the per-night, per-(ticker, event) `SourceBundle`
 field assembler: `assemble_nightly_source_bundle` turns one already-staged
@@ -66,11 +70,14 @@ different event, a caller-declared `panel_anchor` (issue #53: the as-of the
 panel row's market-state values were computed against) that postdates
 `as_of`, or a used feature whose own fold_start postdates `as_of`.
 `quote_domain_map` (extracted from `tools/capture_tier0_corpus.py`'s
-`_quote_map`) and `validated_as_of` are its other real `__all__` exports; no
-production caller resolves a full bundle yet (`tools/capture_tier0_corpus.py`
-calls `quote_domain_map()` only), so only `quote_domain_map` — the one name a
-real cross-package `__all__` check requires be declared — joins the directive
-below today. See `ARCHITECTURE.md` for why the rest join later.
+`_quote_map`) and `validated_as_of` are its other real `__all__` exports.
+`engine.v2.ops.native_score_batch.py` (Cutover PR-3) already imports
+`assemble_nightly_source_bundle`/`validated_as_of`/`NightlySourceBundleRefusal`
+too, but its `native_score_batch` job is never submitted in production, so
+no caller resolves a full bundle in production yet. Only `quote_domain_map`
+is in the directive below today (`checks/package_readmes.py` passes with
+just that one listed). See `ARCHITECTURE.md` for what runs in production
+today versus only in tests.
 
 <!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map -->
 

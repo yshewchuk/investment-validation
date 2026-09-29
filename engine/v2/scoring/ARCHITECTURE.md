@@ -19,11 +19,17 @@ calibration and analog population it reads is frozen data, verified by
 content hash before use. Does not mutate a strategy or model registry
 (`engine/v2/registry` does that).
 
-Two modules, `nightly_source_bundle.py` and `release_bindings.py`, exist
-with no production caller yet: they are the per-night `SourceBundle`
-assembler and the live-deployment release reader respectively, and wiring a
-caller that combines both is sequenced, not-yet-landed cutover work outside
-this package's scope (see Dependencies).
+Two modules, `nightly_source_bundle.py` (the per-night `SourceBundle`
+assembler) and `release_bindings.py` (the live-deployment release reader),
+are consumed today by `engine.v2.ops.native_score_batch.py`'s
+`native_score_batch` job worker, but that worker never actually runs in
+production yet — `engine.v2.ops.supervisor.py`'s tick loop never submits a
+`native_score_batch` job because the raw-row producer that would build one
+from real staged data is still missing (cutover PR-6, `engine/v2/ops/
+ARCHITECTURE.md`). The one piece of this that IS live: the same tick loop
+calls `release_bindings.resolve_production_release_binding()` directly,
+every tick, as a cheap release-readiness gate, independent of the
+never-submitted job (see Dependencies).
 
 ## Primary contracts and public interfaces
 
@@ -51,11 +57,12 @@ load-bearing entrypoints:
   `quote_domain_map()`, `validated_as_of()`, `NightlySourceBundleRefusal` —
   the per-night, per-`(ticker, event)` `SourceBundle` field assembler (see
   Inputs/Outputs/Failure semantics). Only `quote_domain_map` is in
-  `README.md`'s `<!-- public-interface: -->` directive today: the directive
-  tracks the real cross-package import graph, and today the only caller of
-  this module is `tools/capture_tier0_corpus.py` (a script, outside the v2
-  package graph the directive covers). The other three symbols join it once
-  a real `engine.v2.*` consumer exists.
+  `README.md`'s `<!-- public-interface: -->` directive today
+  (`checks/package_readmes.py` passes with just that one listed).
+  `engine.v2.ops.native_score_batch.py` (Cutover PR-3) already imports the
+  other three symbols too — a real `engine.v2.*` consumer exists for all
+  four today (see Dependencies for what that consumer actually runs in
+  production).
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
   identity, model artifact refs, and analog/payoff/recalibration artifacts;
@@ -195,10 +202,18 @@ display-only analog row ids). `checks/phase4_frozen_bridge.py` and
 `tools/capture_tier0_corpus.py` call `frozen_inputs.py` as compatibility
 callers, and the latter also calls `nightly_source_bundle.quote_domain_map()`
 for offline capture; `checks/*`/`tools/*` sit outside the package's
-machine-checked consumers allowlist by design. `assemble_nightly_source_bundle`
-and `release_bindings.py` have no production caller yet: wiring a per-night
-`SourceBundle` assembler that combines both is sequenced work in the
-broader cutover program, not a gap this package tracks itself.
+machine-checked consumers allowlist by design. `engine.v2.ops.native_score_batch.py`
+(Cutover PR-3) is a real production module that imports
+`assemble_nightly_source_bundle`/`NightlySourceBundleRefusal`/`validated_as_of`
+and calls `resolve_release_binding` from its `native_score_batch` job
+worker — but nothing submits that job yet (`engine/v2/ops/ARCHITECTURE.md`'s
+"Cutover PR-7a": the raw-row producer that would build one from real staged
+data is cutover PR-6, still missing), so this call path has never executed
+outside tests. Separately, `engine.v2.ops.supervisor.py`'s tick loop
+(Cutover PR-7a) DOES call `release_bindings.resolve_production_release_binding()`
+live, every tick, memo-gated, purely as a release-readiness check ahead of
+that same never-submitted job — this one runs in production today,
+independent of whether the job itself ever does.
 
 ## External systems and libraries
 
