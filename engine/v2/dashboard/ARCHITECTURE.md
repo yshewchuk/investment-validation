@@ -49,22 +49,25 @@ loopback): `run()` refuses a non-loopback `--host` with `SystemExit`
 ("refusing non-loopback host ... without --allow-non-loopback") unless
 `--allow-non-loopback` is also passed, mirroring `engine/v2/serving/api.py`'s
 own `--allow-non-loopback` guard on its server entrypoint. `--model-release-root`,
-`--calibration-health-path`, `--ops-root`, `--serving-index-path` and
-`--native-parity-report-path` are all optional; each unlocks exactly one
-route (`/models/release.json`, `/calibration-health.json`,
-`POST /actions/refresh`, `GET /analogs.json`, `GET /native_parity`+
-`GET /native_parity.json` respectively) and none is ever inferred from
-`--release-root` or `--health-path` — omitting one keeps that route's own
-explicit "not configured" refusal (see Failure semantics).
-`--native-parity-report-path` differs from the others in ONE way: the file
-it names need not exist yet (`engine.v2.serving.native_parity_projection
-.native_parity_summary`'s own `"no_report"` state, not this launcher's "not
-configured" 503 — see Outputs). `--release-root`,
-`--health-path`, `--model-release-root`, `--calibration-health-path`,
-`--serving-index-path` and `--native-parity-report-path` are serving roots:
+`--calibration-health-path`, `--ops-root` and `--serving-index-path` are
+all optional; each unlocks exactly one route (`/models/release.json`,
+`/calibration-health.json`, `POST /actions/refresh`, `GET /analogs.json`
+respectively) and none is ever inferred from `--release-root` or
+`--health-path` — omitting one keeps that route's own explicit "not
+configured" refusal (see Failure semantics). Design here, code in this same
+PR's next commit: a new optional `--native-parity-report-path` will unlock
+`GET /native_parity`+`GET /native_parity.json` the same way, with one
+difference — the file it names need not exist yet
+(`engine.v2.serving.native_parity_projection.native_parity_summary`'s own
+`"no_report"` state, not this launcher's "not configured" 503 — see
+Outputs). `--release-root`, `--health-path`, `--model-release-root`,
+`--calibration-health-path` and `--serving-index-path` are serving roots:
 they are read via
 `engine.v2.serving`'s bounded/paginated reads, never by directly reading
-scoring/evaluation/ledger data. `--ops-root` is not a serving read at
+scoring/evaluation/ledger data. `native_parity_summary` (once wired) reads
+its whole file in one call — `worst_limit` bounds how many rows the
+RETURNED document lists, not how much is read — so it is deliberately left
+out of that "bounded/paginated" claim. `--ops-root` is not a serving read at
 all — it names a job root, not a data root: when configured, `_server.py`'s
 `_refresh_callback` passes it straight to `engine.v2.ops.cli.refresh_action`
 to submit a shadow nightly plan (see Dependencies for what that call does
@@ -79,8 +82,9 @@ score/strategy's persisted analog row ids and count, keyed by
 `release_id`/`event_id` query params, or a refusal — not configured,
 unreadable, outdated, no rows for that event, or missing query params) —
 and, when a refresh root is configured, queued refresh job ids from
-`POST /actions/refresh`. When `--native-parity-report-path` is configured,
-`GET /native_parity.json` serves
+`POST /actions/refresh`. Design here, code in this same PR's next commit:
+once `--native-parity-report-path` is configured,
+`GET /native_parity.json` will serve
 `engine.v2.serving.native_parity_projection.native_parity_summary`'s
 document unchanged (`"no_report"`/`"unavailable"`/`"available"` — see that
 module's own doc), and `GET /native_parity` is a small page that fetches it
@@ -127,11 +131,12 @@ no direct filesystem, database or third-party API access of its own.
     is ever called. Neither reaches the serving layer.
   - **Serving-time, in `engine.v2.serving` (not this package)**: an
     omitted *optional* root (`--model-release-root`,
-    `--calibration-health-path`, `--serving-index-path`,
-    `--native-parity-report-path`) is passed straight through to
-    `create_server`, whose own typed responses answer the request at call
-    time — e.g. the read-only 503 "refresh not configured" when no refresh
-    callback is wired, or 503 "native parity not configured" when
+    `--calibration-health-path`, `--serving-index-path`, and, design here
+    with code in this same PR's next commit, `--native-parity-report-path`)
+    is passed straight through to `create_server`, whose own typed
+    responses answer the request at call time — e.g. the read-only 503
+    "refresh not configured" when no refresh callback is wired, or (once
+    wired) 503 "native parity not configured" when
     `--native-parity-report-path` itself was never given (distinct from
     that same route's own `"no_report"` 200 when the path IS configured but
     nothing has been written there yet).
