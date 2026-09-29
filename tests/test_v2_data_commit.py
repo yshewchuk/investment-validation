@@ -17,6 +17,9 @@ it):
   ``_record_for(year, input_receipt_refs=...)`` with a different value is a
   self-consistent record sharing the same ``fragment_id``
   (``test_v2_data_manifests.py::test_fragment_id_stable_but_manifest_hash_moves_with_provenance``);
+  since issue #97 such a provenance-only difference is a reuse, not a
+  conflict, and ``test_fragment_provenance_only_difference_reuses_the_stored_row``
+  pins that behavior;
 * a dataset version's / snapshot's id sorts its evidence refs while its
   ``manifest_hash`` covers the full, caller-ordered document, so the same
   evidence cited in a different order is a self-consistent manifest/snapshot
@@ -137,7 +140,7 @@ def test_same_id_identical_payload_is_a_noop_across_a_second_snapshot(tmp_path):
 
 # --------------------------------------------------------------------------
 # D04 (python half): same-ID different payload raises IDENTITY_CONFLICT,
-# zero rows changed, for each of contract/object/fragment/dataset-version/snapshot
+# zero rows changed, for each of contract/object/dataset-version/snapshot
 # --------------------------------------------------------------------------
 
 
@@ -178,20 +181,40 @@ def test_identity_conflict_object_different_payload(tmp_path):
     assert _row_counts(conn) == before
 
 
-def test_identity_conflict_fragment_different_payload(tmp_path):
+def test_fragment_provenance_only_difference_reuses_the_stored_row(tmp_path):
+    """Issue #97 reversal of the old same-ID-fragment conflict: provenance
+    (``input_receipt_refs``) is covered only by the fragment's
+    ``manifest_hash``, so a candidate identical in identity but citing a
+    different receipt is a reuse — the stored row is neither conflicted nor
+    rewritten, and the commit's snapshot pins the stored provenance.
+    """
     conn, clock = _catalog(tmp_path)
     base = _record_for("2024")
     _commit(conn, clock, [base], receipt_id="r1")
+    first_head = conn.execute(
+        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = 'shadow'").fetchone()
     before = _row_counts(conn)
 
     mutated = _record_for("2024", input_receipt_refs=(RECEIPT_B,))
     assert mutated.fragment_id == base.fragment_id
     assert mutated.manifest_hash != base.manifest_hash
 
-    with pytest.raises(DataError) as err:
-        _commit(conn, clock, [mutated], receipt_id="r2", scope="other")
-    assert err.value.code == "IDENTITY_CONFLICT"
-    assert _row_counts(conn) == before
+    _commit(conn, clock, [mutated], receipt_id="r2", scope="other")
+    after = _row_counts(conn)
+
+    for table in _TABLES:
+        expected = before[table] + (1 if table in ("data_import_receipts", "data_snapshot_heads")
+                                    else 0)
+        assert after[table] == expected, table
+
+    other_head = conn.execute(
+        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = 'other'").fetchone()
+    assert other_head["snapshot_id"] == first_head["snapshot_id"]
+    stored = Repository(conn).resolve_full(other_head["snapshot_id"])
+    stored_manifest = stored.table_manifests["securities"]
+    assert stored_manifest.fragment_refs == (manifests.fragment_ref(base),)
+    first = Repository(conn).resolve_full(first_head["snapshot_id"])
+    assert stored_manifest == first.table_manifests["securities"]
 
 
 def test_identity_conflict_dataset_version_different_payload(tmp_path):

@@ -3,8 +3,9 @@
 One function commits a fully-built snapshot: :func:`commit_snapshot` opens one
 short ``BEGIN IMMEDIATE`` coordinator transaction, verifies the caller's fence
 and the expected current head, inserts every immutable row idempotently (an
-existing ID is accepted only if its full canonical payload matches — an
-IDENTITY_CONFLICT otherwise, with nothing written), inserts the success
+existing ID is accepted only if its canonical payload matches — an
+IDENTITY_CONFLICT otherwise, with nothing written — except that a fragment
+differing only in provenance is a reuse; see below), inserts the success
 receipt, and compare-and-swaps the scope's head — never last-writer-wins.
 :func:`record_failed_import` persists a failed/conflict receipt in its own
 transaction, without ever touching a head. :func:`move_head` is the one
@@ -42,8 +43,19 @@ stored (never the candidate's own). ``commit_snapshot`` threads that
 reconciliation up through the snapshot before deciding whether the snapshot
 itself is a reuse, so a freshly inserted one never stores a ``manifest_hash``
 computed over an unreconciled child; an already-at-head result leaves the
-head untouched rather than CAS'd to itself. Contracts, objects and fragments
-have no parent field and keep the original same-ID-different-payload rule.
+head untouched rather than CAS'd to itself. Contracts and objects have no
+parent field and keep the original same-ID-different-payload rule.
+
+**Review fix (issue #97):** a fragment's ``fragment_id`` excludes
+``input_receipt_refs``/``import_request_hash`` — only its own ``manifest_hash``
+covers them — so ``_insert_fragment`` compares the eight identity columns
+only: a fragment differing solely in provenance is a *reuse* of the stored
+row, not an ``IDENTITY_CONFLICT``, and the stored provenance is never
+rewritten. ``commit_snapshot`` rebuilds any dataset manifest whose
+``fragment_refs`` no longer match the rows the catalog truly stores
+(:func:`_reconcile_manifests`), so the dataset version and snapshot it
+commits pin a ``manifest_hash`` a reader can still rebuild from those rows
+(``repository._manifest`` recomputes it on every resolve).
 
 Required fault points (task brief decision 2), fired through one ``fault``
 hook in commit order: ``before_transaction``, ``after_contracts``,
@@ -56,8 +68,9 @@ injected failure rolls back to nothing new; object-side fault points belong to
 from __future__ import annotations
 
 import dataclasses
+import json
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 
 from engine.v2.contracts import (
@@ -69,15 +82,7 @@ from engine.v2.contracts import (
     SnapshotRef,
     TableContract,
 )
-from engine.v2.data.errors import fail
-from engine.v2.data.manifests import snapshot_ref as build_snapshot_ref
-from engine.v2.data.manifests import (
-    table_contract_hash,
-    verify_dataset_manifest,
-    verify_fragment_record,
-    verify_partition_hashes,
-    verify_snapshot_ref,
-)
+from engine.v2.data import errors, manifests, objects
 from engine.v2.foundation import (
     CONTENT_HASH_PREFIX,
     ArtifactStore,
@@ -126,7 +131,7 @@ def _records_for(manifest: DatasetManifest, records: Sequence[FragmentRecord]) -
     for ref in manifest.fragment_refs:
         record = by_ref.get((ref.fragment_id, ref.manifest_hash))
         if record is None:
-            raise fail("MANIFEST_CORRUPT", "a dataset manifest references a fragment record "
+            raise errors.fail("MANIFEST_CORRUPT", "a dataset manifest references a fragment record "
                       "that was not provided", details={"fragment_id": ref.fragment_id})
         matched.append(record)
     return matched
@@ -136,7 +141,7 @@ def _table_name_for(manifest: DatasetManifest, snapshot: SnapshotRef) -> str:
     for name, ref in snapshot.table_versions.items():
         if ref == manifest.dataset_version_ref:
             return name
-    raise fail("MANIFEST_CORRUPT", "a dataset manifest is not referenced by the snapshot",
+    raise errors.fail("MANIFEST_CORRUPT", "a dataset manifest is not referenced by the snapshot",
               details={"dataset_version_id": manifest.dataset_version_ref.dataset_version_id})
 
 
@@ -154,30 +159,30 @@ def _check_no_key_overlap(records: Sequence[FragmentRecord]) -> None:
         ordered = sorted(group, key=lambda r: r.primary_key_min)
         for prev, cur in zip(ordered, ordered[1:]):
             if prev.primary_key_max >= cur.primary_key_min:
-                raise fail("MANIFEST_CORRUPT", "fragment key ranges overlap within one partition",
+                raise errors.fail("MANIFEST_CORRUPT", "fragment key ranges overlap within one partition",
                           details={"partition_key": partition_key})
 
 
 def _verify_everything(contracts: Sequence[TableContract], records: Sequence[FragmentRecord],
-                       manifests: Sequence[DatasetManifest], snapshot: SnapshotRef, store,
+                       dataset_manifests: Sequence[DatasetManifest], snapshot: SnapshotRef, store,
                        audit_partitions: bool) -> None:
     for contract in contracts:
-        if table_contract_hash(contract) != contract.definition_hash:
-            raise fail("MANIFEST_CORRUPT", "contract definition_hash does not match its content",
+        if manifests.table_contract_hash(contract) != contract.definition_hash:
+            raise errors.fail("MANIFEST_CORRUPT", "contract definition_hash does not match its content",
                       details={"contract_id": contract.contract_id})
     for record in records:
-        verify_fragment_record(record)
+        manifests.verify_fragment_record(record)
     contract_by_id = {c.contract_id: c for c in contracts}
     by_table: dict[str, DatasetManifest] = {}
-    for manifest in manifests:
+    for manifest in dataset_manifests:
         matched = _records_for(manifest, records)
-        verify_dataset_manifest(manifest, matched)
+        manifests.verify_dataset_manifest(manifest, matched)
         _check_no_key_overlap(matched)
         contract = contract_by_id[manifest.dataset_version_ref.table_contract_ref.contract_id]
         if audit_partitions:
-            verify_partition_hashes(store, manifest, matched, contract)
+            manifests.verify_partition_hashes(store, manifest, matched, contract)
         by_table[_table_name_for(manifest, snapshot)] = manifest
-    verify_snapshot_ref(snapshot, by_table)
+    manifests.verify_snapshot_ref(snapshot, by_table)
 
 
 # --------------------------------------------------------------------------
@@ -197,7 +202,7 @@ def _insert_contract(conn: sqlite3.Connection, contract: TableContract, now: str
     payload = (contract.schema_version, contract.table_name, contract.definition_hash, _dumps(contract))
     if existing is not None:
         if tuple(existing) != payload:
-            raise fail("IDENTITY_CONFLICT", "contract_id already exists with different content",
+            raise errors.fail("IDENTITY_CONFLICT", "contract_id already exists with different content",
                       details={"contract_id": contract.contract_id})
         return
     conn.execute(
@@ -213,7 +218,7 @@ def _insert_object(conn: sqlite3.Connection, ref: ObjectRef, now: str) -> None:
         (ref.object_id,)).fetchone()
     if existing is not None:
         if tuple(existing) != payload:
-            raise fail("IDENTITY_CONFLICT", "object_id already exists with different content",
+            raise errors.fail("IDENTITY_CONFLICT", "object_id already exists with different content",
                       details={"object_id": ref.object_id})
         return
     conn.execute(
@@ -221,7 +226,37 @@ def _insert_object(conn: sqlite3.Connection, ref: ObjectRef, now: str) -> None:
         "registered_at) VALUES (?, ?, ?, ?, ?, ?)", (ref.object_id, *payload, now))
 
 
-def _insert_fragment(conn: sqlite3.Connection, record: FragmentRecord, now: str) -> None:
+def _record_with_stored_provenance(record: FragmentRecord, existing: sqlite3.Row) -> FragmentRecord:
+    """``record``'s identity with the provenance columns the catalog already stores.
+
+    Rebuilt through ``manifests.fragment_record`` so both of the returned
+    record's id fields are recomputed, never copied from the candidate.
+    """
+    inspection = objects.FragmentInspection(
+        object_ref=record.object_ref, partition_key=record.partition_key,
+        row_count=record.row_count, byte_hash=record.byte_hash,
+        logical_content_hash=record.logical_content_hash,
+        primary_key_min=record.primary_key_min, primary_key_max=record.primary_key_max,
+        time_min=record.time_min, time_max=record.time_max)
+    stored = manifests.fragment_record(
+        inspection, record.table_contract_ref,
+        input_receipt_refs=tuple(json.loads(existing["input_receipt_refs_json"])),
+        import_request_hash=existing["import_request_hash"])
+    if stored.fragment_id != record.fragment_id:
+        raise errors.fail("MANIFEST_CORRUPT", "a stored fragment row does not match its identity payload",
+                  details={"fragment_id": record.fragment_id})
+    return stored
+
+
+def _insert_fragment(conn: sqlite3.Connection, record: FragmentRecord, now: str) -> FragmentRecord:
+    """Insert, or reuse a row and return the fragment as the catalog truly stores it.
+
+    ``fragment_id`` excludes ``input_receipt_refs``/``import_request_hash``
+    (only the record's own ``manifest_hash`` covers them — issue #97), so the
+    identity comparison is the first eight columns only; a candidate differing
+    solely in provenance is a reuse, and the stored row's provenance is
+    returned (never the candidate's own, and never written over).
+    """
     key_bounds = canonical_json({"primary_key_min": list(record.primary_key_min),
                                  "primary_key_max": list(record.primary_key_max)})
     time_bounds = (None if record.time_min is None else
@@ -236,15 +271,65 @@ def _insert_fragment(conn: sqlite3.Connection, record: FragmentRecord, now: str)
         "key_bounds_json, time_bounds_json, import_request_hash, input_receipt_refs_json "
         "FROM data_fragments WHERE fragment_id = ?", (record.fragment_id,)).fetchone()
     if existing is not None:
-        if tuple(existing) != payload:
-            raise fail("IDENTITY_CONFLICT", "fragment_id already exists with different content",
+        if tuple(existing)[:8] != payload[:8]:
+            raise errors.fail("IDENTITY_CONFLICT", "fragment_id already exists with different content",
                       details={"fragment_id": record.fragment_id})
-        return
+        if tuple(existing)[8:] == payload[8:]:
+            return record
+        return _record_with_stored_provenance(record, existing)
     conn.execute(
         "INSERT INTO data_fragments (fragment_id, object_id, contract_id, partition_key, row_count, "
         "byte_hash, logical_content_hash, key_bounds_json, time_bounds_json, import_request_hash, "
         "input_receipt_refs_json, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (record.fragment_id, *payload, now))
+    return record
+
+
+def _reconcile_manifests(dataset_manifests: Sequence[DatasetManifest],
+                         stored_records: Mapping[str, FragmentRecord]) -> list[DatasetManifest]:
+    """Rebuild every manifest whose refs no longer match the rows truly stored.
+
+    ``_insert_fragment`` reuses a provenance-only-different fragment without
+    rewriting its row (issue #97), so a candidate manifest built over the
+    caller's fresh provenance would otherwise pin a ``manifest_hash`` no
+    reader can rebuild from those rows (``repository._manifest`` recomputes
+    it on every resolve and raises ``MANIFEST_CORRUPT`` otherwise). Manifests
+    whose refs already match are returned untouched.
+    """
+    reconciled: list[DatasetManifest] = []
+    for manifest in dataset_manifests:
+        matched = []
+        for ref in manifest.fragment_refs:
+            record = stored_records.get(ref.fragment_id)
+            if record is None:
+                raise errors.fail("MANIFEST_CORRUPT", "a dataset manifest references a fragment record "
+                          "that was not provided", details={"fragment_id": ref.fragment_id})
+            matched.append(record)
+        if all(manifests.fragment_ref(record) == ref
+               for record, ref in zip(matched, manifest.fragment_refs)):
+            reconciled.append(manifest)
+            continue
+        reconciled.append(manifests.dataset_manifest(
+            manifest.dataset_version_ref.table_contract_ref, matched,
+            knowledge_mode=manifest.knowledge_mode,
+            coverage_receipt_refs=manifest.coverage_receipt_refs,
+            availability_evidence_refs=manifest.availability_evidence_refs,
+            parent_dataset_version_id=manifest.parent_dataset_version_id,
+            partition_logical_hashes=manifest.partition_logical_hashes))
+    return reconciled
+
+
+def _insert_fragments_and_reconcile(conn: sqlite3.Connection, records: Sequence[FragmentRecord],
+                                    dataset_manifests: Sequence[DatasetManifest],
+                                    now: str) -> list[DatasetManifest]:
+    """Insert every fragment, then rebuild any manifest over the rows truly stored.
+
+    ``_insert_fragment`` returns each fragment as the catalog stores it (issue
+    #97 provenance reuse), and ``_reconcile_manifests`` keeps the dataset
+    version about to pin those refs rebuildable from those rows.
+    """
+    truthful = [_insert_fragment(conn, record, now) for record in records]
+    return _reconcile_manifests(dataset_manifests, {r.fragment_id: r for r in truthful})
 
 
 def _reconciled_manifest(manifest: DatasetManifest, true_parent: str | None,
@@ -282,7 +367,7 @@ def _insert_dataset_version(conn: sqlite3.Connection, manifest: DatasetManifest,
         "WHERE dataset_version_id = ?", (ref.dataset_version_id,)).fetchone()
     if existing is not None:
         if tuple(existing[:5]) != identity:
-            raise fail("IDENTITY_CONFLICT", "dataset_version_id already exists with different content",
+            raise errors.fail("IDENTITY_CONFLICT", "dataset_version_id already exists with different content",
                       details={"dataset_version_id": ref.dataset_version_id})
         return _reconciled_manifest(manifest, existing["parent_dataset_version_id"],
                                     existing["manifest_hash"])
@@ -303,7 +388,7 @@ def _insert_memberships(conn: sqlite3.Connection, manifest: DatasetManifest) -> 
             "AND ordinal = ?", (dsv_id, ordinal)).fetchone()
         if existing is not None:
             if existing["fragment_id"] != ref.fragment_id:
-                raise fail("IDENTITY_CONFLICT", "dataset version membership changed at this ordinal",
+                raise errors.fail("IDENTITY_CONFLICT", "dataset version membership changed at this ordinal",
                           details={"dataset_version_id": dsv_id, "ordinal": ordinal})
             continue
         conn.execute(
@@ -319,7 +404,7 @@ def _reconcile_snapshot(snapshot: SnapshotRef, table_versions: dict[str, Dataset
     fix). ``dataset_version_id`` never changes under reconciliation, so the
     rebuilt ``snapshot_id`` always equals the candidate's own.
     """
-    return build_snapshot_ref(
+    return manifests.snapshot_ref(
         table_versions, calendar_version=snapshot.calendar_version,
         source_priority_version=snapshot.source_priority_version,
         finality_receipt_refs=snapshot.finality_receipt_refs,
@@ -345,7 +430,7 @@ def _insert_snapshot(conn: sqlite3.Connection, snapshot: SnapshotRef, receipt_id
         "WHERE snapshot_id = ?", (snapshot.snapshot_id,)).fetchone()
     if existing is not None:
         if tuple(existing[:4]) != identity:
-            raise fail("IDENTITY_CONFLICT", "snapshot_id already exists with different content",
+            raise errors.fail("IDENTITY_CONFLICT", "snapshot_id already exists with different content",
                       details={"snapshot_id": snapshot.snapshot_id})
         if (existing["parent_snapshot_id"] == snapshot.parent_snapshot_id
                 and existing["manifest_hash"] == snapshot.manifest_hash):
@@ -369,7 +454,7 @@ def _insert_snapshot_tables(conn: sqlite3.Connection, snapshot: SnapshotRef) -> 
             "AND table_name = ?", (snapshot.snapshot_id, table_name)).fetchone()
         if existing is not None:
             if existing["dataset_version_id"] != ref.dataset_version_id:
-                raise fail("IDENTITY_CONFLICT", "snapshot table binding changed",
+                raise errors.fail("IDENTITY_CONFLICT", "snapshot table binding changed",
                           details={"snapshot_id": snapshot.snapshot_id, "table_name": table_name})
             continue
         conn.execute(
@@ -401,10 +486,10 @@ def _check_head_expectation(current: sqlite3.Row | None, expected_snapshot_id: s
                             expected_generation: int) -> None:
     if current is None:
         if expected_snapshot_id is not None or expected_generation != 0:
-            raise fail("SNAPSHOT_CONFLICT", "expected head does not match the current catalog state")
+            raise errors.fail("SNAPSHOT_CONFLICT", "expected head does not match the current catalog state")
         return
     if current["snapshot_id"] != expected_snapshot_id or current["generation"] != expected_generation:
-        raise fail("SNAPSHOT_CONFLICT", "expected head does not match the current catalog state")
+        raise errors.fail("SNAPSHOT_CONFLICT", "expected head does not match the current catalog state")
 
 
 def _update_head(conn: sqlite3.Connection, scope: str, new_snapshot_id: str,
@@ -421,7 +506,7 @@ def _update_head(conn: sqlite3.Connection, scope: str, new_snapshot_id: str,
         (new_snapshot_id, expected_generation + 1, now, receipt_id, scope, expected_snapshot_id,
          expected_generation))
     if cursor.rowcount == 0:
-        raise fail("SNAPSHOT_CONFLICT", "head compare-and-swap changed zero rows")
+        raise errors.fail("SNAPSHOT_CONFLICT", "head compare-and-swap changed zero rows")
 
 
 # --------------------------------------------------------------------------
@@ -454,7 +539,7 @@ def _existing_receipt(conn: sqlite3.Connection, receipt_id: str, request_hash: s
     found = (row["attempt_id"], row["fence"], row["source_manifest_hash"], row["scope"], row["status"],
             row["result_snapshot_id"])
     if found != expected:
-        raise fail("IDENTITY_CONFLICT", "receipt_id already exists with a different outcome",
+        raise errors.fail("IDENTITY_CONFLICT", "receipt_id already exists with a different outcome",
                   details={"receipt_id": receipt_id})
     already_at_head = snapshot.snapshot_id == expected_head_snapshot_id
     resulting_generation = (expected_head_generation if already_at_head
@@ -511,8 +596,7 @@ def commit_snapshot(conn: sqlite3.Connection, *, scope: str, request_hash: str,
         for obj in objects:
             _insert_object(conn, obj, now)
         fault("after_objects")
-        for record in records:
-            _insert_fragment(conn, record, now)
+        manifests = _insert_fragments_and_reconcile(conn, records, manifests, now)
         fault("after_fragments")
         reconciled = [_insert_dataset_version(conn, manifest, now) for manifest in manifests]
         fault("after_dataset_versions")
@@ -574,7 +658,7 @@ def record_failed_import(conn: sqlite3.Connection, *, receipt_id: str, request_h
             found = (existing["attempt_id"], existing["fence"], existing["source_manifest_hash"],
                      existing["status"], existing["result_snapshot_id"])
             if found != expected:
-                raise fail("IDENTITY_CONFLICT", "receipt_id already exists with a different outcome",
+                raise errors.fail("IDENTITY_CONFLICT", "receipt_id already exists with a different outcome",
                           details={"receipt_id": receipt_id})
         else:
             conn.execute(
@@ -603,7 +687,7 @@ def move_head(conn: sqlite3.Connection, *, scope: str, to_snapshot_id: str, expe
         target = conn.execute("SELECT 1 FROM data_snapshots WHERE snapshot_id = ?",
                               (to_snapshot_id,)).fetchone()
         if target is None:
-            raise fail("SNAPSHOT_NOT_FOUND", "rollback target snapshot is not in the catalog",
+            raise errors.fail("SNAPSHOT_NOT_FOUND", "rollback target snapshot is not in the catalog",
                       details={"snapshot_id": to_snapshot_id})
         _check_head_expectation(_current_head(conn, scope), expected_snapshot_id, expected_generation)
         cursor = conn.execute(
@@ -612,4 +696,4 @@ def move_head(conn: sqlite3.Connection, *, scope: str, to_snapshot_id: str, expe
             (to_snapshot_id, expected_generation + 1, now, receipt_ref, scope, expected_snapshot_id,
              expected_generation))
         if cursor.rowcount == 0:
-            raise fail("SNAPSHOT_CONFLICT", "head compare-and-swap changed zero rows")
+            raise errors.fail("SNAPSHOT_CONFLICT", "head compare-and-swap changed zero rows")

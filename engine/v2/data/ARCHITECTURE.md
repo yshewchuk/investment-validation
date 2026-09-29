@@ -183,11 +183,22 @@ responsible for two things that follow from a change to that mapping:
   session already normalized under the old mapping is served back verbatim
   on any later replay that reuses its `raw_hash`, silently mixing pre- and
   post-fix rows under one identity. `_stage_normalizations` therefore pins
-  the literal string (`"daily_market.v2"` as of #96, was `"daily_market.v1"`)
-  and this string is bumped in the same PR as any change to the provider's
-  row mapping; a session cached under the old id is never read back into a
-  `v2`-normalized candidate; it is only revisited by a fresh fetch, which
-  gets a new raw receipt and a `v2` normalization id.
+  the literal string (`"daily_market.v3"` as of #97, was `"daily_market.v2"`
+  as of #96, `"daily_market.v1"` before that) and this string is bumped in
+  the same PR as any change that alters what a normalized document contains
+  for the same raw input — the #97 bump was for a changed `RevisionCandidate`
+  shape (content-addressed `revision_id`/`revision_ordinal`), not a changed
+  row mapping, but the same rule applies: a session cached under the old id
+  is never read back into a `v3`-normalized candidate; it is only revisited
+  by a new attempt, and every new attempt normalizes under the current
+  `v3` id regardless of whether it calls the provider. A fresh fetch does
+  not always get a new raw receipt either — if its request and bytes match
+  a stored one, `cache_raw_receipt` reuses that receipt's id and
+  `received_at` unchanged. `_cached_fetched_units` (`incremental.py`) skips
+  the provider call altogether when the raw receipt already exists,
+  rebuilding the same rows straight from that stored receipt. Either path
+  still gets a fresh `observed_at` for revision ordering, and either path's
+  candidate is always normalized under the current `v3` id.
 - **mcap backward carry is bounded to the partitions this build already
   loaded, never a fresh historical scan, and it only ever writes into a row
   this build actually produced a winner for.** One ORATS `tradeDate` fetch
@@ -570,6 +581,200 @@ call whose code argument sits on its own line):
 `CALENDAR_UNAVAILABLE` is registered here (`contracts/data.py:153`) but
 raised only by `engine.v2.research`, never from inside this package. None
 of the 22 is dead in `DATA_FAILURE_CODES` overall.
+
+### `daily_market` re-ingest identity and partial-response detection (#97)
+
+Before this fix, any second fetch of an already-committed `daily_market`
+session refused permanently with `IDENTITY_CONFLICT` (a changed
+context-ticker universe, a smoke or shadow run of the same session, or a
+provider correction all hit it), and a genuinely partial provider response
+could be committed as if it were complete. This PR closes the provider
+correction and completeness cases below; the changed-ticker-universe case
+(normalization identity) needs a shared migration-framework change and is
+tracked separately (issue #133) rather than folded into this PR — see that
+bullet for exactly what still blocks it. Two independent identity/
+completeness fixes ship here, both in `incremental.py` unless noted:
+
+- **Revision identity now distinguishes content, so a corrected payload
+  supersedes the old one instead of conflicting.** `_fetched_revision`
+  previously derived `revision_id` from `(unit.request_id, ticker,
+  session_date)` alone and hard-coded `revision_ordinal=1` for every fetch.
+  Two revisions for the same logical key with DIFFERENT row content — a
+  provider correction, or a `_load_retained_revisions`-reloaded revision
+  from an earlier committed run merging against a freshly re-fetched one in
+  `select_revision_winners` — collided on that same `revision_id`, and
+  since their payloads differed, the early exact-id dedup loop refused
+  `IDENTITY_CONFLICT: one revision id has conflicting payloads` before
+  ranking ever ran. Fixed to match this package's own precedent for a
+  content-addressed revision id
+  (`event_revisions.event_revision_candidate`'s `revision_id="event_rev_" +
+  content_hash(payload)...`) and `engine.v2.ops.forward_calendar_store`'s
+  precedent for a received-at-derived ordinal (`_revision`'s
+  `revision_ordinal=int(pd.Timestamp(received_at).timestamp() *
+  1_000_000)`): `revision_id` now folds in `content` (the same
+  `revision_content_hash` already computed for
+  `RevisionCandidate.content_hash`), and `revision_ordinal` is derived from
+  `received_at` the same way (as a floor — see below), instead of the
+  constant `1`. A corrected fetch therefore gets a distinct `revision_id`
+  (no more early exact-id collision against the retained one), and — when
+  both revisions were built by the same process (see below for the
+  cross-process case) — a strictly later ordinal too, so
+  `_rank_revision_group` picks it over the earlier revision by ordinal
+  precedence and never reaches its own "equal-ranked ... conflicting
+  content" refusal. That refusal cannot happen at all for two revisions
+  built by the same process: `received_at`'s
+  clock resolution is coarser than its microsecond string format implies,
+  so `_received_at_ordinal` treats the clock-derived value as a floor only,
+  bumped past a process-wide high-water mark whenever it would otherwise
+  tie or go backward — two revisions from the same process always get
+  distinct ordinals. The high-water mark is process-local, not shared, so
+  the refusal remains reachable across two genuinely separate
+  processes/attempts: their independent floors and bumps are never
+  coordinated with each other, so the ordinals they allocate for the same
+  logical key can still coincide without either process's own clock
+  reading having to match the other's — still refused as an unresolvable
+  ambiguity in that case.
+  `revision_ordinal`'s `received_at` is a
+  fresh `observed_at` captured once per acquisition attempt (in `_fetch_unit`
+  and `_cached_fetched_units`), deliberately NOT `cache_raw_receipt`'s own
+  `record.received_at` — which reuses the ORIGINAL timestamp on a
+  byte-identical raw cache hit — because a revision's ordinal has to mean
+  "when did this attempt confirm this fact", not "when were these exact raw
+  bytes first ever seen": a session that goes 100 → 105 → 100 must have the
+  reverted 100 outrank the intervening 105, which it cannot if its ordinal
+  is pinned to the first fetch's now-stale timestamp. `_FetchedUnit`'s own
+  `received_at` (and `raw_payload["received_at"]`, which feeds coverage's
+  `completed_at`) is untouched — that field's cache-replay reproducibility
+  is a different, still-correct invariant (see `_fetched_coverage`'s own
+  docstring). Because `revision_ordinal`/`received_at` are now always fresh,
+  `cache_normalization`'s existing-row check no longer requires an exact
+  `normalized_hash` match on a cache hit — it compares revision identity
+  (`_revision_identity_document`, ticker/session/row/deleted/content_hash)
+  instead, and always returns the stored document. A fragment-level
+  analogue of this same problem is fixed in `catalog.py`: `_insert_fragment`
+  compared the full stored row, including the two columns (
+  `import_request_hash`, `input_receipt_refs`) `fragment_id` itself already
+  excludes from identity (`manifests.fragment_record`'s own docstring), so a
+  revert arriving via a new session's receipts still refused
+  `IDENTITY_CONFLICT` one layer below the revision fix. It now compares only
+  the columns `fragment_id` actually covers and reuses the stored row's
+  provenance on a match; `commit_snapshot` reconciles any dataset manifest
+  whose `fragment_refs` would otherwise cite provenance the catalog does not
+  store, so every committed `manifest_hash` stays rebuildable.
+- **A reused fragment's `manifest_hash` is reconciled into the changeset
+  audit row too, for both `daily_market` and the generic-table path.** The
+  fragment-reuse fix above changes a table's `manifest_hash` without
+  changing its `dataset_version_id` (`commit_snapshot`'s own fragment/
+  dataset-version reconciliation), but each `record_references` callback
+  (`incremental.py`'s `_record_candidate_references` for `daily_market`,
+  `generic_incremental.py`'s `_record_references` for every other table)
+  builds its `changeset` before that reconciliation runs, from the
+  caller's own (possibly stale) `candidate.table_manifest`. Left alone,
+  the committed `data_changesets` row could cite a
+  `result_dataset_version_ref.manifest_hash` inconsistent with what
+  `commit_snapshot` actually stored in `data_dataset_versions`. Both
+  callbacks now read back the truly-stored row for that
+  `dataset_version_id` (already inserted-or-reconciled by the time
+  `record_references` runs, same transaction) and rebuild the changeset's
+  `result_dataset_version_ref`/`changeset_hash` from it when they diverge —
+  `_reconciled_changeset` in each module (two copies, not shared: importing
+  `incremental.py` from `generic_incremental.py` would be circular, since
+  `incremental.py` already imports `generic_incremental`). `changeset_id`
+  itself never changes (it is derived from `snapshot_id`/`changes`, not
+  `manifest_hash`), so this only ever changes a changeset row's content on
+  the rare path where reconciliation actually swapped in different stored
+  provenance, never which row is targeted.
+- **A retried commit's revision ordinal is authoritative from the database
+  row, not required to match the cached normalization artifact.** A retry
+  after a failed commit (the outer `commit_snapshot` transaction rolled
+  back after `cache_normalization` had already durably cached its own row
+  in a separate mini-transaction) gets a fresh `observed_at`-derived
+  `revision_ordinal` on its next attempt — correctly, so it can still
+  outrank a stale correction in that attempt's own ranking — and commits
+  that fresh ordinal into `data_daily_market_revisions.revision_number`.
+  The earlier failed attempt's cached normalization artifact still holds
+  the older ordinal, though, since nothing had reason to update it.
+  `_load_retained_revisions` already treats `raw_receipt_id` and
+  `normalization_id` as attempt-specific bookkeeping the database row is
+  authoritative for (overridden onto the reloaded revision, never compared
+  against the artifact); `revision_ordinal` is exactly the same kind of
+  field — already excluded from `_revision_identity_document`'s identity
+  comparison — so it now gets the same treatment: sourced from
+  `revision_number`, not checked for agreement with the artifact. (An
+  earlier attempt at this fix tried to keep the cached artifact itself in
+  sync via `INSERT OR REPLACE` into `data_normalizations`, bypassing its
+  immutable-row trigger; reverted before merge, since it silently defeats
+  an intentional invariant this repo explicitly disallows working around —
+  see `guides/rearchitecture_phase1_operations.md`.)
+- **Normalization identity still does not include the expected-key set —
+  tracked at #133, not fixed here.** `cache_normalization`'s
+  `normalization_id` keys only on `(raw_hash, normalizer_id, contract_id)`.
+  ORATS's `hist/summaries`/`hist/cores` responses are market-wide
+  per-`tradeDate` dumps (see
+  `engine.v2.ops.providers.orats_daily_market`'s own module docstring), so
+  the SAME raw payload bytes — and thus the same `raw_hash` — can be
+  normalized against two DIFFERENT `expected_keys` sets from two separate
+  fetch units of the same session (e.g. a context-ticker universe that grew
+  between an earlier and a later run), each producing a different filtered
+  `revisions` list from the identical raw receipt under what is still the
+  same `normalization_id` — refusing the second as `IDENTITY_CONFLICT:
+  normalization identity has conflicting content`. The Python-level fix is
+  simple (fold a canonical, sorted hash of the unit's `expected_keys` into
+  `normalization_id`, alongside `raw_hash`/`normalizer_id`/`contract_id`)
+  and was implemented and verified during this PR's work, but it cannot ship
+  alone: `data_normalizations` also carries a DB-level `UNIQUE (raw_hash,
+  normalizer_id, contract_id)` from schema migration v10, predating
+  `normalization_id` varying with `expected_keys`, which still refuses the
+  second row outright (a raw `sqlite3.IntegrityError`, not the
+  application's own `IDENTITY_CONFLICT`) regardless of what
+  `normalization_id`'s value would be. Dropping that stale constraint needs
+  a new migration (migrations are checksummed and immutable once applied,
+  `engine/v2/ops/migrations.py`, so v10 itself cannot be edited) that
+  recreates the table without it — and that recreate's `DROP TABLE
+  data_normalizations` fails with `FOREIGN KEY constraint failed` on any
+  catalog with existing `data_daily_market_revisions` rows, because
+  `engine/v2/ops/catalog.py` turns foreign-key enforcement on for every
+  connection, `PRAGMA foreign_keys = OFF` is a documented no-op inside an
+  active transaction, and `migrations.py`'s `migrate()` runs every
+  migration inside one `BEGIN IMMEDIATE` — so a migration's own statement
+  list has no way to disable foreign-key enforcement for its own recreate.
+  Fixing this needs a change to the shared, checksummed migration framework
+  itself (used by all three schema owners, not just this one), which is a
+  decision with its own blast radius and is tracked at #133 rather than
+  decided inside this PR.
+- **Coverage `expected` comes from the unit's requested keys, never from
+  the rows that happened to come back.** `_fetched_unit_rows` built
+  `_FetchedUnit.expected` from `_coverage_key(item) for item in
+  revisions` — the revisions actually produced from RETURNED rows — so
+  coverage completeness was a tautology: a unit could never be anything but
+  complete against its own returned set, no matter how many expected
+  tickers a truncated response actually omitted. `expected` is now built
+  directly from `unit["expected_keys"]` paired with the unit's own session
+  date (`unit["partition_key"]`), independent of what came back, so a
+  missing expected ticker is a genuine gap `build_completed_coverage` can
+  see. This only matters once
+  `engine.v2.ops.providers.orats_daily_market._classify` stops masking the
+  gap: it previously folded every expected-but-not-returned ticker into
+  `empty_keys` — `incremental_data.classify_response`'s "the provider
+  affirmatively reported no data for this key" signal, which ORATS never
+  actually gives per ticker — which made its `covered` set always equal
+  `requested` and so `_response_kind` could never see `covered !=
+  requested`, the exact condition that already yields `"partial"` (a
+  retryable gap, `_FAILURE_CODE_BY_KIND["partial"] = "TRANSIENT_SOURCE"`,
+  already wired but previously unreachable for this provider) in
+  `classify_response`'s own general framework. `_classify` no longer
+  synthesizes `empty_keys` from absence, only from `returned`: a 2xx
+  response missing an expected ticker now classifies `"partial"`, which
+  `_overall_kind` turns into a refusal at fetch time (`_fetch_unit` never
+  gets a `response_kind` to cache) — `TRANSIENT_SOURCE` unless the
+  paired `summaries`/`cores` endpoint's own kind is worse (a `not_final`
+  endpoint outranks it to `SOURCE_NOT_FINAL`; `credential_invalid`/
+  `rate_limited` outrank both — see that provider's own `ARCHITECTURE.md`
+  for the full ranking), so
+  `nightly._native_cached_outcome`'s `response_kind = 'complete'` cache
+  lookup can never see it, and a genuinely complete day (every expected
+  ticker returned, or the provider's whole-response 2xx-with-zero-rows
+  `not_final` case for a date not yet published) is unaffected.
 
 ### `catalog.commit_snapshot` / `generic_incremental.commit_generic_table_candidate` — the #56 fence-composition contract (4c R1–R6)
 
