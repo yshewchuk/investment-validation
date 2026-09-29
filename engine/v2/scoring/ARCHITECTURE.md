@@ -244,7 +244,7 @@ request)`:
 | Condition | Outcome |
 |---|---|
 | binding's `decision_clock_id` matches the request's, and `strategy_id` is the request's own | in scope |
-| binding's `strategy_id == "*"` (wildcard) | always in scope, shared across every strategy |
+| binding's `strategy_id == "*"` (wildcard) | in scope for every strategy sharing the matching decision clock |
 | binding's `decision_clock_id`/`strategy_id` mismatch and not wildcard | excluded from the canonical executors AND from folded `outputs`/`gate_result` (`_collect_frozen_results`) — checked at both points, so an out-of-scope `InferenceRequest` submitted anyway never leaks into the published record |
 | two in-scope bindings collide on the same canonical target or the gate role | `FrozenBindingConflict(target, binding_ids)` (`ValueError`), raised before any inference runs — a release-authoring defect, never resolved by binding order; fails the whole `score_frozen` call and, through it, the whole `score_frozen_batch` batch (batch preflight does not re-check) |
 | `release` declares no `bindings` attribute at all | scoping returns `None`; caller keeps the historical unscoped fold |
@@ -323,7 +323,7 @@ message `f"{code}: {detail}"`.
 | a name in the feature-name leakage denylist — a realized panel outcome column, `driver_name` itself, or a Tier-4 stamp/band/metadata column (`*_fold_start`/`*_model_id`/`"tier3_snapshot"`/`pred_iv_crush_30*`) — checked on `feature_names` alone, before any row is read | `LEAKED_FEATURE_NAME` |
 | a calculated scoring answer surfaces in the assembled `context`/`feature_vector` (`source_inputs._reject_answers`, the same denylist `build_native_score_inputs` enforces — an independent second layer over raw source-table columns, not a duplicate of the name denylist above) | plain `ValueError` (not this refusal type) |
 | `panel_row["date"]` (normalized) != `calendar_row["event_date"]` (normalized) — `panel_row["date"]` is the EVENT date, not an observation date, so this is the only check that catches a row staged for the wrong event; it never compares against `as_of` | `PANEL_ROW_WRONG_EVENT` |
-| `as_of`, `calendar_row["calendar_observed_through"]`, `panel_anchor`, or a `quote_rows` entry's `observed_at` fails `validated_as_of` (rejects `None`/`NaT`/a bare number or bool/unparseable/timezone-aware), or any of them lands strictly after `as_of` | `POST_AS_OF_ROW` (or `validated_as_of`'s own `ValueError`) |
+| `as_of`, `calendar_row["calendar_observed_through"]`, `panel_anchor`, or a `quote_rows` entry's `observed_at` fails `validated_as_of` (rejects `None`/`NaT`/a bare number or bool/unparseable/timezone-aware), or any of them lands strictly after `as_of` | `POST_AS_OF_ROW` (or `NightlySourceBundleRefusal`: `MISSING_STAGED_INPUT` for `None`, `INVALID_DATE` otherwise) |
 | a feature resolved from `tier4_row`, non-null, whose own base metric's `fold_start` is missing, or missing-and-present-but-dated-after `as_of` (a null resolved value — legacy's own "no forecast" — skips this check entirely, whatever its `fold_start` holds) | `MISSING_STAGED_INPUT` / `POST_AS_OF_ROW` |
 | `calendar_row["spot"]` not coercible to `float`, non-finite, or `<= 0.0` | `INVALID_SPOT` |
 | `feature_names` a bare `str`/`bytes`, not a `Sequence`, or containing a non-`str`, empty, or duplicate entry | `INVALID_FEATURE_NAMES` |
