@@ -615,12 +615,14 @@ completeness fixes ship here, both in `incremental.py` unless noted:
   `revision_content_hash` already computed for
   `RevisionCandidate.content_hash`), and `revision_ordinal` is derived from
   `received_at` the same way (as a floor — see below), instead of the
-  constant `1`. A corrected fetch therefore gets both a distinct
-  `revision_id` (no more early exact-id collision against the retained
-  one) and a strictly later ordinal, so `_rank_revision_group` picks it
-  over the earlier revision by ordinal precedence and never reaches its own
-  "equal-ranked ... conflicting content" refusal. That refusal cannot
-  happen at all for two revisions built by the same process: `received_at`'s
+  constant `1`. A corrected fetch therefore gets a distinct `revision_id`
+  (no more early exact-id collision against the retained one), and — when
+  both revisions were built by the same process (see below for the
+  cross-process case) — a strictly later ordinal too, so
+  `_rank_revision_group` picks it over the earlier revision by ordinal
+  precedence and never reaches its own "equal-ranked ... conflicting
+  content" refusal. That refusal cannot happen at all for two revisions
+  built by the same process: `received_at`'s
   clock resolution is coarser than its microsecond string format implies,
   so `_received_at_ordinal` treats the clock-derived value as a floor only,
   bumped past a process-wide high-water mark whenever it would otherwise
