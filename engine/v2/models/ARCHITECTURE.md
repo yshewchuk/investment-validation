@@ -249,19 +249,12 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
   (root doc §5), scoped to `deployment.py`'s own explicit checks: duplicate
   bindings, payload hash mismatches, a stale or corrupt manifest hash, and
   a broken pointer history each raise a `DeploymentError` subclass, never a
-  substituted value. Three things this does NOT cover, all pre-existing and
-  out of scope here (issue #207): reading a manifest whose JSON does not
-  even parse can leak a bare `json.JSONDecodeError`/`DocumentError` instead
-  of a typed refusal — `restage_semantic_hash` guards its own read against
-  this, but `stage_release`, `promote`/`rollback` and `resolve_release`/
-  `current_release` do not; `stage_release` also depends on
-  `releases.require_complete_release`, which raises its own
-  `ModelReleaseRefusal` for an incomplete inventory — not a
-  `DeploymentError` subclass, a sibling hierarchy; and `FrozenInference`
-  (`loader.py`) uses a separate, non-exception mechanism entirely for every
-  refusal it detects (duplicate or missing binding, an invalid artifact, a
-  release/request mismatch) — a typed `InferenceResult` with
-  `status=MODEL_NOT_READY` and a reason code, never a raised exception.
+  substituted value. An unparseable manifest can still escape untyped from
+  several deployment operations (issue #207); an incomplete inventory raises
+  `releases.require_complete_release`'s own `ModelReleaseRefusal`, not a
+  `DeploymentError`; and `FrozenInference` (`loader.py`) reports every
+  refusal it detects through a typed `InferenceResult` with
+  `status=MODEL_NOT_READY`, never a raised exception.
 - **A hash mismatch never falls back.** No branch anywhere in this package
   substitutes a different object, an older cached value, or a default when
   a content hash disagrees — including the pointer swap itself:
