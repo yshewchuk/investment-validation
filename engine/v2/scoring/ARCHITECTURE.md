@@ -70,9 +70,11 @@ load-bearing entrypoints:
   other three (`assemble_nightly_source_bundle`, `validated_as_of`,
   `NightlySourceBundleRefusal`) but not `quote_domain_map`. Either way the
   checker would pass without any of the four listed. They're declared anyway
-  because all four are real `__all__` exports with a real `engine.v2.*`
-  consumer today (see Dependencies for what that consumer actually runs in
-  production).
+  because all four are real `__all__` exports with a real caller today —
+  `quote_domain_map`'s is the external `tools/capture_tier0_corpus.py`, not
+  an `engine.v2.*` module; the other three's is `engine.v2.ops.
+  native_score_batch.py` (see Dependencies for what that consumer actually
+  runs in production).
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
   identity, model artifact refs, and analog/payoff/recalibration artifacts;
