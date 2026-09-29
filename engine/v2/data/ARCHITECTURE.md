@@ -625,9 +625,13 @@ completeness fixes ship here, both in `incremental.py` unless noted:
   so `_received_at_ordinal` treats the clock-derived value as a floor only,
   bumped past a process-wide high-water mark whenever it would otherwise
   tie or go backward — two revisions from the same process always get
-  distinct ordinals. The refusal remains reachable only across genuinely
-  separate processes/attempts whose real-world clocks land on the
-  identical microsecond, still refused as an unresolvable ambiguity.
+  distinct ordinals. The high-water mark is process-local, not shared, so
+  the refusal remains reachable across two genuinely separate
+  processes/attempts: their independent floors and bumps are never
+  coordinated with each other, so the ordinals they allocate for the same
+  logical key can still coincide without either process's own clock
+  reading having to match the other's — still refused as an unresolvable
+  ambiguity in that case.
   `revision_ordinal`'s `received_at` is a
   fresh `observed_at` captured once per acquisition attempt (in `_fetch_unit`
   and `_cached_fetched_units`), deliberately NOT `cache_raw_receipt`'s own
