@@ -1255,10 +1255,14 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
 `release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
 `identity`/`application`), `engine.v2.ledger` (6.0), `engine.v2.parity`
-(6.5). `engine.v2.models` (3.5, `no_fit`/`payoff_artifact`) and
-`engine.v2.domain.generation` (2.0, `Geometry`/`Pricing`) are lazy-only,
-imported only at specific rescore/native-score-input call sites, never at
-module top level.
+(6.5). `engine.v2.models` (3.5) and `engine.v2.domain.generation` (2.0,
+`Geometry`/`Pricing`) are lazy-only, never at module top level.
+`engine.v2.domain.generation` is imported only at one rescore/
+native-score-input call site (`cli.py::_load_native_score_inputs`);
+`engine.v2.models` (`no_fit`/`payoff_artifact`/`deployment`/`training`/
+`RuntimeFitForbidden`/`TrainingRefused`) has more call sites, spanning
+rescore (`cli.py`, `native_score_batch.py`, `worker.py`) as well as
+training/promotion/release resolution (`training.py`, `supervisor.py`).
 
 It does not import its layer-7.0 peers `engine.v2.serving`/
 `engine.v2.research`, or anything above them (`engine.v2.diagnosis`,
@@ -1468,10 +1472,14 @@ request's or plan's root. `submit_computed_moves_refresh_if_ready` runs
 inside a live `Service` instead, which already has its own authoritative
 worker-source root (`self.code_source`, what `Service._launch` validates
 `implementation_ref` against); it takes `code_source` as a caller-supplied
-parameter and fingerprints that, never a self-derived root of its own. No
-other stage in this package may self-derive a fingerprinting root the way
-`build_legacy_job_requests` does — a stage that runs inside `Service` takes
-`code_source` as a parameter instead.
+parameter and fingerprints that, never a self-derived root of its own. The
+distinction is plan builder vs. `Service` submitter, not a rule unique to
+`build_legacy_job_requests`: other plan builders that run outside a live
+`Service` (`training.py`'s and `experiments.py`'s own plan builders,
+`worker_source_manifest`-based, and `cli.py`'s own further call sites) may
+self-derive their own fingerprinting root the same way, since they have no
+live `Service` to draw one from. Only a stage that runs *inside* `Service`
+must take `code_source` as a parameter instead of self-deriving.
 
 `native_score_batch.py` adds **no runtime fitting** (root doc §2's
 layer-6.0 rule): `run_native_score_batch_worker` runs `score_batch` inside
