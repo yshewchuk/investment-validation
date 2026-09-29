@@ -239,9 +239,8 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     head = _head(conn)
     configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
 
-    missing, extra = "BBB", "ZZZ"
-    _plan, requests = _build_requests(conn, store, clock, tmp_path,
-                                      context_tickers=(TICKER, missing))
+    extra = "ZZZ"
+    _plan, requests = _build_requests(conn, store, clock, tmp_path)
     request = requests[0]
     assert request.job.parameters["provider_calls"] == 6
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
@@ -255,9 +254,48 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     revisions = conn.execute(
         "SELECT ticker, session_date FROM data_daily_market_revisions").fetchall()
     assert [(row["ticker"], row["session_date"]) for row in revisions] == [(TICKER, SESSION)]
-    assert missing not in {row["ticker"] for row in revisions}
     assert extra not in {row["ticker"] for row in revisions}
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
+
+
+def test_a_missing_expected_ticker_refuses_the_refresh_without_committing(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    head = _head(conn)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+
+    _plan, requests = _build_requests(conn, store, clock, tmp_path,
+                                      context_tickers=(TICKER, "BBB"))
+    request = requests[0]
+    receipt = submit(conn, registry(), POLICY, request, clock=clock)
+
+    monkeypatch.setenv("ORATS_API_KEY", "test-key")
+    _install_fake_http_fetcher(monkeypatch, explode=False)
+
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock, code_source=ROOT)
+    service.start()
+    try:
+        states = ("succeeded", "failed", "retry_wait")
+        state = run_until(service, conn, receipt.job_id, timeout=60, states=states)
+        for _ in range(4):
+            if state != "retry_wait":
+                break
+            clock.advance(70)
+            state = run_until(service, conn, receipt.job_id, timeout=60, states=states)
+    finally:
+        service.close()
+
+    assert state != "succeeded"
+    assert state == "failed"
+    failure = json.loads(conn.execute(
+        "SELECT failure_json FROM jobs WHERE job_id = ?",
+        (receipt.job_id,)).fetchone()[0])
+    assert failure["code"] == "TRANSIENT_SOURCE"
+    unchanged = _head(conn)
+    assert (unchanged["snapshot_id"], unchanged["generation"]) == (
+        head["snapshot_id"], head["generation"])
+    assert conn.execute("SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 0
 
 
 def test_second_native_refresh_for_the_same_session_is_cache_only(tmp_path, monkeypatch):

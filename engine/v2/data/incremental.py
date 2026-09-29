@@ -47,6 +47,7 @@ from engine.v2.foundation import (
     content_hash,
     format_timestamp,
     from_document,
+    parse_timestamp,
     to_document,
 )
 
@@ -203,7 +204,7 @@ def select_revision_winners(
     unique: dict[str, DailyMarketRevision] = {}
     for revision in revisions:
         prior = unique.get(revision.candidate.revision_id)
-        if prior is not None and _revision_document(prior) != _revision_document(revision):
+        if prior is not None and _revision_identity_document(prior) != _revision_identity_document(revision):
             raise errors.fail("IDENTITY_CONFLICT", "one revision id has conflicting payloads")
         unique[revision.candidate.revision_id] = revision
     grouped: dict[str, list[DailyMarketRevision]] = {}
@@ -539,6 +540,23 @@ def _revision_document(revision):
     }
 
 
+def _revision_identity_document(revision):
+    """``_revision_document`` with attempt-specific bookkeeping removed, for
+    deciding whether two entries sharing a (content-derived) revision_id are
+    the same FACT. A session-wide re-fetch that changes one ticker gives
+    every OTHER, unchanged ticker in that same fetch a new raw_receipt_id
+    and a new received_at/revision_ordinal even though its row is identical;
+    that must not look like a genuine identity conflict."""
+    document = _revision_document(revision)
+    candidate = dict(document["candidate"])
+    candidate.pop("received_at", None)
+    candidate.pop("revision_ordinal", None)
+    document["candidate"] = candidate
+    document.pop("raw_receipt_id", None)
+    document.pop("normalization_id", None)
+    return document
+
+
 def _coverage_key_identity(key):
     return content_hash(to_document(key))
 
@@ -657,6 +675,17 @@ def load_raw_receipt(conn: Any, store: ArtifactStore, receipt_id: str) -> bytes:
 def cache_normalization(conn: Any, store: ArtifactStore,
                         raw: RawReceiptRecord, revisions: Sequence[DailyMarketRevision], *,
                         normalizer_id: str, contract_id: str, created_at: str) -> NormalizationRecord:
+    """Cache one raw receipt's normalized revisions under
+    ``(raw_hash, normalizer_id, contract_id)``.
+
+    A byte-identical replay of the same raw content is a cache hit even when
+    ``normalized_hash`` differs, as long as the stored and incoming revisions
+    are the same facts modulo attempt-specific ``received_at``/
+    ``revision_ordinal`` bookkeeping (``_revision_identity_document``): those
+    candidate fields are now re-derived from each attempt's own clock, so a
+    raw-receipt cache hit or a revert legitimately normalizes to a document
+    with a different hash under the same normalization identity.
+    """
     ordered = tuple(sorted(revisions, key=lambda item: item.candidate.revision_id))
     document = {"schema_version": NORMALIZED_SCHEMA_REF, "raw_hash": raw.raw_hash,
                 "normalizer_id": normalizer_id,
@@ -669,16 +698,18 @@ def cache_normalization(conn: Any, store: ArtifactStore,
         "SELECT * FROM data_normalizations WHERE normalization_id = ?",
         (normalization_id,)).fetchone()
     if existing is not None:
-        if existing["normalized_hash"] != normalized_hash:
-            raise errors.fail("IDENTITY_CONFLICT",
-                              "normalization identity has conflicting content")
         object_ref = _object_ref_document(existing["artifact_ref_json"])
         stored = store.read_verified(_artifact_ref(object_ref, NORMALIZED_SCHEMA_REF))
         stored_revisions = _normalized_revisions(stored)
+        if existing["normalized_hash"] != normalized_hash and (
+                tuple(_revision_identity_document(item) for item in stored_revisions) !=
+                tuple(_revision_identity_document(item) for item in ordered)):
+            raise errors.fail("IDENTITY_CONFLICT",
+                              "normalization identity has conflicting content")
         return NormalizationRecord(
             normalization_id=normalization_id, raw_hash=raw.raw_hash,
             normalizer_id=normalizer_id, contract_id=contract_id,
-            normalized_hash=normalized_hash, object_ref=object_ref,
+            normalized_hash=existing["normalized_hash"], object_ref=object_ref,
             revisions=stored_revisions, cache_hit=True)
 
     encoded = canonical_json(document).encode("utf-8")
@@ -778,18 +809,19 @@ def _load_retained_revisions(conn: Any, store: ArtifactStore) \
                               "revision audit row is absent from normalization artifact")
         revision = dataclasses.replace(
             revision, raw_receipt_id=row["raw_receipt_id"],
-            normalization_id=normalization_id)
+            normalization_id=normalization_id,
+            candidate=dataclasses.replace(
+                revision.candidate, revision_ordinal=row["revision_number"]))
         expected = (
             revision.ticker, revision.session_date, revision.candidate.source,
             revision.candidate.source_priority,
             1 if revision.candidate.finality == "final" else 0,
-            revision.candidate.revision_ordinal, int(revision.deleted),
-            revision.candidate.content_hash,
+            int(revision.deleted), revision.candidate.content_hash,
         )
         actual = (
             row["ticker"], row["session_date"], row["source"],
             row["source_priority"], row["finality_rank"],
-            row["revision_number"], row["deleted"], row["row_hash"],
+            row["deleted"], row["row_hash"],
         )
         if actual != expected:
             raise errors.fail("MANIFEST_CORRUPT",
@@ -956,6 +988,30 @@ def build_daily_market_candidate(parent: manifests.ResolvedSnapshot, store: Arti
         rewritten_partitions=len(merge.changed_partitions))
 
 
+def _reconciled_changeset(c: Any, changeset: ChangeSet,
+                          changeset_hash: str) -> tuple[ChangeSet, str]:
+    stored_version = c.execute(
+        "SELECT manifest_hash FROM data_dataset_versions WHERE dataset_version_id = ?",
+        (changeset.result_dataset_version_ref.dataset_version_id,)).fetchone()
+    if (stored_version is not None
+            and stored_version["manifest_hash"] != changeset.result_dataset_version_ref.manifest_hash):
+        # issue #97 review fix: a fragment reused with different (stored)
+        # provenance changes that table's manifest_hash without changing its
+        # dataset_version_id (commit_snapshot's own fragment/dataset-version
+        # reconciliation, engine/v2/data/catalog.py). candidate.changeset was
+        # built before that reconciliation ran, so it can still carry the
+        # stale, unreconciled manifest_hash here -- rebuild it from the row
+        # commit_snapshot actually just stored, so this audit row can never
+        # cite a manifest_hash inconsistent with data_dataset_versions.
+        changeset = dataclasses.replace(
+            changeset,
+            result_dataset_version_ref=dataclasses.replace(
+                changeset.result_dataset_version_ref,
+                manifest_hash=stored_version["manifest_hash"]))
+        changeset_hash = content_hash(to_document(changeset))
+    return changeset, changeset_hash
+
+
 def _record_candidate_references(c: Any, committed_receipt_id: str,
                                  candidate: DailyMarketCandidate, clock) -> None:
     coverage = candidate.coverage
@@ -974,21 +1030,23 @@ def _record_candidate_references(c: Any, committed_receipt_id: str,
     elif tuple(existing_coverage) != (coverage_hash, coverage_json):
         raise errors.fail("IDENTITY_CONFLICT", "coverage identity has conflicting content")
 
-    changeset_json = canonical_json(to_document(candidate.changeset))
+    changeset, changeset_hash = _reconciled_changeset(
+        c, candidate.changeset, candidate.changeset_hash)
+    changeset_json = canonical_json(to_document(changeset))
     existing_changeset = c.execute(
         "SELECT changeset_hash, changeset_json FROM data_changesets "
-        "WHERE changeset_id = ?", (candidate.changeset.changeset_id,)).fetchone()
+        "WHERE changeset_id = ?", (changeset.changeset_id,)).fetchone()
     if existing_changeset is None:
         c.execute(
             "INSERT INTO data_changesets (changeset_id, snapshot_id, import_receipt_id, "
             "table_name, old_dataset_version_id, new_dataset_version_id, changeset_hash, "
             "changeset_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (candidate.changeset.changeset_id, candidate.snapshot.snapshot_id,
+            (changeset.changeset_id, candidate.snapshot.snapshot_id,
              committed_receipt_id, TABLE_NAME,
-             candidate.changeset.base_dataset_version_ref.dataset_version_id,
-             candidate.changeset.result_dataset_version_ref.dataset_version_id,
-             candidate.changeset_hash, changeset_json, format_timestamp(clock.now())))
-    elif tuple(existing_changeset) != (candidate.changeset_hash, changeset_json):
+             changeset.base_dataset_version_ref.dataset_version_id,
+             changeset.result_dataset_version_ref.dataset_version_id,
+             changeset_hash, changeset_json, format_timestamp(clock.now())))
+    elif tuple(existing_changeset) != (changeset_hash, changeset_json):
         raise errors.fail("IDENTITY_CONFLICT", "changeset identity has conflicting content")
 
     for revision in candidate.merge.incoming_revisions:
@@ -1012,8 +1070,19 @@ def _record_candidate_references(c: Any, committed_receipt_id: str,
                 "deleted, row_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (revision.candidate.revision_id, committed_receipt_id, *values,
                  format_timestamp(clock.now())))
-        elif tuple(existing) != values:
-            raise errors.fail("IDENTITY_CONFLICT", "revision identity has conflicting content")
+        else:
+            identity_existing = (existing["ticker"], existing["session_date"],
+                                 existing["source"], existing["source_priority"],
+                                 existing["finality_rank"], existing["deleted"],
+                                 existing["row_hash"])
+            identity_new = (
+                revision.ticker, revision.session_date, revision.candidate.source,
+                revision.candidate.source_priority,
+                1 if revision.candidate.finality == "final" else 0,
+                int(revision.deleted), revision.candidate.content_hash)
+            if identity_existing != identity_new:
+                raise errors.fail("IDENTITY_CONFLICT",
+                                  "revision identity has conflicting content")
 
 
 def _candidate_head_fence(c: Any, scope: str, expected_snapshot: str | None,
@@ -1134,6 +1203,10 @@ def _acquire_refresh_units(parameters, root, document, fetcher):
            for unit in (*units, *tuple(plan.get("units", ())))):
         raise errors.fail("CONTRACT_MISMATCH",
                           "refresh plan table_name does not match the staged refresh identity")
+    if any("expected_keys" not in unit
+           for unit in (*units, *tuple(plan.get("units", ())))):
+        raise errors.fail("CONTRACT_MISMATCH",
+                          "refresh plan fetch unit is missing expected_keys")
     conn = catalog.sqlite3.connect(str(document["catalog_path"]))
     conn.row_factory = catalog.sqlite3.Row
     try:
@@ -1164,6 +1237,7 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
     if merge_rows is None:
         raise errors.fail("RESOURCE_UNAVAILABLE",
                           "the provider adapter cannot rebuild cached daily_market rows")
+    observed_at = format_timestamp(SystemClock().now())
     units = {str(unit.get("request_id", "")): unit for unit in plan.get("units", ())}
     fetched = []
     for outcome in plan.get("cached", ()):
@@ -1174,7 +1248,7 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
         record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})
         raw_bytes = store.read_verified(_artifact_ref(record.object_ref, RAW_SCHEMA_REF))
         fetched.append(_fetched_unit_rows(
-            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows, unit), record))
+            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows, unit), record, observed_at))
     return tuple(fetched)
 
 
@@ -1213,21 +1287,27 @@ def _fetch_unit(conn, store, contract, unit, fetcher):
         "partition_key": str(unit["partition_key"]),
         "keys": [str(key) for key in unit.get("expected_keys", ())],
     }
+    observed_at = format_timestamp(SystemClock().now())
     record = cache_raw_receipt(
         conn, store,
         RawPayload(payload=raw_bytes, response_kind=response_kind,
                    response_meta=dict(response_meta)),
         source=FETCH_SOURCE, endpoint=request["table_name"], request=request,
-        received_at=format_timestamp(SystemClock().now()))
-    return _fetched_unit_rows(contract, unit, ticker_rows, record)
+        received_at=observed_at)
+    return _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at)
 
 
-def _fetched_unit_rows(contract, unit, ticker_rows, record):
+def _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at):
     """One ``_FetchedUnit`` from ``(unit, ticker_rows, receipt)`` -- shared by
     the live-fetch and cache-only branches so both stage identical evidence."""
     revisions = tuple(
-        _fetched_revision(contract, unit, row, record.raw_receipt_id, record.received_at)
+        _fetched_revision(contract, unit, row, record.raw_receipt_id, observed_at)
         for row in ticker_rows)
+    session_date = _session_date(unit["partition_key"])
+    expected = tuple(
+        CoverageKey(item_key=daily_market_logical_key(str(key), session_date),
+                   session_date=session_date, ticker=str(key))
+        for key in unit.get("expected_keys", ()))
     return _FetchedUnit(
         raw_payload={"receipt_id": record.raw_receipt_id,
                      "response_kind": record.response_kind,
@@ -1235,9 +1315,33 @@ def _fetched_unit_rows(contract, unit, ticker_rows, record):
                      "source": record.source, "endpoint": record.endpoint,
                      "request": dict(record.request), "received_at": record.received_at},
         revisions=tuple(_revision_document(item) for item in revisions),
-        expected=tuple(_coverage_key(item) for item in revisions),
+        expected=expected,
         outcomes=tuple(_coverage_outcome(item, record.raw_receipt_id) for item in revisions),
         receipt_id=record.raw_receipt_id, received_at=record.received_at)
+
+
+_revision_ordinal_high_water_mark = 0
+
+
+def _received_at_ordinal(received_at: str) -> int:
+    """Microsecond-resolution ordinal from a received_at wire timestamp, so a
+    later fetch of the same logical key outranks an earlier one even within
+    the same second. Matches engine.v2.ops.forward_calendar_store._revision's
+    revision_ordinal=int(pd.Timestamp(received_at).timestamp() * 1_000_000)
+    as a FLOOR, not as the exact value: the clock's real resolution is
+    coarser than this microsecond string format implies, so two calls in
+    the same process can compute the identical floor even for genuinely
+    different revisions. A module-level high-water mark makes the
+    returned ordinal strictly increase across every call in this process,
+    so two revisions built here never tie -- `received_at` itself is
+    unaffected and still reflects the real observation time.
+    """
+    global _revision_ordinal_high_water_mark
+    floor = int(parse_timestamp(received_at).timestamp() * 1_000_000)
+    ordinal = floor if floor > _revision_ordinal_high_water_mark \
+        else _revision_ordinal_high_water_mark + 1
+    _revision_ordinal_high_water_mark = ordinal
+    return ordinal
 
 
 def _fetched_revision(contract, unit, row, raw_receipt_id, received_at):
@@ -1246,14 +1350,13 @@ def _fetched_revision(contract, unit, row, raw_receipt_id, received_at):
     session_date = _session_date(canonical["date"])
     content = revision_content_hash(ticker=ticker, session_date=session_date,
                                     row=canonical, deleted=False)
-    revision_id = "rev_" + content_hash({
-        "unit": str(unit["request_id"]), "ticker": ticker,
-        "session_date": session_date}).removeprefix(CONTENT_HASH_PREFIX)[:32]
+    revision_id = "rev_" + content.removeprefix(CONTENT_HASH_PREFIX)[:32]
     candidate = RevisionCandidate(
         revision_id=revision_id,
         logical_key=daily_market_logical_key(ticker, session_date),
         source=FETCH_SOURCE, source_priority=0, finality="final",
-        revision_ordinal=1, received_at=received_at, content_hash=content)
+        revision_ordinal=_received_at_ordinal(received_at),
+        received_at=received_at, content_hash=content)
     return DailyMarketRevision(
         candidate=candidate, ticker=ticker, session_date=session_date, row=canonical,
         deleted=False, raw_receipt_id=raw_receipt_id, normalization_id="pending")
@@ -1474,7 +1577,7 @@ def _stage_normalizations(conn, store, raw_records, revisions, contract_id, cloc
         if raw is None:
             raise errors.fail("INPUT_CHANGED", "revision references an uncached raw receipt")
         record = cache_normalization(
-            conn, store, raw, group, normalizer_id="daily_market.v2",
+            conn, store, raw, group, normalizer_id="daily_market.v3",
             contract_id=contract_id, created_at=format_timestamp(clock.now()))
         cache_hits += int(record.cache_hit)
         normalized.extend(dataclasses.replace(

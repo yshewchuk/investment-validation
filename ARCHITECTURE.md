@@ -332,6 +332,47 @@ or a new consumer must update that package's README in the same change.
   is designed here. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
   pool/residual refresh" and `engine/v2/models/ARCHITECTURE.md` §§1, 2, 7.6,
   7.7, 8 for the full design.
+- **Native parity summary projection (serving, read-only).**
+  `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
+  is a pure, read-only aggregate over the `native_parity` stage's own
+  report artifact (`engine/v2/ops/native_parity_report.py`'s
+  `native_parity_report.v1.1` JSON). It reports exactly what that stored
+  artifact's own `mismatches`/`only_legacy`/`only_native`/`native_refused*`
+  fields already say, never a second implementation of the one shared
+  comparator (§5) — but the artifact itself can be stale, or was produced
+  under a different tolerance policy than whichever is in effect when this
+  projection is read; this projection does not re-verify either. No
+  production job writes that report yet (this section's "Cutover PR-4
+  (redo)" bullet — `native_parity` has no submitted job kind), so
+  `"no_report"` is today's everyday answer, not a degraded one.
+  `engine/v2/serving` (7.0) reads the artifact directly rather than importing
+  `engine/v2/ops` (a 7.0 peer the layer map forbids importing).
+
+  Output document (`native_parity_summary.v1.0`), when a report is found and
+  parses: `status: "available"`; `partial` (`true` when the artifact predates
+  the `native_refused`/`native_refused_unmatched` fields); `source_schema_version`;
+  `compared_count`/`only_legacy_count`/`only_native_count`; `field_mismatch_counts`
+  (mismatch count per field name, across every dimension); `dimension_mismatch_counts`
+  (mismatch-entry count per dimension); `worst_rows` (the rows with the most
+  mismatched fields, most first, ties broken by row key); and
+  `native_refused_count`/`native_refused_unmatched_count`/`native_refused_reasons`
+  (refusal-code counts). Failure semantics:
+
+  | Condition | Outcome |
+  |---|---|
+  | No file at `report_path` | `status: "no_report"` (200) |
+  | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
+  | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
+  | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
+
+  No production caller yet — the dashboard page that renders this summary
+  (a later PR) is its first consumer. `engine/v2/serving` has no
+  `ARCHITECTURE.md` of its own yet (this doc's "Component docs" table lists
+  it `(pending)`); per that section's own rule a pending component is
+  documented only at this root doc's level until a follow-up PR gives it a
+  file of its own — a whole-component doc for `engine/v2/serving` (14
+  existing files, none of them touched by this task) is exactly that
+  follow-up, not a side effect of adding one function.
 
 ### 4.1 Production flow
 
