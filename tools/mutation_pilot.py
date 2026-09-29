@@ -657,9 +657,10 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`.
 
     A file that is DYNAMIC by `_is_dynamic_file`'s allowlist (or has a
-    non-literal/annotated conftest.py `pytest_plugins`) skips this precise
-    resolution entirely and instead depends on EVERY OTHER TRACKED FILE
-    (`edges |= tracked_set - {rel}`), never a narrower guess. This
+    non-literal/annotated conftest.py `pytest_plugins`) still gets this
+    precise resolution (see `.precise` below), but ALSO depends on EVERY
+    OTHER TRACKED FILE in its main entry (`edges |= tracked_set - {rel}`),
+    never a narrower guess for that added catch-all. This
     classification is conservative for the constructs `_is_dynamic_file`
     recognizes, NOT sound in general -- see
     https://github.com/yshewchuk/investment-validation/issues/42 for
