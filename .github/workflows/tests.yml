@@ -27,7 +27,7 @@ jobs:
           # .github/workflows/mutation.yml's plan job already uses).
           # push/schedule/workflow_dispatch: unchanged default shallow
           # checkout (depth 1).
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || 1 }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
