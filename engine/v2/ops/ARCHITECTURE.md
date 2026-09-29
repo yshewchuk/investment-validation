@@ -1528,11 +1528,12 @@ including `native_parity`; it has no production caller, only
 `tests/test_v2_ops_legacy_workflows.py` and
 `tests/test_v2_ops_native_shadow_render.py` call it.
 `computed_moves_refresh` and `native_score_batch` are both real submittable
-job kinds, but each is reached only through its own tick-loop sidecar
-(`Service._reconcile_computed_moves_refresh` /
-`Service._reconcile_native_score_batch_shadow`), never through this
-graph's own walk; `_stage_sequence` filters both out of every
-job-submission stage list by name (see "Outputs"). `native_score_batch`'s
+job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its
+whole-graph walk. Automatic *production* submission reaches them only
+through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` /
+`Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters
+both out of every job-submission stage list by name (see "Outputs").
+`native_score_batch`'s
 sidecar never actually reaches `submission.submit` today:
 `submit_native_score_batch_shadow_if_ready` refuses (R1) before building a
 `JobSpec` if the selected `"score"` job pinned no snapshot, and otherwise
