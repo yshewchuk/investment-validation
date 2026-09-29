@@ -660,6 +660,20 @@ def test_run_with_time_budget_escalates_to_sigkill_when_sigint_is_ignored(monkey
 # -- config and workflow shape ----------------------------------------------------------
 
 CFG = pilot.load_config()
+
+
+class _DynGraph(dict):
+    """Test-only: a plain ``dict[str, set[str]]`` graph that also marks
+    which files are DYNAMIC (their catch-all edge must not be expanded
+    further by ``module_dependency_closure``), explicitly via ``.dynamic``
+    -- never inferred from edge-set shape, which a small synthetic graph's
+    ordinary real edges can coincidentally match."""
+
+    def __init__(self, data, dynamic=()):
+        super().__init__(data)
+        self.dynamic = set(dynamic)
+
+
 WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "mutation.yml").read_text())
 JOBS = WORKFLOW["jobs"]
 
@@ -2248,7 +2262,9 @@ def test_real_toml_inert_allowlist_is_the_small_docs_only_list():
     # silently through an unrelated toml edit. The allowlist names root-level
     # Markdown files explicitly (2026-09-26) rather than a broad "*.md",
     # which used to make every package-local README.md (e.g.
-    # engine/v2/foundation/README.md) inert too.
+    # engine/v2/foundation/README.md) inert too; `*ARCHITECTURE.md` was
+    # added on top for the same reason (PR #118 selected all 33 enabled
+    # modules for a docs-only ARCHITECTURE.md change).
     cfg2 = pilot.load_config()
     assert cfg2["pr_selection"]["inert"] == [
         "README.md",
@@ -2258,6 +2274,7 @@ def test_real_toml_inert_allowlist_is_the_small_docs_only_list():
         "TECH_DEBT.md",
         "docs/*",
         "guides/*",
+        "*ARCHITECTURE.md",
     ]
 
 
@@ -2425,6 +2442,123 @@ def test_changed_modules_selects_a_module_that_only_transitively_depends_on_the_
     }
     cfg2 = _sel_cfg()
     assert pilot.changed_modules(cfg2, ["alpha", "beta"], ["engine/c.py"], graph=graph) == ["alpha"]
+
+
+@pytest.mark.synthetic_cfg
+def test_module_dependency_closure_stops_at_a_dynamic_catch_all_boundary():
+    # dynamic.py is DYNAMIC: its edge set is the exact catch-all signature
+    # (tracked_set - {self}), the same shape tests/conftest.py gets in the
+    # real graph. alpha's own test file reaches it directly. Before this
+    # round, expanding a catch-all edge pulled in engine/unrelated.py too,
+    # even though nothing has a REAL import edge to it -- that cascade is
+    # the defect this round fixes (see module_dependency_closure's
+    # docstring). Reaching dynamic.py must still count (it is added to the
+    # closure), but its catch-all edge must not be expanded further.
+    graph = _DynGraph({
+        "engine/a.py": set(),
+        "tests/test_a.py": {"engine/a.py", "tests/dynamic.py"},
+        "tests/dynamic.py": {"engine/a.py", "tests/test_a.py", "engine/unrelated.py"},
+        "engine/unrelated.py": set(),
+    }, dynamic={"tests/dynamic.py"})
+    cfg2 = _sel_cfg()  # alpha: mutate=[engine/a.py], tests=[tests/test_a.py]
+    closure = pilot.module_dependency_closure(cfg2, "alpha", graph)
+    assert "tests/dynamic.py" in closure
+    assert "engine/unrelated.py" not in closure
+
+
+@pytest.mark.synthetic_cfg
+def test_changed_modules_a_dynamic_files_own_change_still_selects_its_reachers():
+    # The other half of the fix: changing the DYNAMIC file ITSELF (not some
+    # unrelated file its catch-all edge used to sweep in) must still select
+    # every module that reaches it -- that is the deliberate
+    # over-invalidation the fix must keep.
+    graph = _DynGraph({
+        "engine/a.py": set(),
+        "tests/test_a.py": {"engine/a.py", "tests/dynamic.py"},
+        "tests/dynamic.py": {"engine/a.py", "tests/test_a.py", "engine/unrelated.py"},
+        "engine/unrelated.py": set(),
+    }, dynamic={"tests/dynamic.py"})
+    cfg2 = _sel_cfg()
+    assert pilot.changed_modules(
+        cfg2, ["alpha", "beta"], ["tests/dynamic.py"], graph=graph,
+    ) == ["alpha"]
+
+
+def test_build_import_graph_a_dynamic_files_own_real_import_is_still_recovered(tmp_path, monkeypatch):
+    # The real-repo counterexample this round fixes: a file can be
+    # individually DYNAMIC (its own sys.path.insert, same idiom as the real
+    # tests/conftest.py) AND ALSO have a plain, ordinary import elsewhere in
+    # the same file (tests/test_v2_ops_foundation.py does exactly this for
+    # `from engine.v2 import foundation`). `graph[...]` must still return the
+    # catch-all (unchanged contract: a DYNAMIC file always fails the whole
+    # file safe) -- but `.precise` must recover the real edge separately, or
+    # a module whose own test file is ALSO dynamic loses its genuine
+    # dependency the moment DYNAMIC stops cascading (see
+    # module_dependency_closure's docstring).
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "real.py").write_text("X = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_mixed.py").write_text(
+        "import sys\n"
+        "sys.path.insert(0, '.')\n"
+        "from engine import real\n"
+    )
+    tracked = ["engine/real.py", "tests/test_mixed.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    tracked_set = set(tracked)
+    assert graph["tests/test_mixed.py"] == tracked_set - {"tests/test_mixed.py"}
+    assert "engine/real.py" in graph.precise["tests/test_mixed.py"]
+
+
+def test_scoring_stages_change_no_longer_selects_every_enabled_module():
+    # The real-repo defect this round fixes (PR #116, CI run 36416358131): a
+    # change to a single component's own source + tests + ARCHITECTURE.md
+    # selected all 33 enabled modules, because tests/conftest.py's DYNAMIC
+    # catch-all edge (a closure root for every module) used to cascade into
+    # "every module depends on every tracked file."
+    names = pilot.enabled_modules(CFG)
+    changed = [
+        "engine/v2/scoring/ARCHITECTURE.md",
+        "engine/v2/scoring/application.py",
+        "engine/v2/scoring/stages.py",
+        "tests/test_v2_scoring_native_payoff.py",
+        "tests/test_v2_scoring_runup_frozen.py",
+    ]
+    selected = pilot.changed_modules(CFG, names, changed)
+    assert set(selected) == set(names) - {
+        "canonical", "data_incremental", "no_fit", "research",
+    }, (
+        "selection drifted from the exact expected set -- re-check whether "
+        "this is a narrowing regression (e.g. back toward all 33) or a "
+        "legitimate closure change that needs this expectation updated"
+    )
+
+
+def test_conftest_change_still_selects_broadly():
+    # Deliberate over-invalidation is KEPT for tests/conftest.py itself --
+    # only the cascade through its catch-all edge into unrelated modules'
+    # closures is fixed, not conftest.py's own status as a shared root every
+    # module's tests reach.
+    names = pilot.enabled_modules(CFG)
+    selected = pilot.changed_modules(CFG, names, ["tests/conftest.py"])
+    assert len(selected) == len(names)
+
+
+def test_architecture_md_changes_are_inert():
+    # The other real-repo defect this round fixes (PR #118, CI run
+    # 36418848039): 3 ARCHITECTURE.md edits and no code selected all 33
+    # enabled modules, because ARCHITECTURE.md was missing from
+    # tools/mutation_pilot.toml's [pr_selection] inert docs allowlist.
+    assert pilot.is_inert_changed_path(CFG, "ARCHITECTURE.md") is True
+    assert pilot.is_inert_changed_path(CFG, "engine/v2/scoring/ARCHITECTURE.md") is True
+    names = pilot.enabled_modules(CFG)
+    changed = [
+        "ARCHITECTURE.md",
+        "engine/v2/ops/ARCHITECTURE.md",
+        "engine/v2/parity/ARCHITECTURE.md",
+    ]
+    assert pilot.changed_modules(CFG, names, changed) == []
 
 
 def test_artifacts_change_selects_every_module_whose_tests_transitively_import_foundation():
@@ -2666,8 +2800,11 @@ def test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert():
     # `sys.path.insert(0, str(REPO_ROOT))` -- a two-statement form this
     # graph never resolves (no cross-statement variable tracking), so it
     # fails safe. Every test file's dependency closure includes
-    # tests/conftest.py via `_conftest_ancestors`, so this is why a
-    # non-inert change today still selects all 33 enabled modules.
+    # tests/conftest.py via `_conftest_ancestors`, so a change to
+    # tests/conftest.py itself (or reaching it) still selects broadly --
+    # module_dependency_closure no longer CASCADES this catch-all edge into
+    # every other module's dependency set (see test_scoring_stages_change_
+    # no_longer_selects_every_enabled_module below).
     graph = pilot.build_import_graph()
     tracked_set = set(graph)
     assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}
@@ -2681,10 +2818,18 @@ def test_conftest_dynamic_classification_guards_static_analysis_holes():
     # subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
     # outside a conftest.py or under an `if`, and `from pkg import *`
     # re-exports). None of them matter today, because tests/conftest.py
-    # itself always classifies DYNAMIC (its own sys.path.insert), so every
-    # test file's dependency closure already includes tests/conftest.py and
-    # mutation selection can never narrow past those holes. This is a
-    # dedicated guard, separate from
+    # itself always classifies DYNAMIC (its own sys.path.insert): a change
+    # to tests/conftest.py itself, or reaching it, still selects broadly.
+    # (Reaching a DYNAMIC file no longer CASCADES into every other module's
+    # dependency set as of this round -- see module_dependency_closure's own
+    # docstring. That function walks `.precise` alone and never consults
+    # this raw catch-all edge, so it is NOT an operational backstop for a
+    # hole in tests/conftest.py's OWN unresolved constructs either: a
+    # changed file reachable from tests/conftest.py only through one of
+    # them is not selected for any module, same as the same holes in some
+    # OTHER test file reaching a changed file with no other real edge to it
+    # -- see issue #155 for both.) This is
+    # a dedicated guard, separate from
     # test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert
     # above, so a failure here points straight at issue #42 instead of only
     # restating the fail-safe fact.
@@ -3081,24 +3226,21 @@ def test_domain_valuation_init_change_selects_its_dependents():
     assert "scoring_application" in selected
 
 
-def test_a_leaf_module_change_now_selects_every_module_via_the_sys_path_failsafe():
-    # Before 2026-09-26, engine/v2/research/*.py was imported by nothing
-    # outside the research module itself, so this changed path selected
-    # exactly ["research"]. The path-based-loader fail-safe added that day
-    # changed this: a large share of tracked checks/*.py files use the
-    # common `sys.path.insert(0, str(Path(__file__).resolve().parents[1]))`
-    # idiom to make themselves runnable as standalone scripts, which the
-    # fail-safe (deliberately, per spec) cannot distinguish from a genuinely
-    # unpredictable sys.path mutation -- each such file is marked as
-    # depending on EVERY tracked file. Because nearly every enabled module's
-    # test suite transitively reaches at least one checks/*.py file (the
-    # same "chooser via checks bridge" path proven elsewhere in this file),
-    # this is no longer a leaf change: it now selects all 33 enabled
-    # modules, same as an unrecognized path would. This is a real, reported
-    # breadth effect of the fail-safe (see PR discussion), not a bug in this
-    # test.
+def test_a_leaf_module_change_selects_only_its_own_module_again():
+    # Before 2026-09-26, this changed path selected exactly ["research"].
+    # A path-based-loader fail-safe added that day made every checks/*.py
+    # file using the common `sys.path.insert(0,
+    # str(Path(__file__).resolve().parents[1]))` idiom depend on EVERY
+    # tracked file (DYNAMIC, no narrower edge attempted), and because nearly
+    # every enabled module's test suite transitively reached at least one
+    # such file, changing this leaf module then selected all 33 enabled
+    # modules -- the same breadth defect that made tests/conftest.py's own
+    # DYNAMIC catch-all edge collapse every module's dependency set (see
+    # module_dependency_closure's docstring). Fixed the same way: the walk
+    # now follows a DYNAMIC file's REAL edges (`build_import_graph.precise`)
+    # instead of cascading its catch-all, so this is a leaf change again.
     names = pilot.enabled_modules(CFG)
-    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == names
+    assert pilot.changed_modules(CFG, names, ["engine/v2/research/replay.py"]) == ["research"]
 
 
 # -- import-graph build guard: deterministic parse-count property ------------
