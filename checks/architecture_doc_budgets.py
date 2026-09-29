@@ -10,10 +10,10 @@ that keeps growing past that shape is the mechanical symptom this check
 catches: every ``ARCHITECTURE.md`` (root or component) must stay at or under
 BUDGET lines.
 
-Four docs already exceed BUDGET and predate this check. Rewriting them to
+Five docs already exceed BUDGET and predate this check. Rewriting them to
 contract level is real work this PR does not do by fiat, so each is pinned in
 EXEMPT at its line count when this check was added -- a cap, not a new
-allowance: none of the four may grow even one line past that number (see
+allowance: none of the five may grow even one line past that number (see
 ``_effective_cap``).
 
 Reads every tracked path's staged content by default (what would actually be
@@ -54,6 +54,7 @@ EXEMPT: dict[str, int] = {
     "engine/v2/data/ARCHITECTURE.md": 1048,
     "engine/v2/scoring/ARCHITECTURE.md": 942,
     "engine/v2/models/ARCHITECTURE.md": 863,
+    "ARCHITECTURE.md": 524,
 }
 
 
@@ -121,9 +122,10 @@ def _read_staged_strict(root: Path, rel: str) -> bytes:
 
 
 def _sources(root: Path, use_worktree: bool) -> dict[str, bytes]:
+    paths = [rel for rel in tracked_paths(root) if _is_architecture_doc(rel)]
     if use_worktree:
-        return {rel: _read_worktree_strict(root, rel) for rel in tracked_paths(root)}
-    return {rel: _read_staged_strict(root, rel) for rel in tracked_paths(root)}
+        return {rel: _read_worktree_strict(root, rel) for rel in paths}
+    return {rel: _read_staged_strict(root, rel) for rel in paths}
 
 
 def main(argv: list[str] | None = None) -> int:

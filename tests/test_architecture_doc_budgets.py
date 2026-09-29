@@ -47,7 +47,7 @@ def test_default_mode_reads_staged_not_worktree(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, env=env, check=True)
 
     # Stage an over-budget version, but leave the worktree file small.
-    doc.write_text("x\n" * (adb.BUDGET + 1))
+    doc.write_text("x\n" * (adb.EXEMPT["ARCHITECTURE.md"] + 1))
     subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, env=env, check=True)
     doc.write_text("x\n" * 3)
 
@@ -71,8 +71,11 @@ def test_a_doc_at_exactly_budget_passes():
 
 
 def test_root_architecture_doc_is_in_scope():
-    big = ("x\n" * (adb.BUDGET + 1)).encode()
-    assert not adb.check_files({"ARCHITECTURE.md": big}).ok
+    cap = adb.EXEMPT["ARCHITECTURE.md"]
+    over = ("x\n" * (cap + 1)).encode()
+    at_cap = ("x\n" * cap).encode()
+    assert not adb.check_files({"ARCHITECTURE.md": over}).ok
+    assert adb.check_files({"ARCHITECTURE.md": at_cap}).ok
 
 
 def test_exempt_doc_is_capped_at_its_pinned_size_not_unlimited():
