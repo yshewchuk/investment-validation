@@ -28,12 +28,13 @@ rather than glossed over:
   ``.effects`` finds no reader of ``JobKind.effects`` anywhere today; it is a
   declared, currently-unconsumed field. Direct assertion.
 - ``parameters`` (the dataclass type) for artifact_check/adhoc_rescore/
-  snapshot_import: ``CheckParameters``, ``RescoreParameters`` and
-  ``SnapshotImportParameters`` are structurally identical (same field names
-  and types), so no schema-shape consumer can tell them apart. The other
-  three core kinds' parameter classes DO have distinguishing fields and are
-  proven through ``_check_parameters`` (a real consumer) instead. Direct
-  assertion for these three only.
+  snapshot_import/native_parity: ``CheckParameters``, ``RescoreParameters``,
+  ``SnapshotImportParameters`` and ``NativeParityParameters`` are
+  structurally identical (same field names and types), so no schema-shape
+  consumer can tell them apart. The other three core kinds' parameter
+  classes DO have distinguishing fields and are proven through
+  ``_check_parameters`` (a real consumer) instead. Direct assertion for
+  these four only.
 - the LAST ``backoff_seconds`` element for decision_evidence/adhoc_rescore/
   snapshot_import/legacy_materialize (2 entries, but max_attempts is also 2:
   ``advance_job`` fails the job outright at attempt 2, before ever calling
@@ -61,7 +62,7 @@ _ACTUAL = {kind.name: kind for kind in stages._core_kinds()}
 
 # name -> resource_class, checkpoint_contract, max_attempts, backoff_seconds,
 #         and an (extra field, value) unique to that kind's parameters class
-#         where one exists (None for the three structurally-identical ones).
+#         where one exists (None for the four structurally-identical ones).
 _CASES = {
     "artifact_check": dict(
         resource_class="delivery", checkpoint_contract="receipt.v1.0",
@@ -89,6 +90,10 @@ _CASES = {
                   "snapshot_id": "snap1", "calendar_revision": "cal-rev-1",
                   "feature_names": ["f1"],
                   "gate_policy": {"STR-THRU": {"threshold": 0.0}}}),
+    "native_parity": dict(
+        resource_class="validation",
+        checkpoint_contract="native_parity_report.v1.1",
+        max_attempts=2, backoff=(5, 30), extra_field=None),
     "snapshot_import": dict(
         resource_class="legacy_rebuild",
         checkpoint_contract="snapshot_import_inspections.v1.0",
@@ -119,7 +124,8 @@ _CASES = {
 }
 
 _EMPTY_DOMAIN_KINDS = ("artifact_check", "decision_evidence", "adhoc_rescore",
-                      "native_score_batch", "legacy_rebuild_candidate",
+                      "native_score_batch", "native_parity",
+                      "legacy_rebuild_candidate",
                       "legacy_materialize", "decisions_supersede")
 
 #: Pairs of core kinds whose parameters classes genuinely share a field
@@ -237,12 +243,34 @@ def test_submission_reads_resource_class_checkpoint_retry_and_max_refs(tmp_path,
 
 
 def test_structurally_identical_parameter_classes_are_declared_correctly():
-    """CheckParameters/RescoreParameters/SnapshotImportParameters are
-    identical in shape (see module docstring) -- no consumer can distinguish
-    them, so this is a direct, explicitly-named fallback."""
+    """CheckParameters/RescoreParameters/SnapshotImportParameters/
+    NativeParityParameters are identical in shape (see module docstring) --
+    no consumer can distinguish them, so this is a direct, explicitly-named
+    fallback."""
     assert _ACTUAL["artifact_check"].parameters is stages.CheckParameters
     assert _ACTUAL["adhoc_rescore"].parameters is stages.RescoreParameters
     assert _ACTUAL["snapshot_import"].parameters is stages.SnapshotImportParameters
+    assert _ACTUAL["native_parity"].parameters is stages.NativeParityParameters
+
+
+def test_native_parity_kind_is_declared_correctly():
+    """Cutover PR-4 redo, slice 2B(a): direct field read-back for the new
+    ``native_parity`` kind. Its resource_class/checkpoint/retry values are
+    also driven through the real ``submit()`` consumers by the parametrized
+    tests above (the kind is in ``_CASES``); ``worker``/``effects`` are the
+    module-wide direct fallbacks, and its parameters class is structurally
+    identical to ``CheckParameters`` (see module docstring)."""
+    kind = _ACTUAL["native_parity"]
+    assert kind.name == "native_parity"
+    assert kind.worker == "native_parity"
+    assert kind.parameters is stages.NativeParityParameters
+    assert kind.resource_classes == frozenset({"validation"})
+    assert kind.effects == ("staged",)
+    assert kind.checkpoint_contract == "native_parity_report.v1.1"
+    assert kind.namespaces == frozenset({"shadow", "smoke"})
+    assert kind.retry.name == "bounded"
+    assert kind.retry.max_attempts == 2
+    assert kind.retry.backoff_seconds == (5, 30)
 
 
 def _fail_once(conn, clock, supervisor):
