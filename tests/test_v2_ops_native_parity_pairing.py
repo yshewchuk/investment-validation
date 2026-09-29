@@ -4,15 +4,26 @@ no filesystem, no clock.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import legacy_parity_rows
 from engine.v2.ops.native_parity_report import (
     _empty_native_report,
+    _native_rows_and_refusals,
+    _population_key_from_board_request_key,
     apply_native_refusals,
 )
+from engine.v2.ops.native_score_batch import run_native_score_batch_worker
 from engine.v2.parity.tolerance import SCORE_RECORD_V1
+from tests.test_v2_ops_native_score_batch import (
+    _event_doc,
+    _stage_release,
+    _worker_parameters,
+)
 
 _DIMENSIONS = ("forecasts", "simulation", "financial_diagnostics", "verdicts",
                "analogs")
@@ -161,3 +172,85 @@ def test_apply_native_refusals_default_unkeyable_empty():
               "mismatches": []}
     updated = apply_native_refusals(report, {})
     assert updated["native_refused_unmatched"] == []
+
+
+def test_population_key_from_board_request_key_splits_and_joins():
+    assert _population_key_from_board_request_key("ABC|STR-THRU|2026-01-15|am") == (
+        "ABC|STR-THRU|2026-01-15")
+
+
+def test_population_key_from_board_request_key_agrees_with_population_key():
+    legacy_row = {"ticker": "ABC", "strategy": "STR-THRU",
+                  "event_date": "2026-01-15"}
+    assert population_key(legacy_row) == _population_key_from_board_request_key(
+        "ABC|STR-THRU|2026-01-15|am")
+
+
+@pytest.mark.parametrize("bad_key", ["ABC|STR-THRU|2026-01-15", "A|B|C|D|E"])
+def test_population_key_from_board_request_key_rejects_wrong_part_count(bad_key):
+    with pytest.raises(OpsError) as exc:
+        _population_key_from_board_request_key(bad_key)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_native_rows_and_refusals_happy_path():
+    records_document = {"records": {"ABC|STR-THRU|2026-01-15|am": {"forecast": 1}}}
+    refusals_document = {
+        "refusals": {"XYZ|STR-THRU|2026-01-20|am": {
+            "code": "RELEASE_MISSING_ROLE", "detail": "..."}},
+        "unkeyable_refusals": [],
+    }
+    native_rows, native_refusals, unkeyable_refusals = _native_rows_and_refusals(
+        records_document, refusals_document)
+    assert native_rows == {"ABC|STR-THRU|2026-01-15": {"forecast": 1}}
+    assert native_refusals == {"XYZ|STR-THRU|2026-01-20": "RELEASE_MISSING_ROLE"}
+    assert unkeyable_refusals == ()
+
+
+def test_native_rows_and_refusals_requires_unkeyable_refusals_key():
+    with pytest.raises(KeyError):
+        _native_rows_and_refusals({"records": {}}, {"refusals": {}})
+
+
+def test_native_rows_and_refusals_passes_unkeyable_refusals_through():
+    entry = {"key": {"ticker": "T|X", "strategy": "STR-THRU",
+                     "event_date": "2026-01-15", "session": "am"},
+             "code": "INVALID_KEY_FIELD", "detail": "..."}
+    refusals_document = {"refusals": {}, "unkeyable_refusals": [entry]}
+    native_rows, native_refusals, unkeyable_refusals = _native_rows_and_refusals(
+        {"records": {}}, refusals_document)
+    assert native_rows == {}
+    assert native_refusals == {}
+    assert unkeyable_refusals == (entry,)
+
+
+def test_native_rows_and_refusals_rejects_collision_after_projection():
+    records_document = {"records": {"ABC|STR-THRU|2026-01-15|am": {"forecast": 1}}}
+    refusals_document = {
+        "refusals": {"ABC|STR-THRU|2026-01-15|pm": {
+            "code": "RELEASE_MISSING_ROLE", "detail": "..."}},
+        "unkeyable_refusals": [],
+    }
+    with pytest.raises(OpsError) as exc:
+        _native_rows_and_refusals(records_document, refusals_document)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_native_score_batch_and_native_parity_keys_agree_end_to_end(tmp_path):
+    _stage_release(tmp_path)
+    root = tmp_path / "staging"
+    root.mkdir()
+    event_doc = _event_doc()
+    event_doc["key"]["ticker"] = "ABC"
+    event_doc["calendar_row"]["ticker"] = "ABC"
+    (root / "events.json").write_text(json.dumps([event_doc]))
+    run_native_score_batch_worker(
+        _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+    records_document = json.loads((root / "records.json").read_text())
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    native_rows, _, _ = _native_rows_and_refusals(records_document, refusals_document)
+    legacy_rows = legacy_parity_rows({"rows": [{
+        "ticker": "ABC", "strategy": "STR-THRU",
+        "event_date": "2026-01-15", "other_field": 1}]})
+    assert len(native_rows) == 1
+    assert set(native_rows) == set(legacy_rows)
