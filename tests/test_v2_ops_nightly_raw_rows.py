@@ -11,7 +11,8 @@ import pandas as pd
 
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
-from engine.v2.ops.native_board_universe import BoardRequest, board_requests
+from engine.v2.ops.native_board_universe import (
+    _COVERED_STRATEGIES, BoardRequest, board_requests)
 from engine.v2.ops.nightly_raw_rows import scan_forward_board_requests
 from tests.data_scan_support import commit_tables, contract_for, contract_ref_for, publish_and_inspect
 from tests.ops_support import catalog
@@ -120,4 +121,14 @@ def test_scan_forward_board_requests_matches_board_requests_called_directly(tmp_
                                   "session": row["session"]} for row in rows])
     direct = board_requests(_AS_OF, _HORIZON_DAYS, None, events_table)
 
+    expected = tuple(
+        BoardRequest(ticker, strategy, pd.Timestamp(event_date), "BMO")
+        for ticker, event_date in (("ACN", "2026-10-01"), ("ACI", "2026-10-13"))
+        for strategy in (*_COVERED_STRATEGIES, "DYN-SV")
+    )
+
     assert scanned == direct
+    assert scanned == expected
+    mutated = expected[:-1]
+    # proves the exact-tuple assertion above is not vacuously true for a scan that dropped a row
+    assert scanned != mutated

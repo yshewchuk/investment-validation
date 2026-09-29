@@ -121,6 +121,11 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
     ``engine.v2.foundation.clock.parse_timestamp``) so materialization can
     never see a ``price_history`` retrieval made after this job's own
     cutoff, whatever a later capture adds to the pinned snapshot version.
+
+    Returns a dict with (among other fields) ``snapshot_id``, ``snapshot_manifest_hash``,
+    ``calendar_version`` (``SnapshotRef.calendar_version`` off the same resolved snapshot --
+    issue #200 item 1), ``snapshot_generation_receipt_id``, ``materialization_request_ref``,
+    ``materialization_request_hash``, and ``scratch_estimate_bytes``.
     """
     if not tickers or not expected_population:
         raise fail("INVALID_REQUEST", "snapshot input mode needs planned tickers and population")

@@ -18,7 +18,12 @@ import pandas as pd
 
 from engine.v2.contracts import DataQuery, KeyPredicate, SnapshotRef
 from engine.v2.data.repository import Repository
-from engine.v2.ops.native_board_universe import BoardRequest, board_requests
+from engine.v2.ops.native_board_universe import (
+    BoardRequest,
+    _validated_as_of,
+    _validated_horizon_days,
+    board_requests,
+)
 
 __all__ = ["scan_forward_board_requests"]
 
@@ -38,12 +43,18 @@ def scan_forward_board_requests(
     same read ``computed_moves_store._scan_once`` uses for the same table --
     and return ``native_board_universe.board_requests``'s ordered tuple for
     the forward window. As this module's own docstring says, the scan adds no
-    ``src_orats`` filter of its own.
+    ``src_orats`` filter of its own. It restricts the scanned partitions to
+    the years the forward window can touch, re-validating ``as_of``/
+    ``horizon_days`` the same way ``board_requests`` does for that reason.
     """
-    contract_ref = snapshot.table_versions[_EVENTS_TABLE].table_contract_ref
+    as_of_ts = _validated_as_of(as_of).normalize()
+    horizon_days = _validated_horizon_days(horizon_days)
+    window_years = set(range(as_of_ts.year, (as_of_ts + pd.Timedelta(days=horizon_days)).year + 1))
     contract = repository.table_contract(snapshot, _EVENTS_TABLE)
+    contract_ref = snapshot.table_versions[_EVENTS_TABLE].table_contract_ref
     years = tuple(sorted({int(record.partition_key)
-                          for record in repository.fragment_records(snapshot, _EVENTS_TABLE)}))
+                          for record in repository.fragment_records(snapshot, _EVENTS_TABLE)}
+                         & window_years))
     if not years:
         return board_requests(as_of, horizon_days, tickers,
                               pd.DataFrame(columns=_EVENTS_COLUMNS))

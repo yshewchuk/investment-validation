@@ -704,7 +704,7 @@ pin an unvalidated snapshot — but `pin_snapshot_inputs` does not yet
 consume that value, so the window is not closed today; that CAS check is
 [#200](https://github.com/yshewchuk/investment-validation/issues/200).
 `nightly_raw_rows.scan_forward_board_requests` (PR-6a, #199) scans
-`events_table` and enumerates `BoardRequest`s -- no `src_orats` filter
+`earnings_events` and enumerates `BoardRequest`s -- no `src_orats` filter
 (history-only source; forward dates are Nasdaq/yfinance). Row staging and
 `calendar_revision` sourcing stay open under #199.
 
