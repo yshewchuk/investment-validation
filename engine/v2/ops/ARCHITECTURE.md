@@ -1564,10 +1564,16 @@ each is simply absent from the submitted stage list. `NO_JOB_STAGES`
 prerequisite-inclusive `plan["order"]` walk unconditionally;
 `_stage_sequence` then has separate, explicit by-name filters only for
 `computed_moves_refresh` and `native_score_batch` (`native_parity` needs no
-such filter — `NO_JOB_STAGES` already removes it). All three stages reach
-production submission, when they do, through a fourth path entirely,
-outside `_stage_sequence`/`build_legacy_job_requests`: `supervisor.Service`'s
-own tick loop (see "Outputs"/"Failure semantics" for each sidecar).
+such filter — `NO_JOB_STAGES` already removes it). None of the three reach
+production submission through `_stage_sequence`/`build_legacy_job_requests`
+at all; the only path is `supervisor.Service`'s own tick loop, and today
+that path's actual reach differs per stage: `computed_moves_refresh`'s
+sidecar (`Service._reconcile_computed_moves_refresh`) does reach
+`submission.submit`; `native_score_batch`'s sidecar exists but always
+refuses or raises before `submission.submit`, never reaching it (see
+above); `native_parity` has no production sidecar at all yet (see
+"`native_parity`" above), so it has no path to production submission
+today, only to `run_shadow_nightly`'s shadow walk.
 
 ### CLI → catalog → coordinator effect
 
