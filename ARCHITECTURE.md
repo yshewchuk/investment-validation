@@ -340,8 +340,8 @@ or a new consumer must update that package's README in the same change.
   cutover PR-13b; a native producer for the Tier-4 forecasts table native
   currently only imports from a legacy snapshot is cutover PR-13c; neither
   is designed here. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
-  pool/residual refresh" and `engine/v2/models/ARCHITECTURE.md` §§1, 2, 7.6,
-  7.7, 8 for the full design.
+  pool/residual refresh", `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
+  issue #192 for the full design.
 - **Native parity summary projection (serving, read-only).**
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
   is a pure, read-only aggregate over the `native_parity` stage's own
