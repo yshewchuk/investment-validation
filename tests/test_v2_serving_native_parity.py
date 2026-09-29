@@ -323,6 +323,32 @@ def test_malformed_mismatch_null_dimension_returns_unavailable(tmp_path):
     assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
 
 
+def test_malformed_mismatch_row_key_not_in_compared_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["mismatches"][0]["row_key"] = "NOT-A-COMPARED-KEY"
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_duplicate_compared_key_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["compared"] = report["compared"] + [report["compared"][0]]
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
 def test_malformed_refusal_code_null_returns_unavailable(tmp_path):
     path, report = _full_report(tmp_path)
     report = json.loads(path.read_text())

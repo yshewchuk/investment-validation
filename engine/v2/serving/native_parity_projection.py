@@ -126,6 +126,26 @@ def _validate_optional_lists(report: dict[str, Any]) -> None:
                     raise ValueError(f"native parity report field {field!r} entry is malformed")
 
 
+def _validate_compared(compared: list[Any], mismatches: list[dict[str, Any]]) -> None:
+    """``compared`` must be unique strings, and every mismatch's ``row_key``
+    must be one of them.
+
+    ``matched_row_count`` is derived as
+    ``len(compared) - len(distinct mismatch row keys)``; without this check a
+    malformed report (duplicate ``compared`` entries, or a mismatch row_key
+    that is not in ``compared``) can make that arithmetic wrong -- including
+    negative -- while still passing as ``200 available``.
+    """
+    if not all(isinstance(key, str) for key in compared):
+        raise ValueError("native parity report field 'compared' has a non-string entry")
+    if len(compared) != len(set(compared)):
+        raise ValueError("native parity report field 'compared' has duplicate keys")
+    compared_set = set(compared)
+    for entry in mismatches:
+        if entry["row_key"] not in compared_set:
+            raise ValueError("native parity mismatch row_key is not in 'compared'")
+
+
 def _load_report(handle) -> dict[str, Any]:
     """Parse and shape-check the report; raises on anything malformed."""
     report = json.load(handle)
@@ -137,6 +157,7 @@ def _load_report(handle) -> dict[str, Any]:
         if not isinstance(report.get(field), list):
             raise ValueError(f"native parity report field {field!r} is missing or not a list")
     _validate_mismatches(report["mismatches"])
+    _validate_compared(report["compared"], report["mismatches"])
     _validate_optional_lists(report)
     return report
 
