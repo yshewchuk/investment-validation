@@ -49,14 +49,20 @@ loopback): `run()` refuses a non-loopback `--host` with `SystemExit`
 ("refusing non-loopback host ... without --allow-non-loopback") unless
 `--allow-non-loopback` is also passed, mirroring `engine/v2/serving/api.py`'s
 own `--allow-non-loopback` guard on its server entrypoint. `--model-release-root`,
-`--calibration-health-path`, `--ops-root` and `--serving-index-path` are
-all optional; each unlocks exactly one route (`/models/release.json`,
-`/calibration-health.json`, `POST /actions/refresh`, `GET /analogs.json`
-respectively) and none is ever inferred from `--release-root` or
-`--health-path` — omitting one keeps that route's own explicit
-"not configured" refusal (see Failure semantics). `--release-root`,
-`--health-path`, `--model-release-root`, `--calibration-health-path` and
-`--serving-index-path` are serving roots: they are read via
+`--calibration-health-path`, `--ops-root`, `--serving-index-path` and
+`--native-parity-report-path` are all optional; each unlocks exactly one
+route (`/models/release.json`, `/calibration-health.json`,
+`POST /actions/refresh`, `GET /analogs.json`, `GET /native_parity`+
+`GET /native_parity.json` respectively) and none is ever inferred from
+`--release-root` or `--health-path` — omitting one keeps that route's own
+explicit "not configured" refusal (see Failure semantics).
+`--native-parity-report-path` differs from the others in ONE way: the file
+it names need not exist yet (`engine.v2.serving.native_parity_projection
+.native_parity_summary`'s own `"no_report"` state, not this launcher's "not
+configured" 503 — see Outputs). `--release-root`,
+`--health-path`, `--model-release-root`, `--calibration-health-path`,
+`--serving-index-path` and `--native-parity-report-path` are serving roots:
+they are read via
 `engine.v2.serving`'s bounded/paginated reads, never by directly reading
 scoring/evaluation/ledger data. `--ops-root` is not a serving read at
 all — it names a job root, not a data root: when configured, `_server.py`'s
@@ -73,7 +79,14 @@ score/strategy's persisted analog row ids and count, keyed by
 `release_id`/`event_id` query params, or a refusal — not configured,
 unreadable, outdated, no rows for that event, or missing query params) —
 and, when a refresh root is configured, queued refresh job ids from
-`POST /actions/refresh`.
+`POST /actions/refresh`. When `--native-parity-report-path` is configured,
+`GET /native_parity.json` serves
+`engine.v2.serving.native_parity_projection.native_parity_summary`'s
+document unchanged (`"no_report"`/`"unavailable"`/`"available"` — see that
+module's own doc), and `GET /native_parity` is a small page that fetches it
+and renders the counts, per-field mismatch breakdown and worst rows, with a
+client-side match/mismatch/incomparable/refused filter over that SAME
+document (no server-side query, no second data source).
 
 ## Dependencies
 
@@ -114,10 +127,14 @@ no direct filesystem, database or third-party API access of its own.
     is ever called. Neither reaches the serving layer.
   - **Serving-time, in `engine.v2.serving` (not this package)**: an
     omitted *optional* root (`--model-release-root`,
-    `--calibration-health-path`, `--serving-index-path`) is passed
-    straight through to `create_server`, whose own typed responses
-    answer the request at call time — e.g. the read-only 503
-    "refresh not configured" when no refresh callback is wired.
+    `--calibration-health-path`, `--serving-index-path`,
+    `--native-parity-report-path`) is passed straight through to
+    `create_server`, whose own typed responses answer the request at call
+    time — e.g. the read-only 503 "refresh not configured" when no refresh
+    callback is wired, or 503 "native parity not configured" when
+    `--native-parity-report-path` itself was never given (distinct from
+    that same route's own `"no_report"` 200 when the path IS configured but
+    nothing has been written there yet).
     `--ops-root` is the one exception: this package's own
     `_server.py::_refresh_callback` converts it to a bound
     `submit_refresh` callable, or to `None` when the root is missing or
