@@ -966,18 +966,23 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     ANNOTATED or non-literal top-level `pytest_plugins` assignment. The
     qualified `builtins.exec`/`builtins.eval` form is also caught, since
     it is the exact same risk under a different spelling. Deliberately
-    narrower than `_is_dynamic_file`: it excludes `sys.path`,
-    `subprocess`, `multiprocessing`, `site`, `pkgutil`, os-exec
-    functions, and the bare `compile`/`syspath_prepend`/
-    `addsitedir`/`PYTHONPATH` names -- none of those mean the file could
-    load some OTHER, unknown TRACKED module at runtime, which is the only
-    thing that makes an importer's own closure untrustworthy. Those five
-    constructs ARE included here despite that narrowing, because each can
-    load an arbitrary tracked module by a non-statically-resolvable path,
-    unlike the others, which either only affect import machinery
-    (`sys.path`) or launch something outside this process (`subprocess`,
-    `multiprocessing`, os-exec) or don't by themselves load a module
-    (bare `compile`). Used only by select_pr_tests's taint rule."""
+    narrower than `_is_dynamic_file`, its excluded set splits into two
+    groups with different rationales. `sys.path`, `site`, `pkgutil`,
+    the bare `compile`/`syspath_prepend`/`addsitedir`/`PYTHONPATH`
+    names, and `subprocess`, `multiprocessing`, the os-exec functions
+    are all excluded. The first group does not itself load some OTHER,
+    unknown TRACKED module at runtime -- those constructs only affect
+    import machinery (`sys.path`) or don't by themselves load a module
+    (bare `compile`) -- which is the only thing that makes an importer's
+    own closure untrustworthy. The second group, however, CAN execute
+    tracked repository code in a child process, so excluding it is a
+    deliberate, accepted limitation under the project's documented
+    best-effort contract (see ARCHITECTURE.md), not a claim of
+    incapability. Tracking process boundaries is out of scope for this
+    static analysis, so a test depending on repository code only through
+    such runtime loading may be omitted from a PR's narrowed selection;
+    the full suite on every push to `main` is the backstop. Used only by
+    select_pr_tests's taint rule."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
