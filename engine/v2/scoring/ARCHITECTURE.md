@@ -63,11 +63,13 @@ load-bearing entrypoints:
   `README.md`'s `<!-- public-interface: -->` directive. `checks/
   package_readmes.py` only strictly requires an entry for a name reached
   via an *unqualified* `from engine.v2.scoring import <name>`, which none
-  of these four are — `tools/capture_tier0_corpus.py` and
-  `engine.v2.ops.native_score_batch.py` (Cutover PR-3, which imports all
-  but `quote_domain_map`) both reach them through the submodule-qualified
-  `from engine.v2.scoring.nightly_source_bundle import ...`, so the checker
-  would pass without any of the four listed. They're declared anyway
+  of these four are — each reaches only its own subset through a
+  submodule-qualified `from engine.v2.scoring.nightly_source_bundle import
+  ...`: `tools/capture_tier0_corpus.py` imports `quote_domain_map` alone,
+  and `engine.v2.ops.native_score_batch.py` (Cutover PR-3) imports the
+  other three (`assemble_nightly_source_bundle`, `validated_as_of`,
+  `NightlySourceBundleRefusal`) but not `quote_domain_map`. Either way the
+  checker would pass without any of the four listed. They're declared anyway
   because all four are real `__all__` exports with a real `engine.v2.*`
   consumer today (see Dependencies for what that consumer actually runs in
   production).
