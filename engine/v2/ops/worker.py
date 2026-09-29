@@ -145,28 +145,15 @@ def dispatch(worker, parameters, root, *, envelope=None):
         from engine.v2.ops.materialization_worker import run_materialize
         return run_materialize(parameters, root, envelope)
     if worker.startswith("legacy_"):
-        from engine.v2.ops.legacy_actions import run_action
-        values = parameters if isinstance(parameters, dict) else vars(parameters)
-        # Last read-set gap fix (2026-09-15): only present for a
-        # ``legacy_finality`` attempt whose launch resolved a
-        # ``finality_check`` materialization (``snapshot_stages.prepare_launch``);
-        # ``None`` for every other action, unchanged.
-        output = run_action(worker, values, root, legacy_root=envelope.get("legacy_root"),
-                            cross_check=envelope.get("finality_cross_check"))
-        outputs = [{"name": worker, "path": output["path"], "schema": "legacy_action.v1.0"}]
-        # A legacy action may publish additional named outputs alongside its
-        # primary one (e.g. legacy_finality's finality_coverage.json) — see
-        # ``legacy_adapter._action_finality``.
-        outputs.extend({"name": extra["name"], "path": extra["path"], "schema": extra["schema"]}
-                       for extra in output.get("extra", []))
-        return {"outputs": outputs, "completed_ids": [worker], "action": worker,
-                "coverage": output}
+        return _dispatch_legacy_action(worker, parameters, root, envelope)
     if worker == "decision_evidence":
         return _dispatch_decision_evidence(parameters, root)
     if worker == "adhoc_rescore":
         return _dispatch_adhoc_rescore(parameters, root)
     if worker == "native_score_batch":
         return _dispatch_native_score_batch(parameters, root)
+    if worker == "native_parity":
+        return _dispatch_native_parity(parameters, root)
     if worker in ("snapshot_import", "legacy_rebuild_candidate"):
         return _dispatch_snapshot_import(worker, parameters, root)
     if worker in ("ledger_export", "engineering_gate", "publication", "backup",
@@ -189,6 +176,25 @@ def dispatch(worker, parameters, root, *, envelope=None):
     raise ValueError("unsupported worker")
 
 
+def _dispatch_legacy_action(worker, parameters, root, envelope):
+    from engine.v2.ops.legacy_actions import run_action
+    values = parameters if isinstance(parameters, dict) else vars(parameters)
+    # Last read-set gap fix (2026-09-15): only present for a
+    # ``legacy_finality`` attempt whose launch resolved a
+    # ``finality_check`` materialization (``snapshot_stages.prepare_launch``);
+    # ``None`` for every other action, unchanged.
+    output = run_action(worker, values, root, legacy_root=envelope.get("legacy_root"),
+                        cross_check=envelope.get("finality_cross_check"))
+    outputs = [{"name": worker, "path": output["path"], "schema": "legacy_action.v1.0"}]
+    # A legacy action may publish additional named outputs alongside its
+    # primary one (e.g. legacy_finality's finality_coverage.json) — see
+    # ``legacy_adapter._action_finality``.
+    outputs.extend({"name": extra["name"], "path": extra["path"], "schema": extra["schema"]}
+                   for extra in output.get("extra", []))
+    return {"outputs": outputs, "completed_ids": [worker], "action": worker,
+            "coverage": output}
+
+
 def _dispatch_model_worker(worker, parameters, root):
     from engine.v2.ops.training import run_promote_worker, run_training_worker
 
@@ -199,6 +205,11 @@ def _dispatch_model_worker(worker, parameters, root):
 def _dispatch_native_score_batch(parameters, root):
     from engine.v2.ops.native_score_batch import run_native_score_batch_worker
     return run_native_score_batch_worker(parameters, root)
+
+
+def _dispatch_native_parity(parameters, root):
+    from engine.v2.ops.native_parity_report import run_native_parity_worker
+    return run_native_parity_worker(parameters, root)
 
 
 def _dispatch_refresh(worker, parameters, root):

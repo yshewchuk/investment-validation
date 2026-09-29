@@ -33,4 +33,9 @@ python3 "$ROOT/checks/package_readmes.py" --quiet
 # 5. Pinned v2 style/import/dead-code rules, also against staged bytes.
 python3 "$ROOT/checks/rearchitecture_phase1_lint.py" --quiet
 
-echo "pre-commit: hygiene, layers, budgets, READMEs and v2 lint all green"
+# 6. ARCHITECTURE.md per-PR growth ceiling: below 1000 lines a PR may add at
+#    most 50 net lines; at/over it a doc may only shrink (compression PR or
+#    refactor needed first). See checks/architecture_doc_budgets.py.
+python3 "$ROOT/checks/architecture_doc_budgets.py" --quiet
+
+echo "pre-commit: hygiene, layers, budgets, READMEs, v2 lint and doc budgets all green"

@@ -64,10 +64,13 @@ reviews:
         stands, and any part of a pre-existing defect the PR makes worse
         or newly reachable.
 
-        Flag a PR that changes more than about 300 changed non-test lines
-        or more than about 5 non-test files and states no reason for the
-        size — tests and generated fixtures don't count toward that
-        figure.
+        Flag a code PR that changes more than ~200 non-test code lines or
+        more than ~60 doc lines (tests and generated fixtures don't count).
+        Flag a design PR (an ARCHITECTURE.md/design-doc change with no
+        implementation) that exceeds ~150 doc lines, or whose description
+        has no split list naming each follow-up code PR's estimated code,
+        test and doc lines. Oversize work should be split — add, then wire,
+        then remove — not justified by a stated reason.
 
     - path: "**/ARCHITECTURE.md"
       instructions: |
@@ -93,6 +96,19 @@ reviews:
           (missing input, cache, retry, transaction, partial write,
           idempotency); check every invariant the doc claims to enforce
           against the root doc's actual §5 bullet.
+        - Doc volume (AGENTS.md "Small PRs", user decision 2026-09-28): a
+          component doc is contract level only — purpose, interfaces,
+          dependencies, invariants, and failure semantics as a short
+          condition -> outcome table. Flag step-by-step procedure that
+          restates the code, a retry-key derivation, or a per-branch
+          refusal walk — that belongs in code, tests or the opencode build
+          spec, not here. Flag a design or plan for a future PR — that
+          belongs in the PR description or an issue. Flag a history entry
+          (a dated "added ..." note, a changelog-style narrative of a past
+          change) — the doc describes the system as it is now. When a
+          finding corrects a wrong claim, the fix must land at the right
+          granularity (correct it, rewrite it at contract level, or remove
+          it if inconsequential); more procedural prose is not a fix.
     - path: "engine/v2/**"
       instructions: |
         Apply /ARCHITECTURE.md §5: a native row must never carry a
