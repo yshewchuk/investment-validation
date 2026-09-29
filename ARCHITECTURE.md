@@ -136,55 +136,16 @@ request body and, if durable, in the operator guides instead — see
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
-  - **`test` CI PR selection** (`tools/mutation_pilot.py`'s
-    `select_pr_tests`, consumed by `.github/workflows/tests.yml`'s `test`
-    job): on a `pull_request` run, narrows which `tests/test_*.py` files
-    pytest collects to the subset the PR's diff can affect, generalizing
-    `changed_modules`'s reuse of `build_import_graph`/`.precise`/
-    `is_inert_changed_path` from the hand-configured mutation-module
-    partition to every tracked test file's own real-edge closure (plus its
-    `tests/conftest.py` ancestors). Returns "run every test file" (never a
-    narrower guess) for a changed path on `[pr_selection]`'s new
-    `full_suite` allowlist (`tests/conftest.py`, `tools/*`,
-    `requirements*.txt`, `.github/workflows/*` — shared inputs the import
-    graph cannot see the effect of, or that legitimately affect every
-    test), for a changed path no test file's closure reaches and that is
-    not on the docs-only `inert` allowlist, or for any failure building the
-    graph or scanning for unresolved imports. The check stays named `test`
-    either way, so the branch-protection ruleset and auto-merge are
-    unaffected.
-    Push/`workflow_dispatch`/schedule runs are unaffected: always the
-    unfiltered full suite.
-
-    [#155](https://github.com/yshewchuk/investment-validation/issues/155)
-    handling here is two-part, and neither part is a full reachability
-    walk: (a) a test file that is itself classified broadly DYNAMIC
-    (`_is_dynamic_file`) is always selected, since its own edges cannot be
-    trusted -- checking a test's own broad-dynamic status by
-    reachability instead was measured, in #155 itself, to make most of the
-    mutation-module partition permanently universal, and the same collapse
-    would apply here; (b) a test file whose closure reaches, via a real
-    import edge OR a conftest ancestor relationship, some OTHER file with a
-    genuine unresolved import ATTEMPT (the narrower
-    `unresolved_import_files` set, not the broad DYNAMIC one) is also
-    selected -- this DOES include conftest ancestors: a conftest that
-    dynamically loads an unknown module taints every test using its
-    fixtures, because fixture injection is a runtime name lookup the
-    static closure never sees; only the test file's own
-    narrow-unresolved status is exempt from that closure walk, since part
-    (a) already covers it via the broader set. This leaves a non-trivial,
-    measurable fraction of test files unconditionally selected on the
-    broad-DYNAMIC basis; the exact count is a point-in-time measurement of
-    the repo, not tracked here to avoid a figure that goes stale as test
-    files are added — see the PR that introduced this bullet for the count
-    measured at that commit.
-
-    A test that depends on repository code only through a subprocess or
-    other runtime loading this static analysis can't see may be omitted
-    from a PR's narrowed selection; the full suite on every push to
-    `main` is the backstop that would still catch it.
-    [#184](https://github.com/yshewchuk/investment-validation/issues/184)
-    measures how often this actually happens.
+  - **`test` CI PR selection** (`select_pr_tests` in `tools/mutation_pilot.py`, used by
+    `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
+    `tests/test_*.py` files pytest collects to the subset the diff can affect, falling
+    back to every test file when it can't prove a narrower subset is safe; push/
+    `workflow_dispatch`/schedule runs always run the unfiltered full suite. Selection is
+    best-effort: a test reachable only through runtime loading this static analysis
+    doesn't track may be omitted from a PR's narrowed run, backstopped by the full
+    suite on every push to `main`. [#184](https://github.com/yshewchuk/investment-validation/issues/184)
+    measures how often. The selection rule (leaf, taint, `full_suite`, conftest ancestors)
+    is documented in `select_pr_tests`'s and `_has_unresolved_import_attempt`'s docstrings, not here.
 
 ## 2. Layers and allowed dependency direction
 
