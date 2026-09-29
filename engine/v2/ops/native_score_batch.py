@@ -453,6 +453,32 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
         quote_status=doc.get("quote_status"))
 
 
+def _keyed_by_board_request(items: Any) -> dict[str, Any]:
+    """Key an iterable of ``(BoardRequest, value)`` pairs by
+    :func:`_board_request_key`, raising ``ValueError`` on a canonical-key
+    collision instead of silently letting the later pair overwrite the
+    earlier one.
+
+    Two DISTINCT ``BoardRequest``s that differ only by time of day within
+    ``event_date`` both pass ``_checked_batch_arguments``'s own duplicate
+    check (full ``BoardRequest`` equality), but ``_board_request_key``'s
+    ``_iso(event_date)`` collapses both to the SAME calendar-date string --
+    if ``ticker``/``strategy``/``session`` also match, this guard is what
+    actually catches it. This is a batch-level failure (a plain
+    ``ValueError``, matching this module's existing ``duplicate
+    request_hash`` batch-level check in
+    :func:`assemble_score_batch_inputs`), never a per-row refusal: nothing
+    here can say which of the two colliding rows is "the bad one".
+    """
+    keyed: dict[str, Any] = {}
+    for key, value in items:
+        canonical_key = _board_request_key(key)
+        if canonical_key in keyed:
+            raise ValueError(f"duplicate canonical BoardRequest key: {canonical_key}")
+        keyed[canonical_key] = value
+    return keyed
+
+
 def _native_score_batch_documents(
     keys_in_order: Sequence[BoardRequest],
     records: Sequence[Any],
@@ -485,26 +511,22 @@ def _native_score_batch_documents(
         "schema_version": "native_score_batch_records.v2.0",
         "authoritative": False,
         "known_gaps": [],
-        "records": {
-            _board_request_key(key): to_document(record)
+        "records": _keyed_by_board_request(
+            (key, to_document(record))
             for key, record in zip(keys_in_order, records, strict=True)
-        },
+        ),
     }
-    keyed_refusals: dict[str, dict[str, Any]] = {}
-    unkeyable_refusals: list[dict[str, Any]] = []
-    for refusal in refusals:
-        if refusal.code == "INVALID_KEY_FIELD":
-            # No safe canonical string exists for this row (that is what
-            # "INVALID_KEY_FIELD" means) -- keep its raw structured key,
-            # never a joined string that could collide or fail to re-parse.
-            unkeyable_refusals.append(refusal.as_document())
-        else:
-            # Every non-INVALID_KEY_FIELD refusal's key already passed the
-            # "|"-free check above (INVALID_KEY_FIELD runs first in
-            # _assemble_one_event), so this can never itself raise.
-            keyed_refusals[_board_request_key(refusal.key)] = {
-                "code": refusal.code, "detail": refusal.detail,
-            }
+    unkeyable_refusals: list[dict[str, Any]] = [
+        # No safe canonical string exists for these rows (that is what
+        # "INVALID_KEY_FIELD" means) -- keep their raw structured key,
+        # never a joined string that could collide or fail to re-parse.
+        refusal.as_document() for refusal in refusals
+        if refusal.code == "INVALID_KEY_FIELD"
+    ]
+    keyed_refusals = _keyed_by_board_request(
+        (refusal.key, {"code": refusal.code, "detail": refusal.detail})
+        for refusal in refusals if refusal.code != "INVALID_KEY_FIELD"
+    )
     refusals_document = {
         "schema_version": "native_score_batch_refusals.v2.0",
         "refusals": keyed_refusals,

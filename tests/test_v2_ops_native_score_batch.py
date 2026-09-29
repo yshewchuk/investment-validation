@@ -606,3 +606,33 @@ def test_native_score_batch_documents_rejects_length_mismatch():
              BoardRequest(ticker="B", strategy="STR-THRU",
                           event_date=pd.Timestamp("2026-01-15"), session="am")),
             [{"stub": True}], ())
+
+
+def test_native_score_batch_documents_rejects_duplicate_canonical_keys_in_records():
+    """CodeRabbit round 2: two DISTINCT BoardRequests differing only by time
+    of day collapse to one canonical key once _iso reduces both to the same
+    calendar date -- the later row must never silently overwrite the earlier
+    one's record."""
+    first = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15 09:00"), session="am")
+    second = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                          event_date=pd.Timestamp("2026-01-15 16:00"), session="am")
+    assert first != second
+    with pytest.raises(ValueError):
+        _native_score_batch_documents((first, second), [{"a": 1}, {"b": 2}], ())
+
+
+def test_native_score_batch_documents_rejects_duplicate_canonical_keys_in_refusals():
+    """CodeRabbit round 2: the same canonical-key collision applies to the
+    keyed-refusals dict, not just records -- both routes must raise."""
+    first = NativeScoreBatchRowRefusal(
+        BoardRequest(ticker="TEST", strategy="STR-THRU",
+                     event_date=pd.Timestamp("2026-01-15 09:00"), session="am"),
+        "UNSUPPORTED_STRATEGY", "first detail")
+    second = NativeScoreBatchRowRefusal(
+        BoardRequest(ticker="TEST", strategy="STR-THRU",
+                     event_date=pd.Timestamp("2026-01-15 16:00"), session="am"),
+        "UNSUPPORTED_STRATEGY", "second detail")
+    assert first.key != second.key
+    with pytest.raises(ValueError):
+        _native_score_batch_documents((), (), (first, second))
