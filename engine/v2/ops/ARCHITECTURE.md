@@ -1580,9 +1580,14 @@ production submission through `_stage_sequence`/`build_legacy_job_requests`
 at all; the only path is `supervisor.Service`'s own tick loop, and today
 that path's actual reach differs per stage: `computed_moves_refresh`'s
 sidecar (`Service._reconcile_computed_moves_refresh`) does reach
-`submission.submit`; `native_score_batch`'s sidecar exists but always
-refuses or raises before `submission.submit`, never reaching it (see
-above); `native_parity` has no automatic production submission sidecar yet (see
+`submission.submit`; `native_score_batch`'s sidecar exists but never
+reaches `submission.submit` today: it returns a normal no-op when there is
+nothing to do (no succeeded `"score"` job, that job pinning no snapshot, or
+today's session already has a job under this key) and raises
+`VALIDATION_FAILED` only in the one remaining reachable case — a new,
+eligible, snapshot-pinned job, where the missing raw-row producer (see
+above) blocks it before it can build one; `native_parity` has no automatic
+production submission sidecar yet (see
 "`native_parity`" above) — nothing wires it into `submission.submit`/
 `submit_graph` from any operator command or tick-loop sidecar today. The
 generic `submission.submit` API could still enqueue a bound `native_parity`
