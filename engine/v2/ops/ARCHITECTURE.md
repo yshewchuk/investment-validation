@@ -751,9 +751,10 @@ not built by this PR.
   by the caller, never re-resolved per row), a sequence of
   `NightlyEventInputs` (one `BoardRequest` key plus its staged
   `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows`/optional
-  `quote_status`), the batch's `feature_names`, and an optional
-  `gate_policy: Mapping[str, Mapping[str, Any]]` keyed by strategy (see
-  "Failure semantics" for why this is caller-supplied and optional). The
+  `quote_status` — the calendar row must carry a non-empty string
+  `event_id`, see "Failure semantics"), the batch's `feature_names`, and an
+  optional `gate_policy: Mapping[str, Mapping[str, Any]]` keyed by strategy
+  (see "Failure semantics" for why this is caller-supplied and optional). The
   worker's own `NativeScoreBatchParameters` additionally carries
   `release_root` as a plain string field and
   `input_bindings={"events.json": <artifact ref>}` for the one staged
@@ -1454,6 +1455,7 @@ Per row (collected as a refusal, never sinks the batch):
 | Refusal code | Condition |
 |---|---|
 | `INVALID_KEY_FIELD` | the row's own key contains a reserved separator |
+| `MISSING_STAGED_INPUT` | the staged `calendar_row` has no non-empty string `event_id` |
 | `CALENDAR_ROW_INVALID` | the staged calendar row is not a mapping, or its dates don't parse |
 | `CALENDAR_ROW_KEY_MISMATCH` | the staged row's ticker/event_date disagrees with the row's own key |
 | `UNSUPPORTED_STRATEGY` | the row's strategy is outside this assembler's supported set |
