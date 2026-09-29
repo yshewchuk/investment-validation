@@ -487,7 +487,7 @@ def _native_score_batch_documents(
         "known_gaps": [],
         "records": {
             _board_request_key(key): to_document(record)
-            for key, record in zip(keys_in_order, records)
+            for key, record in zip(keys_in_order, records, strict=True)
         },
     }
     keyed_refusals: dict[str, dict[str, Any]] = {}

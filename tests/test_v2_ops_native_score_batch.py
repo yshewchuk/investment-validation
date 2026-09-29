@@ -22,6 +22,7 @@ from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch import (
     NativeScoreBatchRowRefusal,
     NightlyEventInputs,
+    _native_score_batch_documents,
     assemble_score_batch_inputs,
     run_native_score_batch_worker,
 )
@@ -595,3 +596,13 @@ def test_invalid_key_field_takes_priority_over_unsupported_strategy(tmp_path):
     assert assembled == {}
     assert len(refusals) == 1
     assert refusals[0].code == "INVALID_KEY_FIELD"
+
+
+def test_native_score_batch_documents_rejects_length_mismatch():
+    with pytest.raises(ValueError):
+        _native_score_batch_documents(
+            (BoardRequest(ticker="A", strategy="STR-THRU",
+                          event_date=pd.Timestamp("2026-01-15"), session="am"),
+             BoardRequest(ticker="B", strategy="STR-THRU",
+                          event_date=pd.Timestamp("2026-01-15"), session="am")),
+            [{"stub": True}], ())

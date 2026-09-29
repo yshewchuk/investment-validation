@@ -206,7 +206,7 @@ the pure functions this section documents — `legacy_parity_rows`,
 `native_parity_report._empty_native_report`, and
 `native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` bumped
 `v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. Phase 2
-slice 2A (this PR) lands the other half of the keyed-join design this
+slice 2A (`#185`) lands the other half of the keyed-join design this
 section already specified before either half was code: `native_score_batch.py`'s
 `v2.0` keyed `records.json`/`refusals.json` schema (`_board_request_key`,
 the new `INVALID_KEY_FIELD` refusal, schema tags
@@ -215,7 +215,7 @@ plus `native_parity_report._population_key_from_board_request_key` and
 `native_parity_report._native_rows_and_refusals` — the pure projection
 functions this doc's "Primary contracts" section below documents. Both
 halves are still pure functions with no job/worker/supervisor wiring.
-Phase 2 slice 2B (deferred, not this PR): the `native_parity` job kind
+Phase 2 slice 2B (deferred, not `#185`): the `native_parity` job kind
 itself (`stages.py::_native_parity_kind`, `worker.py`'s dispatch branch,
 `run_native_parity_worker`, `NativeParityParameters`), its tick-loop
 sidecar (`supervisor.Service._reconcile_native_parity`,
@@ -226,7 +226,7 @@ PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)
 and shadow-submission code (`#126`) are all already merged; PR-7a's code
 (`#126`) implemented the tick-loop submission sidecar only, not the `v2.0`
 schema this redo's design always said was `native_parity`'s own PR to
-build (see "the row-key/join gap is not designed here" below) — this PR
+build (see "the row-key/join gap is not designed here" below) — `#185`
 is that build. One piece is
 untouched by this redo, real code already on `main`, independent of
 everything `#66`/`#88`/`#126` supply: `native_parity_report.py`'s
