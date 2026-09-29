@@ -81,9 +81,16 @@ def test_checkout_fetch_depth_is_conditional_on_pull_request():
 
     steps = workflow["jobs"]["test"]["steps"]
     assert steps[0]["uses"].startswith("actions/checkout@")
-    assert steps[0]["with"]["fetch-depth"] == (
-        "${{ github.event_name == 'pull_request' && 0 || 1 }}"
-    )
+    # A bare, unquoted 0 is FALSY in GitHub Actions expressions, so
+    # `condition && 0 || 1` always evaluates to 1 regardless of `condition`
+    # (0 is falsy, so `0 || 1` falls through to 1). The 0 must be a quoted
+    # string ('0') to survive the || fallback -- matching the working
+    # pattern already used in .github/workflows/mutation.yml and
+    # mutation-mutmut.yml.
+    fetch_depth = steps[0]["with"]["fetch-depth"]
+    assert fetch_depth == "${{ github.event_name == 'pull_request' && '0' || 1 }}"
+    assert "&& '0'" in fetch_depth
+    assert "&& 0 " not in fetch_depth
 
 
 def test_select_step_only_runs_on_pull_request_and_diffs_against_base():
