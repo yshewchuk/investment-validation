@@ -132,7 +132,8 @@ same reason: a v2 package may not import legacy code without a declared
 adapter.
 
 **Known duplication (issue #69):** `_scan.py` (used directly by
-`fill_quality.py`, `polygon_fills.py`, `signal_screen.py`) and
+`fill_quality.py`, `polygon_fills.py`, `signal_screen.py`, and
+`_pricing.trading_calendar_from_snapshot`) and
 `_snapshot.py` (used by `_chains.py`'s replay reads and
 `_trades_publish.py`'s build/reconcile reads) are still two independent
 modules. Since issue #107, `_snapshot.read_table` delegates its scan to
@@ -328,9 +329,11 @@ callers (`_chains.read_chain_keys`, `_chains.read_chains_for_years`,
 `_replay_run.events_frame`) and the `_chains.load_chain_index` wrapper
 (through `read_chains_for_years`) keep their existing interfaces.
 
-A partition scan, whether reached through `_snapshot.read_table` or
-`_scan.read_table`'s other direct caller `polygon_fills.read_trades`
-(untouched by this PR, same underlying code):
+A partition scan, whether reached through `_snapshot.read_table` or one of
+`_scan.read_table`'s other direct callers (`polygon_fills.read_trades`,
+`fill_quality.py`, `signal_screen.py`,
+`_pricing.trading_calendar_from_snapshot` — none touched by this PR, all
+sharing this same code):
 
 | Condition | Outcome |
 |---|---|
