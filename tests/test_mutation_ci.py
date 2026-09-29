@@ -2561,6 +2561,109 @@ def test_architecture_md_changes_are_inert():
     assert pilot.changed_modules(CFG, names, changed) == []
 
 
+_SELECT_CFG = {"pr_selection": {"inert": ["*.md"], "inert_skip": [],
+                                 "full_suite": ["tools/*", "tests/conftest.py"]}}
+
+
+def test_select_pr_tests_empty_changed_returns_empty_list():
+    assert pilot.select_pr_tests(_SELECT_CFG, []) == []
+
+
+def test_select_pr_tests_narrows_to_the_test_file_that_imports_the_changed_source(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("from engine import b\n")
+    (tmp_path / "tests" / "test_c.py").write_text("X = 1\n")
+    tracked = ["engine/b.py", "tests/test_a.py", "tests/test_c.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected == ["tests/test_a.py"]
+
+
+def test_select_pr_tests_full_suite_path_selects_none_sentinel(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("from engine import b\n")
+    (tmp_path / "tests" / "test_c.py").write_text("X = 1\n")
+    tracked = ["engine/b.py", "tests/test_a.py", "tests/test_c.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["tools/some_script.py"], graph=graph)
+    assert selected is None
+
+
+def test_select_pr_tests_unrecognized_unreached_path_selects_none_sentinel(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("from engine import b\n")
+    (tmp_path / "tests" / "test_c.py").write_text("X = 1\n")
+    tracked = ["engine/b.py", "tests/test_a.py", "tests/test_c.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["some/unrelated/file.py"], graph=graph)
+    assert selected is None
+
+
+def test_select_pr_tests_inert_path_selects_nothing(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text("from engine import b\n")
+    (tmp_path / "tests" / "test_c.py").write_text("X = 1\n")
+    tracked = ["engine/b.py", "tests/test_a.py", "tests/test_c.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["NOTES.md"], graph=graph)
+    assert selected == []
+
+
+def test_select_pr_tests_dynamic_test_file_is_always_selected(tmp_path, monkeypatch):
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("Y = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "import importlib\n"
+        "name = 'engine.b'\n"
+        "importlib.import_module(name)\n")
+    (tmp_path / "tests" / "test_c.py").write_text("X = 1\n")
+    tracked = ["engine/b.py", "tests/test_a.py", "tests/test_c.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["NOTES.md"], graph=graph)
+    assert selected == ["tests/test_a.py"]
+
+
+def test_select_pr_tests_graph_build_failure_selects_none_sentinel(monkeypatch):
+    monkeypatch.setattr(pilot, "build_import_graph",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert pilot.select_pr_tests(_SELECT_CFG, ["anything.py"]) is None
+
+
+def test_select_pr_tests_real_pr156_diff_selects_its_own_test_and_reports_dynamic_leaf_count():
+    changed = [
+        "engine/v2/ops/ARCHITECTURE.md",
+        "engine/v2/ops/computed_moves_store.py",
+        "tests/test_v2_ops_computed_moves_store.py",
+    ]
+    selected = pilot.select_pr_tests(pilot.load_config(), changed)
+    assert selected is not None
+    assert "tests/test_v2_ops_computed_moves_store.py" in selected
+    real_graph = pilot.build_import_graph()
+    real_tests = pilot.pytest_test_files(set(real_graph))
+    dyn_leaf = pilot.dynamic_files(real_graph) & set(real_tests)
+    # The always-selected dynamic-leaf tests must all be present too, and
+    # selection must be a strict subset of the full test list (the whole
+    # point of this PR): fail loudly if it ever stops narrowing anything.
+    assert dyn_leaf <= set(selected)
+    assert len(selected) < len(real_tests)
+    print(f"[measured] {len(dyn_leaf)} of {len(real_tests)} test files are "
+          f"permanently selected as DYNAMIC leaves")
+
+
 def test_artifacts_change_selects_every_module_whose_tests_transitively_import_foundation():
     # The Opus-blocking counterexample this round fixes: the pre-fix rule
     # selected ONLY ['foundation'] for engine/v2/foundation/artifacts.py,

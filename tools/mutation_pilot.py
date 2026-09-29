@@ -906,6 +906,111 @@ def changed_modules(cfg: dict, names: list[str], changed: list[str], *,
     return [n for n in names if n in owned]
 
 
+# -- PR test selection: every test file's own real-edge closure -------------
+#
+# select_pr_tests generalizes changed_modules above from the hand-configured
+# [modules.<name>] partition (which covers only engine/v2/* + ops, not the
+# whole tests/ tree) to every tracked tests/test_*.py file's own closure, so
+# the `test` CI job's pull_request runs can narrow WHICH TEST FILES pytest
+# collects instead of always running all of them. It reuses
+# build_import_graph, .precise, _conftest_ancestors and
+# is_inert_changed_path unchanged; it does not touch changed_modules or
+# module_dependency_closure.
+
+def dynamic_files(graph: dict[str, set[str]]) -> set[str]:
+    """Tracked files build_import_graph classified DYNAMIC: their resolved
+    edge set (self) is a strict superset of their real ast-resolved edges
+    alone (.precise), because it also carries the catch-all
+    (tracked_set - {rel}). A graph with no .precise (e.g. a hand-built
+    plain dict) reports none."""
+    precise = getattr(graph, "precise", None)
+    if precise is None:
+        return set()
+    return {f for f, edges in graph.items() if edges - precise.get(f, set())}
+
+
+def pytest_test_files(tracked_set: set[str]) -> list[str]:
+    """Every tracked file the `test` CI job's pytest run collects: that
+    job's positional argument is the tests/ directory, and pytest's default
+    collection pattern is test_*.py."""
+    return sorted(p for p in tracked_set
+                  if p.startswith("tests/") and p.rsplit("/", 1)[-1].startswith("test_")
+                  and p.endswith(".py"))
+
+
+def forces_full_suite(cfg: dict, path: str) -> bool:
+    """True if `path` matches tools/mutation_pilot.toml's [pr_selection]
+    full_suite allowlist. Same fnmatch convention as is_inert_changed_path."""
+    return any(fnmatch.fnmatchcase(path, pat)
+               for pat in cfg.get("pr_selection", {}).get("full_suite", []))
+
+
+def _closure_from_roots(roots: set[str], graph: dict[str, set[str]]) -> set[str]:
+    """BFS over graph's REAL edges only (graph.precise when present, else
+    graph itself), starting from `roots`. The same real-edges-only rule
+    module_dependency_closure documents and applies to a configured
+    module's glob-pattern roots; here the roots are a single test file's
+    own path plus its tests/conftest.py ancestors."""
+    precise = getattr(graph, "precise", None)
+    seen: set[str] = set()
+    stack = list(roots)
+    while stack:
+        f = stack.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        stack.extend((precise if precise is not None else graph).get(f, ()))
+    return seen
+
+
+def select_pr_tests(cfg: dict, changed: list[str], *,
+                    graph: dict[str, set[str]] | None = None) -> list[str] | None:
+    """The pytest test files (tests/test_*.py) a pull_request `test` CI run
+    should collect. Returns None for "run the full suite" (a path on the
+    full_suite allowlist, an unrecognized/unreached path, or any failure
+    building the graph -- never a silent narrow selection on an error).
+    An empty `changed` returns [] (no diff -> nothing to run), the one
+    intentional zero-selection case, matching changed_modules.
+
+    Known gap (#155): a file with an unresolved dynamic import can load
+    literally anything, so its own real edges cannot be trusted. Unlike
+    changed_modules (which only follows a DYNAMIC file's real edges), a
+    test file that is ITSELF classified DYNAMIC (_is_dynamic_file) is
+    always selected here, regardless of whether any changed path reaches
+    it -- narrower than treating every test that merely *reaches* a
+    DYNAMIC file (e.g. every test via tests/conftest.py) as unsafe, which
+    would collapse this into the full suite for every PR (the module-level
+    version of that measurement is in #155 itself)."""
+    changed_set = set(changed)
+    if not changed_set:
+        return []
+    if graph is None:
+        try:
+            graph = build_import_graph()
+        except Exception as exc:
+            print(f"[mutation_pilot] import graph build failed "
+                  f"({type(exc).__name__}: {exc}); selecting the full test suite",
+                  flush=True)
+            return None
+    if any(forces_full_suite(cfg, p) for p in changed_set):
+        return None
+    tracked_set = set(graph)
+    tests = pytest_test_files(tracked_set)
+    dyn = dynamic_files(graph)
+    closures = {t: _closure_from_roots({t} | _conftest_ancestors(t, tracked_set), graph)
+                for t in tests}
+    selected = {t for t in tests if t in dyn}
+    for path in changed_set:
+        hit = {t for t in tests if path in closures[t]}
+        if hit:
+            selected |= hit
+            continue
+        if is_inert_changed_path(cfg, path):
+            continue
+        return None
+    return sorted(selected)
+
+
 # -- work copy ---------------------------------------------------------------
 
 def _tracked(paths: list[str]) -> list[str]:
@@ -1026,6 +1131,18 @@ def cmd_matrix(cfg: dict, args) -> int:
     print(json.dumps(names))
     return 0
 
+def cmd_select_tests(cfg: dict, args) -> int:
+    """Print __ALL__ (run the full test suite) or the selected pytest test
+    file paths, one per line (possibly zero lines, never a trailing blank
+    line), for the `test` CI job's pull_request runs."""
+    changed = read_changed_files(args.changed_files)
+    selected = select_pr_tests(cfg, changed)
+    if selected is None:
+        print("__ALL__")
+    else:
+        for t in selected:
+            print(t)
+    return 0
 
 # Test-side changes mutmut cannot see: it re-tests a mutant only when the
 # mutated function's own source changes. A new or stronger test therefore
@@ -1298,6 +1415,11 @@ def main(argv: list[str] | None = None) -> int:
                         "cannot be built); a path that is not an existing file is a hard "
                         "failure, not a silent empty selection. Omitted/blank: unchanged "
                         "behavior.")
+    p = sub.add_parser("select-tests",
+                       help="test files (or __ALL__) a pull_request `test` CI run should run")
+    p.add_argument("--changed-files", required=True, metavar="PATH",
+                   help="path to a NUL-delimited changed-file list (git diff -z --no-renames "
+                        "--name-only); see select_pr_tests's docstring for the selection rule")
     p = sub.add_parser("count")
     p.add_argument("modules", nargs="*")
     p = sub.add_parser("run")
@@ -1316,7 +1438,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("module")
     args = parser.parse_args(argv)
     cfg = load_config()
-    return {"list": cmd_list, "matrix": cmd_matrix, "count": cmd_count, "run": cmd_run,
+    return {"list": cmd_list, "matrix": cmd_matrix, "select-tests": cmd_select_tests,
+            "count": cmd_count, "run": cmd_run,
             "report": cmd_report, "config-hash": cmd_config_hash}[args.cmd](cfg, args)
 
 
