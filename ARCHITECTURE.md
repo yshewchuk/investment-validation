@@ -179,6 +179,13 @@ request body and, if durable, in the operator guides instead — see
     files are added — see the PR that introduced this bullet for the count
     measured at that commit.
 
+    A test that depends on repository code only through a subprocess or
+    other runtime loading this static analysis can't see may be omitted
+    from a PR's narrowed selection; the full suite on every push to
+    `main` is the backstop that would still catch it.
+    [#184](https://github.com/yshewchuk/investment-validation/issues/184)
+    measures how often this actually happens.
+
 ## 2. Layers and allowed dependency direction
 
 The rule is **strictly less than**: a package may import a package on a

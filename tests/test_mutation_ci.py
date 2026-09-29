@@ -2773,6 +2773,37 @@ def test_select_pr_tests_bare_exec_helper_taints_its_importer(tmp_path, monkeypa
     assert "tests/test_a.py" in selected
 
 
+def test_select_pr_tests_qualified_builtins_exec_helper_taints_its_importer(tmp_path, monkeypatch):
+    # The gate found this exact gap: builtins.exec(...) (qualified) is the
+    # same risk as a bare exec(...) call, just a different spelling -- both
+    # must taint the same way.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("VALUE = 2\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helper.py").write_text(
+        "import builtins\n"
+        "\n"
+        "def load(code):\n"
+        "    builtins.exec(code)\n")
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "from tests.helper import load\n"
+        "\n"
+        "def test_load():\n"
+        "    load('x = 1')\n")
+    (tmp_path / "tests" / "test_b.py").write_text(
+        "import engine.b\n"
+        "\n"
+        "def test_import():\n"
+        "    assert engine.b is not None\n")
+    tracked = ["engine/b.py", "tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "tests/helper.py" in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected
+
+
 def test_select_pr_tests_conftest_as_root_does_not_taint_every_test(tmp_path, monkeypatch):
     # Guards the fix above from regressing into the mass-collapse #153
     # already fixed at the module level: tests/conftest.py is DYNAMIC (its
