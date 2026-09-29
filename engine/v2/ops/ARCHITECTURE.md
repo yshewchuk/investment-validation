@@ -1545,10 +1545,10 @@ through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` /
 both out of every job-submission stage list by name (see "Outputs").
 `native_score_batch`'s
 sidecar never actually reaches `submission.submit` today:
-`submit_native_score_batch_shadow_if_ready` refuses (R1) before building a
-`JobSpec` if the selected `"score"` job pinned no snapshot, and otherwise
-raises `VALIDATION_FAILED`, since the raw-row producer that would build
-`events.json`
+`submit_native_score_batch_shadow_if_ready` returns a normal no-op if the
+selected `"score"` job pinned no snapshot (never a JobSpec, never a raise),
+and raises `VALIDATION_FAILED` only for a new eligible snapshot-pinned job,
+since the raw-row producer that would build `events.json`
 ([#199](https://github.com/yshewchuk/investment-validation/issues/199))
 does not exist yet — see "Outputs"/"Failure semantics" for both cases.
 
