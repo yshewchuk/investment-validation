@@ -764,23 +764,15 @@ not built by this PR.
 (`_reconcile_native_score_batch_shadow`), never inside
 `nightly.submit_native_score_batch_shadow_if_ready` itself:
 
-- **The release binding.** `Service._native_release_root_or_none` runs three
-  calls gated in two stages: `deployment.production_release_root()` (one
-  `os.environ` read, every tick, never cached) and
-  `deployment.current_pointer()` (one file-existence check plus a small JSON
-  decode, every tick) are both cheap and always run; the expensive,
-  hash-verifying `release_bindings.resolve_production_release_binding()`
-  runs only when the cheap check's root or `release_id` differs from a
-  one-slot memo of the last root/`release_id` pair this sidecar already
-  verified (success or failure) — so a persistently-broken release is not
-  re-hashed every tick, and a newly-promoted one is picked up on the very
-  next tick. Only the resolved root (a plain string) passes to
-  `submit_native_score_batch_shadow_if_ready`'s own `release_root` argument;
-  `run_native_score_batch_worker` never receives the sidecar's
-  `ScoringReleaseBinding` object and independently re-resolves and
-  re-verifies the binding itself, matching that type's documented contract.
-  Every outcome here (unset/blank env var, no pointer, or a release that
-  fails hash verification) is Failure semantics R1 below.
+- **The release binding.** `Service._native_release_root_or_none` resolves
+  the production release root, re-verifying it only when it may have
+  changed since last checked, and passes only the resolved root (a plain
+  string) to `submit_native_score_batch_shadow_if_ready`'s own
+  `release_root` argument. `run_native_score_batch_worker` never receives
+  the sidecar's `ScoringReleaseBinding` object; it independently re-resolves
+  and re-verifies the binding itself, matching that type's documented
+  contract. Every failure mode here (unset/blank env var, no pointer, or a
+  release that fails hash verification) is Failure semantics R1 below.
 - **Per-event raw rows** (`calendar_row`/`panel_row`/`panel_anchor`/
   `tier4_row`/`quote_rows` per `BoardRequest`, in the shape
   `NightlyEventInputs`/`assemble_nightly_source_bundle` require): the
@@ -1186,24 +1178,18 @@ tick. It is submitted alone (`submission.submit`, never `submit_graph`),
 never sharing `build_legacy_job_requests`'s graph — bundling a REQUIRED and
 an OPTIONAL job into one all-or-nothing graph submission is exactly what
 R4 below forbids. If a job already exists under that key, in any state,
-nothing is rebuilt or resubmitted. The deeper build work
-(`target_tickers_from_snapshot`'s full pandas scan, when there is something
-to rebuild) is memoized per `(session, snapshot_id, generation)` in
-`Service._computed_moves_memo`, with an attempt count and a fixed backoff
-schedule (`_COMPUTED_MOVES_BACKOFF_SECONDS`, indexed by attempt) that stops
-retrying that identity at all after `_COMPUTED_MOVES_MAX_ATTEMPTS` — a
-changed identity (new session, or the same session on a new head) always
-resets to an immediate first try, and a successful submission clears the
-memo entirely. `_build_native_computed_moves_plan` derives `expected_ids`
-from the same `target_tickers_from_snapshot`/`computed_moves_units` calls
-the worker itself makes at run time, so a caller's coverage denominator
-never disagrees with what the worker recomputes: `completed_ids` on a
-`"complete"`/`"noop"` result is the full whole-market target set, not only
-tickers that got a written fragment (a target with no committable rows is
-still "considered," so still counted as covered). `forward_calendar_refresh`
-does not share this denominator design — its own `expected_ids` is always
-`set(tickers)`, so a whole-market (`tickers=()`) submission is not
-supported as a job today, only the standalone runner accepts it.
+nothing is rebuilt or resubmitted. Rebuild attempts against an identity
+that keeps coming back empty are memoized with a bounded retry budget
+(`Service._computed_moves_memo`), so a full target-ticker scan is not
+repeated every tick; a changed identity (new session, or the same session
+on a new head) always gets a fresh budget. `completed_ids` on a
+`"complete"`/`"noop"` result is the full whole-market target set the
+worker itself derives at run time, not only tickers that got a written
+fragment, so a caller's coverage denominator never disagrees with the
+worker. `forward_calendar_refresh` does not share this denominator design
+— its own `expected_ids` is always `set(tickers)`, so a whole-market
+(`tickers=()`) submission is not supported as a job today, only the
+standalone runner accepts it.
 
 Both stores validate their own staged input document and `parameters`
 up front, before the sqlite connection opens (unknown keys, wrong types,
@@ -1229,14 +1215,10 @@ today; this describes the destination once #199 lands.
   `#refusals`) — resolvable through `input_bindings.resolve_bindings`
   exactly like `score.json`'s own `job_<id>#score` binding; no new binding
   mechanism is needed.
-- **Per-night identity.** The idempotency key is
-  `"nightly:<as_of>:<scope_hash>:native_score_batch"`, keyed to the specific
-  succeeded `"score"` job selected (Failure semantics R6) — never session
-  alone, since a later `"score"` job for the same session under a different
-  `scope_hash` is a genuinely different native batch. A later job finds
-  that night's attempt with `idempotency_key LIKE
-  'nightly:<as_of>:%:native_score_batch' ESCAPE '\'`, with any literal `_`
-  or `%` in `<as_of>` backslash-escaped first.
+- **Per-night identity.** The idempotency key is keyed to the specific
+  succeeded `"score"` job selected (Failure semantics R6), never session
+  alone — a later `"score"` job for the same session under a different
+  `scope_hash` is a genuinely different native batch and gets its own key.
 - **Row keys.** `records.json`/`refusals.json` are keyed by the same
   canonical `_board_request_key` string described above, not by array
   position, so a row is never paired against `events.json` positionally.
