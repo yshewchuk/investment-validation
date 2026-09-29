@@ -88,11 +88,13 @@ STATUSES = ("submitted", "not_yet", "missed", "already_submitted", "busy_legacy"
 #: A terminal as-of never probes, never writes and never submits again.
 TERMINAL_STATUSES = frozenset({"already_submitted", "completed", "failed", "missed",
                                "failed_setup"})
-#: A recorded plan_ref means the decision is made: resume it, never re-plan.
-#: A "timed_out" status with NO plan_ref (the pre-plan snapshot-import wait,
-#: Cutover PR-7b) is resumable too: the decision to proceed with this as_of
-#: was already made on the tick that first wrote this status, even though no
-#: plan exists yet -- see run_trigger's `resuming` computation.
+#: Every one of these statuses can only be written by code _decide already
+#: gated once (its window and probe-finality checks): resuming never
+#: re-checks either one, REGARDLESS of whether plan_ref is set yet -- a
+#: pre-plan status (error or timed_out with plan_ref=None, e.g. a
+#: snapshot-import failure/timeout, gate-round-5 fix) is just as resumable
+#: as a post-plan one (plan_ref already set) -- see run_trigger's
+#: `resuming` computation.
 RESUME_STATUSES = frozenset({"submitting", "submitted", "error", "timed_out"})
 FAILURE_STATUSES = frozenset({"error", "failed", "failed_setup", "missed", "timed_out"})
 SUCCESS_JOB_STATES = frozenset({"succeeded"})
@@ -403,12 +405,13 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     """The whole tick: terminal -> resume -> lock -> window -> probe -> submit -> serve.
 
     The resume check runs before the legacy lock is attempted, so a busy lock
-    can never overwrite a resumable state's plan_ref. A "timed_out" status
-    with no plan_ref yet (the pre-plan snapshot-import wait) resumes the
-    same way, skipping straight past `_decide`'s window check -- the
-    decision to proceed with this as_of was already made on an earlier
-    tick, so a later tick must not re-litigate the window (gate-round-4
-    fix, Cutover PR-7b-2).
+    can never overwrite a resumable state's plan_ref. Any RESUME_STATUSES
+    status resumes the same way even with no plan_ref yet (a pre-plan
+    "error" or "timed_out", e.g. a snapshot-import failure or timeout),
+    skipping straight past `_decide`'s window check -- the decision to
+    proceed with this as_of was already made on an earlier tick, so a
+    later tick must not re-litigate the window (gate-round-5 fix,
+    generalizing round 4's "timed_out"-only version, Cutover PR-7b-2).
 
     ``tickers``/``context_tickers`` are the plan's watchlist and historical
     evidence universe (``full_population`` derives both from the native
@@ -423,8 +426,7 @@ def run_trigger(root: Path, as_of: str, *, tickers: Iterable[str] = (),
     prior = load_state(root, as_of)
     if prior is not None and prior.status in TERMINAL_STATUSES:
         return _idle(clock, as_of, prior)
-    resuming = prior is not None and prior.status in RESUME_STATUSES and (
-        bool(prior.plan_ref) or prior.status == "timed_out")
+    resuming = prior is not None and prior.status in RESUME_STATUSES
     with _LegacyLock(legacy_lock_path(root)) as held:
         if not held:
             if resuming:

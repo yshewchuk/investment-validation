@@ -1097,8 +1097,10 @@ status transition:
    ALSO caught up. On a mismatch, this phase submits nothing and returns
    `("not_yet", None)` (never raises) — the caller's `snapshot_attempt` is
    NOT bumped for this outcome (only the except-branch around THIS call,
-   on a raised `_HANDLED_FAILURES`, ever increments it — see the `Trigger
-   Receipt` fix above), so a `"not_yet"` tick costs nothing against
+   and only on a terminal `INPUT_CHANGED` refusal out of a raised
+   `_HANDLED_FAILURES` — never a transient `OSError` — ever increments it;
+   gate-round-4 fix, CodeRabbit finding on `817b238`, real: see the
+   `TriggerReceipt` fix above), so a `"not_yet"` tick costs nothing against
    either the `snapshot_attempt` identity or the `error_count` give-up
    budget; the next tick calls `_ensure_shadow_snapshot` again with the
    SAME `attempt` value and retries `plan_import` fresh.
@@ -3944,9 +3946,15 @@ retry, transaction, partial write, idempotency).
 
 ### `nightly_trigger.py` (Cutover PR-7b design: `_ensure_shadow_snapshot`, the 4c R1–R6 template)
 
-**Design only — no code lands with this PR; a later PR in this sequence
-implements what this subsection describes** (see the main narrative above,
-"Cutover PR-7b"). `_ensure_shadow_snapshot` is a new step inside
+**Gate-round-4 fix (doc drift, CodeRabbit finding on `817b238`, real, left
+unanswered until now): this line originally read "Design only — no code
+lands with this PR; a later PR in this sequence implements what this
+subsection describes." That was accurate when PR-7b-1 first wrote this
+section, before PR-7b-1 itself had merged. It is stale now: PR-7b-1 (#145)
+already landed `_ensure_shadow_snapshot` exactly as this subsection
+describes, and PR-7b-2 (#150, this PR) wires it into `_submit_plan` as the
+default `ensure_snapshot_fn` — see "Status" in the main "Cutover PR-7b"
+narrative above for the current, landed state.** `_ensure_shadow_snapshot` is a new step inside
 `_submit_plan`, called before its existing `plan_fn(...)` call and
 returning `("ready", snapshot_id)`/`("not_yet", None)`/`("timed_out",
 None)` or raising (never returning anything `_submit_plan` could mistake
@@ -4066,7 +4074,13 @@ was needed where a separate status was not.
   of its retry window. Retrying instead means minting a GENUINELY NEW key:
   `attempt`
   is `TriggerReceipt.snapshot_attempt`, a counter DEDICATED to this phase
-  and touched ONLY by a raised `_HANDLED_FAILURES` out of THIS call (never
+  and touched ONLY by a terminal `INPUT_CHANGED` refusal out of THIS call's
+  raised `_HANDLED_FAILURES` (gate-round-4 fix, CodeRabbit finding on
+  `817b238`, real: an earlier draft of this sentence said ANY raised
+  `_HANDLED_FAILURES` bumps it; the shipped code bumps only for
+  `INPUT_CHANGED` — see `_snapshot_attempt_bump` and "Bumped in exactly one
+  place" in the main "Cutover PR-7b" narrative above for why a transient
+  `OSError` must not) (never
   by `error_count`, which a `"timed_out"` tick from THIS SAME phase's own
   drive-to-terminal wait — R1's point 4 above — would otherwise reset the
   wrong value against, since `error_count` is shared with that unrelated

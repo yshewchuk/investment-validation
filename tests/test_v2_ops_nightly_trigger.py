@@ -591,6 +591,73 @@ def test_three_consecutive_pre_plan_timeouts_become_failed(tmp_path):
     assert len(ensure.calls) == 3  # a terminal tick never re-checks the snapshot
 
 
+def test_a_pre_plan_terminal_failure_resumes_past_the_window_close(tmp_path):
+    # Gate-round-5 fix: the SAME defect round 4 fixed for "timed_out" also
+    # applies to a pre-plan "error" (plan_ref=None) -- e.g. ensure_snapshot_fn
+    # raising a terminal INPUT_CHANGED failure late in the day, after the
+    # retry window has already closed. Tick 1 (in window) fails terminally.
+    # Tick 2 runs well after the window's close -- proving the fix resumes
+    # anyway (a fresh attempt, new snapshot_attempt) instead of falling into
+    # _decide and recording a terminal "missed".
+    provider = FakeProvider(True)
+
+    class ExplodingEnsure:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, root, as_of, clock, attempt):
+            self.calls.append(attempt)
+            raise fail("INPUT_CHANGED", "boom")
+
+    first = _run(tmp_path, FakeClock(IN_WINDOW), provider, FakePlan("plan_should_not_build"),
+                 FakeSubmit(), FakeServe(), ensure_snapshot_fn=ExplodingEnsure())
+    assert first.status == "error" and first.plan_ref is None
+    assert first.snapshot_attempt == 1  # INPUT_CHANGED bumps it
+
+    plan, submit, serve = FakePlan("plan_late_recovery"), FakeSubmit(), FakeServe("completed")
+    second_ensure = FakeEnsureSnapshot(readiness="ready", snapshot_id="snap_recovery")
+    second = _run(tmp_path, FakeClock(AFTER_DEADLINE), provider, plan, submit, serve,
+                  ensure_snapshot_fn=second_ensure)
+    assert second.status == "completed" and second.plan_ref == "plan_late_recovery"
+    assert second_ensure.calls == [{"root": tmp_path, "as_of": AS_OF, "attempt": 1}]
+    assert provider.calls == [(AS_OF, ("AAA", "BBB"))]  # probed once, on tick 1, never again
+
+
+def test_three_consecutive_pre_plan_terminal_failures_become_failed_setup(tmp_path):
+    # Mirrors test_three_consecutive_setup_errors_become_failed_setup_once,
+    # but for a PRE-plan ensure_snapshot_fn terminal failure (plan_ref=None
+    # throughout) instead of a post-plan submit_fn failure -- each retry
+    # after the first is reached through run_trigger's (round-5-generalized)
+    # resume branch.
+    provider = FakeProvider(True)
+
+    class ExplodingEnsure:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, root, as_of, clock, attempt):
+            self.calls.append(attempt)
+            raise fail("INPUT_CHANGED", "boom")
+
+    ensure = ExplodingEnsure()
+    plan = FakePlan("plan_should_not_build")
+    statuses, counts = [], []
+    for _ in range(3):
+        receipt = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, FakeSubmit(),
+                       FakeServe(), ensure_snapshot_fn=ensure)
+        statuses.append(receipt.status)
+        counts.append(receipt.error_count)
+    assert statuses == ["error", "error", "failed_setup"]
+    assert counts == [1, 2, 3]
+    assert provider.calls == [(AS_OF, ("AAA", "BBB"))]  # probed once, on tick 1, never again
+    assert plan.calls == []  # the plan was never built -- the snapshot never came ready
+    assert ensure.calls == [0, 1, 2]  # each terminal failure mints a genuinely new attempt
+    terminal = _run(tmp_path, FakeClock(IN_WINDOW), provider, plan, FakeSubmit(), FakeServe(),
+                    ensure_snapshot_fn=ensure)
+    assert terminal.status == "idle"
+    assert len(ensure.calls) == 3  # a terminal tick never re-checks the snapshot
+
+
 def test_three_consecutive_timeouts_become_failed(tmp_path):
     provider, plan = FakeProvider(True), FakePlan("plan_3t")
     submit, serve = FakeSubmit(), FakeServe("timed_out")
