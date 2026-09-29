@@ -136,6 +136,16 @@ request body and, if durable, in the operator guides instead — see
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
+  - **`test` CI PR selection** (`select_pr_tests` in `tools/mutation_pilot.py`, used by
+    `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
+    `tests/test_*.py` files pytest collects to the subset the diff can affect, falling
+    back to every test file when it can't prove a narrower subset is safe; push/
+    `workflow_dispatch`/schedule runs always run the unfiltered full suite. Selection is
+    best-effort: a test reachable only through runtime loading this static analysis
+    doesn't track may be omitted from a PR's narrowed run, backstopped by the full
+    suite on every push to `main`. [#184](https://github.com/yshewchuk/investment-validation/issues/184)
+    measures how often. The selection rule (leaf, taint, `full_suite`, conftest ancestors)
+    is documented in `select_pr_tests`'s and `_has_unresolved_import_attempt`'s docstrings, not here.
 
 ## 2. Layers and allowed dependency direction
 
