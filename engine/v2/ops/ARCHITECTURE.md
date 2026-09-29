@@ -1671,17 +1671,20 @@ flowchart LR
 
 `board_requests` itself only consumes an `events_table` a caller passes
 in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a
-real, reachable-today shadow-scope snapshot (the scheduled trigger's
-`"score"` job now pins one — see "Primary contracts"), but only via
-`import_snapshot.plan_import`/`submit_import`; it never itself scans
-`earnings_events` — that `Repository.scan("earnings_events")` precedent
-belongs to `computed_moves_store._scan_once`, a different boundary. What
-is still missing is the dashed edge: the raw-row producer
+real shadow-scope snapshot via `import_snapshot.plan_import`/
+`submit_import` only — never a `Repository.scan("earnings_events")` call,
+which belongs to `computed_moves_store._scan_once` instead, a different
+boundary. It is reachable today for `nightly_trigger._default_plan`'s
+scheduled `"score"` job specifically (see "Primary contracts"); a plan
+built directly with the lower-level plan builder can still default to
+`legacy` input mode instead. What is still missing is the dashed edge: the
+raw-row producer
 ([#199](https://github.com/yshewchuk/investment-validation/issues/199))
 that would enumerate `board_requests` and stage each one's raw rows into
 `events.json` (see "Inputs"/"Cutover PR-7a's input sourcing"). Until it
-lands, `submit_native_score_batch_shadow_if_ready` has no `events_table` to
-call `board_requests` with at all (see "Outputs"/"Failure semantics" for
+lands, a snapshot-pinned `"score"` job reaches this missing producer and
+`submit_native_score_batch_shadow_if_ready` raises `VALIDATION_FAILED`
+without submitting a batch (see "Outputs"/"Failure semantics" for
 its condition-outcome table); `board_requests` has no production caller
 today for the same reason (see "Dependencies" → "Callers").
 
