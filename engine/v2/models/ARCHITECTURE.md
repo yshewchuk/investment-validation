@@ -280,12 +280,8 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
   continue to accept a verified legacy manifest — deliberately different
   rules for deliberately different questions ("is this safe to make live"
   vs. "is this the release a past score actually used").
-- **Driver residual pool artifacts are tied to the champion model's own
-  fit, not to any event date.** They key on `(role, model_id, fold)` and
-  mirror the champion's fit-time residuals; content changes if and only if
-  the champion is refit. Re-deriving them against an unchanged champion
-  reproduces byte-identical content (write-once dedup: no new object is
-  written).
+- **Driver residual pool artifacts use `(role, model_id, fold)` keys and
+  content-hashed payloads.**
 
 ## 9. Diagrams
 
