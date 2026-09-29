@@ -425,6 +425,22 @@ def test_v5_v6_migrations_are_checksummed_idempotent_and_append_only(tmp_path):
         raw.close()
 
 
+def test_unknown_kind_refusal_details_carries_no_legacy_path(tmp_path):
+    """issue #202: refusing an unknown reference-input kind must not leak the
+    raw legacy filesystem path into ``Problem.details`` — that dict survives
+    unchanged into a durably persisted receipt row (``snapshot_promotion`` /
+    ``catalog.record_failed_import``). Only the internal ``kind`` label stays."""
+    conn, clock = catalog(tmp_path)
+    ids = build_chain(conn, clock)
+    legacy_path = "engine/data/legacy_secret_dir/file.parquet"
+    with pytest.raises(DataError) as excinfo:
+        insert_reference_inputs(conn, ids["receipt_id"],
+                                [_reference(legacy_path, kind="unknown_kind_xyz")])
+    assert excinfo.value.problem.details == {"kind": "unknown_kind_xyz"}
+    assert "legacy_secret_dir" not in str(excinfo.value.problem.details)
+    conn.close()
+
+
 # --------------------------------------------------------------------------
 # plan-time guard: legacy_score in snapshot mode needs both model outputs pinned
 # --------------------------------------------------------------------------
