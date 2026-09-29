@@ -136,6 +136,10 @@ def test_available_full_report_counts_and_worst_rows(tmp_path):
     assert body["compared_count"] == len(report["compared"])
     assert body["only_legacy_count"] == len(report["only_legacy"])
     assert body["only_native_count"] == len(report["only_native"])
+    expected_mismatched_rows = {entry["row_key"] for entry in report["mismatches"]}
+    assert body["mismatched_row_count"] == len(expected_mismatched_rows)
+    assert body["matched_row_count"] == len(report["compared"]) - len(expected_mismatched_rows)
+    assert body["matched_row_count"] + body["mismatched_row_count"] == body["compared_count"]
     expected_field_counts = dict(sorted(Counter(
         field
         for entry in report["mismatches"]
@@ -168,6 +172,7 @@ def test_available_partial_when_refusal_fields_absent(tmp_path):
     assert body["native_refused_count"] == 0
     assert body["native_refused_unmatched_count"] == 0
     assert body["native_refused_reasons"] == {}
+    assert body["matched_row_count"] + body["mismatched_row_count"] == body["compared_count"]
 
 
 def test_worst_limit_caps_returned_rows(tmp_path):

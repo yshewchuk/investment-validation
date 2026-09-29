@@ -172,6 +172,8 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
         with handle:
             report = _load_report(handle)
         mismatches = report["mismatches"]
+        mismatched_row_count = len({entry["row_key"] for entry in mismatches})
+        matched_row_count = len(report["compared"]) - mismatched_row_count
         field_mismatch_counts = _field_mismatch_counts(mismatches)
         dimension_mismatch_counts = _dimension_mismatch_counts(mismatches)
         worst_rows = _worst_rows(mismatches, worst_limit)
@@ -195,6 +197,8 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
         "compared_count": len(report["compared"]),
         "only_legacy_count": len(report["only_legacy"]),
         "only_native_count": len(report["only_native"]),
+        "matched_row_count": matched_row_count,
+        "mismatched_row_count": mismatched_row_count,
         "field_mismatch_counts": field_mismatch_counts,
         "dimension_mismatch_counts": dimension_mismatch_counts,
         "worst_rows": worst_rows,
