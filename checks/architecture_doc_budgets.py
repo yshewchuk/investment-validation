@@ -158,12 +158,14 @@ _MISSING_AT_REF_MARKERS = ("does not exist in", "exists on disk, but not in")
 
 def _read_base(root: Path, rel: str, base_ref: str) -> bytes | None:
     """``rel``'s content at ``base_ref``, or None if it simply doesn't
-    exist there (new in this PR). Any other git failure (a bad ref, a
+    exist there (new in this PR) -- detected from git's English stderr text,
+    so the subprocess is forced to the C locale regardless of the caller's
+    LANG/LC_ALL. Any other git failure (a bad ref, a
     corrupt object) raises rather than reading as 0 lines, which would
     silently exempt a doc from the growth check."""
     proc = subprocess.run(
         ["git", "-C", str(root), "show", f"{base_ref}:{rel}"],
-        capture_output=True, env=_clean_git_env(),
+        capture_output=True, env={**_clean_git_env(), "LC_ALL": "C"},
     )
     if proc.returncode == 0:
         return proc.stdout

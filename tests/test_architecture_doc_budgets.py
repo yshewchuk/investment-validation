@@ -235,7 +235,11 @@ def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monke
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
 
-    base, new = adb._sources(ROOT, use_worktree=True, base_ref="origin/main")
+    # base_ref="HEAD" (not origin/main): this test's concern is tracked_paths
+    # under an ambient GIT_DIR/GIT_WORK_TREE hijack, not base-ref resolution,
+    # and HEAD always resolves regardless of checkout depth -- origin/main
+    # may not exist locally in a shallow CI checkout.
+    base, new = adb._sources(ROOT, use_worktree=True, base_ref="HEAD")
     assert "ARCHITECTURE.md" in new
 
 
@@ -267,9 +271,11 @@ def test_git_index_file_is_honored_not_stripped(tmp_path, monkeypatch):
 
 
 def test_the_real_tree_passes_against_main():
+    # No --base-ref: this exercises the real auto-detect (and, in a shallow
+    # CI checkout with no local origin/main, the fetch-fallback) path in
+    # _resolve_base_ref, rather than assuming origin/main already exists.
     proc = subprocess.run(
-        [sys.executable, str(ROOT / "checks" / "architecture_doc_budgets.py"),
-         "--all", "--base-ref", "origin/main"],
+        [sys.executable, str(ROOT / "checks" / "architecture_doc_budgets.py"), "--all"],
         capture_output=True, text=True, cwd=ROOT,
     )
     assert proc.returncode == 0, proc.stderr
