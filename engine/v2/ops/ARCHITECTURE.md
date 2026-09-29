@@ -778,10 +778,12 @@ not built by this PR.
   `tier4_row`/`quote_rows` per `BoardRequest`, in the shape
   `NightlyEventInputs`/`assemble_nightly_source_bundle` require): the
   producer that stages these from a pinned snapshot does not exist yet
-  ([#199](https://github.com/yshewchuk/investment-validation/issues/199)),
-  and neither does a source for the snapshot identity itself when the
-  selected `"score"` job pinned none (today's production default) — see
-  Failure semantics R1 for the resulting refusal.
+  ([#199](https://github.com/yshewchuk/investment-validation/issues/199)).
+  The scheduled trigger's `"score"` job now pins a snapshot (see "Primary
+  contracts" above), so the sidecar raises `VALIDATION_FAILED` rather than
+  silently returning nothing; only a `legacy`-input-mode plan built
+  directly (not the scheduled trigger) still gets a silent no-op — see
+  Failure semantics R1 for both outcomes.
 
 `SourceBundle` construction (`assemble_nightly_source_bundle`,
 `source_inputs.build_native_score_inputs`) happens inside the worker, not
@@ -1077,8 +1079,10 @@ starts working with no change of its own.
   `_board_request_key(key: BoardRequest) -> str` string (see "Primary
   contracts" for the key design and the `INVALID_KEY_FIELD` refusal that
   makes it a bijection): `records.json` (`schema_version
-  native_score_batch_records.v2.0`, a `records` object mapping canonical
-  key to each succeeded, serialized `ScoreRecord`) and `refusals.json`
+  native_score_batch_records.v2.0`, `authoritative: false`, `known_gaps: []`
+  — neither field is populated today; both stay in the schema for a future
+  gap this module might need to flag — and a `records` object mapping
+  canonical key to each succeeded, serialized `ScoreRecord`) and `refusals.json`
   (`schema_version native_score_batch_refusals.v2.0`, a `refusals` object
   keyed the same way, plus an always-present `unkeyable_refusals` array for
   rows whose own key was unusable). Keying by canonical key, rather than
