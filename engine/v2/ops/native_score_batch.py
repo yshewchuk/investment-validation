@@ -92,6 +92,28 @@ class NativeScoreBatchRowRefusal(ValueError):
         }
 
 
+def _board_request_key(key: BoardRequest) -> str:
+    """The canonical, JSON-object-key-safe string identity for one row:
+    ``f"{ticker}|{strategy}|{event_date_iso}|{session}"``. ``event_date_iso``
+    (a fixed ``YYYY-MM-DD`` form) can never contain the ``"|"`` join
+    delimiter, but ``ticker``/``strategy``/``session`` are free-text-shaped
+    inputs this module does not control at the source. Raises a
+    :class:`NativeScoreBatchRowRefusal` (code ``INVALID_KEY_FIELD``) the
+    moment ``"|"`` appears in any of those three fields, BEFORE the row is
+    ever encoded into ``records.json``'s/``refusals.json``'s own keys --
+    this makes the encoding a true bijection for every row that does get a
+    canonical key.
+    """
+    for field_name, value in (
+        ("ticker", key.ticker), ("strategy", key.strategy), ("session", key.session),
+    ):
+        if "|" in value:
+            raise NativeScoreBatchRowRefusal(
+                key, "INVALID_KEY_FIELD",
+                f"{field_name} contains the canonical key delimiter")
+    return f"{key.ticker}|{key.strategy}|{_iso(key.event_date)}|{key.session}"
+
+
 def _iso(value: Any) -> str | None:
     """One date-shaped value as an ISO date string, ``None`` passed through."""
     if value is None:
@@ -245,6 +267,10 @@ def _assemble_one_event(
     complexity budget -- see that function's docstring for the refusal codes.
     """
     key = event.key
+    try:
+        _board_request_key(key)
+    except NativeScoreBatchRowRefusal as exc:
+        return exc
     strategy = key.strategy
     problem = _calendar_row_problem(key, event.calendar_row)
     if problem is not None:
@@ -427,6 +453,99 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
         quote_status=doc.get("quote_status"))
 
 
+def _keyed_by_board_request(items: Any) -> dict[str, Any]:
+    """Key an iterable of ``(BoardRequest, value)`` pairs by
+    :func:`_board_request_key`, raising ``ValueError`` on a canonical-key
+    collision instead of silently letting the later pair overwrite the
+    earlier one.
+
+    Two DISTINCT ``BoardRequest``s that differ only by time of day within
+    ``event_date`` both pass ``_checked_batch_arguments``'s own duplicate
+    check (full ``BoardRequest`` equality), but ``_board_request_key``'s
+    ``_iso(event_date)`` collapses both to the SAME calendar-date string --
+    if ``ticker``/``strategy``/``session`` also match, this guard is what
+    actually catches it. This is a batch-level failure (a plain
+    ``ValueError``, matching this module's existing ``duplicate
+    request_hash`` batch-level check in
+    :func:`assemble_score_batch_inputs`), never a per-row refusal: nothing
+    here can say which of the two colliding rows is "the bad one".
+    """
+    keyed: dict[str, Any] = {}
+    for key, value in items:
+        canonical_key = _board_request_key(key)
+        if canonical_key in keyed:
+            raise ValueError(f"duplicate canonical BoardRequest key: {canonical_key}")
+        keyed[canonical_key] = value
+    return keyed
+
+
+def _native_score_batch_documents(
+    keys_in_order: Sequence[BoardRequest],
+    records: Sequence[Any],
+    refusals: Sequence[NativeScoreBatchRowRefusal],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the v2.0 ``records.json``/``refusals.json`` documents.
+
+    Split out of :func:`run_native_score_batch_worker` purely to keep that
+    function under its line budget -- see that function's docstring for the
+    full contract.
+    """
+    # score_batch/score_many preserve request order and identity (see their
+    # own docstrings), and the caller builds batch.requests from this SAME
+    # assembled.values() iteration that keys_in_order comes from -- so
+    # zipping keys_in_order (assembled's own dict-order keys) against
+    # records is a safe, exact positional pairing within this one call.
+    # This is NOT the events.json-vs-records.json positional pairing the
+    # PR-7a design names as broken (that hazard is about reconstructing
+    # order from the ORIGINAL per-event array after refusals have been
+    # dropped; here nothing has been dropped or reordered between the two
+    # zipped sequences).
+    #
+    # Issue #53 (the post-as_of panel-feature anchor gap) is fixed
+    # upstream (#67): assemble_nightly_source_bundle's own required
+    # panel_anchor parameter refuses POST_AS_OF_ROW per-row before a
+    # bundle is ever built here. Nothing populates known_gaps today;
+    # the key stays in the schema for a future gap this module might
+    # need to flag.
+    records_by_key = _keyed_by_board_request(
+        (key, to_document(record))
+        for key, record in zip(keys_in_order, records, strict=True)
+    )
+    unkeyable_refusals: list[dict[str, Any]] = [
+        # No safe canonical string exists for these rows (that is what
+        # "INVALID_KEY_FIELD" means) -- keep their raw structured key,
+        # never a joined string that could collide or fail to re-parse.
+        refusal.as_document() for refusal in refusals
+        if refusal.code == "INVALID_KEY_FIELD"
+    ]
+    keyed_refusals = _keyed_by_board_request(
+        (refusal.key, {"code": refusal.code, "detail": refusal.detail})
+        for refusal in refusals if refusal.code != "INVALID_KEY_FIELD"
+    )
+    overlap = set(records_by_key) & set(keyed_refusals)
+    if overlap:
+        # The same time-of-day collision _keyed_by_board_request already
+        # catches WITHIN one dict can also happen ACROSS the two: one
+        # colliding BoardRequest succeeded (a record) while the other
+        # failed (a refusal), and neither dict's own internal check can
+        # see the other dict at all.
+        raise ValueError(
+            "canonical BoardRequest key used by both a record and a "
+            f"refusal: {sorted(overlap)!r}")
+    records_document = {
+        "schema_version": "native_score_batch_records.v2.0",
+        "authoritative": False,
+        "known_gaps": [],
+        "records": records_by_key,
+    }
+    refusals_document = {
+        "schema_version": "native_score_batch_refusals.v2.0",
+        "refusals": keyed_refusals,
+        "unkeyable_refusals": unkeyable_refusals,
+    }
+    return records_document, refusals_document
+
+
 def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> dict[str, Any]:
     """The ``native_score_batch`` job kind's worker entrypoint.
 
@@ -460,33 +579,23 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
         "as_of": as_of, "snapshot_id": snapshot_id,
         "calendar_revision": calendar_revision,
     })
+    keys_in_order = tuple(assembled.keys())
     batch = ScoreBatch(batch_id=batch_id, requests=tuple(r for r, _ in assembled.values()),
                        population_ref=snapshot_id)
     with no_fit_guard():
         records = score_batch(batch, fields_by_request)
-    records_document = {
-        "schema_version": "native_score_batch_records.v1.0",
-        "authoritative": False,
-        # Issue #53 (the post-as_of panel-feature anchor gap) is fixed
-        # upstream (#67): assemble_nightly_source_bundle's own required
-        # panel_anchor parameter refuses POST_AS_OF_ROW per-row before a
-        # bundle is ever built here. Nothing populates known_gaps today;
-        # the key stays in the schema for a future gap this module might
-        # need to flag.
-        "known_gaps": [],
-        "records": [to_document(record) for record in records],
-    }
+    records_document, refusals_document = _native_score_batch_documents(
+        keys_in_order, records, refusals)
     (root / "records.json").write_text(json.dumps(records_document, sort_keys=True,
                                                   separators=(",", ":")))
     (root / "refusals.json").write_text(json.dumps(
-        [refusal.as_document() for refusal in refusals], sort_keys=True,
-        separators=(",", ":")))
+        refusals_document, sort_keys=True, separators=(",", ":")))
     return {
         "outputs": [
             {"name": "records", "path": "records.json",
-             "schema": "native_score_batch_records.v1.0"},
+             "schema": "native_score_batch_records.v2.0"},
             {"name": "refusals", "path": "refusals.json",
-             "schema": "native_score_batch_refusals.v1.0"},
+             "schema": "native_score_batch_refusals.v2.0"},
         ],
         "completed_ids": list(parameters["expected_ids"]),
         "no_work": not parameters["expected_ids"],

@@ -286,7 +286,7 @@ def _native_score_batch_kind() -> JobKind:
         parameters=NativeScoreBatchParameters,
         resource_classes=frozenset({"io_fetch"}), effects=("staged",),
         retry=RetryPolicy("bounded", 2, (5, 30)),
-        checkpoint_contract="native_score_batch_records.v1.0",
+        checkpoint_contract="native_score_batch_records.v2.0",
         namespaces=frozenset({"shadow", "smoke"}))
 
 

@@ -22,6 +22,7 @@ from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch import (
     NativeScoreBatchRowRefusal,
     NightlyEventInputs,
+    _native_score_batch_documents,
     assemble_score_batch_inputs,
     run_native_score_batch_worker,
 )
@@ -437,26 +438,25 @@ def test_planted_record_identity_corruption_is_caught():
         corrupted, event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
 
 
-def _refusal_matches_key(document, *, ticker, strategy, event_date, session) -> bool:
-    """Independent identity check for one serialized refusal's key
-    (CodeRabbit round 5, PR #66) -- the assembly-level tests above only
-    check the in-memory BoardRequest key; this checks the published
-    refusals.json document itself."""
-    key = document["key"]
-    return (key["ticker"] == ticker and key["strategy"] == strategy
-            and key["event_date"] == event_date and key["session"] == session)
+def _refusal_matches_key(document, canonical_key, expected_code) -> None:
+    """Independent identity check for one serialized keyed refusal (v2.0
+    shape) -- the assembly-level tests above only check the in-memory
+    BoardRequest key; this checks the published refusals.json document
+    itself."""
+    assert document["refusals"][canonical_key]["code"] == expected_code
 
 
 def test_planted_refusal_key_corruption_is_caught():
     """Proves _refusal_matches_key is not a tautology: it must fail on a
-    corrupted serialized key field."""
-    good = {"key": {"ticker": "TEST", "strategy": "TWIN-P",
-                    "event_date": "2026-01-15", "session": "am"}}
-    assert _refusal_matches_key(good, ticker="TEST", strategy="TWIN-P",
-                                event_date="2026-01-15", session="am")
-    corrupted = {"key": {**good["key"], "ticker": "WRONG"}}
-    assert not _refusal_matches_key(corrupted, ticker="TEST", strategy="TWIN-P",
-                                    event_date="2026-01-15", session="am")
+    corrupted serialized refusal code."""
+    good = {"refusals": {"TEST|TWIN-P|2026-01-15|am": {
+        "code": "UNSUPPORTED_STRATEGY", "detail": "only STR-THRU is supported"}}}
+    _refusal_matches_key(good, "TEST|TWIN-P|2026-01-15|am", "UNSUPPORTED_STRATEGY")
+    corrupted = {"refusals": {"TEST|TWIN-P|2026-01-15|am": {
+        "code": "WRONG_CODE", "detail": "only STR-THRU is supported"}}}
+    with pytest.raises(AssertionError):
+        _refusal_matches_key(corrupted, "TEST|TWIN-P|2026-01-15|am",
+                             "UNSUPPORTED_STRATEGY")
 
 
 def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
@@ -470,6 +470,7 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     assert result["completed_ids"] == ["native_score_batch"]
     assert result["no_work"] is False
     records_document = json.loads((root / "records.json").read_text())
+    assert records_document["schema_version"] == "native_score_batch_records.v2.0"
     assert records_document["authoritative"] is False
     # Issue #53 (fixed by #67): known_gaps is empty now that
     # assemble_nightly_source_bundle verifies panel_anchor itself.
@@ -478,16 +479,17 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     # CodeRabbit round 2 (PR #66): compare actual record CONTENT against an
     # independently-known expected identity, not just the record count.
     assert _record_matches_identity(
-        records_document["records"][0], event_id="evt-1",
-        strategy_version="STR-THRU", deployment_id="d1")
+        records_document["records"]["TEST|STR-THRU|2026-01-15|am"],
+        event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
     refusals_document = json.loads((root / "refusals.json").read_text())
-    assert len(refusals_document) == 1
-    assert refusals_document[0]["code"] == "UNSUPPORTED_STRATEGY"
-    # CodeRabbit round 5 (PR #66): compare the refusal's serialized key
-    # against an independently-known expected identity, not just its code.
-    assert _refusal_matches_key(
-        refusals_document[0], ticker="TEST", strategy="TWIN-P",
-        event_date="2026-01-15", session="am")
+    assert refusals_document["schema_version"] == "native_score_batch_refusals.v2.0"
+    assert len(refusals_document["refusals"]) == 1
+    assert refusals_document["unkeyable_refusals"] == []
+    # CodeRabbit round 5 (PR #66): compare the refusal's fully serialized
+    # canonical key against an independently-known expected identity, not
+    # just its code.
+    _refusal_matches_key(refusals_document, "TEST|TWIN-P|2026-01-15|am",
+                         "UNSUPPORTED_STRATEGY")
 
 
 def test_run_native_score_batch_worker_scores_under_no_fit_guard(tmp_path, monkeypatch):
@@ -526,5 +528,126 @@ def test_empty_events_is_a_legitimate_no_op(tmp_path):
         _worker_parameters(tmp_path, expected_ids=[]), root)
     assert result["no_work"] is True
     assert result["completed_ids"] == []
-    assert json.loads((root / "records.json").read_text())["records"] == []
-    assert json.loads((root / "refusals.json").read_text()) == []
+    assert json.loads((root / "records.json").read_text())["records"] == {}
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    assert refusals_document["refusals"] == {}
+    assert refusals_document["unkeyable_refusals"] == []
+
+
+def test_invalid_key_field_ticker_delimiter_is_unkeyable(tmp_path):
+    binding = _stage_release(tmp_path)
+    good = _event_inputs()
+    bad = _event_inputs(ticker="TE|ST", calendar_row=_calendar_row(ticker="TE|ST"))
+    assembled, refusals = _assemble(binding, [good, bad])
+    assert list(assembled) == [good.key]
+    assert len(refusals) == 1
+    assert refusals[0].code == "INVALID_KEY_FIELD"
+
+    root = tmp_path / "staging"
+    root.mkdir()
+    bad_doc = _event_doc(event_id="evt-2")
+    bad_doc["key"]["ticker"] = "TE|ST"
+    bad_doc["calendar_row"]["ticker"] = "TE|ST"
+    (root / "events.json").write_text(json.dumps([_event_doc(), bad_doc]))
+    run_native_score_batch_worker(
+        _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    assert refusals_document["refusals"] == {}
+    assert len(refusals_document["unkeyable_refusals"]) == 1
+    unkeyable = refusals_document["unkeyable_refusals"][0]
+    assert unkeyable["code"] == "INVALID_KEY_FIELD"
+    assert unkeyable["key"]["ticker"] == "TE|ST"
+    records_document = json.loads((root / "records.json").read_text())
+    assert len(records_document["records"]) == 1
+
+
+def test_invalid_key_field_session_delimiter_is_unkeyable(tmp_path):
+    binding = _stage_release(tmp_path)
+    good = _event_inputs()
+    bad = _event_inputs(key=BoardRequest(ticker="TEST", strategy="STR-THRU",
+                                         event_date=pd.Timestamp("2026-01-15"),
+                                         session="a|m"))
+    assembled, refusals = _assemble(binding, [good, bad])
+    assert list(assembled) == [good.key]
+    assert len(refusals) == 1
+    assert refusals[0].code == "INVALID_KEY_FIELD"
+
+    root = tmp_path / "staging"
+    root.mkdir()
+    bad_doc = _event_doc(event_id="evt-2")
+    bad_doc["key"]["session"] = "a|m"
+    (root / "events.json").write_text(json.dumps([_event_doc(), bad_doc]))
+    run_native_score_batch_worker(
+        _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    assert refusals_document["refusals"] == {}
+    assert len(refusals_document["unkeyable_refusals"]) == 1
+    unkeyable = refusals_document["unkeyable_refusals"][0]
+    assert unkeyable["code"] == "INVALID_KEY_FIELD"
+    assert unkeyable["key"]["session"] == "a|m"
+    records_document = json.loads((root / "records.json").read_text())
+    assert len(records_document["records"]) == 1
+
+
+def test_invalid_key_field_takes_priority_over_unsupported_strategy(tmp_path):
+    binding = _stage_release(tmp_path)
+    bad = _event_inputs(strategy="TWIN|P")
+    assembled, refusals = _assemble(binding, [bad])
+    assert assembled == {}
+    assert len(refusals) == 1
+    assert refusals[0].code == "INVALID_KEY_FIELD"
+
+
+def test_native_score_batch_documents_rejects_length_mismatch():
+    with pytest.raises(ValueError):
+        _native_score_batch_documents(
+            (BoardRequest(ticker="A", strategy="STR-THRU",
+                          event_date=pd.Timestamp("2026-01-15"), session="am"),
+             BoardRequest(ticker="B", strategy="STR-THRU",
+                          event_date=pd.Timestamp("2026-01-15"), session="am")),
+            [{"stub": True}], ())
+
+
+def test_native_score_batch_documents_rejects_duplicate_canonical_keys_in_records():
+    """CodeRabbit round 2: two DISTINCT BoardRequests differing only by time
+    of day collapse to one canonical key once _iso reduces both to the same
+    calendar date -- the later row must never silently overwrite the earlier
+    one's record."""
+    first = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                         event_date=pd.Timestamp("2026-01-15 09:00"), session="am")
+    second = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                          event_date=pd.Timestamp("2026-01-15 16:00"), session="am")
+    assert first != second
+    with pytest.raises(ValueError):
+        _native_score_batch_documents((first, second), [{"a": 1}, {"b": 2}], ())
+
+
+def test_native_score_batch_documents_rejects_duplicate_canonical_keys_in_refusals():
+    """CodeRabbit round 2: the same canonical-key collision applies to the
+    keyed-refusals dict, not just records -- both routes must raise."""
+    first = NativeScoreBatchRowRefusal(
+        BoardRequest(ticker="TEST", strategy="STR-THRU",
+                     event_date=pd.Timestamp("2026-01-15 09:00"), session="am"),
+        "UNSUPPORTED_STRATEGY", "first detail")
+    second = NativeScoreBatchRowRefusal(
+        BoardRequest(ticker="TEST", strategy="STR-THRU",
+                     event_date=pd.Timestamp("2026-01-15 16:00"), session="am"),
+        "UNSUPPORTED_STRATEGY", "second detail")
+    assert first.key != second.key
+    with pytest.raises(ValueError):
+        _native_score_batch_documents((), (), (first, second))
+
+
+def test_native_score_batch_documents_rejects_cross_dict_canonical_key_collision():
+    """CodeRabbit round 3: two DISTINCT BoardRequests differing only by time
+    of day collide onto one canonical key -- when one succeeds (a record)
+    and the other fails (a refusal), neither dict's own internal duplicate
+    check can see the other, so the cross-dict overlap must raise too."""
+    record_key = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                              event_date=pd.Timestamp("2026-01-15 09:00"), session="am")
+    refusal = NativeScoreBatchRowRefusal(
+        BoardRequest(ticker="TEST", strategy="STR-THRU",
+                     event_date=pd.Timestamp("2026-01-15 16:00"), session="am"),
+        "UNSUPPORTED_STRATEGY", "some detail")
+    with pytest.raises(ValueError):
+        _native_score_batch_documents((record_key,), [{"a": 1}], (refusal,))

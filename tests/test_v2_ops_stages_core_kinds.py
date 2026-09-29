@@ -77,7 +77,7 @@ _CASES = {
         max_attempts=2, backoff=(5, 30), extra_field=None),
     "native_score_batch": dict(
         resource_class="io_fetch",
-        checkpoint_contract="native_score_batch_records.v1.0",
+        checkpoint_contract="native_score_batch_records.v2.0",
         max_attempts=2, backoff=(5, 30),
         extra_field=("calendar_revision", "cal-rev-1"),
         # CodeRabbit round 1 (PR #66): gate_policy is exercised here as a
