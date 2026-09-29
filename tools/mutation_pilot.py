@@ -965,29 +965,23 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     bare `ast.Name` `exec` or `eval`; or, for a conftest.py only, an
     ANNOTATED or non-literal top-level `pytest_plugins` assignment. The
     qualified `builtins.exec`/`builtins.eval` form is also caught, since
-    it is the exact same risk under a different spelling. Deliberately
-    narrower than `_is_dynamic_file`, its excluded set splits into two
-    groups with different rationales. `sys.path`, `site`, the bare
-    `compile`/`syspath_prepend`/`addsitedir`/`PYTHONPATH`
-    names, and `subprocess`, `multiprocessing`, the os-exec functions
-    are all excluded. The first group does not itself load some OTHER,
-    unknown TRACKED module at runtime -- those constructs only affect
-    import machinery (`sys.path`) or don't by themselves load a module
-    (bare `compile`) -- which is the only thing that makes an importer's
-    own closure untrustworthy. The second group, however, CAN execute
-    tracked repository code in a child process, so excluding it is a
-    deliberate, accepted limitation under the project's documented
-    best-effort contract (see ARCHITECTURE.md), not a claim of
-    incapability. Tracking process boundaries is out of scope for this
-    static analysis, so a test depending on repository code only through
-    such runtime loading may be omitted from a PR's narrowed selection;
-    the full suite on every push to `main` is the backstop.
-    `pkgutil.resolve_name(...)` is a separate instance of the same
-    accepted limitation: it CAN import a module named by a runtime
-    value, but this narrow taint scan does not track that dependency,
-    so a test depending on it may also be omitted from a PR's narrowed
-    selection (same backstop: caught by the full suite on `main`). Used
-    only by select_pr_tests's taint rule."""
+    it is the exact same risk under a different spelling.
+    Deliberately narrower than `_is_dynamic_file`: this function checks
+    only for import-statement-shaped dynamic loading (the forms listed
+    above). `sys.path`, `site`, `pkgutil`, bare `compile`,
+    `syspath_prepend`, `addsitedir`, `PYTHONPATH`, `subprocess`,
+    `multiprocessing`, and the os-exec functions are all out of scope for
+    this taint scan -- not because any of them is known to be unable to
+    load or execute tracked repository code, but because this scan
+    targets import-statement-shaped dynamic loading specifically, and
+    none of these are that. Tracking every way code can run is out of
+    scope for a static analysis; this is a deliberate scope boundary
+    under the project's documented best-effort contract (see
+    ARCHITECTURE.md): a test that depends on repository code only
+    through one of these constructs, or any other runtime loading this
+    analysis doesn't track, may be omitted from a PR's narrowed
+    selection, and the full suite on every push to `main` is the
+    backstop. Used only by select_pr_tests's taint rule."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
