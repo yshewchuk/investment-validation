@@ -604,12 +604,19 @@ snapshot before scoring.** `nightly_trigger._default_plan` runs in
 `input_mode="snapshot"`, `snapshot_scope="shadow"` (was `"legacy"`/`None`):
 legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
 `"model_evidence"` and, once
-[#199](https://github.com/yshewchuk/investment-validation/issues/199)
-lands, `native_score_batch` all read through ONE pinned, frozen snapshot
-per session, removing "legacy and native read the store at two different
-moments" from the shadow comparison. This never touches the real legacy
-nightly: `nightly_trigger.py` is a wholly separate script on its own
-crontab line with no code path into the legacy process.
+[#199](https://github.com/yshewchuk/investment-validation/issues/199) AND
+[#200](https://github.com/yshewchuk/investment-validation/issues/200)
+both land, `native_score_batch` all read through ONE pinned, frozen
+snapshot per session, removing "legacy and native read the store at two
+different moments" from the shadow comparison — #199 gives
+`native_score_batch` a reader at all, and #200 is what makes
+`pin_snapshot_inputs` actually bind to the EXACT `snapshot_id`
+`_ensure_shadow_snapshot` verified rather than re-resolving the head
+independently. This never touches the real legacy nightly:
+`nightly_trigger.py` runs on its own systemd timer
+(`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate
+from whatever schedules the legacy nightly, with no code path into the
+legacy process.
 
 `nightly_trigger._ensure_shadow_snapshot(root, as_of, clock, attempt, ...)
 -> (status, snapshot_id | None)`, called from `_submit_plan` immediately
