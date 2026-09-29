@@ -167,6 +167,9 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
         register_artifact(conn, ref, None, clock)
     return {"scope": scope, "snapshot_ref_artifact_id": head.artifact_id,
             "snapshot_id": snapshot.snapshot_id, "snapshot_manifest_hash": snapshot.manifest_hash,
+            # issue #200 item 1 (cutover PR-7b-3): calendar_version only -- the expected_snapshot_id
+            # CAS check (#200 item 2) is a separate, not-yet-built change.
+            "calendar_version": snapshot.calendar_version,
             "snapshot_generation_receipt_id": receipt_id or "",
             "materialization_request_ref": ref.artifact_id,
             "materialization_request_hash": request.request_hash,
