@@ -1262,7 +1262,10 @@ native-score-input call site (`cli.py::_load_native_score_inputs`);
 `engine.v2.models` (`no_fit`/`payoff_artifact`/`deployment`/`training`/
 `RuntimeFitForbidden`/`TrainingRefused`) has more call sites, spanning
 rescore (`cli.py`, `native_score_batch.py`, `worker.py`) as well as
-training/promotion/release resolution (`training.py`, `supervisor.py`).
+`training.py`'s and `supervisor.py`'s own training/promotion/
+release-resolution call sites — including `training.py`'s `promote_plan`,
+one of the plan-builder functions the Invariants section below cites for
+self-derived fingerprinting roots.
 
 It does not import its layer-7.0 peers `engine.v2.serving`/
 `engine.v2.research`, or anything above them (`engine.v2.diagnosis`,
