@@ -214,7 +214,8 @@ Root doc §5 invariants this package is responsible for:
   `errors.py` performs no automatic redaction — each call site is
   responsible for excluding legacy paths and row-derived values from a
   `Problem`'s `details` itself (e.g. `reference_catalog.py`'s unknown-kind
-  refusal identifies the input by `kind` alone, never by `legacy_path`).
+  refusal reports a fixed `"<unknown>"` marker, never the caller-controlled
+  `kind` or `legacy_path` values).
 - **Atomic snapshot commit, compare-and-swap head, never last-writer-wins.**
   Zero rows changed on the head update is `SNAPSHOT_CONFLICT`. Only
   `data_snapshot_heads` is mutable; every other `data_*` table is

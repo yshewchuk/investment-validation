@@ -106,7 +106,7 @@ def insert_reference_inputs(conn: sqlite3.Connection, receipt_id: str,
     for item in inputs:
         if item.kind not in REFERENCE_KINDS:
             raise errors.fail("CONTRACT_MISMATCH", "unknown reference input kind",
-                              details={"kind": item.kind})
+                              details={"kind": "<unknown>"})
         conn.execute(
             "INSERT INTO data_import_reference_inputs (receipt_id, legacy_path, kind, object_id, "
             "content_hash, byte_size, fold) VALUES (?, ?, ?, ?, ?, ?, ?)",
