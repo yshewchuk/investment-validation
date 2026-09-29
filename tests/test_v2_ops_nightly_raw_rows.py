@@ -7,6 +7,8 @@ four REAL ``earnings_events`` rows the slice's spec captured from the pinned
 ``board_requests`` directly yields."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 
 from engine.v2.data.repository import Repository
@@ -43,11 +45,13 @@ def _head_row(conn, scope="shadow"):
 
 def _build_parent(conn, clock, store, *, events_rows=()):
     tables = {"daily_market": []}
-    if events_rows:
-        record = publish_and_inspect(store, _EVENTS, _EVENTS_REF, list(events_rows), "2026")
-        tables["earnings_events"] = [record]
-    else:
-        tables["earnings_events"] = []
+    rows_by_year: dict[str, list[dict]] = {}
+    for row in events_rows:
+        rows_by_year.setdefault(str(row["year"]), []).append(row)
+    tables["earnings_events"] = [
+        publish_and_inspect(store, _EVENTS, _EVENTS_REF, rows, year)
+        for year, rows in sorted(rows_by_year.items())
+    ]
     contracts = {"earnings_events": _EVENTS, "daily_market": _DAILY}
     commit_tables(conn, clock, tables, contracts, store=store)
     return _head_row(conn)
@@ -129,6 +133,24 @@ def test_scan_forward_board_requests_matches_board_requests_called_directly(tmp_
 
     assert scanned == direct
     assert scanned == expected
-    mutated = expected[:-1]
-    # proves the exact-tuple assertion above is not vacuously true for a scan that dropped a row
-    assert scanned != mutated
+    corrupted = expected[:-1] + (replace(expected[-1], session="AMC"),)
+    # same length as `expected` -- proves the assertion checks VALUES, not just tuple length
+    assert scanned != corrupted
+
+
+def test_scan_forward_board_requests_spans_a_december_to_january_window(tmp_path):
+    as_of = "2026-12-20"
+    horizon_days = 45
+    rows = [_event_row("ACI", "2026-12-28", "BMO", False),
+            _event_row("ACN", "2027-01-15", "BMO", False)]
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(conn, clock, store, events_rows=rows)
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(head["snapshot_id"])
+
+    result = scan_forward_board_requests(repository, snapshot, as_of=as_of,
+                                         horizon_days=horizon_days)
+
+    tickers = {request.ticker for request in result}
+    assert tickers == {"ACI", "ACN"}

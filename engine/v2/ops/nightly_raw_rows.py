@@ -46,6 +46,13 @@ def scan_forward_board_requests(
     ``src_orats`` filter of its own. It restricts the scanned partitions to
     the years the forward window can touch, re-validating ``as_of``/
     ``horizon_days`` the same way ``board_requests`` does for that reason.
+
+    Outcomes: ``earnings_events`` missing from the pinned snapshot raises
+    ``CONTRACT_MISMATCH`` (``Repository.table_contract``'s own typed refusal);
+    a forward window with no matching partition year returns an empty tuple,
+    not an exception; a malformed ``as_of``/``horizon_days`` raises
+    ``INVALID_REQUEST`` (``native_board_universe``'s own validators, run
+    before the scan).
     """
     as_of_ts = _validated_as_of(as_of).normalize()
     horizon_days = _validated_horizon_days(horizon_days)
