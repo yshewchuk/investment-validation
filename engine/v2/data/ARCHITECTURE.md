@@ -101,7 +101,8 @@ truly-stored dataset-version row — Invariants); a `computed_moves`/
 committed by `engine.v2.ops.computed_moves_store.py`/
 `.price_history_store.py` (this package supplies only the math and the
 `TableContract`); refusals as a `DataError`/`Problem` from
-`DATA_FAILURE_CODES` — never a local path or row value.
+`DATA_FAILURE_CODES`, intended to carry no local path or row value — not
+fully enforced today (Invariants).
 
 ## Dependencies
 
@@ -210,11 +211,16 @@ Root doc §5 invariants this package is responsible for:
   `engine.paths`/`ArtifactStore`, never a locally computed project root
   (`legacy_mapping.py`'s one `Path(__file__)` use resolves a sibling
   package resource, not a project root).
-- **Nothing published carries a local path or raw exception text** —
-  `errors.py` performs no automatic redaction. Call sites should exclude
-  legacy paths and row-derived values, but this is not universal — for
-  example, `reference_catalog.py` includes `item.legacy_path` in error
-  details.
+- **Nothing published carries a local path or raw exception text — not
+  fully enforced.** `errors.py` performs no automatic redaction; call sites
+  are meant to exclude legacy paths and row-derived values, but at least
+  one does not: `reference_catalog.py` puts a raw legacy path
+  (`item.legacy_path`) in a `Problem`'s `details`, and that value survives
+  unchanged through `engine.v2.ops.snapshot_promotion`'s translation
+  (`_translate` forwards `details` verbatim) into
+  `catalog.record_failed_import`'s durably persisted
+  `data_import_receipts.problem_json` row — tracked as issue
+  [#202](https://github.com/yshewchuk/investment-validation/issues/202).
 - **Atomic snapshot commit, compare-and-swap head, never last-writer-wins.**
   Zero rows changed on the head update is `SNAPSHOT_CONFLICT`. Only
   `data_snapshot_heads` is mutable; every other `data_*` table is
