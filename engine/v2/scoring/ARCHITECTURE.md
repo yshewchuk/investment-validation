@@ -132,7 +132,11 @@ load-bearing entrypoints:
   `observed_at`, plus an optional `quote_status` for a legitimately empty
   domain); `feature_names` (a non-string sequence of non-empty,
   non-duplicate names; may never name a realized outcome, `driver_name`
-  itself, or a Tier-4 stamp/band column — see Failure semantics);
+  itself, a Tier-4 producer-stamp column (`*_fold_start`/`*_model_id`/
+  `tier3_snapshot`), or any `pred_iv_crush_30*` column (that one family's
+  bands included) — other metrics' own band columns (e.g.
+  `pred_abs_move_p10`) are legitimate feature names, gated instead by their
+  base metric's `fold_start` — see Failure semantics);
   `calendar_row["spot"]` must be finite and `> 0`. `model_identity`,
   `model_artifact_refs`, `forecast_recipes`, `residual_recipe`,
   `analog_recipe`, `gate_recipe` are accepted as optional pass-throughs,
