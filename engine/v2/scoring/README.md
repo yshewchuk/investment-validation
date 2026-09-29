@@ -72,13 +72,17 @@ panel row's market-state values were computed against) that postdates
 `as_of`, or a used feature whose own fold_start postdates `as_of`.
 `quote_domain_map` (extracted from `tools/capture_tier0_corpus.py`'s
 `_quote_map`), `validated_as_of`, and `NightlySourceBundleRefusal` are its
-other real `__all__` exports, all four now declared below:
-`engine.v2.ops.native_score_batch.py` (Cutover PR-3) imports
-`assemble_nightly_source_bundle`/`validated_as_of`/`NightlySourceBundleRefusal`
-(`checks/package_readmes.py` requires a directive entry for a name any
-package imports, including via a submodule-qualified import), but its
-`native_score_batch` job is never submitted in production, so no caller
-resolves a full bundle in production yet. See `ARCHITECTURE.md` for what
+other real `__all__` exports, all four now declared below even though
+`checks/package_readmes.py` only strictly requires an entry for a name
+reached via an unqualified `from engine.v2.scoring import <name>` — every
+real caller of these four (`tools/capture_tier0_corpus.py`,
+`engine.v2.ops.native_score_batch.py`'s Cutover PR-3 import of
+`assemble_nightly_source_bundle`/`validated_as_of`/`NightlySourceBundleRefusal`)
+reaches them through the submodule-qualified `from
+engine.v2.scoring.nightly_source_bundle import ...` instead, which the
+checker doesn't enforce. `native_score_batch`'s own job is never submitted
+in production, so no caller resolves a full bundle in production yet. See
+`ARCHITECTURE.md` for what
 runs in production today versus only in tests.
 
 <!-- public-interface: application, compatibility, financial, frozen_batch, frozen_executor, frozen_inputs, identity, release_bindings, source_inputs, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->

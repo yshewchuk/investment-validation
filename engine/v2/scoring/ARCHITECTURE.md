@@ -59,12 +59,18 @@ load-bearing entrypoints:
 - `nightly_source_bundle.py` — `assemble_nightly_source_bundle()`,
   `quote_domain_map()`, `validated_as_of()`, `NightlySourceBundleRefusal` —
   the per-night, per-`(ticker, event)` `SourceBundle` field assembler (see
-  Inputs/Outputs/Failure semantics). All four names are in `README.md`'s
-  `<!-- public-interface: -->` directive: `checks/package_readmes.py`
-  requires an entry for any name a package imports, including via a
-  submodule-qualified import, and `engine.v2.ops.native_score_batch.py`
-  (Cutover PR-3) imports all but `quote_domain_map` (see Dependencies for
-  what that consumer actually runs in production).
+  Inputs/Outputs/Failure semantics). All four names are declared in
+  `README.md`'s `<!-- public-interface: -->` directive. `checks/
+  package_readmes.py` only strictly requires an entry for a name reached
+  via an *unqualified* `from engine.v2.scoring import <name>`, which none
+  of these four are — `tools/capture_tier0_corpus.py` and
+  `engine.v2.ops.native_score_batch.py` (Cutover PR-3, which imports all
+  but `quote_domain_map`) both reach them through the submodule-qualified
+  `from engine.v2.scoring.nightly_source_bundle import ...`, so the checker
+  would pass without any of the four listed. They're declared anyway
+  because all four are real `__all__` exports with a real `engine.v2.*`
+  consumer today (see Dependencies for what that consumer actually runs in
+  production).
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
   identity, model artifact refs, and analog/payoff/recalibration artifacts;
