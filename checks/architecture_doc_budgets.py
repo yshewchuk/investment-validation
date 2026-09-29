@@ -37,7 +37,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from checks.repo_hygiene import (  # noqa: E402
     read_staged_blob,
     read_worktree_blob,
-    staged_paths,
     tracked_paths,
 )
 
@@ -108,13 +107,9 @@ def check_files(files: dict[str, bytes]) -> Report:
 
 
 def _sources(root: Path, use_worktree: bool) -> dict[str, bytes]:
-    blobs: dict[str, bytes] = {}
-    for rel in tracked_paths(root):
-        blobs[rel] = read_worktree_blob(root, rel)
-    if not use_worktree:
-        for rel in staged_paths(root):
-            blobs[rel] = read_staged_blob(root, rel)
-    return blobs
+    if use_worktree:
+        return {rel: read_worktree_blob(root, rel) for rel in tracked_paths(root)}
+    return {rel: read_staged_blob(root, rel) for rel in tracked_paths(root)}
 
 
 def main(argv: list[str] | None = None) -> int:
