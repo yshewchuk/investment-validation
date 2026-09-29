@@ -582,10 +582,15 @@ schedule it now, well before Phase 7.
 `native_score_batch` is registered as a job kind
 (`stages.py::_native_score_batch_kind`) and has a production caller —
 `supervisor.Service`'s tick sidecar, alongside legacy scoring, with no
-authority change — but no job is ever actually submitted under today's
-production default: the selected `"score"` job always pins no snapshot,
-so `submit_native_score_batch_shadow_if_ready` refuses before building one
-(see "Failure semantics" below). Three symbols, mirroring
+authority change — but no job is ever actually submitted: since cutover
+PR-7b's own flip of `nightly_trigger`'s scheduled plan to
+`input_mode="snapshot"`, the selected `"score"` job now pins a snapshot,
+so `submit_native_score_batch_shadow_if_ready` raises `VALIDATION_FAILED`
+(the raw-row producer, [#199](https://github.com/yshewchuk/investment-validation/issues/199),
+is not built yet) rather than silently returning nothing — only a
+`legacy`-input-mode plan built directly via `ops plan` (not the scheduled
+trigger) still gets a silent no-op (see "Failure semantics" below). Three
+symbols, mirroring
 `computed_moves_refresh`'s own shape:
 `supervisor.Service._reconcile_native_score_batch_shadow` (tick-loop
 sidecar, called from `Service.tick`); `nightly.submit_native_score_batch_shadow_if_ready`
@@ -656,13 +661,14 @@ resumable rather than permanently `"missed"`.
 
 Commits land directly in scope `"shadow"` (no candidate-scope-then-promote
 step): `"shadow"` has no downstream consumer needing pre-advance
-validation. The plan binds to the EXACT `snapshot_id` this call verified
+validation. The EXACT `snapshot_id` this call verified is threaded through
 (`expected_shadow_snapshot_id` → `_default_plan`'s
-`expected_snapshot_id`), never a re-resolved mutable head — closing a
-window where a human `ops snapshot submit`/`promote` between verification
-and planning could pin an unvalidated snapshot; `pin_snapshot_inputs` does
-not yet consume that value
-([#200](https://github.com/yshewchuk/investment-validation/issues/200)).
+`expected_snapshot_id`) so a later CAS check COULD bind the plan to it
+instead of a re-resolved mutable head — closing a window where a human
+`ops snapshot submit`/`promote` between verification and planning could
+pin an unvalidated snapshot — but `pin_snapshot_inputs` does not yet
+consume that value, so the window is not closed today; that CAS check is
+[#200](https://github.com/yshewchuk/investment-validation/issues/200).
 The `events_table` scan, per-event row staging, and `calendar_revision`
 source `native_score_batch`'s raw-row producer needs are
 [#199](https://github.com/yshewchuk/investment-validation/issues/199),
