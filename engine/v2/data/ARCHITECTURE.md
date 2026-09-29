@@ -214,14 +214,12 @@ Root doc §5 invariants this package is responsible for:
 - **Nothing published carries a local path or raw exception text — not
   fully enforced.** `errors.py` performs no automatic redaction; each call
   site is responsible for excluding legacy paths and row-derived values
-  from a `Problem`'s `details` itself. `reference_catalog.py`'s unknown-kind
-  refusal reports a fixed `"<unknown>"` marker (issue #202);
-  `reference_inputs.py`'s `publish_reference_inputs` reports only a count
-  for its two missing-input refusals (issue #217) — neither echoes a
-  caller-controlled or legacy-path value any more. The same file's
-  `champion_entries`/`_artifact_path`/`_tier4_caches` still put a raw
-  legacy path or registry-derived string in `details` — tracked as issue
-  [#218](https://github.com/yshewchuk/investment-validation/issues/218).
+  from a `Problem`'s `details` itself. `reference_catalog.py` (issue #202)
+  and every refusal in `reference_inputs.py` (issues #217, #218) now redact
+  or drop the legacy path instead of echoing it. `import_snapshot.py` and
+  `legacy_materialization.py` still put a raw legacy path in `details` for
+  several refusals — tracked as issue
+  [#220](https://github.com/yshewchuk/investment-validation/issues/220).
 - **Atomic snapshot commit, compare-and-swap head, never last-writer-wins.**
   Zero rows changed on the head update is `SNAPSHOT_CONFLICT`. Only
   `data_snapshot_heads` is mutable; every other `data_*` table is
