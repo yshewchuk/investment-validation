@@ -213,8 +213,13 @@ the new `INVALID_KEY_FIELD` refusal, schema tags
 `native_score_batch_records.v2.0` / `native_score_batch_refusals.v2.0`)
 plus `native_parity_report._population_key_from_board_request_key` and
 `native_parity_report._native_rows_and_refusals` — the pure projection
-functions this doc's "Primary contracts" section below documents. Both
-halves are still pure functions with no job/worker/supervisor wiring.
+functions this doc's "Primary contracts" section below documents. The
+new `native_parity_report` projection functions are pure, with no
+`native_parity` job/worker/supervisor wiring of their own — that wiring
+is slice 2B, below. `native_score_batch.py`'s own worker and
+shadow-submission sidecar are unaffected by this schema bump: they
+already exist and are already wired (cutover PR-3 `#66`'s worker
+dispatch, PR-7a `#126`'s tick-loop submission).
 Phase 2 slice 2B (deferred, not `#185`): the `native_parity` job kind
 itself (`stages.py::_native_parity_kind`, `worker.py`'s dispatch branch,
 `run_native_parity_worker`, `NativeParityParameters`), its tick-loop
@@ -2051,7 +2056,11 @@ starts working with no change of its own.
   outcome, not a worker failure (see "Failure semantics"), and (Cutover
   PR-4 redo) is exactly the case `native_parity_report._empty_native_report`
   (above) exists to turn into a real report rather than a refused
-  comparison.
+  comparison. Exception: this still fails the job if two of those refusals
+  (or a record and a refusal) collide on canonical key — two `BoardRequest`s
+  that differ only by time-of-day within the same `event_date` truncate to
+  the same key — `_native_score_batch_documents` raises `ValueError` before
+  either output file is written rather than silently dropping one row.
 - `computed_moves_store.py` commits one new snapshot generation per run,
   carrying every other table forward unchanged alongside a fresh
   `computed_moves` table version (`engine/v2/data/computed_moves_table.py`;
