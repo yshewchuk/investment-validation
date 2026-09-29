@@ -507,15 +507,10 @@ def _native_score_batch_documents(
     # bundle is ever built here. Nothing populates known_gaps today;
     # the key stays in the schema for a future gap this module might
     # need to flag.
-    records_document = {
-        "schema_version": "native_score_batch_records.v2.0",
-        "authoritative": False,
-        "known_gaps": [],
-        "records": _keyed_by_board_request(
-            (key, to_document(record))
-            for key, record in zip(keys_in_order, records, strict=True)
-        ),
-    }
+    records_by_key = _keyed_by_board_request(
+        (key, to_document(record))
+        for key, record in zip(keys_in_order, records, strict=True)
+    )
     unkeyable_refusals: list[dict[str, Any]] = [
         # No safe canonical string exists for these rows (that is what
         # "INVALID_KEY_FIELD" means) -- keep their raw structured key,
@@ -527,6 +522,22 @@ def _native_score_batch_documents(
         (refusal.key, {"code": refusal.code, "detail": refusal.detail})
         for refusal in refusals if refusal.code != "INVALID_KEY_FIELD"
     )
+    overlap = set(records_by_key) & set(keyed_refusals)
+    if overlap:
+        # The same time-of-day collision _keyed_by_board_request already
+        # catches WITHIN one dict can also happen ACROSS the two: one
+        # colliding BoardRequest succeeded (a record) while the other
+        # failed (a refusal), and neither dict's own internal check can
+        # see the other dict at all.
+        raise ValueError(
+            "canonical BoardRequest key used by both a record and a "
+            f"refusal: {sorted(overlap)!r}")
+    records_document = {
+        "schema_version": "native_score_batch_records.v2.0",
+        "authoritative": False,
+        "known_gaps": [],
+        "records": records_by_key,
+    }
     refusals_document = {
         "schema_version": "native_score_batch_refusals.v2.0",
         "refusals": keyed_refusals,

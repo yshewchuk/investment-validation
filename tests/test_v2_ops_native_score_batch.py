@@ -636,3 +636,18 @@ def test_native_score_batch_documents_rejects_duplicate_canonical_keys_in_refusa
     assert first.key != second.key
     with pytest.raises(ValueError):
         _native_score_batch_documents((), (), (first, second))
+
+
+def test_native_score_batch_documents_rejects_cross_dict_canonical_key_collision():
+    """CodeRabbit round 3: two DISTINCT BoardRequests differing only by time
+    of day collide onto one canonical key -- when one succeeds (a record)
+    and the other fails (a refusal), neither dict's own internal duplicate
+    check can see the other, so the cross-dict overlap must raise too."""
+    record_key = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                              event_date=pd.Timestamp("2026-01-15 09:00"), session="am")
+    refusal = NativeScoreBatchRowRefusal(
+        BoardRequest(ticker="TEST", strategy="STR-THRU",
+                     event_date=pd.Timestamp("2026-01-15 16:00"), session="am"),
+        "UNSUPPORTED_STRATEGY", "some detail")
+    with pytest.raises(ValueError):
+        _native_score_batch_documents((record_key,), [{"a": 1}], (refusal,))
