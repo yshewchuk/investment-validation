@@ -340,8 +340,8 @@ or a new consumer must update that package's README in the same change.
   cutover PR-13b; a native producer for the Tier-4 forecasts table native
   currently only imports from a legacy snapshot is cutover PR-13c; neither
   is designed here. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
-  pool/residual refresh" and `engine/v2/models/ARCHITECTURE.md` §§1, 2, 7.6,
-  7.7, 8 for the full design.
+  pool/residual refresh", `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
+  issue #192 for the full design.
 - **Native parity summary projection (serving, read-only).**
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
   is a pure, read-only aggregate over the `native_parity` stage's own
@@ -361,10 +361,14 @@ or a new consumer must update that package's README in the same change.
   Output document (`native_parity_summary.v1.0`), when a report is found and
   parses: `status: "available"`; `partial` (`true` when the artifact predates
   the `native_refused`/`native_refused_unmatched` fields); `source_schema_version`;
-  `compared_count`/`only_legacy_count`/`only_native_count`; `field_mismatch_counts`
-  (mismatch count per field name, across every dimension); `dimension_mismatch_counts`
-  (mismatch-entry count per dimension); `worst_rows` (the rows with the most
-  mismatched fields, most first, ties broken by row key); and
+  `compared_count`/`only_legacy_count`/`only_native_count`;
+  `matched_row_count`/`mismatched_row_count` (distinct row keys with zero
+  vs. at least one dimension mismatch — `matched_row_count +
+  mismatched_row_count == compared_count`); `field_mismatch_counts`
+  (mismatch count per field name,
+  across every dimension); `dimension_mismatch_counts` (mismatch-entry count
+  per dimension); `worst_rows` (the rows with the most mismatched fields,
+  most first, ties broken by row key); and
   `native_refused_count`/`native_refused_unmatched_count`/`native_refused_reasons`
   (refusal-code counts). Failure semantics:
 
@@ -375,8 +379,13 @@ or a new consumer must update that package's README in the same change.
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  No production caller yet — the dashboard page that renders this summary
-  (a later PR) is its first consumer. `engine/v2/serving` has no
+  The one consumer today is the read-only operations preview server's
+  `GET /native_parity`/`GET /native_parity.json` routes
+  (`engine/v2/serving/operations.py`), which read this document unchanged,
+  wired through `engine/v2/dashboard/preview.py`'s optional
+  `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
+  for that route/CLI contract.
+  `engine/v2/serving` has no
   `ARCHITECTURE.md` of its own yet (this doc's "Component docs" table lists
   it `(pending)`); per that section's own rule a pending component is
   documented only at this root doc's level until a follow-up PR gives it a

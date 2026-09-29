@@ -16,15 +16,16 @@ from engine.v2.models.deployment import (
     resolve_release,
 )
 
-from . import analog_projection, derivation_projection, release_media
+from . import analog_projection, derivation_projection, native_parity_projection, release_media
 
 HTTPStatus = http.HTTPStatus
 
 __all__ = ["OperationsHandler", "analogs_page_document", "create_server",
-           "derivation_page_document", "model_release_page_document", "shell_document",
+           "derivation_page_document", "model_release_page_document",
+           "native_parity_page_document", "shell_document",
            "STATIC_ROUTES", "PARAMETERIZED_ROUTES", "route_table"]
 
-_VIEWS = ("board", "explorer", "book", "models", "derivation", "analogs", "flags")
+_VIEWS = ("board", "explorer", "book", "models", "derivation", "analogs", "native_parity", "flags")
 
 #: Every route whose path resolves with no path parameter, declared once so
 #: ``route_table()`` -- not a hand list in ``tools/v2_route_probe.py`` -- is
@@ -39,6 +40,7 @@ STATIC_ROUTES: tuple[tuple[str, str], ...] = (
     ("GET", "/models/release"),
     ("GET", "/derivation.json"),
     ("GET", "/analogs.json"),
+    ("GET", "/native_parity.json"),
     ("GET", "/release/current.json"),
     ("GET", "/release/current"),
     ("POST", "/actions/refresh"),
@@ -58,7 +60,7 @@ PARAMETERIZED_ROUTES: tuple[tuple[str, str, str], ...] = (
 #: Static GET paths answered by the shell document: ``/`` plus every view
 #: except ``/derivation`` and ``/analogs``, which have their own pages.
 _SHELL_ROUTES = frozenset({"/", *(f"/{view}" for view in _VIEWS
-                                  if view not in ("derivation", "analogs"))})
+                                  if view not in ("derivation", "analogs", "native_parity"))})
 
 
 def route_table() -> list[dict]:
@@ -148,7 +150,7 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     """
     frozen = frozen_at or "unknown"
     routes = ("/#/trades/board", "/#/trades/explorer", "/#/trades/book", "/#/models/modelx",
-              "/derivation", "/analogs", "/#/models/health")
+              "/derivation", "/analogs", "/native_parity", "/#/models/health")
     views = "".join(f'<a href="{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
     html = f'''<!doctype html><meta charset="utf-8"><title>Operations shell</title>
 <style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
@@ -360,6 +362,111 @@ document.querySelector('#lookup').addEventListener('submit',function(event){
     return html.encode()
 
 
+_NATIVE_PARITY_PAGE_HTML = '''<!doctype html><meta charset="utf-8"><title>Native parity</title>
+<style>
+body{margin:0;font:14px sans-serif;padding:16px}
+#summary.refused{color:#a33}
+.tiles{display:flex;gap:12px;margin:8px 0;flex-wrap:wrap}
+.tile{border:1px solid #ccc;padding:8px 12px}
+table{border-collapse:collapse;margin:8px 0}
+td,th{border:1px solid #ccc;padding:4px 8px;text-align:left}
+</style>
+<h1>Native-vs-legacy parity</h1>
+<div id="summary">loading...</div>
+<div id="controls" style="display:none">
+  <label>show <select id="filter">
+    <option value="all">all</option>
+    <option value="match">match</option>
+    <option value="mismatch">mismatch</option>
+    <option value="incomparable">incomparable</option>
+    <option value="refused">refused</option>
+  </select></label>
+</div>
+<div class="tiles" id="tiles"></div>
+<div id="sections"></div>
+<script>
+function el(tag, text){const e=document.createElement(tag); if(text!==undefined) e.textContent=text; return e;}
+function tile(category, label, count){
+  const d=el('div', label+': '+count); d.className='tile'; d.dataset.category=category; return d;
+}
+function tableEl(headers, rows){
+  const t=document.createElement('table');
+  const head=document.createElement('tr');
+  for(const h of headers) head.appendChild(el('th', h));
+  t.appendChild(head);
+  for(const r of rows){
+    const tr=document.createElement('tr');
+    for(const c of r) tr.appendChild(el('td', String(c)));
+    t.appendChild(tr);
+  }
+  return t;
+}
+function section(category, title, node){
+  const div=el('div'); div.dataset.category=category;
+  div.appendChild(el('h2', title));
+  div.appendChild(node);
+  return div;
+}
+function applyFilter(value){
+  for(const node of document.querySelectorAll('[data-category]')){
+    node.style.display=(value==='all'||value===node.dataset.category)?'':'none';
+  }
+}
+async function load(){
+  const summary=document.querySelector('#summary'), tiles=document.querySelector('#tiles'),
+        sections=document.querySelector('#sections'), controls=document.querySelector('#controls');
+  try{
+    const r=await fetch('/native_parity.json',{credentials:'same-origin'});
+    const j=await r.json();
+    if(j.status==='no_report'){
+      summary.textContent='no native-parity report yet'; summary.className=''; return;
+    }
+    if(j.status!=='available'){
+      summary.textContent='parity report unavailable: '+(j.reason_code||'UNKNOWN');
+      summary.className='refused'; return;
+    }
+    summary.textContent='compared '+j.compared_count+(j.partial?' (partial: refusal data not in this report)':'');
+    summary.className='';
+    const incomparable=j.only_legacy_count+j.only_native_count;
+    const refused=j.native_refused_count+j.native_refused_unmatched_count;
+    tiles.appendChild(tile('match','match',j.matched_row_count));
+    tiles.appendChild(tile('mismatch','mismatch',j.mismatched_row_count));
+    tiles.appendChild(tile('incomparable','incomparable',incomparable));
+    tiles.appendChild(tile('refused','refused',refused));
+    sections.appendChild(section('mismatch','per-field mismatch counts',
+      tableEl(['field','mismatches'], Object.entries(j.field_mismatch_counts||{}))));
+    sections.appendChild(section('mismatch','worst differing rows',
+      tableEl(['row','fields','dimensions'], (j.worst_rows||[]).map(w=>[w.row_key,w.mismatched_field_count,w.dimensions.join(', ')]))));
+    sections.appendChild(section('incomparable','only-legacy / only-native',
+      tableEl(['side','count'], [['legacy',j.only_legacy_count],['native',j.only_native_count]])));
+    sections.appendChild(section('refused','refusal reasons',
+      tableEl(['reason','count'], Object.entries(j.native_refused_reasons||{}))));
+    controls.style.display='';
+    document.querySelector('#filter').addEventListener('change', e=>applyFilter(e.target.value));
+  }catch(e){
+    summary.textContent='parity report unavailable'; summary.className='refused';
+  }
+}
+load();
+</script>'''
+
+
+def native_parity_page_document() -> bytes:
+    """Small standalone page for the native-vs-legacy parity summary (PR2).
+
+    Fetches ``/native_parity.json`` client-side -- the SAME document the
+    JSON route serves -- and renders it by building DOM nodes with
+    ``textContent`` only (no ``innerHTML``, nothing here builds HTML out of
+    server data). ``"no_report"`` renders as an explicit empty state (no
+    nightly report has been produced yet, the everyday state today);
+    ``"unavailable"`` renders as an explicit error with its reason code;
+    neither is ever a blank page. A client-side "show" select filters which
+    section is visible (match/mismatch/incomparable/refused/all) over the
+    fields the summary already returns -- it never requests different data.
+    """
+    return _NATIVE_PARITY_PAGE_HTML.encode()
+
+
 class OperationsHandler(http.server.BaseHTTPRequestHandler):
     """Handler factory state is assigned by ``create_server``; no ops imports."""
 
@@ -396,6 +503,8 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, derivation_page_document(), "text/html")
         if path == "/analogs":
             return self._send(HTTPStatus.OK, analogs_page_document(), "text/html")
+        if path == "/native_parity":
+            return self._send(HTTPStatus.OK, native_parity_page_document(), "text/html")
         if path == "/models/release.json":
             return self._model_release_json_route(config)
         if path == "/models/release":
@@ -404,6 +513,8 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             return self._derivation_json_route(config)
         if path == "/analogs.json":
             return self._analogs_json_route(config)
+        if path == "/native_parity.json":
+            return self._native_parity_json_route(config)
         if path == "/release/current.json":
             return self._current_json_route(config)
         if path == "/release/current":
@@ -578,6 +689,16 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
             conn.close()
         return self._send_document(status, document)
 
+    def _native_parity_json_route(self, config):
+        if not self._authorized():
+            return self._send(HTTPStatus.UNAUTHORIZED, b"unauthorized\n", "text/plain")
+        if config.native_parity_report_path is None:
+            return self._send(HTTPStatus.SERVICE_UNAVAILABLE,
+                              b"native parity not configured\n", "text/plain")
+        status, document = native_parity_projection.native_parity_summary(
+            config.native_parity_report_path)
+        return self._send_document(status, document)
+
     def _send_document(self, status, document):
         body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         return self._send(status, body, "application/json")
@@ -635,7 +756,8 @@ def create_server(address, *, token: str, health_path: Path | str, release_root:
                   frozen_at: str = "unknown", submit_refresh=None, submit_whatif=None,
                   fetch_whatif=None, model_release_root: Path | str | None = None,
                   calibration_health_path: Path | str | None = None,
-                  serving_index_path: Path | str | None = None):
+                  serving_index_path: Path | str | None = None,
+                  native_parity_report_path: Path | str | None = None):
     config = type("Config", (), {"token": token, "health_path": Path(health_path),
                                   "release_root": Path(release_root), "frozen_at": frozen_at,
                                   "submit_refresh": submit_refresh, "submit_whatif": submit_whatif,
@@ -648,7 +770,10 @@ def create_server(address, *, token: str, health_path: Path | str, release_root:
                                                                else None),
                                   "serving_index_path": (Path(serving_index_path)
                                                          if serving_index_path is not None
-                                                         else None)})
+                                                         else None),
+                                  "native_parity_report_path": (Path(native_parity_report_path)
+                                                                if native_parity_report_path is not None
+                                                                else None)})
     server = http.server.ThreadingHTTPServer(address, OperationsHandler)
     server.config = config
     return server
