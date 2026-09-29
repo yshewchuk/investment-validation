@@ -141,8 +141,8 @@ request body and, if durable, in the operator guides instead — see
     job): on a `pull_request` run, narrows which `tests/test_*.py` files
     pytest collects to the subset the PR's diff can affect, generalizing
     `changed_modules`'s reuse of `build_import_graph`/`.precise`/
-    `is_inert_changed_path` from the hand-configured 33-module partition to
-    every tracked test file's own real-edge closure (plus its
+    `is_inert_changed_path` from the hand-configured mutation-module
+    partition to every tracked test file's own real-edge closure (plus its
     `tests/conftest.py` ancestors). Returns "run every test file" (never a
     narrower guess) for a changed path on `[pr_selection]`'s new
     `full_suite` allowlist (`tests/conftest.py`, `tools/*`,
@@ -161,11 +161,13 @@ request body and, if durable, in the operator guides instead — see
     its own edges cannot be trusted, but a test file that only
     *transitively reaches* a DYNAMIC file (every test does, via
     `tests/conftest.py`) is not — the module-level version of that broader
-    rule was measured, in #155 itself, to make most of the 33-module
+    rule was measured, in #155 itself, to make most of the mutation-module
     partition permanently universal, and the same collapse would apply
-    here. Currently selects ~112 of 355 test files unconditionally on this
-    basis; the PR introducing this bullet reports the exact count measured
-    against the repo at that commit.
+    here. This leaves a non-trivial, measurable fraction of test files
+    unconditionally selected on this basis; the exact count is a
+    point-in-time measurement of the repo, not tracked here to avoid a
+    figure that goes stale as test files are added — see the PR that
+    introduced this bullet for the count measured at that commit.
 
 ## 2. Layers and allowed dependency direction
 
