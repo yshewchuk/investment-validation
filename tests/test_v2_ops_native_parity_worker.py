@@ -1,0 +1,178 @@
+"""Worker semantics for the ``native_parity`` job kind.
+
+``run_native_parity_worker`` reads the three staged inputs (``score.json``
+from the paired legacy score job, ``records.json``/``refusals.json`` from
+the paired ``native_score_batch`` job), classifies every row through the
+pairing core, and writes ``native_parity_report.json``.  Fixture shapes
+mirror ``tests/test_v2_ops_native_parity_pairing.py`` and
+``tests/test_v2_ops_native_score_batch.py``.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from engine.v2.ops import worker
+from engine.v2.ops.errors import OpsError
+from engine.v2.ops.native_parity_report import (
+    SCHEMA_VERSION,
+    run_native_parity_worker,
+)
+
+_OUTPUTS = [{"name": "report", "path": "native_parity_report.json",
+             "schema": SCHEMA_VERSION}]
+
+
+def _legacy_row(ticker="ABC", strategy="STR-THRU", event_date="2026-01-15", **extra):
+    return {"ticker": ticker, "strategy": strategy, "event_date": event_date, **extra}
+
+
+def _canonical_key(ticker="ABC", strategy="STR-THRU", event_date="2026-01-15",
+                   session="regular"):
+    return "|".join((ticker, strategy, event_date, session))
+
+
+def _row_key(row):
+    return "|".join((row["ticker"], row["strategy"], row["event_date"]))
+
+
+def _write_inputs(root, *, rows=(), records=None, refusals=None, unkeyable=()):
+    (root / "score.json").write_text(json.dumps({"rows": list(rows)}))
+    (root / "records.json").write_text(json.dumps({"records": records or {}}))
+    (root / "refusals.json").write_text(json.dumps(
+        {"refusals": refusals or {}, "unkeyable_refusals": list(unkeyable)}))
+
+
+def _happy_rows_and_records():
+    shared = {"gate_score": 0.5, "gate_pass": True}
+    first = _legacy_row(ticker="ABC", **shared)
+    second = _legacy_row(ticker="XYZ", strategy="MR-PRINT",
+                         event_date="2026-01-16", **shared)
+    records = {
+        _canonical_key("ABC", "STR-THRU", "2026-01-15"): dict(shared),
+        _canonical_key("XYZ", "MR-PRINT", "2026-01-16", session="pm"): dict(shared),
+    }
+    return [first, second], records
+
+
+def _read_report(root):
+    return json.loads((root / "native_parity_report.json").read_text())
+
+
+def test_run_native_parity_worker_happy_path(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+
+    result = run_native_parity_worker({"expected_ids": ("a", "b")}, tmp_path)
+
+    assert result["outputs"] == _OUTPUTS
+    assert result["completed_ids"] == ["a", "b"]
+    assert result["no_work"] is False
+    report = _read_report(tmp_path)
+    assert report["schema_version"] == SCHEMA_VERSION
+    assert report["compared"] == sorted(_row_key(row) for row in rows)
+    assert report["only_legacy"] == []
+    assert report["only_native"] == []
+    assert report["mismatches"] == []
+    assert report["native_refused"] == []
+    assert report["native_refused_unmatched"] == []
+
+
+def test_run_native_parity_worker_empty_legacy_rows_raises(tmp_path):
+    _write_inputs(tmp_path, rows=[], records={_canonical_key(): {}})
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_run_native_parity_worker_all_refused_keyable(tmp_path):
+    row = _legacy_row(ticker="AAA")
+    key = _canonical_key("AAA", "STR-THRU", "2026-01-15", session="am")
+    _write_inputs(tmp_path, rows=[row], records={},
+                  refusals={key: {"code": "RELEASE_MISSING_ROLE", "detail": "..."}})
+
+    run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["compared"] == []
+    assert report["only_legacy"] == []
+    assert report["native_refused"] == [
+        {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE"}]
+    assert report["native_refused_unmatched"] == []
+
+
+def test_run_native_parity_worker_all_refused_unkeyable_only(tmp_path):
+    row = _legacy_row(ticker="AAA")
+    entry = {"key": {"ticker": "T|X", "strategy": "STR-THRU",
+                     "event_date": "2026-01-15", "session": "am"},
+             "code": "INVALID_KEY_FIELD", "detail": "bad ticker"}
+    _write_inputs(tmp_path, rows=[row], records={}, unkeyable=[entry])
+
+    run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["compared"] == []
+    assert report["only_legacy"] == [_row_key(row)]
+    assert report["native_refused"] == []
+    assert report["native_refused_unmatched"] == [
+        {"row_key": entry["key"], "refusal_code": "INVALID_KEY_FIELD"}]
+
+
+def test_run_native_parity_worker_disjoint_native_rows_with_keyed_refusal(tmp_path):
+    row = _legacy_row(ticker="AAA")
+    native_key = _canonical_key("ZZZ", "STR-THRU", "2026-01-15", session="am")
+    refusal_key = _canonical_key("AAA", "STR-THRU", "2026-01-15", session="am")
+    _write_inputs(tmp_path, rows=[row], records={native_key: {"gate_pass": None}},
+                  refusals={refusal_key: {"code": "RELEASE_MISSING_ROLE",
+                                          "detail": "..."}})
+
+    run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["compared"] == []
+    assert report["only_legacy"] == []
+    assert report["only_native"] == ["ZZZ|STR-THRU|2026-01-15"]
+    assert report["native_refused"] == [
+        {"row_key": _row_key(row), "refusal_code": "RELEASE_MISSING_ROLE"}]
+
+
+def test_run_native_parity_worker_genuinely_missing_native_rows_raises(tmp_path):
+    _write_inputs(tmp_path, rows=[_legacy_row()], records={}, refusals={},
+                  unkeyable=[])
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_run_native_parity_worker_malformed_canonical_key_raises(tmp_path):
+    _write_inputs(tmp_path, rows=[_legacy_row()], records={"AAA|CALL_SPREAD": {}})
+
+    with pytest.raises(OpsError) as exc:
+        run_native_parity_worker({"expected_ids": ("a",)}, tmp_path)
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
+def test_run_native_parity_worker_empty_expected_ids_is_no_work(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+
+    result = run_native_parity_worker({"expected_ids": ()}, tmp_path)
+
+    assert result["no_work"] is True
+    assert result["completed_ids"] == []
+    assert (tmp_path / "native_parity_report.json").is_file()
+
+
+def test_dispatch_routes_native_parity_to_the_worker(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+
+    result = worker.dispatch("native_parity", {"expected_ids": ["a"]}, tmp_path)
+
+    assert result["outputs"] == _OUTPUTS
+    assert result["completed_ids"] == ["a"]
+    assert result["no_work"] is False
+    assert _read_report(tmp_path)["compared"] == sorted(_row_key(row) for row in rows)

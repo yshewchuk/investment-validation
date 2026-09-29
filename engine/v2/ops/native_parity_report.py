@@ -57,6 +57,7 @@ __all__ = [
     "apply_native_refusals",
     "compare_native_vs_legacy",
     "native_parity_handler",
+    "run_native_parity_worker",
     "write_parity_report",
 ]
 
@@ -372,6 +373,51 @@ def write_parity_report(report: dict, path: Path | str) -> Path:
     path = Path(path)
     path.write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
     return path
+
+
+def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    """The ``native_parity`` job kind's worker entrypoint.
+
+    Reads three job-bound inputs already staged into ``root`` by the
+    generic input-binding mechanism: ``score.json`` (the paired legacy
+    "score" job's output), ``records.json``/``refusals.json`` (the paired
+    ``native_score_batch`` job's v2.0 outputs). Builds ``legacy_rows`` via
+    :func:`engine.v2.ops.nightly.legacy_parity_rows` and
+    ``native_rows``/``native_refusals``/``unkeyable_refusals`` via
+    :func:`_native_rows_and_refusals`, then classifies every row via
+    :func:`compare_native_vs_legacy` -- or, when nothing shared but a
+    refusal explains why, :func:`_empty_native_report` -- and layers
+    :func:`apply_native_refusals` on top before writing
+    ``native_parity_report.json``. See ARCHITECTURE.md's "Cutover PR-4
+    (redo)" section for the full branching rationale.
+    """
+    from engine.v2.ops.nightly import legacy_parity_rows
+
+    score_document = json.loads((root / "score.json").read_text())
+    records_document = json.loads((root / "records.json").read_text())
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    legacy_rows = legacy_parity_rows(score_document)
+    native_rows, native_refusals, unkeyable_refusals = _native_rows_and_refusals(
+        records_document, refusals_document)
+    if legacy_rows and not (set(legacy_rows) & set(native_rows)) and (
+            native_refusals or unkeyable_refusals):
+        report = _empty_native_report(
+            legacy_rows, native_rows, PARITY_DIMENSIONS, SCORE_RECORD_V1)
+    else:
+        report = compare_native_vs_legacy(
+            legacy_rows, native_rows, PARITY_DIMENSIONS,
+            tolerance_policy=SCORE_RECORD_V1)
+    report = apply_native_refusals(report, native_refusals, unkeyable_refusals)
+    (root / "native_parity_report.json").write_text(
+        json.dumps(report, sort_keys=True, separators=(",", ":")))
+    return {
+        "outputs": [
+            {"name": "report", "path": "native_parity_report.json",
+             "schema": SCHEMA_VERSION},
+        ],
+        "completed_ids": list(parameters["expected_ids"]),
+        "no_work": not parameters["expected_ids"],
+    }
 
 
 def native_parity_handler(
