@@ -229,7 +229,6 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 | `MODEL_RELEASE_ROOT` unset or blank | Refuses `MissingReleaseRoot` — no fallback to a repo-relative or other default path: this is the one config key naming "which release root is production" |
 | Set | Read fresh from the environment on every call (never cached), then resolved via `Path.expanduser().resolve()` — this touches the filesystem to normalize the path (symlink resolution) and, for a relative `MODEL_RELEASE_ROOT` value, resolves it against the current working directory |
 | Retry, transaction, partial write | Not applicable: this is a read and a path computation, not a write |
-| Idempotency | Same environment value and working directory always resolve to the same path |
 
 ### 7.5 `restage_semantic_hash`
 
