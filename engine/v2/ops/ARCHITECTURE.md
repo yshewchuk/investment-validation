@@ -220,13 +220,18 @@ is slice 2B, below. `native_score_batch.py`'s own worker and
 shadow-submission sidecar are unaffected by this schema bump: they
 already exist and are already wired (cutover PR-3 `#66`'s worker
 dispatch, PR-7a `#126`'s tick-loop submission).
-Phase 2 slice 2B (deferred, not `#185`): the `native_parity` job kind
-itself (`stages.py::_native_parity_kind`, `worker.py`'s dispatch branch,
-`run_native_parity_worker`, `NativeParityParameters`), its tick-loop
-sidecar (`supervisor.Service._reconcile_native_parity`,
-`nightly.submit_native_parity_if_ready`/`_native_parity_identity`,
-including the pre-submission `schema_version` check), and the
-`nightly.GRAPH` node width change — none of it is touched here. Cutover
+Phase 2 slice 2B(a) (this PR) lands the `native_parity` job kind itself
+-- `stages.py::_native_parity_kind`, `worker.py`'s dispatch branch,
+`run_native_parity_worker`, `NativeParityParameters`. Slice 2B(b)
+(deferred, not this PR) is its tick-loop sidecar
+(`supervisor.Service._reconcile_native_parity`); slice 2B(c) (deferred,
+not this PR) is the nightly wiring
+(`nightly.submit_native_parity_if_ready`/`_native_parity_identity`,
+including the pre-submission `schema_version` check, and the
+`nightly.GRAPH` node width change). Neither (b) nor (c) is touched here,
+so no production caller submits a `native_parity` job yet even once this
+PR lands -- the job kind exists and its worker is real, but nothing in
+the nightly graph or the supervisor's tick loop builds one. Cutover
 PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)
 and shadow-submission code (`#126`) are all already merged; PR-7a's code
 (`#126`) implemented the tick-loop submission sidecar only, not the `v2.0`
@@ -267,7 +272,11 @@ production — can never silently diverge in comparison logic: root doc
 §5's "one shared parity comparator" invariant, restated one level up as
 one shared CALLER of that comparator, reached two ways.
 
-Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
+Four new symbols, mirroring `native_score_batch`'s own PR-7a shape.
+**Only the last of the four (`stages.py::_native_parity_kind`) is
+implemented as of slice 2B(a); the first three are slice 2B(b)/(c),
+still deferred and described here in the design's own present tense for
+readability, not because they exist yet:**
 
 - `supervisor.Service._reconcile_native_parity` — a new tick-loop sidecar
   method, called from `Service.tick` (`supervisor.py:227`) right after
@@ -292,7 +301,8 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   never a second, independently written lookup. Returns `(as_of,
   scope_hash, score_job_id, native_score_batch_job_id)`, or `None` when
   no succeeded `native_score_batch` job exists yet.
-- `stages.py::_native_parity_kind()` — a new `JobKind`, mirroring
+- `stages.py::_native_parity_kind()` — **implemented, slice 2B(a) (this
+  PR)** — a new `JobKind`, mirroring
   `_native_score_batch_kind()` (`stages.py:271`) in shape:
   `name="native_parity"`, `worker="native_parity"`,
   `parameters=NativeParityParameters` (new, `RescoreParameters`-shaped —
@@ -380,7 +390,7 @@ a submission source" rule Part 4 already established for
   `population_key`, `_population_key`, and `_action_score`'s own
   set-based check are all unchanged by this PR.
 - **`native_parity_report.run_native_parity_worker(parameters, root)`**
-  (new) — the `native_parity` job kind's worker entrypoint (dispatched
+  (implemented, slice 2B(a), this PR) — the `native_parity` job kind's worker entrypoint (dispatched
   from `worker.py`, registered in `stages.py::_core_kinds`). Reads its two
   job-bound inputs (`score.json` from the paired `"score"` job;
   `records.json`/`refusals.json` from the paired `native_score_batch` job
@@ -1823,7 +1833,9 @@ reference (`input_bindings.py:70-73`), since no prior job produces it.
 `parameters["input_bindings"] = {"events.json": <that artifact id>}`; no
 `dependency_job_ids` entry is needed for it.
 
-**Cutover PR-4 (redo)'s own input sourcing (design).**
+**Cutover PR-4 (redo)'s own input sourcing (design — slice 2B(c), still
+deferred; `submit_native_parity_if_ready`/`_native_parity_identity` do
+not exist yet).**
 `submit_native_parity_if_ready` gathers nothing beyond what
 `_native_parity_identity` already found, WITH ONE DELIBERATE EXCEPTION
 (CodeRabbit round 6; refined by an Opus gate finding on where it belongs,
