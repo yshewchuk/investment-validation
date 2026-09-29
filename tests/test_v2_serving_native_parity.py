@@ -136,6 +136,10 @@ def test_available_full_report_counts_and_worst_rows(tmp_path):
     assert body["compared_count"] == len(report["compared"])
     assert body["only_legacy_count"] == len(report["only_legacy"])
     assert body["only_native_count"] == len(report["only_native"])
+    expected_mismatched_rows = {entry["row_key"] for entry in report["mismatches"]}
+    assert body["mismatched_row_count"] == len(expected_mismatched_rows)
+    assert body["matched_row_count"] == len(report["compared"]) - len(expected_mismatched_rows)
+    assert body["matched_row_count"] + body["mismatched_row_count"] == body["compared_count"]
     expected_field_counts = dict(sorted(Counter(
         field
         for entry in report["mismatches"]
@@ -168,6 +172,7 @@ def test_available_partial_when_refusal_fields_absent(tmp_path):
     assert body["native_refused_count"] == 0
     assert body["native_refused_unmatched_count"] == 0
     assert body["native_refused_reasons"] == {}
+    assert body["matched_row_count"] + body["mismatched_row_count"] == body["compared_count"]
 
 
 def test_worst_limit_caps_returned_rows(tmp_path):
@@ -309,6 +314,32 @@ def test_malformed_mismatch_null_dimension_returns_unavailable(tmp_path):
     path, report = _full_report(tmp_path)
     report = json.loads(path.read_text())
     report["mismatches"][0]["dimension"] = None
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_mismatch_row_key_not_in_compared_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["mismatches"][0]["row_key"] = "NOT-A-COMPARED-KEY"
+    path.write_text(json.dumps(report))
+
+    status, body = native_parity_summary(path)
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_malformed_duplicate_compared_key_returns_unavailable(tmp_path):
+    path, report = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["compared"] = report["compared"] + [report["compared"][0]]
     path.write_text(json.dumps(report))
 
     status, body = native_parity_summary(path)

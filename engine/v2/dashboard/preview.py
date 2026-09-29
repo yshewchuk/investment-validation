@@ -30,12 +30,21 @@ at the serving index sqlite file it reads persisted analog row ids from —
 again distinct from ``--release-root``, never guessed from it. Omitting it
 keeps that route's explicit 503 ``analogs not configured`` refusal.
 
+``--native-parity-report-path`` points the authenticated
+``GET /native_parity.json`` route (and the ``/native_parity`` page that fetches
+it) at the native-vs-legacy parity report file
+``engine.v2.serving.native_parity_projection`` reads — again distinct from
+``--release-root``, never guessed from it. The file need not exist yet: a
+missing report is the route's own explicit ``"no_report"`` state, not this
+flag's missing configuration. Omitting the flag keeps that route's explicit
+503 ``native parity not configured`` refusal.
+
 Run as::
 
     V2_DASHBOARD_TOKEN=... python3 -m engine.v2.dashboard.preview \\
         --host 127.0.0.1 --port 8765 --release-root R --health-path H \\
         --model-release-root M --ops-root O --calibration-health-path C \\
-        --serving-index-path S
+        --serving-index-path S --native-parity-report-path N
 """
 from __future__ import annotations
 
@@ -107,6 +116,13 @@ def _parse_args(argv):
                              "row ids from; distinct from --release-root, never inferred from "
                              "it. Omit to keep the route's explicit 503 'analogs not "
                              "configured' refusal.")
+    parser.add_argument("--native-parity-report-path", default=None,
+                        help="the native-vs-legacy parity report file GET /native_parity.json "
+                             "reads (and the /native_parity page renders); distinct from "
+                             "--release-root, never inferred from it. The file need not exist "
+                             "yet -- a missing report is the route's own 'no_report' state, not "
+                             "this flag's missing configuration. Omit to keep the route's "
+                             "explicit 503 'native parity not configured' refusal.")
     parser.add_argument("--frozen-at", default="unknown")
     parser.add_argument("--allow-non-loopback", action="store_true")
     return parser.parse_args(argv)
@@ -130,7 +146,8 @@ def run(argv=None):
                           frozen_at=args.frozen_at, model_release_root=args.model_release_root,
                           ops_root=args.ops_root,
                           calibration_health_path=args.calibration_health_path,
-                          serving_index_path=args.serving_index_path)
+                          serving_index_path=args.serving_index_path,
+                          native_parity_report_path=args.native_parity_report_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     probe_host = args.host if args.host not in ("0.0.0.0", "::") else "127.0.0.1"
