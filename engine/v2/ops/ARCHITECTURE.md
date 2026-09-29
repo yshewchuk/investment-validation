@@ -1097,17 +1097,18 @@ starts working with no change of its own.
   (two `BoardRequest`s that differ only by time-of-day within the same
   `event_date` truncate to the same key) — the worker raises before either
   output file is written, rather than silently dropping one row.
-- `computed_moves_store.py` commits one new snapshot generation per run,
-  carrying every other table forward unchanged alongside a fresh
-  `computed_moves` table version (one fragment per ticker, via the same
-  immutable-object/manifest/atomic-head commit primitives `price_history_store`
-  uses). Alongside the snapshot commit it inserts one append-only row per
-  attempted ticker into `data_computed_moves_captures` — a capture already
-  logged (same content-derived `capture_id`) is never re-logged. Every
-  committed row's `computed_at` derives from `as_of`, never the run's own
-  wall clock, so a same-`as_of` rerun over identical inputs produces
-  byte-identical fragment content and resolves back to the parent snapshot
-  rather than a fresh generation.
+- `computed_moves_store.py` commits a new snapshot generation only when the
+  `computed_moves` table's content actually changes, carrying every other
+  table forward unchanged alongside the fresh `computed_moves` table version
+  (one fragment per ticker, via the same immutable-object/manifest/atomic-head
+  commit primitives `price_history_store` uses). Alongside the snapshot commit
+  it inserts one append-only row per attempted ticker into
+  `data_computed_moves_captures` — a capture already logged (same
+  content-derived `capture_id`) is never re-logged. Every committed row's
+  `computed_at` derives from `as_of`, never the run's own wall clock, so a
+  same-`as_of` rerun over identical inputs produces byte-identical fragment
+  content and resolves back to the parent snapshot rather than committing a
+  new generation.
 - Coordinator-side effects for every kind in
   `supervisor._COORDINATOR_EFFECT_KINDS` (cited by name rather than copied
   here since the list can drift) — catalog/outbox/filesystem writes
@@ -1236,15 +1237,14 @@ today; this describes the destination once #199 lands.
   that night's attempt with `idempotency_key LIKE
   'nightly:<as_of>:%:native_score_batch' ESCAPE '\'`, with any literal `_`
   or `%` in `<as_of>` backslash-escaped first.
-- **Row keys.** `records.json`'s rows are the successful subset only, in
-  `assembled`'s own iteration order, with refused rows already dropped —
-  so a `records.json` row can never be paired against `events.json` by
-  position once any row has refused; the two arrays are then different
-  lengths with no fixed offset. Which row-identity key `native_parity`
-  joins on is not designed here — that is part of the slice 2B(b)/(c) work
-  described under "Primary contracts" above, against `BoardRequest`'s
-  existing fields and `NativeScoreBatchRowRefusal.as_document()`'s existing
-  `"key"` dict.
+- **Row keys.** `records.json`/`refusals.json` are keyed by the same
+  canonical `_board_request_key` string described above, not by array
+  position, so a row is never paired against `events.json` positionally.
+  `native_parity_report._native_rows_and_refusals`/
+  `_population_key_from_board_request_key` already join on this key today
+  (built, not designed here). What is still slice 2B(b)/(c) work (see
+  "Primary contracts" above) is submitting and scheduling the `native_parity`
+  job itself, not the key format it joins on.
 - **Namespace/authority.** Every one of these jobs is submitted under a
   `NamespacePolicy` scoped to `{"shadow"}` only; `native_score_batch`'s
   registered `namespaces=frozenset({"shadow", "smoke"})` already forbids
