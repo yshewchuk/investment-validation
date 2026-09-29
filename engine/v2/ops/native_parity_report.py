@@ -37,6 +37,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
 from engine.v2.parity.dimensions import (
@@ -56,10 +57,19 @@ __all__ = [
     "apply_native_refusals",
     "compare_native_vs_legacy",
     "native_parity_handler",
+    "run_native_parity_worker",
     "write_parity_report",
 ]
 
 SCHEMA_VERSION = "native_parity_report.v1.1"
+
+#: The exact ``schema_version`` tags
+#: ``native_score_batch._native_score_batch_documents`` writes for its v2.0
+#: ``records.json``/``refusals.json`` pair. A worker fed anything else refuses
+#: up front rather than silently misreading a pre-v2.0 document as if it were
+#: keyed.
+_RECORDS_SCHEMA_VERSION = "native_score_batch_records.v2.0"
+_REFUSALS_SCHEMA_VERSION = "native_score_batch_refusals.v2.0"
 
 #: The checker's own numeric field groups, reused by name -- see
 #: ``checks/phase4_real._compare_numeric_outputs``, whose dimension names and
@@ -128,6 +138,142 @@ def _refuse_empty_inputs(legacy_rows: Mapping[str, Any], native_rows: Mapping[st
         raise fail("VALIDATION_FAILED", "native parity report has no legacy rows")
     if not native_rows:
         raise fail("VALIDATION_FAILED", "native parity report has no native rows")
+
+
+def _population_key_from_board_request_key(key: str) -> str:
+    """Project one ``records.json``/``refusals.json`` canonical key (the
+    4-field ``f"{ticker}|{strategy}|{event_date_iso}|{session}"`` string
+    ``native_score_batch._board_request_key`` builds) down to the 3-field
+    ``population_key`` format :func:`engine.v2.ops.decision_validation.
+    population_key` already uses for legacy rows.
+
+    Splits on ``"|"`` into exactly 4 parts and reuses ``population_key``'s
+    own join format for the first three (never string-concatenating a
+    fourth time), so the two sides can never silently drift onto two
+    different separators or field orders. ``session`` (the 4th part) is
+    validated as present but never folded into the key -- legacy rows carry
+    no ``session`` field to join against.
+
+    Raises ``engine.v2.ops.errors.fail("VALIDATION_FAILED", ...)`` (an
+    ``OpsError``) if ``key`` does not split into exactly 4 parts.
+    """
+    parts = key.split("|")
+    if len(parts) != 4:
+        raise fail("VALIDATION_FAILED",
+                   "native canonical key does not have exactly 4 parts",
+                   details={"key": key, "parts": len(parts)})
+    ticker, strategy, event_date, _session = parts
+    return population_key({"ticker": ticker, "strategy": strategy, "event_date": event_date})
+
+
+def _native_comparison_row(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten one ``records.json`` entry into the checker's per-dimension
+    field shape.
+
+    ``record`` is ``native_score_batch``'s ``to_document(ScoreRecord)``
+    value, which PRESERVES :class:`~engine.v2.contracts.ScoreRecord`'s own
+    nested per-dimension dicts (``forecasts``, ``uncertainty``,
+    ``resolved_request``, ``financial_diagnostics``, ``gate_terms``), while
+    :func:`_dimension_view` looks every field up at the row's TOP level.
+    This projection reads each dimension's fields from the same nested
+    sources ``checks/phase4_real._numeric_views`` reads them from on the
+    native side -- ``forecasts`` first, then ``uncertainty``/
+    ``resolved_request``, in its exact fallback order -- so the nightly
+    report's view of a record can never drift from the checker's. It is a
+    DATA-SHAPE projection only: every comparison decision still comes from
+    ``compare_dimension``.
+
+    The never-ran groups follow
+    ``engine.v2.serving.native_render.native_display_row``'s convention: a
+    field the record does not carry reads as ``None`` here, and the
+    absent-vs-zero distinction for ``n_analogs`` is preserved (a record that
+    carries no ``n_analogs`` key never invents ``0``; memory
+    ``n-analogs-int-default-mismatch``).  ``engine.v2.serving`` is a layer
+    ABOVE ``engine.v2.ops`` and can never be imported here, so this narrow
+    projection is local to this module -- exactly as
+    :func:`_population_key_from_board_request_key` re-derives its own
+    serving-layer concept.
+    """
+    forecasts = record.get("forecasts") or {}
+    uncertainty = record.get("uncertainty") or {}
+    resolved = record.get("resolved_request") or {}
+    financial = record.get("financial_diagnostics") or {}
+    gate = record.get("gate_terms") or {}
+    row: dict[str, Any] = {}
+    for name in FORECAST_FIELDS:
+        row[name] = forecasts.get(name, uncertainty.get(name, resolved.get(name)))
+    for name in SIMULATION_FIELDS:
+        row[name] = forecasts.get(name, resolved.get(name))
+    for name in FINANCIAL_FIELDS:
+        row[name] = financial.get(name)
+    for name in GATE_FIELDS:
+        row[name] = gate.get(name)
+    for name in ANALOG_FIELDS:
+        row[name] = resolved.get(name)
+    return row
+
+
+def _native_rows_and_refusals(
+    records_document: Mapping[str, Any],
+    refusals_document: Mapping[str, Any],
+) -> tuple[dict[str, dict], dict[str, str], tuple[Mapping[str, Any], ...]]:
+    """Project ``native_score_batch``'s v2.0 ``records.json``/
+    ``refusals.json`` canonical keys down to ``population_key``, returning
+    ``(native_rows, native_refusals, unkeyable_refusals)``.
+
+    ``records_document["records"]`` and ``refusals_document["refusals"]``
+    are both ``{canonical_key: value}`` objects (the v2.0 shape). Every key
+    from BOTH, together, is projected through
+    :func:`_population_key_from_board_request_key`; the projection is LOSSY
+    (it drops ``session``), so two DISTINCT canonical keys -- the same
+    ``(ticker, strategy, event_date)`` under two different ``session``
+    values -- can collide onto the SAME ``population_key``. Any
+    ``population_key`` produced by more than one distinct canonical key
+    raises ``fail("VALIDATION_FAILED", ...)`` for the WHOLE call, before
+    ``native_rows``/``native_refusals`` are built -- never a silent
+    last-write-wins overwrite.
+
+    ``refusals_document["unkeyable_refusals"]`` is accessed with `[...]`,
+    never ``.get(..., ())``: this function's only caller is only ever
+    reached for a document already confirmed ``v2.0``-shaped (see
+    ARCHITECTURE.md), and the v2.0 writer always emits this key, even as
+    ``[]`` for a batch with none -- its absence means the file is
+    malformed, and the resulting ``KeyError`` is meant to propagate and be
+    caught by the caller alongside its other decode failures, never
+    silently treated as "no unkeyable refusals." Its entries are returned
+    unchanged: an ``INVALID_KEY_FIELD`` row never had a ``population_key``
+    to compute, so there is nothing here to project or collision-check for
+    it.
+
+    ``native_rows`` maps ``population_key -> the record's own document``
+    (the ``records_document["records"]`` value, untouched). ``native_refusals``
+    maps ``population_key -> refusal code string`` (``refusals_document
+    ["refusals"][canonical_key]["code"]``).
+    """
+    unkeyable_refusals = refusals_document["unkeyable_refusals"]
+    projected: dict[str, str] = {}
+
+    def _project(source_key: str) -> str:
+        population = _population_key_from_board_request_key(source_key)
+        prior = projected.get(population)
+        if prior is not None and prior != source_key:
+            raise fail(
+                "VALIDATION_FAILED",
+                "native population key collision after projection",
+                details={"population_key": population,
+                         "keys": sorted([source_key, prior])})
+        projected[population] = source_key
+        return population
+
+    native_rows: dict[str, dict] = {}
+    for source_key, record in records_document["records"].items():
+        native_rows[_project(source_key)] = record
+
+    native_refusals: dict[str, str] = {}
+    for source_key, refusal in refusals_document["refusals"].items():
+        native_refusals[_project(source_key)] = refusal["code"]
+
+    return native_rows, native_refusals, tuple(unkeyable_refusals)
 
 
 def compare_native_vs_legacy(
@@ -282,6 +428,83 @@ def write_parity_report(report: dict, path: Path | str) -> Path:
     path = Path(path)
     path.write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
     return path
+
+
+def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    """The ``native_parity`` job kind's worker entrypoint.
+
+    Reads three job-bound inputs already staged into ``root`` by the
+    generic input-binding mechanism: ``score.json`` (the paired legacy
+    "score" job's output), ``records.json``/``refusals.json`` (the paired
+    ``native_score_batch`` job's v2.0 outputs). Both native documents must
+    declare exactly the ``schema_version`` tags
+    ``native_score_batch._native_score_batch_documents`` writes -- anything
+    else is refused with ``VALIDATION_FAILED`` before a single row is read,
+    so the generic job-submission API can never route a pre-v2.0 pair past
+    this worker. Builds ``legacy_rows`` via
+    :func:`engine.v2.ops.nightly.legacy_parity_rows` and
+    ``native_rows``/``native_refusals``/``unkeyable_refusals`` via
+    :func:`_native_rows_and_refusals`, projects every native record through
+    :func:`_native_comparison_row` (its nested per-dimension dicts flattened
+    to the shape ``_dimension_view`` reads), then classifies every row via
+    :func:`compare_native_vs_legacy` -- or, when nothing shared but a
+    refusal explains why, :func:`_empty_native_report` -- and layers
+    :func:`apply_native_refusals` on top before writing
+    ``native_parity_report.json``. See ARCHITECTURE.md's "Cutover PR-4
+    (redo)" section for the full branching rationale.
+    """
+    from engine.v2.ops.nightly import legacy_parity_rows
+
+    score_document = json.loads((root / "score.json").read_text())
+    records_document = json.loads((root / "records.json").read_text())
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    if not isinstance(records_document, dict):
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch records.json is not a JSON mapping",
+                   details={"schema_version": None})
+    if records_document.get("schema_version") != _RECORDS_SCHEMA_VERSION:
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch records.json has an unsupported schema_version",
+                   details={"schema_version": records_document.get("schema_version")})
+    if not isinstance(refusals_document, dict):
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch refusals.json is not a JSON mapping",
+                   details={"schema_version": None})
+    if refusals_document.get("schema_version") != _REFUSALS_SCHEMA_VERSION:
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch refusals.json has an unsupported schema_version",
+                   details={"schema_version": refusals_document.get("schema_version")})
+    legacy_rows = legacy_parity_rows(score_document)
+    native_rows, native_refusals, unkeyable_refusals = _native_rows_and_refusals(
+        records_document, refusals_document)
+    native_rows = {key: _native_comparison_row(record)
+                   for key, record in native_rows.items()}
+    shared = set(legacy_rows) & set(native_rows)
+    if legacy_rows and not shared:
+        fully_refused = set(legacy_rows) <= set(native_refusals)
+        nothing_keyable_at_all = (
+            not native_rows and not native_refusals and bool(unkeyable_refusals))
+        refusal_explains_absence = fully_refused or nothing_keyable_at_all
+    else:
+        refusal_explains_absence = False
+    if refusal_explains_absence:
+        report = _empty_native_report(
+            legacy_rows, native_rows, PARITY_DIMENSIONS, SCORE_RECORD_V1)
+    else:
+        report = compare_native_vs_legacy(
+            legacy_rows, native_rows, PARITY_DIMENSIONS,
+            tolerance_policy=SCORE_RECORD_V1)
+    report = apply_native_refusals(report, native_refusals, unkeyable_refusals)
+    (root / "native_parity_report.json").write_text(
+        json.dumps(report, sort_keys=True, separators=(",", ":")))
+    return {
+        "outputs": [
+            {"name": "report", "path": "native_parity_report.json",
+             "schema": SCHEMA_VERSION},
+        ],
+        "completed_ids": list(parameters["expected_ids"]),
+        "no_work": not parameters["expected_ids"],
+    }
 
 
 def native_parity_handler(

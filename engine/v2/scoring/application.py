@@ -17,7 +17,7 @@ from .frozen_executor import FrozenStageExecutor, FrozenStageRefusal
 from .identity import dependency_hash, request_hash, with_score_id
 from .stages import NativeScoreInputs, StageObserver, assemble_native_values, flags_refuse
 
-__all__ = ["replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
+__all__ = ["FrozenBindingConflict", "replay", "score_batch", "score_event", "score_frozen", "score_many", "score_one"]
 
 _FEATURE_REGISTRY = default_feature_registry()
 _FROZEN_ROLE_OUTPUTS = {
@@ -49,6 +49,25 @@ _RUNUP_DERIVED_FIELDS = frozenset({
     "runup_move_sd", "runup_move_days", "runup_move_scale",
     "runup_move_provenance",
 })
+
+
+class FrozenBindingConflict(ValueError):
+    """More than one release binding, once scoped to this request's
+    ``(strategy, decision_clock)``, would answer the same canonical
+    forecast target, or more than one claims the gate role. A release-
+    authoring defect, never a per-request condition: ``score_frozen``
+    refuses with this instead of letting binding order decide silently
+    (issue #93)."""
+
+    def __init__(self, target: str, binding_ids: tuple[str, ...]) -> None:
+        self.target = target
+        self.binding_ids = tuple(binding_ids)
+        super().__init__(
+            f"release binds {len(self.binding_ids)} bindings "
+            f"{self.binding_ids!r} to canonical target {target!r} for this "
+            "request's (strategy, decision_clock); refusing rather than "
+            "letting the last one win"
+        )
 
 
 class _CanonicalFrozenExecutor:
@@ -476,6 +495,70 @@ def _frozen_role_outputs(binding) -> frozenset[str]:
     return frozenset(outputs)
 
 
+def _binding_declares_scope(binding) -> bool:
+    """True when ``binding`` declares both fields a real ``ModelBinding``
+    always has (``decision_clock_id`` and ``strategy_id``). False only for
+    a degenerate stand-in binding that carries no scope information at
+    all -- it must not be silently treated as a confirmed non-match."""
+    return hasattr(binding, "decision_clock_id") and hasattr(binding, "strategy_id")
+
+
+def _frozen_scoped_bindings(release, request: ScoreRequest) -> tuple[Any, ...] | None:
+    """Every ``release`` binding visible to ``request``: its own
+    ``(strategy_id, decision_clock_id)``, or a ``strategy_id="*"`` binding
+    shared across every strategy -- the same convention ``checks/
+    phase4_frozen_bridge.py`` already resolves a binding's strategy match
+    with (``strategy_id not in {request.strategy_version, "*"}`` there). A
+    release's OTHER strategies' own bindings never reach this request's
+    canonical forecast targets or gate slot.
+
+    ``None`` means ``release`` declares no ``bindings`` attribute at all:
+    scoping is impossible, so the caller keeps the historical unscoped
+    fold. Only an undeclared stand-in (a bare ``object()`` in tests) hits
+    this; every real ``ModelRelease`` always declares ``bindings``. An
+    empty tuple is the different, meaningful answer: this release's own
+    bindings were checked and NONE match this request's ``(strategy,
+    decision_clock)`` -- a confirmed, deliberate result that must be
+    respected and never converted back to ``None`` downstream. The same
+    reasoning applies one level down: a
+    binding that does not itself declare BOTH ``decision_clock_id`` and
+    ``strategy_id`` carries no scope information at all, so it cannot be
+    confirmed out of scope and is always included (``_binding_declares_
+    scope``), exactly mirroring the release-level ``hasattr`` check."""
+    if not hasattr(release, "bindings"):
+        return None
+    strategy = getattr(request, "strategy_version", None)
+    clock = getattr(request, "decision_clock_id", None)
+    scoped = tuple(
+        binding for binding in release.bindings
+        if not _binding_declares_scope(binding)
+        or (getattr(binding, "decision_clock_id", None) == clock
+            and getattr(binding, "strategy_id", None) in (strategy, "*"))
+    )
+    _refuse_ambiguous_frozen_bindings(scoped)
+    return scoped
+
+
+def _refuse_ambiguous_frozen_bindings(bindings) -> None:
+    """Raise ``FrozenBindingConflict`` if two of ``bindings`` (already
+    scoped to one request) would own the same canonical forecast target, or
+    if more than one claims the gate role."""
+    owners: dict[str, list[str]] = {}
+    for binding in bindings:
+        for target in _frozen_role_outputs(binding):
+            owners.setdefault(target, []).append(str(getattr(binding, "binding_id", "")))
+    for target, binding_ids in owners.items():
+        if len(binding_ids) > 1:
+            raise FrozenBindingConflict(target, tuple(binding_ids))
+    gate_ids = tuple(
+        str(getattr(binding, "binding_id", ""))
+        for binding in bindings
+        if str(getattr(binding, "role", "")).split(":", 1)[0] == "gate"
+    )
+    if len(gate_ids) > 1:
+        raise FrozenBindingConflict("gate", gate_ids)
+
+
 def _gate_forecast_producer_ids(gate) -> frozenset[str]:
     """The release binding ids a gate names as its derived-forecast producer.
 
@@ -608,7 +691,20 @@ def _frozen_result_state(result, binding, inference_request, days):
 
 
 def _collect_frozen_results(results, bindings, inference_requests, days,
-                            gate_only_forecast=frozenset()):
+                            gate_only_forecast=frozenset(), *,
+                            scoped_binding_ids: frozenset[str] | None = None):
+    """Fold the per-binding inference results into the canonical collections.
+
+    ``scoped_binding_ids`` narrows every answer-bearing or
+    refusal-affecting collection --
+    ``outputs``, ``gate_result``, ``required_roles``, ``state`` and ``flags``
+    -- to the bindings scoped to this request: an out-of-scope binding must
+    not demand a role forecast validation would then refuse on, nor stamp a
+    not-READY result's refusal onto an in-scope record. Only
+    ``artifact_hashes`` (pure provenance metadata) stays merged from every
+    binding, and ``None`` keeps the historical unscoped fold the direct
+    eager-path callers use, while an empty scoped set folds nothing.
+    """
     outputs = {}
     state = {}
     flags = []
@@ -621,21 +717,46 @@ def _collect_frozen_results(results, bindings, inference_requests, days,
         role_name, role_outputs, result_state, role_flags, hashes, current_gate = (
             _frozen_result_state(result, binding, inference_request, days)
         )
+        in_scope = (scoped_binding_ids is None
+                    or getattr(binding, "binding_id", None)
+                    in scoped_binding_ids)
         # A gate-only size producer feeds the gate's ``pred_abs_move`` columns
         # alone, never ``result.forecast_abs_move`` (legacy
         # ``_forecast_for_gate``). Keep its provenance/refusal, hold the value
         # and the ``size`` role out of the top-level score output.
         if not _is_gate_only_size(binding, gate_only_forecast):
-            outputs.update(role_outputs)
-            if role_name in {"driver", "size", "implied_t1", "runup_move",
-                             "iv_crush"}:
+            # An out-of-scope binding's raw result must never populate
+            # ``frozen_outputs``, even when no scoped binding claims the
+            # same canonical target -- reachable in production because
+            # capture submits every release binding's inference request
+            # unconditionally, so a multi-strategy release routinely hands
+            # ``score_frozen`` bindings outside its own (strategy, clock).
+            if in_scope:
+                outputs.update(role_outputs)
+            # Scoping only the outputs is not enough: an out-of-scope
+            # binding could still add its role here, so forecast validation
+            # would demand (and refuse on) a target that was correctly
+            # filtered out of ``frozen_outputs``.
+            if in_scope and role_name in {"driver", "size", "implied_t1",
+                                          "runup_move", "iv_crush"}:
                 required_roles.append(role_name)
-        state.update(result_state)
-        flags.extend(role_flags)
-        flags.extend(getattr(result, "reason_codes", ()) or ())
+        # An out-of-scope not-READY result's state/refusal codes would
+        # otherwise force ``score_frozen``'s final status check to refuse
+        # an in-scope record.
+        if in_scope:
+            state.update(result_state)
+            flags.extend(role_flags)
+            flags.extend(getattr(result, "reason_codes", ()) or ())
+        # ``artifact_hashes`` stays unscoped: pure provenance metadata.
         artifact_hashes.extend(hashes)
         if current_gate is not None:
-            gate_result = current_gate
+            # An out-of-scope binding's gate result must never populate
+            # ``frozen_score`` either, even when this request has no scoped
+            # gate binding at all (the executor_bindings-based pop in
+            # ``_frozen_gate_inputs`` would then never run) -- same
+            # unconditional-capture reachability as above.
+            if in_scope:
+                gate_result = current_gate
     return outputs, state, flags, artifact_hashes, required_roles, gate_result
 
 
@@ -1034,9 +1155,17 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     if days is not None:
         features["days_before_print"] = days
     gate_only_forecast = _frozen_gate_only_forecast(base, bindings, executor_bindings)
+    # ``None`` means the release declares no bindings at all (scoping
+    # impossible); an empty tuple is a CONFIRMED zero-match scope and must
+    # narrow the fold to nothing, never fall back to the unscoped fold.
+    scoped_binding_ids = (
+        frozenset(getattr(b, "binding_id", None) for b in executor_bindings)
+        if executor_bindings is not None else None
+    )
     outputs, result_state, flags, artifact_hashes, required_roles, gate_result = (
         _collect_frozen_results(results, bindings, inference_requests, days,
-                                gate_only_forecast)
+                                gate_only_forecast,
+                                scoped_binding_ids=scoped_binding_ids)
     )
     context.update(result_state)
     frozen_interval = {
@@ -1070,11 +1199,57 @@ def _frozen_native_inputs(fields: Mapping[str, Any], results, bindings,
     ), frozen_interval
 
 
+def _frozen_scoped_binding_ids(scoped_bindings) -> frozenset[Any] | None:
+    """The binding ids ``score_frozen``'s final not-READY check may consider.
+
+    ``None`` when scoping is impossible -- the release declares no
+    ``bindings`` attribute at all (only a bare ``object()`` stand-in;
+    every real ``ModelRelease`` declares one), mirroring the same
+    ``None`` convention ``_frozen_native_inputs`` applies. An empty scoped
+    tuple is a CONFIRMED zero-match scope: its empty frozenset narrows the
+    not-READY check to nothing instead of falling back to the historical
+    unscoped fold. Factored out of ``score_frozen`` so the complexity
+    budget sees it as one call rather than a comprehension plus its
+    empty-set fallback.
+    """
+    if scoped_bindings is None:
+        return None
+    return frozenset(getattr(binding, "binding_id", None)
+                     for binding in scoped_bindings)
+
+
+def _frozen_status_results(results, bindings, release,
+                           scoped_binding_ids: frozenset[Any] | None):
+    """The inference results ``score_frozen``'s final not-READY check may
+    consider: this request's own bindings, plus any binding id ``release``
+    does not know at all.
+
+    The scoping rules are ``_frozen_scoped_binding_ids``'s (``None`` keeps
+    the historical unscoped fold; an empty set is a confirmed zero-match
+    scope). A binding id absent from ``release``'s own known bindings
+    entirely is never excluded here, since it can only be an unresolved/
+    refused request, never a legitimate out-of-scope answer. Factored out
+    of ``score_frozen`` so the complexity budget sees it as one call
+    rather than a comprehension plus its condition.
+    """
+    release_ids_known = frozenset(
+        getattr(binding, "binding_id", None)
+        for binding in getattr(release, "bindings", ())
+    )
+    return tuple(
+        result for result, binding in zip(results, bindings, strict=True)
+        if scoped_binding_ids is None
+        or getattr(binding, "binding_id", None) in scoped_binding_ids
+        or getattr(binding, "binding_id", None) not in release_ids_known
+    )
+
+
 def score_frozen(request: ScoreRequest, inference, release, inference_request,
                  fields: Mapping[str, Any], *, observer: StageObserver | None = None) -> ScoreRecord:
     """Run verified inference through the canonical native scoring graph."""
     requests = (tuple(inference_request) if isinstance(inference_request, (tuple, list))
                 else (inference_request,))
+    scoped_bindings = _frozen_scoped_bindings(release, request)
     results = tuple(inference.infer(release, item) for item in requests)
     bindings = tuple(
         _frozen_binding(release, result, item)
@@ -1082,7 +1257,7 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     )
     inputs, frozen_runup_interval = _frozen_native_inputs(
         fields, results, bindings, requests, request, release, inference,
-        executor_bindings=getattr(release, "bindings", ()),
+        executor_bindings=scoped_bindings,
     )
     record = score_one(request, inputs, observer=observer)
     missing_runup = {
@@ -1091,6 +1266,19 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     }
     if missing_runup:
         record = replace(record, uncertainty={**record.uncertainty, **missing_runup})
+    # Scope the final not-READY check to this request's own bindings -- an
+    # out-of-scope binding's not-READY inference result and reason codes
+    # must never force a refusal on an in-scope record, mirroring the same
+    # scoping already applied inside ``_frozen_native_inputs`` and
+    # ``_collect_frozen_results``. ``None`` (the release declares no
+    # ``bindings`` at all) keeps the historical unscoped behavior; an empty
+    # scoped tuple is a confirmed zero-match scope and considers nothing. A
+    # binding id absent from ``release``'s own known bindings entirely is
+    # never excluded here, since it can only be an unresolved/refused
+    # request, never a legitimate out-of-scope answer.
+    scoped_binding_ids = _frozen_scoped_binding_ids(scoped_bindings)
+    status_results = _frozen_status_results(results, bindings, release,
+                                            scoped_binding_ids)
     artifact_hashes = tuple(dict.fromkeys(
         hash_value
         for result in results
@@ -1104,9 +1292,9 @@ def score_frozen(request: ScoreRequest, inference, release, inference_request,
     record = replace(record, model_artifact_ids=artifact_hashes,
                      evidence_refs=tuple(dict.fromkeys((*request.dependency_refs,
                                                          *release_ids, *binding_ids))))
-    if any(getattr(result, "status", None) != "READY" for result in results):
+    if any(getattr(result, "status", None) != "READY" for result in status_results):
         record = replace(record, reason_codes=tuple(dict.fromkeys(
-            (*record.reason_codes, *_inference_refusal_reasons(results)))),
+            (*record.reason_codes, *_inference_refusal_reasons(status_results)))),
                          validation_status="refused", readiness="refused")
     return with_score_id(record)
 
