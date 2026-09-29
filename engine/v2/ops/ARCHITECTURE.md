@@ -1955,7 +1955,13 @@ starts working with no change of its own.
   None of this raises: masking a value is normal-path behavior for this
   provider, not a failure (see "Failure semantics" for what does raise:
   `SOURCE_NOT_FINAL`/`TRANSIENT_SOURCE`/etc. for a genuinely bad response,
-  never for a masked field).
+  never for a masked field). A missing ticker is different from a masked
+  field, though: `_classify` (`orats_daily_market.py`) only reaches
+  `final=True` once at least one requested ticker came back, and
+  `classify_response` then kinds any such response that is still missing
+  one of the unit's `expected_keys` tickers as `partial`, not `complete` —
+  the whole response is refused as a retryable `TRANSIENT_SOURCE`, never
+  committed with that ticker silently absent.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
