@@ -108,14 +108,19 @@ def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monke
     """An inherited GIT_DIR/GIT_WORK_TREE pointing at an unrelated repo must
     not make tracked_paths (and so _sources) silently see zero files for the
     real root -- that would let the whole budget check pass with docs=0."""
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
+        monkeypatch.delenv(var, raising=False)
+    setup_env = {k: v for k, v in os.environ.items()
+                 if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")}
+
     other = tmp_path / "other_repo"
     other.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=other, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t"], cwd=other, check=True)
-    subprocess.run(["git", "config", "user.name", "t"], cwd=other, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=other, env=setup_env, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=other, env=setup_env, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=other, env=setup_env, check=True)
     (other / "f.txt").write_text("hi\n")
-    subprocess.run(["git", "add", "f.txt"], cwd=other, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=other, check=True)
+    subprocess.run(["git", "add", "f.txt"], cwd=other, env=setup_env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=other, env=setup_env, check=True)
 
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))

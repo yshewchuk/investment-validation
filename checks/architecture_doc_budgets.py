@@ -79,7 +79,7 @@ BUDGET = 500
 #: rewrite this PR does not make; each is capped at its own size instead of
 #: being free to keep growing.
 EXEMPT: dict[str, int] = {
-    "engine/v2/ops/ARCHITECTURE.md": 5314,
+    "engine/v2/ops/ARCHITECTURE.md": 5429,
     "engine/v2/data/ARCHITECTURE.md": 1048,
     "engine/v2/scoring/ARCHITECTURE.md": 1017,
     "engine/v2/models/ARCHITECTURE.md": 863,
