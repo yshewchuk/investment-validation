@@ -245,15 +245,20 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 
 ## 8. Invariants
 
-- **Missing input → typed refusal, never a silent default** (root doc §5)
-  — every function that validates a manifest before trusting it
-  (`stage_release`, `promote`/`rollback`, `restage_semantic_hash`) states a
-  `DeploymentError` subclass (or, for the frozen-state artifacts, their own
-  typed `*Error`/`*Refusal`), never a substituted value. `resolve_release`/
-  `current_release` are the one gap: reading a corrupt or undecodable
-  manifest can propagate the underlying parse error (a bare
-  `json.JSONDecodeError`/`DocumentError`) instead of a typed refusal —
-  issue #207.
+- **A detected validation issue → typed refusal, never a silent default**
+  (root doc §5) — every explicit check this package makes (duplicate
+  bindings, payload hash mismatches, a stale or corrupt manifest hash, a
+  broken pointer history) raises a `DeploymentError` subclass (or, for the
+  frozen-state artifacts, their own typed `*Error`/`*Refusal`), never a
+  substituted value. Two gaps this does not cover, both pre-existing and
+  out of scope here (issue #207): reading a manifest whose JSON does not
+  even parse can leak a bare `json.JSONDecodeError`/`DocumentError` instead
+  of a typed refusal — `restage_semantic_hash` guards its own read against
+  this, but `stage_release`, `promote`/`rollback` and `resolve_release`/
+  `current_release` do not; and `stage_release` also depends on
+  `releases.require_complete_release`, which raises its own
+  `ModelReleaseRefusal` for an incomplete inventory — not a
+  `DeploymentError` subclass, a sibling hierarchy.
 - **A hash mismatch never falls back.** No branch anywhere in this package
   substitutes a different object, an older cached value, or a default when
   a content hash disagrees — including the pointer swap itself:
