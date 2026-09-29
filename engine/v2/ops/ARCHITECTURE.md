@@ -201,25 +201,37 @@ a manual/operator-invoked script, as `native_parity`'s production caller.
 The previous owner proved that script can never be more than manual: it
 calls `run_shadow_nightly`, which "has no production caller [and] needs
 14 caller-supplied stage handlers nothing builds" — a manual script
-outside any schedule is not what "the REAL nightly" means. This doc
-describes the design Phase 2 of this redo will leave it, not a
-pre-existing fact: Phase 1 (cutover PR-4 redo slice 1, `#132`) has
-landed the pure functions this section documents — `legacy_parity_rows`,
+outside any schedule is not what "the REAL nightly" means. Phase 1 (cutover PR-4 redo slice 1, `#132`) landed
+the pure functions this section documents — `legacy_parity_rows`,
 `native_parity_report._empty_native_report`, and
 `native_parity_report.apply_native_refusals` (`SCHEMA_VERSION` bumped
-`v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. The new
-`native_parity` job kind (its `dispatch` branch, and any submission path
-that enumerates `BoardRequest`s and stages this job) stays deferred,
-gated on cutover PR-7a (`#88`) merging first — `native_parity`'s
-native-side input is the `native_score_batch` job's staged
-`records.json`/`refusals.json` output PR-7a's design places there, so
-that wiring cannot be implemented before that one lands. Cutover PR-3
-(`native_score_batch.py`, `#66`) is already merged, unlike when the
-original PR-4 was written. One piece is
+`v1.0` → `v1.1`) — with no job/worker/supervisor wiring yet. Phase 2
+slice 2A (this PR) lands the other half of the keyed-join design this
+section already specified before either half was code: `native_score_batch.py`'s
+`v2.0` keyed `records.json`/`refusals.json` schema (`_board_request_key`,
+the new `INVALID_KEY_FIELD` refusal, schema tags
+`native_score_batch_records.v2.0` / `native_score_batch_refusals.v2.0`)
+plus `native_parity_report._population_key_from_board_request_key` and
+`native_parity_report._native_rows_and_refusals` — the pure projection
+functions this doc's "Primary contracts" section below documents. Both
+halves are still pure functions with no job/worker/supervisor wiring.
+Phase 2 slice 2B (deferred, not this PR): the `native_parity` job kind
+itself (`stages.py::_native_parity_kind`, `worker.py`'s dispatch branch,
+`run_native_parity_worker`, `NativeParityParameters`), its tick-loop
+sidecar (`supervisor.Service._reconcile_native_parity`,
+`nightly.submit_native_parity_if_ready`/`_native_parity_identity`,
+including the pre-submission `schema_version` check), and the
+`nightly.GRAPH` node width change — none of it is touched here. Cutover
+PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)
+and shadow-submission code (`#126`) are all already merged; PR-7a's code
+(`#126`) implemented the tick-loop submission sidecar only, not the `v2.0`
+schema this redo's design always said was `native_parity`'s own PR to
+build (see "the row-key/join gap is not designed here" below) — this PR
+is that build. One piece is
 untouched by this redo, real code already on `main`, independent of
-everything `#66`/`#88` supply: `native_parity_report.py`'s tolerance
-policy is already pluggable — see "the tolerance policy is now pluggable"
-below, unchanged.**
+everything `#66`/`#88`/`#126` supply: `native_parity_report.py`'s
+tolerance policy is already pluggable — see "the tolerance policy is now
+pluggable" below, unchanged.**
 
 `native_parity` closes the gap the root doc §4 and this doc's own
 "Diagrams" section both name: `run_shadow_nightly` "has no production
