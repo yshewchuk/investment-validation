@@ -335,12 +335,23 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 # imports of importlib/sys, __import__ via globals()/builtins, asyncio
 # subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
 # outside a conftest.py or under an `if`, and `from pkg import *`
-# re-exports). None of that matters today: `tests/conftest.py` itself
-# always classifies DYNAMIC (its own `sys.path.insert`), every test file's
-# closure includes `tests/conftest.py`, and so every non-inert PR change
-# already selects all enabled modules regardless of those holes. A
-# synthetic-tree test in `tests/test_mutation_ci.py` fails loudly, naming
-# issue #42, the moment `tests/conftest.py` stops classifying DYNAMIC.
+# re-exports). `tests/conftest.py` itself always classifies DYNAMIC (its own
+# `sys.path.insert`) and is a closure root for every test file
+# (`_conftest_ancestors`), so a PR that changes `tests/conftest.py` itself
+# still selects broadly -- deliberate, since conftest.py is a genuinely
+# shared input. `module_dependency_closure` walks a DYNAMIC file's REAL
+# edges (`build_import_graph`'s `.precise`) rather than treating its
+# catch-all as something to expand further, so reaching `tests/conftest.py`
+# (or any other DYNAMIC file) no longer cascades into "every enabled module,
+# for every unrelated single-module change" the way it used to -- see
+# `module_dependency_closure`'s own docstring for the mechanism. Two
+# dedicated guards
+# (`test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert`,
+# `test_conftest_dynamic_classification_guards_static_analysis_holes` in
+# `tests/test_mutation_ci.py`) still assert `tests/conftest.py`'s own
+# catch-all edge is intact; a synthetic-tree test fails loudly, naming issue
+# #42, if `tests/conftest.py` ever stops classifying DYNAMIC -- that guard is
+# unrelated to, and unaffected by, this fix.
 def _tracked_roots(tracked_set: set[str]) -> set[str]:
     """Every top-level package/module name present in `tracked_set` -- the
     first path segment of each tracked `.py` file (or, for a tracked file
@@ -614,6 +625,24 @@ def _pytest_plugins_targets(tree: ast.Module) -> tuple[bool, list[str] | None]:
     return (False, None)
 
 
+class _ImportGraph(dict):
+    """`build_import_graph`'s return value: behaves as a plain
+    `dict[str, set[str]]` everywhere (subscripting, `.get`, `in`, `len`,
+    `set(...)`, `.items()`, equality against a plain dict/set of the same
+    contents) -- every existing caller that treats it as exactly that type is
+    unaffected. Carries one extra attribute, `precise`: a
+    `dict[str, set[str]]` of each tracked file's REAL, ast-resolved edges
+    only, computed unconditionally (whether or not the file is also
+    DYNAMIC), before a DYNAMIC file's catch-all (`tracked_set - {rel}`) is
+    unioned into its entry in `self`. A DYNAMIC file's own real edges (if
+    any) are always a subset of its catch-all, so `self[rel]`'s VALUE is
+    unchanged by tracking them separately -- `precise` exists purely so
+    `module_dependency_closure` can walk real edges through a file that is
+    ALSO individually DYNAMIC, instead of losing that information the moment
+    the file fails safe. A caller that never asks for `.precise` (every
+    caller before this round) sees no difference at all."""
+
+
 def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     """Static import graph over EVERY git-tracked `.py` file in the repo (no
     hand-kept root allowlist -- see `_tracked_roots`): maps each file to the
@@ -628,9 +657,10 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`.
 
     A file that is DYNAMIC by `_is_dynamic_file`'s allowlist (or has a
-    non-literal/annotated conftest.py `pytest_plugins`) skips this precise
-    resolution entirely and instead depends on EVERY OTHER TRACKED FILE
-    (`edges |= tracked_set - {rel}`), never a narrower guess. This
+    non-literal/annotated conftest.py `pytest_plugins`) still gets this
+    precise resolution (see `.precise` below), but ALSO depends on EVERY
+    OTHER TRACKED FILE in its main entry (`edges |= tracked_set - {rel}`),
+    never a narrower guess for that added catch-all. This
     classification is conservative for the constructs `_is_dynamic_file`
     recognizes, NOT sound in general -- see
     https://github.com/yshewchuk/investment-validation/issues/42 for
@@ -639,20 +669,44 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     globals()/builtins, asyncio subprocess-exec calls, __path__/meta_path
     edits, pytest_plugins outside a conftest.py, `from pkg import *`).
     Today `tests/conftest.py` itself is always DYNAMIC (its own
-    `sys.path.insert`), so every test file's closure already includes it
-    and every non-inert change already selects every enabled module -- the
-    holes in issue #42 are masked by that fail-safe until something narrows
-    selection past it. Every tracked file is a key, even one with no
+    `sys.path.insert`) and is included, via `_conftest_ancestors`, in every
+    test file's closure -- but `module_dependency_closure` stops expanding a
+    DYNAMIC file's catch-all edge past the one hop that reaches it (its own
+    docstring has the detail), so this no longer collapses every module's
+    dependency set into the whole tracked tree. It still means a change to
+    `tests/conftest.py` itself selects broadly: every test file's closure
+    includes it as a root (`_conftest_ancestors`), and `module_dependency_
+    closure` then follows ITS `.precise` edges too, so anything conftest.py
+    imports via a REAL, resolvable import also selects broadly. A change to
+    something conftest.py can reach ONLY through one of its own unresolved
+    constructs (issue #42's list) is NOT selected -- `module_dependency_
+    closure` walks `.precise` alone, never the catch-all, so that edge is
+    simply absent from every module's closure. Known PR-selection gap,
+    tracked in issue #155 (see ARCHITECTURE.md); push-to-main and the
+    weekly scheduled mutation run are unaffected (they mutate every module)
+    and are this gap's backstop. Every tracked file is a key, even one with no
     resolvable imports (an empty set), so `module_dependency_closure` can
     always look it up. Raises `SyntaxError` (via `ast.parse`) on the first
     file that fails to parse -- a real syntax error in the current tree,
     never swallowed into a silently partial graph; `changed_modules` treats
-    that as "select every module"."""
+    that as "select every module".
+
+    The returned `_ImportGraph` also carries `.precise`: each file's REAL
+    ast-resolved edges alone, computed UNCONDITIONALLY (a DYNAMIC file's own
+    ordinary, statically-resolvable imports are never skipped just because
+    it also fails safe elsewhere), before a DYNAMIC file's catch-all is
+    unioned into its entry in `self`. Since a DYNAMIC file's real edges are
+    always a subset of its own catch-all, `self[rel]` is IDENTICAL to what it
+    would be without `.precise` -- every caller that only ever subscripted
+    the graph is unaffected. `.precise` exists for `module_dependency_closure`,
+    which needs a DYNAMIC file's real edges without inheriting its catch-all
+    as something to expand further (see that function's own docstring)."""
     tracked = tracked if tracked is not None else [
         p for p in _tracked(["."]) if p.endswith(".py")]
     tracked_set = set(tracked)
     roots = _tracked_roots(tracked_set)
-    graph: dict[str, set[str]] = {rel: set() for rel in tracked}
+    graph = _ImportGraph({rel: set() for rel in tracked})
+    precise: dict[str, set[str]] = {}
     for rel in tracked:
         source = (REPO / rel).read_text(encoding="utf-8")
         try:
@@ -672,38 +726,42 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                         if target:
                             edges.add(target)
                         edges |= _ancestor_package_inits(dotted, tracked_set)
-        if not dynamic:
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        target = _resolve_dotted(alias.name, tracked_set, roots)
-                        if target:
-                            edges.add(target)
-                        edges |= _ancestor_package_inits(alias.name, tracked_set)
-                elif isinstance(node, ast.ImportFrom):
-                    if node.level:
-                        base = _relative_base(rel, node.level)
-                        dotted = _join_dotted(base, node.module) if base is not None else None
-                    else:
-                        dotted = node.module or ""
-                    if dotted:
-                        target = _resolve_dotted(dotted, tracked_set, roots)
-                        if target:
-                            edges.add(target)
-                        edges |= _ancestor_package_inits(dotted, tracked_set)
-                        for alias in node.names:
-                            sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set, roots)
-                            if sub:
-                                edges.add(sub)
-                elif isinstance(node, ast.Call):
-                    target = _allowed_import_module_call(node)
+        # Always resolve precise imports now, DYNAMIC or not -- the DYNAMIC
+        # check below only decides whether the catch-all is ALSO unioned in,
+        # never whether real edges are computed at all (see `_ImportGraph`).
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    target = _resolve_dotted(alias.name, tracked_set, roots)
                     if target:
-                        resolved = _resolve_dotted(target, tracked_set, roots)
-                        if resolved:
-                            edges.add(resolved)
-                        edges |= _ancestor_package_inits(target, tracked_set)
+                        edges.add(target)
+                    edges |= _ancestor_package_inits(alias.name, tracked_set)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = _relative_base(rel, node.level)
+                    dotted = _join_dotted(base, node.module) if base is not None else None
+                else:
+                    dotted = node.module or ""
+                if dotted:
+                    target = _resolve_dotted(dotted, tracked_set, roots)
+                    if target:
+                        edges.add(target)
+                    edges |= _ancestor_package_inits(dotted, tracked_set)
+                    for alias in node.names:
+                        sub = _resolve_dotted(_join_dotted(dotted, alias.name), tracked_set, roots)
+                        if sub:
+                            edges.add(sub)
+            elif isinstance(node, ast.Call):
+                target = _allowed_import_module_call(node)
+                if target:
+                    resolved = _resolve_dotted(target, tracked_set, roots)
+                    if resolved:
+                        edges.add(resolved)
+                    edges |= _ancestor_package_inits(target, tracked_set)
+        precise[rel] = set(edges)
         if dynamic:
             edges |= tracked_set - {rel}
+    graph.precise = precise
     return graph
 
 
@@ -760,8 +818,41 @@ def module_dependency_closure(cfg: dict, name: str, graph: dict[str, set[str]],
     `name` relies on -- and `changed_modules` uses it in REVERSE: a changed
     path in this set means code `name`'s own tests exercise has changed, so
     `name`'s cached mutation verdict may now be stale even though `name`
-    does not OWN that path."""
+    does not OWN that path.
+
+    The walk follows REAL edges only -- `graph.precise` when `graph` is a
+    real `_ImportGraph` from `build_import_graph` (every production call
+    site). This recovers a DYNAMIC file's genuine, statically-resolvable
+    imports (e.g. `tests/test_v2_ops_foundation.py` is individually DYNAMIC
+    yet has a plain `from engine.v2 import foundation` -- the closure must
+    still reach `engine.v2.foundation` through it) while never treating a
+    DYNAMIC file's catch-all edge (`tracked_set - {rel}`, "this file might
+    import literally anything") as something to expand further: that catch-
+    all is a conservative fact about the file ITSELF (reaching it, or
+    changing it, still selects every module whose closure reaches it -- see
+    `_closure_roots`/`_conftest_ancestors` for `tests/conftest.py`, which is
+    a closure root for every module), not a real transitive edge to relay
+    (measured: relaying it collapsed every enabled module's dependency set
+    to the whole ~932-file tracked tree, because `tests/conftest.py` is
+    always DYNAMIC via its own `sys.path.insert`).
+
+    A synthetic test may instead pass a graph with an explicit `.dynamic`
+    attribute (a `set[str]` of file names whose catch-all edge must not be
+    expanded further) -- there is no other reliable way for such a test to
+    express "this node is DYNAMIC": inferring it from edge-set shape
+    (`edges == tracked_set - {f}`) is unsound, because a small synthetic
+    graph's ORDINARY real edge can coincidentally equal "every other tracked
+    file" (e.g. a 2-file graph where the only file imports the other). A
+    plain `dict` with no `.dynamic` attribute gets an empty
+    `dynamic_boundary` -- ordinary full-edge traversal, no cutoff -- so
+    existing synthetic graphs that never intended to exercise DYNAMIC
+    catch-all behavior are unaffected."""
     tracked_set = tracked_set if tracked_set is not None else set(graph)
+    precise = getattr(graph, "precise", None)
+    dynamic_boundary = (
+        None if precise is not None
+        else getattr(graph, "dynamic", set())
+    )
     seen: set[str] = set()
     stack = list(_closure_roots(module_cfg(cfg, name), tracked_set))
     while stack:
@@ -769,7 +860,12 @@ def module_dependency_closure(cfg: dict, name: str, graph: dict[str, set[str]],
         if f in seen:
             continue
         seen.add(f)
-        stack.extend(graph.get(f, ()))
+        if precise is not None:
+            stack.extend(precise.get(f, ()))
+        elif f in dynamic_boundary:
+            continue
+        else:
+            stack.extend(graph.get(f, ()))
     return seen
 
 
