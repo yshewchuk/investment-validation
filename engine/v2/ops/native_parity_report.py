@@ -37,6 +37,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
 from engine.v2.parity.dimensions import (
@@ -128,6 +129,95 @@ def _refuse_empty_inputs(legacy_rows: Mapping[str, Any], native_rows: Mapping[st
         raise fail("VALIDATION_FAILED", "native parity report has no legacy rows")
     if not native_rows:
         raise fail("VALIDATION_FAILED", "native parity report has no native rows")
+
+
+def _population_key_from_board_request_key(key: str) -> str:
+    """Project one ``records.json``/``refusals.json`` canonical key (the
+    4-field ``f"{ticker}|{strategy}|{event_date_iso}|{session}"`` string
+    ``native_score_batch._board_request_key`` builds) down to the 3-field
+    ``population_key`` format :func:`engine.v2.ops.decision_validation.
+    population_key` already uses for legacy rows.
+
+    Splits on ``"|"`` into exactly 4 parts and reuses ``population_key``'s
+    own join format for the first three (never string-concatenating a
+    fourth time), so the two sides can never silently drift onto two
+    different separators or field orders. ``session`` (the 4th part) is
+    validated as present but never folded into the key -- legacy rows carry
+    no ``session`` field to join against.
+
+    Raises ``engine.v2.ops.errors.fail("VALIDATION_FAILED", ...)`` (an
+    ``OpsError``) if ``key`` does not split into exactly 4 parts.
+    """
+    parts = key.split("|")
+    if len(parts) != 4:
+        raise fail("VALIDATION_FAILED",
+                   "native canonical key does not have exactly 4 parts",
+                   details={"key": key, "parts": len(parts)})
+    ticker, strategy, event_date, _session = parts
+    return population_key({"ticker": ticker, "strategy": strategy, "event_date": event_date})
+
+
+def _native_rows_and_refusals(
+    records_document: Mapping[str, Any],
+    refusals_document: Mapping[str, Any],
+) -> tuple[dict[str, dict], dict[str, str], tuple[Mapping[str, Any], ...]]:
+    """Project ``native_score_batch``'s v2.0 ``records.json``/
+    ``refusals.json`` canonical keys down to ``population_key``, returning
+    ``(native_rows, native_refusals, unkeyable_refusals)``.
+
+    ``records_document["records"]`` and ``refusals_document["refusals"]``
+    are both ``{canonical_key: value}`` objects (the v2.0 shape). Every key
+    from BOTH, together, is projected through
+    :func:`_population_key_from_board_request_key`; the projection is LOSSY
+    (it drops ``session``), so two DISTINCT canonical keys -- the same
+    ``(ticker, strategy, event_date)`` under two different ``session``
+    values -- can collide onto the SAME ``population_key``. Any
+    ``population_key`` produced by more than one distinct canonical key
+    raises ``fail("VALIDATION_FAILED", ...)`` for the WHOLE call, before
+    ``native_rows``/``native_refusals`` are built -- never a silent
+    last-write-wins overwrite.
+
+    ``refusals_document["unkeyable_refusals"]`` is accessed with `[...]`,
+    never ``.get(..., ())``: this function's only caller is only ever
+    reached for a document already confirmed ``v2.0``-shaped (see
+    ARCHITECTURE.md), and the v2.0 writer always emits this key, even as
+    ``[]`` for a batch with none -- its absence means the file is
+    malformed, and the resulting ``KeyError`` is meant to propagate and be
+    caught by the caller alongside its other decode failures, never
+    silently treated as "no unkeyable refusals." Its entries are returned
+    unchanged: an ``INVALID_KEY_FIELD`` row never had a ``population_key``
+    to compute, so there is nothing here to project or collision-check for
+    it.
+
+    ``native_rows`` maps ``population_key -> the record's own document``
+    (the ``records_document["records"]`` value, untouched). ``native_refusals``
+    maps ``population_key -> refusal code string`` (``refusals_document
+    ["refusals"][canonical_key]["code"]``).
+    """
+    unkeyable_refusals = refusals_document["unkeyable_refusals"]
+    projected: dict[str, str] = {}
+
+    def _project(source_key: str) -> str:
+        population = _population_key_from_board_request_key(source_key)
+        prior = projected.get(population)
+        if prior is not None and prior != source_key:
+            raise fail(
+                "VALIDATION_FAILED",
+                "native population key collision after projection",
+                details={"population_key": population,
+                         "keys": sorted([source_key, prior])})
+        projected[population] = source_key
+        return population
+
+    native_rows: dict[str, dict] = {}
+    for source_key, record in records_document["records"].items():
+        native_rows[_project(source_key)] = record
+
+    native_refusals: dict[str, str] = {}
+    for source_key, refusal in refusals_document["refusals"].items():
+        native_refusals[_project(source_key)] = refusal["code"]
+
+    return native_rows, native_refusals, tuple(unkeyable_refusals)
 
 
 def compare_native_vs_legacy(
