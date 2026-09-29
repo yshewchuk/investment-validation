@@ -21,6 +21,13 @@ Replaces (§4.4): `the data half of dashboard/render.py`, `dashboard/earnings_ap
   ETag'd JSON over `projections`' bounded read helpers — `/api/v1/releases/
   current`, `/api/v1/releases/{id}`, `/api/v1/events`, `/api/v1/events/{id}/
   scores`, `/api/v1/scores/{id}`, `/api/v1/operations`.
+- `native_parity_projection.native_parity_summary` (read-only): a compact,
+  dashboard-ready aggregate over
+  the `native_parity` stage's own report artifact — per-field and
+  per-dimension mismatch counts, the worst differing rows, and
+  refused/incomparable counts with reasons. No comparison of its own. Full
+  field list and failure semantics: root `ARCHITECTURE.md` §4 "Native parity
+  summary projection".
 
 ## Non-responsibilities
 
