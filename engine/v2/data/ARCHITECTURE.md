@@ -207,9 +207,10 @@ Root doc §5 invariants this package is responsible for:
   (`legacy_mapping.py`'s one `Path(__file__)` use resolves a sibling
   package resource, not a project root).
 - **Nothing published carries a local path or raw exception text** —
-  `errors.py` performs no automatic redaction; every message is hand-written
-  by this package's own call sites to exclude a legacy path or row value (a
-  column/table name is schema metadata and may appear).
+  `errors.py` performs no automatic redaction. Call sites should exclude
+  legacy paths and row-derived values, but this is not universal — for
+  example, `reference_catalog.py` includes `item.legacy_path` in error
+  details.
 - **Atomic snapshot commit, compare-and-swap head, never last-writer-wins.**
   Zero rows changed on the head update is `SNAPSHOT_CONFLICT`. Only
   `data_snapshot_heads` is mutable; every other `data_*` table is
