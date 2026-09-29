@@ -246,9 +246,14 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 ## 8. Invariants
 
 - **Missing input → typed refusal, never a silent default** (root doc §5)
-  — every function in this package that can fail states a `DeploymentError`
-  subclass (or, for the frozen-state artifacts, their own typed
-  `*Error`/`*Refusal`), never a bare exception or a substituted value.
+  — every function that validates a manifest before trusting it
+  (`stage_release`, `promote`/`rollback`, `restage_semantic_hash`) states a
+  `DeploymentError` subclass (or, for the frozen-state artifacts, their own
+  typed `*Error`/`*Refusal`), never a substituted value. `resolve_release`/
+  `current_release` are the one gap: reading a corrupt or undecodable
+  manifest can propagate the underlying parse error (a bare
+  `json.JSONDecodeError`/`DocumentError`) instead of a typed refusal —
+  issue #207.
 - **A hash mismatch never falls back.** No branch anywhere in this package
   substitutes a different object, an older cached value, or a default when
   a content hash disagrees — including the pointer swap itself:
