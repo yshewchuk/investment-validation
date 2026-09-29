@@ -136,6 +136,36 @@ request body and, if durable, in the operator guides instead — see
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
+  - **`test` CI PR selection** (`tools/mutation_pilot.py`'s
+    `select_pr_tests`, consumed by `.github/workflows/tests.yml`'s `test`
+    job): on a `pull_request` run, narrows which `tests/test_*.py` files
+    pytest collects to the subset the PR's diff can affect, generalizing
+    `changed_modules`'s reuse of `build_import_graph`/`.precise`/
+    `is_inert_changed_path` from the hand-configured 33-module partition to
+    every tracked test file's own real-edge closure (plus its
+    `tests/conftest.py` ancestors). Returns "run every test file" (never a
+    narrower guess) for a changed path on `[pr_selection]`'s new
+    `full_suite` allowlist (`tests/conftest.py`, `tools/*`,
+    `requirements*.txt`, `.github/workflows/*` — shared inputs the import
+    graph cannot see the effect of, or that legitimately affect every
+    test), for a changed path no test file's closure reaches and that is
+    not on the docs-only `inert` allowlist, or for any failure building the
+    graph or reading the diff. The check stays named `test` either way, so
+    the branch-protection ruleset and auto-merge are unaffected.
+    Push/`workflow_dispatch`/schedule runs are unaffected: always the
+    unfiltered full suite.
+
+    Same [#155](https://github.com/yshewchuk/investment-validation/issues/155)
+    gap, applied at the leaf rather than through reachability: a test file
+    that is itself DYNAMIC (`_is_dynamic_file`) is always selected, since
+    its own edges cannot be trusted, but a test file that only
+    *transitively reaches* a DYNAMIC file (every test does, via
+    `tests/conftest.py`) is not — the module-level version of that broader
+    rule was measured, in #155 itself, to make most of the 33-module
+    partition permanently universal, and the same collapse would apply
+    here. Currently selects ~112 of 355 test files unconditionally on this
+    basis; the PR introducing this bullet reports the exact count measured
+    against the repo at that commit.
 
 ## 2. Layers and allowed dependency direction
 
