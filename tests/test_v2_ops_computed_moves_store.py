@@ -232,20 +232,18 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     future closes and committed stamped ``computed_at = as_of``, leaking
     realized data).
 
-    Row-level read-back through this repo's scan helpers is genuinely not
-    reachable here -- ``_scan_rows`` (the store's only generic scanner) is
-    year-partitioned and ``computed_moves`` fragments are partitioned by
-    ticker, so ``int(partition_key)`` raises before any scan -- so this uses
-    the sanctioned fallback: the capture log proves a fragment WAS written
-    (``outcome == "added"``, not a skip), and a ``build_rows`` spy asserts
-    what actually survived into the row builder -- no event at/after
-    ``as_of``, a series truncated at ``as_of``, and the ordinary pre-``as_of``
-    event still computing a real (non-skipped) move.
-
-    The committed-row proof below instead uses a direct
-    ``DataQuery``/``KeyPredicate`` scan -- the same mechanism
-    ``tests/test_v2_ops_price_history.py`` uses for its own
-    ticker-partitioned table.
+    Row-level read-back: ``_scan_rows`` -- the store's only generic scanner --
+    cannot read this table back (it assumes year-partitioned fragments;
+    ``computed_moves`` fragments are partitioned by ticker, so
+    ``int(partition_key)`` raises before any scan). So this test proves
+    committed content with a direct ``DataQuery``/``KeyPredicate`` scan below
+    -- the same mechanism ``tests/test_v2_ops_price_history.py`` uses for its
+    own ticker-partitioned table -- plus a ``build_rows`` spy for what was
+    proposed to the row builder: no event at/after ``as_of``, a series
+    truncated at ``as_of``, and the ordinary pre-``as_of`` event still
+    computing a real (non-skipped) move. The capture log's
+    ``outcome == "added"`` additionally shows a fragment WAS written (not a
+    skip).
     """
     monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
                         lambda *a, **k: (["AAAA"], {}))
@@ -320,6 +318,116 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     assert len(committed_pre) == 1
     assert committed_pre[0]["skipped"] is False
     assert committed_pre[0]["realized_move_pct"] is not None
+
+
+def test_run_computed_moves_refresh_series_entirely_after_as_of_is_too_few(
+        tmp_path, monkeypatch):
+    """The issue #99 truncation branch of ``_capture_targets``: every fetched
+    close is dated AFTER ``as_of``, so the series truncates to empty before
+    hashing and the unit logs ``too_few`` -- a legitimate business finding
+    that does not fail the job, exactly like the "BBBB has no events"
+    ``too_few`` outcome two functions below.
+
+    AAAA keeps real pre-``as_of`` events, so the branch under test is
+    specifically the series-truncates-to-empty one (``sd.size == 0``), not
+    the earlier ``events is None`` branch. A second ticker, BBBB, carrying an
+    ordinary complete series, is what lets this run commit at all: a
+    zero-fragment run short-circuits to a true noop BEFORE
+    ``_insert_captures`` (reached only through the commit's
+    ``record_references``) logs anything, so a ``too_few`` outcome is only
+    observable in a run that writes at least one fragment -- the same shape
+    as the BBBB test below, with the roles mirrored.
+    """
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA", "BBBB"], {}))
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    events_rows = [_event_row(ticker, d) for ticker in ("AAAA", "BBBB")
+                   for d in _EVENT_DAYS]  # every event strictly before _AS_OF
+    head = _build_parent(conn, clock, store, events_rows=events_rows)
+
+    after_as_of = pd.bdate_range("2024-02-06", "2024-02-29")  # entirely after _AS_OF
+    truncated = "\n".join(["Date,Close"] + [f"{d.date()},{100.0 + i}"
+                                            for i, d in enumerate(after_as_of)]).encode()
+    series_by_ticker = {"AAAA": truncated, "BBBB": _closes_csv()}
+    calls: list[str] = []
+
+    def fetcher(ticker):  # same return shape as _CountingFetcher, per-ticker bytes
+        calls.append(ticker)
+        return series_by_ticker[ticker], "complete", {}, None
+
+    root = tmp_path / "attempt"
+    _write_input(root, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path, head=head)
+    parameters = _parameters(head, expected_ids=("AAAA", "BBBB"),
+                             catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+    result = computed_moves_store.run_computed_moves_refresh(
+        parameters, root, as_of=_AS_OF, fetcher=fetcher)
+
+    assert result.status == "complete"  # a too_few outcome never fails the job
+    row = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("AAAA",)).fetchone()
+    assert row["outcome"] == "too_few"
+    other = conn.execute(
+        "SELECT outcome FROM data_computed_moves_captures WHERE ticker = ?",
+        ("BBBB",)).fetchone()
+    assert other["outcome"] == "added"  # the run really committed, not a noop
+
+
+def test_run_computed_moves_refresh_capture_id_is_stable_across_different_post_as_of_tails(
+        tmp_path_factory, monkeypatch):
+    """Issue #99: capture identity must be a pure function of the series
+    TRUNCATED to ``as_of``, never of the raw fetch. Two runs whose fetches
+    agree on every date ``<= as_of`` but disagree on what comes after it --
+    the same ticker pulled on two different wall-clock days, with different
+    post-``as_of`` closes -- must log the SAME ``capture_id``: ``source_hash``
+    (and so ``_capture_id_for``) is computed from the truncated closes, and
+    the post-``as_of`` tail is invisible to capture identity.
+
+    The two runs are fully independent -- separate sqlite catalogs and
+    separate ``ArtifactStore`` roots via ``tmp_path_factory`` -- so this
+    compares hashes across DIFFERENT raw fetches, not the same-catalog
+    rerun no-op/cache behavior already covered by
+    ``test_run_computed_moves_refresh_cached_rerun_refetches_nothing``.
+    """
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                        lambda *a, **k: (["AAAA"], {}))
+
+    through_as_of = pd.bdate_range("2024-01-02", "2024-02-05")  # identical, incl. _AS_OF
+
+    def _series(tail):  # tail: (date, close) pairs strictly AFTER _AS_OF
+        lines = [f"{d.date()},{100.0 + i}" for i, d in enumerate(through_as_of)]
+        lines += [f"{d.date()},{close}" for d, close in tail]
+        return "\n".join(["Date,Close"] + lines).encode()
+
+    tail_a = [(d, 900.0 + i) for i, d in enumerate(pd.bdate_range("2024-02-06", "2024-02-08"))]
+    tail_b = [(d, 800.0 + 7 * i)
+              for i, d in enumerate(pd.bdate_range("2024-02-06", "2024-02-15"))]
+
+    def _run(directory, csv_bytes):
+        conn, clock, _ = catalog(directory)
+        store = ArtifactStore(directory)
+        events_rows = [_event_row("AAAA", d) for d in _EVENT_DAYS]  # all before _AS_OF
+        head = _build_parent(conn, clock, store, events_rows=events_rows)
+        root = directory / "attempt"
+        _write_input(root, catalog_path=directory / "ops.sqlite",
+                     objects_root=directory, head=head)
+        parameters = _parameters(head, expected_ids=("AAAA",),
+                                 catalog_path=directory / "ops.sqlite",
+                                 objects_root=directory)
+        result = computed_moves_store.run_computed_moves_refresh(
+            parameters, root, as_of=_AS_OF, fetcher=_CountingFetcher(csv_bytes))
+        assert result.status == "complete"
+        logged = conn.execute(
+            "SELECT outcome, capture_id FROM data_computed_moves_captures WHERE ticker = ?",
+            ("AAAA",)).fetchone()
+        assert logged["outcome"] == "added"  # a real capture both times, not two no-ops
+        return logged["capture_id"]
+
+    capture_a = _run(tmp_path_factory.mktemp("a"), _series(tail_a))
+    capture_b = _run(tmp_path_factory.mktemp("b"), _series(tail_b))
+    assert capture_a == capture_b  # identity ignores the differing post-as_of tail
 
 
 def test_run_computed_moves_refresh_completed_ids_cover_every_target_even_when_one_has_no_committable_rows(

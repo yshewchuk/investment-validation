@@ -4248,46 +4248,26 @@ was needed where a separate status was not.
   is the ordinary, correct path for every as-of's first few ticks before any
   plan exists.
 
-### `computed_moves_store.py` (issue #99: captured rows must never carry realized data from after `as_of`)
+### `computed_moves_store.py` (issue #99: a captured ticker's rows must never carry realized data from after `as_of`)
 
-- **R1, no post-`as_of` realized move is ever committed.** `_capture_targets`
-  fetches each target ticker's full available price history through the
-  injected `fetcher` at RUN TIME. A fresh same-day session's run time and
-  `as_of` coincide, but a re-run of a PAST `as_of` (a backfill or a resumed
-  session) fetches history through the run's real wall-clock date, later
-  than `as_of`. Before this fix, only `events["event_date"] >= sd[0]` (the
-  fetched series' first date) bounded which events reached `build_rows`;
-  nothing bounded the series' last date or the events' upper end, so an
-  event dated after `as_of` — whose exit price should not exist yet from
-  `as_of`'s point of view — was scored against real future closes and
-  committed as an ordinary (non-skipped) row, `computed_at` stamped `as_of`
-  regardless. `_capture_targets` now truncates the parsed `(dates, closes)`
-  series to `dates <= as_of` BEFORE computing `source_hash` — so the
-  capture identity stays a pure function of `as_of` and the fetched source,
-  as `_capture_id_for`'s own docstring already requires — and filters
-  `events` to `sd[0] <= event_date < as_of` before calling `build_rows`. An
-  event that passes this filter but whose session-aware exit price would
-  still fall past the truncated series (an AMC print shortly before `as_of`,
-  say) gets no special-cased exclusion: `session_move`'s own out-of-range
-  guard (`j_post >= len(sd)`) already returns `None` for it, and `build_rows`
-  folds that into an ordinary `skipped=True` row — the same "no post-print
-  price yet" case a genuinely current run hits for its own most recent
-  prints, never a distinct code path.
-- **R6, idempotency is unaffected.** Truncating the series changes
-  `source_hash` (and so `capture_id`) only when the untruncated fetch
-  actually carried post-`as_of` bytes; a same-`as_of` rerun whose provider
-  fetch is unchanged truncates to the identical bound both times, so the
-  no-op/re-resolve behavior `#41` established is unchanged.
-- **Materiality (measured against the real curated corpus, `data/curated/earnings_events` and `data/curated/daily_market`, real dates through 2026-09-25):**
-  nothing reads `computed_moves` today (no caller outside
-  `computed_moves_store.py`/`nightly.py`'s own submission wiring touches the
-  table), so the defect had zero live consumers as of this fix. Re-running
-  the ORATS-confirmed-session/`MIN_SCOREABLE` selection at several past
-  `as_of` dates against the real events table shows the exposure a re-run
-  would have had: 21 leaked rows (21 tickers) for a `as_of` 7 days stale,
-  251 rows (250 tickers) at 30 days stale, 2,833 rows (2,806 tickers) at 90
-  days stale — i.e. the leak scales with how far behind `as_of` the actual
-  fetch's wall clock runs, exactly the backfill/resume scenario above.
+- **R1.** `_capture_targets` truncates the fetched `(dates, closes)` series to
+  `dates <= as_of` before computing `source_hash`, and filters `events` to
+  `sd[0] <= event_date < as_of`, before either reaches `build_rows`. This
+  bounds every ticker THIS RUN captures: a fragment `_commit_generation`
+  carries forward unchanged, for a ticker this run does not capture, is not
+  re-filtered — a separate, pre-existing gap, tracked as
+  [#179](https://github.com/yshewchuk/investment-validation/issues/179).
+- **R2.** A truncated-to-empty series (every fetched date was after `as_of`)
+  degrades to the existing `outcome="too_few"` case, never a raise.
+- **R3.** An event that survives the filter but whose session-aware exit
+  price still falls past the truncated series gets no special-cased
+  exclusion: `session_move`'s existing out-of-range guard already returns
+  `None` for it, and `build_rows` folds that into an ordinary
+  `skipped=True` row.
+- **R6.** `source_hash`/`capture_id` are computed from the truncated series,
+  so a same-`as_of` rerun with an unchanged provider fetch truncates to the
+  identical bound both times — the no-op/re-resolve behavior `#41`
+  established is unchanged.
 
 ## Invariants
 
