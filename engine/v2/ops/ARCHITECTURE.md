@@ -1456,11 +1456,13 @@ no parity-only mode (`native_parity` runs the real code, never a
 legacy-shaped branch); one shared parity comparator (`native_parity_report.py`
 calls `engine/v2/parity`, never a second comparator); snapshot/root
 isolation (data and artifact paths resolve through `engine.paths`/the v2
-foundation, never a module's own `Path(__file__)`-derived root); nothing
-published carries a local path, raw exception text, or an unsanitised
-free-text field (`worker.py`'s convention — a caught traceback goes to a
-private per-attempt file, never the result pipe — is the model other
-stages in this package follow).
+foundation, never a module's own `Path(__file__)`-derived root); a root-doc
+requirement, not something this package mechanically enforces everywhere,
+is that nothing published carries a local path, raw exception text, or an
+unsanitised free-text field. `worker.py` keeps a caught traceback in a
+private per-attempt file, never the result pipe, which is the model other
+stages follow — but that one convention does not by itself cover every
+diagnostic or native batch output writer in this package.
 
 **The one documented root-isolation exemption is worker-*source*
 fingerprinting.** `build_legacy_job_requests` computes `implementation_ref`
