@@ -105,28 +105,37 @@ request body and, if durable, in the operator guides instead — see
     the PR's changed-file list plus `tools/mutation_pilot.toml`'s module
     partition and `[pr_selection]` allowlist; its output is the module
     subset the CI matrix runs. `*ARCHITECTURE.md` entries are inert for
-    selection. `module_dependency_closure` walks
+    selection. `module_dependency_closure` walks ONLY
     `build_import_graph`'s real, statically-resolved edges
-    (`_ImportGraph.precise`) rather than a DYNAMIC file's catch-all edge
+    (`_ImportGraph.precise`), never a DYNAMIC file's catch-all edge
     (`build_import_graph` gives a file it cannot parse precisely — e.g. one
     referencing `sys.path`, `subprocess`, or a non-literal
     `importlib.import_module` — an edge to every other tracked file, never a
     narrower guess): reaching a DYNAMIC file adds it to that module's own
-    closure without expanding further, and a DYNAMIC file changing directly
+    closure via its real edges only, and a DYNAMIC file changing directly
     selects every module whose closure reaches it -- narrow for most DYNAMIC
     files (just their own owners/reachers, e.g. `tests/dynamic.py` selecting
     only the module whose test imports it), but still broad, deliberately,
     for one that is ALSO a shared closure root, like `tests/conftest.py`
     (applied to every test by pytest and therefore a closure root for every
     module). Either way, that no longer cascades into selecting every
-    enabled module for an unrelated single-module change. Known failure
-    mode, tracked in
+    enabled module for an unrelated single-module change.
+
+    Known limitation, tracked in
     [#155](https://github.com/yshewchuk/investment-validation/issues/155):
-    a module whose own test file reaches a changed file *only* through one
-    of the still-unresolvable constructs above (not through any other real,
-    statically-resolvable edge) is not selected — the same static-analysis
+    since the walk never follows a DYNAMIC file's catch-all edge, a changed
+    file reachable ONLY through one of the still-unresolvable constructs
+    above (not through any other real, statically-resolvable edge) is not
+    selected. This misses just one module when the unresolvable import is
+    in that module's own test file, but misses EVERY module when it is in
+    `tests/conftest.py` itself -- `module_dependency_closure` reaches
+    `tests/conftest.py` as a closure root for every test file, then follows
+    only its real edges, never its catch-all. Same static-analysis
     limitation `_is_dynamic_file`'s docstring documents, now reachable
-    instead of masked by every PR over-selecting.
+    instead of masked by every PR over-selecting. The narrowing this
+    section describes applies to `pull_request` runs only: a push to main
+    and the weekly scheduled run mutate every enabled module unfiltered, so
+    this gap costs informational PR coverage, never an unmutated merge.
 
 ## 2. Layers and allowed dependency direction
 

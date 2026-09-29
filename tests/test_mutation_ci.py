@@ -2822,11 +2822,13 @@ def test_conftest_dynamic_classification_guards_static_analysis_holes():
     # to tests/conftest.py itself, or reaching it, still selects broadly.
     # (Reaching a DYNAMIC file no longer CASCADES into every other module's
     # dependency set as of this round -- see module_dependency_closure's own
-    # docstring -- but tests/conftest.py's own catch-all edge, asserted
-    # below, is unaffected and still the backstop for these holes IN
-    # tests/conftest.py ITSELF. The same holes in some OTHER test file, with
-    # no other real edge to the changed path, are NOT backstopped any more
-    # -- see issue #155.) This is
+    # docstring. That function walks `.precise` alone and never consults
+    # this raw catch-all edge, so it is NOT an operational backstop for a
+    # hole in tests/conftest.py's OWN unresolved constructs either: a
+    # changed file reachable from tests/conftest.py only through one of
+    # them is not selected for any module, same as the same holes in some
+    # OTHER test file reaching a changed file with no other real edge to it
+    # -- see issue #155 for both.) This is
     # a dedicated guard, separate from
     # test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert
     # above, so a failure here points straight at issue #42 instead of only

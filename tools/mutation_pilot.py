@@ -674,11 +674,17 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     DYNAMIC file's catch-all edge past the one hop that reaches it (its own
     docstring has the detail), so this no longer collapses every module's
     dependency set into the whole tracked tree. It still means a change to
-    `tests/conftest.py` itself, or to anything conftest.py's own imports
-    would have reached had they been statically resolvable, selects broadly
-    -- the holes in issue #42 stay masked for `tests/conftest.py`'s OWN
-    unresolved constructs specifically, not globally for every other file's
-    real, resolvable imports. Every tracked file is a key, even one with no
+    `tests/conftest.py` itself selects broadly: every test file's closure
+    includes it as a root (`_conftest_ancestors`), and `module_dependency_
+    closure` then follows ITS `.precise` edges too, so anything conftest.py
+    imports via a REAL, resolvable import also selects broadly. A change to
+    something conftest.py can reach ONLY through one of its own unresolved
+    constructs (issue #42's list) is NOT selected -- `module_dependency_
+    closure` walks `.precise` alone, never the catch-all, so that edge is
+    simply absent from every module's closure. Known PR-selection gap,
+    tracked in issue #155 (see ARCHITECTURE.md); push-to-main and the
+    weekly scheduled mutation run are unaffected (they mutate every module)
+    and are this gap's backstop. Every tracked file is a key, even one with no
     resolvable imports (an empty set), so `module_dependency_closure` can
     always look it up. Raises `SyntaxError` (via `ast.parse`) on the first
     file that fails to parse -- a real syntax error in the current tree,
