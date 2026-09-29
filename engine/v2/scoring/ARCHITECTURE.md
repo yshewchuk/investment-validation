@@ -26,9 +26,12 @@ are consumed today by `engine.v2.ops.native_score_batch.py`'s
 production yet — `engine.v2.ops.supervisor.py`'s tick loop never submits a
 `native_score_batch` job because the raw-row producer that would build one
 from real staged data is still missing (cutover PR-6, `engine/v2/ops/
-ARCHITECTURE.md`). The one piece of this that IS live: the same tick loop
-calls `release_bindings.resolve_production_release_binding()` directly,
-every tick, as a cheap release-readiness gate, independent of the
+ARCHITECTURE.md`). The one piece of this that IS live: the same tick loop's
+cheap release-identity gate runs every tick, and calls
+`release_bindings.resolve_production_release_binding()` — which
+hash-verifies every model file — whenever the release root/id it sees has
+changed since the last tick (memo-gated: skipped on repeat ticks once that
+identity's already been resolved, success or refusal), independent of the
 never-submitted job (see Dependencies).
 
 ## Primary contracts and public interfaces
@@ -210,10 +213,13 @@ worker — but nothing submits that job yet (`engine/v2/ops/ARCHITECTURE.md`'s
 "Cutover PR-7a": the raw-row producer that would build one from real staged
 data is cutover PR-6, still missing), so this call path has never executed
 outside tests. Separately, `engine.v2.ops.supervisor.py`'s tick loop
-(Cutover PR-7a) DOES call `release_bindings.resolve_production_release_binding()`
-live, every tick, memo-gated, purely as a release-readiness check ahead of
-that same never-submitted job — this one runs in production today,
-independent of whether the job itself ever does.
+(Cutover PR-7a) runs a cheap release-identity check every tick and DOES call
+`release_bindings.resolve_production_release_binding()` live whenever that
+identity changes (memo-gated: skipped on repeat ticks once the current
+release root/id has already been resolved, success or refusal) — purely a
+release-readiness check ahead of that same never-submitted job, but a real
+one that runs in production today, independent of whether the job itself
+ever does.
 
 ## External systems and libraries
 
@@ -339,7 +345,7 @@ message `f"{code}: {detail}"`.
 | Condition | Code |
 |---|---|
 | `calendar_row`/`panel_row`/`tier4_row`/`quote_rows` wholly absent or not a sequence; `calendar_row` missing a required key; `panel_row` missing its own `date` column (the real panel key — never `observed_at`, which neither real table has ever carried); a `quote_rows[i]` missing `observed_at` | `MISSING_STAGED_INPUT` |
-| a name in the feature-name leakage denylist — a realized panel outcome column, `driver_name` itself, or a Tier-4 stamp/band/metadata column (`*_fold_start`/`*_model_id`/`"tier3_snapshot"`/`pred_iv_crush_30*`) — checked on `feature_names` alone, before any row is read | `LEAKED_FEATURE_NAME` |
+| a name in the feature-name leakage denylist — a realized panel outcome column, `driver_name` itself, a Tier-4 producer-stamp column (`*_fold_start`/`*_model_id`/`"tier3_snapshot"`), or any `pred_iv_crush_30*` column (that one family's bands included) — checked on `feature_names` alone, before any row is read; another metric's own band column (e.g. `pred_abs_move_p10`) is NOT denylisted | `LEAKED_FEATURE_NAME` |
 | a calculated scoring answer surfaces in the assembled `context`/`feature_vector` (`source_inputs._reject_answers`, the same denylist `build_native_score_inputs` enforces — an independent second layer over raw source-table columns, not a duplicate of the name denylist above) | plain `ValueError` (not this refusal type) |
 | `panel_row["date"]` (normalized) != `calendar_row["event_date"]` (normalized) — `panel_row["date"]` is the EVENT date, not an observation date, so this is the only check that catches a row staged for the wrong event; it never compares against `as_of` | `PANEL_ROW_WRONG_EVENT` |
 | `as_of`, `calendar_row["calendar_observed_through"]`, `panel_anchor`, or a `quote_rows` entry's `observed_at` fails `validated_as_of` (rejects `None`/`NaT`/a bare number or bool/unparseable/timezone-aware), or any of them lands strictly after `as_of` | `POST_AS_OF_ROW` (or `NightlySourceBundleRefusal`: `MISSING_STAGED_INPUT` for `None`, `INVALID_DATE` otherwise) |
