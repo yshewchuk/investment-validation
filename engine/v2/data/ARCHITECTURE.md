@@ -614,14 +614,21 @@ completeness fixes ship here, both in `incremental.py` unless noted:
   1_000_000)`): `revision_id` now folds in `content` (the same
   `revision_content_hash` already computed for
   `RevisionCandidate.content_hash`), and `revision_ordinal` is derived from
-  `received_at` the same way, instead of the constant `1`. A corrected
-  fetch therefore gets both a distinct `revision_id` (no more early
-  exact-id collision against the retained one) and a strictly later
-  ordinal, so `_rank_revision_group` picks it over the earlier revision by
-  ordinal precedence and never reaches its own "equal-ranked ... conflicting
-  content" refusal — that refusal is reserved for two revisions genuinely
-  arriving at the identical instant with different content, still refused
-  as an unresolvable ambiguity. `revision_ordinal`'s `received_at` is a
+  `received_at` the same way (as a floor — see below), instead of the
+  constant `1`. A corrected fetch therefore gets both a distinct
+  `revision_id` (no more early exact-id collision against the retained
+  one) and a strictly later ordinal, so `_rank_revision_group` picks it
+  over the earlier revision by ordinal precedence and never reaches its own
+  "equal-ranked ... conflicting content" refusal. That refusal cannot
+  happen at all for two revisions built by the same process: `received_at`'s
+  clock resolution is coarser than its microsecond string format implies,
+  so `_received_at_ordinal` treats the clock-derived value as a floor only,
+  bumped past a process-wide high-water mark whenever it would otherwise
+  tie or go backward — two revisions from the same process always get
+  distinct ordinals. The refusal remains reachable only across genuinely
+  separate processes/attempts whose real-world clocks land on the
+  identical microsecond, still refused as an unresolvable ambiguity.
+  `revision_ordinal`'s `received_at` is a
   fresh `observed_at` captured once per acquisition attempt (in `_fetch_unit`
   and `_cached_fetched_units`), deliberately NOT `cache_raw_receipt`'s own
   `record.received_at` — which reuses the ORIGINAL timestamp on a
@@ -752,8 +759,12 @@ completeness fixes ship here, both in `incremental.py` unless noted:
   `classify_response`'s own general framework. `_classify` no longer
   synthesizes `empty_keys` from absence, only from `returned`: a 2xx
   response missing an expected ticker now classifies `"partial"`, which
-  `_overall_kind` turns into a `TRANSIENT_SOURCE` refusal at fetch time
-  (`_fetch_unit` never gets a `response_kind` to cache), so
+  `_overall_kind` turns into a refusal at fetch time (`_fetch_unit` never
+  gets a `response_kind` to cache) — `TRANSIENT_SOURCE` unless the
+  paired `summaries`/`cores` endpoint's own kind is worse (a `not_final`
+  endpoint outranks it to `SOURCE_NOT_FINAL`; `credential_invalid`/
+  `rate_limited` outrank both — see that provider's own `ARCHITECTURE.md`
+  for the full ranking), so
   `nightly._native_cached_outcome`'s `response_kind = 'complete'` cache
   lookup can never see it, and a genuinely complete day (every expected
   ticker returned, or the provider's whole-response 2xx-with-zero-rows
