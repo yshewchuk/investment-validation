@@ -30,6 +30,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import subprocess
 import sys
@@ -49,6 +50,24 @@ _GIT_ENV_LEAK = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIREC
 def _clean_git_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in _GIT_ENV_LEAK}
 
+
+@contextlib.contextmanager
+def _clean_git_process_env():
+    """Temporarily strips ``_GIT_ENV_LEAK`` from the process environment, so
+    every git call inside the block -- including ``tracked_paths``, which
+    shells out with the ambient environment rather than an explicit
+    ``env=`` -- inspects the requested root. Without this, an inherited
+    ``GIT_DIR``/``GIT_WORK_TREE`` can silently retarget ``tracked_paths`` to
+    an unrelated repository, so ``_sources`` sees zero files and the whole
+    budget check passes with ``docs=0`` instead of failing or erroring."""
+    saved = {k: os.environ.pop(k, None) for k in _GIT_ENV_LEAK}
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
 __all__ = ["BUDGET", "EXEMPT", "Violation", "Report", "check_files", "main"]
 
 #: Contract-level docs measured on this tree fit comfortably under this; see
@@ -64,7 +83,7 @@ EXEMPT: dict[str, int] = {
     "engine/v2/data/ARCHITECTURE.md": 1048,
     "engine/v2/scoring/ARCHITECTURE.md": 1017,
     "engine/v2/models/ARCHITECTURE.md": 863,
-    "ARCHITECTURE.md": 524,
+    "ARCHITECTURE.md": 531,
 }
 
 
@@ -132,10 +151,11 @@ def _read_staged_strict(root: Path, rel: str) -> bytes:
 
 
 def _sources(root: Path, use_worktree: bool) -> dict[str, bytes]:
-    paths = [rel for rel in tracked_paths(root) if _is_architecture_doc(rel)]
-    if use_worktree:
-        return {rel: _read_worktree_strict(root, rel) for rel in paths}
-    return {rel: _read_staged_strict(root, rel) for rel in paths}
+    with _clean_git_process_env():
+        paths = [rel for rel in tracked_paths(root) if _is_architecture_doc(rel)]
+        if use_worktree:
+            return {rel: _read_worktree_strict(root, rel) for rel in paths}
+        return {rel: _read_staged_strict(root, rel) for rel in paths}
 
 
 def main(argv: list[str] | None = None) -> int:

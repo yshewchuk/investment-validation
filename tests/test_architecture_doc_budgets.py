@@ -102,3 +102,23 @@ def test_worktree_read_failure_raises_not_silently_empty():
 def test_staged_read_failure_raises_not_silently_empty():
     with pytest.raises(subprocess.CalledProcessError):
         adb._read_staged_strict(ROOT, "no/such/tracked/path/ARCHITECTURE.md")
+
+
+def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monkeypatch):
+    """An inherited GIT_DIR/GIT_WORK_TREE pointing at an unrelated repo must
+    not make tracked_paths (and so _sources) silently see zero files for the
+    real root -- that would let the whole budget check pass with docs=0."""
+    other = tmp_path / "other_repo"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=other, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=other, check=True)
+    (other / "f.txt").write_text("hi\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=other, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=other, check=True)
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+
+    sources = adb._sources(ROOT, use_worktree=True)
+    assert "ARCHITECTURE.md" in sources
