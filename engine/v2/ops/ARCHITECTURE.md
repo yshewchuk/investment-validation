@@ -1678,15 +1678,12 @@ real, reachable-today shadow-scope snapshot (the scheduled trigger's
 belongs to `computed_moves_store._scan_once`, a different boundary. What
 is still missing is the dashed edge: the raw-row producer
 ([#199](https://github.com/yshewchuk/investment-validation/issues/199))
-that would enumerate a session's `BoardRequest`s from `board_requests` and
-stage each one's `calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/
-`quote_rows` into `events.json` — until it lands, the scheduled trigger's
-pinned-snapshot path has no `events_table` to build `board_requests` from
-at all, so `submit_native_score_batch_shadow_if_ready` raises
-`VALIDATION_FAILED` rather than reaching this diagram (only a
-manually-built `legacy`-input-mode plan built directly, not the scheduled
-trigger, gets a silent no-op instead). `board_requests` has no production
-caller today for the same reason (see "Dependencies" → "Callers").
+that would enumerate `board_requests` and stage each one's raw rows into
+`events.json` (see "Inputs"/"Cutover PR-7a's input sourcing"). Until it
+lands, `submit_native_score_batch_shadow_if_ready` has no `events_table` to
+call `board_requests` with at all (see "Outputs"/"Failure semantics" for
+its condition-outcome table); `board_requests` has no production caller
+today for the same reason (see "Dependencies" → "Callers").
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 
