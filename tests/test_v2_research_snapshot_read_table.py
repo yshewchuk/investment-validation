@@ -222,6 +222,20 @@ def test_read_table_empty_result_keeps_object_dtypes(tmp_path):
     conn.close()
 
 
+def test_read_table_normalizes_a_non_canonical_int_partition_key(tmp_path):
+    conn, store, snap = _commit_chains(
+        tmp_path,
+        {"2024": _chain_rows("TEST", {"2024-01-10": 2}, 2024)},
+        maximum_result_rows=4,
+    )
+    repository = Repository(conn, store)
+
+    frame = read_table(repository, snap, "option_chains", _COLUMNS,
+                       partition_keys=["02024"])
+    assert len(frame) == 2
+    conn.close()
+
+
 def test_read_table_with_no_fragments_still_refuses_a_bare_value_error(tmp_path):
     conn, clock, store = catalog_and_store(tmp_path)
     contract = _capped_contract(4)

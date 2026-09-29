@@ -77,7 +77,8 @@ def resolve_snapshot(repository, *, scope: str = DEFAULT_SCOPE, snapshot_id: str
 
 def _validated_partition_keys(contract, table_name: str, keys) -> list[str]:
     """``keys`` cast-checked against each declared partition column's
-    physical type, then returned as their original string form.
+    physical type, then returned in canonical form (an ``int64`` key as
+    its canonical decimal string, e.g. ``"02024"`` -> ``"2024"``).
 
     A value that cannot be cast to its column's declared type (e.g. a
     non-integer string for an ``int64`` partition column) is refused with
@@ -89,6 +90,7 @@ def _validated_partition_keys(contract, table_name: str, keys) -> list[str]:
     ``_scan.read_table``, which is a legitimate empty result, not a
     refusal.
     """
+    physical = None
     for column in contract.partition_columns:
         physical = next((c.physical_type for c in contract.columns
                          if c.name == column), None)
@@ -105,7 +107,7 @@ def _validated_partition_keys(contract, table_name: str, keys) -> list[str]:
                     f"{table_name}: partition key {key!r} is not a valid "
                     f"{physical!r} value for column {column!r}"
                 ) from None
-    return list(keys)
+    return [str(int(key)) if physical == "int64" else key for key in keys]
 
 
 def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str],
