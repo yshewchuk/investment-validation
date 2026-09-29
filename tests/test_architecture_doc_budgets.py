@@ -25,6 +25,31 @@ def test_the_real_tree_is_within_budget():
     assert proc.returncode == 0, proc.stderr
 
 
+def test_default_mode_reads_staged_not_worktree(tmp_path, monkeypatch):
+    """No --all: a staged-only ARCHITECTURE.md change is what gets checked,
+    not whatever is sitting in the worktree."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    doc = repo / "ARCHITECTURE.md"
+    doc.write_text("x\n" * 5)
+    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+    # Stage an over-budget version, but leave the worktree file small.
+    doc.write_text("x\n" * (adb.BUDGET + 1))
+    subprocess.run(["git", "add", "ARCHITECTURE.md"], cwd=repo, check=True)
+    doc.write_text("x\n" * 3)
+
+    default_report = adb.check_files(adb._sources(repo, use_worktree=False))
+    assert not default_report.ok
+
+    all_report = adb.check_files(adb._sources(repo, use_worktree=True))
+    assert all_report.ok
+
+
 def test_a_new_doc_over_budget_fails():
     big = ("x\n" * (adb.BUDGET + 1)).encode()
     report = adb.check_files({"engine/v2/newpkg/ARCHITECTURE.md": big})
