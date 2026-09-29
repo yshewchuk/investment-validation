@@ -775,47 +775,19 @@ submit_import_fn=None, serve_fn=None) -> tuple[Literal["ready", "not_yet",
 "timed_out"], str | None]` (raises the usual `_HANDLED_FAILURES` on a
 terminal problem, exactly like `plan_fn`/`submit_fn`/`serve_fn` already
 do — never returns a fourth, silent-failure value) is instead a NEW,
-separate step inside `_submit_plan` itself, called immediately before its
-existing `plan_ref = plan_fn(...)` call, inside the SAME `if plan_ref is
-None:` guard (so, like `plan_fn`, it never runs on the resume branch — a
-resumed run's plan already references an already-committed snapshot from
-whichever earlier attempt built it, so there is nothing left to ensure).
-The second tuple element is the exact `snapshot_id` this call verified is
+separate step inside `_submit_plan` (via its own `_ensure_plan_ref` helper)
+called immediately before its existing `plan_fn(...)` call, inside the
+SAME `if plan_ref is None:` guard — reached on EVERY pre-plan attempt,
+first-time or resumed (a resumed run only skips it once `plan_ref` is
+already set; see "R6, idempotency" above for the two resume cases). The
+second tuple element is the exact `snapshot_id` this call verified is
 fresh for `as_of`, present only for `"ready"` (`None` for `"not_yet"`/
 `"timed_out"`) — see round-2's own "Bind resumed plans to the committed
-snapshot" fix, below, for why this cannot be a bare status string.
-Concretely, `_submit_plan`'s own body gains, right before its existing
-`plan_ref = plan_fn(...)` line:
-
-```python
-if plan_ref is None:
-    snapshot_attempt = prior.snapshot_attempt if prior is not None else 0
-    try:
-        readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
-    except _HANDLED_FAILURES as exc:
-        bump = 1 if isinstance(exc, OpsError) and exc.code == "INPUT_CHANGED" else 0
-        return _failure(root, clock, as_of, None, exc, prior, snapshot_attempt=snapshot_attempt + bump)
-    if readiness == "not_yet":
-        return _record(root, _receipt(
-            clock, as_of, "not_yet", "the shadow snapshot has not caught up to as_of yet",
-            snapshot_attempt=snapshot_attempt))
-    if readiness == "timed_out":
-        previous = prior.error_count if prior is not None and prior.status == "timed_out" else 0
-        count = previous + 1
-        if count >= MAX_CONSECUTIVE_ERRORS:
-            return _record(root, _receipt(
-                clock, as_of, "failed",
-                f"the shadow snapshot import exceeded its deadline {count} consecutive "
-                "times; giving up", error_count=count, snapshot_attempt=snapshot_attempt))
-        return _record(root, _receipt(
-            clock, as_of, "timed_out",
-            "the shadow snapshot import has not finished; the legacy lock is released, "
-            "resuming next tick", error_count=count, snapshot_attempt=snapshot_attempt))
-    try:
-        plan_ref = plan_fn(root, as_of, tuple(tickers), tuple(context_tickers), clock,
-                           full_run=full_run, expected_shadow_snapshot_id=snapshot_id)
-    ...  # unchanged from here
-```
+snapshot" fix, below, for why this cannot be a bare status string. The
+outcomes table further below (under "`_ensure_shadow_snapshot`" heading)
+gives the current, load-bearing contract for every return value; this is
+the design-time context for why the call exists here rather than inside
+`_default_plan`.
 
 `ensure_snapshot_fn` is a new keyword parameter on `_submit_plan`
 (`=None`, defaulting to `_ensure_shadow_snapshot`, the same injection-seam
@@ -3995,8 +3967,8 @@ value exists at all. Its contract:
   | `("ready", snapshot_id)` | either | (none here — proceeds to `plan_fn`, then `"submitting"`) |
   | `("not_yet", None)` | no (via `_decide`) | `"not_yet"` (non-resumable; window re-checked next tick) |
   | `("not_yet", None)` | yes | `"snapshot_not_yet"` (gate-round-7; resumable, window not re-checked) |
-  | `("timed_out", None)` | either | `"timed_out"`, reused — see "R6, idempotency" above |
-  | raises (`_HANDLED_FAILURES`) | either | `"error"`, reused — only `INPUT_CHANGED` bumps `snapshot_attempt` |
+  | `("timed_out", None)` | either | `"timed_out"`, reused (→ `"failed"` at `MAX_CONSECUTIVE_ERRORS`) — see "R6, idempotency" above |
+  | raises (`_HANDLED_FAILURES`) | either | `"error"`, reused (→ `"failed_setup"` at `MAX_CONSECUTIVE_ERRORS`) — only `INPUT_CHANGED` bumps `snapshot_attempt` |
 
 `TriggerReceipt.snapshot_attempt` is this whole design's one new FIELD
 (see "`TriggerReceipt` gains a new field" above); `"snapshot_not_yet"` is
