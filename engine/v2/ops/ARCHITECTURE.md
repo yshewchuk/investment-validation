@@ -1956,12 +1956,16 @@ starts working with no change of its own.
   provider, not a failure (see "Failure semantics" for what does raise:
   `SOURCE_NOT_FINAL`/`TRANSIENT_SOURCE`/etc. for a genuinely bad response,
   never for a masked field). A missing ticker is different from a masked
-  field, though: `_classify` (`orats_daily_market.py`) only reaches
-  `final=True` once at least one requested ticker came back, and
-  `classify_response` then kinds any such response that is still missing
-  one of the unit's `expected_keys` tickers as `partial`, not `complete` —
-  the whole response is refused as a retryable `TRANSIENT_SOURCE`, never
-  committed with that ticker silently absent.
+  field, though: `_classify` (`orats_daily_market.py`) classifies a
+  response that is still missing one of the unit's `expected_keys`
+  tickers as `partial`, not `complete`, via `classify_response`; that
+  ticker is never committed silently absent. `_overall_kind` then takes
+  the worse of the `summaries`/`cores` endpoints' two kinds, so `partial`
+  becomes a retryable `TRANSIENT_SOURCE` refusal only when neither
+  endpoint mapped to a higher-severity code — a `not_final` endpoint
+  (an empty or literal-404 response) outranks it and produces
+  `SOURCE_NOT_FINAL` instead, and `credential_invalid`/`rate_limited`
+  outrank both.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
