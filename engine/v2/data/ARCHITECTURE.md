@@ -190,11 +190,15 @@ responsible for two things that follow from a change to that mapping:
   shape (content-addressed `revision_id`/`revision_ordinal`), not a changed
   row mapping, but the same rule applies: a session cached under the old id
   is never read back into a `v3`-normalized candidate; it is only revisited
-  by a fresh fetch. That fetch does not always get a new raw receipt — if
-  its request and bytes match a stored one, `cache_raw_receipt` reuses that
-  receipt's id and `received_at` unchanged — but the attempt still gets a
-  fresh `observed_at` for revision ordering, and the resulting candidate is
-  always normalized under the current `v3` id.
+  by a new attempt, and every new attempt normalizes under the current
+  `v3` id regardless of whether it calls the provider. A fresh fetch does
+  not always get a new raw receipt either — if its request and bytes match
+  a stored one, `cache_raw_receipt` reuses that receipt's id and
+  `received_at` unchanged. `_cached_fetched_units` (`incremental.py`) skips
+  the provider call altogether when the raw receipt already exists,
+  rebuilding the same rows straight from that stored receipt. Either path
+  still gets a fresh `observed_at` for revision ordering, and either path's
+  candidate is always normalized under the current `v3` id.
 - **mcap backward carry is bounded to the partitions this build already
   loaded, never a fresh historical scan, and it only ever writes into a row
   this build actually produced a winner for.** One ORATS `tradeDate` fetch

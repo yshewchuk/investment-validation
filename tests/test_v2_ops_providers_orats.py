@@ -450,9 +450,13 @@ def test_run_daily_market_refresh_a_reverted_ticker_with_new_provenance_is_recom
     assert reverted["status"] == "complete"
     assert _committed_rows(conn, store, reverted["candidate_snapshot_id"])["AAA"]["spot"] == 100.0
 
-    audit = json.loads(conn.execute(
-        "SELECT changeset_json FROM data_changesets ORDER BY created_at DESC LIMIT 1"
-    ).fetchone()["changeset_json"])
+    changeset_row = conn.execute(
+        "SELECT changeset_json FROM data_changesets WHERE snapshot_id = ?",
+        (reverted["candidate_snapshot_id"],)).fetchone()
+    assert changeset_row is not None, (
+        "expected a data_changesets row for the reverted attempt's own "
+        "candidate snapshot")
+    audit = json.loads(changeset_row["changeset_json"])
     ref = audit["result_dataset_version_ref"]
     stored_version = conn.execute(
         "SELECT manifest_hash FROM data_dataset_versions WHERE dataset_version_id = ?",
