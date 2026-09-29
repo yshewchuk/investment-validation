@@ -949,8 +949,16 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     """True if `tree` attempts to load some OTHER module by a construct
     whose target cannot be statically resolved: `importlib` used any way
     other than the one literal `importlib.import_module("<literal>")`
-    shape (an aliased import, any `from importlib import ...`, any other
-    `importlib.*` attribute, or a non-literal `import_module(...)` call);
+    shape or a bare `importlib.reload(...)` call. `reload` is allowed
+    unconditionally (unlike `import_module`, there is no literal-argument
+    shape to check): it only re-executes a module that was already
+    obtained some other way, so it cannot by itself introduce a new,
+    otherwise-invisible dependency -- whatever obtained the module in the
+    first place is what would need checking, and a dynamic way of
+    obtaining it is already caught by the other rules here. Every other
+    `importlib` use is flagged: an aliased import, any `from importlib
+    import ...`, any other `importlib.*` attribute, or a non-literal
+    `import_module(...)` call;
     the standalone name `__import__`, however bound;
     `spec_from_file_location` or `SourceFileLoader` as a bare name or an
     attribute's `.attr`; any `import runpy` or `from runpy import ...`; a
@@ -985,7 +993,7 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
             if node.attr in ("__import__", "spec_from_file_location", "SourceFileLoader"):
                 return True
             if isinstance(node.value, ast.Name) and node.value.id == "importlib" \
-                    and node.attr != "import_module":
+                    and node.attr not in ("import_module", "reload"):
                 return True
         elif isinstance(node, ast.Name):
             if node.id in ("__import__", "spec_from_file_location", "SourceFileLoader", "exec"):
@@ -1016,22 +1024,39 @@ def unresolved_import_files(tracked: list[str]) -> set[str]:
 
 
 def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
-                        dyn: set[str]) -> tuple[set[str], bool]:
+                        dyn: set[str], *, taint_exempt: set[str]) -> tuple[set[str], bool]:
     """BFS over graph's REAL edges only (graph.precise when present, else
     graph itself), starting from `roots`. Returns (closure, tainted):
     `tainted` is True iff some file reached via a real import edge -- never
-    one of `roots` themselves -- is itself in `dyn` (unresolved_import_files'
+    one of `taint_exempt` -- is itself in `dyn` (unresolved_import_files'
     output). Such a file's own further edges are unresolvable (an
     unresolved dynamic import could load literally anything), so anything
     that transitively imports it cannot trust its own closure either.
-    Excluding `roots` from tainting is deliberate: tests/conftest.py is a
-    root for every test file (_conftest_ancestors) and is DYNAMIC only
-    because of its own sys.path.insert, not an unresolved import, and it
-    carries no real edges into the tracked tree today -- without this
-    exclusion, every test's closure would taint on conftest.py alone and
-    selection would collapse to the full suite for every PR."""
+
+    `taint_exempt` is normally just `{t}` (the test file itself): its OWN
+    narrow-unresolved status is handled by the separate, broader leaf rule
+    in `select_pr_tests` (`t in dyn`, where `dyn` is the broad
+    `dynamic_files` set, a superset of `unresolved_import_files`), so
+    re-tainting it here would be redundant. It is NOT the test file's
+    conftest ancestors: a conftest ancestor with a genuine unresolved
+    import SHOULD taint its dependents, because a test using one of that
+    conftest's fixtures can have a real, invisible runtime dependency on
+    whatever the fixture loads -- fixture injection is a runtime name
+    lookup, not a static import edge, so the test's own closure never sees
+    that dependency (the gate's reproduced scenario: a conftest.py fixture
+    calls `importlib.import_module(name)` with a non-literal `name`, and
+    the test using the fixture has no static edge at all to the loaded
+    module).
+
+    `tests/conftest.py`'s OWN incidental broad-DYNAMIC-ness (e.g. its
+    `sys.path.insert`) never taints anything even though it is passed in
+    `roots` as every test's ancestor: this function is only ever called
+    with the NARROW `unresolved_import_files` set as `dyn`, never the
+    broad `dynamic_files` set -- a conftest.py that is dynamic only for
+    sys.path/subprocess/etc. reasons was never in the narrow set to begin
+    with, so no separate exemption for it is needed once you're only
+    checking the narrow set."""
     precise = getattr(graph, "precise", None)
-    root_set = set(roots)
     seen: set[str] = set()
     tainted = False
     stack = list(roots)
@@ -1040,7 +1065,7 @@ def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
         if f in seen:
             continue
         seen.add(f)
-        if f in dyn and f not in root_set:
+        if f in dyn and f not in taint_exempt:
             tainted = True
         stack.extend((precise if precise is not None else graph).get(f, ()))
     return seen, tainted
@@ -1058,12 +1083,15 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
 
     #155 (unresolved dynamic import) handling: a test file that is ITSELF
     classified DYNAMIC (_is_dynamic_file) is always selected, and so is a
-    test file that reaches, via a real import edge, some OTHER file that is
-    DYNAMIC (a "helper" with its own unresolved import) -- both via
-    _closure_from_roots's `tainted` return. Reaching tests/conftest.py is
-    exempted from this (it is a root for every test file, not something a
-    test file "imports"), which is what keeps this from collapsing every
-    PR into the full suite; see _closure_from_roots's own docstring."""
+    test file that reaches, via a real import edge, some OTHER file that
+    has a genuine unresolved import ATTEMPT (a "helper" with its own
+    unresolved import) -- both via _closure_from_roots's `tainted` return.
+    Only the test file's OWN narrow-unresolved status is exempted here
+    (handled separately by the `t in dyn` leaf rule, using the broader
+    dynamic_files set); a conftest ANCESTOR with a genuine unresolved
+    import DOES taint its dependents, because a test using one of its
+    fixtures can have a real, invisible runtime dependency on whatever
+    that fixture loads -- see _closure_from_roots's own docstring."""
     changed_set = set(changed)
     if not changed_set:
         return []
@@ -1073,7 +1101,7 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
         except Exception as exc:
             print(f"[mutation_pilot] import graph build failed "
                   f"({type(exc).__name__}: {exc}); selecting the full test suite",
-                  flush=True)
+                  file=sys.stderr, flush=True)
             return None
     if any(forces_full_suite(cfg, p) for p in changed_set):
         return None
@@ -1085,13 +1113,14 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     except Exception as exc:
         print(f"[mutation_pilot] unresolved-import scan failed "
               f"({type(exc).__name__}: {exc}); selecting the full test suite",
-              flush=True)
+              file=sys.stderr, flush=True)
         return None
     closures: dict[str, set[str]] = {}
     selected: set[str] = set()
     for t in tests:
         closure, tainted = _closure_from_roots(
-            {t} | _conftest_ancestors(t, tracked_set), graph, unresolved)
+            {t} | _conftest_ancestors(t, tracked_set), graph, unresolved,
+            taint_exempt={t})
         closures[t] = closure
         if t in dyn or tainted:
             selected.add(t)

@@ -2815,6 +2815,63 @@ def test_select_pr_tests_re_compile_helper_does_not_taint_its_importer(tmp_path,
     assert selected == []  # neither test tainted; NOTES.md is inert and reaches nothing
 
 
+def test_select_pr_tests_importlib_reload_of_a_known_import_is_not_unresolved(tmp_path, monkeypatch):
+    # Guards the gate's finding: importlib.reload(x) only re-executes a
+    # module already obtained via a real import -- it introduces no NEW
+    # dependency by itself, so it must not be flagged as an unresolved
+    # import attempt (this is exactly the shape tests/conftest.py's own
+    # tmp_root fixture uses).
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "paths.py").write_text("ROOT = '/x'\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helper.py").write_text(
+        "import importlib\n"
+        "\n"
+        "def reload_paths():\n"
+        "    from engine import paths\n"
+        "    importlib.reload(paths)\n"
+        "    return paths\n")
+    tracked = ["engine/paths.py", "tests/helper.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    assert "tests/helper.py" not in pilot.unresolved_import_files(tracked)
+
+
+def test_select_pr_tests_conftest_fixture_with_unresolved_import_taints_its_user(tmp_path, monkeypatch):
+    # The gate's own reproduced counterexample: a conftest.py fixture that
+    # dynamically loads a module by a non-literal name. A test using that
+    # fixture has NO static edge to the loaded module (fixture injection is
+    # a runtime name lookup) -- it must still be tainted (selected) when
+    # that module changes, or a real failure in the full suite would be
+    # silently missed by the narrowed subset.
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "b.py").write_text("VALUE = 2\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import importlib\n"
+        "import pytest\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def dynamic_value():\n"
+        "    name = 'engine.b'\n"
+        "    return importlib.import_module(name).VALUE\n")
+    (tmp_path / "tests" / "test_a.py").write_text(
+        "def test_value(dynamic_value):\n"
+        "    assert dynamic_value == 1\n")
+    (tmp_path / "tests" / "test_b.py").write_text(
+        "import engine.b\n"
+        "\n"
+        "def test_import():\n"
+        "    assert engine.b is not None\n")
+    tracked = ["engine/b.py", "tests/conftest.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "tests/conftest.py" in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected  # the real fix: this used to be omitted
+    assert "tests/test_b.py" in selected
+
+
 def test_select_pr_tests_graph_build_failure_selects_none_sentinel(monkeypatch):
     monkeypatch.setattr(pilot, "build_import_graph",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))

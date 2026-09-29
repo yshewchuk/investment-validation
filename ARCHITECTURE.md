@@ -150,24 +150,34 @@ request body and, if durable, in the operator guides instead — see
     graph cannot see the effect of, or that legitimately affect every
     test), for a changed path no test file's closure reaches and that is
     not on the docs-only `inert` allowlist, or for any failure building the
-    graph or reading the diff. The check stays named `test` either way, so
-    the branch-protection ruleset and auto-merge are unaffected.
+    graph or scanning for unresolved imports. The check stays named `test`
+    either way, so the branch-protection ruleset and auto-merge are
+    unaffected.
     Push/`workflow_dispatch`/schedule runs are unaffected: always the
     unfiltered full suite.
 
-    Same [#155](https://github.com/yshewchuk/investment-validation/issues/155)
-    gap, applied at the leaf rather than through reachability: a test file
-    that is itself DYNAMIC (`_is_dynamic_file`) is always selected, since
-    its own edges cannot be trusted, but a test file that only
-    *transitively reaches* a DYNAMIC file (every test does, via
-    `tests/conftest.py`) is not — the module-level version of that broader
-    rule was measured, in #155 itself, to make most of the mutation-module
-    partition permanently universal, and the same collapse would apply
-    here. This leaves a non-trivial, measurable fraction of test files
-    unconditionally selected on this basis; the exact count is a
-    point-in-time measurement of the repo, not tracked here to avoid a
-    figure that goes stale as test files are added — see the PR that
-    introduced this bullet for the count measured at that commit.
+    [#155](https://github.com/yshewchuk/investment-validation/issues/155)
+    handling here is two-part, and neither part is a full reachability
+    walk: (a) a test file that is itself classified broadly DYNAMIC
+    (`_is_dynamic_file`) is always selected, since its own edges cannot be
+    trusted -- checking a test's own broad-dynamic status by
+    reachability instead was measured, in #155 itself, to make most of the
+    mutation-module partition permanently universal, and the same collapse
+    would apply here; (b) a test file whose closure reaches, via a real
+    import edge OR a conftest ancestor relationship, some OTHER file with a
+    genuine unresolved import ATTEMPT (the narrower
+    `unresolved_import_files` set, not the broad DYNAMIC one) is also
+    selected -- this DOES include conftest ancestors: a conftest that
+    dynamically loads an unknown module taints every test using its
+    fixtures, because fixture injection is a runtime name lookup the
+    static closure never sees; only the test file's own
+    narrow-unresolved status is exempt from that closure walk, since part
+    (a) already covers it via the broader set. This leaves a non-trivial,
+    measurable fraction of test files unconditionally selected on the
+    broad-DYNAMIC basis; the exact count is a point-in-time measurement of
+    the repo, not tracked here to avoid a figure that goes stale as test
+    files are added — see the PR that introduced this bullet for the count
+    measured at that commit.
 
 ## 2. Layers and allowed dependency direction
 
