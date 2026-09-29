@@ -288,6 +288,10 @@ def test_a_missing_expected_ticker_refuses_the_refresh_without_committing(tmp_pa
 
     assert state != "succeeded"
     assert state == "failed"
+    failure = json.loads(conn.execute(
+        "SELECT failure_json FROM jobs WHERE job_id = ?",
+        (receipt.job_id,)).fetchone()[0])
+    assert failure["code"] == "TRANSIENT_SOURCE"
     unchanged = _head(conn)
     assert (unchanged["snapshot_id"], unchanged["generation"]) == (
         head["snapshot_id"], head["generation"])
