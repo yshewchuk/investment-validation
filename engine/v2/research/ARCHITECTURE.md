@@ -131,20 +131,18 @@ package). `polygon_fills.option_ticker` is likewise a verbatim copy of
 same reason: a v2 package may not import legacy code without a declared
 adapter.
 
-**Known duplication (pre-existing, not touched by this doc's change):**
-two independent snapshot-resolution modules exist side by side —
-`_scan.py` (used by `fill_quality.py`, `polygon_fills.py`,
-`signal_screen.py`) splits a bounded read into calendar-month/day intervals
-so a multi-million-row year partition (e.g. `option_chains`) never exceeds
-`maximum_result_rows` in one scan; `_snapshot.py` (used by `_chains.py`'s
-replay reads and `_trades_publish.py`'s build/reconcile reads) bounds a read
-by partition-key predicates only, with no time-interval splitting. Both
-were kept, under the same names, because a sibling in-flight branch
-(`worktree-agent-aa49bb24e5d746918`) already owned the name `_scan.py` for
-its own version when `_snapshot.py`'s functionality was needed — a
-naming collision avoidance, not a design intent to have two mechanisms.
-Tracked as a follow-up (issue #69); not fixed here because neither module
-changed in this PR.
+**Known duplication (issue #69):** `_scan.py` (used directly by
+`fill_quality.py`, `polygon_fills.py`, `signal_screen.py`, and
+`_pricing.trading_calendar_from_snapshot`) and
+`_snapshot.py` (used by `_chains.py`'s replay reads and
+`_trades_publish.py`'s build/reconcile reads) are still two independent
+modules. Since issue #107, `_snapshot.read_table` delegates its scan to
+`_scan.read_table` (see "`_snapshot.read_table` splits like `_scan.py`
+(issue #107)" below), so the two no longer duplicate the bounded-scan
+splitting itself; `_snapshot.py` still keeps its own partition-key
+resolution, its own no-partition refusal, and its own empty-result frame
+shape. Merging the two remains issue #69: that would change both
+modules' callers, outside this PR's one concern.
 
 Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The only consumers are the CLI
@@ -210,13 +208,20 @@ uncaught traceback instead.
     `Repository.resolve`/`resolve_full`/`scan` raises `MANIFEST_CORRUPT`
     (`category="integrity"`, not retryable) — a tampered snapshot is
     refused rather than read.
-  - **A table absent from the resolved snapshot, or whose fragments carry
-    no recorded time bounds** (`_scan.py`'s path). `CONTRACT_MISMATCH`
-    (`category="validation"`, not retryable). `_scan.read_table` itself
-    returns an *empty* frame, not a refusal, when a partition filter
-    simply matches no fragment records — `CONTRACT_MISMATCH` here is only
-    for a table the snapshot doesn't have, or one whose matched fragments
-    lack `time_min`/`time_max`. This is also what a replay or build-trades
+  - **A table absent from the resolved snapshot, or one whose fragments
+    must split by calendar and carry no recorded time bounds** (`_scan.py`'s
+    path). `CONTRACT_MISMATCH` (`category="validation"`, not retryable).
+    `_scan.read_table` itself returns an *empty* frame, not a refusal, when
+    a partition filter simply matches no fragment records. Missing
+    `time_min`/`time_max` is only reached — and only then raised — when a
+    partition actually needs a calendar split: `_scan_partition` tries one
+    full-partition scan first (needing no time bounds at all), so a
+    partition small enough to read in that one scan never touches this
+    refusal even if its fragments carry no recorded bounds; the refusal
+    fires once splitting is required, whether because that whole-partition
+    scan overflowed or because an unfiltered, non-nullable partition's own
+    manifest row count already exceeds the cap. This is also what a replay
+    or build-trades
     run gets when its pinned snapshot has no `daily_market` table at all
     (no table_version, not just an empty one):
     `_pricing.trading_calendar_from_snapshot` reads `daily_market` through
@@ -252,11 +257,14 @@ uncaught traceback instead.
     one condition escapes as an uncaught traceback rather than the typed
     refusal every other condition here gets. Pre-existing, not introduced
     or fixed by this doc; tracked as a follow-up (issue #70).
-  - **A single day-partition scan that still exceeds
-    `maximum_result_rows`** (`_scan.py`'s path only — `_snapshot.py` has no
-    finer split to fall back to). `RESULT_LIMIT_EXCEEDED`
+  - **A whole-partition scan with a nullable observation-time column that
+    exceeds `maximum_result_rows`, or a single day-partition scan that still
+    exceeds `maximum_result_rows`** (`_scan.py`'s path, and — since issue
+    #107 — `_snapshot.py`'s: see "`_snapshot.read_table` splits like
+    `_scan.py` (issue #107)" below). `RESULT_LIMIT_EXCEEDED`
     (`category="resource"`, not retryable): the table needs finer
-    partitioning than this rule can supply; it never truncates silently.
+    partitioning (or, for the nullable case, a different split strategy)
+    than this rule can supply; it never truncates or drops rows silently.
   - **No overlap rows after a join/filter** (fill quality's
     `since`-filtered join). `POPULATION_COLLAPSED`
     (`category="validation"`, not retryable) — an empty report is refused
@@ -306,6 +314,49 @@ uncaught traceback instead.
   a caller that wants "publish this exact changeset once" relies on the
   `SNAPSHOT_CONFLICT` fence, not on this package silently no-op-ing a
   duplicate call.
+
+**`_snapshot.read_table` splits like `_scan.py` (issue #107).**
+`_snapshot.read_table` delegates each requested partition's read (or, with
+no `partition_keys` given, every partition the snapshot has) to
+`_scan.read_table`, instead of issuing one capped, unsplit `DataQuery` of
+its own. It keeps its own signature (`partition_keys` only, no
+`key_filter`), its own pre-`_scan` guard for "no declared partition column,
+or no partition values available at all" (the bare `ValueError` case
+above, issue #70, unchanged), and its own empty-result frame shape
+(`pd.Series(dtype="object")` per requested column). The five direct
+callers (`_chains.read_chain_keys`, `_chains.read_chains_for_years`,
+`_trades_publish.read_event_rows`, `_trades_publish.read_existing_trades`,
+`_replay_run.events_frame`) and the `_chains.load_chain_index` wrapper
+(through `read_chains_for_years`) keep their existing interfaces.
+
+A partition scan, whether reached through `_snapshot.read_table` or one of
+`_scan.read_table`'s other direct callers (`polygon_fills.read_trades`,
+`fill_quality.py`, `signal_screen.py`,
+`_pricing.trading_calendar_from_snapshot` — none touched by this PR, all
+sharing this same code):
+
+| Condition | Outcome |
+|---|---|
+| Partition fits under `maximum_result_rows` in one scan | One full-partition scan, no time interval — includes null-valued observation rows. |
+| Partition overflows, observation column not nullable | Falls back to a calendar split: by month, then by day within an overflowing month. |
+| Whole partition overflows and its observation column is nullable | Refuses `RESULT_LIMIT_EXCEEDED` — a null can never match a time interval, so splitting would silently drop it. |
+| A single day-partition scan still overflows | Refuses `RESULT_LIMIT_EXCEEDED`. |
+| No declared partition column, or no partition values at all | `_snapshot.read_table` raises a bare `ValueError` (issue #70, unchanged). |
+| Valid partition key(s) with no matching data | Empty result, object dtypes — not a refusal. |
+
+Every scan — full-partition or split — carries a `KeyPredicate` scoped to
+its own partition (`_partition_filter`) alongside any caller `key_filter`,
+so a result row can never duplicate across partitions.
+
+This also changes `polygon_fills.read_trades`'s behavior, since it shares
+`_scan.py` with `_snapshot.read_table`'s new delegation: `trades` rows with
+a null `entry_date` are now returned instead of dropped, and cross-year
+duplicate rows are eliminated. `option_chains` and `earnings_events` are
+unaffected — `legacy_annotations.json` documents both of their partition
+columns as derived from their own observation column, so neither defect
+could arise for them; `trades`' partition column (the earnings event's
+year) is not tied to `entry_date`, which is what exposed both defects for
+it.
 
 ## Invariants
 

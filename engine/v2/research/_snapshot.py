@@ -16,9 +16,8 @@ from __future__ import annotations
 from typing import Sequence
 
 import pandas as pd
-import pyarrow as pa
 
-from engine.v2.contracts.data import DataQuery, KeyPredicate
+from engine.v2.research import _scan
 
 __all__ = [
     "DEFAULT_SCOPE",
@@ -76,21 +75,39 @@ def resolve_snapshot(repository, *, scope: str = DEFAULT_SCOPE, snapshot_id: str
     return repository.resolve_pinned(scope)
 
 
-def _predicate_values(contract, column: str, values: Sequence) -> tuple:
-    """Cast ``values`` to the partition column's declared physical type.
+def _validated_partition_keys(contract, table_name: str, keys) -> list[str]:
+    """``keys`` cast-checked against each declared partition column's
+    physical type, then returned in canonical form (an ``int64`` key as
+    its canonical decimal string, e.g. ``"02024"`` -> ``"2024"``).
 
-    ``operator="in"`` requires one shared scalar type and unique values; a
-    caller passing year strings against an int64 partition would otherwise
-    match nothing rather than fail loudly.
+    A value that cannot be cast to its column's declared type (e.g. a
+    non-integer string for an ``int64`` partition column) is refused with
+    ``ValueError`` rather than silently excluded by ``_scan.read_table``'s
+    plain string-membership filter -- a caller must never get a partial
+    read that looks complete. A syntactically valid but absent key (e.g.
+    ``"1999"`` when no such partition exists) is not this function's
+    concern: it passes validation here and simply matches nothing in
+    ``_scan.read_table``, which is a legitimate empty result, not a
+    refusal.
     """
-    physical = next(c.physical_type for c in contract.columns if c.name == column)
-    if physical == "int64":
-        cast = tuple(dict.fromkeys(int(v) for v in values))
-    elif physical == "bool":
-        cast = tuple(dict.fromkeys(bool(v) for v in values))
-    else:
-        cast = tuple(dict.fromkeys(str(v) for v in values))
-    return cast
+    physical = None
+    for column in contract.partition_columns:
+        physical = next((c.physical_type for c in contract.columns
+                         if c.name == column), None)
+        for key in keys:
+            try:
+                if physical == "int64":
+                    int(key)
+                elif physical == "bool":
+                    bool(key)
+                # any other declared physical type has no narrower cast to
+                # validate against here; a plain string is always valid.
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{table_name}: partition key {key!r} is not a valid "
+                    f"{physical!r} value for column {column!r}"
+                ) from None
+    return [str(int(key)) if physical == "int64" else key for key in keys]
 
 
 def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str],
@@ -100,33 +117,28 @@ def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str]
     ``partition_keys``, when given, restricts the scan to the contract's
     declared partition column(s) — the replacement for the legacy
     ``iter_table(..., years=...)`` partition filter.
+
+    The actual scan is delegated to ``_scan.read_table``, which bounds each
+    partition's read and splits it into calendar months, then days, on
+    ``RESULT_LIMIT_EXCEEDED`` (issue #107) — this function keeps its own
+    partition-key resolution, its own refusal when no partition column or
+    partition value is available at all (issue #70, unchanged), and its own
+    empty-result frame shape.
     """
     contract = repository.table_contract(snapshot_ref, table_name)
-    predicates: list[KeyPredicate] = []
-    for column in contract.partition_columns:
-        values = partition_keys if partition_keys else sorted(
-            {record.partition_key for record
-             in repository.fragment_records(snapshot_ref, table_name)}
-        )
-        cast = _predicate_values(contract, column, values)
-        if cast:
-            predicates.append(KeyPredicate(column=column, operator="in", values=cast))
-    if not predicates:
+    keys = (_validated_partition_keys(contract, table_name, partition_keys)
+            if partition_keys else sorted(
+        {record.partition_key for record
+         in repository.fragment_records(snapshot_ref, table_name)}
+    ))
+    if not contract.partition_columns or not keys:
         # A scan must be bounded by at least one key predicate or a time bound.
         raise ValueError(
             f"{table_name}: a bounded read needs partition_keys over a declared "
             "partition column"
         )
-    query = DataQuery(
-        snapshot_id=snapshot_ref.snapshot_id,
-        table_contract_ref=snapshot_ref.table_versions[table_name].table_contract_ref,
-        columns=tuple(columns),
-        key_filter=tuple(predicates),
-        order_by=tuple(contract.primary_key),
-        max_batch_rows=min(contract.maximum_batch_rows, contract.maximum_result_rows),
-        max_result_rows=contract.maximum_result_rows,
-    )
-    batches = list(repository.scan(query, table_name=table_name))
-    if not batches:
+    frame = _scan.read_table(repository, snapshot_ref, table_name, columns,
+                             partition_keys=keys)
+    if frame.empty:
         return pd.DataFrame({name: pd.Series(dtype="object") for name in columns})
-    return pa.Table.from_batches(batches).to_pandas().reset_index(drop=True)
+    return frame
