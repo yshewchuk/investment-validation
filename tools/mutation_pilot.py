@@ -967,8 +967,8 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     qualified `builtins.exec`/`builtins.eval` form is also caught, since
     it is the exact same risk under a different spelling. Deliberately
     narrower than `_is_dynamic_file`, its excluded set splits into two
-    groups with different rationales. `sys.path`, `site`, `pkgutil`,
-    the bare `compile`/`syspath_prepend`/`addsitedir`/`PYTHONPATH`
+    groups with different rationales. `sys.path`, `site`, the bare
+    `compile`/`syspath_prepend`/`addsitedir`/`PYTHONPATH`
     names, and `subprocess`, `multiprocessing`, the os-exec functions
     are all excluded. The first group does not itself load some OTHER,
     unknown TRACKED module at runtime -- those constructs only affect
@@ -981,8 +981,13 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     incapability. Tracking process boundaries is out of scope for this
     static analysis, so a test depending on repository code only through
     such runtime loading may be omitted from a PR's narrowed selection;
-    the full suite on every push to `main` is the backstop. Used only by
-    select_pr_tests's taint rule."""
+    the full suite on every push to `main` is the backstop.
+    `pkgutil.resolve_name(...)` is a separate instance of the same
+    accepted limitation: it CAN import a module named by a runtime
+    value, but this narrow taint scan does not track that dependency,
+    so a test depending on it may also be omitted from a PR's narrowed
+    selection (same backstop: caught by the full suite on `main`). Used
+    only by select_pr_tests's taint rule."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
