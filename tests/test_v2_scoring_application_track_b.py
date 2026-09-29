@@ -320,3 +320,36 @@ def test_frozen_inference_preserves_refusals_roles_and_verified_artifacts():
     assert "MISSING_EXPIRY" in record.reason_codes
     assert record.validation_status == "refused"
     assert record.model_artifact_ids == ("sha256:verified",)
+
+
+def test_unknown_binding_result_is_never_scoped_out_of_the_final_refusal_check():
+    # Issue #93 / CodeRabbit: an inference request whose binding_id matches NO
+    # release binding at all is always a refusal, never a legitimate
+    # out-of-scope answer. Unlike a real other-strategy binding (correctly
+    # excluded by scoping), it must reach the final not-READY check even
+    # though it is absent from this request's scoped binding ids.
+    known = SimpleNamespace(binding_id="known-size", role="size",
+                            output_names=("prediction",))
+    release = SimpleNamespace(bindings=(known,))
+    inference_request = SimpleNamespace(release_id="rel-1",
+                                        binding_id="unknown-binding")
+
+    class Frozen:
+        def infer(self, release, inference_request):
+            # Exactly what FrozenInference._resolve refuses with when no
+            # release binding matches the request's binding id: the same
+            # unresolved id echoed back, no predictions/outputs.
+            return SimpleNamespace(
+                status="MODEL_NOT_READY", release_id=inference_request.release_id,
+                binding_id=inference_request.binding_id, model_id=None,
+                artifact_hashes=(), output_names=(), predictions=(),
+                reason_codes=("BINDING_NOT_FOUND",), detail=None,
+            )
+
+    record = application.score_frozen(
+        _request(), Frozen(), release, inference_request,
+        {"_native_inputs": _native(exp_pnl_analog=0.1)},
+    )
+
+    assert record.validation_status == "refused"
+    assert "BINDING_NOT_FOUND" in record.reason_codes
