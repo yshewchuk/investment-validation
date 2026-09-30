@@ -139,6 +139,27 @@ def test_missing_provenance_is_not_published(selected, monkeypatch, field):
         export.build_captured_comparison(root, "one")
 
 
+@pytest.mark.parametrize("stage", ["write", "replace"])
+def test_publication_failure_removes_temp_and_preserves_output(selected, tmp_path, monkeypatch, stage):
+    output = tmp_path / "report.json"
+    output.write_text("previous")
+    write = Path.write_text
+    def refuse(path, *args, **kwargs):
+        if stage == "write":
+            write(path, "partial")
+        raise OSError("private /source/path")
+    monkeypatch.setattr(Path, "write_text" if stage == "write" else "replace", refuse)
+    assert export.main(["--corpus", str(selected[0]), "--fixture-id", "one", "--output", str(output)]) == 1
+    assert output.read_text() == "previous"
+    assert not list(tmp_path.glob("report.json.tmp*"))
+
+
+def test_cli_reports_safe_typed_refusal(selected, tmp_path, capsys):
+    assert export.main(["--corpus", str(selected[0]), "--fixture-id", "missing",
+                        "--output", str(tmp_path / "report.json")]) == 1
+    assert "fixture is not manifest-declared" in capsys.readouterr().err
+
+
 @pytest.mark.needs_corpus
 def test_retained_real_replay_and_planted_native_defect(monkeypatch):
     """Use a completed Phase 4 paired capture; never commit its licensed values.

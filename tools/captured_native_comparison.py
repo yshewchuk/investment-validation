@@ -32,13 +32,13 @@ def _selected_pair(root: Path, fixture_id: str) -> tuple[dict, dict]:
     """Hydrate only the declared selection and verify its content addressing."""
     _require(bool(fixture_id) and Path(fixture_id).name == fixture_id
              and fixture_id not in {".", ".."}, "invalid fixture selection")
-    index = json.loads((root / "INDEX.json").read_text())
+    index = json.loads((root / "INDEX.json").read_text(encoding="utf-8"))
     declared = index["pairs"]
     _require(fixture_id in declared, "fixture is not manifest-declared")
     manifest_hash = content_hash({key: row["payload_hash"]
                                   for key, row in sorted(declared.items())})
     _require(manifest_hash == index["corpus_hash"], "corpus declaration hash mismatch")
-    pair = json.loads((root / "pairs" / f"{fixture_id}.json").read_text())
+    pair = json.loads((root / "pairs" / f"{fixture_id}.json").read_text(encoding="utf-8"))
     pair = tier0_corpus._resolve_shared(pair, root / "shared", {}, set(), {})
     _require(not _verify_manifest_fields(declared, fixture_id, pair),
              "selected manifest metadata mismatch")
@@ -147,6 +147,9 @@ def main(argv: list[str] | None = None) -> int:
         report = build_captured_comparison(root, args.fixture_id)
         _atomic_write(args.output, json.dumps(report, sort_keys=True, indent=2,
                                             allow_nan=False) + "\n")
+    except ComparisonRefused as error:
+        print(f"captured comparison refused: {error}", file=sys.stderr)
+        return 1
     except Exception:
         print("captured comparison refused; no comparison published", file=sys.stderr)
         return 1

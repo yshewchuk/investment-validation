@@ -335,7 +335,7 @@ or a new consumer must update that package's README in the same change.
   it needs no stored forward row. See `engine/v2/ops/ARCHITECTURE.md`'s "Native nightly
   pool/residual refresh", `engine/v2/models/ARCHITECTURE.md` §§1, 2, 8, and
   issue #192 for the full design.
-- **Native parity summary projection (serving, read-only).**
+- **Captured native comparison export (tools, read-only inputs).**
   `tools/captured_native_comparison.py` exports one explicitly selected,
   manifest-declared STR-THRU replay into the existing parity-report shape.
   Its optional `captured_comparison` payload contains paired numeric views,
@@ -343,17 +343,18 @@ or a new consumer must update that package's README in the same change.
   release identities. Legacy values come from the saved paired record; native
   values come from verified frozen inference through the canonical scorer.
   The tool owns capture hydration and verification; serving imports no checker.
-  Corpus/request date, actual decision date, quote date and event date remain
+  Corpus/request date, actual decision date, quote date, event date and session remain
   separate facts copied from their sources. Selected-case evidence never claims
   whole-corpus acceptance, a current board, nightly readiness or cutover status.
   No source corpus, operational release pointer or legacy artifact is modified.
 
   | Captured comparison condition | Outcome |
   |---|---|
-  | Undeclared/malformed case, mismatched hash, missing resource or replay refusal | No comparison artifact is published |
+  | Undeclared/malformed case, mismatched hash, missing resource or replay refusal | No new artifact is published; any existing output is unchanged |
   | Compared values differ | Preserve both values and shared-comparator findings |
   | Same verified inputs and code on retry | Same semantic report; output publication is atomic |
   | Output targets the retained corpus | Refuse; no partial source write |
+- **Native parity summary projection (serving, read-only).**
 
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
   is a pure, read-only aggregate over the `native_parity` stage's own
