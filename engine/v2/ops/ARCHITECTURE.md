@@ -688,13 +688,12 @@ resumable rather than permanently `"missed"`.
 Commits land directly in scope `"shadow"` (no candidate-scope-then-promote
 step): `"shadow"` has no downstream consumer needing pre-advance
 validation. The EXACT `snapshot_id` this call verified is threaded through
-(`expected_shadow_snapshot_id` → `_default_plan`'s
-`expected_snapshot_id`) so a later CAS check COULD bind the plan to it
-instead of a re-resolved mutable head — closing a window where a human
-`ops snapshot submit`/`promote` between verification and planning could
-pin an unvalidated snapshot — but `pin_snapshot_inputs` does not yet
-consume that value, so the window is not closed today; that CAS check is
-[#200](https://github.com/yshewchuk/investment-validation/issues/200).
+(`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id`
+→ `cli._snapshot_inputs` → `pin_snapshot_inputs(expected_snapshot_id=None)`).
+The optional guard compares the already-loaded `SnapshotRef.snapshot_id`,
+without a second head resolution. A mismatch raises `INPUT_CHANGED` before
+materialization or artifact registration; equality keeps that resolved ref.
+Omitting the expected id preserves direct and legacy caller behavior.
 `nightly_raw_rows.scan_forward_board_requests` scans the pinned snapshot's
 `earnings_events` and returns `BoardRequest`s for the forward window, with
 no `src_orats` filter (history-only; forward dates are Nasdaq/yfinance).
