@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.research import experiment_trades  # noqa: E402
+from engine.v2.research._trades_revisions import _TRADES_COLUMNS  # noqa: E402
 from experiments import common_v2  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
     catalog_and_store,
@@ -31,6 +32,15 @@ from tests.test_v2_research_replay import _event_rows  # noqa: E402
 
 PROVENANCE = experiment_trades.PROVENANCE
 
+#: The compared columns: the trades-table contract plus the one column the
+#: ``earnings_events`` join adds -- an explicit list, never read back from the
+#: frame under test.
+_COMPARED_COLUMNS = (*_TRADES_COLUMNS, "session")
+
+#: Columns ``load_trades`` returns as datetimes, and columns that are floats.
+_DATE_COLUMNS = ("event_date", "entry_date", "exit_date", "expiry")
+_FLOAT_COLUMNS = ("strike", "fill_alpha", "entry_cost", "exit_value", "ret")
+
 
 def _str_thru_fixture_rows() -> list[dict]:
     """The two STR-THRU/PROVENANCE rows both value-comparison tests seed."""
@@ -40,14 +50,34 @@ def _str_thru_fixture_rows() -> list[dict]:
     ]
 
 
-def _expected_str_thru_frame(columns: list[str]) -> pd.DataFrame:
+def _expected_str_thru_frame() -> pd.DataFrame:
     """The explicit expected frame for every seeded value of
-    ``_str_thru_fixture_rows()`` plus the ``session`` the join adds."""
+    ``_str_thru_fixture_rows()`` plus the ``session`` the join adds.
+
+    Column set and dtypes are chosen here, independently of the frame under
+    test: ``_COMPARED_COLUMNS`` comes from the trades-table contract, and the
+    datetimes/floats are coerced by name.
+    """
     rows = [{**row, "session": "AMC"} for row in _str_thru_fixture_rows()]
-    frame = pd.DataFrame(rows)[columns]
-    for column in ("event_date", "entry_date", "exit_date", "expiry"):
-        frame[column] = pd.to_datetime(frame[column])
+    frame = pd.DataFrame(rows)[list(_COMPARED_COLUMNS)]
+    for column in _DATE_COLUMNS:
+        # Pinned to nanoseconds: pandas 3 parses in-process dates at
+        # microsecond resolution while the scan returns the contract's
+        # ``datetime64[ns]`` (``engine/data/schemas.py`` pins ns for the same
+        # reason).
+        frame[column] = pd.to_datetime(frame[column]).astype("datetime64[ns]")
+    for column in _FLOAT_COLUMNS:
+        frame[column] = frame[column].astype("float64")
     return frame
+
+
+def _assert_str_thru_dtypes(frame: pd.DataFrame) -> None:
+    """The actual frame's dtypes, checked by name against this test's own
+    expectations -- never against the actual frame's own ``dtypes`` mapping."""
+    for column in _DATE_COLUMNS:
+        assert pd.api.types.is_datetime64_any_dtype(frame[column]), column
+    for column in _FLOAT_COLUMNS:
+        assert pd.api.types.is_float_dtype(frame[column]), column
 
 
 def _load_str_thru_sorted(tmp_path) -> pd.DataFrame:
@@ -69,24 +99,29 @@ def test_load_trades_returns_the_strategy_rows_with_session_joined(tmp_path):
     actual = _load_str_thru_sorted(tmp_path)
 
     assert set(actual["trade_id"].astype(str)) == {"T-THRU-A", "T-THRU-B"}
-    expected = _expected_str_thru_frame(list(actual.columns)).astype(
-        actual.dtypes.to_dict())
-    pd.testing.assert_frame_equal(actual, expected)
-    for column in ("event_date", "entry_date", "exit_date"):
-        assert pd.api.types.is_datetime64_any_dtype(actual[column])
+    compared = actual[list(_COMPARED_COLUMNS)]
+    _assert_str_thru_dtypes(compared)
+    # ``check_dtype=False`` is only the resolution/backing exemption
+    # ``test_v2_research_replay.py`` documents (Arrow gives datetime64[ns] and
+    # object strings, in-process pandas 3 gives microsecond-resolution dates
+    # and str strings); the dtype check above is the real one, and every value
+    # is still compared exactly.
+    pd.testing.assert_frame_equal(
+        compared, _expected_str_thru_frame(), check_dtype=False)
 
 
 def test_load_trades_comparison_catches_a_corrupted_value(tmp_path):
     """The planted defect proves the frame comparison above is real: it
     fails on a corrupted cell, so its pass is not vacuous."""
     actual = _load_str_thru_sorted(tmp_path)
-    expected = _expected_str_thru_frame(list(actual.columns)).astype(
-        actual.dtypes.to_dict())
+    _assert_str_thru_dtypes(actual[list(_COMPARED_COLUMNS)])
 
     actual.loc[actual["trade_id"] == "T-THRU-A", "entry_cost"] = 999.0
 
     with pytest.raises(AssertionError):
-        pd.testing.assert_frame_equal(actual, expected)
+        pd.testing.assert_frame_equal(
+            actual[list(_COMPARED_COLUMNS)], _expected_str_thru_frame(),
+            check_dtype=False)
 
 
 def test_load_trades_refuses_empty_result(tmp_path):
