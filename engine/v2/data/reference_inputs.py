@@ -219,7 +219,7 @@ def resolve_reference_files(root: Path, *, panel_content_hash: str,
         ref = file_ref(root, path)
         if ref.content_hash != CONTENT_HASH_PREFIX + str(entry.get("artifact_sha256")):
             raise errors.fail("CONTRACT_MISMATCH", "champion artifact bytes differ from the "
-                              "registry's recorded sha256", details={"model_id": entry.get("id")})
+                              "registry's recorded sha256")
         refs[path] = ref
     for path in _tier4_caches(root, champions, panel_content_hash):
         refs[path] = file_ref(root, path)
@@ -258,7 +258,7 @@ def _artifact_path(entry: dict) -> str:
               and path.startswith(_MODELS_DIR + "/") and kind_for_path(path) == "champion_artifact")
     if not inside:
         raise errors.fail("CONTRACT_MISMATCH", "champion artifact path is not inside the models "
-                          "directory", details={"model_id": entry.get("id")})
+                          "directory")
     return path
 
 

@@ -233,18 +233,25 @@ def test_bad_registry_or_artifact_is_a_contract_mismatch(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_champion_artifact_bytes_mismatch_details_carry_only_model_id(tmp_path):
-    """issue #218, site 1: the bytes-vs-registry-sha256 refusal must name the
-    champion by its registry ``id``, not by the artifact's raw legacy path --
-    ``Problem.details`` survives verbatim into a durably persisted receipt."""
+def test_champion_artifact_bytes_mismatch_details_carry_nothing(tmp_path):
+    """issue #218 round 2, site 1: the bytes-vs-registry-sha256 refusal carries
+    no details at all. ``entry.get("id")`` is read straight from the registry
+    JSON and never validated, so it is itself a caller-controlled string --
+    possibly a legacy filesystem path or exception text -- and must never reach
+    the durably persisted ``Problem.details``, not even as the model_id."""
     build_legacy_store(tmp_path)
     (tmp_path / reference_artifact_path()).write_bytes(b"retrained without re-registering")
+    registry_path = tmp_path / INPUTS["model_registry"]["path"]
+    document = json.loads(registry_path.read_text())
+    document["models"][0]["id"] = "/var/data/legacy/models/champion.json"
+    registry_path.write_text(json.dumps(document))
     with pytest.raises(DataError) as excinfo:
         _plan(tmp_path)
     problem = excinfo.value.problem
     assert excinfo.value.code == "CONTRACT_MISMATCH"
-    assert problem.details == {"model_id": REFERENCE_MODEL_ID}
+    assert problem.details == {}
     assert reference_artifact_path() not in str(problem.details)
+    assert "/var/data/legacy/models/champion.json" not in str(problem.details)
 
 
 def test_malformed_registry_details_carry_no_registry_path(tmp_path):
@@ -262,21 +269,24 @@ def test_malformed_registry_details_carry_no_registry_path(tmp_path):
     assert INPUTS["model_registry"]["path"] not in str(problem.details)
 
 
-def test_out_of_bounds_artifact_details_carry_no_registry_artifact_string(tmp_path):
-    """issue #218, site 3: the escaping-artifact-path refusal names the model
-    by ``id`` only -- the ``artifact`` value is an arbitrary, unvalidated
-    string read straight from the registry file's own JSON."""
+def test_out_of_bounds_artifact_details_carry_nothing(tmp_path):
+    """issue #218 round 2, site 3: the escaping-artifact-path refusal carries no
+    details at all. Both the ``artifact`` value and the ``id`` it used to report
+    are arbitrary, unvalidated strings read straight from the registry file's own
+    JSON, so neither may appear in a persisted ``Problem``."""
     build_legacy_store(tmp_path)
     registry_path = tmp_path / INPUTS["model_registry"]["path"]
     document = json.loads(registry_path.read_text())
     document["models"][0]["artifact"] = "../outside.joblib"
+    document["models"][0]["id"] = "/var/data/legacy/models/champion.json"
     registry_path.write_text(json.dumps(document))
     with pytest.raises(DataError) as excinfo:
         _plan(tmp_path)
     problem = excinfo.value.problem
     assert excinfo.value.code == "CONTRACT_MISMATCH"
-    assert problem.details == {"model_id": REFERENCE_MODEL_ID}
+    assert problem.details == {}
     assert "../outside.joblib" not in str(problem.details)
+    assert "/var/data/legacy/models/champion.json" not in str(problem.details)
 
 
 def test_tier4_serving_symlink_details_carry_no_path(tmp_path):
