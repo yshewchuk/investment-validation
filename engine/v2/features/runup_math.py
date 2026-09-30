@@ -32,7 +32,7 @@ def _signed_streak(out: pd.DataFrame) -> np.ndarray:
 
 
 def _price_features(group: pd.DataFrame, px: pd.DataFrame,
-                    as_of_column: str) -> dict[str, np.ndarray]:
+                    decision_dates: np.ndarray) -> dict[str, np.ndarray]:
     px = px.sort_values("date")
     closes = px["close_adj"].to_numpy(dtype=float)
     pdates = px["date"].to_numpy()
@@ -41,8 +41,7 @@ def _price_features(group: pd.DataFrame, px: pd.DataFrame,
     result = {name: np.full(len(group), np.nan) for name in _MARKET_COLUMNS}
     result["runup_asof"] = np.full(len(group), np.datetime64("NaT", "ns"),
                                    dtype="datetime64[ns]")
-    row_idx = _anchor_index(pdates, group["date"].to_numpy(),
-                            group[as_of_column].to_numpy())
+    row_idx = _anchor_index(pdates, group["date"].to_numpy(), decision_dates)
     for j, idx in enumerate(row_idx):
         idx = int(idx)
         if idx < 0:
@@ -69,8 +68,8 @@ def add_runup_features(frame: pd.DataFrame,
     Explicitly pass ``"date"`` for the historical event-date convention.
     """
     out = frame.sort_values(["ticker", "date"]).reset_index(drop=True)
-    # Require the decision column even when no ticker has usable price history.
-    out[as_of_column]
+    # Preserve the input clock even when its name is also an output column.
+    decision_dates = out[as_of_column].to_numpy(copy=True)
     out["signed_streak"] = _signed_streak(out)
     out["ema12r_abs"] = out["ema12_prior_abs_move"].where(
         out["n_prior"] >= 12, out["mean_prior_abs_move"])
@@ -81,6 +80,7 @@ def add_runup_features(frame: pd.DataFrame,
         px = prices_by_ticker.get(ticker)
         if px is None or len(px) < 300 or "close_adj" not in px.columns:
             continue
-        for column, values in _price_features(group, px, as_of_column).items():
+        values_by_column = _price_features(group, px, decision_dates[group.index])
+        for column, values in values_by_column.items():
             out.loc[group.index, column] = values
     return out

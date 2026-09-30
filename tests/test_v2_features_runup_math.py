@@ -64,17 +64,32 @@ def test_independent_algebra_and_sorted_immutable_inputs():
     _assert_equal(prices, prices_before)
 
 
-def test_both_date_ceilings_negative_anchor_and_post_cutoff_invariance():
+def test_both_date_ceilings_negative_anchor_and_post_cutoff_invariance(tmp_path, monkeypatch):
     frame = _events((301, 311, 321))
     px = _prices()
     frame["decision"] = [px.date.iloc[280], px.date.iloc[330], px.date.iloc[0] - pd.Timedelta(days=1)]
+    expected = _legacy_result(frame, px, tmp_path, monkeypatch, "decision")
     actual = add_runup_features(frame, {"A": px}, "decision")
+    _assert_equal(actual, expected)
     assert actual.runup_asof.iloc[:2].tolist() == [px.date.iloc[280], px.date.iloc[310]]
     assert pd.isna(actual.runup_asof.iloc[2])
     assert actual.loc[2, MARKET].isna().all()
     changed = px.copy()
     changed.loc[311:, "close_adj"] = -9999
-    _assert_equal(add_runup_features(frame, {"A": changed}, "decision"), actual)
+    _assert_equal(add_runup_features(frame, {"A": changed}, "decision"), expected)
+
+
+@pytest.mark.parametrize("decision_column", OUTPUTS)
+def test_decision_clock_survives_output_column_alias(decision_column, tmp_path, monkeypatch):
+    frame, px = _events((301, 311, 321)), _prices()
+    frame["decision"] = px.date.iloc[[280, 290, 300]].to_numpy()
+    expected = _legacy_result(frame, px, tmp_path, monkeypatch, "decision")
+    aliased = frame.rename(columns={"decision": decision_column}).iloc[::-1]
+    before = aliased.copy(deep=True)
+    actual = add_runup_features(aliased, {"A": px}, decision_column)
+    _assert_equal(actual[OUTPUTS], expected[OUTPUTS])
+    assert actual.runup_asof.tolist() == px.date.iloc[[280, 290, 300]].tolist()
+    _assert_equal(aliased, before)
 
 
 @pytest.mark.parametrize("price_kind", ["absent", "short", "missing_close"])
