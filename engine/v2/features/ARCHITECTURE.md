@@ -49,7 +49,7 @@ wiring anything to call it.
 
 ### Runup feature math
 
-`runup_math.add_runup_features(frame, prices_by_ticker, as_of_column="date")`
+`runup_math.add_runup_features(frame, prices_by_ticker, as_of_column)`
 returns a new event DataFrame, sorted by ticker and event date, with
 `signed_streak`, `ema12r_abs`, `dist_high`, `dist_ema`, `ret5`, `ret10`,
 `ret20`, and `runup_asof`. It preserves the arithmetic and missing-value
@@ -60,7 +60,9 @@ The caller supplies event rows with prior-history aggregates and a mapping
 of ticker to date/adjusted-close DataFrames. The caller owns history-row
 visibility and coherent price-source selection; the function neither selects
 a capture nor stitches retrievals. Existing history arithmetic is reused by
-the caller rather than recomputed here. Inputs are not mutated.
+the caller rather than recomputed here. The decision column must be named
+explicitly; `"date"` is allowed for the historical event-date convention.
+Inputs are not mutated.
 
 | Condition | Outcome |
 |---|---|
