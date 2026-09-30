@@ -18,7 +18,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from engine import paths  # noqa: E402
 from engine.evaluate import evaluate  # noqa: E402
 from engine.models.training import gate_forecast_analog as ga  # noqa: E402
 from experiments import common, common_v2, lib  # noqa: E402
@@ -63,30 +62,38 @@ def main() -> None:
     repricer = common_v2.make_v2_repricer(
         STRATEGY, catalog=V2_CATALOG, store_root=V2_STORE_ROOT, snapshot_id=v2_snapshot_id,
     )
-    input_files = sorted((paths.CURATED / "trades").glob("year=*/part-*.parquet"))
 
     def required_outputs(result):
-        return [{
-            "title": "Gate construction (promotion candidate)",
-            "body": [
-                f"engine.models.training.gate_forecast_analog: {len(ga.FEATURES)} "
-                f"features — the incumbent's registered 41 plus "
-                f"{', '.join(ga.EXTRA_FEATURES)}.",
-                "No stored threshold: each walk-forward fold chose its own "
-                f"top-{ga.TOP_FRACTION:.0%} quantile on that fold's training "
-                "predictions (experiments.common.make_trained_gate).",
-                f"Fold interactions recorded: {len(gate_state.stats)}.",
-                "Live serving verified byte-identical to this training data's "
-                "forecast column and to the board's own analog layer before "
-                "this experiment ran — see engine/score.py "
-                "Scorer._forecast_for_gate / _gate_feature_frame.",
-            ],
-        }]
+        return [
+            {
+                "title": "Gate construction (promotion candidate)",
+                "body": [
+                    f"engine.models.training.gate_forecast_analog: {len(ga.FEATURES)} "
+                    f"features — the incumbent's registered 41 plus "
+                    f"{', '.join(ga.EXTRA_FEATURES)}.",
+                    "No stored threshold: each walk-forward fold chose its own "
+                    f"top-{ga.TOP_FRACTION:.0%} quantile on that fold's training "
+                    "predictions (experiments.common.make_trained_gate).",
+                    f"Fold interactions recorded: {len(gate_state.stats)}.",
+                    "Live serving verified byte-identical to this training data's "
+                    "forecast column and to the board's own analog layer before "
+                    "this experiment ran — see engine/score.py "
+                    "Scorer._forecast_for_gate / _gate_feature_frame.",
+                ],
+            },
+            {
+                "title": "Data provenance (v2)",
+                "body": [
+                    f"Trades and T±1 repricing both read v2 snapshot {v2_snapshot_id!r} "
+                    "(experiments.common_v2.load_v2_trades / make_v2_repricer) — never the legacy "
+                    "curated trades store this experiment previously fingerprinted via input_files.",
+                ],
+            },
+        ]
 
     result = evaluate(
         spec, trades, gate=gate, run_dir=HERE,
         repricer=repricer, spy_daily=spy,
-        input_files=input_files,
         extra_sections=required_outputs,
     )
     if not args.no_ledger:
