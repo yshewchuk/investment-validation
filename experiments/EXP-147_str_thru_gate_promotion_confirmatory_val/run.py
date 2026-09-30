@@ -27,7 +27,7 @@ from experiments import common, common_v2, lib  # noqa: E402
 HERE = Path(__file__).resolve().parent
 STRATEGY = "STR-THRU"
 V2_CATALOG = paths.ROOT / "private" / "ops" / "catalog.sqlite"
-V2_STORE_ROOT = paths.ROOT / "private" / "ops" / "objects"
+V2_STORE_ROOT = paths.ROOT / "private" / "ops"
 
 
 def main() -> None:
