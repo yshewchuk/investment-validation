@@ -8,7 +8,9 @@ a head another writer already advanced must refuse, not overwrite.
 """
 from __future__ import annotations
 
+import gc
 import sys
+import weakref
 from pathlib import Path
 
 import pandas as pd
@@ -153,6 +155,43 @@ def test_rebuild_tombstones_only_the_rebuilt_strategys_vanished_rows(tmp_path, m
     expected = {f"STR-THRU:e+0_x+1:TEST:20240502:a{alpha}"
                 for alpha in (0, 25, 50, 75, 100)}
     assert set(rebuilt["trade_id"].astype(str)) == expected
+    conn.close()
+
+
+def test_run_releases_replay_and_existing_trades_memory_before_publish(tmp_path, monkeypatch):
+    """Regression for the real OOM at publish: the full existing-trades table
+    was held live through the whole ``publish()`` call, on top of ``publish``'s
+    own allocations. ``run`` must drop its reference to ``existing`` first; the
+    trade output itself is covered by the neighboring rebuild test.
+    """
+    conn, clock, store = catalog_and_store(tmp_path)
+    _commit_all(conn, clock, store, trades_rows=_initial_trades(), receipt_id="r1")
+    repository = Repository(conn, store)
+
+    refs: list = []
+    checked: list = []
+    real_read = _build_run.read_existing_trades
+    real_publish = _build_run.publish
+
+    def traced_read(repo, snap):
+        frame = real_read(repo, snap)
+        refs.append(weakref.ref(frame))
+        return frame
+
+    def traced_publish(repo, snap, **kwargs):
+        gc.collect()
+        assert refs and refs[0]() is None
+        checked.append(True)
+        return real_publish(repo, snap, **kwargs)
+
+    monkeypatch.setattr(_build_run, "read_existing_trades", traced_read)
+    monkeypatch.setattr(_build_run, "publish", traced_publish)
+
+    _build_run.run(repository, strategies=["STR-THRU"],
+                   reports_dir=tmp_path / "reports", stamp="t1")
+
+    assert len(refs) == 1
+    assert checked == [True]
     conn.close()
 
 
