@@ -29,7 +29,7 @@ import pandas as pd
 from engine import paths
 from engine.calendar import TradingCalendar, trading_calendar
 from engine.evaluate import Gate
-from engine.models.registry import load_registry
+from engine.models.registry import ANY_STRATEGY, load_registry
 from engine.models.training import gate as gate_mod
 from engine.models.training.common import SEED
 from engine.structures import BUY, STRUCTURES, Structure
@@ -278,7 +278,16 @@ def make_registered_gate(
     per-fold diagnostics the report quotes (rows scored vs not, threshold).
     """
     registry = load_registry(missing_ok=False)
-    entry = registry.get(gate_id) if gate_id is not None else registry.champion("gate", strategy)
+    if gate_id is not None:
+        entry = registry.get(gate_id)
+        if entry.role != "gate" or entry.strategy not in (strategy, ANY_STRATEGY):
+            raise ValueError(
+                f"{gate_id}: not a gate registry entry for {strategy!r} "
+                f"(role={entry.role!r}, strategy={entry.strategy!r}) -- refusing to "
+                "pin an incompatible entry as this call's gate"
+            )
+    else:
+        entry = registry.champion("gate", strategy)
     if entry.threshold is None:
         raise ValueError(f"{entry.id}: champion gate carries no stored threshold")
 

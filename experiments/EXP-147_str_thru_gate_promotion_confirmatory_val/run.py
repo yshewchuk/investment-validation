@@ -136,13 +136,14 @@ def main() -> None:
     # trades/harness/settings) -- grid_cell=True is the harness's own exemption
     # for exactly this, the same pattern EXP-145's run_arm() uses per arm.
     champion_spec["grid_cell"] = True
+    champion_run_dir = HERE / "champion"
     champion_result = evaluate(
-        champion_spec, trades, gate=champion_gate, run_dir=HERE,
+        champion_spec, trades, gate=champion_gate, run_dir=champion_run_dir,
         repricer=repricer, spy_daily=spy,
         extra_sections=champion_extra_sections,
     )
     if not args.no_ledger:
-        lib.record_evaluation(HERE, champion_spec, champion_result.results)
+        lib.record_evaluation(champion_run_dir, champion_spec, champion_result.results)
     print(f"[{spec['id']}] champion report: {champion_result.report_path}", flush=True)
     print(f"[{spec['id']}] champion headline: mean={champion_result.results['headline'].get('mean')} "
           f"cagr={champion_result.results['headline'].get('cagr')} "
