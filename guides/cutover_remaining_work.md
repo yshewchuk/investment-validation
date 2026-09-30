@@ -37,9 +37,9 @@ and decide slice 2B(c)'s scope → configure the production release root. The
 dashboard side itself (projection, API route, page) is already built and
 needs no further PRs; it just has nothing to show yet. Everything after that
 (LegacyScoreBridge replacement, native decisions-predictions, the 10-session
-qualification) is Phase 7 work that hasn't started. Slice 6b is not started
-and has no PR open; every unstarted item below currently has no owner or
-open PR.
+qualification) is Phase 7 work that hasn't started. Slice 6b is not started;
+no PR is open for it. Every unstarted item below is likewise not started,
+with no PR open.
 
 ## Critical path to the dual dashboard
 
@@ -115,7 +115,7 @@ passes. Both are tracked separately above.
 
 ## Decisions waiting on the user
 
-- **Restarting slice 6b.** No owner or open PR; needs to be picked back up.
+- **Restarting slice 6b.** Not started; no PR open.
 - **Native nightly timer/scheduling install.** Queued to ask once the
   raw-row producer (step 4) lands; not yet asked.
 - **DYN-SV lineage rerun (EXP-160→169) on v2 trades.** Still undecided,
