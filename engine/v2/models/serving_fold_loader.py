@@ -79,7 +79,8 @@ def _pools(artifact, descriptor):
         raise ServingFoldError()
     pools = [np.asarray(header[key]) for key in (descriptor.pool_pred_field, descriptor.pool_res_field)]
     if any(pool.ndim != 1 or pool.dtype.kind not in "fiu"
-           or len(pool) != descriptor.pool_count or not np.isfinite(pool).all() for pool in pools):
+           or len(pool) != descriptor.pool_count
+           or not np.isfinite(np.asarray(pool, dtype=float)).all() for pool in pools):
         raise ServingFoldError()
     return tuple(tuple(float(v) for v in pool) for pool in pools)
 

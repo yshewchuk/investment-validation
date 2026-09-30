@@ -161,6 +161,7 @@ def test_legacy_minimal_fold_keeps_prediction_acceptance(setup, monkeypatch):
     ("model_id", "wrong"), ("fold_start", "2026-11-01"), ("tier3_snapshot", "a" * 64),
     ("pool_pred", [[1, 2]]), ("pool_res", [float("nan"), 0]), ("pool_res", [1]),
     ("pool_res", ["bad", "bad"]), ("pool_res", None),
+    ("pool_res", np.array([np.finfo(np.longdouble).max, 0], dtype=np.longdouble)),
 ])
 def test_rehashed_invalid_header_and_pools_refuse(setup, key, value):
     inference, descriptor, parent, path, stored = setup
