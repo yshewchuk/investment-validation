@@ -32,7 +32,7 @@ underscore convention, and an import of a name absent from this list fails
 `recipes` provides `FeatureRegistry` and `default_feature_registry`; `context`
 provides `FeatureContextPlanner` and causal `FeatureFrame` construction.
 
-<!-- public-interface: recipes, FeatureRegistry, default_feature_registry -->
+<!-- public-interface: recipes, FeatureRegistry, default_feature_registry, regime.add_regime_features -->
 
 ## Consumers
 
@@ -46,12 +46,22 @@ failure rather than a stale sentence.
 
 ## Usage
 
+The package includes pure regime calculation logic over explicit inputs.
+No production path calls the regime helper yet; source reads and forward
+panel assembly remain separate integration work.
+
 `panel_math.advance_history(last_row)` advances a caller-selected realized
 panel row into next-event history aggregates. It is pure arithmetic; callers
 retain ownership of event selection and observation cutoffs. No production
 panel-row builder calls it yet.
 
 ## Testing
+
+`regime.add_regime_features` accepts explicit event and market frames, returning
+regime values with their actual observation dates. It has no production caller.
+Its real captured-source parity test is marked `needs_corpus`; the payload stays
+private and can be selected with `V2_REGIME_CORPUS_CSV`; its sibling
+`manifest.json` records the source and verifies the captured file hash.
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
 panel load, no network, no fitting. Fixtures live in the private
