@@ -213,20 +213,20 @@ imports `engine.*` to inspect it, because importing the legacy scorer loads
 a panel. Three rules, each blocking on its own:
 
 1. **Inside v2, imports point down only.** Equal-layer peers may not import
-   each other either (see the 4a/4b split above). `engine/v2/diagnosis` is
-   imported by nothing.
+  each other either (see the 4a/4b split above). `engine/v2/diagnosis` is
+  imported by nothing.
 2. **v2 reaches legacy only through declared adapters.** Every
-   `engine/v2/** -> engine/*` edge is a named entry in
-   `checks/legacy_adapters.json` (that file's own `count` field is the
-   current, maintained entry count — not repeated here since it changes
-   with every adapter review), confined to one adapter module per package
-   (e.g. `engine/v2/ops/legacy_adapter.py`). An undeclared legacy import
-   fails the check. Each entry states its reason, its read/write sets,
-   credentials, hidden subprocesses, retry behaviour, and its removal
-   phase — an adapter is a tracked, temporary bridge, not a permanent
-   seam.
+  `engine/v2/** -> engine/*` edge is a named entry in
+  `checks/legacy_adapters.json` (that file's own `count` field is the
+  current, maintained entry count — not repeated here since it changes
+  with every adapter review), confined to one adapter module per package
+  (e.g. `engine/v2/ops/legacy_adapter.py`). An undeclared legacy import
+  fails the check. Each entry states its reason, its read/write sets,
+  credentials, hidden subprocesses, retry behaviour, and its removal
+  phase — an adapter is a tracked, temporary bridge, not a permanent
+  seam.
 3. **Legacy never imports v2.** The legacy tree runs the board unchanged and
-   must not acquire a dependency on code still being proved.
+  must not acquire a dependency on code still being proved.
 
 The legacy tree itself is measured once, for the record, against this same
 layering — see `guides/system_rearchitecture.md` §4.2 for the current edge
@@ -278,33 +278,27 @@ or a new consumer must update that package's README in the same change.
   `engineering`). `native_parity` is not in `_DAG_STAGES` at all, so in
   production it is simply absent from the submitted list, not filtered out
   of it. **The one trap worth stating here**: `NO_JOB_STAGES` (today
-  `{"native_parity"}`, since `native_parity` has no job kind of its own
-  yet) only does work on the *other* branch — `include_prerequisites=True`,
-  exercised by tests only — where `_stage_sequence` instead returns
-  `plan["order"]` (the full `GRAPH` order, `native_parity` included) and
-  strips `NO_JOB_STAGES` from it before returning. See
-  `engine/v2/ops/ARCHITECTURE.md` for the full stage graph and its
-  `OPTIONAL` markings and this same distinction.
+  `{"native_parity"}`, since `native_parity` has no production caller
+  yet even though it has had its own job kind since cutover PR-4 redo's
+  slice 2B(a), `#191`) only does work on the *other* branch --
+  `include_prerequisites=True`, exercised by tests only — where
+  `_stage_sequence` instead returns `plan["order"]` (the full `GRAPH`
+  order, `native_parity` included) and strips `NO_JOB_STAGES` from it
+  before returning. See `engine/v2/ops/ARCHITECTURE.md` for the full
+  stage graph and its `OPTIONAL` markings and this same distinction.
 
-  **Design, not yet code (cutover PR-4 redo, `engine/v2/ops/ARCHITECTURE.md`'s
-  "Cutover PR-4 (redo)" section):** `native_parity` and `computed_moves_refresh`
-  both reach production submission through a FOURTH path, entirely outside
-  `GRAPH`/`_DAG_STAGES`/`build_legacy_job_requests`:
-  `supervisor.Service`'s own tick-loop sidecars.
-  `Service._reconcile_computed_moves_refresh` is real code today,
-  submitting `computed_moves_refresh` alone via `submission.submit` (never
-  `submit_graph`, so an optional stage's own submission problem can never
-  abort the required graph). A proposed `Service._reconcile_native_parity`,
-  calling a proposed `nightly.submit_native_parity_if_ready`, would submit
-  `native_parity` the identical way once built — neither symbol exists in
-  `nightly.py`/`supervisor.py` yet. Once that PR's code lands, `native_parity`
-  gains a real job kind and `NO_JOB_STAGES` becomes empty: `_stage_sequence`'s
-  test-only branch instead excludes `"native_parity"` by name, the same way
-  it already excludes `"computed_moves_refresh"` today (a real job kind
-  that is nonetheless never submitted through `_DAG_STAGES`). See that
-  doc's own "Cutover PR-4 (redo)" section for the full design, including
-  why `NO_JOB_STAGES`'s emptying does not change how `_DAG_STAGES` itself
-  behaves.
+  `computed_moves_refresh` reaches production submission through a
+  FOURTH path, entirely outside `GRAPH`/`_DAG_STAGES`/
+  `build_legacy_job_requests`: `supervisor.Service`'s own tick-loop
+  sidecars (`Service._reconcile_computed_moves_refresh`, submitting
+  `computed_moves_refresh` alone via `submission.submit`, never
+  `submit_graph`, so an optional stage's own submission problem can
+  never abort the required graph). `native_parity`'s own equivalent
+  sidecar (`Service._reconcile_native_parity`, calling
+  `nightly.submit_native_parity_if_ready`, cutover PR-4 redo slice 2B(b))
+  is a separate PR stacked on this one. See
+  `engine/v2/ops/ARCHITECTURE.md`'s "Cutover PR-4 (redo)" section for
+  the full design.
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
@@ -351,10 +345,12 @@ or a new consumer must update that package's README in the same change.
   fields already say, never a second implementation of the one shared
   comparator (§5) — but the artifact itself can be stale, or was produced
   under a different tolerance policy than whichever is in effect when this
-  projection is read; this projection does not re-verify either. No
-  production job writes that report yet (this section's "Cutover PR-4
-  (redo)" bullet — `native_parity` has no submitted job kind), so
-  `"no_report"` is today's everyday answer, not a degraded one.
+  projection is read; this projection does not re-verify either.
+  `nightly.submit_native_parity_if_ready` (cutover PR-4 redo slice 2B(b),
+  this PR) can submit a `native_parity` job once its paired inputs are
+  ready, but has no production caller yet — its tick-loop sidecar is a
+  separate, stacked PR — so `"no_report"` is today's everyday answer, not
+  a degraded one.
   `engine/v2/serving` (7.0) reads the artifact directly rather than importing
   `engine/v2/ops` (a 7.0 peer the layer map forbids importing).
 
