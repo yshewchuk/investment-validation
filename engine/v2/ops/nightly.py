@@ -852,10 +852,16 @@ def _session_from_refresh_key(idempotency_key):
     native refresh's session is recorded; ``RefreshParameters`` has no
     ``as_of`` field. Returns ``None`` for anything that does not match this
     module's own key format exactly."""
-    parts = idempotency_key.split(":")
-    if len(parts) == 4 and parts[0] == "nightly" and parts[3] == "refresh":
-        return parts[1]
-    return None
+    prefix, sep1, rest = idempotency_key.partition(":")
+    if prefix != "nightly" or not sep1:
+        return None
+    session, sep2, remainder = rest.partition(":")
+    if not sep2 or not session:
+        return None
+    scope_hash, sep3, stage = remainder.rpartition(":")
+    if not sep3 or stage != "refresh" or not scope_hash:
+        return None
+    return session
 
 
 def _build_computed_moves_refresh_request(as_of, key, *, catalog_path, objects_root,
@@ -1182,8 +1188,8 @@ def _native_score_batch_key(session, scope_hash):
 def _session_scope_from_score_key(idempotency_key):
     """Recover ``(session, scope_hash)`` from a legacy "score" job's own
     idempotency key (``"nightly:<session>:<scope_hash>:score"``) -- mirrors
-    ``_session_from_refresh_key``'s exact-prefix/suffix check, but via
-    partition rather than a fixed ``split(":")`` count: ``scope_hash``
+    ``_session_from_refresh_key``'s delimiter-aware prefix/suffix check:
+    partition avoids a fixed ``split(":")`` count because ``scope_hash``
     itself is a content-hash string (``_scope_hash`` -> ``content_hash(...)
     [:24]``) that already contains its own colon (``"sha256:<hex>"``), so a
     real key has FIVE colon-separated segments, not four -- only the

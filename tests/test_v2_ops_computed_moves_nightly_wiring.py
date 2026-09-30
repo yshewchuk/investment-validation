@@ -187,12 +187,50 @@ def test_computed_moves_refresh_key_is_session_only_no_scope_hash():
 
 @pytest.mark.parametrize("key,expected", [
     ("nightly:2026-09-18:abc123:refresh", "2026-09-18"),
+    ("nightly:session:scope:with:colons:refresh", "session"),
     ("nightly:2026-09-18:abc123:computed_moves_refresh", None),
     ("nightly:2026-09-18:refresh", None),
+    ("nightly::abc123:refresh", None),
+    ("nightly:2026-09-18::refresh", None),
+    ("other:2026-09-18:abc123:refresh", None),
+    ("nightly:2026-09-18:abc123:refresh:extra", None),
+    ("nightly:2026-09-18:abc123:", None),
+    ("nightly", None),
+    ("", None),
     ("not-a-nightly-key", None),
 ])
 def test_session_from_refresh_key(key, expected):
     assert _session_from_refresh_key(key) == expected
+
+
+def test_computed_moves_identity_accepts_native_refresh_producer_key(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _commit_parent(conn, clock, store)
+    snapshot = Repository(conn, store).resolve(head["snapshot_id"])
+    unit = incremental_data.RefreshUnit(
+        request_id="daily_market:FAKE", table_name="daily_market",
+        partition_key="FAKE", expected_keys=("FAKE",))
+    refresh_plan = incremental_data.plan_refresh(
+        snapshot, (unit,), cached_outcomes={unit.request_id: AcquisitionOutcome(
+            request_id=unit.request_id, kind="complete", requested_keys=unit.expected_keys,
+            returned_keys=unit.expected_keys, receipt_ref="sha256:" + "0" * 64)},
+        provider_account=None, expected_head_generation=head["generation"])
+    session = "2026-09-18"
+    # Production builds the key and the native refresh JobSpec; do not reconstruct either.
+    requests = build_legacy_job_requests(
+        build_nightly_plan(ROOT, session), tickers=("FAKE",), year_start=2025, year_end=2026,
+        refresh_mode="native", refresh_plan=refresh_plan,
+        catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
+        conn=conn, store=store, clock=clock)
+    refresh = next(item for item in requests if item.job.kind == NATIVE_REFRESH_ACTION)
+    assert ":sha256:" in refresh.idempotency_key
+    receipt = submit(conn, registry(), _POLICY, refresh, clock=clock)
+    assert _computed_moves_identity(conn) is None
+    conn.execute("UPDATE jobs SET state = 'succeeded' WHERE job_id = ?", (receipt.job_id,))
+    conn.commit()
+
+    assert _computed_moves_identity(conn) == (session, head["snapshot_id"], head["generation"])
 
 
 # --------------------------------------------------------------------------
