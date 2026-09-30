@@ -703,7 +703,7 @@ exact pinned event ID. Revision means the earnings dataset version (`EventRef`),
 not `SnapshotRef.calendar_version`, which may be a placeholder.
 Entry/exit/expiry, spot and calendar-observed-through are staged inputs; validation covers shape, not sourcing or strategy.
 No match → `EVENT_NOT_FOUND`; multiple matches → `IDENTITY_CONFLICT`;
-invalid staged input → `INVALID_REQUEST`; repository failures propagate.
+Invalid staged/key input or blank persisted event ID/dataset revision → `INVALID_REQUEST`; repository failures propagate.
 
 ## Inputs
 

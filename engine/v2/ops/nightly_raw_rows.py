@@ -108,7 +108,8 @@ def _calendar_day(value: Any) -> str:
 
 
 def _calendar_spot(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, numbers.Number):
+    if (isinstance(value, bool) or not isinstance(value, numbers.Number)
+            or isinstance(value, numbers.Complex) and not isinstance(value, numbers.Real)):
         raise fail("INVALID_REQUEST", "calendar spot requires a positive finite number")
     try:
         spot = float(value)
@@ -135,9 +136,10 @@ def _pinned_calendar_event(repository: Repository, snapshot: SnapshotRef,
         max_batch_rows=min(contract.maximum_batch_rows, 1000),
         max_result_rows=min(contract.maximum_result_rows, 1000))
     matches = []
+    target_date = pd.Timestamp(event_date)
     for batch in repository.scan(query, table_name=_EVENTS_TABLE):
         for row in batch.to_pylist():
-            if (row["ticker"] == key.ticker and _calendar_day(row["event_date"]) == event_date
+            if (row["ticker"] == key.ticker and row["event_date"] == target_date
                     and row["session"] == key.session):
                 matches.append(row)
     if not matches:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -264,7 +265,8 @@ def test_calendar_row_rejects_invalid_staged_dates(calendar_source, field, bad):
     assert "not-a-date" not in str(exc.value)
 
 
-@pytest.mark.parametrize("bad", [None, True, "20", 0, -1, float("nan"), float("inf"), 2j])
+@pytest.mark.parametrize("bad", [None, True, "20", 0, -1, float("nan"), float("inf"), 2j,
+                                  np.complex128(20 + 1j), np.bool_(True)])
 def test_calendar_row_rejects_invalid_spot(calendar_source, bad):
     repository, snapshot = calendar_source[-2:]
     with pytest.raises(OpsError) as exc:
@@ -330,3 +332,21 @@ def test_calendar_row_meets_source_bundle_contract_and_causal_checks(calendar_so
     with pytest.raises(NightlySourceBundleRefusal) as exc:
         assemble_nightly_source_bundle(as_of="2026-09-28", **kwargs)
     assert exc.value.code == "POST_AS_OF_ROW"
+
+
+def test_calendar_row_other_intraday_event_does_not_abort_exact_match(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    # Synthetic boundary mutation of the captured ACI row: timestamp is valid
+    # for the repository contract but cannot match a day-valued request key.
+    rows = [_event_row("ACI", "2026-10-12T01:00:00", "BMO", False),
+            _event_row("ACI", "2026-10-13", "BMO", False)]
+    head = _build_parent(conn, clock, store, events_rows=rows)
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(head["snapshot_id"])
+    result = scan_calendar_row(repository, snapshot, _KEY, **_CONTEXT)
+    assert result.calendar_row["event_id"] == "ACI_2026-10-13"
+    with pytest.raises(DataError) as exc:
+        scan_calendar_row(repository, snapshot,
+                          replace(_KEY, event_date=pd.Timestamp("2026-10-12")), **_CONTEXT)
+    assert exc.value.code == "EVENT_NOT_FOUND"
