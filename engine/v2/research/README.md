@@ -69,14 +69,17 @@ internal too.
 The replay half: `replay.replay`, `replay.replay_one`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
 `_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
-`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`.
+`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
+`_pricing.trading_calendar_from_snapshot`.
 
 `experiment_trades.load_trades` is a second kind of entrypoint: a plain
 library call (no `tools/v2_*.py` CLI of its own) for a caller that already
 holds a `Repository` and a resolved `SnapshotRef` — today only
-`experiments/common_v2.py`.
+`experiments/common_v2.py`. `_pricing.trading_calendar_from_snapshot` is a
+third, carved out of `_pricing`'s otherwise-internal contents the same way
+`_pricing.STRUCTURES` already is, for the same caller.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades -->
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot -->
 
 ## Consumers
 
@@ -88,8 +91,9 @@ _Nothing inside `engine/` imports this package. Its consumers are the CLI
 leaves `tools/v2_signal_screen.py`, `tools/v2_fill_quality.py`,
 `tools/v2_polygon_fills.py`, `tools/v2_replay.py`,
 `tools/v2_build_trades.py` and `tools/v2_reconcile_trades.py`, plus
-`experiments/common_v2.py` (for `experiment_trades.load_trades` only) —
-none of which the layering hook parses (none is an `engine.*` module)._
+`experiments/common_v2.py` (for `experiment_trades.load_trades` and
+`_pricing.trading_calendar_from_snapshot`) — none of which the layering
+hook parses (none is an `engine.*` module)._
 
 <!-- consumers: none -->
 
