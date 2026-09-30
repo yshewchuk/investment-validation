@@ -330,6 +330,41 @@ def test_native_parity_handler_status_is_explicit_and_the_report_is_separate(tmp
     assert report["mismatches"] == []
 
 
+@pytest.mark.parametrize("corrupt_native", [False, True])
+def test_native_parity_report_uses_independent_model_expectation(tmp_path, corrupt_native):
+    """An independently calculated legacy expectation detects native drift."""
+    # _numerical_independence_source declares two prior payoff points:
+    # (driver=0, exit=2), (driver=10, exit=6). At driver=7, exit=4.8;
+    # the two mid quotes cost 4, so (4.8 - 4) / 4 = 0.2.
+    # These expectations are never copied from a native row or scorer result.
+    key = "PHASE4|STR-THRU|2026-09-16"
+    legacy_rows = {key: {"exp_pnl_model": 0.2}}
+    rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
+    # Scope this regression to the model return exposed by serving rows.
+    native_rows = {key: {"exp_pnl_model": rows[key]["exp_pnl_model"]}}
+    if corrupt_native:
+        native_rows[key]["exp_pnl_model"] += 0.5
+    policy = TolerancePolicy(
+        policy_id="test.independent_model_arithmetic.v1",
+        rules=(("exp_pnl_model", Tolerance(
+            absolute=1e-12, reason="float64 two-point fit versus decimal arithmetic")),))
+    report_path = tmp_path / "parity_report.json"
+
+    result = native_parity_handler(
+        _NATIVE_PLAN, legacy_rows=legacy_rows, native_rows=native_rows,
+        report_path=report_path, dimensions=("simulation",),
+        tolerance_policy=policy)({"session": _EVENT_DATE})
+
+    report = json.loads(report_path.read_text())
+    assert result["native_parity"]["status"] == "compared"
+    assert result["native_parity"]["mismatches"] == int(corrupt_native)
+    assert report["compared"] == [key]
+    assert report["only_legacy"] == report["only_native"] == []
+    assert [(item["row_key"], item["dimension"], item["finding_fields"])
+            for item in report["mismatches"]] == (
+        [(key, "simulation", ["exp_pnl_model"])] if corrupt_native else [])
+
+
 def test_native_parity_handler_report_always_carries_v1_1_refusal_fields(tmp_path):
     """v1.1: the handler's written report always carries the additive
     refusal fields, even though this handler has no refusal inputs."""
