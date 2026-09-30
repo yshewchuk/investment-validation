@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -41,9 +42,19 @@ def _repricer(tmp_path):
 def test_make_v2_repricer_prices_a_trade_covered_by_the_pinned_chains(tmp_path):
     conn, repricer = _repricer(tmp_path)
     assert callable(repricer)
-    result = repricer(_trades("2024-05-02", "2024-05-03"), shift_days=0)
+    # entry 2024-05-01 / exit 2024-05-02 shifted +1 trading day lands on the
+    # fixture's covered 2024-05-02 / 2024-05-03 chains. Those chains price the
+    # STR-THRU ATM straddle (spot 100, strike 100, first post-event expiry,
+    # scale 1.0 leg) at alpha 0.5: entry mid 2.2 + 1.2 = 3.4, exit mid
+    # 3.2 + 2.2 = 5.4, ret (5.4 - 3.4) / 3.4.
+    result = repricer(_trades("2024-05-01", "2024-05-02"), shift_days=1)
     assert isinstance(result, pd.DataFrame)
     assert result.attrs["coverage"] == 1.0
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["entry_cost"] == pytest.approx(3.4)
+    assert row["exit_value"] == pytest.approx(5.4)
+    assert row["ret"] == pytest.approx(2.0 / 3.4)
     conn.close()
 
 

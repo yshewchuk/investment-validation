@@ -51,11 +51,14 @@ def make_v2_repricer(
     "latest".
     """
     conn = open_catalog(Path(catalog), clock=SystemClock())
-    repository = Repository(conn, ArtifactStore(Path(store_root)))
-    snapshot = repository.resolve(snapshot_id)
+    try:
+        repository = Repository(conn, ArtifactStore(Path(store_root)))
+        snapshot = repository.resolve(snapshot_id)
+        cal = _pricing.trading_calendar_from_snapshot(repository, snapshot)
+    finally:
+        conn.close()
 
     struct = structure or _pricing.STRUCTURES[strategy]()
-    cal = _pricing.trading_calendar_from_snapshot(repository, snapshot)
 
     def repricer(trades: pd.DataFrame, shift_days: int) -> pd.DataFrame:
         t = trades.reset_index(drop=True)
@@ -80,7 +83,15 @@ def make_v2_repricer(
             keys.add((row.ticker, exit_))
 
         started = time.time()
-        index = load_chain_index(repository, snapshot, keys) if keys else ChainIndex({})
+        if keys:
+            chain_conn = open_catalog(Path(catalog), clock=SystemClock())
+            try:
+                chain_repository = Repository(chain_conn, ArtifactStore(Path(store_root)))
+                index = load_chain_index(chain_repository, snapshot, keys)
+            finally:
+                chain_conn.close()
+        else:
+            index = ChainIndex({})
         print(
             f"  [repricer] {strategy} shift {int(shift_days):+d}d: "
             f"{len(index):,}/{len(keys):,} shifted chains loaded in {time.time() - started:.0f}s",

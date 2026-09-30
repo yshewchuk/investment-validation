@@ -52,9 +52,9 @@ one; the library entrypoints below are this package's real public interface:
 
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
 `replay.replay_one`, `_replay_run.run`, `_replay_run.events_frame`,
-`_plan.plan_events`, `_chains.ChainIndex`, `_trades_table.to_trades_table`,
-`_build_run.run`, `reconcile_trades.run`, `_trades_publish.publish`,
-`build_trades.coverage`, `_pricing.STRUCTURES`,
+`_plan.plan_events`, `_chains.ChainIndex`, `_chains.load_chain_index`,
+`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
+`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
 `_pricing.trading_calendar_from_snapshot`.
 
 `experiment_trades.load_trades(repository, snapshot, strategy)` is a second
@@ -169,9 +169,9 @@ modules' callers, outside this PR's one concern.
 Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
 listed above are one consumer; `experiments/common_v2.py` is the other, for
-`experiment_trades.load_trades` and `_pricing.trading_calendar_from_snapshot`
-— neither is parsed by the layering hook (it only parses `engine*` importers,
-and `experiments/` is outside it too).
+`experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
+and `_chains.load_chain_index` — neither is parsed by the layering hook (it
+only parses `engine*` importers, and `experiments/` is outside it too).
 
 ## External systems and libraries
 
