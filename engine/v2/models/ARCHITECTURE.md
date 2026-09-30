@@ -258,6 +258,7 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Condition | Outcome |
 |---|---|
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
+| Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
 | Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
 | Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs |
