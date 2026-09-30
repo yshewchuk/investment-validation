@@ -27,7 +27,10 @@ write path.
 
 - Pure analysis cores moved verbatim from the legacy research tools.
 - One `resolve_pinned`/`resolve` call per run, with the resulting
-  `snapshot_id` threaded through every read and into the output.
+  `snapshot_id` threaded through every read and into the output — except
+  `experiment_trades.load_trades`'s returned frame, which matches the legacy
+  loader's frame contract exactly and so carries no `snapshot_id` column
+  (see `ARCHITECTURE.md`'s Outputs/Invariants).
 - Plan and price events against one resolved `SnapshotRef`, at a grid of fill
   alphas, with the same arithmetic the legacy replay uses.
 - Publish replay output as the `trades` table through the generic incremental

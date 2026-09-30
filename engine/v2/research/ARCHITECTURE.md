@@ -293,7 +293,13 @@ uncaught traceback instead.
     (`experiment_trades.load_trades`, via `_trades_publish.
     read_existing_trades`). `CONTRACT_MISMATCH`, the same code and the same
     helper `tools/v2_build_trades.py`'s own read-before-append already uses
-    for this condition.
+    for this condition. `load_trades` raises the same `CONTRACT_MISMATCH`
+    for two more of its own cases: a zero-fragment `earnings_events` table
+    (the same issue #70 bare `ValueError`, converted the same way), and a
+    surviving trades row whose `event_id` has no `earnings_events` match or
+    whose matched event's `session` is null — either way, a trade this
+    function cannot session-join is refused rather than returned with a
+    missing value.
 - **R2, cache.** None: every run resolves its snapshot and reads its tables
   fresh through `Repository.scan`; nothing is cached across runs or across
   processes. Within one run, the resolved `SnapshotRef` and, in the replay
