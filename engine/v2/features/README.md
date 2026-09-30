@@ -32,7 +32,10 @@ underscore convention, and an import of a name absent from this list fails
 `recipes` provides `FeatureRegistry` and `default_feature_registry`; `context`
 provides `FeatureContextPlanner` and causal `FeatureFrame` construction.
 
-<!-- public-interface: recipes, FeatureRegistry, default_feature_registry, regime.add_regime_features -->
+`runup_math.add_runup_features(frame, prices_by_ticker, as_of_column)` computes
+shared streak and price-history inputs from caller-selected event/price frames.
+
+<!-- public-interface: recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features -->
 
 ## Consumers
 
