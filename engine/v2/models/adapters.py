@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 
 from .contracts import ModelBinding
@@ -130,6 +131,15 @@ class JoblibEstimatorAdapter:
         return [tuple(float(item) for item in value) for value in values]
 
 
+@dataclass(frozen=True)
+class _ServingFold:
+    estimator: ReadOnlyArtifact
+    header: Mapping[str, Any]
+
+    def predict(self, rows):
+        return self.estimator.predict(rows)
+
+
 class Tier4ServingFoldAdapter:
     """A cached Tier-4 serving fold (R4-16).
 
@@ -161,7 +171,8 @@ class Tier4ServingFoldAdapter:
             raise AdapterError("tier4 serving fold carries no estimator")
         if tuple(stored.get("features", ())) != binding.feature_order:
             raise AdapterError("artifact feature order disagrees with binding")
-        return stored["estimator"]
+        return _ServingFold(ReadOnlyArtifact(stored["estimator"]),
+                            MappingProxyType({k: v for k, v in stored.items() if k != "estimator"}))
 
     def predict(self, artifact, rows, binding):
         if len(binding.output_names) != 1:

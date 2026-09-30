@@ -56,8 +56,12 @@ def run(repository, *, strategies: Sequence[str], years=None,
     if len(engine_rows):
         engine_rows["provenance"] = PROVENANCE
         engine_rows["snapshot_id"] = snapshot.snapshot_id
+    # Drop the spent per-strategy results before the trades read stacks on their ChainIndex memory.
+    del results
     existing = read_existing_trades(repository, snapshot)
     revisions = revisions_for_rebuild(existing, engine_rows, set(strategies), years=years)
+    # The existing table only fed revisions; drop it before publish reads its own prior-rows copy.
+    del existing
     published = publish(
         repository, snapshot, revisions=revisions, rows=engine_rows,
         scope=scope, dry_run=dry_run,

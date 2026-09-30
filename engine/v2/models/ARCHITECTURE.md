@@ -86,7 +86,8 @@ implemented — see #192.
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
-below; runtime loading, selection and scoring integration remain design only.
+below; verified loading is defined in 6d-2 below, while selection and scoring
+integration remain design only.
 Monthly folds
 are separate from the full-refit champion bindings. A `ServingFoldRef`
 identifies one release-owned `tier4_folds:size` estimator object, its model,
@@ -134,6 +135,27 @@ metadata before catalog publication. No fitting or inference occurs here.
 | Other fold roles | Keep existing opaque catalog objects; this descriptor contract covers size only |
 | Failed preparation | No deployment-pointer changes; ordinary staging may leave unreferenced files; retry is permitted |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
+
+**Verified serving-fold ownership (6d-2).** `load_serving_fold` validates one
+descriptor against a verified parent manifest and catalog identity, returning
+a `ServingFoldRef` with immutable metadata/pools, its shared `FrozenInference`
+owner and an ephemeral single-binding inference view. The view identity binds
+parent, catalog and descriptor; it is never staged or promoted. Selection,
+catalog discovery and source-bundle wiring remain separate work.
+
+`FrozenInference` owns the only decoded-artifact cache. Its existing adapter
+retains fold metadata with the estimator, so validation and prediction share
+one decode. Each cache entry may also own a byte ceiling established by bounded
+preparation; subsequent cold/warm verification cannot relax that ceiling.
+Legacy entries without a ceiling retain their existing behavior. Prediction
+still uses `Tier4ServingFoldAdapter` through the existing inference executors.
+
+| Verified fold condition | Outcome |
+|---|---|
+| Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; fixed path-free refusal, no inference or fallback |
+| Escaped path, missing/corrupt bytes or object above 32 MiB | Refuse before deserialization, including warm reads through the shared owner |
+| Repeated preparation and inference on the same owner/object | Reverify bytes; reuse the decoded artifact, never a second model cache |
+| Different current panel bytes or multi-fragment layout | No equivalence is inferred here; selector availability/provenance contract remains a prerequisite |
 
 - **`current_release_inventory` (`inventory.py`)**: the champion registry
   (`engine.models.registry`) and the real files under `data/models/*` —
