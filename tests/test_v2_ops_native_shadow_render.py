@@ -335,14 +335,13 @@ def test_native_parity_report_uses_independent_model_expectation(tmp_path, corru
     """An independently calculated legacy expectation detects native drift."""
     # _numerical_independence_source declares two prior payoff points:
     # (driver=0, exit=2), (driver=10, exit=6). At driver=7, exit=4.8;
-    # the two mid quotes cost 4, so (4.8 - 4) / 4 = 0.2 and every draw wins.
+    # the two mid quotes cost 4, so (4.8 - 4) / 4 = 0.2.
     # These expectations are never copied from a native row or scorer result.
     key = "PHASE4|STR-THRU|2026-09-16"
-    legacy_rows = {key: {"exp_pnl_model": 0.2, "win_model": 1.0}}
+    legacy_rows = {key: {"exp_pnl_model": 0.2}}
     rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
-    # Scope this regression to model simulation fields, excluding analogs.
-    native_rows = {key: {field: rows[key][field]
-                         for field in ("exp_pnl_model", "win_model")}}
+    # Scope this regression to the model return exposed by serving rows.
+    native_rows = {key: {"exp_pnl_model": rows[key]["exp_pnl_model"]}}
     if corrupt_native:
         native_rows[key]["exp_pnl_model"] += 0.5
     policy = TolerancePolicy(
