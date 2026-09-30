@@ -3,7 +3,7 @@
 Example::
 
     python3 tools/v2_build_trades.py --catalog private/ops/catalog.sqlite \
-        --store-root private/ops/objects --scope shadow --strategy STR-THRU
+        --store-root private/ops --scope shadow --strategy STR-THRU
 
 The legacy ``engine/build_trades.py`` and ``tools/reconcile_trades.py`` are
 untouched; this writes a NEW dataset version of the same ``trades`` table
