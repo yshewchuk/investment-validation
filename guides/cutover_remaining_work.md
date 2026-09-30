@@ -20,7 +20,7 @@ raises `VALIDATION_FAILED` ("cutover PR-6 (raw-row producer) is not built
 yet"), which the caller catches, reports and backs off like any other
 transient failure. The raw-row producer that turns a real night's events
 into per-event inputs ("cutover PR-6", tracked in #199, split into slices
-6a-6f) has slice 6a merged and slice 6b open (#239); 6c-6f have no PR open.
+6a-6f) has slices 6a and 6b merged (#212, #239); 6c-6f have no PR open.
 
 The redone native_parity comparison job (plan PR-4, re-scoped 2026-09-28 to
 run as a real supervisor-submitted job) is now fully merged, including the
@@ -35,14 +35,13 @@ release lookup closed here. Whether production's own environment has it set
 is unverified from this checkout.
 
 **Critical path to a populated side-by-side page:** finish raw-row producer
-slices 6b-6f → confirm `native_score_batch` scores a real event → decide
+slices 6c-6f → confirm `native_score_batch` scores a real event → decide
 slice 2B(c)'s scope → confirm the production release root is set. Both
 native_parity and the dashboard side (projection, API route, page) are
 already fully built and need no further PRs; they just have nothing to show
 yet. Everything after that (LegacyScoreBridge replacement, native
 decisions-predictions, the 10-session qualification) is Phase 7 work that
-hasn't started. Slice 6b has a PR open (#239, in code review); every other
-unstarted item below has no PR open.
+hasn't started. Every unstarted item below has no PR open.
 
 ## Critical path to the dual dashboard
 
@@ -56,11 +55,11 @@ unstarted item below has no PR open.
 3. **Batch assembler + native_score_batch worker dispatch** — Done, wired,
    blocked upstream. #66. Turns per-event inputs into a submitted job; worker
    dispatch exists.
-4. **Raw-row producer ("cutover PR-6", 6 slices)** — 6a done, 6b open, 6c-6f
-   not started. #212 (merged), #239 (6b, open), #199 (tracking issue).
-   Enumerates real board requests and stages the per-event rows the
-   assembler needs. Slice 6a (events scan + enumeration) is merged; 6b
-   (calendar row) is in code review at #239; 6c-6f have no PR open. Since
+4. **Raw-row producer ("cutover PR-6", 6 slices)** — 6a and 6b done, 6c-6f
+   not started. #212, #239 (both merged), #199 (tracking issue). Enumerates
+   real board requests and stages the per-event rows the assembler needs.
+   Slice 6a (events scan + enumeration) and 6b (calendar row) are merged;
+   6c-6f have no PR open. Since
    the real nightly's "score" stage always pins a snapshot (Cutover PR-7b),
    each attempt that clears the shadow submission's own backoff/
    attempt-limit gate raises "not built yet" rather than quietly no-oping.
@@ -142,7 +141,7 @@ passes. Both are tracked separately above.
   ARCHITECTURE.md's failure-semantics table) predated #211; both remain
   open, so whether they still describe a stale state or were updated by
   #211 itself is worth a fresh look rather than assumed self-resolved.
-- **#199** — parent tracking issue for the raw-row producer; 5 of 6 slices
+- **#199** — parent tracking issue for the raw-row producer; 4 of 6 slices
   remain.
 - **#200** — pin_snapshot_inputs's CAS check, half of PR-7b-3.
 - **#206** — forward_calendar_refresh has no nightly graph node or tick-loop
