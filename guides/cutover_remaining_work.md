@@ -11,35 +11,37 @@ with those, they win and this file is stale.
 
 The three core scoring-plumbing PRs (release reader, `SourceBundle`
 assembler, batch dispatch — plan PR-1/2/3) are merged, and PR-7a's
-shadow-submission check runs on every real supervisor tick, but the actual
-`native_score_batch` submission it gates is conditional (a pinned snapshot
-and no existing job for that identity). The chain is still functionally a
-no-op in production, though: the raw-row producer
-that turns a real night's events into per-event inputs ("cutover PR-6",
-tracked in #199, split into slices 6a-6f) has only slice 6a merged, so the
-shadow submission either no-ops (default legacy input mode) or explicitly
-raises "raw-row producer is not built yet" when a snapshot is pinned.
+shadow-submission check runs on every real supervisor tick. Since Cutover
+PR-7b's `input_mode="snapshot"` flip, the real nightly's "score" stage
+always pins a snapshot, so an eligible tick does not silently no-op: it
+reaches the still-missing raw-row producer and raises `VALIDATION_FAILED`
+("cutover PR-6 (raw-row producer) is not built yet"), which the caller
+catches and backs off like any other transient failure. The raw-row
+producer that turns a real night's events into per-event inputs ("cutover
+PR-6", tracked in #199, split into slices 6a-6f) has slice 6a merged and
+slice 6b open (#239); 6c-6f have no PR open.
 
 The redone native_parity comparison job (plan PR-4, re-scoped 2026-09-28 to
-run as a real supervisor-submitted job) has 4 of its 5 planned slices merged;
-the 5th, the tick-loop caller (#211), is open in review. A separate,
-not-yet-scoped-as-required item, slice 2B(c) (a nightly-graph node-width
-change), hasn't started. The dashboard's serving
+run as a real supervisor-submitted job) is now fully merged, including the
+tick-loop caller (#211): `Service._reconcile_native_parity` runs every real
+tick. A separate, not-yet-scoped-as-required item, slice 2B(c) (a
+nightly-graph node-width change), hasn't started. The dashboard's serving
 projection and native_parity page (#189, #198) are both merged, but the page
-renders empty (`no_report`) because nothing upstream has produced a real
-report yet. The release-root binding is environment-only; this checkout has
-it unconfigured, which fails the release lookup closed here. Whether
-production's own environment has it set is unverified from this checkout.
+renders empty (`no_report`) because no `native_score_batch` has ever
+succeeded to produce a report from. The release-root binding is
+environment-only; this checkout has it unconfigured, which fails the
+release lookup closed here. Whether production's own environment has it set
+is unverified from this checkout.
 
 **Critical path to a populated side-by-side page:** finish raw-row producer
-slices 6b-6f → confirm `native_score_batch` scores a real event → merge #211
-and decide slice 2B(c)'s scope → confirm the production release root is set.
-The
-dashboard side itself (projection, API route, page) is already built and
-needs no further PRs; it just has nothing to show yet. Everything after that
-(LegacyScoreBridge replacement, native decisions-predictions, the 10-session
-qualification) is Phase 7 work that hasn't started. Slice 6b has a PR open
-(#239, in code review); every other unstarted item below has no PR open.
+slices 6b-6f → confirm `native_score_batch` scores a real event → decide
+slice 2B(c)'s scope → confirm the production release root is set. Both
+native_parity and the dashboard side (projection, API route, page) are
+already fully built and need no further PRs; they just have nothing to show
+yet. Everything after that (LegacyScoreBridge replacement, native
+decisions-predictions, the 10-session qualification) is Phase 7 work that
+hasn't started. Slice 6b has a PR open (#239, in code review); every other
+unstarted item below has no PR open.
 
 ## Critical path to the dual dashboard
 
@@ -57,22 +59,23 @@ qualification) is Phase 7 work that hasn't started. Slice 6b has a PR open
    not started. #212 (merged), #239 (6b, open), #199 (tracking issue).
    Enumerates real board requests and stages the per-event rows the
    assembler needs. Slice 6a (events scan + enumeration) is merged; 6b
-   (calendar row) is in code review at #239; 6c-6f have no PR open. The
-   shadow-submission path currently either no-ops or raises a "not built
-   yet" error, confirmed in code. *Note: this is a different "PR-6" than
-   the plan's original S4C job-kind-wiring PR-6 — see the naming note
-   below.*
-5. **native_score_batch shadow submission (PR-7a)** — Code merged,
-   functionally no-op. #88, #126. Called every real tick, gated by a
-   release-availability check; produces nothing until step 4 lands.
-6. **native_parity job (PR-4, redone 2026-09-28)** — 4 of 5 planned slices
-   merged, the 5th open in review. #132, #185, #191, #227 merged; #211 open.
-   Pairs a night's legacy and native records field-by-field. Re-scoped after
-   the original design named a production caller that nothing actually
-   calls; the real design is a supervisor-submitted job. Open: the
-   tick-loop caller (#211, in review). Separately, not counted in the 5:
-   slice 2B(c), a nightly-graph node-width change, not started — scope not
-   yet confirmed as required for Phase 7.
+   (calendar row) is in code review at #239; 6c-6f have no PR open. Since
+   the real nightly's "score" stage always pins a snapshot (Cutover PR-7b),
+   this raises "not built yet" on every eligible real tick rather than
+   quietly no-oping. *Note: this is a different "PR-6" than the plan's
+   original S4C job-kind-wiring PR-6 — see the naming note below.*
+5. **native_score_batch shadow submission (PR-7a)** — Code merged, active
+   but blocked. #88, #126. Called every real tick; reaches step 4's gap
+   (see above) until the raw-row producer lands.
+6. **native_parity job (PR-4, redone 2026-09-28)** — All 5 planned slices
+   merged. #132, #185, #191, #227, #211. Pairs a night's legacy and native
+   records field-by-field. Re-scoped after the original design named a
+   production caller that nothing actually calls; the real design is a
+   supervisor-submitted job. `Service._reconcile_native_parity` runs every
+   real tick, but has nothing to pair yet since no `native_score_batch` has
+   succeeded (step 5). Separately, not counted in the 5: slice 2B(c), a
+   nightly-graph node-width change, not started — scope not yet confirmed
+   as required for Phase 7.
 7. **Dashboard side-by-side view** — Page and authenticated JSON route
    merged. #189 (serving projection), #198 (page + route). Renders a nightly
    summary, per-field diff breakdown, and worst-rows drill-down, but shows
@@ -85,10 +88,11 @@ qualification) is Phase 7 work that hasn't started. Slice 6b has a PR open
    which fails the release lookup closed here; whether production's own
    environment has it set is unverified. No downstream dependency, but not
    worth chasing until step 4 is closer to done.
-9. **Native nightly timer/scheduling install** — Not asked yet. Queued to
-   ask the user once the raw-row producer lands. No scheduler entry for
-   either the legacy or native nightly was found in this checkout; how the
-   real nightly triggers in production is unverified here.
+9. **Native nightly timer/scheduling install** — Files checked in;
+   production install unverified. `ops/systemd/` holds a service and timer
+   unit that run `engine.v2.ops.nightly_trigger` on a 30-minute timer as a
+   oneshot job. Whether this unit is actually installed and enabled on the
+   production host is unverified from this checkout.
 
 ## Remaining work to the Phase 7 cutover
 
@@ -117,14 +121,15 @@ passes. Both are tracked separately above.
 
 ## Decisions waiting on the user
 
-- **Native nightly timer/scheduling install.** Queued to ask once the
-  raw-row producer (step 4) lands; not yet asked.
+- **Native nightly timer/scheduling install.** The service/timer unit is
+  checked in (step 9); whether it's installed and enabled on the production
+  host is unconfirmed and not yet asked.
 - **DYN-SV lineage rerun (EXP-160→169) on v2 trades.** Still undecided,
   separate from the side-by-side track — the recommendation on file is to
   redo it, but the user hasn't ruled.
 - **Scope of slice 2B(c)** (the nightly-graph node-width change for
   native_parity). No ruling yet on whether it's required before Phase 7 or
-  can stay a follow-up; worth confirming once #211 merges.
+  can stay a follow-up, now that #211 has merged without it.
 
 ## Related open issues
 
@@ -132,19 +137,18 @@ passes. Both are tracked separately above.
   the native fixture rather than an independent source; a real risk to
   trusting mismatch detection once the sidecar goes live.
 - **#135** / **#214** — docs (native_parity_report.py diagram; ops
-  ARCHITECTURE.md's failure-semantics table) both currently claim a
-  production caller/sidecar that doesn't exist yet; expected to self-resolve
-  once #211 merges and docs are updated.
+  ARCHITECTURE.md's failure-semantics table) predated #211; both remain
+  open, so whether they still describe a stale state or were updated by
+  #211 itself is worth a fresh look rather than assumed self-resolved.
 - **#199** — parent tracking issue for the raw-row producer; 5 of 6 slices
   remain.
 - **#200** — pin_snapshot_inputs's CAS check, half of PR-7b-3.
 - **#206** — forward_calendar_refresh has no nightly graph node or tick-loop
   submitter.
 - **#192** — PR-13a has a merged design but zero implementation.
-- **#154** / **#137** / **#149** — PR-13a design gaps: no recovery path for
-  a hard training failure or a stale champion after a concurrent promote; no
-  lock against a direct non-job promote/rollback caller; can't distinguish a
-  light-check-failed staged release from a succeeded one.
+- **#154** / **#137** / **#149** — PR-13a design gaps: no recovery for a
+  hard training failure or stale champion; no lock against a direct
+  non-job promote/rollback; can't tell a light-check failure from success.
 - **#233** — a nightly.py schema-check helper misclassifies an error as
   retryable; affects native_score_batch/native_parity retry behavior.
 - **#128** — the native refresh job's idempotency-key parser rejects every
