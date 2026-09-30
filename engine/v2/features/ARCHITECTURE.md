@@ -65,6 +65,7 @@ is a unitless ratio minus one. No market read, implicit clock or cache exists.
 |---|---|
 | No eligible source row, including an empty market | NaN features and NaT anchor |
 | Insufficient history for one window | That feature stays NaN; eligible source date remains the anchor |
+| Zero 252-day volatility | `spy_vol20_rel252` remains NaN |
 | Empty events with required columns | Empty result with feature/anchor columns |
 | Missing columns or invalid scalar conversion | Existing pandas/NumPy/Python error propagates |
 | Retry with unchanged inputs | Safe recomputation produces unchanged outputs |
@@ -135,18 +136,8 @@ is a unitless ratio minus one. No market read, implicit clock or cache exists.
 - `regime` uses `panel_math._anchor_index` plus NumPy/pandas; it has no
   filesystem/network access or legacy imports. Its only callers are tests.
   Neither input frame is mutated. Production forward-panel assembly is absent.
-- `panel_math` supplies anchoring to `regime`. The remaining chain is: **Part D**
-  (`engine/v2/ops/native_feature_job.py`, a new job kind, not yet built) —
-  the future caller of the whole chain — → Part C, a per-row feature
-  orchestrator in this package (not yet built, planned as
-  `board_features.py`) → `panel_math` plus `regime` and remaining market-state
-  blocks. Until the orchestrator and job land and are wired into the
-  nightly graph, `panel_math` is inert: it has unit tests of its own but
-  cannot affect a board row.
-- The correctness check planned to exercise `panel_math` beyond its unit
-  tests is a parity proof tool (this package's `engine.v2.parity`
-  counterpart), not yet built, that will call these functions directly on
-  real inputs and compare against legacy's own output on the same inputs.
+- `panel_math` supplies anchoring to `regime`; both have focused parity tests.
+  Neither has a production forward-panel caller.
 
 ## External systems and libraries
 
@@ -248,5 +239,4 @@ not apply" by construction rather than a policy choice:
                      └──────────────────────────┘
 ```
 
-`regime` calls `panel_math._anchor_index` within this package; the future
-orchestrator/job that will call these pure blocks remains separate work.
+`regime` calls `panel_math._anchor_index` within this package.
