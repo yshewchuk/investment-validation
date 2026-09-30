@@ -56,7 +56,8 @@ fixtures.
 `regime.add_regime_features` accepts explicit event and market frames, returning
 regime values with their actual observation dates. It has no production caller.
 Its real captured-source parity test is marked `needs_corpus`; the payload stays
-private and can be selected with `V2_REGIME_CORPUS_CSV`.
+private and can be selected with `V2_REGIME_CORPUS_CSV`; its sibling
+`manifest.json` records the source and verifies the captured file hash.
 
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
 panel load, no network, no fitting. Fixtures live in the private
