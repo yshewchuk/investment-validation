@@ -445,6 +445,45 @@ def test_crash_between_submit_and_state_write_resubmits_the_same_plan_ref(tmp_pa
     assert submit.calls == [(AS_OF, "plan_A"), (AS_OF, "plan_A")]  # same ref, no new plan
 
 
+def test_crash_between_plan_fn_and_the_submitting_write_replans_but_never_double_submits(
+    tmp_path, monkeypatch,
+):
+    """Issue #186: a crash between plan_fn returning and _ensure_plan_ref's
+    "submitting" receipt write leaves no durable record of the built
+    plan_ref. The next tick's fresh _decide calls plan_fn again -- proving
+    the accepted-risk behavior engine/v2/ops/ARCHITECTURE.md's
+    nightly_trigger.py table now documents: the first plan is orphaned
+    (never referenced again), but the run still completes cleanly under the
+    SECOND plan_ref, with no double-submission."""
+    plan = FakePlan("plan_ORPHANED")
+    submit, serve = FakeSubmit(), FakeServe()
+    real_record = nightly_trigger._record
+    crash_armed = {"on": True}
+
+    def crashing_record(root, receipt):
+        if crash_armed["on"] and receipt.status == "submitting":
+            crash_armed["on"] = False
+            raise RuntimeError("simulated crash before the submitting receipt lands")
+        return real_record(root, receipt)
+
+    monkeypatch.setattr(nightly_trigger, "_record", crashing_record)
+    with pytest.raises(RuntimeError):
+        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert load_state(tmp_path, AS_OF) is None  # nothing durable recorded the orphaned plan_ref
+    assert len(plan.calls) == 1
+    assert submit.calls == []  # the orphaned plan was never submitted before the crash
+    assert serve.calls == []  # nor served
+
+    plan.plan_ref = "plan_SECOND"  # the resumed tick's fresh plan differs from the orphan
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
+    assert receipt.status == "completed" and receipt.plan_ref == "plan_SECOND"
+    assert len(plan.calls) == 2  # plan_fn ran twice: the orphaned build, then the real one
+    assert submit.calls == [(AS_OF, "plan_SECOND")]  # submitted exactly once, only the real ref
+    assert serve.calls == [("plan_SECOND", tmp_path)]  # served exactly once, only the real ref
+    stored = load_state(tmp_path, AS_OF)
+    assert stored is not None and stored.plan_ref == "plan_SECOND"  # the orphan is never referenced again
+
+
 def test_submitted_state_resumes_serving_without_replanning(tmp_path):
     write_state(tmp_path, TriggerReceipt(as_of=AS_OF, status="submitted", detail="crash",
                                          checked_at="2026-09-26T06:00:00Z", plan_ref="plan_X"))

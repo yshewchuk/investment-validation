@@ -521,6 +521,33 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
                      clock, plan_fn, ensure_snapshot_fn, full_run,
                      prior: TriggerReceipt | None,
                      snapshot_attempt: int) -> tuple[str | None, TriggerReceipt | None]:
+    """Ensure the as-of snapshot, then build and durably record a fresh plan_ref.
+
+    ``ensure_snapshot_fn`` runs first; a not-yet/timed-out/failed readiness
+    returns ``(None, receipt)`` with that outcome already recorded (or, on a
+    failure, recorded by ``_failure``), and no plan is built. Otherwise
+    ``plan_fn`` builds the plan and this function records the ``"submitting"``
+    receipt naming the new ``plan_ref``, returning ``(plan_ref, None)`` so
+    ``_submit_plan`` can submit it.
+
+    Accepted risk (issue #186): a crash landing between ``plan_fn`` returning
+    and the ``_record(..., "submitting", ...)`` call a few lines below leaves
+    ``plan_ref`` unrecorded. The next ELIGIBLE retry then calls ``plan_fn``
+    again and can build another plan (each ``_default_plan`` call reads a
+    fresh ``decision_clock``, but repeated formatted timestamps and
+    identical inputs can still produce the same plan document) -- via
+    ``_decide``, subject to its own window/probe check (a
+    retry landing after the window closes becomes ``"missed"`` instead), if no
+    resumable status is on disk yet; or via ``run_trigger``'s resume branch,
+    which never re-checks the window and so can rebuild and submit even past
+    it, if an earlier pre-plan resumable status (e.g. ``"snapshot_not_yet"``)
+    is still recorded. Either way, if the rebuilt plan DIFFERS from the
+    first, the first plan is orphaned: it is named by no receipt, so it is
+    never submitted or scored,
+    and nothing double-submits or double-scores. This is accepted as a wasted
+    plan build/artifact write, never a correctness defect, and this function
+    deliberately makes no change to close that window.
+    """
     try:
         readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
     except _HANDLED_FAILURES as exc:
