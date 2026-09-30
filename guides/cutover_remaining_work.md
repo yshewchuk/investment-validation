@@ -27,13 +27,14 @@ not-yet-scoped-as-required item, slice 2B(c) (a nightly-graph node-width
 change), hasn't started. The dashboard's serving
 projection and native_parity page (#189, #198) are both merged, but the page
 renders empty (`no_report`) because nothing upstream has produced a real
-report yet. The production release binding also has no release root
-configured in this checkout's environment, so it fails closed until an
-operator sets one.
+report yet. The release-root binding is environment-only; this checkout has
+it unconfigured, which fails the release lookup closed here. Whether
+production's own environment has it set is unverified from this checkout.
 
 **Critical path to a populated side-by-side page:** finish raw-row producer
 slices 6b-6f → confirm `native_score_batch` scores a real event → merge #211
-and decide slice 2B(c)'s scope → configure the production release root. The
+and decide slice 2B(c)'s scope → confirm the production release root is set.
+The
 dashboard side itself (projection, API route, page) is already built and
 needs no further PRs; it just has nothing to show yet. Everything after that
 (LegacyScoreBridge replacement, native decisions-predictions, the 10-session
@@ -78,11 +79,12 @@ qualification) is Phase 7 work that hasn't started. Slice 6b has a PR open
    `no_report` today because the production report path (steps 4-6) hasn't
    produced one yet. No further dashboard PRs are queued; this step is
    waiting on data, not code.
-8. **Operator step: configure the production release root** — Not done. A
-   model release was deployed 2026-09-28, but the release-root binding is
-   environment-only and unset in this checkout, so the release lookup fails
-   closed every tick until an operator sets it. No downstream dependency,
-   but not worth doing until step 4 is closer to done.
+8. **Operator step: confirm the production release root is configured** —
+   Unverified from this checkout. A model release was deployed 2026-09-28.
+   The release-root binding is environment-only and unset in this checkout,
+   which fails the release lookup closed here; whether production's own
+   environment has it set is unverified. No downstream dependency, but not
+   worth chasing until step 4 is closer to done.
 9. **Native nightly timer/scheduling install** — Not asked yet. Queued to
    ask the user once the raw-row producer lands. No scheduler entry for
    either the legacy or native nightly was found in this checkout; how the
