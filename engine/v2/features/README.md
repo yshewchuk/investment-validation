@@ -46,10 +46,10 @@ failure rather than a stale sentence.
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+`panel_math.advance_history(last_row)` advances a caller-selected realized
+panel row into next-event history aggregates. It is pure arithmetic; callers
+retain ownership of event selection and observation cutoffs. No production
+panel-row builder calls it yet.
 
 ## Testing
 
