@@ -796,7 +796,7 @@ has no board-universe enumeration or release resolution of its own, since
 every value it needs is already a committed job output:
 
 - **The one exception: a `schema_version` pre-submission check, not a
-  content read.** `_native_parity_identity` (above) is a cheap
+  row read.** `_native_parity_identity` (above) is a cheap
   CATALOG-only lookup — it finds the latest succeeded `native_score_batch`
   job by idempotency key alone, never opening that job's own staged
   `records.json`/`refusals.json`. But `native_score_batch`'s own worker
