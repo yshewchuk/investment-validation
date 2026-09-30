@@ -29,7 +29,7 @@ import pandas as pd
 from engine import paths
 from engine.calendar import TradingCalendar, trading_calendar
 from engine.evaluate import Gate
-from engine.models.registry import load_registry
+from engine.models.registry import ANY_STRATEGY, load_registry
 from engine.models.training import gate as gate_mod
 from engine.models.training.common import SEED
 from engine.structures import BUY, STRUCTURES, Structure
@@ -262,15 +262,32 @@ class _RegisteredGateState:
         return out
 
 
-def make_registered_gate(strategy: str, dataset: pd.DataFrame) -> tuple[Gate, _RegisteredGateState]:
+def make_registered_gate(
+    strategy: str, dataset: pd.DataFrame, *, gate_id: str | None = None,
+) -> tuple[Gate, _RegisteredGateState]:
     """The registered champion gate for ``strategy`` as a walk-forward Gate.
+
+    ``gate_id``, when given, pins that exact registry entry instead of
+    resolving the current champion for ``strategy`` -- use this when a
+    result must be measured against a NAMED incumbent regardless of what the
+    registry marks champion at run time (e.g. a promotion decision's stored
+    baseline).
 
     ``dataset`` is :func:`gate_dataset` output: one row per event at alpha=0.5
     with the registry's feature columns. The returned state object carries the
     per-fold diagnostics the report quotes (rows scored vs not, threshold).
     """
     registry = load_registry(missing_ok=False)
-    entry = registry.champion("gate", strategy)
+    if gate_id is not None:
+        entry = registry.get(gate_id)
+        if entry.role != "gate" or entry.strategy not in (strategy, ANY_STRATEGY):
+            raise ValueError(
+                f"{gate_id}: not a gate registry entry for {strategy!r} "
+                f"(role={entry.role!r}, strategy={entry.strategy!r}) -- refusing to "
+                "pin an incompatible entry as this call's gate"
+            )
+    else:
+        entry = registry.champion("gate", strategy)
     if entry.threshold is None:
         raise ValueError(f"{entry.id}: champion gate carries no stored threshold")
 

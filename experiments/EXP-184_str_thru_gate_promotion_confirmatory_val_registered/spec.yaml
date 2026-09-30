@@ -27,8 +27,7 @@ candidate:
 
 champion_baseline:
   gate_id: gate_midfill_str_thru
-  threshold: 0.05679090768112426
-  source: "experiments/EXP-145_str_thru_gate_comparison_seven_gating_ar/arms/arm1_incumbent_model/results/metrics_*.json -- a fresh, full evaluate() run of the CURRENT registry champion on the identical trade universe and harness, run 2026-09-07 (the EXP-105 confirmatory run predates the 2026-09-06 registry promotion and is stale for this comparison)"
+  source: "this run's own champion re-evaluation -- run.py calls engine.evaluate.evaluate() a second time with experiments.common.make_registered_gate's registered gate (the registry's own stored threshold, refit per fold), on the identical v2 snapshot, trades, repricer, walk-forward and MC settings as the candidate. Written to champion/results/metrics_<hash>.json, in its own run_dir under this experiment's directory (kept separate from the candidate's run_dir so the champion's REPORT.md and figures never overwrite the candidate's). Supersedes experiments/EXP-145_str_thru_gate_comparison_seven_gating_ar/arms/arm1_incumbent_model/results/metrics_*.json (run 2026-09-07 on the pre-v2 legacy trades universe), which is no longer a valid comparison baseline for a candidate scored on this v2 snapshot."
 
 promotion_rule: "experiments/promote.py's mechanical decide(): (a) CAGR AND trade Sharpe both beat champion, years-positive share no worse; (b) MC P(loss)@5% no worse; (c) no new red stress regime cell; (d) pre-registration valid; (e) accuracy checklist clean; (f) Brier skill >= -0.05. All must pass; no partial promotion."
 
@@ -59,7 +58,7 @@ data:
   quota_calls: 0
 
 data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
-v2_snapshot_id: null
+v2_snapshot_id: snap_86b4ea43ab86eb1af139b25a1f2600c8
 walk_forward:
   unit: year
   min_train_years: 2
@@ -67,3 +66,4 @@ equity_mode: cashflow
 max_deployed_fraction: 1.0
 mc_draw_order: shared
 has_short_leg: false
+preregistered_at: "2026-09-30T05:00:00+00:00"
