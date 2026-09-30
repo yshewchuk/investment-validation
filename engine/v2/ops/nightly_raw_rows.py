@@ -1,7 +1,8 @@
-"""Cutover PR-6's raw-row producer, slice 6a: the events-scan + ``BoardRequest``
-enumeration half only. Row-staging (``calendar_row``/``panel_row``/
-``panel_anchor``/``tier4_row``/``quote_rows`` -> ``native_score_batch.
-NightlyEventInputs``) is a later slice, not built here.
+"""Pinned board enumeration and calendar-row staging for cutover PR-6.
+
+Calendar identity comes from the snapshot; market context is explicitly
+staged by the caller. Panel/Tier-4/quote sourcing and production wiring
+remain separate slices.
 
 The scan deliberately applies no ``src_orats`` filter (unlike
 ``computed_moves_store._scan_once``, whose backward-looking selection has its
@@ -14,18 +15,26 @@ Like ``native_board_universe``, this module never imports ``engine.score`` /
 """
 from __future__ import annotations
 
+import math
+import numbers
+from dataclasses import dataclass
+from typing import Any, Mapping
+
 import pandas as pd
 
 from engine.v2.contracts import DataQuery, KeyPredicate, SnapshotRef
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
+from engine.v2.ops.errors import fail
 from engine.v2.ops.native_board_universe import (
     BoardRequest,
     _validated_as_of,
     _validated_horizon_days,
     board_requests,
 )
+from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal, validated_as_of
 
-__all__ = ["scan_forward_board_requests"]
+__all__ = ["CalendarRowInputs", "scan_calendar_row", "scan_forward_board_requests"]
 
 _EVENTS_TABLE = "earnings_events"
 _EVENTS_COLUMNS = ("ticker", "event_date", "session")
@@ -77,3 +86,102 @@ def scan_forward_board_requests(
         rows.extend(batch.to_pylist())
     events_table = pd.DataFrame(rows) if rows else pd.DataFrame(columns=_EVENTS_COLUMNS)
     return board_requests(as_of, horizon_days, tickers, events_table)
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarRowInputs:
+    """A staged row and the earnings dataset revision used by EventRef."""
+
+    calendar_revision: str
+    calendar_row: Mapping[str, Any]
+
+
+def _calendar_day(value: Any) -> str:
+    """Reject non-day values without exposing submitted text in refusals."""
+    try:
+        day = validated_as_of(value)
+    except NightlySourceBundleRefusal:
+        raise fail("INVALID_REQUEST", "calendar context requires valid naive dates") from None
+    if day != day.normalize():
+        raise fail("INVALID_REQUEST", "calendar context requires midnight dates")
+    return day.date().isoformat()
+
+
+def _calendar_spot(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, numbers.Number):
+        raise fail("INVALID_REQUEST", "calendar spot requires a positive finite number")
+    try:
+        spot = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise fail("INVALID_REQUEST", "calendar spot requires a positive finite number") from None
+    if not math.isfinite(spot) or spot <= 0:
+        raise fail("INVALID_REQUEST", "calendar spot requires a positive finite number")
+    return spot
+
+
+def _pinned_calendar_event(repository: Repository, snapshot: SnapshotRef,
+                           key: BoardRequest, event_date: str) -> tuple[str, dict]:
+    contract = repository.table_contract(snapshot, _EVENTS_TABLE)
+    version = snapshot.table_versions[_EVENTS_TABLE]
+    revision = version.dataset_version_id
+    if not isinstance(revision, str) or not revision.strip():
+        raise fail("INVALID_REQUEST", "earnings dataset revision is missing")
+    query = DataQuery(
+        snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
+        columns=("event_id", *_EVENTS_COLUMNS),
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
+                    KeyPredicate(column="year", operator="eq", values=(int(event_date[:4]),))),
+        order_by=tuple(contract.primary_key),
+        max_batch_rows=min(contract.maximum_batch_rows, 1000),
+        max_result_rows=min(contract.maximum_result_rows, 1000))
+    matches = []
+    for batch in repository.scan(query, table_name=_EVENTS_TABLE):
+        for row in batch.to_pylist():
+            if (row["ticker"] == key.ticker and _calendar_day(row["event_date"]) == event_date
+                    and row["session"] == key.session):
+                matches.append(row)
+    if not matches:
+        raise data_fail("EVENT_NOT_FOUND", "no exact calendar event in the pinned snapshot")
+    if len(matches) != 1:
+        raise data_fail("IDENTITY_CONFLICT", "multiple exact calendar events in the pinned snapshot")
+    row = matches[0]
+    if not isinstance(row["event_id"], str) or not row["event_id"].strip():
+        raise fail("INVALID_REQUEST", "persisted calendar event identity is missing")
+    return revision, row
+
+
+def scan_calendar_row(
+    repository: Repository,
+    snapshot: SnapshotRef,
+    key: BoardRequest,
+    *,
+    entry_date: Any,
+    exit_date: Any,
+    expiry: Any,
+    spot: Any,
+    calendar_observed_through: Any,
+) -> CalendarRowInputs:
+    """Build one calendar row from a pinned event and staged market context.
+
+    Dates must be naive calendar days and spot a finite positive number.
+    No strategy window, expiry or market-price policy is chosen here. The
+    downstream SourceBundle assembler checks observation dates against as_of.
+    Missing/ambiguous events raise EVENT_NOT_FOUND/IDENTITY_CONFLICT;
+    malformed inputs raise INVALID_REQUEST; repository failures propagate.
+    """
+    if not isinstance(key, BoardRequest) or any(
+        not isinstance(value, str) or not value.strip()
+        for value in (key.ticker, key.strategy, key.session)
+    ):
+        raise fail("INVALID_REQUEST", "calendar key requires non-empty identity fields")
+    event_date = _calendar_day(key.event_date)
+    context = {
+        "entry_date": _calendar_day(entry_date), "exit_date": _calendar_day(exit_date),
+        "expiry": _calendar_day(expiry), "spot": _calendar_spot(spot),
+        "calendar_observed_through": _calendar_day(calendar_observed_through),
+    }
+    revision, row = _pinned_calendar_event(repository, snapshot, key, event_date)
+    return CalendarRowInputs(calendar_revision=revision, calendar_row={
+        "event_id": row["event_id"], "ticker": row["ticker"],
+        "event_date": event_date, "session": row["session"], **context,
+    })
