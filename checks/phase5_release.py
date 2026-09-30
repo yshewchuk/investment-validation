@@ -11,11 +11,12 @@ A staged release root holds two things:
     the content-addressed ``objects/<sha256>``, and (only if an incumbent was
     copied in) ``DEPLOYED`` plus ``history/``. The model bindings live here and
     are staged through ``stage_release``, so its completeness checks ran.
-``phase5_release.json``
-    The P5-6 manifest for everything that is NOT a model binding: the frozen
+``deployment/releases/<id>/phase5_release.json``
+    The P5-6 catalog for everything that is NOT a model binding: the frozen
     non-model states (payoff line/surface, recalibration, residual pools, the
     admissible table, the analog matcher) and the Tier-4 serving folds. Their
     objects sit in the same ``deployment/objects/`` store, named by hash.
+    A root ``phase5_release.json`` copy selects the last staged candidate.
 
 Every catalog row has a status. ``STAGED`` rows carry objects. ``MISSING``
 means the artifact type exists in this tree but the preparer produced no
@@ -33,6 +34,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from engine.v2.foundation import content_hash
+from engine.v2.models import deployment
 
 PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 MANIFEST_NAME = "phase5_release.json"
@@ -186,24 +188,97 @@ def manifest_body(release_id: str, deployment_id: str, members: list[dict],
     return body
 
 
-def write_manifest(release_root: Path, body: Mapping[str, Any]) -> Path:
-    path = Path(release_root) / MANIFEST_NAME
-    path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
-    return path
+def _catalog_path(release_root: Path, release_id: str) -> Path:
+    if not isinstance(release_id, str):
+        raise ReleaseLayoutError("release_id must be a string")
+    try:
+        return deployment._manifest_path(deployment_root(release_root), release_id).with_name(
+            MANIFEST_NAME)
+    except deployment.DeploymentError as exc:
+        raise ReleaseLayoutError("unsafe release_id") from exc
 
 
-def read_manifest(release_root: Path) -> dict:
-    path = Path(release_root) / MANIFEST_NAME
-    if not path.is_file():
-        raise ReleaseLayoutError(f"no {MANIFEST_NAME} under {release_root}")
-    body = json.loads(path.read_text())
-    if body.get("schema_version") != PHASE5_RELEASE_SCHEMA:
+def _validate_catalog(body: Any, expected_id: str | None = None) -> dict:
+    if not isinstance(body, dict) or body.get("schema_version") != PHASE5_RELEASE_SCHEMA:
         raise ReleaseLayoutError("unknown phase5 release schema")
+    _catalog_path(Path(), body.get("release_id"))
+    if expected_id is not None and body["release_id"] != expected_id:
+        raise ReleaseLayoutError("phase5 release_id does not match selected release")
     claimed = body.get("manifest_hash")
     unhashed = {key: value for key, value in body.items() if key != "manifest_hash"}
     if claimed != content_hash(unhashed):
         raise ReleaseLayoutError("phase5_release.json does not match its manifest_hash")
     return body
+
+
+def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
+    try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return None
+        if not path.is_file():
+            raise ReleaseLayoutError("phase5 catalog is not a readable file")
+        return _validate_catalog(json.loads(path.read_bytes()), expected_id)
+    except (OSError, ValueError) as exc:
+        raise ReleaseLayoutError("phase5 catalog could not be read or validated") from exc
+
+
+def _verify_staged(store: Path, release_id: str) -> None:
+    try:
+        manifest = deployment._read_manifest(store, release_id)
+        if (manifest is None or manifest.release.release_id != release_id
+                or not deployment._manifest_hash_matches(manifest)):
+            raise ReleaseLayoutError("catalog requires a matching verified staged release")
+    except (OSError, ValueError, deployment.DeploymentError) as exc:
+        raise ReleaseLayoutError("catalog staged release could not be verified") from exc
+
+
+def _write_catalog(path: Path, body: Mapping[str, Any]) -> None:
+    deployment._atomic_write_bytes(
+        path, (json.dumps(body, indent=2, sort_keys=True) + "\n").encode())
+
+
+def validate_legacy_manifest(store: Path, legacy_path: Path) -> None:
+    """Read-only preflight against a deployment store, including custom names."""
+    body = _read_catalog(legacy_path)
+    if body is not None:
+        release_id = body["release_id"]
+        _verify_staged(store, release_id)
+        path = deployment._manifest_path(store, release_id).with_name(MANIFEST_NAME)
+        _read_catalog(path, release_id)
+
+
+def preserve_legacy_manifest(release_root: Path, legacy_path: Path | None = None) -> None:
+    """Preserve a verified legacy catalog without replacing local authority."""
+    body = _read_catalog(legacy_path if legacy_path is not None
+                         else Path(release_root) / MANIFEST_NAME)
+    if body is None:
+        return
+    release_id = body["release_id"]
+    _verify_staged(deployment_root(release_root), release_id)
+    path = _catalog_path(release_root, release_id)
+    if _read_catalog(path, release_id) is None:
+        _write_catalog(path, body)
+
+
+def write_manifest(release_root: Path, body: Mapping[str, Any]) -> Path:
+    body = _validate_catalog(dict(body))
+    preserve_legacy_manifest(release_root)
+    _verify_staged(deployment_root(release_root), body["release_id"])
+    path = _catalog_path(release_root, body["release_id"])
+    _write_catalog(path, body)
+    _write_catalog(Path(release_root) / MANIFEST_NAME, body)
+    return path
+
+
+def read_manifest(release_root: Path) -> dict:
+    """Read the root-selected candidate, preferring its release-local catalog."""
+    body = _read_catalog(Path(release_root) / MANIFEST_NAME)
+    if body is None:
+        raise ReleaseLayoutError(f"no {MANIFEST_NAME} under {release_root}")
+    local = _read_catalog(_catalog_path(release_root, body["release_id"]), body["release_id"])
+    return body if local is None else local
 
 
 def member_row(spec: StateSpec, status: str, objects: list[dict], detail: str) -> dict:
@@ -222,5 +297,6 @@ __all__ = [
     "RECALIBRATION_MODULES", "STAGED", "STATE_SPECS", "TIER4_ROLES",
     "TRAILING_CUTOFF_MODULES", "ReleaseLayoutError", "StateSpec", "deployment_root",
     "manifest_body", "member_row", "modules_available", "object_relpath",
-    "read_manifest", "sha256_bytes", "write_manifest", "write_object",
+    "preserve_legacy_manifest", "read_manifest", "sha256_bytes", "write_manifest", "write_object",
+    "validate_legacy_manifest",
 ]

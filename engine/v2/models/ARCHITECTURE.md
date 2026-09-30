@@ -174,9 +174,10 @@ metadata before catalog publication. No fitting or inference occurs here.
   other file under the release store is ever touched by this function.
 - Every non-model frozen-state builder (`training/residuals.py`,
   `training/chooser_pool.py`, …) returns an immutable dataclass; the
-  release/state catalog file (`phase5_release.json`) is written and read
-  by `checks/phase5_release.py` today, one path per release ROOT with one
-  catalog body for one `release_id` — not by this package.
+  release/state catalog (`phase5_release.json`) is owned by
+  `checks/phase5_release.py` and stored beside each release manifest.
+  The release-root copy selects the last staged candidate for existing
+  tooling; it is not authority for a different deployed release.
 
 ## 5. Dependencies
 
@@ -295,6 +296,25 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 | Legacy (member-only) manifest | Its own verification covers `release_id` and every member's `content_hash`, not `adapter`/`feature_order`/`output_names`; the semantic hash this call writes covers all of them going forward, not retroactively |
 | Write | One atomic rewrite of `manifest.json` only; nothing else under the release store is touched |
 | Idempotency | Same starting manifest always produces the same rewritten manifest; a second call hits the "already at current version" no-op above |
+
+### 7.6 Phase-5 state catalogs (staging-tool ownership)
+
+Catalogs live at `<release_root>/deployment/releases/<release_id>/phase5_release.json`.
+Release IDs are validated before path construction; preservation requires
+a matching, hash-verified staged model manifest.
+`checks.phase5_release.read_manifest` selects a candidate using the root copy;
+production scoring instead selects the release named by `DEPLOYED`.
+
+| Condition | Outcome |
+|---|---|
+| Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
+| Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
+| Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
+| Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
+| Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
+| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee |
+| Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |
+| Historical catalog was already overwritten before migration | It cannot be recovered from a model manifest; rebuilding that catalog is required |
 
 ## 8. Invariants
 
