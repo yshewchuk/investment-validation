@@ -37,9 +37,8 @@ and decide slice 2B(c)'s scope → configure the production release root. The
 dashboard side itself (projection, API route, page) is already built and
 needs no further PRs; it just has nothing to show yet. Everything after that
 (LegacyScoreBridge replacement, native decisions-predictions, the 10-session
-qualification) is Phase 7 work that hasn't started. Slice 6b is not started;
-no PR is open for it. Every unstarted item below is likewise not started,
-with no PR open.
+qualification) is Phase 7 work that hasn't started. Slice 6b has a PR open
+(#239, in code review); every other unstarted item below has no PR open.
 
 ## Critical path to the dual dashboard
 
@@ -53,14 +52,15 @@ with no PR open.
 3. **Batch assembler + native_score_batch worker dispatch** — Done, wired,
    blocked upstream. #66. Turns per-event inputs into a submitted job; worker
    dispatch exists.
-4. **Raw-row producer ("cutover PR-6", 6 slices)** — 6a done, 6b-6f not
-   started. #212 (merged), #199 (tracking issue). Enumerates real board
-   requests and stages the per-event rows the assembler needs. Slice 6a
-   (events scan + enumeration) is merged; 6b (calendar row) is not started
-   and has no PR open; 6c-6f are unstarted. The shadow-submission
-   path currently either no-ops or raises a "not built yet" error, confirmed
-   in code. *Note: this is a different "PR-6" than the plan's original S4C
-   job-kind-wiring PR-6 — see the naming note below.*
+4. **Raw-row producer ("cutover PR-6", 6 slices)** — 6a done, 6b open, 6c-6f
+   not started. #212 (merged), #239 (6b, open), #199 (tracking issue).
+   Enumerates real board requests and stages the per-event rows the
+   assembler needs. Slice 6a (events scan + enumeration) is merged; 6b
+   (calendar row) is in code review at #239; 6c-6f have no PR open. The
+   shadow-submission path currently either no-ops or raises a "not built
+   yet" error, confirmed in code. *Note: this is a different "PR-6" than
+   the plan's original S4C job-kind-wiring PR-6 — see the naming note
+   below.*
 5. **native_score_batch shadow submission (PR-7a)** — Code merged,
    functionally no-op. #88, #126. Called every real tick, gated by a
    release-availability check; produces nothing until step 4 lands.
@@ -115,7 +115,6 @@ passes. Both are tracked separately above.
 
 ## Decisions waiting on the user
 
-- **Restarting slice 6b.** Not started; no PR open.
 - **Native nightly timer/scheduling install.** Queued to ask once the
   raw-row producer (step 4) lands; not yet asked.
 - **DYN-SV lineage rerun (EXP-160→169) on v2 trades.** Still undecided,
