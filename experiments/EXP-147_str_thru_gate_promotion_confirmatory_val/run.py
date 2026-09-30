@@ -18,14 +18,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from engine import paths  # noqa: E402
 from engine.evaluate import evaluate  # noqa: E402
 from engine.models.training import gate_forecast_analog as ga  # noqa: E402
 from experiments import common, common_v2, lib  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 STRATEGY = "STR-THRU"
-V2_CATALOG = ROOT / "private" / "ops" / "catalog.sqlite"
-V2_STORE_ROOT = ROOT / "private" / "ops" / "objects"
+V2_CATALOG = paths.ROOT / "private" / "ops" / "catalog.sqlite"
+V2_STORE_ROOT = paths.ROOT / "private" / "ops" / "objects"
 
 
 def main() -> None:
