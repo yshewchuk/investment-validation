@@ -113,7 +113,9 @@ def main() -> None:
     # comparison once the candidate runs on a different trades universe.
     # common.make_registered_gate applies the registry's own stored threshold,
     # refit per fold, exactly like EXP-145's arm1_incumbent_model.
-    champion_gate, champion_state = common.make_registered_gate(STRATEGY, dataset)
+    champion_gate, champion_state = common.make_registered_gate(
+        STRATEGY, dataset, gate_id="gate_midfill_str_thru",
+    )
 
     def champion_extra_sections(result):
         return [{

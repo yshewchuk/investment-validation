@@ -262,15 +262,23 @@ class _RegisteredGateState:
         return out
 
 
-def make_registered_gate(strategy: str, dataset: pd.DataFrame) -> tuple[Gate, _RegisteredGateState]:
+def make_registered_gate(
+    strategy: str, dataset: pd.DataFrame, *, gate_id: str | None = None,
+) -> tuple[Gate, _RegisteredGateState]:
     """The registered champion gate for ``strategy`` as a walk-forward Gate.
+
+    ``gate_id``, when given, pins that exact registry entry instead of
+    resolving the current champion for ``strategy`` -- use this when a
+    result must be measured against a NAMED incumbent regardless of what the
+    registry marks champion at run time (e.g. a promotion decision's stored
+    baseline).
 
     ``dataset`` is :func:`gate_dataset` output: one row per event at alpha=0.5
     with the registry's feature columns. The returned state object carries the
     per-fold diagnostics the report quotes (rows scored vs not, threshold).
     """
     registry = load_registry(missing_ok=False)
-    entry = registry.champion("gate", strategy)
+    entry = registry.get(gate_id) if gate_id is not None else registry.champion("gate", strategy)
     if entry.threshold is None:
         raise ValueError(f"{entry.id}: champion gate carries no stored threshold")
 
