@@ -533,18 +533,19 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
     Accepted risk (issue #186): a crash landing between ``plan_fn`` returning
     and the ``_record(..., "submitting", ...)`` call a few lines below leaves
     ``plan_ref`` unrecorded. The next ELIGIBLE retry then calls ``plan_fn``
-    again and builds a SECOND, different plan (each ``_default_plan`` call
-    bakes in a fresh ``decision_clock``, so the two plan documents are never
-    identical) -- via ``_decide``, subject to its own window/probe check (a
+    again and can build another plan (each ``_default_plan`` call reads a
+    fresh ``decision_clock``, but repeated formatted timestamps and
+    identical inputs can still produce the same plan document) -- via
+    ``_decide``, subject to its own window/probe check (a
     retry landing after the window closes becomes ``"missed"`` instead), if no
     resumable status is on disk yet; or via ``run_trigger``'s resume branch,
     which never re-checks the window and so can rebuild and submit even past
     it, if an earlier pre-plan resumable status (e.g. ``"snapshot_not_yet"``)
-    is still recorded. Either way the FIRST plan is orphaned: it is named by no
-    receipt, so it is never submitted or scored, and nothing double-submits or
-    double-scores. This is accepted as a wasted plan build/artifact write,
-    never a correctness defect, and this function deliberately makes no change
-    to close that window.
+    is still recorded. Either way, a rebuilt plan that DIFFERS from the first
+    orphans it: it is named by no receipt, so it is never submitted or scored,
+    and nothing double-submits or double-scores. This is accepted as a wasted
+    plan build/artifact write, never a correctness defect, and this function
+    deliberately makes no change to close that window.
     """
     try:
         readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
