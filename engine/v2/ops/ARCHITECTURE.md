@@ -766,8 +766,8 @@ Invalid staged/key input or blank persisted event ID/dataset revision → `INVAL
 - **Per-event raw rows** (`calendar_row`/`panel_row`/`panel_anchor`/
   `tier4_row`/`quote_rows`): end-to-end staging remains unimplemented
   ([#199](https://github.com/yshewchuk/investment-validation/issues/199));
-  the calendar helper has no production caller. Pinned-snapshot submission
-  raises `VALIDATION_FAILED`; direct legacy-mode plans remain a no-op (R1).
+  helpers have no production caller (forward forecast design: `../scoring/ARCHITECTURE.md`).
+  Pinned submission raises `VALIDATION_FAILED`; direct legacy plans remain a no-op (R1).
 
 `SourceBundle` construction (`assemble_nightly_source_bundle`,
 `source_inputs.build_native_score_inputs`) happens inside the worker, not
