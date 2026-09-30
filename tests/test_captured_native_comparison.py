@@ -30,6 +30,8 @@ def selected(tmp_path, monkeypatch):
     declared = {"one": {key: pair[key] for key in ("payload_hash", "request_hash", "covers")}}
     declared["one"]["record_kind"] = "score_result"
     root = _write_corpus(tmp_path / "corpus", [pair], declared=declared)
+    index = json.loads((root / "INDEX.json").read_text())
+    (root / "INDEX.json").write_text(json.dumps(dict(index, as_of="2026-09-12")))
     verified = {"frozen_replay": object(), "trace_hash": "trace-1",
                 "same_input_receipt": "receipt-1",
                 "inputs": SimpleNamespace(context={"chain_as_of": "2026-09-12"})}
@@ -45,7 +47,7 @@ def test_export_preserves_dates_values_and_existing_reader(selected, tmp_path):
     captured = report["captured_comparison"]
     assert captured["clocks"]["requested_decision_at"] == "2026-09-12"
     assert captured["clocks"]["decision_as_of"] == "2026-09-16"
-    assert captured["clocks"]["corpus_as_of"] is None
+    assert captured["clocks"]["corpus_as_of"] == "2026-09-12"
     assert captured["runtime_stage_count"] == 12
     assert captured["legacy"] == captured["native"]
     assert report["mismatches"] == []
@@ -66,19 +68,20 @@ def test_refuses_invalid_selection(selected, fixture_id):
 
 
 @pytest.mark.parametrize("target", ["payload", "manifest", "request", "kind", "strategy"])
-def test_tampered_capture_never_publishes(selected, tmp_path, target):
+def test_tampered_capture_never_publishes(selected, tmp_path, capsys, target):
     root, pair, _ = selected
     if target == "payload":
         pair["payload"]["record"]["spot"] += 1
     elif target == "manifest":
         pair["covers"] = ["changed"]
     elif target == "request":
-        pair["request_hash"] = "wrong"
+        pair["payload"]["request"]["ticker"] = "TAMPERED"
     else:
         if target == "kind":
             pair["payload"]["record_kind"] = "dyn_sv_choice"
         else:
             pair["payload"]["record"]["strategy"] = "RUNUP"
+    if target in {"request", "kind", "strategy"}:
         pair["payload_hash"] = content_hash(pair["payload"])
         index = json.loads((root / "INDEX.json").read_text())
         index["pairs"]["one"]["payload_hash"] = pair["payload_hash"]
@@ -91,6 +94,34 @@ def test_tampered_capture_never_publishes(selected, tmp_path, target):
     assert export.main(["--corpus", str(root), "--fixture-id", "one", "--output", str(output)]) == 1
     assert output.read_text() == "previous"
     assert not list(tmp_path.glob("report.json.tmp*"))
+    if target == "request":
+        assert "selected request hash mismatch" in capsys.readouterr().err
+
+
+def test_public_native_defect_is_reported_without_legacy_substitution(selected, monkeypatch):
+    root, pair, native = selected
+    original = pair["payload"]["record"]["driver_prediction"]
+    altered = replace(native, forecasts=dict(native.forecasts, driver_prediction=original + 1))
+    monkeypatch.setattr(export.phase4_real, "_replayed_member", lambda *args: (altered, (1,) * 12, ()))
+    report = export.build_captured_comparison(root, "one")
+    captured = report["captured_comparison"]
+    assert captured["legacy"]["forecasts"]["driver_prediction"] == original
+    assert captured["native"]["forecasts"]["driver_prediction"] == original + 1
+    assert any("driver_prediction" in str(row["finding_fields"]) for row in report["mismatches"])
+
+
+@pytest.mark.parametrize("clock", ["corpus", "quote"])
+@pytest.mark.parametrize("value", [None, "", 123])
+def test_missing_capture_clocks_refuse(selected, clock, value):
+    root = selected[0]
+    if clock == "corpus":
+        index = json.loads((root / "INDEX.json").read_text())
+        (root / "INDEX.json").write_text(json.dumps(dict(index, as_of=value)))
+    else:
+        verified = export.phase4_real._verified_trace_bundle(None, None)
+        verified["inputs"].context["chain_as_of"] = value
+    with pytest.raises(export.ComparisonRefused, match=f"missing {clock} date"):
+        export.build_captured_comparison(root, "one")
 
 
 @pytest.mark.parametrize("defect", ["resource", "runtime", "identity", "missing_identity", "no_frozen"])

@@ -56,6 +56,10 @@ def _comparison(index: dict, pair: dict, root: Path, fixture_id: str) -> dict:
     """Replay verified inputs and project both answers without reconciliation."""
     verified = phase4_real._verified_trace_bundle(pair, root)
     _require(verified["frozen_replay"] is not None, "frozen inference is required")
+    corpus_as_of = index.get("as_of")
+    quote_as_of = verified["inputs"].context.get("chain_as_of")
+    _require(isinstance(corpus_as_of, str) and bool(corpus_as_of), "missing corpus date")
+    _require(isinstance(quote_as_of, str) and bool(quote_as_of), "missing quote date")
     payload = pair["payload"]
     legacy = payload["record"]
     member = _replay_regular_member(legacy, verified)
@@ -82,10 +86,10 @@ def _comparison(index: dict, pair: dict, root: Path, fixture_id: str) -> dict:
         "current_board": False,
         "identity": identity,
         "clocks": {
-            "corpus_as_of": index.get("as_of"),
+            "corpus_as_of": corpus_as_of,
             "requested_decision_at": trace["request"]["requested_decision_at"],
             "decision_as_of": identity["as_of"],
-            "quote_as_of": verified["inputs"].context.get("chain_as_of"),
+            "quote_as_of": quote_as_of,
             "event_date": identity["event_date"],
             "session": identity["session"],
         },
