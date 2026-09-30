@@ -47,6 +47,33 @@ wiring anything to call it.
 | `add_implied_history(df) -> pd.DataFrame` | DataFrame in, DataFrame out | byte-identical copy of `engine.data.features.panel.add_implied_history` — the one function in this module that is pandas-shaped, because its ported body is itself pandas code (`groupby`/`shift`/`expanding`) |
 | `daily_state_lookup(rows, decision_date) -> dict` | plain sequence of mappings + a date in, plain mapping out | new: factors the per-`(ticker, as_of)` extraction rule out of `engine.features.daily_state_frame`, which is batched (DataFrame-in/DataFrame-out) and stays in legacy unchanged |
 
+### Runup feature math
+
+`runup_math.add_runup_features(frame, prices_by_ticker, as_of_column="date")`
+returns a new event DataFrame, sorted by ticker and event date, with
+`signed_streak`, `ema12r_abs`, `dist_high`, `dist_ema`, `ret5`, `ret10`,
+`ret20`, and `runup_asof`. It preserves the arithmetic and missing-value
+rules of the legacy panel block, without its filesystem reads or fallback
+loaders. These are shared model inputs, not RUNUP forecast/payoff outputs.
+
+The caller supplies event rows with prior-history aggregates and a mapping
+of ticker to date/adjusted-close DataFrames. The caller owns history-row
+visibility and coherent price-source selection; the function neither selects
+a capture nor stitches retrievals. Existing history arithmetic is reused by
+the caller rather than recomputed here. Inputs are not mutated.
+
+| Condition | Outcome |
+|---|---|
+| Price anchor | Reuse `panel_math._anchor_index`: strictly before the event and on-or-before an explicit decision date; return the actual source date as `runup_asof` |
+| Missing or insufficient price history | Preserve legacy missing market-feature values and `NaT` anchor; event-history features remain independently available |
+| Anchor before the first price row | Leave market features missing; never use negative indexing |
+| Malformed required event columns or incompatible values | Propagate pandas/NumPy input errors; no fabricated defaults |
+| Cache, retry, transaction | No cache or side effects; identical inputs give identical outputs |
+
+This module depends only on pandas, NumPy, and the sibling anchor helper.
+It performs no I/O, training, inference, or legacy import. It has no production
+caller yet; adding this arithmetic alone does not change a nightly or board.
+
 ## Inputs
 
 - `panel_math.history_features`/`_causal_ema`: a ticker's prior realized
