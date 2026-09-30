@@ -31,7 +31,7 @@ wiring anything to call it.
   explicit, timezone-aware timestamp, and `observed_at` must be
   on-or-before the decision cutoff, or the call raises
   `FeatureContextError` (`engine.v2.contracts.scoring.FeatureFrame`).
-- `panel_math` — five pure functions with no `FeatureRecipe`/`FeatureFrame`
+- `panel_math` — six pure functions with no `FeatureRecipe`/`FeatureFrame`
   wrapping of their own (see below). Nothing in this package or any other
   yet constructs a `FeatureRecipe` or calls `FeatureContextPlanner` for
   this math; that binding is future work.
@@ -41,6 +41,7 @@ wiring anything to call it.
 | Function | Shape | Status |
 |---|---|---|
 | `history_features(prior_moves, prior_abs) -> dict` | plain sequences in, plain mapping out | byte-identical copy of `engine.data.features.panel.history_features` |
+| `advance_history(last_row) -> dict` | one prior panel row in, fresh mapping out | arithmetic port of `engine.features.advance_history`, resuming stored aggregates without rereading truncated panel history |
 | `_causal_ema(history, span) -> float \| None` | plain list in, scalar out | byte-identical copy of `engine.data.features.panel._causal_ema`; `history_features`'s helper |
 | `_anchor_index(series_dates, event_dates, as_of_dates) -> np.ndarray` | numpy arrays in and out | byte-identical copy of `engine.data.features.panel._anchor_index` |
 | `add_implied_history(df) -> pd.DataFrame` | DataFrame in, DataFrame out | byte-identical copy of `engine.data.features.panel.add_implied_history` — the one function in this module that is pandas-shaped, because its ported body is itself pandas code (`groupby`/`shift`/`expanding`) |
@@ -51,6 +52,9 @@ wiring anything to call it.
 - `panel_math.history_features`/`_causal_ema`: a ticker's prior realized
   moves and their absolute values, as plain float sequences — no I/O, no
   source dependency.
+- `panel_math.advance_history`: one caller-selected realized panel row with
+  its count, move, absolute move, means and span EMAs; implied-move fields
+  are optional. The caller owns ticker/event selection and causal cutoffs.
 - `panel_math._anchor_index`: three numpy datetime arrays (a market
   series's own dates, event dates, and an optional as-of ceiling).
 - `panel_math.add_implied_history`: a DataFrame that already carries
@@ -65,6 +69,9 @@ wiring anything to call it.
 
 ## Outputs
 
+- `advance_history`: incremented count and stepped move/implied means and
+  span EMAs, preserving legacy NaN behavior. Missing implied observations
+  retain a known implied mean; unavailable means/EMAs stay unavailable.
 - `history_features`: a fixed-key mapping (`n_prior`, `mean_prior_move`,
   `mean_prior_abs_move`, and `ema{2,4,8,12}_prior_{move,abs_move}`), every
   key always present, with `None` for a window that has not yet reached its
@@ -127,6 +134,10 @@ new pattern. No network, filesystem, or database access anywhere in
 `panel_math`.
 
 ## Failure semantics
+
+`advance_history` adds no validation or fallback: missing required keys and
+invalid scalar arithmetic propagate Python/pandas errors. It does not mutate
+the input, read dates, infer observation stamps, or enforce a cutoff.
 
 `context.py`/`recipes.py` are not pure math and do raise:
 
