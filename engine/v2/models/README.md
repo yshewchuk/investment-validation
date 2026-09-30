@@ -30,6 +30,7 @@ underscore convention, and an import of a name absent from this list fails
 
 ArtifactMember, ModelBinding, ModelRelease, InferenceRequest, InferenceResult,
 PredictionFrame,
+SizeFoldPolicy, ServingFoldDescriptor (from `serving_folds`, offline metadata),
 FrozenInference, the inference adapters, ModelArtifactInventory,
 ArtifactInventoryMember, ReleaseBinding, ReleaseRequirement,
 ModelReleaseInventory, ReleaseIssue, ModelReleaseRefusal, release_issues,
