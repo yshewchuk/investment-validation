@@ -634,16 +634,13 @@ raw-row producer.
 snapshot before scoring.** `nightly_trigger._default_plan` runs in
 `input_mode="snapshot"`, `snapshot_scope="shadow"` (was `"legacy"`/`None`):
 legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
-`"model_evidence"` and, once
-[#199](https://github.com/yshewchuk/investment-validation/issues/199) AND
-[#200](https://github.com/yshewchuk/investment-validation/issues/200)
-both land, `native_score_batch` all read through ONE pinned, frozen
-snapshot per session, removing "legacy and native read the store at two
-different moments" from the shadow comparison — #199 gives
-`native_score_batch` a reader at all, and #200 is what makes
-`pin_snapshot_inputs` actually bind to the EXACT `snapshot_id`
-`_ensure_shadow_snapshot` verified rather than re-resolving the head
-independently. This never touches the real legacy nightly:
+`"model_evidence"` read through one pinned, frozen snapshot per session.
+`pin_snapshot_inputs` binds that snapshot to the exact `snapshot_id`
+`_ensure_shadow_snapshot` verified. Extending that shared snapshot to
+`native_score_batch` still depends on
+[#199](https://github.com/yshewchuk/investment-validation/issues/199)'s reader,
+which removes independent legacy/native store reads from the shadow comparison.
+This never touches the real legacy nightly:
 `nightly_trigger.py` runs on its own systemd timer
 (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate
 from whatever schedules the legacy nightly, with no code path into the
