@@ -1247,149 +1247,70 @@ today; this describes the destination once #199 lands.
 
 ## Dependencies
 
-Imports observed in this package's own source, top-level and lazy
-(mechanically walked by `.oc_logs/import_scan.py`, an `ast` walk over
-every `.py` file that reports every `engine.*` import at any depth,
-including inside function bodies):
+Top-level imports, all strictly below this package's own layer (7.0):
+`engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5), `engine.v2.data`
+(1.0 — `generic_incremental`/`incremental_tables`/`repository.Repository`/
+`computed_moves`/`computed_moves_table`), `engine.v2.registry` (3.0,
+`DYNAMIC_MENU`), `engine.v2.scoring` (5.0 — `native_board_universe.py`'s
+`SUPPORTED_STRATEGIES`/`source_inputs`; `native_score_batch.py`'s
+`release_bindings`/`nightly_source_bundle`/`source_inputs`/`stages`/
+`identity`/`application`), `engine.v2.ledger` (6.0), `engine.v2.parity`
+(6.5). `engine.v2.models` (3.5) and `engine.v2.domain.generation` (2.0,
+`Geometry`/`Pricing`) are lazy-only, never at module top level.
+`engine.v2.domain.generation` is imported only at one rescore/
+native-score-input call site (`cli.py::_load_native_score_inputs`);
+`engine.v2.models` (`no_fit`/`payoff_artifact`/`deployment`/`training`/
+`RuntimeFitForbidden`/`TrainingRefused`) has more call sites, spanning
+rescore (`cli.py`, `native_score_batch.py`, `worker.py`) as well as
+`training.py`'s and `supervisor.py`'s own training/promotion/
+release-resolution call sites — including `training.py`'s `promote_plan`,
+one of the plan-builder functions the Invariants section below cites for
+self-derived fingerprinting roots.
 
-- Top-level: `engine.v2.contracts` (0.0), `engine.v2.foundation` (0.5),
-  `engine.v2.data` (1.0), `engine.v2.registry` (3.0, `native_board_universe.py`'s
-  `DYNAMIC_MENU` import), `engine.v2.scoring` (5.0, `native_board_universe.py`'s
-  `SUPPORTED_STRATEGIES` import), `engine.v2.ledger` (6.0), `engine.v2.parity`
-  (6.5) — all strictly below this package's own layer (7.0), per the root
-  doc's §2 rule. `forward_calendar_store.py` adds one new `engine.v2.data`
-  submodule to this package's dependency surface,
-  `engine.v2.data.computed_moves` (`native_trading_calendar`, layer 1.0),
-  alongside its existing top-level use of `generic_incremental`,
-  `incremental_tables` and `repository.Repository`. `nightly.py`'s own
-  `_build_native_computed_moves_plan` (Part 4) adds a lazy import of
-  `engine.v2.data.computed_moves_table` (`COMPUTED_MOVES_TABLE_NAME`,
-  layer 1.0) and reuses this same package's `computed_moves_store`/
-  `incremental_data`/`repository.Repository` — no new cross-package edge,
-  since `engine.v2.data` was already a top-level dependency here.
-  `native_score_batch.py` (new) imports `engine.v2.scoring.release_bindings`
-  (`ScoringReleaseBinding`, `resolve_release_binding`),
-  `engine.v2.scoring.nightly_source_bundle`
-  (`assemble_nightly_source_bundle`, `NightlySourceBundleRefusal`),
-  `engine.v2.scoring.source_inputs` (`build_native_score_inputs`),
-  `engine.v2.scoring.stages` (`NativeScoreInputs`, the type only),
-  `engine.v2.scoring.identity` (`request_hash`), and
-  `engine.v2.scoring.application` (`score_batch`) — all layer 5.0, already
-  this package's top-level dependency via `native_board_universe.py`, so no
-  new cross-package edge — plus `engine.v2.ops.native_board_universe`
-  (`BoardRequest`, reused unchanged as this module's batch-map key; a
-  same-layer, intra-package import) and `engine.v2.contracts`
-  (`ScoreRequest`, `ScoreBatch`, layer 0.0, already top-level here).
-  `engine.v2.models.no_fit` (`no_fit_guard`) is imported lazily, inside
-  `run_native_score_batch_worker` only — the same lazy pattern
-  `worker.py::_dispatch_adhoc_rescore` already uses for the same symbol, so
-  `engine.v2.models` stays lazy-only for this package.
-- Lazy, function-local: `engine.v2.contracts` also appears lazily
-  (`cli.py::_decisions_supersede`, `cli.py::rescore_command`,
-  `cli.py::whatif_action`); `engine.v2.data`/`engine.v2.foundation`/
-  `engine.v2.ledger` also have lazy call sites (`cli.py`, `bootstrap.py`)
-  in addition to their top-level ones; `unit_receipts.py` adds further
-  lazy `engine.v2.data` call sites of its own — `record_unit_receipt` and
-  `cached_unit_payloads` each import `engine.v2.data.incremental`
-  (`cache_raw_receipt`/`RawPayload`, and `load_raw_receipt`), and
-  `cached_unit_outcomes` imports both `engine.v2.data.incremental`'s
-  `_jsonable` and `engine.v2.foundation`'s `content_hash`;
-  `engine.v2.models` is lazy-only
-  (`cli.py::_restored_model_block` — `payoff_artifact`,
-  `cli.py::rescore_command` — `no_fit`, `worker.py::_dispatch_adhoc_rescore`
-  — `no_fit`, both layer 3.5); `engine.v2.domain.generation` is lazy-only
-  (`cli.py::_load_native_score_inputs` — `Geometry`/`Pricing`, layer 2.0).
-  `engine.v2.scoring` is no longer lazy-only: alongside its existing lazy
-  call sites (`cli.py::_load_native_score_inputs` — `stages`,
-  `cli.py::rescore_command` and `worker.py::_dispatch_adhoc_rescore` —
-  `application.score_one`, backing `rescore`/ad-hoc-rescore's read-only
-  re-score path, root doc's CLI list `rescore --request --native-inputs`),
-  `native_board_universe.py` now imports `engine.v2.scoring.source_inputs`
-  at top level — still strictly below layer 7.0.
-  `native_board_universe.py` itself has no lazy imports: both of its
-  `engine.v2.*` imports (`registry`, `scoring`) are top-level, alongside
-  its top-level `engine.v2.ops.errors` import.
+It does not import its layer-7.0 peers `engine.v2.serving`/
+`engine.v2.research`, or anything above them (`engine.v2.diagnosis`,
+`engine.v2.dashboard`), lazily or otherwise. Legacy reads go through the
+one declared adapter module, `engine/v2/ops/legacy_adapter.py`
+(`checks/legacy_adapters.json`); its own further legacy `engine.*` imports
+are the adapter's job and are not layer-checked v2 dependencies.
 
-It does not import its layer-7.0 peers `engine.v2.serving` or
-`engine.v2.research`, or anything above it (`engine.v2.diagnosis` at 7.5,
-`engine.v2.dashboard` at 8.0), lazily or otherwise. Legacy reads go
-through the one declared adapter module, `engine/v2/ops/legacy_adapter.py`
-(`checks/legacy_adapters.json`) — its own further legacy `engine.*` lazy
-imports (`engine.calendar`, `engine.data*`, `engine.dashboard`,
-`engine.evaluate`, `engine.features`, …) are exactly the adapter's job and
-are not layer-checked v2 dependencies.
+`native_board_universe.py` deliberately never imports `engine.score`,
+`engine.structures`, `engine.replay`, or `engine.fills` — the first two
+each pull in `engine.replay`/`engine.fills` (the legacy chain index and
+fill model) at their own top level, which would violate the isolation
+invariant at import time even for a read-only comparison. It performs no
+consistency check against `engine.score.DISABLED_STRATEGIES` either:
+`SUPPORTED_STRATEGIES` (native's own input-builder strategy set, exported
+from `engine.v2.scoring.source_inputs`) already excludes both disabled
+strategies by construction, so no legacy read is needed; it is instead
+checked against `engine.v2.registry.strategies.DYNAMIC_MENU` (a subset
+assertion paid once at import time, no I/O, no legacy dependency).
 
-`native_board_universe.py` deliberately does not depend on `engine.score`,
-`engine.structures`, `engine.replay`, or `engine.fills`: `engine.score`'s
-own top-level import block pulls in `engine.replay` → `engine.fills` (the
-legacy chain index and fill model), and `engine.structures`'s own
-top-level import block pulls in `engine.fills` directly — importing
-either, even solely to read a registry key set for a read-only
-comparison, would violate the isolation invariant at import time, before
-any call happens. It also performs no read-only consistency check against
-`engine.score.DISABLED_STRATEGIES` (the legacy scorer's own
-strategy-refusal set, unextracted, unexported): any v2 → legacy import
-must be declared in `checks/legacy_adapters.json`, whose adapter count may
-only shrink, and `engine.v2.ops` already has its one allowed adapter
-module (`legacy_adapter.py`, above). `SUPPORTED_STRATEGIES` already
-excludes both disabled strategies by construction (it comes from native's
-own input builder, which has no entry for CAL-P/CND-P), so no such check
-is needed — this module reads the native-covered set from
-`engine.v2.scoring.source_inputs` only, and checks it against
-`engine.v2.registry.strategies.DYNAMIC_MENU` (a subset assertion paid
-once at import time, no I/O, no legacy dependency). `SUPPORTED_STRATEGIES`
-is `engine.v2.scoring.source_inputs`'s public alias for its own
-pre-existing internal strategy set (`_STRATEGY_FORECAST_OUTPUTS`'s key
-set: `STR-THRU`, `STR-RUNUP`, and the seven `DYNAMIC_MENU` members) — the
-same value that module already computed for its own input-building use;
-exporting it added a name, not a behavior, and gave this module the one
-fact it needs (which strategies native can build scoring inputs for)
-without duplicating that set here.
-
-Callers: `engine.v2.dashboard._server`'s lazy, documented import of
+**Callers:** `engine.v2.dashboard._server`'s lazy, documented import of
 `cli.refresh_action` (root doc §4); the `tools/v2_*.py` operator CLIs
-(direct import — permitted, since `tools/*` is not a layered production
-package per the root doc's §1); `experiments/*` runners submitting plans;
-`checks/rearchitecture_*.py` verification scripts (read-only inspection);
-and the `tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package
-above layer 7.0 imports this package, and no legacy `engine/**` module
-does either — none except the documented lazy `engine.v2.dashboard._server`
-caller of `cli.refresh_action` noted above. `board_requests` has no
-production caller today: it is a library function exercised only by its
-own tests (`tests/test_v2_ops_native_board_universe.py`), part of the
-`tests/test_v2_ops_*.py` suite above. It becomes reachable once a later
-stage adds a `native_score` job kind to the nightly graph and calls it as
-that job's first step — out of scope for this change.
+(direct import — permitted, `tools/*` is not a layered production package
+per the root doc's §1); `experiments/*` runners submitting plans;
+`checks/rearchitecture_*.py` verification scripts; and the
+`tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package above
+layer 7.0 imports this package, and no legacy `engine/**` module does
+either, except that one documented dashboard caller. `board_requests` has
+no production caller today — exercised only by its own tests — pending the
+still-missing raw-row producer
+([#199](https://github.com/yshewchuk/investment-validation/issues/199)).
 
 ## External systems and libraries
 
-`sqlite3` (the operations catalog); the local filesystem (artifact store,
-snapshot roots, legacy px/fetch-cache trees read through the adapter); the
-market-data provider accounts this package's `provider-account` command
-budgets against (`engine/v2/ops/providers/`) — credentials themselves are
-never held here, only remaining-call/reserve counts. Three accounts exist
-today: `orats-daily-market` (keyed, reads `ORATS_API_KEY`); and, as of spec
-s4c, `nasdaq` and `yfinance` — both unmetered and keyless (their
-`PROVIDER_CREDENTIAL_VARIABLES` tuples are empty), but still
-operator-provisioned budget rows so the shared scheduler reserves against
-them like any keyed account. `providers/nasdaq_calendar.py` calls Nasdaq's
-public `api.nasdaq.com/api/calendar/earnings` endpoint (one date per call,
-a plain keyless HTTPS GET with a browser user-agent — the endpoint refuses
-the default client UA with a 403); `providers/yfinance_edge.py` wraps the
-third-party `yfinance` library (imported lazily, only inside the default
-callables, so importing the module touches no network) — one
-`Ticker.history`/`Ticker.get_earnings_dates` call per ticker, never a
-direct HTTP client of its own.
+| System / library | Used for | Notes |
+|---|---|---|
+| `sqlite3` | the operations catalog | — |
+| Local filesystem | artifact store, snapshot roots, legacy px/fetch-cache trees | legacy trees are read only through `legacy_adapter.py` |
+| `orats-daily-market` provider account | ORATS daily-market rows | keyed, reads `ORATS_API_KEY`; credentials are never held here, only remaining-call/reserve counts |
+| `nasdaq` provider account (`providers/nasdaq_calendar.py`) | forward-calendar rows via Nasdaq's public `api.nasdaq.com/api/calendar/earnings` endpoint, one date per call | unmetered, keyless (empty `PROVIDER_CREDENTIAL_VARIABLES`); still budget-tracked like a keyed account; needs a browser user-agent (the endpoint 403s the default client UA) |
+| `yfinance` provider account (`providers/yfinance_edge.py`) | quote/earnings-date rows via the third-party `yfinance` library (`Ticker.history`/`Ticker.get_earnings_dates`, one call per ticker) | unmetered, keyless; `yfinance` is imported lazily inside the default callables, so importing the module touches no network |
+| `pandas`/`numpy` | `native_board_universe.py`'s events-table filter, `BoardRequest.event_date` typing, and its `isinstance(v, (numbers.Number, np.number))` scalar-date guard | already transitive dependencies of this package; no file, network, or database access of their own |
 
-`native_board_universe.py` adds no new external system: `pandas` (already
-a transitive dependency of this package) is its main library, for the
-events-table filter and the `BoardRequest.event_date` type; it also imports
-`numpy` (an existing transitive dependency of `pandas`, now imported
-directly) and the standard-library `numbers` module, both used only for the
-`isinstance(v, (numbers.Number, np.number))` scalar-type check that refuses
-a bare number wherever a date is expected (a numpy scalar such as
-`np.int64` in an `object`-dtype column, or as `as_of` itself) — no file,
-network, or database access.
+All three provider accounts are operator-provisioned budget rows so the
+shared scheduler reserves against them uniformly, keyed or not.
 
 ## Failure semantics
 
@@ -1533,60 +1454,47 @@ job.
 
 ## Invariants
 
-Enforces or is bound by, from the root doc §5: missing-input typed
-refusal; no parity-only mode (`native_parity` runs the real code and is
-never given a legacy-shaped branch); one shared parity comparator
-(`native_parity_report.py` calls `engine/v2/parity`, never a second
-comparator); snapshot/root isolation (data and artifact paths resolve
-through `engine.paths`/the v2 foundation, never a module's own
-`Path(__file__)`-derived root) — the one documented exemption is worker-*source*
-fingerprinting: `build_legacy_job_requests` computes `implementation_ref`
-from `worker_source_manifest(Path(__file__).resolve().parents[3])`, a code
-closure keyed to where `nightly.py` itself sits on disk, independent of
-the plan's `source_root`/`catalog_path`/`objects_root`. That fingerprint
-answers "what worker code is running," not "which data root," so it is
-never redirected by a request's or plan's root; nothing else in this
-package may adopt the same pattern for a data or artifact path. That
-exemption does NOT extend to `submit_computed_moves_refresh_if_ready`
-(Part 4, CodeRabbit finding on the Opus re-gate): `build_legacy_job_requests`
-is CLI/plan-driven, with no `Service` in its call chain, so its self-derived
-root and `cli.py`'s own separately self-derived `Service(code_source=...)`
-happen to agree only because both files sit in the same checkout at the
-same relative depth; `submit_computed_moves_refresh_if_ready` instead runs
-INSIDE a live `Service` (called from `Service._reconcile_computed_moves_refresh`),
-which already has its own authoritative worker-source root
-(`self.code_source`, what `Service._launch` validates `implementation_ref`
-against) — so it takes `code_source` as a caller-supplied parameter and
-fingerprints THAT, never a root of its own; nothing published carries a
-local path, raw exception text, or an unsanitised free-text field —
-`worker.py`'s convention (a caught traceback goes to a private per-attempt
-file, never the result pipe) is the model other stages in this package
-follow.
+Enforces or is bound by, from the root doc §5: missing-input typed refusal;
+no parity-only mode (`native_parity` runs the real code, never a
+legacy-shaped branch); one shared parity comparator (`native_parity_report.py`
+calls `engine/v2/parity`, never a second comparator); snapshot/root
+isolation (data and artifact paths resolve through `engine.paths`/the v2
+foundation, never a module's own `Path(__file__)`-derived root); a root-doc
+requirement, not something this package mechanically enforces everywhere,
+is that nothing published carries a local path, raw exception text, or an
+unsanitised free-text field. `worker.py` keeps a caught traceback in a
+private per-attempt file, never the result pipe, which is the model other
+stages follow — but that one convention does not by itself cover every
+diagnostic or native batch output writer in this package.
 
-`native_score_batch.py` touches the same missing-input typed-refusal
-invariant (above, split into batch-level raises vs. per-row refusals — see
-"Failure semantics") and adds one of its own: **no runtime fitting**
-(root doc §2's layer-6.0 rule, "never runs inside a score request") —
-`run_native_score_batch_worker` runs `score_batch` inside
+**The one documented root-isolation exemption is worker-*source*
+fingerprinting**, and it applies only to that — never to a data or artifact
+root. A plan builder that runs outside a live `Service`
+(`build_legacy_job_requests`, and `training.py`'s/`experiments.py`'s own
+plan builders) may self-derive its own worker-source fingerprint root,
+since it has no live `Service` to draw one from. A stage that runs *inside*
+`Service` (`submit_computed_moves_refresh_if_ready`) must instead take
+`code_source` as a caller-supplied parameter and fingerprint that, never a
+root of its own.
+
+`native_score_batch.py` adds **no runtime fitting** (root doc §2's
+layer-6.0 rule): `run_native_score_batch_worker` runs `score_batch` inside
 `engine.v2.models.no_fit.no_fit_guard()`, the same guard
-`worker.py::_dispatch_adhoc_rescore` already wraps `score_one` in, so this
-job kind can never silently fit a model even if a future change to
-`assemble_score_batch_inputs` accidentally fed it a fitting path.
+`worker.py::_dispatch_adhoc_rescore` wraps `score_one` in.
 
-`native_board_universe.py` touches the same missing-input typed-refusal
-invariant (above) and adds two of its own, scoped to that module:
-- **Native vs. legacy values** — `ticker`, `event_date`, and `session` come
+`native_board_universe.py` adds two invariants of its own:
+- **Native vs. legacy values.** `ticker`, `event_date`, and `session` come
   from the shared events table, which neither side owns; `strategy` comes
   from the native-covered strategy set (`SUPPORTED_STRATEGIES`) or the
-  `DYN-SV` literal, never from the events table. The module's one
-  consistency assertion (`DYNAMIC_MENU` is a subset of
-  `SUPPORTED_STRATEGIES`) reads only v2-native names — it does not import
-  `engine.score`'s `DISABLED_STRATEGIES` or any other legacy-owned name.
-- **Isolation** — this module never loads the legacy option-chain index
-  and never constructs a legacy `Scorer`; it also never *imports*
-  `engine.score` or `engine.structures`, so its import graph never reaches
-  `engine.replay`/`engine.fills` either — the isolation holds at import
-  time, not only at call time.
+  `DYN-SV` literal, never from the events table. Its one consistency
+  assertion (`DYNAMIC_MENU` is a subset of `SUPPORTED_STRATEGIES`) reads
+  only v2-native names — never `engine.score.DISABLED_STRATEGIES` or any
+  other legacy-owned name.
+- **Isolation.** This module never loads the legacy option-chain index or
+  constructs a legacy `Scorer`, and never *imports* `engine.score` or
+  `engine.structures`, so its import graph never reaches
+  `engine.replay`/`engine.fills` either — isolation holds at import time,
+  not only at call time.
 
 ## Diagrams
 
@@ -1618,90 +1526,50 @@ flowchart TD
 ```
 
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
-blocks the graph. This diagram is the *shadow* graph: `build_nightly_plan`
-stamps `graph_order()`'s output into every plan's `"order"` field, and
-`run_shadow_nightly` is the only function that walks it whole, inline — it
-has no production caller, only `tests/test_v2_ops_legacy_workflows.py` and
-`tests/test_v2_ops_native_shadow_render.py` call it, for every stage
-including `native_parity`. `computed_moves_refresh` (Part 4) is a real
-submittable job kind reached a DIFFERENT way — through its own tick-loop
-sidecar (`Service._reconcile_computed_moves_refresh`), never through this
-graph's own walk.
+blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly`
+is the only function that walks it whole, inline, for every stage
+including `native_parity`; it has no production caller, only
+`tests/test_v2_ops_legacy_workflows.py` and
+`tests/test_v2_ops_native_shadow_render.py` call it.
+`computed_moves_refresh` and `native_score_batch` are both real submittable
+job kinds and `GRAPH` nodes; `run_shadow_nightly` reaches both through its
+whole-graph walk. Automatic *production* submission reaches them only
+through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` /
+`Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters
+both out of every job-submission stage list by name (see "Outputs").
+`native_score_batch`'s
+sidecar never actually reaches `submission.submit` today:
+`submit_native_score_batch_shadow_if_ready` returns a normal no-op if the
+selected `"score"` job pinned no snapshot (never a JobSpec, never a raise),
+and raises `VALIDATION_FAILED` only for a new eligible snapshot-pinned job,
+since the raw-row producer that would build `events.json`
+([#199](https://github.com/yshewchuk/investment-validation/issues/199))
+does not exist yet — see "Outputs"/"Failure semantics" for both cases.
 
-`native_score_batch` (Cutover PR-7a) has a real call path reached through
-the tick sidecar, the same sidecar mechanism `computed_moves_refresh` uses
-— but, unlike `computed_moves_refresh`, that path never actually reaches
-`submission.submit` today: `submit_native_score_batch_shadow_if_ready`
-refuses (R1) before building a `JobSpec` whenever the selected `"score"`
-job pinned no snapshot (production's own default), and raises instead of
-building one in the reachable pinned-snapshot case, since the raw-row
-producer that would build `events.json` (cutover PR-6) is not built by
-this PR — see "Outputs"/"Failure semantics" above for both cases and the
-identical race/all-or-nothing rationale `computed_moves_refresh` already
-establishes for why this is never folded into this graph's submission
-path. **This diagram is `nightly.py::GRAPH`/`OPTIONAL` as they exist
-today**, exactly like `#54` added `computed_moves_refresh`'s own edge/node
-to this same diagram when IT shipped code: the
-`score -.-> native_score_batch` edge/node above is real, matching
-`GRAPH`/`OPTIONAL`, not aspirational — a real GRAPH node existing, and a
-real call path to it existing, is not the same claim as a job actually
-being submitted through it. `_stage_sequence` filters `native_score_batch`
-out of every job-submission stage list by name, the identical treatment
-`computed_moves_refresh` already gets, since `supervisor.Service`'s own
-tick loop — never `build_legacy_job_requests`/`run_shadow_nightly` — is
-its only (so far always-refusing) submitter (see "Outputs" above).
+**`native_parity`.** The job kind and its worker
+(`run_native_parity_worker`, dispatched from `worker.py`) are shipped. What
+remains unbuilt is the production submission sidecar
+(`_reconcile_native_parity`/`submit_native_parity_if_ready`) that would
+reach it the same tick-loop way `computed_moves_refresh`/
+`native_score_batch` are reached — until that sidecar exists,
+`native_parity`'s only caller is `run_shadow_nightly`'s own whole-graph
+walk, and its node above (`"native_parity": ("score",)`) stays as drawn.
 
-`native_parity` (Cutover PR-4 redo, `#118`, design) is designed to become a
-real submittable job kind reached the SAME way, through its own tick-loop
-sidecar (`_reconcile_native_parity`) — see that design's own
-"Outputs"/"Failure semantics" for `submit_native_parity_if_ready` and the
-identical race/all-or-nothing rationale above for why it will never be
-folded into this graph's submission path once it exists. Neither this PR
-(#126) nor `#118` ships `native_parity` code: today its only registered
-handler (`native_parity_handler`, `_registered_handlers`) still runs
-inline, exclusively inside `run_shadow_nightly`'s own whole-graph walk —
-matching the discipline `#88`'s own CodeRabbit review established for
-`native_score_batch`'s own diagram edge above (an earlier draft added that
-edge before code shipped, which was wrong). `native_parity`'s existing
-node (`"native_parity": ("score",)`, `nightly.py:60`) is left exactly as
-it appears above, even though "Primary contracts" above describes Phase 2
-widening it to `("score", "native_score_batch")` — the redo's design does
-not get ahead of its own not-yet-shipped code. `NO_JOB_STAGES` still reads
-`frozenset({"native_parity"})` today; the "Corrected by this redo" note
-below describes the state once that future code lands, not the state now.
-
-Production job **submission** does not walk this graph. `build_legacy_job_requests`'s
-only production caller, `cli.py`, always passes `include_prerequisites=False`,
-so `_stage_sequence` returns a second, separately hand-maintained tuple,
-`_DAG_STAGES` — whose stage names diverge from this diagram's
-(`decision_replay`/`decision_evidence`/`decision_commit` where this graph
-has `decision_validation`/`decision_commit`; `ledger_export` for `export`;
-`engineering_gate` for `engineering`) — and which never contains
-`native_parity` at all: in production `native_parity` is simply absent
-from the submitted stage list, not removed by a filter. **Corrected by
-this redo:** `NO_JOB_STAGES` used to read `frozenset({"native_parity"})` —
-true only while `native_parity` had no job kind at all. Now that it does
-(Cutover PR-4 redo, above), `NO_JOB_STAGES` is empty, and `_stage_sequence`'s
-own by-name filter (the one already excluding `computed_moves_refresh`
-from a prerequisite-inclusive, test-only `plan["order"]` walk, below)
-gains `"native_parity"` alongside it, for the identical reason: a real job
-kind that is nonetheless never submitted through
-`_DAG_STAGES`/`build_legacy_job_requests` must still be excluded from the
-test-only walk's OUTPUT by name, since it is no longer excluded for free
-by having "no job" at all. `computed_moves_refresh` is not in `_DAG_STAGES`
-either, and — unlike in the first cut of Part 4 — `_stage_sequence` never
-prepends it in native mode any more: `refresh_mode="native"` prepends only
-`("refresh",)` now, exactly as before this stage existed, and
-`_NATIVE_ACTION_STAGES` maps only `"refresh"`. In legacy mode,
-`_stage_sequence` filters both `"computed_moves_refresh"` and, from this
-redo on, `"native_parity"` out of a prerequisite-inclusive `plan["order"]`
-walk explicitly, by name, since neither is a member of
-`_NATIVE_ACTION_STAGES` to fall out of that check for free. Both stages
-reach production submission through a FOURTH path entirely, outside
-`_stage_sequence`/`build_legacy_job_requests` altogether:
-`supervisor.Service`'s own tick loop. See "Outputs"/"Failure semantics"
-above for `submit_computed_moves_refresh_if_ready`/`submit_native_parity_if_ready`
-and why each was pulled out of the graph-submission path.
+**Production job submission does not walk this diagram's graph at all** —
+it uses the separately maintained `_DAG_STAGES`, which never contains
+`native_parity`, `computed_moves_refresh`, or `native_score_batch`. None of
+the three reach production submission that way; the only path for any of
+them is `supervisor.Service`'s own tick loop, and each stage's actual
+reach differs: `computed_moves_refresh`'s sidecar
+(`Service._reconcile_computed_moves_refresh`) does reach
+`submission.submit`; `native_score_batch` has a sidecar that does not
+reach `submission.submit` today (see "Outputs"/"Failure semantics" for its
+no-op and `VALIDATION_FAILED` conditions); `native_parity` has no automatic
+production submission sidecar at all (see "`native_parity`" above) —
+`run_shadow_nightly`'s shadow walk is its only actual caller today, though
+the generic `submission.submit` API could enqueue a bound job if a caller
+built one directly, exactly as `board_requests` above is a library
+function nothing calls yet.
 
 ### CLI → catalog → coordinator effect
 
@@ -1774,30 +1642,31 @@ commit happens until the combined kind list is clean.
 
 ```mermaid
 flowchart LR
-    SS[("shadow scope snapshot\n(Cutover PR-7b design:\n_ensure_shadow_snapshot)")] -.->|"Repository.scan\n(earnings_events)"| ET[events_table]
-    ET --> BR[board_requests]
+    ET[events_table] --> BR[board_requests]
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
-    BR -.->|"still-missing raw-row producer\n(cutover PR-6)"| NC[(nightly.submit_native_score_batch_shadow_if_ready)]
+    BR -.->|"still-missing raw-row producer\n(#199)"| NC[(nightly.submit_native_score_batch_shadow_if_ready)]
 ```
 
-`board_requests` is meant to get its first real caller from the still-missing
-raw-row producer (cutover PR-6, "Cutover PR-7a's input sourcing" above):
-enumerating the session's `BoardRequest`s from it, to stage each one's
-`calendar_row`/`panel_row`/`panel_anchor`/`tier4_row`/`quote_rows` into
-`events.json`. Cutover PR-7a's own code (implemented) never reaches this
-step: under today's production default (`"legacy"` input mode) the selected
-`"score"` job always pinned no snapshot, so
-`submit_native_score_batch_shadow_if_ready` refuses (R1) before there is
-anything to enumerate. The dashed edge is therefore still aspirational, not
-a pre-existing fact, until PR-6 lands — see "Dependencies" → "Callers"
-above and "Primary contracts" above for the full account. The dashed
-`events_table` edge is Cutover PR-7b's own design (above), also not yet
-built: before PR-7b's code lands, nothing commits the `shadow`-scope
-snapshot `events_table` would need to be scanned from at all —
-`computed_moves_store._scan_once`'s identical `earnings_events` scan is
-the precedent this edge follows, not a new read path.
+`board_requests` itself only consumes an `events_table` a caller passes
+in; it does no scanning of its own. `_ensure_shadow_snapshot` commits a
+real shadow-scope snapshot via `import_snapshot.plan_import`/
+`submit_import` only — never a `Repository.scan("earnings_events")` call,
+which belongs to `computed_moves_store._scan_once` instead, a different
+boundary. It is reachable today for `nightly_trigger._default_plan`'s
+scheduled `"score"` job specifically (see "Primary contracts"); a plan
+built directly with the lower-level plan builder can still default to
+`legacy` input mode instead. What is still missing is the dashed edge: the
+raw-row producer
+([#199](https://github.com/yshewchuk/investment-validation/issues/199))
+that would enumerate `board_requests` and stage each one's raw rows into
+`events.json` (see "Inputs"/"Cutover PR-7a's input sourcing"). Until it
+lands, a snapshot-pinned `"score"` job reaches this missing producer and
+`submit_native_score_batch_shadow_if_ready` raises `VALIDATION_FAILED`
+without submitting a batch (see "Outputs"/"Failure semantics" for
+its condition-outcome table); `board_requests` has no production caller
+today for the same reason (see "Dependencies" → "Callers").
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 
