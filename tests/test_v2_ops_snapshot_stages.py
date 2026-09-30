@@ -1203,3 +1203,17 @@ def test_pin_snapshot_inputs_pins_the_exact_receipt_it_resolved(case):
                                 expected_population=("AAA|S1|2020-01-15",), clock=case.clock,
                                 session=SESSION)
     assert later["snapshot_generation_receipt_id"] == "r2-references"
+
+
+def test_pin_snapshot_inputs_returns_calendar_version_matching_the_resolved_snapshot(case):
+    """Issue #200 item 1 (cutover PR-7b-3): the returned dict now carries calendar_version
+    straight off the already-resolved SnapshotRef, so a caller building native_score_batch's
+    batch-level calendar_revision never re-fetches/re-parses the published SnapshotRef a second
+    time. The expected_snapshot_id CAS check (#200 item 2) is separate and not added here."""
+    from engine.v2.ops.snapshot_planning import pin_snapshot_inputs
+
+    result = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
+                                 year_start=2020, year_end=2021,
+                                 expected_population=("AAA|S1|2020-01-15",), clock=case.clock,
+                                 session=SESSION)
+    assert result["calendar_version"] == case.snap.calendar_version

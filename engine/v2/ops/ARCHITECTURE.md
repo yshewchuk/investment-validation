@@ -703,10 +703,10 @@ instead of a re-resolved mutable head — closing a window where a human
 pin an unvalidated snapshot — but `pin_snapshot_inputs` does not yet
 consume that value, so the window is not closed today; that CAS check is
 [#200](https://github.com/yshewchuk/investment-validation/issues/200).
-The `events_table` scan, per-event row staging, and `calendar_revision`
-source `native_score_batch`'s raw-row producer needs are
-[#199](https://github.com/yshewchuk/investment-validation/issues/199),
-not built by this PR.
+`nightly_raw_rows.scan_forward_board_requests` scans the pinned snapshot's
+`earnings_events` and returns `BoardRequest`s for the forward window, with
+no `src_orats` filter (history-only; forward dates are Nasdaq/yfinance).
+`pin_snapshot_inputs` also returns the pinned snapshot's `calendar_version`.
 
 ## Inputs
 
