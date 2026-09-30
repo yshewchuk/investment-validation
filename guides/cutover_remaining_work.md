@@ -21,9 +21,10 @@ shadow submission either no-ops (default legacy input mode) or explicitly
 raises "raw-row producer is not built yet" when a snapshot is pinned.
 
 The redone native_parity comparison job (plan PR-4, re-scoped 2026-09-28 to
-run as a real supervisor-submitted job) has four of five slices merged; the
-slice that calls it every tick (#211) is open in review, and slice 2B(c) (a
-nightly-graph node-width change) hasn't started. The dashboard's serving
+run as a real supervisor-submitted job) has 4 of its 5 planned slices merged;
+the 5th, the tick-loop caller (#211), is open in review. A separate,
+not-yet-scoped-as-required item, slice 2B(c) (a nightly-graph node-width
+change), hasn't started. The dashboard's serving
 projection and native_parity page (#189, #198) are both merged, but the page
 renders empty (`no_report`) because nothing upstream has produced a real
 report yet. The production release binding also has no release root
@@ -63,13 +64,14 @@ owner or open PR.
 5. **native_score_batch shadow submission (PR-7a)** — Code merged,
    functionally no-op. #88, #126. Called every real tick, gated by a
    release-availability check; produces nothing until step 4 lands.
-6. **native_parity job (PR-4, redone 2026-09-28)** — 4/5 slices merged, 1
-   open, 1 unstarted. #132, #185, #191, #227 merged; #211 open. Pairs a
-   night's legacy and native records field-by-field. Re-scoped after the
-   original design named a production caller that nothing actually calls;
-   the real design is a supervisor-submitted job. Open: the tick-loop caller
-   (#211, in review). Not started: slice 2B(c), a nightly-graph node-width
-   change — scope not yet confirmed as required for Phase 7.
+6. **native_parity job (PR-4, redone 2026-09-28)** — 4 of 5 planned slices
+   merged, the 5th open in review. #132, #185, #191, #227 merged; #211 open.
+   Pairs a night's legacy and native records field-by-field. Re-scoped after
+   the original design named a production caller that nothing actually
+   calls; the real design is a supervisor-submitted job. Open: the
+   tick-loop caller (#211, in review). Separately, not counted in the 5:
+   slice 2B(c), a nightly-graph node-width change, not started — scope not
+   yet confirmed as required for Phase 7.
 7. **Dashboard side-by-side view** — Page and authenticated JSON route
    merged. #189 (serving projection), #198 (page + route). Renders a nightly
    summary, per-field diff breakdown, and worst-rows drill-down, but shows
