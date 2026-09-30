@@ -215,10 +215,12 @@ Root doc §5 invariants this package is responsible for:
   fully enforced.** `errors.py` performs no automatic redaction; each call
   site is responsible for excluding legacy paths and row-derived values
   from a `Problem`'s `details` itself. `reference_catalog.py` (issue #202)
-  and every refusal in `reference_inputs.py` (issues #217, #218) now redact
-  or drop the legacy path instead of echoing it. `import_snapshot.py` and
-  `legacy_materialization.py` still put a raw legacy path in `details` for
-  several refusals — tracked as issue
+  and the refusal sites covered by issues #217 and #218 in
+  `reference_inputs.py` now redact or drop legacy paths instead of echoing
+  them. The `TIER4_CACHE_STALE` refusal in that same file is unchanged and
+  still includes a registry-derived value in `details`. `import_snapshot.py`
+  and `legacy_materialization.py` still put a raw legacy path in `details`
+  for several refusals — tracked as issue
   [#220](https://github.com/yshewchuk/investment-validation/issues/220).
 - **Atomic snapshot commit, compare-and-swap head, never last-writer-wins.**
   Zero rows changed on the head update is `SNAPSHOT_CONFLICT`. Only
