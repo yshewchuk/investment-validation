@@ -850,10 +850,10 @@ every value it needs is already a committed job output:
   job, so `native_score_batch`'s own sidecar never resubmits it — there is
   no later run "for that session" to ever land.
 
-  If either committed artifact is missing from `attempt_outputs` or cannot
-  be decoded, `submit_native_parity_if_ready` raises non-retryable
-  `VALIDATION_FAILED` and submits no job. Storage-layer exceptions from
-  `store.read_verified` propagate to the caller.
+  Missing output bindings, undecodable documents, or confirmed artifact
+  `INTEGRITY_FAILED` errors cause non-retryable, redacted `VALIDATION_FAILED`
+  in `submit_native_parity_if_ready`, with no job submitted. Other artifact
+  errors and storage I/O failures propagate unchanged to the caller.
 
   This is a wait state exactly like the missing-job case, never a refusal
   and never a job failure — because, unlike every other input this

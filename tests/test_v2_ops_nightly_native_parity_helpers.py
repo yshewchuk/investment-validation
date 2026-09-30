@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 
 from engine.v2.foundation import ArtifactStore, format_timestamp
+from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops import nightly
-from engine.v2.ops.checkpoints import register_artifact
+from engine.v2.ops.checkpoints import artifact, register_artifact
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_parity_report import _REFUSALS_SCHEMA_VERSION, _RECORDS_SCHEMA_VERSION
 from engine.v2.ops.stages import registry
@@ -344,6 +345,75 @@ def test_native_score_batch_document_schema_ok_raises_on_invalid_json(tmp_path):
     assert exc.value.problem.retryable is False
     assert "records.json is not valid JSON" in exc.value.problem.message
     assert exc.value.problem.details["native_score_batch_job_id"] == batch_job_id
+
+
+@pytest.mark.parametrize("name", ["records", "refusals"])
+@pytest.mark.parametrize("corruption", ["hash", "size"])
+def test_native_score_batch_corrupt_committed_bytes_refuse_submission(tmp_path, name, corruption):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    batch_job_id = _seed_batch_job(conn, clock, as_of="S1", scope_hash="H1")
+    _seed_score_job(conn, clock, as_of="S1", scope_hash="H1")
+    attempt_id = _seed_batch_documents(conn, store, supervisor, clock, batch_job_id)
+    row = conn.execute("SELECT artifact_id FROM attempt_outputs WHERE attempt_id=? AND name=?",
+                       (attempt_id, name)).fetchone()
+    ref = artifact(conn, store, row[0])
+    path = store.root / ref.storage_key
+    payload = path.read_bytes()
+    # Corrupt bytes produced by the real ArtifactStore, retaining its original reference.
+    path.chmod(0o600)
+    path.write_bytes(b"!" + payload[1:] if corruption == "hash" else payload + b" ")
+
+    with pytest.raises(ArtifactError) as raw:
+        store.read_verified(ref)
+    assert raw.value.code == "INTEGRITY_FAILED"
+    for check in (
+        lambda: nightly._native_score_batch_document_schema_ok(conn, store, batch_job_id),
+        lambda: _submit(conn, tmp_path, clock, store),
+    ):
+        with pytest.raises(OpsError) as exc:
+            check()
+        assert exc.value.code == "VALIDATION_FAILED"
+        assert exc.value.problem.retryable is False
+        assert exc.value.problem.message == (
+            "native_score_batch " + name + ".json failed artifact verification")
+        assert exc.value.problem.details == {"native_score_batch_job_id": batch_job_id}
+        assert exc.value.__suppress_context__ is True
+    assert _native_parity_job_count(conn) == 0
+
+
+@pytest.mark.parametrize("name", ["records", "refusals"])
+def test_native_score_batch_missing_object_preserves_artifact_error(tmp_path, name):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    batch_job_id = _seed_batch_job(conn, clock, as_of="S1", scope_hash="H1")
+    attempt_id = _seed_batch_documents(conn, store, supervisor, clock, batch_job_id)
+    row = conn.execute("SELECT artifact_id FROM attempt_outputs WHERE attempt_id=? AND name=?",
+                       (attempt_id, name)).fetchone()
+    ref = artifact(conn, store, row[0])
+    (store.root / ref.storage_key).unlink()
+
+    with pytest.raises(ArtifactError) as exc:
+        nightly._native_score_batch_document_schema_ok(conn, store, batch_job_id)
+    assert exc.value.code == "MISSING"
+
+
+@pytest.mark.parametrize("error", [ArtifactError("UNSAFE_PATH", "private path"),
+                                  OSError("private read failure")])
+@pytest.mark.parametrize("method", ["verify", "read_verified"])
+def test_native_score_batch_preserves_other_storage_errors(tmp_path, monkeypatch, error, method):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    batch_job_id = _seed_batch_job(conn, clock, as_of="S1", scope_hash="H1")
+    _seed_batch_documents(conn, store, supervisor, clock, batch_job_id)
+
+    def fail_read(ref):
+        raise error
+
+    monkeypatch.setattr(store, method, fail_read)
+    with pytest.raises(type(error)) as exc:
+        nightly._native_score_batch_document_schema_ok(conn, store, batch_job_id)
+    assert exc.value is error
 
 
 def test_native_score_batch_document_schema_ok_raises_on_non_mapping_document(tmp_path):
