@@ -103,9 +103,11 @@ def _build(repository, store, snapshot, pinned, scopes, observation_ceiling):
 
 
 def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
-                        expected_population, clock, session: str) -> dict:
+                        expected_population, clock, session: str,
+                        expected_snapshot_id: str | None = None) -> dict:
     """Resolve ``scope``'s head once and publish the request built on that ref,
     with the reference inputs the catalog recorded for that exact snapshot.
+    ``expected_snapshot_id`` optionally rejects a changed loaded ref with ``INPUT_CHANGED``.
 
     ``tickers`` (P2-C04) is the historical EVIDENCE universe (the caller's
     ``context_tickers``, not the narrower direct watchlist) — the evidence
@@ -149,6 +151,9 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
     try:
         head = resolve_snapshot_head(conn, store, scope, clock=clock)
         snapshot = from_document(SnapshotRef, json.loads(store.read_verified(head)))
+        if expected_snapshot_id is not None and snapshot.snapshot_id != expected_snapshot_id:
+            raise fail("INPUT_CHANGED",
+                       "the shadow snapshot head moved since it was verified for this session")
         # External review #5: resolve "latest committed receipt for this
         # snapshot" exactly once, here, and carry the receipt_id itself
         # forward in the returned dict -- nightly._stage_parameters stamps
@@ -172,8 +177,6 @@ def pin_snapshot_inputs(conn, store, scope, *, tickers, year_start, year_end,
         register_artifact(conn, ref, None, clock)
     return {"scope": scope, "snapshot_ref_artifact_id": head.artifact_id,
             "snapshot_id": snapshot.snapshot_id, "snapshot_manifest_hash": snapshot.manifest_hash,
-            # issue #200 item 1 (cutover PR-7b-3): calendar_version only -- the expected_snapshot_id
-            # CAS check (#200 item 2) is a separate, not-yet-built change.
             "calendar_version": snapshot.calendar_version,
             "snapshot_generation_receipt_id": receipt_id or "",
             "materialization_request_ref": ref.artifact_id,

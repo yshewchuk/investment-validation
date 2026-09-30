@@ -1209,7 +1209,7 @@ def test_pin_snapshot_inputs_returns_calendar_version_matching_the_resolved_snap
     """Issue #200 item 1 (cutover PR-7b-3): the returned dict now carries calendar_version
     straight off the already-resolved SnapshotRef, so a caller building native_score_batch's
     batch-level calendar_revision never re-fetches/re-parses the published SnapshotRef a second
-    time. The expected_snapshot_id CAS check (#200 item 2) is separate and not added here."""
+    time."""
     from engine.v2.ops.snapshot_planning import pin_snapshot_inputs
 
     result = pin_snapshot_inputs(case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
@@ -1217,3 +1217,104 @@ def test_pin_snapshot_inputs_returns_calendar_version_matching_the_resolved_snap
                                  expected_population=("AAA|S1|2020-01-15",), clock=case.clock,
                                  session=SESSION)
     assert result["calendar_version"] == case.snap.calendar_version
+
+
+@pytest.mark.parametrize("expected_mode", ["matching", "none", "omitted"])
+def test_snapshot_guard_accepts_matching_or_unspecified_id_once(case, monkeypatch, expected_mode):
+    from unittest.mock import Mock
+    from engine.v2.ops import snapshot_planning as planning
+
+    resolve = Mock(wraps=planning.resolve_snapshot_head)
+    monkeypatch.setattr(planning, "resolve_snapshot_head", resolve)
+    kwargs = {} if expected_mode == "omitted" else {
+        "expected_snapshot_id": case.snap.snapshot_id if expected_mode == "matching" else None}
+    result = planning.pin_snapshot_inputs(
+        case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
+        year_start=2020, year_end=2021, expected_population=("AAA|S1|2020-01-15",),
+        clock=case.clock, session=SESSION, **kwargs)
+    resolve.assert_called_once_with(case.conn, case.store, "shadow", clock=case.clock)
+    assert result["snapshot_id"] == case.snap.snapshot_id
+    assert result["snapshot_ref_artifact_id"] == case.snapshot_ref.artifact_id
+    assert result["calendar_version"] == case.snap.calendar_version
+
+
+@pytest.mark.parametrize("empty_id", [False, True])
+def test_snapshot_guard_refuses_before_materialization_work(case, monkeypatch, empty_id):
+    from unittest.mock import Mock
+    from engine.v2.ops import snapshot_planning as planning
+    from engine.v2.ops.errors import OpsError
+
+    expected = "" if empty_id else case.snap.snapshot_id
+    _advance_head(case)
+    resolve = Mock(wraps=planning.resolve_snapshot_head)
+    monkeypatch.setattr(planning, "resolve_snapshot_head", resolve)
+    sentinels = []
+    for name in ("committed_receipt_for_snapshot", "_build", "register_artifact"):
+        sentinel = Mock(side_effect=AssertionError("guard must precede materialization work"))
+        monkeypatch.setattr(planning, name, sentinel)
+        sentinels.append(sentinel)
+    with pytest.raises(OpsError, match="head moved since it was verified") as raised:
+        planning.pin_snapshot_inputs(
+            case.conn, case.store, "shadow", tickers=("AAA", "BBB"),
+            year_start=2020, year_end=2021, expected_population=("AAA|S1|2020-01-15",),
+            clock=case.clock, session=SESSION, expected_snapshot_id=expected)
+    assert raised.value.code == "INPUT_CHANGED"
+    resolve.assert_called_once_with(case.conn, case.store, "shadow", clock=case.clock)
+    for sentinel in sentinels:
+        sentinel.assert_not_called()
+
+
+@pytest.mark.parametrize("move_head", [False, True])
+def test_trigger_real_cli_plan_checks_verified_snapshot(case, monkeypatch, move_head):
+    from unittest.mock import Mock
+    from engine.v2.ops import bootstrap, nightly_trigger, snapshot_planning as planning
+    from engine.v2.ops.errors import OpsError
+
+    # Reuse the existing synthetic capture and real snapshot/catalog fixtures.
+    args = parser().parse_args(_plan_files(case))
+    open_catalog = bootstrap.open_catalog
+    monkeypatch.setattr(bootstrap, "open_catalog", lambda path, **kwargs:
+                        open_catalog(case.tmp / "catalog.sqlite", **kwargs))
+    monkeypatch.setattr(nightly_trigger, "_ops_root", lambda root: case.root)
+    monkeypatch.setattr(nightly_trigger, "_qualification_path",
+                        lambda root, name: args.expected_population)
+    monkeypatch.setattr(nightly_trigger, "_capture_input_manifest",
+                        lambda *a, **k: args.input_manifest)
+    monkeypatch.setattr(nightly_trigger, "_derive_years", lambda as_of: (2020, 2021))
+    expected = case.snap.snapshot_id
+    if move_head:
+        _advance_head(case)
+    resolve = Mock(wraps=planning.resolve_snapshot_head)
+    monkeypatch.setattr(planning, "resolve_snapshot_head", resolve)
+    save = Mock(wraps=cli.save_plan)
+    monkeypatch.setattr(cli, "save_plan", save)
+
+    def plan():
+        return nightly_trigger._default_plan(
+            case.tmp, SESSION, ("AAA", "BBB"), ("AAA", "BBB"), case.clock,
+            expected_shadow_snapshot_id=expected)
+
+    if move_head:
+        with pytest.raises(OpsError) as raised:
+            plan()
+        assert raised.value.code == "INPUT_CHANGED"
+        save.assert_not_called()
+    else:
+        ref = plan()
+        saved = json.loads(case.store.read_verified(cli.artifact(case.conn, case.store, ref)))
+        assert saved["snapshot_inputs"]["snapshot_id"] == expected
+        save.assert_called_once()
+    assert resolve.call_count == 1
+
+
+def test_legacy_plan_needs_no_expected_snapshot_attribute(case, monkeypatch):
+    from unittest.mock import Mock
+    from engine.v2.ops import snapshot_planning as planning
+
+    args = parser().parse_args(["plan", "nightly", "--as-of", SESSION])
+    assert not hasattr(args, "expected_snapshot_id")
+    pin = Mock(side_effect=AssertionError("legacy mode must not pin a snapshot"))
+    monkeypatch.setattr(planning, "pin_snapshot_inputs", pin)
+    planned = cli._plan_command(args, case.root, case.conn, case.clock)
+    assert "snapshot_inputs" not in planned["plan"]
+    pin.assert_not_called()

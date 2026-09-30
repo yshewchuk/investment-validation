@@ -630,16 +630,13 @@ raw-row producer.
 snapshot before scoring.** `nightly_trigger._default_plan` runs in
 `input_mode="snapshot"`, `snapshot_scope="shadow"` (was `"legacy"`/`None`):
 legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/
-`"model_evidence"` and, once
-[#199](https://github.com/yshewchuk/investment-validation/issues/199) AND
-[#200](https://github.com/yshewchuk/investment-validation/issues/200)
-both land, `native_score_batch` all read through ONE pinned, frozen
-snapshot per session, removing "legacy and native read the store at two
-different moments" from the shadow comparison — #199 gives
-`native_score_batch` a reader at all, and #200 is what makes
-`pin_snapshot_inputs` actually bind to the EXACT `snapshot_id`
-`_ensure_shadow_snapshot` verified rather than re-resolving the head
-independently. This never touches the real legacy nightly:
+`"model_evidence"` read through one pinned, frozen snapshot per session.
+`pin_snapshot_inputs` binds that snapshot to the exact `snapshot_id`
+`_ensure_shadow_snapshot` verified. Extending that shared snapshot to
+`native_score_batch` still depends on
+[#199](https://github.com/yshewchuk/investment-validation/issues/199)'s reader,
+which removes independent legacy/native store reads from the shadow comparison.
+This never touches the real legacy nightly:
 `nightly_trigger.py` runs on its own systemd timer
 (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate
 from whatever schedules the legacy nightly, with no code path into the
@@ -684,13 +681,12 @@ resumable rather than permanently `"missed"`.
 Commits land directly in scope `"shadow"` (no candidate-scope-then-promote
 step): `"shadow"` has no downstream consumer needing pre-advance
 validation. The EXACT `snapshot_id` this call verified is threaded through
-(`expected_shadow_snapshot_id` → `_default_plan`'s
-`expected_snapshot_id`) so a later CAS check COULD bind the plan to it
-instead of a re-resolved mutable head — closing a window where a human
-`ops snapshot submit`/`promote` between verification and planning could
-pin an unvalidated snapshot — but `pin_snapshot_inputs` does not yet
-consume that value, so the window is not closed today; that CAS check is
-[#200](https://github.com/yshewchuk/investment-validation/issues/200).
+(`expected_shadow_snapshot_id` → `_default_plan`'s `args.expected_snapshot_id`
+→ `cli._snapshot_inputs` → `pin_snapshot_inputs(expected_snapshot_id=None)`).
+The optional guard compares the already-loaded `SnapshotRef.snapshot_id`,
+without a second head resolution. A mismatch raises `INPUT_CHANGED` before
+materialization request construction or registration; equality keeps that ref.
+Omitting the expected id preserves direct and legacy caller behavior.
 `nightly_raw_rows.scan_forward_board_requests` scans the pinned snapshot's
 `earnings_events` and returns `BoardRequest`s for the forward window, with
 no `src_orats` filter (history-only; forward dates are Nasdaq/yfinance).
