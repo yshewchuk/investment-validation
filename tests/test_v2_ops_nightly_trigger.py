@@ -456,6 +456,7 @@ def test_crash_between_plan_fn_and_the_submitting_write_replans_but_never_double
     (never referenced again), but the run still completes cleanly under the
     SECOND plan_ref, with no double-submission."""
     plan = FakePlan("plan_ORPHANED")
+    submit, serve = FakeSubmit(), FakeServe()
     real_record = nightly_trigger._record
     crash_armed = {"on": True}
 
@@ -467,14 +468,18 @@ def test_crash_between_plan_fn_and_the_submitting_write_replans_but_never_double
 
     monkeypatch.setattr(nightly_trigger, "_record", crashing_record)
     with pytest.raises(RuntimeError):
-        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, FakeSubmit(), FakeServe())
+        _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
     assert load_state(tmp_path, AS_OF) is None  # nothing durable recorded the orphaned plan_ref
     assert len(plan.calls) == 1
+    assert submit.calls == []  # the orphaned plan was never submitted before the crash
+    assert serve.calls == []  # nor served
 
     plan.plan_ref = "plan_SECOND"  # the resumed tick's fresh plan differs from the orphan
-    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, FakeSubmit(), FakeServe())
+    receipt = _run(tmp_path, FakeClock(IN_WINDOW), FakeProvider(True), plan, submit, serve)
     assert receipt.status == "completed" and receipt.plan_ref == "plan_SECOND"
     assert len(plan.calls) == 2  # plan_fn ran twice: the orphaned build, then the real one
+    assert submit.calls == [(AS_OF, "plan_SECOND")]  # submitted exactly once, only the real ref
+    assert serve.calls == [("plan_SECOND", tmp_path)]  # served exactly once, only the real ref
     stored = load_state(tmp_path, AS_OF)
     assert stored is not None and stored.plan_ref == "plan_SECOND"  # the orphan is never referenced again
 
