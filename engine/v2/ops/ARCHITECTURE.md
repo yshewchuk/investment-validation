@@ -212,12 +212,12 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
   already uses (`worker.py:167-168`, `:198-200`).
 
-`nightly.GRAPH` gains a `"native_score_batch": ("score",)` node (`#88`),
-and `"native_parity"`'s own existing node (`nightly.py:58`) widens from
-`("score",)` to `("score", "native_score_batch")` — topological
-documentation only, for `run_shadow_nightly`'s whole-graph test-only
-walk; no submission path reads either edge (the same "documentation, not
-a submission source" rule Part 4 already established for
+`nightly.GRAPH` has a `"native_score_batch": ("score",)` node (`#88`),
+while `"native_parity"` remains `("score",)` (`nightly.py:124`). Widening
+that node to `("score", "native_score_batch")` is separate topological
+documentation work for `run_shadow_nightly`'s whole-graph test-only
+walk; runtime parity submission already binds both jobs directly. No
+submission path reads either edge (the rule Part 4 established for
 `computed_moves_refresh`'s own node).
 
 - **`nightly.legacy_parity_rows(score_document: Mapping[str, Any]) ->
