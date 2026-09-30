@@ -50,7 +50,8 @@ def _stage(root, rid="A", alpha=0.55, incumbent=None):
     }
     release, inventory, models = _models(rid, keys=(("gate", "STR-THRU"),))
     states = [s for s in prep.build_states(payloads) if s.spec.member_id in payloads]
-    return prep.write_release(root, release, inventory, models, states, incumbent=incumbent)
+    path = prep.write_release(root, release, inventory, models, states, incumbent=incumbent)
+    return path, (payoff.content_hash, recal.content_hash, analog.content_hash)
 
 
 def _hashes(root):
@@ -72,9 +73,9 @@ def _rewrite(path, **changes):
 @pytest.mark.parametrize("copy_incumbent", [False, True])
 def test_real_rollback_restores_all_three_state_families(tmp_path, legacy, copy_incumbent):
     source = tmp_path / "source"
-    _stage(source)
+    _, hashes_a = _stage(source)
     deployment.promote(layout.deployment_root(source), "A")
-    hashes_a = _hashes(source)
+    assert _hashes(source) == hashes_a
     if legacy:
         _local(source).unlink()
     root = tmp_path / "destination" if copy_incumbent else source
@@ -82,19 +83,33 @@ def test_real_rollback_restores_all_three_state_families(tmp_path, legacy, copy_
     if copy_incumbent:
         incumbent = source / "custom-store-name"
         layout.deployment_root(source).rename(incumbent)
-    _stage(root, "B", 0.65, incumbent)
+    _, hashes_b = _stage(root, "B", 0.65, incumbent)
     assert layout.read_manifest(root)["release_id"] == "B"
     assert staged_keys(root)["payoff_line:STR-THRU"] == {("STR-THRU", 0.65, None)}
     assert _hashes(root) == hashes_a  # Staging B must not switch scoring off A.
     dep = layout.deployment_root(root)
     deployment.promote(dep, "B")
-    hashes_b = _hashes(root)
+    assert _hashes(root) == hashes_b
     assert all(a != b for a, b in zip(hashes_a, hashes_b))
     deployment.rollback(dep)
     assert resolve_release_binding(root).release_id == "A"
     assert _hashes(root) == hashes_a
     assert _local(root, "A").is_file() and _local(root, "B").is_file()
     assert layout.read_manifest(root)["release_id"] == "B"
+
+
+def test_producer_hash_oracle_rejects_planted_b_result_after_rollback(tmp_path, monkeypatch):
+    _, expected_a = _stage(tmp_path)
+    dep = layout.deployment_root(tmp_path)
+    deployment.promote(dep, "A")
+    _stage(tmp_path, "B", 0.65)
+    deployment.promote(dep, "B")
+    wrong = resolve_release_binding(tmp_path)
+    deployment.rollback(dep)
+    assert _hashes(tmp_path) == expected_a
+    monkeypatch.setattr(__name__ + ".resolve_release_binding", lambda root: wrong)
+    with pytest.raises(AssertionError):
+        assert _hashes(tmp_path) == expected_a
 
 
 @pytest.mark.parametrize("damage", ["json", "schema", "hash", "id", "directory", "dangling", "fifo"])
@@ -245,5 +260,5 @@ def test_interrupted_root_publication_keeps_complete_files_and_retry_works(tmp_p
     assert (dep / "DEPLOYED").read_bytes() == pointer
     assert {p.name: p.read_bytes() for p in (dep / "history").iterdir()} == history
     assert resolve_release_binding(tmp_path).release_id == "A"
-    assert _stage(tmp_path, "B", 0.65) == _local(tmp_path, "B")
+    assert _stage(tmp_path, "B", 0.65)[0] == _local(tmp_path, "B")
     assert layout.read_manifest(tmp_path)["release_id"] == "B"
