@@ -66,6 +66,8 @@ is a unitless ratio minus one. No market read, implicit clock or cache exists.
 | Insufficient history for one window | That feature stays NaN; eligible source date remains the anchor |
 | Empty events with required columns | Empty result with feature/anchor columns |
 | Missing columns or invalid scalar conversion | Existing pandas/NumPy/Python error propagates |
+| Retry with unchanged inputs | Safe recomputation produces unchanged outputs |
+| Calculation fails | No transaction or partial write; inputs remain unchanged |
 
 - `panel_math.history_features`/`_causal_ema`: a ticker's prior realized
   moves and their absolute values, as plain float sequences — no I/O, no

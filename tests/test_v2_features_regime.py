@@ -15,6 +15,8 @@ import pytest
 from engine import paths
 from engine.data.features import panel as legacy_panel
 from engine.v2.features.regime import add_regime_features
+from engine.v2.parity import compare_dimension
+from engine.v2.parity.tolerance import SCORE_RECORD_V1
 
 FEATURES = ("spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5",
             "spy_vol20", "spy_vol60", "spy_vol252", "spy_vol20_rel252")
@@ -33,8 +35,28 @@ def _legacy(events, market, tmp_path, monkeypatch, as_of_column="date"):
     return legacy_panel.add_regime_features(events, path, as_of_column)
 
 
+def _frame_records(frame):
+    # The record comparator represents an absent timestamp as None, not pandas NaT.
+    return {str(i): {key: None if value is pd.NaT else value
+                     for key, value in frame.iloc[i].to_dict().items()}
+            for i in range(len(frame))}
+
+
+def _compare_parity(actual, expected):
+    assert actual.shape == expected.shape
+    pd.testing.assert_index_equal(actual.index, expected.index)
+    pd.testing.assert_index_equal(actual.columns, expected.columns)
+    pd.testing.assert_series_equal(actual.dtypes, expected.dtypes)
+    return compare_dimension(_frame_records(expected), _frame_records(actual), "regime",
+                             tolerance_policy=SCORE_RECORD_V1)
+
+
 def _assert_parity(actual, expected):
-    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    comparison = _compare_parity(actual, expected)
+    if actual.empty:
+        assert comparison["agree"] is False  # Empty populations are incomparable.
+    else:
+        assert comparison["agree"], comparison["finding_fields"]
 
 
 def test_batch_direct_shuffle_and_immutability(tmp_path, monkeypatch):
@@ -118,19 +140,22 @@ def test_comparator_rejects_numeric_missing_defects(field, corruption, tmp_path,
     actual = add_regime_features(events, market)
     _assert_parity(actual, expected)
     actual.loc[0, field] = corruption
-    with pytest.raises(AssertionError):
-        _assert_parity(actual, expected)
+    comparison = _compare_parity(actual, expected)
+    assert comparison["agree"] is False
+    assert any(path.endswith(f".{field}") for path in comparison["finding_fields"])
 
 
-def test_comparator_rejects_regime_asof_defect(tmp_path, monkeypatch):
+@pytest.mark.parametrize("corruption", [pd.Timestamp("2021-01-01"), pd.NaT])
+def test_comparator_rejects_regime_asof_defect(corruption, tmp_path, monkeypatch):
     market = _market()
     events = pd.DataFrame({"date": [pd.Timestamp("2021-01-01")]})
     expected = _legacy(events, market, tmp_path, monkeypatch)
     actual = add_regime_features(events, market)
     _assert_parity(actual, expected)
-    actual.loc[0, "regime_asof"] = pd.Timestamp("2021-01-01")
-    with pytest.raises(AssertionError):
-        _assert_parity(actual, expected)
+    actual.loc[0, "regime_asof"] = corruption
+    comparison = _compare_parity(actual, expected)
+    assert comparison["agree"] is False
+    assert any(path.endswith(".regime_asof") for path in comparison["finding_fields"])
 
 
 def test_missing_columns_and_invalid_closes_propagate():

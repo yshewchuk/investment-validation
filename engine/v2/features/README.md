@@ -32,7 +32,7 @@ underscore convention, and an import of a name absent from this list fails
 `recipes` provides `FeatureRegistry` and `default_feature_registry`; `context`
 provides `FeatureContextPlanner` and causal `FeatureFrame` construction.
 
-<!-- public-interface: recipes, FeatureRegistry, default_feature_registry -->
+<!-- public-interface: recipes, FeatureRegistry, default_feature_registry, regime.add_regime_features -->
 
 ## Consumers
 
@@ -46,10 +46,9 @@ failure rather than a stale sentence.
 
 ## Usage
 
-No runnable example yet: phase 0 creates the package and writes no
-production logic into it. The shortest real example lands with the first
-public name, and is expected to run in under a second from frozen
-fixtures.
+The package includes pure regime calculation logic over explicit inputs.
+No production path calls the regime helper yet; source reads and forward
+panel assembly remain separate integration work.
 
 ## Testing
 
