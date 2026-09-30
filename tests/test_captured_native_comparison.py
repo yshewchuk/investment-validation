@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -143,15 +144,35 @@ def test_missing_provenance_is_not_published(selected, monkeypatch, field):
 def test_publication_failure_removes_temp_and_preserves_output(selected, tmp_path, monkeypatch, stage):
     output = tmp_path / "report.json"
     output.write_text("previous")
-    write = Path.write_text
+    fdopen = os.fdopen
     def refuse(path, *args, **kwargs):
-        if stage == "write":
-            write(path, "partial")
         raise OSError("private /source/path")
-    monkeypatch.setattr(Path, "write_text" if stage == "write" else "replace", refuse)
+    @contextmanager
+    def failing_writer(fd, *args, **kwargs):
+        with fdopen(fd, *args, **kwargs) as handle:
+            handle.write("partial")
+            yield SimpleNamespace(write=refuse)
+    if stage == "write":
+        monkeypatch.setattr(os, "fdopen", failing_writer)
+    else:
+        monkeypatch.setattr(Path, "replace", refuse)
     assert export.main(["--corpus", str(selected[0]), "--fixture-id", "one", "--output", str(output)]) == 1
     assert output.read_text() == "previous"
     assert not list(tmp_path.glob("report.json.tmp*"))
+
+
+def test_private_atomic_creation_does_not_follow_existing_temp_symlink(tmp_path):
+    output = tmp_path / "report.json"
+    source = tmp_path / "retained.json"
+    source.write_text("retained")
+    temp = output.with_name(output.name + f".tmp{os.getpid()}")
+    temp.symlink_to(source)
+    with pytest.raises(FileExistsError):
+        export._atomic_write(output, "comparison")
+    assert source.read_text() == "retained" and temp.is_symlink()
+    temp.unlink()
+    export._atomic_write(output, "comparison")
+    assert output.stat().st_mode & 0o777 == 0o600
 
 
 def test_cli_reports_safe_typed_refusal(selected, tmp_path, capsys):
