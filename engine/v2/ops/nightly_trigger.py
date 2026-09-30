@@ -541,8 +541,9 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
     resumable status is on disk yet; or via ``run_trigger``'s resume branch,
     which never re-checks the window and so can rebuild and submit even past
     it, if an earlier pre-plan resumable status (e.g. ``"snapshot_not_yet"``)
-    is still recorded. Either way, a rebuilt plan that DIFFERS from the first
-    orphans it: it is named by no receipt, so it is never submitted or scored,
+    is still recorded. Either way, if the rebuilt plan DIFFERS from the
+    first, the first plan is orphaned: it is named by no receipt, so it is
+    never submitted or scored,
     and nothing double-submits or double-scores. This is accepted as a wasted
     plan build/artifact write, never a correctness defect, and this function
     deliberately makes no change to close that window.
