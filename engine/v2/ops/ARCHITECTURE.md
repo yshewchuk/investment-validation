@@ -816,7 +816,7 @@ every value it needs is already a committed job output:
   mapping's `"schema_version"` field (`== "native_score_batch_records.v2.0"`/
   `"native_score_batch_refusals.v2.0"`); the `records`/`refusals` row
   arrays inside each document are decoded but never iterated or used here,
-  BEFORE calling `stages.submit_job` at all.
+  BEFORE calling `engine.v2.ops.submission.submit` at all.
 
   **A confirmed mismatch is a permanent wait state for THIS
   `native_score_batch_job_id`, not a retried one.** Only when no
@@ -850,19 +850,10 @@ every value it needs is already a committed job output:
   job, so `native_score_batch`'s own sidecar never resubmits it — there is
   no later run "for that session" to ever land.
 
-  A decode failure once the artifact's bytes are in hand — invalid JSON,
-  a non-dict document, or a document missing the `schema_version` key
-  entirely — is a DISTINCT outcome from a clean mismatch: it is an
-  exception, not a checked value. Such a decode failure, and a missing
-  `attempt_outputs` row for either name, both raise a non-retryable
-  `VALIDATION_FAILED` (the underlying committed artifact can never
-  change); a genuine STORAGE-layer exception from `store.read_verified`
-  itself (a transient I/O fault, a content-hash mismatch) is a
-  different, uncaught outcome instead.
-  `submit_native_parity_if_ready` does not catch either kind — both
-  propagate to its caller, which does not exist yet in this slice; see
-  the stacked tick-loop-sidecar PR for how each is handled once one
-  does.
+  If either committed artifact is missing from `attempt_outputs` or cannot
+  be decoded, `submit_native_parity_if_ready` raises non-retryable
+  `VALIDATION_FAILED` and submits no job. Storage-layer exceptions from
+  `store.read_verified` propagate to the caller.
 
   This is a wait state exactly like the missing-job case, never a refusal
   and never a job failure — because, unlike every other input this
@@ -1406,7 +1397,9 @@ job.
 | `legacy_rows` is empty | `VALIDATION_FAILED`, unconditionally — a missing legacy input is never explained by a native refusal |
 | no shared key between native and legacy, but every legacy key is covered by its own matching keyed refusal (or nothing was ever keyable at all) | reported as a normal (degenerate) parity report, not a job failure — an unrelated refusal naming a different population key never counts |
 | no shared key and no refusal explains it | job fails, same as a genuinely missing native input |
-| the records/refusals schema tag is stale | when no `native_parity` job exists yet for this identity, `submit_native_parity_if_ready`'s own pre-submission check (this PR) raises `VALIDATION_FAILED` (`reason: "schema_mismatch"`) when called directly, submitting nothing (an already-existing job short-circuits before this check ever runs); `run_native_parity_worker` also checks independently and fails `VALIDATION_FAILED` if a job reaches it with a stale tag anyway (e.g. the generic job-submission API used directly). A caller-side memo to avoid repeated raises needs a caller — the tick-loop sidecar is a separate, stacked PR |
+| the records/refusals schema tag is stale, no `native_parity` job exists yet for this identity | `submit_native_parity_if_ready`'s pre-submission check raises `VALIDATION_FAILED` (`reason: "schema_mismatch"`), submitting nothing |
+| the records/refusals schema tag is stale, a `native_parity` job already exists for this identity | the existing-job short-circuit returns `None` before the check ever runs |
+| a `native_parity` job reaches `run_native_parity_worker` with a stale schema tag anyway (e.g. the generic job-submission API used directly) | the worker's own independent check fails `VALIDATION_FAILED` |
 
 ### Tick-loop sidecars: submission identity
 

@@ -293,12 +293,9 @@ or a new consumer must update that package's README in the same change.
   sidecars (`Service._reconcile_computed_moves_refresh`, submitting
   `computed_moves_refresh` alone via `submission.submit`, never
   `submit_graph`, so an optional stage's own submission problem can
-  never abort the required graph). `native_parity`'s own equivalent
-  sidecar (`Service._reconcile_native_parity`, calling
-  `nightly.submit_native_parity_if_ready`, cutover PR-4 redo slice 2B(b))
-  is a separate PR stacked on this one. See
-  `engine/v2/ops/ARCHITECTURE.md`'s "Cutover PR-4 (redo)" section for
-  the full design.
+  never abort the required graph). `nightly.submit_native_parity_if_ready`
+  (cutover PR-4 redo slice 2B(b), this PR) can submit a `native_parity`
+  job once its paired inputs are ready, but has no production caller yet.
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
@@ -348,9 +345,8 @@ or a new consumer must update that package's README in the same change.
   projection is read; this projection does not re-verify either.
   `nightly.submit_native_parity_if_ready` (cutover PR-4 redo slice 2B(b),
   this PR) can submit a `native_parity` job once its paired inputs are
-  ready, but has no production caller yet — its tick-loop sidecar is a
-  separate, stacked PR — so `"no_report"` is today's everyday answer, not
-  a degraded one.
+  ready, but has no production caller yet, so `"no_report"` is today's
+  everyday answer, not a degraded one.
   `engine/v2/serving` (7.0) reads the artifact directly rather than importing
   `engine/v2/ops` (a 7.0 peer the layer map forbids importing).
 
