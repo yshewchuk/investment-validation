@@ -809,14 +809,14 @@ every value it needs is already a committed job output:
   NEVER retried: the existence check alone gates every future tick, so a
   job that would only ever fail (or worse, misread a `v1.0` array as
   `v2.0`) can never be corrected by a LATER `native_score_batch` re-run.
-  `submit_native_parity_if_ready` therefore reads just the two documents'
-  `"schema_version"` field (`records_document["schema_version"] ==
-  "native_score_batch_records.v2.0"` AND `refusals_document[
-  "schema_version"] == "native_score_batch_refusals.v2.0"`) — the SAME
-  `job_<native_score_batch_job_id>#records`/`#refusals` artifacts the
-  worker later reads in full, opened here ONLY far enough to check one
-  field, never parsed for rows — BEFORE calling `stages.submit_job` at
-  all.
+  `submit_native_parity_if_ready` therefore fully reads and JSON-decodes
+  both artifacts (`_native_score_batch_document_schema_ok`, `nightly.py`)
+  — the SAME `job_<native_score_batch_job_id>#records`/`#refusals`
+  artifacts the worker later reads — but consults only the resulting
+  mapping's `"schema_version"` field (`== "native_score_batch_records.v2.0"`/
+  `"native_score_batch_refusals.v2.0"`); the `records`/`refusals` row
+  arrays inside each document are decoded but never iterated or used here,
+  BEFORE calling `stages.submit_job` at all.
 
   **A confirmed mismatch is a permanent wait state for THIS
   `native_score_batch_job_id`, not a retried one.** Only when no
