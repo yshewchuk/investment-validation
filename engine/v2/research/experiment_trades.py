@@ -30,8 +30,11 @@ def load_trades(repository, snapshot, strategy: str) -> pd.DataFrame:
 
     Raises ``engine.v2.data.errors.DataError``:
     - ``CONTRACT_MISMATCH`` — the snapshot has no ``trades`` table at all
-      (raised by ``read_existing_trades`` itself), or a surviving trade row's
-      ``event_id`` has no ``earnings_events`` row to join a ``session`` from.
+      (raised by ``read_existing_trades`` itself), its ``earnings_events``
+      table has no fragments at all (the same issue #70 bare ``ValueError``,
+      converted here too — trivially every row's session is then unmatched),
+      or a surviving trade row's ``event_id`` has no ``earnings_events`` row
+      to join a ``session`` from.
     - ``POPULATION_COLLAPSED`` — the snapshot's ``trades`` table has no row
       for this ``strategy``/``PROVENANCE`` pair, or no fragments at all (the
       latter is ``_snapshot.read_table``'s documented issue #70 bare
@@ -65,7 +68,16 @@ def load_trades(repository, snapshot, strategy: str) -> pd.DataFrame:
     for column in ("event_date", "entry_date", "exit_date"):
         rows[column] = pd.to_datetime(rows[column])
 
-    events = read_event_rows(repository, snapshot)
+    try:
+        events = read_event_rows(repository, snapshot)
+    except ValueError:
+        if repository.fragment_records(snapshot, "earnings_events"):
+            raise
+        raise errors.fail(
+            "CONTRACT_MISMATCH",
+            "a trades row has no matching earnings_events session",
+            details={"snapshot_id": snapshot.snapshot_id, "strategy": strategy},
+        ) from None
     events["event_date"] = pd.to_datetime(events["event_date"])
     rows = rows.merge(
         events[["event_id", "session"]].drop_duplicates("event_id"),

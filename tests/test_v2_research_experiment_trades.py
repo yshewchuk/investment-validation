@@ -176,6 +176,33 @@ def test_load_trades_refuses_an_empty_trades_table(tmp_path):
     conn.close()
 
 
+def test_load_trades_refuses_a_snapshot_with_an_empty_events_table(tmp_path):
+    """Mirror of the empty-``trades``-table case above, for
+    ``earnings_events``: a normal one-row ``trades`` table plus a ZERO-fragment
+    ``earnings_events`` table (the same ``commit_tables(conn, clock,
+    {"<table>": []}, ...)`` pattern) must reach the caller as a typed
+    ``CONTRACT_MISMATCH`` -- ``read_event_rows``' bare ``ValueError`` (issue
+    #70) is the same exposure the ``read_existing_trades`` call already
+    converts, and an empty events table trivially leaves every row's
+    ``session`` unmatched."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    trades_contract = contract_for("trades")
+    events_contract = contract_for("earnings_events")
+    trades_record = publish_and_inspect(
+        store, trades_contract, contract_ref_for(trades_contract),
+        [_trade_row("T-THRU-A", "STR-THRU", PROVENANCE)], "2024")
+    snapshot = commit_tables(
+        conn, clock, {"trades": [trades_record], "earnings_events": []},
+        {"trades": trades_contract, "earnings_events": events_contract},
+        store=store)
+    repository = Repository(conn, store)
+
+    with pytest.raises(DataError) as excinfo:
+        experiment_trades.load_trades(repository, snapshot, "STR-THRU")
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    conn.close()
+
+
 def test_load_trades_refuses_a_snapshot_with_no_trades_table(tmp_path):
     conn, clock, store = catalog_and_store(tmp_path)
     events_contract = contract_for("earnings_events")

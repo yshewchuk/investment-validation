@@ -115,7 +115,12 @@ snapshot-read helpers), `_pricing.py`, `_trades_revisions.py`.
   outcome summary (`committed`, `outcome`, `committed_snapshot_id`,
   `emitted_revisions`) — never a rewrite of the table version the run read.
 - Every output that carries data also carries the `snapshot_id` it was
-  read from, so a report is reproducible without re-resolving anything.
+  read from, so a report is reproducible without re-resolving anything. One
+  exception: `experiment_trades.load_trades`'s returned frame carries no
+  `snapshot_id` column, by design — it mirrors `experiments.common.
+  load_engine_trades`'s frame contract exactly (see Primary contracts), and
+  its caller supplied that exact `snapshot_id` as a required argument, never
+  inferred, so there is no reproducibility gap this rule exists to close.
 
 ## Dependencies
 
@@ -382,7 +387,10 @@ it.
 
 - One `resolve`/`resolve_pinned` call per run; the resulting `snapshot_id`
   is threaded through every subsequent read and written into every output
-  (root doc §5's "no silent default" invariant, applied to research reads).
+  (root doc §5's "no silent default" invariant, applied to research reads) —
+  except `experiment_trades.load_trades`'s returned frame, which carries no
+  `snapshot_id` column so it can match the legacy loader's frame exactly
+  (see Outputs).
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.

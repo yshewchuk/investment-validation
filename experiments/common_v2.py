@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock
 from engine.v2.ops.bootstrap import open_catalog
