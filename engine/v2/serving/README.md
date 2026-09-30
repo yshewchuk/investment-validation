@@ -1,5 +1,7 @@
 # `engine/v2/serving`
 
+Contract: [Serving architecture](ARCHITECTURE.md).
+
 ## Ownership
 
 Implements the **API/projection layer — filter, paginate, authorize, serialize computed records** row of the §4 owner table of
