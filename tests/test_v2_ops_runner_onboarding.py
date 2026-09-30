@@ -84,3 +84,16 @@ def test_leaking_runner_is_caught_by_the_write_audit(tmp_path):
     run_legacy_script(prod, REGISTERED)
     findings = audit_writes(prod, before, disclosed=(prod / "experiments",))
     assert {"path": "ledger/predictions/leak.jsonl", "kind": "new"} in findings
+
+
+def test_exp184_runner_manifest_is_registered():
+    root = Path(__file__).resolve().parents[1]
+    registered = "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py"
+    manifest = runner_manifest(root, registered)
+    assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
+    assert manifest["no_ledger_support"] is True
+    assert manifest["spec_hash"].startswith("sha256:")
+    closure = manifest["source_closure"]
+    assert registered in closure
+    assert "experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py" in closure
+    assert manifest["report_path"] == "REPORT.md"

@@ -1,5 +1,5 @@
-id: EXP-147
-title: "STR-THRU gate promotion: confirmatory validation of the forecast+analog gate"
+id: EXP-184
+title: "STR-THRU gate promotion: confirmatory validation of the forecast+analog gate (v2 runner, registered)"
 hypothesis: "EXP-145 arm 7 (the incumbent gate_midfill_str_thru's 41 registered features plus the size model's own forecast and matched analog-trade statistics as six extra GBM features, top-20 percent walk-forward selection) beats the current champion gate_midfill_str_thru on walk-forward CAGR and trade Sharpe, does not worsen Monte Carlo P(loss) at 5pct sizing, survives the stress battery with no new red regime cell, and clears the accuracy checklist and Brier-skill floor -- run independently through the same harness as a clean pre-registered confirmatory validation, not as part of the original 7-arm comparison. Falsified if any of these fails; the current champion stands and this candidate does not promote."
 type: confirmatory_promotion_candidate
 strategy: "STR-THRU"
@@ -67,4 +67,3 @@ equity_mode: cashflow
 max_deployed_fraction: 1.0
 mc_draw_order: shared
 has_short_leg: false
-preregistered_at: "2026-09-07T14:05:42+00:00"

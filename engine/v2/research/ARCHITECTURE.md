@@ -52,20 +52,27 @@ one; the library entrypoints below are this package's real public interface:
 
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
 `replay.replay_one`, `_replay_run.run`, `_replay_run.events_frame`,
-`_plan.plan_events`, `_chains.ChainIndex`, `_trades_table.to_trades_table`,
-`_build_run.run`, `reconcile_trades.run`, `_trades_publish.publish`,
-`build_trades.coverage`, `_pricing.STRUCTURES`.
+`_plan.plan_events`, `_chains.ChainIndex`, `_chains.load_chain_index`,
+`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
+`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
+`_pricing.trading_calendar_from_snapshot`.
 
 `experiment_trades.load_trades(repository, snapshot, strategy)` is a second
 kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
 for a caller — today only `experiments/common_v2.py` — that already holds a
 `Repository` and a resolved `SnapshotRef` and wants one strategy's committed
 `trades` rows, session-joined, in the same frame `experiments/common.py`'s
-legacy `load_engine_trades` returns.
+legacy `load_engine_trades` returns. `_pricing.trading_calendar_from_snapshot`
+is a third: carved out of `_pricing.py`'s otherwise-internal contents the
+same way `_pricing.STRUCTURES` already is, for the same caller — a repricer
+built over a pinned snapshot needs the identical trading calendar `replay()`
+itself derives, not a second implementation and not the legacy CSV fallback
+(see Invariants).
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
-snapshot-read helpers), `_pricing.py`, `_trades_revisions.py`.
+snapshot-read helpers), `_pricing.py` (except the two names carved out
+above), `_trades_revisions.py`.
 
 ## Inputs
 
@@ -162,9 +169,9 @@ modules' callers, outside this PR's one concern.
 Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
 listed above are one consumer; `experiments/common_v2.py` is the other, for
-`experiment_trades.load_trades` only — neither is parsed by the layering
-hook (it only parses `engine*` importers, and `experiments/` is outside it
-too).
+`experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
+and `_chains.load_chain_index` — neither is parsed by the layering hook (it
+only parses `engine*` importers, and `experiments/` is outside it too).
 
 ## External systems and libraries
 
