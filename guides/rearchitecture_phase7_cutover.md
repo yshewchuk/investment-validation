@@ -3,7 +3,10 @@
 Status: implementation plan, 2026-09-16. This is the authority-switch portion
 of the former Phase 8. Live shadow moved to Phase 8D. Follow the
 [delivery plan](rearchitecture_delivery_plan.md); this document is not a claim
-that production activation has already been authorized or performed.
+that production activation has already been authorized or performed. For a
+kept-current PR/issue-level status of what's merged versus open on the path
+to this phase, see
+[`cutover_remaining_work.md`](cutover_remaining_work.md).
 
 ## Entry gate
 
