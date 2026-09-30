@@ -889,7 +889,8 @@ class Service:
                 code_source=self.code_source, clock=self.clock)
         except OpsError as exc:
             if exc.problem.details.get("reason") == "schema_mismatch":
-                self._native_parity_schema_mismatch_job_id = native_score_batch_job_id
+                self._native_parity_schema_mismatch_job_id = exc.problem.details.get(
+                    "native_score_batch_job_id", native_score_batch_job_id)
                 self._last_native_parity_problem = None
                 return
             if not exc.problem.retryable:

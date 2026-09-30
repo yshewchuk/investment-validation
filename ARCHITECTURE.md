@@ -279,9 +279,9 @@ or a new consumer must update that package's README in the same change.
   production it is simply absent from the submitted list, not filtered out
   of it. **The one trap worth stating here**: `NO_JOB_STAGES` (today
   `{"native_parity"}`, since `native_parity` is submitted exclusively
-  through `supervisor.Service`'s own tick-loop sidecar (cutover PR-4
-  redo slice 2B(b)), never through `_DAG_STAGES`/
-  `build_legacy_job_requests`) only does work on the *other* branch --
+  through `supervisor.Service`'s own tick-loop sidecar, never through
+  `_DAG_STAGES`/`build_legacy_job_requests`) only does work on the
+  *other* branch --
   `include_prerequisites=True`, exercised by tests only — where
   `_stage_sequence` instead returns `plan["order"]` (the full `GRAPH`
   order, `native_parity` included) and strips `NO_JOB_STAGES` from it
@@ -294,10 +294,9 @@ or a new consumer must update that package's README in the same change.
   sidecars (`Service._reconcile_computed_moves_refresh`, submitting
   `computed_moves_refresh` alone via `submission.submit`, never
   `submit_graph`, so an optional stage's own submission problem can
-  never abort the required graph); `Service._reconcile_native_parity`
-  (cutover PR-4 redo slice 2B(b), this PR), calling
-  `nightly.submit_native_parity_if_ready`, submits `native_parity` the
-  identical way.
+  never abort the required graph); `Service._reconcile_native_parity`,
+  calling `nightly.submit_native_parity_if_ready`, submits
+  `native_parity` the identical way.
 - **Checking that new code is reachable from production.** Reachability is
   not the same question as "does this symbol resolve." `tools/phase6_inventory.py`
   builds a capability matrix by static discovery (`ast`, never an import) of
@@ -345,10 +344,9 @@ or a new consumer must update that package's README in the same change.
   comparator (§5) — but the artifact itself can be stale, or was produced
   under a different tolerance policy than whichever is in effect when this
   projection is read; this projection does not re-verify either.
-  `Service.tick()`'s sidecar (cutover PR-4 redo slice 2B(b), this PR)
-  submits a `native_parity` job once its paired inputs are ready, so
-  `"no_report"` stays the answer whenever nothing has completed yet, not
-  a degraded one.
+  `Service.tick()`'s sidecar submits a `native_parity` job once its
+  paired inputs are ready, so `"no_report"` stays the answer whenever
+  nothing has completed yet, not a degraded one.
   `engine/v2/serving` (7.0) reads the artifact directly rather than importing
   `engine/v2/ops` (a 7.0 peer the layer map forbids importing).
 
