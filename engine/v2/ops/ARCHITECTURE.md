@@ -127,15 +127,14 @@ The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 `worker.py`'s dispatch branch, `run_native_parity_worker`,
 `NativeParityParameters` -- is real (cutover PR-4 redo slice 2B(a),
 `#191`). Its nightly-side builder,
-`nightly.submit_native_parity_if_ready`/`_native_parity_identity`
-(cutover PR-4 redo slice 2B(b), this PR), is also real and
-independently tested, but has no production caller yet:
-`supervisor.Service._reconcile_native_parity`, the tick-loop sidecar
-that would call it every tick the way
-`_reconcile_native_score_batch_shadow` (`#88`) already does, is a
-separate PR stacked on this one. The `nightly.GRAPH` node width is a
-further, still doc-only piece of this design (`run_shadow_nightly`'s
-test-only graph walk; no submission path reads it). Cutover
+`nightly.submit_native_parity_if_ready`/`_native_parity_identity`,
+and its tick-loop caller, `supervisor.Service._reconcile_native_parity`
+(cutover PR-4 redo slice 2B(b), this PR), are both real too:
+`Service.tick()` calls it every tick the way
+`_reconcile_native_score_batch_shadow` (`#88`) already does. The
+`nightly.GRAPH` node width is a further, still doc-only piece of this
+design (`run_shadow_nightly`'s test-only graph walk; no submission path
+reads it). Cutover
 PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`)
 and shadow-submission code (`#126`) are all already merged; PR-7a's code
 (`#126`) implemented the tick-loop submission sidecar only, not the `v2.0`
@@ -176,14 +175,14 @@ production — can never silently diverge in comparison logic: root doc
 §5's "one shared parity comparator" invariant, restated one level up as
 one shared CALLER of that comparator, reached two ways.
 
-Three new symbols in this PR, mirroring `native_score_batch`'s own PR-7a
-shape (`stages.py::_native_parity_kind` shipped earlier, in `#191`). The
-tick-loop sidecar that will call the builder
-(`supervisor.Service._reconcile_native_parity`) is a separate, stacked PR;
-its own placement/tick-order design belongs to that PR, not here — today,
-the builder has no caller at all:
+Four new symbols, mirroring `native_score_batch`'s own PR-7a shape
+(`stages.py::_native_parity_kind` shipped earlier, in `#191`):
 
-- `nightly.submit_native_parity_if_ready` — the builder a future sidecar calls,
+- `supervisor.Service._reconcile_native_parity` (this PR) — the
+  tick-loop sidecar called from `Service.tick` right after
+  `self._reconcile_native_score_batch_shadow()` (`#88`); a CONFIRMED
+  `schema_mismatch` parks the job id and short-circuits later ticks.
+- `nightly.submit_native_parity_if_ready` — the builder the sidecar calls,
   mirroring `submit_computed_moves_refresh_if_ready` (`nightly.py:858`)/
   `submit_native_score_batch_shadow_if_ready` (`#88`) in signature shape.
 - `nightly._native_parity_identity` — a cheap catalog-only identity check
@@ -298,14 +297,15 @@ a submission source" rule Part 4 already established for
   `native_score_batch_refusals.v2.0` (gate finding on `#191`, real: the
   generic job-submission API can submit a `native_parity` job against ANY
   bound artifacts today, entirely independent of
-  `submit_native_parity_if_ready`'s OWN pre-submission check (this PR,
-  nightly.py) — a worker-side check stays REQUIRED defense-in-depth
-  regardless: a generic submission always bypasses any one caller's own
-  pre-submission check, and a directly-submitted job has no caller-side
-  memo to protect — it simply fails, correctly, at the worker). See
-  "Cutover PR-4 (redo)'s own input sourcing" above for the sidecar-layer
-  check a later, stacked PR adds, for retry-semantics reasons this
-  worker-side check does not address. It builds
+  `submit_native_parity_if_ready`'s OWN pre-submission check and the
+  sidecar's own schema-mismatch park-and-short-circuit (both this PR) —
+  a worker-side check stays REQUIRED defense-in-depth regardless: a
+  generic submission always bypasses any one caller's own pre-submission
+  check, and a directly-submitted job has no caller-side memo to protect
+  — it simply fails, correctly, at the worker). See "Cutover PR-4
+  (redo)'s own input sourcing" above for why the sidecar-layer check
+  additionally exists, for retry-semantics reasons this worker-side
+  check does not address. It builds
   `legacy_rows`/`native_rows`/`native_refusals`/`unkeyable_refusals` (via
   `_native_rows_and_refusals`, below), projects every native record
   through `_native_comparison_row` (gate finding on `#191`, real: a raw
@@ -786,8 +786,8 @@ immutable, content-addressed artifact via `spec.input_refs`, never a
 `job_<id>#<name>` reference, since no prior job produces it.
 
 **Cutover PR-4 (redo)'s own input sourcing (built, slice 2B(b), this
-PR — `submit_native_parity_if_ready`/`_native_parity_identity`; its
-tick-loop caller is a separate, stacked PR).**
+PR — `submit_native_parity_if_ready`/`_native_parity_identity` and
+their tick-loop caller, `Service._reconcile_native_parity`).**
 `submit_native_parity_if_ready` gathers nothing beyond what
 `_native_parity_identity` already found, WITH ONE DELIBERATE EXCEPTION
 (CodeRabbit round 6; refined by an Opus gate finding on where it belongs,
@@ -1124,9 +1124,9 @@ starts working with no change of its own.
   `"native_refused_unmatched"` (a native refusal with no legacy row to
   move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/
   `tolerance_policy_id` fields; `only_legacy` now excludes rows
-  `native_refused` claims. `nightly.submit_native_parity_if_ready` (this
-  PR) can build such a job already; what still has no production caller
-  is the tick-loop sidecar that would call it, a separate, stacked PR.
+  `native_refused` claims. `nightly.submit_native_parity_if_ready` and
+  its tick-loop caller, `Service._reconcile_native_parity` (both this
+  PR), submit such a job automatically once its inputs are ready.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the existing `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild`
@@ -1219,9 +1219,9 @@ today; this describes the destination once #199 lands.
   `native_parity_report._native_rows_and_refusals`/
   `_population_key_from_board_request_key` already join on this key today
   (built, not designed here). Submitting and scheduling the `native_parity`
-  job itself is built too (`nightly.submit_native_parity_if_ready`, this PR);
-  what still has no production caller is its tick-loop sidecar, a separate,
-  stacked PR — the key format it joins on was never in question.
+  job itself is built too (`nightly.submit_native_parity_if_ready` and its
+  tick-loop caller, both this PR) — the key format it joins on was never
+  in question.
 - **Namespace/authority.** Every one of these jobs is submitted under a
   `NamespacePolicy` scoped to `{"shadow"}` only; `native_score_batch`'s
   registered `namespaces=frozenset({"shadow", "smoke"})` already forbids
@@ -1406,7 +1406,7 @@ job.
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
 | `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request with no raw-row producer yet raises `VALIDATION_FAILED` | the specific succeeded score job read, not session alone |
-| `native_parity` | no succeeded `native_score_batch` yet — returns without submitting | the specific `native_score_batch` identity read |
+| `native_parity` | no succeeded `native_score_batch` yet — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id` and short-circuits every later tick carrying it at zero cost | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | design only, not yet implemented — see [#192](https://github.com/yshewchuk/investment-validation/issues/192) | — |
 
