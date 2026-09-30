@@ -264,15 +264,17 @@ def test_reconcile_schema_mismatch_parks_the_job_id_and_leaves_the_memo_untouche
     conn, clock, _ = catalog(tmp_path)
     service = _service(tmp_path, conn, clock)
     _identity_stub(monkeypatch, _IDENTITY)
+    reported_identity = (_IDENTITY[0], _IDENTITY[1], _IDENTITY[2], "reported-batch-job")
     memo = {"identity": _IDENTITY, "attempts": 2, "not_before": 0.0}
     service._native_parity_memo = memo
     reported = _report_spy(monkeypatch, service)
-    calls = _submit_stub(monkeypatch, _schema_mismatch(_IDENTITY[3]))
+    calls = _submit_stub(monkeypatch, _schema_mismatch(reported_identity[3]))
 
     service._reconcile_native_parity()
 
     assert len(calls) == 1
-    assert service._native_parity_schema_mismatch_job_id == _IDENTITY[3]
+    assert service._native_parity_schema_mismatch_job_id == reported_identity[3]
+    assert service._native_parity_schema_mismatch_job_id != _IDENTITY[3]
     # ZERO cost: no attempt spent, the very same memo object, untouched.
     assert service._native_parity_memo is memo
     assert memo["attempts"] == 2
@@ -284,6 +286,7 @@ def test_reconcile_schema_mismatch_parks_the_job_id_and_leaves_the_memo_untouche
     # a LATER tick carrying the SAME batch job id short-circuits ahead of all
     # memo/backoff machinery -- even though this memo still has 3 attempts left
     # and no backoff window, submit is never reached again for that job id.
+    _identity_stub(monkeypatch, reported_identity)
     service._reconcile_native_parity()
     service._reconcile_native_parity()
     assert len(calls) == 1

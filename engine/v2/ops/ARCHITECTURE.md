@@ -1529,14 +1529,12 @@ since the raw-row producer that would build `events.json`
 does not exist yet — see "Outputs"/"Failure semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
-(`run_native_parity_worker`, dispatched from `worker.py`) are shipped, and so is its nightly-side
-builder (`submit_native_parity_if_ready`/`_native_parity_identity`, this PR). What remains unbuilt is
-the production submission sidecar (`_reconcile_native_parity`) that would call the builder every
-tick the same way `computed_moves_refresh`/`native_score_batch` are reached — until that sidecar
-exists, the builder has no caller at all. This diagram's own `native_parity` node
-(`"native_parity": ("score",)`) is unrelated to the builder: it describes `run_shadow_nightly`'s own
-separate, pre-existing inline handler (`native_parity_handler`), which still runs the same way it
-always has and stays as drawn.
+(`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through
+the production sidecar: `Service.tick()` calls `_reconcile_native_parity()`,
+which calls `nightly.submit_native_parity_if_ready` once paired succeeded
+`native_score_batch`/`score` inputs are ready. This diagram's `native_parity`
+node (`"native_parity": ("score",)`) describes the separate inline handler
+(`native_parity_handler`) in the test-only `run_shadow_nightly` graph.
 
 **Production job submission does not walk this diagram's graph at all** — it
 uses the separately maintained `_DAG_STAGES`, never containing
@@ -1544,8 +1542,8 @@ uses the separately maintained `_DAG_STAGES`, never containing
 path is `supervisor.Service`'s tick loop: `computed_moves_refresh`'s sidecar
 does reach `submission.submit`; `native_score_batch`'s does not today (see
 "Outputs"); `native_parity` has a built, tested nightly-side builder
-(`nightly.submit_native_parity_if_ready`/`_native_parity_identity`, this PR)
-but no production sidecar yet — nothing calls the builder in production.
+(`nightly.submit_native_parity_if_ready`/`_native_parity_identity`), called
+by `Service._reconcile_native_parity` to submit jobs independently of the graph.
 
 ### CLI → catalog → coordinator effect
 
