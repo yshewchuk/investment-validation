@@ -86,7 +86,8 @@ implemented — see #192.
 ## 3. Inputs
 
 **Forward serving-fold contract.** Offline descriptor authoring is described
-below; runtime loading, selection and scoring integration remain design only.
+below; verified loading is defined in 6d-2 below, while selection and scoring
+integration remain design only.
 Monthly folds
 are separate from the full-refit champion bindings. A `ServingFoldRef`
 identifies one release-owned `tier4_folds:size` estimator object, its model,

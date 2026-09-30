@@ -15,6 +15,14 @@ from .contracts import (
 )
 
 
+class _CachedArtifact(ReadOnlyArtifact):
+    __slots__ = ("member_byte_limit",)
+
+    def __init__(self, artifact, limit):
+        super().__init__(artifact)
+        object.__setattr__(self, "member_byte_limit", limit)
+
+
 class FrozenInference:
     def __init__(
         self,
@@ -24,7 +32,7 @@ class FrozenInference:
     ) -> None:
         self._root = Path(artifact_root).resolve()
         self._adapters = dict(default_adapters() if adapters is None else adapters)
-        self._cache: dict[tuple[object, ...], ReadOnlyArtifact] = {}
+        self._cache: dict[tuple[object, ...], _CachedArtifact] = {}
 
     @property
     def cache_size(self) -> int:
@@ -40,17 +48,7 @@ class FrozenInference:
         if adapter is None:
             return self._refuse(request, "UNKNOWN_ADAPTER", binding)
         try:
-            members = self._verified_members(binding)
-            key = (
-                binding.adapter,
-                binding.feature_order,
-                binding.output_names,
-                tuple((item.name, item.content_hash) for item in binding.members),
-            )
-            artifact = self._cache.get(key)
-            if artifact is None:
-                artifact = ReadOnlyArtifact(adapter.load(members, binding))
-                self._cache[key] = artifact
+            artifact = self._load_artifact(binding)
             predictions = tuple(
                 tuple(float(value) for value in row)
                 for row in adapter.predict(artifact, request.rows, binding)
@@ -80,7 +78,27 @@ class FrozenInference:
             return self._refuse(request, reason)
         return matches[0]
 
-    def _verified_members(self, binding):
+    def _load_artifact(self, binding, *, max_member_bytes=None):
+        key = (binding.adapter, binding.feature_order, binding.output_names,
+               tuple((item.name, item.content_hash) for item in binding.members))
+        artifact = self._cache.get(key)
+        limits = [n for n in (max_member_bytes,
+                  None if artifact is None else artifact.member_byte_limit) if n is not None]
+        limit = min(limits) if limits else None
+        try:
+            members = self._verified_members(binding, limit)
+        except OSError:
+            if limit is not None:
+                raise AdapterError("bounded artifact verification failed") from None
+            raise
+        if artifact is None:
+            artifact = _CachedArtifact(self._adapters[binding.adapter].load(members, binding), limit)
+            self._cache[key] = artifact
+        else:
+            object.__setattr__(artifact, "member_byte_limit", limit)
+        return artifact
+
+    def _verified_members(self, binding, max_member_bytes=None):
         names = [item.name for item in binding.members]
         if not names or len(names) != len(set(names)):
             raise AdapterError("artifact member names must be unique and non-empty")
@@ -93,7 +111,13 @@ class FrozenInference:
                 raise AdapterError("artifact path escapes artifact root") from exc
             if not path.is_file():
                 raise FileNotFoundError(f"missing artifact member: {member.name}")
-            payload = path.read_bytes()
+            if max_member_bytes is None:
+                payload = path.read_bytes()
+            else:
+                with path.open("rb") as stream:
+                    payload = stream.read(max_member_bytes + 1)
+                if len(payload) > max_member_bytes:
+                    raise AdapterError("artifact exceeds byte limit")
             if "sha256:" + hashlib.sha256(payload).hexdigest() != member.content_hash:
                 raise AdapterError(f"artifact hash mismatch: {member.name}")
             verified[member.name] = payload
