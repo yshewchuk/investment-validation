@@ -108,15 +108,26 @@ def test_constant_zero_and_nan_sources_preserve_legacy_arithmetic(value, tmp_pat
     assert math.isnan(result.spy_vol20_rel252.iloc[0])
 
 
-@pytest.mark.parametrize("field,corruption", [("spy_ret21", 42.0), ("spy_ret21", np.nan),
-                                               ("regime_asof", pd.Timestamp("2021-01-01"))])
-def test_comparator_rejects_numeric_missing_and_stamp_defects(field, corruption, tmp_path, monkeypatch):
+@pytest.mark.parametrize("field", FEATURES)
+@pytest.mark.parametrize("corruption", [42.0, np.nan])
+def test_comparator_rejects_numeric_missing_defects(field, corruption, tmp_path, monkeypatch):
     market = _market()
     events = pd.DataFrame({"date": [pd.Timestamp("2021-01-01")]})
     expected = _legacy(events, market, tmp_path, monkeypatch)
     actual = add_regime_features(events, market)
     _assert_parity(actual, expected)
     actual.loc[0, field] = corruption
+    with pytest.raises(AssertionError):
+        _assert_parity(actual, expected)
+
+
+def test_comparator_rejects_regime_asof_defect(tmp_path, monkeypatch):
+    market = _market()
+    events = pd.DataFrame({"date": [pd.Timestamp("2021-01-01")]})
+    expected = _legacy(events, market, tmp_path, monkeypatch)
+    actual = add_regime_features(events, market)
+    _assert_parity(actual, expected)
+    actual.loc[0, "regime_asof"] = pd.Timestamp("2021-01-01")
     with pytest.raises(AssertionError):
         _assert_parity(actual, expected)
 
@@ -142,7 +153,8 @@ def test_private_captured_regime_source_parity():
         pytest.skip("private regime corpus unavailable; set V2_REGIME_CORPUS_CSV")
     manifest = json.loads(path.with_name("manifest.json").read_text())
     assert hashlib.sha256(path.read_bytes()).hexdigest() == manifest["fixture_sha256"]
-    print(f"regime corpus source={manifest['source_path']} sha256={manifest['source_sha256']}")
+    source_hash = manifest["source_sha256"]
+    print(f"regime corpus sha256={source_hash}")
     market = pd.read_csv(path, skiprows=3, header=None,
                          names=["date", "adj", "close", "high", "low", "open", "volume"])
     market["date"] = pd.to_datetime(market["date"], errors="coerce")
