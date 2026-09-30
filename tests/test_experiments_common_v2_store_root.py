@@ -14,6 +14,7 @@ helpers — following ``tests/test_v2_research_experiment_trades.py``.
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -37,6 +38,12 @@ from tests.test_v2_research_replay import _event_rows  # noqa: E402
 
 PROVENANCE = experiment_trades.PROVENANCE
 
+_RUN_PY = ROOT / "experiments" / "EXP-147_str_thru_gate_promotion_confirmatory_val" / "run.py"
+_spec = importlib.util.spec_from_file_location("exp147_run_for_test", _RUN_PY)
+_exp147_run = importlib.util.module_from_spec(_spec)
+assert _spec.loader is not None
+_spec.loader.exec_module(_exp147_run)
+
 
 def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
     conn, clock, store = catalog_and_store(tmp_path)
@@ -59,6 +66,9 @@ def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
     # must hold. The published fragments live under ``<ops_root>/objects/...``.
     ops_root = tmp_path / "store"
     assert (ops_root / "objects").is_dir()
+    assert _exp147_run.V2_STORE_ROOT.name != "objects", (
+        "run.py's V2_STORE_ROOT regressed to the ops_root/\"objects\" bug"
+    )
 
     trades = common_v2.load_v2_trades(
         "STR-THRU", catalog=tmp_path / "catalog.sqlite", store_root=ops_root,
