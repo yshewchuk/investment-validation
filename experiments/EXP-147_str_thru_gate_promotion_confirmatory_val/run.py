@@ -12,6 +12,7 @@ lives in spec.yaml; engine.evaluate enforces it.
 """
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -103,6 +104,47 @@ def main() -> None:
     print(f"[{spec['id']}] headline: mean={result.results['headline'].get('mean')} "
           f"cagr={result.results['headline'].get('cagr')} "
           f"sharpe_trade={result.results['headline'].get('sharpe_trade')}",
+          flush=True)
+
+    # Champion re-evaluation: a promotion decision needs gate_midfill_str_thru
+    # scored on the SAME v2 snapshot, trades, repricer, walk-forward and MC
+    # settings as the candidate above -- not the stored EXP-145 metrics, which
+    # were computed on the pre-v2 legacy trades universe and are not a valid
+    # comparison once the candidate runs on a different trades universe.
+    # common.make_registered_gate applies the registry's own stored threshold,
+    # refit per fold, exactly like EXP-145's arm1_incumbent_model.
+    champion_gate, champion_state = common.make_registered_gate(STRATEGY, dataset)
+
+    def champion_extra_sections(result):
+        return [{
+            "title": "Champion re-evaluation (same v2 snapshot)",
+            "body": [
+                "engine.models.training.gate (registered gate_midfill_str_thru), "
+                "refit per fold with the registry's stored threshold "
+                "(experiments.common.make_registered_gate), evaluated on the "
+                f"identical v2 snapshot {v2_snapshot_id!r}, trades, repricer, "
+                "walk-forward and MC settings as the candidate above.",
+                f"Fold interactions recorded: {len(champion_state.stats)}.",
+            ],
+        }]
+
+    champion_spec = copy.deepcopy(spec)
+    champion_spec["title"] = f"{spec['title']} — champion re-evaluation (gate_midfill_str_thru)"
+    # Legitimately differs from the PLANNED row's hash (different gate, same
+    # trades/harness/settings) -- grid_cell=True is the harness's own exemption
+    # for exactly this, the same pattern EXP-145's run_arm() uses per arm.
+    champion_spec["grid_cell"] = True
+    champion_result = evaluate(
+        champion_spec, trades, gate=champion_gate, run_dir=HERE,
+        repricer=repricer, spy_daily=spy,
+        extra_sections=champion_extra_sections,
+    )
+    if not args.no_ledger:
+        lib.record_evaluation(HERE, champion_spec, champion_result.results)
+    print(f"[{spec['id']}] champion report: {champion_result.report_path}", flush=True)
+    print(f"[{spec['id']}] champion headline: mean={champion_result.results['headline'].get('mean')} "
+          f"cagr={champion_result.results['headline'].get('cagr')} "
+          f"sharpe_trade={champion_result.results['headline'].get('sharpe_trade')}",
           flush=True)
 
 
