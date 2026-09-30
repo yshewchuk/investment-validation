@@ -687,10 +687,15 @@ The optional guard compares the already-loaded `SnapshotRef.snapshot_id`,
 without a second head resolution. A mismatch raises `INPUT_CHANGED` before
 materialization request construction or registration; equality keeps that ref.
 Omitting the expected id preserves direct and legacy caller behavior.
-`nightly_raw_rows.scan_forward_board_requests` scans the pinned snapshot's
-`earnings_events` and returns `BoardRequest`s for the forward window, with
-no `src_orats` filter (history-only; forward dates are Nasdaq/yfinance).
-`pin_snapshot_inputs` also returns the pinned snapshot's `calendar_version`.
+`nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward
+events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
+`nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)`
+returns `CalendarRowInputs(calendar_revision, calendar_row)`, copying the
+exact pinned event ID. Revision means the earnings dataset version (`EventRef`),
+not `SnapshotRef.calendar_version`, which may be a placeholder.
+Entry/exit/expiry, spot and calendar-observed-through are staged inputs; validation covers shape, not sourcing or strategy.
+No match → `EVENT_NOT_FOUND`; multiple matches → `IDENTITY_CONFLICT`;
+Invalid staged/key input or blank persisted event ID/dataset revision → `INVALID_REQUEST`; repository failures propagate.
 
 ## Inputs
 
@@ -759,15 +764,10 @@ no `src_orats` filter (history-only; forward dates are Nasdaq/yfinance).
   contract. Every failure mode here (unset/blank env var, no pointer, or a
   release that fails hash verification) is Failure semantics R1 below.
 - **Per-event raw rows** (`calendar_row`/`panel_row`/`panel_anchor`/
-  `tier4_row`/`quote_rows` per `BoardRequest`, in the shape
-  `NightlyEventInputs`/`assemble_nightly_source_bundle` require): the
-  producer that stages these from a pinned snapshot does not exist yet
-  ([#199](https://github.com/yshewchuk/investment-validation/issues/199)).
-  The scheduled trigger's `"score"` job now pins a snapshot (see "Primary
-  contracts" above), so the sidecar raises `VALIDATION_FAILED` rather than
-  silently returning nothing; only a `legacy`-input-mode plan built
-  directly (not the scheduled trigger) still gets a silent no-op — see
-  Failure semantics R1 for both outcomes.
+  `tier4_row`/`quote_rows`): end-to-end staging remains unimplemented
+  ([#199](https://github.com/yshewchuk/investment-validation/issues/199));
+  the calendar helper has no production caller. Pinned-snapshot submission
+  raises `VALIDATION_FAILED`; direct legacy-mode plans remain a no-op (R1).
 
 `SourceBundle` construction (`assemble_nightly_source_bundle`,
 `source_inputs.build_native_score_inputs`) happens inside the worker, not

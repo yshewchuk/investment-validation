@@ -34,6 +34,10 @@ attempt inspection, cancellation, recovery planning, health and supervisor
 execution. Python modules are internal to ops; other production packages consume
 versioned artifacts instead of importing the supervisor.
 
+Internal staging API: `nightly_raw_rows.scan_calendar_row` returns
+`CalendarRowInputs` from a pinned earnings event and explicit market context.
+It has no production caller; see the component architecture contract.
+
 <!-- public-interface: none -->
 
 ## Consumers
