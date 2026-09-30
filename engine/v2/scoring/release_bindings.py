@@ -294,8 +294,15 @@ def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping
     """The ``phase5_release.json`` catalog: parsed, schema-checked,
     self-hash-verified, and checked against the live pointer's release_id --
     all before any of its rows are trusted."""
-    path = release_root / _STATE_CATALOG_NAME
+    path = deployment._manifest_path(
+        release_root / _DEPLOYMENT_DIR, expected_release_id).with_name(_STATE_CATALOG_NAME)
     try:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            path = release_root / _STATE_CATALOG_NAME
+        if not path.is_file():
+            raise ModelNotReady(_STATE_CATALOG_NAME, "catalog is not a readable file")
         raw = path.read_bytes()
     except OSError as exc:
         raise ModelNotReady(_STATE_CATALOG_NAME, f"cannot read {_STATE_CATALOG_NAME}") from exc

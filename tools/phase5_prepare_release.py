@@ -47,6 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from checks.phase5_release import (  # noqa: E402
+    MANIFEST_NAME,
     MISSING,
     PENDING,
     STAGED,
@@ -56,6 +57,7 @@ from checks.phase5_release import (  # noqa: E402
     manifest_body,
     member_row,
     modules_available,
+    preserve_legacy_manifest,
     sha256_bytes,
     write_manifest,
     write_object,
@@ -321,6 +323,7 @@ def _copy_incumbent(source: Path, dest: Path) -> None:
             shutil.copytree(Path(source) / name, dest / name)
     if (Path(source) / "DEPLOYED").is_file():
         shutil.copy2(Path(source) / "DEPLOYED", dest / "DEPLOYED")
+    preserve_legacy_manifest(dest.parent, Path(source).parent / MANIFEST_NAME)
 
 
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
