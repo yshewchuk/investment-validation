@@ -1160,7 +1160,7 @@ and until then it is reachable only through direct `ops submit`, same as
 tick loop (`_reconcile_computed_moves_refresh`, wrapped in the same
 degrade-only-this-stage try/except `_reconcile_publication_status` uses),
 via `nightly.submit_computed_moves_refresh_if_ready`: it finds the latest
-(by session, not by last-updated) succeeded native `"refresh"` job,
+succeeded native `"refresh"` session, accepting colons within its scope hash,
 resolves the shadow head fresh, and keys the job purely by session — no
 `scope_hash`, since its target set is always every scoreable ticker on the
 pinned head, independent of which watchlist's `"refresh"` triggered the
