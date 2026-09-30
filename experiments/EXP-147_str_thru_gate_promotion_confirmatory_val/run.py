@@ -137,6 +137,21 @@ def main() -> None:
     # for exactly this, the same pattern EXP-145's run_arm() uses per arm.
     champion_spec["grid_cell"] = True
     champion_run_dir = HERE / "champion"
+    if not args.no_ledger:
+        # Register the grid cell's exact spec_hash BEFORE evaluate() runs, not
+        # only after: if the run dies partway, results/metrics_<hash>.json and
+        # REPORT.md must never exist with zero ledger trace of the attempt.
+        from datetime import datetime, timezone
+
+        lib.ledger_append([{
+            "id": champion_spec.get("id", ""),
+            "spec_hash": lib.spec_hash(champion_spec),
+            "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+            "stage": "planned",
+            "oos_mean_mid": "",
+            "sharpe_trade": "",
+            "promoted": "False",
+        }])
     champion_result = evaluate(
         champion_spec, trades, gate=champion_gate, run_dir=champion_run_dir,
         repricer=repricer, spy_daily=spy,
