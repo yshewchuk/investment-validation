@@ -261,7 +261,7 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Cache | `checks.phase5_release.read_manifest` and `scoring.release_bindings._read_state_catalog` reload and revalidate catalogs on every call; no catalog data is cached |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
 | Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
-| Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs |
+| Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs; incumbent validation is read-only and precedes copying |
 | Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |
 | Historical catalog was already overwritten before migration | It cannot be recovered from a model manifest; rebuilding that catalog is required |

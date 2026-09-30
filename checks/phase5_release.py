@@ -224,9 +224,9 @@ def _read_catalog(path: Path, expected_id: str | None = None) -> dict | None:
         raise ReleaseLayoutError("phase5 catalog could not be read or validated") from exc
 
 
-def _verify_staged(release_root: Path, release_id: str) -> None:
+def _verify_staged(store: Path, release_id: str) -> None:
     try:
-        manifest = deployment._read_manifest(deployment_root(release_root), release_id)
+        manifest = deployment._read_manifest(store, release_id)
         if (manifest is None or manifest.release.release_id != release_id
                 or not deployment._manifest_hash_matches(manifest)):
             raise ReleaseLayoutError("catalog requires a matching verified staged release")
@@ -239,6 +239,16 @@ def _write_catalog(path: Path, body: Mapping[str, Any]) -> None:
         path, (json.dumps(body, indent=2, sort_keys=True) + "\n").encode())
 
 
+def validate_legacy_manifest(store: Path, legacy_path: Path) -> None:
+    """Read-only preflight against a deployment store, including custom names."""
+    body = _read_catalog(legacy_path)
+    if body is not None:
+        release_id = body["release_id"]
+        _verify_staged(store, release_id)
+        path = deployment._manifest_path(store, release_id).with_name(MANIFEST_NAME)
+        _read_catalog(path, release_id)
+
+
 def preserve_legacy_manifest(release_root: Path, legacy_path: Path | None = None) -> None:
     """Preserve a verified legacy catalog without replacing local authority."""
     body = _read_catalog(legacy_path if legacy_path is not None
@@ -246,7 +256,7 @@ def preserve_legacy_manifest(release_root: Path, legacy_path: Path | None = None
     if body is None:
         return
     release_id = body["release_id"]
-    _verify_staged(release_root, release_id)
+    _verify_staged(deployment_root(release_root), release_id)
     path = _catalog_path(release_root, release_id)
     if _read_catalog(path, release_id) is None:
         _write_catalog(path, body)
@@ -255,7 +265,7 @@ def preserve_legacy_manifest(release_root: Path, legacy_path: Path | None = None
 def write_manifest(release_root: Path, body: Mapping[str, Any]) -> Path:
     body = _validate_catalog(dict(body))
     preserve_legacy_manifest(release_root)
-    _verify_staged(release_root, body["release_id"])
+    _verify_staged(deployment_root(release_root), body["release_id"])
     path = _catalog_path(release_root, body["release_id"])
     _write_catalog(path, body)
     _write_catalog(Path(release_root) / MANIFEST_NAME, body)
@@ -288,4 +298,5 @@ __all__ = [
     "TRAILING_CUTOFF_MODULES", "ReleaseLayoutError", "StateSpec", "deployment_root",
     "manifest_body", "member_row", "modules_available", "object_relpath",
     "preserve_legacy_manifest", "read_manifest", "sha256_bytes", "write_manifest", "write_object",
+    "validate_legacy_manifest",
 ]

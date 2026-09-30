@@ -142,6 +142,10 @@ def test_bad_local_never_falls_back_to_valid_root(tmp_path, damage):
         layout.read_manifest(tmp_path)
     with pytest.raises(layout.ReleaseLayoutError):
         layout.preserve_legacy_manifest(tmp_path)
+    destination = tmp_path / "copy" / "deployment"
+    with pytest.raises(layout.ReleaseLayoutError):
+        prep._copy_incumbent(layout.deployment_root(tmp_path), destination)
+    assert not destination.exists()
 
 
 def test_unreadable_local_and_read_race_are_not_absence(tmp_path, monkeypatch):
@@ -202,6 +206,33 @@ def test_invalid_legacy_migration_refuses(tmp_path, damage):
     assert _root(tmp_path).read_bytes() == before
     with pytest.raises(layout.ReleaseLayoutError):
         prep._copy_incumbent(layout.deployment_root(tmp_path), tmp_path / "copy" / "deployment")
+    assert not (tmp_path / "copy").exists()
+
+
+def test_copy_preflight_is_read_only_and_failed_destination_is_retryable(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    _stage(source)
+    legacy = _root(source).read_bytes()
+    _local(source).unlink()
+    store = source / "custom-store-name"
+    layout.deployment_root(source).rename(store)
+    destination = tmp_path / "copy" / "deployment"
+    _root(source).write_bytes(b"{")
+    with pytest.raises(layout.ReleaseLayoutError):
+        prep._copy_incumbent(store, destination)
+    assert not destination.exists()
+    _root(source).write_bytes(legacy)
+    before = {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()}
+    real_write = deployment._atomic_write_bytes
+
+    def forbid_source_write(path, data):
+        assert source not in path.parents
+        return real_write(path, data)
+
+    monkeypatch.setattr(deployment, "_atomic_write_bytes", forbid_source_write)
+    prep._copy_incumbent(store, destination)
+    assert _local(destination.parent).read_bytes() == legacy
+    assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
 
 
 @pytest.mark.parametrize("copy_incumbent", [False, True])

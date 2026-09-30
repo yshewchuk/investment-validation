@@ -59,6 +59,7 @@ from checks.phase5_release import (  # noqa: E402
     modules_available,
     preserve_legacy_manifest,
     sha256_bytes,
+    validate_legacy_manifest,
     write_manifest,
     write_object,
 )
@@ -318,12 +319,14 @@ def build_states(available_payloads: Mapping[str, Mapping[str, bytes]],
 def _copy_incumbent(source: Path, dest: Path) -> None:
     if (dest / "releases").exists():
         raise PrepareRefused(f"{dest} already holds a deployment store")
+    legacy = Path(source).parent / MANIFEST_NAME
+    validate_legacy_manifest(Path(source), legacy)
     for name in ("releases", "objects", "history"):
         if (Path(source) / name).is_dir():
             shutil.copytree(Path(source) / name, dest / name)
     if (Path(source) / "DEPLOYED").is_file():
         shutil.copy2(Path(source) / "DEPLOYED", dest / "DEPLOYED")
-    preserve_legacy_manifest(dest.parent, Path(source).parent / MANIFEST_NAME)
+    preserve_legacy_manifest(dest.parent, legacy)
 
 
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
