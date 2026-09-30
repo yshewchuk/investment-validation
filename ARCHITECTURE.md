@@ -398,6 +398,7 @@ flowchart LR
         SUBMIT["engine/v2/ops CLI: submit"] --> QUEUE["catalog (sqlite):<br/>queued jobs"]
         SERVE["engine/v2/ops CLI: serve"] --> SUP["supervisor.Service"]
         SUP -- "claim + lease" --> QUEUE
+        SUP -- "tick-loop sidecars:<br/>native_parity,<br/>native_score_batch,<br/>computed_moves_refresh" --> QUEUE
         SUP --> DAG["submitted DAG stages<br/>(nightly.py _DAG_STAGES,<br/>include_prerequisites=False)"]
         DAG --> PUB["shadow publication<br/>(private artifacts)"]
         DASH["engine.v2.dashboard._server"] -. "lazy import:<br/>cli.refresh_action" .-> SUBMIT
