@@ -521,6 +521,26 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
                      clock, plan_fn, ensure_snapshot_fn, full_run,
                      prior: TriggerReceipt | None,
                      snapshot_attempt: int) -> tuple[str | None, TriggerReceipt | None]:
+    """Ensure the as-of snapshot, then build and durably record a fresh plan_ref.
+
+    ``ensure_snapshot_fn`` runs first; a not-yet/timed-out/failed readiness
+    returns ``(None, receipt)`` with that outcome already recorded (or, on a
+    failure, recorded by ``_failure``), and no plan is built. Otherwise
+    ``plan_fn`` builds the plan and this function records the ``"submitting"``
+    receipt naming the new ``plan_ref``, returning ``(plan_ref, None)`` so
+    ``_submit_plan`` can submit it.
+
+    Accepted risk (issue #186): a crash landing between ``plan_fn`` returning
+    and the ``_record(..., "submitting", ...)`` call a few lines below leaves
+    ``plan_ref`` unrecorded, so the next tick's fresh ``_decide`` calls
+    ``plan_fn`` again and builds a SECOND, different plan -- the first is
+    orphaned (each ``_default_plan`` call bakes in a fresh ``decision_clock``,
+    so the two plan documents are never identical). This is accepted as a
+    wasted plan build/artifact write, never a correctness defect: the orphaned
+    ``plan_ref`` is named by no receipt, so it is never submitted or scored,
+    and nothing double-submits or double-scores. This function deliberately
+    makes no change to close that window.
+    """
     try:
         readiness, snapshot_id = ensure_snapshot_fn(root, as_of, clock, snapshot_attempt)
     except _HANDLED_FAILURES as exc:
