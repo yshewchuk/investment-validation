@@ -21,16 +21,32 @@ sys.path.insert(0, str(ROOT))
 from engine import paths  # noqa: E402
 from engine.evaluate import evaluate  # noqa: E402
 from engine.models.training import gate_forecast_analog as ga  # noqa: E402
-from experiments import common, lib  # noqa: E402
+from experiments import common, common_v2, lib  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 STRATEGY = "STR-THRU"
+V2_CATALOG = ROOT / "private" / "ops" / "catalog.sqlite"
+V2_STORE_ROOT = ROOT / "private" / "ops" / "objects"
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-ledger", action="store_true")
+    args = parser.parse_args()
     spec = lib.load_spec(HERE / "spec.yaml")
+    v2_snapshot_id = spec.get("v2_snapshot_id")
+    if not v2_snapshot_id:
+        raise SystemExit(
+            f"[{spec['id']}] spec.yaml is missing v2_snapshot_id — refusing to resolve "
+            "the v2 trades snapshot as \"latest\"; set it explicitly once the pinned "
+            "snapshot exists."
+        )
     print(f"[{spec['id']}] loading engine trades …", flush=True)
-    trades = common.load_engine_trades(STRATEGY)
+    trades = common_v2.load_v2_trades(
+        STRATEGY, catalog=V2_CATALOG, store_root=V2_STORE_ROOT, snapshot_id=v2_snapshot_id,
+    )
     print(f"[{spec['id']}] {len(trades):,} rows / "
           f"{trades['event_id'].nunique():,} events", flush=True)
 
@@ -43,7 +59,10 @@ def main() -> None:
         top_fraction=ga.TOP_FRACTION,
     )
     spy = common.load_spy_daily()
-    repricer = common.make_repricer(STRATEGY)
+    # same pinned snapshot as trades — never a second resolve
+    repricer = common_v2.make_v2_repricer(
+        STRATEGY, catalog=V2_CATALOG, store_root=V2_STORE_ROOT, snapshot_id=v2_snapshot_id,
+    )
     input_files = sorted((paths.CURATED / "trades").glob("year=*/part-*.parquet"))
 
     def required_outputs(result):
@@ -70,7 +89,8 @@ def main() -> None:
         input_files=input_files,
         extra_sections=required_outputs,
     )
-    lib.record_evaluation(HERE, spec, result.results)
+    if not args.no_ledger:
+        lib.record_evaluation(HERE, spec, result.results)
     print(f"[{spec['id']}] report: {result.report_path}", flush=True)
     print(f"[{spec['id']}] headline: mean={result.results['headline'].get('mean')} "
           f"cagr={result.results['headline'].get('cagr')} "

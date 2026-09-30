@@ -357,6 +357,21 @@ RUNNER_INVENTORY = {
         "backup_behavior": "none internal; the coordinator performs the single final private backup",
         "removal_phase": "phase-5 model extraction",
     },
+    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py": {
+        "spec_source": "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/spec.yaml",
+        "declared_runtime_sources": (
+            "experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py",
+        ),
+        "ledger_write_behavior": ("appends experiments/LEDGER.csv rows via main()'s "
+                                  "--no-ledger gate unless disabled; the adapter always "
+                                  "passes --no-ledger"),
+        "registry_effects": ("promotion candidate: gate_midfill_str_thru_forecast_analog "
+                             "vs champion gate_midfill_str_thru, per promotion_target"),
+        "report_path": "REPORT.md",
+        "resumable_units": "none_declared",
+        "backup_behavior": "none internal; the coordinator performs the single final private backup",
+        "removal_phase": "phase-5 model extraction",
+    },
 }
 
 

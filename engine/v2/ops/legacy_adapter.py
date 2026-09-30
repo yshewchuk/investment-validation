@@ -1104,6 +1104,7 @@ def invoke_evaluate(root, spec, trades, *, run_dir, **kwargs):
 
 REGISTERED_RUNNERS = frozenset({
     "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py",
+    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/run.py",
 })
 
 #: Wall-clock budget for one registered legacy runner subprocess. Sized to
