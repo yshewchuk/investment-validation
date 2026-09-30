@@ -85,6 +85,35 @@ implemented — see #192.
 
 ## 3. Inputs
 
+**Forward serving-fold contract (design; not implemented).** Monthly folds
+are separate from the full-refit champion bindings. A `ServingFoldRef`
+identifies one release-owned `tier4_folds:size` estimator object, its model,
+feature order, output, month start, full Tier-3 panel byte hash and declared
+interval policy. Its held-out prediction/residual arrays belong to that same
+object. Offline release preparation records this metadata in the hashed state
+catalog; a read-only loader verifies it against bounded, hash-checked bytes.
+Existing catalogs without this declaration require offline restaging, not a
+nightly fit or a guessed interval policy. The initial contract covers size
+folds for STR-THRU gate features only, not other forecast families.
+
+Selection uses the exact earlier of the event month and decision month,
+the registered size model and feature order, and the pinned panel byte hash.
+It never chooses the newest available fold or substitutes a full-refit model.
+The panel hash comes from the already-pinned snapshot's single original
+`feature_panel` object; an unsupported multi-fragment layout is refused.
+Snapshot ID, dataset version and panel byte hash remain distinct identities.
+Selection returns a separate content-addressed, single-binding inference view
+linked to its parent release and descriptor; it does not mutate or promote the
+champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes
+that binding through `FrozenInference`; no second prediction engine is added.
+
+| Forward fold condition | Outcome |
+|---|---|
+| Exact model/month/panel match, verified metadata and pool | Return immutable selected fold and provenance |
+| Missing, duplicate, future, wrong-panel or incompatible fold | `MODEL_NOT_READY`; no older-model or training fallback |
+| Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
+| Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
+
 - **`current_release_inventory` (`inventory.py`)**: the champion registry
   (`engine.models.registry`) and the real files under `data/models/*` —
   content hashes, never values.

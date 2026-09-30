@@ -121,6 +121,43 @@ load-bearing entrypoints:
 
 ## Inputs
 
+**Forward forecast assembly (design; not implemented).** STR-THRU forward
+inputs use native market/history features from the pinned snapshot (cutover
+6c), plus the verified release. The full-refit `size:*` champion supplies
+`driver_prediction`; a separate causally selected size fold supplies only the
+gate's requested `pred_abs_move` family and `forecast_edge`. Both execute in
+the existing scoring stages, never in the raw-row producer. Gate-only forecasts
+must not create a top-level sizing forecast or change the selected structure.
+
+An optional typed `SourceBundle.gate_forecast_source` carries the selected
+fold's inference view, parent-release identity and held-out pool. The existing
+`gate_recipe.forecast` names its binding/output; `_gate_forecast_members`
+resolves it through `FrozenRecipeExecutor` using the shared `FrozenInference`.
+The champion release stays unchanged. Supplying conflicting legacy pool or
+binding declarations is refused, not resolved by precedence. The ordinary
+bundle path remains valid when the optional source is absent.
+
+Raw feature names exclude stage-owned forecast/analog/pricing answers; the
+gate's declared feature order still includes them for stage-time derivation.
+6c must provide the required raw inputs and observation anchor for the driver,
+gate and selected fold. Missing values retain existing refusal/undetermined
+semantics; thin fold pools retain the existing unavailable-band behavior.
+A forward event needs no persisted Tier-4 row (`tier4_row={}`); it must never
+borrow another event's row. This does not authorize silently treating a missing
+historical Tier-4 row as normal: historical coverage and stored-crush references
+remain a separate contract. Stored non-null inputs retain their existing
+per-metric `fold_start <= as_of` guard. Native Tier-4 table construction
+(PR-13c) and monthly training are separate from forward inference.
+
+```mermaid
+flowchart LR
+  F["6c pinned raw features"] --> S["existing native scoring stages"]
+  C["verified champion binding"] --> S
+  M["exact causal fold and held-out pool"] --> G["existing gate forecast executor"]
+  F --> G
+  G --> S
+```
+
 - A `ScoreRequest` (`engine.v2.contracts`) and either a hand-built
   `NativeScoreInputs` or a `SourceBundle` run through
   `build_native_score_inputs`. `SourceBundle` carries raw context, raw
