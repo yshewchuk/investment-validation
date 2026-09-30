@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine import paths
 from engine.data.features import panel as legacy_panel
 from engine.v2.features.regime import add_regime_features
 
@@ -146,7 +147,7 @@ def test_missing_columns_and_invalid_closes_propagate():
 
 @pytest.mark.needs_corpus  # Captured benchmark observations are private, absent in CI.
 def test_private_captured_regime_source_parity():
-    default = Path(__file__).resolve().parents[1] / "fixtures/native_regime/gspc_daily.csv"
+    default = paths.ROOT / "fixtures/native_regime/gspc_daily.csv"
     override = os.environ.get("V2_REGIME_CORPUS_CSV")
     path = Path(override) if override else default
     if not path.exists() and not override:
