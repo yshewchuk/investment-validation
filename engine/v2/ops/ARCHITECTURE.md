@@ -1441,7 +1441,7 @@ job.
 | legacy's nightly lock is held | on a tick resuming prior state, an ephemeral `busy_legacy` is returned for this tick only (durable prior state, with its plan, untouched); on a non-resuming tick `busy_legacy` is persisted, since there is no prior plan to protect |
 | the per-`as_of` input manifest is captured | written fresh to a per-`as_of` path on every plan build, never a shared static file; a session mismatch is `INPUT_CHANGED` |
 | the scoring context years | derived from `as_of` on every call, mirroring legacy's own formula — never a fixed window that ages past its end |
-| a crash lands between `plan_fn` returning and `_ensure_plan_ref`'s `"submitting"` receipt write | accepted risk (issue #186): `plan_ref` is not yet durable, so the next tick's fresh `_decide` calls `plan_fn` again and stores a second, different plan artifact; the first is orphaned (never named by any receipt, so never submitted or scored) — a wasted artifact write, not a correctness defect |
+| a crash lands between `plan_fn` returning and `_ensure_plan_ref`'s `"submitting"` receipt write | accepted risk (issue #186): `plan_ref` is not yet durable, so an ELIGIBLE retry — via `_decide` if no resumable status is on disk yet, or via the resume branch if an earlier pre-plan resumable status is still recorded — calls `plan_fn` again and stores a second, different plan artifact, subject to the same window/retry rules as any other tick (a retry that never lands in time becomes `missed` instead); a rebuilt first plan is orphaned (never named by any receipt, so never submitted or scored) — a wasted artifact write, not a correctness defect |
 
 ### `computed_moves_store.py`: capture never sees data from after `as_of`
 

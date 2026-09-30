@@ -532,11 +532,16 @@ def _ensure_plan_ref(root: Path, as_of: str, *, tickers, context_tickers,
 
     Accepted risk (issue #186): a crash landing between ``plan_fn`` returning
     and the ``_record(..., "submitting", ...)`` call a few lines below leaves
-    ``plan_ref`` unrecorded, so the next tick's fresh ``_decide`` calls
-    ``plan_fn`` again and builds a SECOND, different plan -- the first is
-    orphaned (each ``_default_plan`` call bakes in a fresh ``decision_clock``,
-    so the two plan documents are never identical). This is accepted as a
-    wasted plan build/artifact write, never a correctness defect: the orphaned
+    ``plan_ref`` unrecorded, so an ELIGIBLE retry -- via ``_decide`` if no
+    resumable status is on disk yet, or via ``run_trigger``'s resume branch
+    if an earlier pre-plan resumable status (e.g. ``"snapshot_not_yet"``) is
+    still recorded -- calls ``plan_fn`` again and builds a SECOND, different
+    plan, subject to the same window/retry rules as any other tick (a retry
+    that never lands in time becomes ``"missed"`` instead, and no plan is
+    ever submitted for this ``as_of``) -- the first is orphaned (each
+    ``_default_plan`` call bakes in a fresh ``decision_clock``, so the two
+    plan documents are never identical). This is accepted as a wasted plan
+    build/artifact write, never a correctness defect: the orphaned
     ``plan_ref`` is named by no receipt, so it is never submitted or scored,
     and nothing double-submits or double-scores. This function deliberately
     makes no change to close that window.
