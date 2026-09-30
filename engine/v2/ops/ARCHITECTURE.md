@@ -176,26 +176,14 @@ production — can never silently diverge in comparison logic: root doc
 §5's "one shared parity comparator" invariant, restated one level up as
 one shared CALLER of that comparator, reached two ways.
 
-Four new symbols, mirroring `native_score_batch`'s own PR-7a shape.
-`nightly.submit_native_parity_if_ready`/`_native_parity_identity` and
-`stages.py::_native_parity_kind` are built and independently tested;
-`supervisor.Service._reconcile_native_parity` is a separate, stacked
-PR and is described here in present tense for readability, not
-because it exists yet:
+Three new symbols in this PR, mirroring `native_score_batch`'s own PR-7a
+shape (`stages.py::_native_parity_kind` shipped earlier, in `#191`). The
+tick-loop sidecar that will call the builder
+(`supervisor.Service._reconcile_native_parity`) is a separate, stacked PR;
+its own placement/tick-order design belongs to that PR, not here — today,
+the builder has no caller at all:
 
-- `supervisor.Service._reconcile_native_parity` — a new tick-loop
-  sidecar method, to be called from `Service.tick`
-  (`supervisor.py:227`) right after
-  `self._reconcile_native_score_batch_shadow()` (`#88`, itself called
-  right after `self._reconcile_computed_moves_refresh()`,
-  `supervisor.py:241`) — so the tick's native-shadow sidecar chain
-  will read computed_moves_refresh → native_score_batch (shadow) →
-  native_parity. The gates are separate: `computed_moves_refresh`
-  requires a succeeded native `refresh` and a `shadow` head;
-  `native_score_batch` requires a succeeded, snapshot-pinned legacy
-  `score`; and `native_parity` requires a paired, succeeded
-  `native_score_batch`/`score` identity with current output schemas.
-- `nightly.submit_native_parity_if_ready` — the builder the sidecar calls,
+- `nightly.submit_native_parity_if_ready` — the builder a future sidecar calls,
   mirroring `submit_computed_moves_refresh_if_ready` (`nightly.py:858`)/
   `submit_native_score_batch_shadow_if_ready` (`#88`) in signature shape.
 - `nightly._native_parity_identity` — a cheap catalog-only identity check
@@ -830,9 +818,9 @@ every value it needs is already a committed job output:
   field, never parsed for rows — BEFORE calling `stages.submit_job` at
   all.
 
-  **A confirmed mismatch is a permanent wait state for THIS `native_score_batch_job_id`,
-  not a retried one (Opus gate finding, correcting an earlier, unreachable claim
-  here).** Only when no `native_parity` job exists yet (an existing one
+  **A confirmed mismatch is a permanent wait state for THIS
+  `native_score_batch_job_id`, not a retried one.** Only when no
+  `native_parity` job exists yet (an existing one
   short-circuits first): a mismatch on EITHER tag makes `submit_native_parity_if_ready`
   raise `VALIDATION_FAILED` (`reason: "schema_mismatch"`) on the tick it is first
   found, submitting NOTHING — so no job — and no `(as_of, scope_hash)` key — is

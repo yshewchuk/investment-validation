@@ -235,6 +235,22 @@ def test_native_parity_identity_requires_paired_succeeded_score_job(tmp_path):
         "S1", "H1", score_job_id, batch_job_id)
 
 
+def test_native_parity_identity_falls_back_to_an_older_fully_paired_batch_when_the_newest_is_unpaired(
+        tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    first_stamp = _stamp(clock)
+    older_batch_job_id = _seed_batch_job(conn, clock, as_of="S1", scope_hash="H1",
+                                         stamp=first_stamp)
+    older_score_job_id = _seed_score_job(conn, clock, as_of="S1", scope_hash="H1",
+                                         stamp=first_stamp)
+    clock.advance(60)
+    second_stamp = _stamp(clock)
+    _seed_batch_job(conn, clock, as_of="S2", scope_hash="H2", stamp=second_stamp)
+
+    assert nightly._native_parity_identity(conn) == (
+        "S1", "H1", older_score_job_id, older_batch_job_id)
+
+
 def test_native_parity_identity_prefers_the_shadow_namespace_over_a_newer_smoke_one(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     first_stamp = _stamp(clock)

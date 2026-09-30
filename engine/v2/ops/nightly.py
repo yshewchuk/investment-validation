@@ -1024,9 +1024,12 @@ def _native_parity_identity(conn):
     native_score_batch_job_id)`` for the latest succeeded
     ``native_score_batch`` job whose matching ``score`` job is also succeeded.
 
-    Latest ``as_of`` wins, then ``created_at``, then ``scope_hash`` only as a
-    deterministic tiebreak. Malformed keys and unusable timestamps are
-    skipped. Returns ``None`` when no paired, fully succeeded identity exists.
+    Candidates are tried latest-first (``as_of``, then ``created_at``, then
+    ``scope_hash`` as a deterministic tiebreak); the first one whose matching
+    ``score`` job is also succeeded wins, so an older fully paired identity is
+    still found when a newer, unpaired batch would otherwise shadow it.
+    Malformed keys and unusable timestamps are skipped. Returns ``None`` when
+    no paired, fully succeeded identity exists at all.
     """
     from engine.v2.ops.submission import job_id_for
 
@@ -1041,18 +1044,16 @@ def _native_parity_identity(conn):
             continue
         as_of, scope_hash = parsed
         candidates.append((as_of, row["created_at"], scope_hash, row["job_id"]))
-    if not candidates:
-        return None
-    as_of, _created_at, scope_hash, native_score_batch_job_id = max(
-        candidates, key=lambda item: (item[0], item[1], item[2]))
-    score_key = "nightly:" + as_of + ":" + scope_hash + ":score"
-    score_job_id = job_id_for("shadow", score_key)
-    exists = conn.execute(
-        "SELECT 1 FROM jobs WHERE job_id = ? AND state = 'succeeded'",
-        (score_job_id,)).fetchone()
-    if exists is None:
-        return None
-    return as_of, scope_hash, score_job_id, native_score_batch_job_id
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    for as_of, _created_at, scope_hash, native_score_batch_job_id in candidates:
+        score_key = "nightly:" + as_of + ":" + scope_hash + ":score"
+        score_job_id = job_id_for("shadow", score_key)
+        exists = conn.execute(
+            "SELECT 1 FROM jobs WHERE job_id = ? AND state = 'succeeded'",
+            (score_job_id,)).fetchone()
+        if exists is not None:
+            return as_of, scope_hash, score_job_id, native_score_batch_job_id
+    return None
 
 
 def _native_score_batch_document_schema_ok(conn, store, native_score_batch_job_id):
