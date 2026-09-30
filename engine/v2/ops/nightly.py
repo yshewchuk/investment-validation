@@ -993,6 +993,172 @@ def submit_computed_moves_refresh_if_ready(conn, registry, policy, store, *, cat
 _LEGACY_SCORE_KIND = "legacy_score"
 
 
+def _scope_from_native_score_batch_key(idempotency_key):
+    """Recover ``(as_of, scope_hash)`` from a ``native_score_batch`` job's
+    idempotency key (``"nightly:<as_of>:<scope_hash>:native_score_batch"``).
+
+    Mirrors ``_session_scope_from_score_key``: exact prefix/suffix checks,
+    ``partition``/``rpartition`` rather than a fixed ``split(":")`` count, and
+    the whole middle segment is treated as ``scope_hash`` even when it is a
+    content hash containing its own colon."""
+    prefix, sep1, rest = idempotency_key.partition(":")
+    if prefix != "nightly" or not sep1:
+        return None
+    as_of, sep2, remainder = rest.partition(":")
+    if not sep2 or not as_of:
+        return None
+    scope_hash, sep3, stage = remainder.rpartition(":")
+    if not sep3 or stage != "native_score_batch" or not scope_hash:
+        return None
+    return as_of, scope_hash
+
+
+def _native_parity_key(as_of, scope_hash):
+    """Build the ``native_parity`` sidecar's idempotency key from the paired
+    batch identity."""
+    return "nightly:" + as_of + ":" + scope_hash + ":native_parity"
+
+
+def _native_parity_identity(conn):
+    """Return the paired ``(as_of, scope_hash, score_job_id,
+    native_score_batch_job_id)`` for the latest succeeded
+    ``native_score_batch`` job whose matching ``score`` job is also succeeded.
+
+    Candidates are tried latest-first (``as_of``, then ``created_at``, then
+    ``scope_hash`` as a deterministic tiebreak); the first one whose matching
+    ``score`` job is also succeeded wins, so an older fully paired identity is
+    still found when a newer, unpaired batch would otherwise shadow it.
+    Malformed keys and unusable timestamps are skipped. Returns ``None`` when
+    no paired, fully succeeded identity exists at all.
+    """
+    from engine.v2.ops.submission import job_id_for
+
+    rows = conn.execute(
+        "SELECT idempotency_key, job_id, created_at FROM jobs "
+        "WHERE kind = ? AND state = 'succeeded' AND namespace = 'shadow'",
+        ("native_score_batch",)).fetchall()
+    candidates = []
+    for row in rows:
+        parsed = _scope_from_native_score_batch_key(row["idempotency_key"])
+        if parsed is None or not row["created_at"]:
+            continue
+        as_of, scope_hash = parsed
+        candidates.append((as_of, row["created_at"], scope_hash, row["job_id"]))
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    for as_of, _created_at, scope_hash, native_score_batch_job_id in candidates:
+        score_key = "nightly:" + as_of + ":" + scope_hash + ":score"
+        score_job_id = job_id_for("shadow", score_key)
+        exists = conn.execute(
+            "SELECT 1 FROM jobs WHERE job_id = ? AND state = 'succeeded'",
+            (score_job_id,)).fetchone()
+        if exists is not None:
+            return as_of, scope_hash, score_job_id, native_score_batch_job_id
+    return None
+
+
+def _native_score_batch_document_schema_ok(conn, store, native_score_batch_job_id):
+    """Return ``True`` only when the latest succeeded ``native_score_batch``
+    attempt's ``records`` and ``refusals`` artifacts cleanly decode to mappings
+    carrying the ``native_parity_report`` v2.0 schema tags.
+
+    Missing attempts/outputs or malformed documents raise: this is an
+    integrity failure, not a mismatch. A clean schema mismatch returns
+    ``False`` for the caller's stale-document refusal.
+    """
+    from engine.v2.ops.native_parity_report import (
+        _RECORDS_SCHEMA_VERSION,
+        _REFUSALS_SCHEMA_VERSION,
+    )
+
+    details = {"native_score_batch_job_id": native_score_batch_job_id}
+    attempt = conn.execute(
+        "SELECT attempt_id FROM attempts WHERE job_id=? AND state='succeeded' "
+        "ORDER BY attempt_number DESC LIMIT 1", (native_score_batch_job_id,)).fetchone()
+    if attempt is None:
+        raise fail("VALIDATION_FAILED",
+                   "native_score_batch job has no succeeded attempt", details=details)
+    expected = (("records", _RECORDS_SCHEMA_VERSION),
+                ("refusals", _REFUSALS_SCHEMA_VERSION))
+    matched = []
+    for name, version in expected:
+        row = conn.execute(
+            "SELECT artifact_id FROM attempt_outputs WHERE attempt_id=? AND name=?",
+            (attempt[0], name)).fetchone()
+        if row is None:
+            raise fail("VALIDATION_FAILED",
+                       "native_score_batch job did not produce a " + name + " output",
+                       details=details)
+        try:
+            document = json.loads(store.read_verified(artifact(conn, store, row[0])))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise fail("VALIDATION_FAILED",
+                       "native_score_batch " + name + ".json is not valid JSON",
+                       details=details) from None
+        if not isinstance(document, Mapping):
+            raise fail("VALIDATION_FAILED", "native_score_batch " + name
+                       + ".json is not a JSON mapping", details=details)
+        if "schema_version" not in document:
+            raise fail("VALIDATION_FAILED", "native_score_batch " + name
+                       + ".json is missing its schema_version tag", details=details)
+        matched.append(document["schema_version"] == version)
+    return all(matched)
+
+
+def submit_native_parity_if_ready(conn, registry, policy, store, *, catalog_path,
+                                  objects_root, code_source, clock):
+    """Submit the sidecar ``native_parity`` job when a paired, fully succeeded
+    ``native_score_batch``/``score`` identity exists and is not yet deduped.
+
+    A confirmed schema mismatch raises so the supervisor PARKS that
+    ``native_score_batch_job_id`` (never reports it as a problem -- a
+    permanent wait state is not an error); every other not-ready outcome
+    returns ``None`` without touching the catalog."""
+    from engine.v2.contracts import JobSpec, SubmitRequest
+    from engine.v2.foundation import to_document
+    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+    from engine.v2.ops.stages import NativeParityParameters
+    from engine.v2.ops.submission import job_id_for, submit
+
+    if conn is None:
+        return None
+    identity = _native_parity_identity(conn)
+    if identity is None:
+        return None
+    as_of, scope_hash, score_job_id, native_score_batch_job_id = identity
+    key = _native_parity_key(as_of, scope_hash)
+    job_id = job_id_for("shadow", key)
+    if conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone() is not None:
+        return None
+    if not _native_score_batch_document_schema_ok(conn, store, native_score_batch_job_id):
+        raise fail(
+            "VALIDATION_FAILED",
+            "native_score_batch records/refusals schema_version is stale for this identity",
+            details={"reason": "schema_mismatch",
+                     "native_score_batch_job_id": native_score_batch_job_id})
+    input_bindings = {
+        "score.json": score_job_id + "#legacy_score",
+        "records.json": native_score_batch_job_id + "#records",
+        "refusals.json": native_score_batch_job_id + "#refusals",
+    }
+    parameters = NativeParityParameters(
+        expected_ids=(as_of + "|" + scope_hash,), input_bindings=input_bindings)
+    job = JobSpec(
+        kind="native_parity",
+        implementation_ref=content_hash(worker_source_manifest(code_source)),
+        spec_hash=None,
+        environment_ref=content_hash(environment_identity(_thread_count("native_parity"))),
+        parameters=to_document(parameters),
+        input_refs=(),
+        dependency_job_ids=(score_job_id, native_score_batch_job_id),
+        output_namespace="shadow",
+        resource_class="validation",
+        retry_policy_ref="bounded",
+        checkpoint_contract_ref="native_parity_report.v1.1")
+    return submit(conn, registry, policy, SubmitRequest(
+        namespace="shadow", idempotency_key=key, principal="operator", job=job),
+        clock=clock)
+
+
 def _native_score_batch_key(session, scope_hash):
     """Cutover PR-7a: builds the same key shape a legacy "score" job's own
     idempotency key uses (``"nightly:<session>:<scope_hash>:score"``,
