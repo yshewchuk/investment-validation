@@ -50,6 +50,11 @@ The package includes pure regime calculation logic over explicit inputs.
 No production path calls the regime helper yet; source reads and forward
 panel assembly remain separate integration work.
 
+`panel_math.advance_history(last_row)` advances a caller-selected realized
+panel row into next-event history aggregates. It is pure arithmetic; callers
+retain ownership of event selection and observation cutoffs. No production
+panel-row builder calls it yet.
+
 ## Testing
 
 `regime.add_regime_features` accepts explicit event and market frames, returning

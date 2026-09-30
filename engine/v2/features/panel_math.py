@@ -1,4 +1,4 @@
-"""Byte-identical v2 copies of legacy panel/feature math, plus a new
+"""Independent v2 copies of legacy panel/feature math, plus a new
 per-decision-date daily-market-state extraction core.
 
 Ported from ``engine/data/features/panel.py`` and ``engine/features.py``.
@@ -11,6 +11,7 @@ Missing-value conventions differ by function, matching each one's own
 legacy source: ``history_features`` always returns its fixed key set, with
 ``None`` for a value not yet available; ``add_implied_history`` represents
 a missing value as ``NaN`` in its output column, exactly as legacy does;
+``advance_history`` retains NaN for unavailable stored aggregates;
 ``daily_state_lookup`` is a new function (not a byte-identical copy) and
 represents a missing value as an ABSENT KEY in the returned mapping, never
 a fabricated NaN/0.0.
@@ -27,6 +28,7 @@ import pandas as pd
 __all__ = [
     "SPANS",
     "history_features",
+    "advance_history",
     "add_implied_history",
     "daily_state_lookup",
 ]
@@ -69,6 +71,53 @@ def history_features(
     for span in SPANS:
         out[f"ema{span}_prior_move"] = _causal_ema(list(prior_moves), span)
         out[f"ema{span}_prior_abs_move"] = _causal_ema(list(prior_abs), span)
+    return out
+
+
+def advance_history(last_row) -> dict[str, float]:
+    """Advance one realized panel row into next-event history aggregates.
+
+    Arithmetic port of ``engine.features.advance_history``. The stored means
+    and EMAs include early events omitted from the persisted panel, so resume
+    those aggregates instead of recomputing from its surviving rows. Missing
+    aggregates remain NaN, including an EMA that cannot yet be resumed.
+
+    The caller selects the eligible row and owns its causal cutoff. This
+    helper reads no dates, validates no provenance and does not mutate inputs.
+    """
+    n = int(last_row["n_prior"])
+    move = float(last_row["move"])
+    abs_move = float(last_row["abs_move"])
+    implied = last_row.get("or_implied")
+
+    out: dict[str, float] = {"n_prior": n + 1}
+    for mean_col, value in (
+        ("mean_prior_move", move),
+        ("mean_prior_abs_move", abs_move),
+    ):
+        prev = last_row[mean_col]
+        out[mean_col] = (
+            (float(prev) * n + value) / (n + 1) if pd.notna(prev) else float("nan")
+        )
+
+    prev_implied = last_row.get("mean_prior_or_implied")
+    if pd.notna(prev_implied) and pd.notna(implied):
+        out["mean_prior_or_implied"] = (float(prev_implied) * n + float(implied)) / (n + 1)
+    elif pd.notna(prev_implied):
+        out["mean_prior_or_implied"] = float(prev_implied)
+    else:
+        out["mean_prior_or_implied"] = float("nan")
+
+    for span in SPANS:
+        alpha = 2.0 / (span + 1.0)
+        for suffix, value in (("move", move), ("abs_move", abs_move)):
+            col = f"ema{span}_prior_{suffix}"
+            prev = last_row[col]
+            out[col] = (
+                alpha * value + (1.0 - alpha) * float(prev)
+                if pd.notna(prev)
+                else float("nan")
+            )
     return out
 
 
