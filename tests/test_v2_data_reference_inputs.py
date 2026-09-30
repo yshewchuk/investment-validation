@@ -229,6 +229,76 @@ def test_bad_registry_or_artifact_is_a_contract_mismatch(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# refusal details carry no raw legacy paths (issue #218)
+# --------------------------------------------------------------------------
+
+
+def test_champion_artifact_bytes_mismatch_details_carry_only_model_id(tmp_path):
+    """issue #218, site 1: the bytes-vs-registry-sha256 refusal must name the
+    champion by its registry ``id``, not by the artifact's raw legacy path --
+    ``Problem.details`` survives verbatim into a durably persisted receipt."""
+    build_legacy_store(tmp_path)
+    (tmp_path / reference_artifact_path()).write_bytes(b"retrained without re-registering")
+    with pytest.raises(DataError) as excinfo:
+        _plan(tmp_path)
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    assert problem.details == {"model_id": REFERENCE_MODEL_ID}
+    assert reference_artifact_path() not in str(problem.details)
+
+
+def test_malformed_registry_details_carry_no_registry_path(tmp_path):
+    """issue #218, site 2: the malformed-registry refusal carries no details
+    at all -- nothing non-identifying exists to report before any entry has
+    been parsed, and the registry's raw legacy path must not leak."""
+    build_legacy_store(tmp_path)
+    registry_path = tmp_path / INPUTS["model_registry"]["path"]
+    registry_path.write_text("[]")
+    with pytest.raises(DataError) as excinfo:
+        _plan(tmp_path)
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    assert problem.details == {}
+    assert INPUTS["model_registry"]["path"] not in str(problem.details)
+
+
+def test_out_of_bounds_artifact_details_carry_no_registry_artifact_string(tmp_path):
+    """issue #218, site 3: the escaping-artifact-path refusal names the model
+    by ``id`` only -- the ``artifact`` value is an arbitrary, unvalidated
+    string read straight from the registry file's own JSON."""
+    build_legacy_store(tmp_path)
+    registry_path = tmp_path / INPUTS["model_registry"]["path"]
+    document = json.loads(registry_path.read_text())
+    document["models"][0]["artifact"] = "../outside.joblib"
+    registry_path.write_text(json.dumps(document))
+    with pytest.raises(DataError) as excinfo:
+        _plan(tmp_path)
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "CONTRACT_MISMATCH"
+    assert problem.details == {"model_id": REFERENCE_MODEL_ID}
+    assert "../outside.joblib" not in str(problem.details)
+
+
+def test_tier4_serving_symlink_details_carry_no_path(tmp_path):
+    """issue #218, site 4: the serving-directory-is-a-symlink refusal carries
+    no details -- ``TIER4_SERVING_DIR`` is a fixed constant the message
+    already names, so repeating it in the persisted envelope adds only the
+    raw legacy path."""
+    build_legacy_store(tmp_path)
+    serving = tmp_path / ri.TIER4_SERVING_DIR
+    assert serving.is_dir() and not serving.is_symlink()
+    moved = tmp_path / f"{ri.TIER4_SERVING_DIR}.moved"
+    serving.rename(moved)
+    serving.symlink_to(moved)
+    with pytest.raises(DataError) as excinfo:
+        _plan(tmp_path)
+    problem = excinfo.value.problem
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert problem.details == {}
+    assert ri.TIER4_SERVING_DIR not in str(problem.details)
+
+
+# --------------------------------------------------------------------------
 # coordinator publish_reference_inputs refusals (issue #217)
 # --------------------------------------------------------------------------
 

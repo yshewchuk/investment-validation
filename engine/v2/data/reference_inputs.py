@@ -219,7 +219,7 @@ def resolve_reference_files(root: Path, *, panel_content_hash: str,
         ref = file_ref(root, path)
         if ref.content_hash != CONTENT_HASH_PREFIX + str(entry.get("artifact_sha256")):
             raise errors.fail("CONTRACT_MISMATCH", "champion artifact bytes differ from the "
-                              "registry's recorded sha256", details={"path": path})
+                              "registry's recorded sha256", details={"model_id": entry.get("id")})
         refs[path] = ref
     for path in _tier4_caches(root, champions, panel_content_hash):
         refs[path] = file_ref(root, path)
@@ -236,8 +236,7 @@ def champion_entries(registry_path: Path) -> list[dict]:
         if not isinstance(models, list) or not all(isinstance(m, dict) for m in models):
             raise TypeError("models is not a list of objects")
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise errors.fail("CONTRACT_MISMATCH", "legacy model registry is not the reviewed shape",
-                          details={"path": _REGISTRY_PATH}) from exc
+        raise errors.fail("CONTRACT_MISMATCH", "legacy model registry is not the reviewed shape") from exc
     return [entry for entry in models if entry.get("champion") is True]
 
 
@@ -259,7 +258,7 @@ def _artifact_path(entry: dict) -> str:
               and path.startswith(_MODELS_DIR + "/") and kind_for_path(path) == "champion_artifact")
     if not inside:
         raise errors.fail("CONTRACT_MISMATCH", "champion artifact path is not inside the models "
-                          "directory", details={"model_id": entry.get("id"), "artifact": raw})
+                          "directory", details={"model_id": entry.get("id")})
     return path
 
 
@@ -267,8 +266,7 @@ def _tier4_caches(root: Path, champions: list[dict], panel_content_hash: str) ->
     suffix = "_" + panel_content_hash.removeprefix(CONTENT_HASH_PREFIX)[:12] + ".joblib"
     directory = root / TIER4_SERVING_DIR
     if directory.is_symlink():
-        raise errors.fail("INPUT_CHANGED", "Tier-4 serving directory is a symlink",
-                          details={"path": TIER4_SERVING_DIR})
+        raise errors.fail("INPUT_CHANGED", "Tier-4 serving directory is a symlink")
     names = sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
     matching = [name for name in names if name.endswith(suffix)]
     for entry in champions:
