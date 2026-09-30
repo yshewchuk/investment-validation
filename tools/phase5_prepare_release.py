@@ -63,6 +63,7 @@ from checks.phase5_release import (  # noqa: E402
 from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
 from engine.v2.models.releases import ModelReleaseInventory  # noqa: E402
+from engine.v2.models.serving_folds import SizeFoldPolicy  # noqa: E402
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"
 #: Output name per role for the frozen binding, following the Phase 4 native
@@ -94,6 +95,7 @@ class StateBuild:
     status: str
     payloads: dict[str, bytes]  # object name -> bytes
     detail: str
+    size_fold_policy: SizeFoldPolicy | None = None
 
 
 # --------------------------------------------------------------------------
@@ -291,7 +293,8 @@ def tier4_fold_payloads(tier4_dir: Path, model_ids: Mapping[str, str], snapshot:
 
 
 def build_states(available_payloads: Mapping[str, Mapping[str, bytes]],
-                 notes: Mapping[str, str] | None = None) -> list[StateBuild]:
+                 notes: Mapping[str, str] | None = None, *,
+                 size_fold_policy: SizeFoldPolicy | None = None) -> list[StateBuild]:
     """One build row per catalog state: STAGED, MISSING or PENDING, never skipped."""
     notes = notes or {}
     builds = []
@@ -305,6 +308,9 @@ def build_states(available_payloads: Mapping[str, Mapping[str, bytes]],
         else:
             builds.append(StateBuild(
                 spec, MISSING, {}, notes.get(spec.member_id, f"no member from {spec.source}")))
+    for build in builds:
+        if build.spec.member_id == "tier4_folds:size":
+            build.size_fold_policy = size_fold_policy
     return builds
 
 
@@ -333,7 +339,7 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     root.mkdir(parents=True, exist_ok=True)
     if incumbent is not None:
         _copy_incumbent(incumbent, root)
-    deployment.stage_release(root, release, inventory, dict(payloads))
+    staged = deployment.stage_release(root, release, inventory, dict(payloads))
     rows = []
     for build in states:
         objects = []
@@ -341,6 +347,12 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
             digest, rel = write_object(out, data)
             objects.append({"name": name, "path": rel, "content_hash": digest,
                             "bytes": len(data)})
+            if build.spec.member_id == "tier4_folds:size" and build.size_fold_policy is not None:
+                from engine.v2.foundation import to_document
+                from tools.phase5_serving_folds import describe_size_fold
+
+                objects[-1]["serving_fold"] = to_document(
+                    describe_size_fold(data, name, build.size_fold_policy, staged))
         rows.append(member_row(build.spec, build.status, objects, build.detail))
     body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
     return write_manifest(out, body)
@@ -401,7 +413,12 @@ def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[
         _merge(found, frozen_state_payloads(args.frozen_state or ()))
     if modules_available(("engine.v2.models.chooser_analog_pool",))[0]:
         _merge(found, chooser_pool_payloads(paths.FEATURES / "chooser_analog_pool.parquet"))
-    return release, inventory, payloads, build_states(found)
+    producer = tier4.size_feature_model()
+    if producer.produces != "pred_abs_move":
+        raise PrepareRefused("unsupported size serving output")
+    policy = SizeFoldPolicy(model_id=producer.model_id, feature_order=producer.features,
+                            panel_sha256=snapshot, interval_floor=producer.interval_floor)
+    return release, inventory, payloads, build_states(found, size_fold_policy=policy)
 
 
 def main(argv=None) -> int:
