@@ -10,9 +10,11 @@ with those, they win and this file is stale.
 ## Summary
 
 The three core scoring-plumbing PRs (release reader, `SourceBundle`
-assembler, batch dispatch — plan PR-1/2/3) are merged, and PR-7a's shadow
-`native_score_batch` submission runs on every real supervisor tick. The chain
-is still functionally a no-op in production, though: the raw-row producer
+assembler, batch dispatch — plan PR-1/2/3) are merged, and PR-7a's
+shadow-submission check runs on every real supervisor tick, but the actual
+`native_score_batch` submission it gates is conditional (a pinned snapshot
+and no existing job for that identity). The chain is still functionally a
+no-op in production, though: the raw-row producer
 that turns a real night's events into per-event inputs ("cutover PR-6",
 tracked in #199, split into slices 6a-6f) has only slice 6a merged, so the
 shadow submission either no-ops (default legacy input mode) or explicitly
