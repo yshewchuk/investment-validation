@@ -23,20 +23,22 @@ raises "raw-row producer is not built yet" when a snapshot is pinned.
 The redone native_parity comparison job (plan PR-4, re-scoped 2026-09-28 to
 run as a real supervisor-submitted job) has four of five slices merged; the
 slice that calls it every tick (#211) is open in review, and slice 2B(c) (a
-nightly-graph node-width change) hasn't started. The dashboard's
-native_parity page (#198) is merged but empty, since nothing upstream has
-produced a report yet. The production release binding also has no release
-root configured in this checkout's environment, so it fails closed until an
+nightly-graph node-width change) hasn't started. The dashboard's serving
+projection and native_parity page (#189, #198) are both merged, but the page
+renders empty (`no_report`) because nothing upstream has produced a real
+report yet. The production release binding also has no release root
+configured in this checkout's environment, so it fails closed until an
 operator sets one.
 
 **Critical path to a populated side-by-side page:** finish raw-row producer
 slices 6b-6f → confirm `native_score_batch` scores a real event → merge #211
-and decide slice 2B(c)'s scope → configure the production release root →
-build the two queued dashboard PRs (serving projection/API, then the page).
-Everything after that (LegacyScoreBridge replacement, native
-decisions-predictions, the 10-session qualification) is Phase 7 work that
-hasn't started. Slice 6b had an owner who stopped before opening a PR; every
-unstarted item below currently has no owner or open PR.
+and decide slice 2B(c)'s scope → configure the production release root. The
+dashboard side itself (projection, API route, page) is already built and
+needs no further PRs; it just has nothing to show yet. Everything after that
+(LegacyScoreBridge replacement, native decisions-predictions, the 10-session
+qualification) is Phase 7 work that hasn't started. Slice 6b had an owner
+who stopped before opening a PR; every unstarted item below currently has no
+owner or open PR.
 
 ## Critical path to the dual dashboard
 
@@ -68,11 +70,12 @@ unstarted item below currently has no owner or open PR.
    the real design is a supervisor-submitted job. Open: the tick-loop caller
    (#211, in review). Not started: slice 2B(c), a nightly-graph node-width
    change — scope not yet confirmed as required for Phase 7.
-7. **Dashboard side-by-side view** — Not started, queued. #198 (empty page,
-   merged). Queued right after native_parity wiring lands: (1) a serving
-   projection + API endpoint reading the latest native_parity report, then
-   (2) a page with a nightly summary, per-field diff breakdown, and
-   per-event drill-down.
+7. **Dashboard side-by-side view** — Page and authenticated JSON route
+   merged. #189 (serving projection), #198 (page + route). Renders a nightly
+   summary, per-field diff breakdown, and worst-rows drill-down, but shows
+   `no_report` today because the production report path (steps 4-6) hasn't
+   produced one yet. No further dashboard PRs are queued; this step is
+   waiting on data, not code.
 8. **Operator step: configure the production release root** — Not done. A
    model release was deployed 2026-09-28, but the release-root binding is
    environment-only and unset in this checkout, so the release lookup fails
