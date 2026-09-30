@@ -1,13 +1,43 @@
 """Native one-step history arithmetic, independent expectations and parity."""
 from __future__ import annotations
 
+import hashlib
 import math
+import os
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from engine.features import advance_history as legacy_advance_history
 from engine.v2.features.panel_math import advance_history
+
+
+# Trimmed, unchanged columns from the persisted research panel:
+# earnings_predictions/data/processed/events_with_orats_sum.csv
+# Source SHA256 c33e9b0581321670e098981acd593ceebb6fab351b755420310ee0a474a42b5f.
+# Captured 2026-09-30: A/2009-05-14 and A/2011-05-13 (date is event identity).
+# This older panel lacks optional mean_prior_or_implied. Its differently defined
+# mean_prior_implied_move is deliberately not renamed or substituted.
+@pytest.mark.needs_corpus
+def test_captured_panel_rows_match_legacy_with_unavailable_fields():
+    # Licensed captured values stay in the ignored private corpus. CI runs the
+    # synthetic boundary cases below; this acceptance case must run locally.
+    fixture = Path(os.environ.get(
+        "V2_HISTORY_PANEL_FIXTURE",
+        Path(__file__).resolve().parents[1] / "fixtures/v2_features/history_rows.csv"))
+    assert hashlib.sha256(fixture.read_bytes()).hexdigest() == (
+        "4faf54a9c9f82efd345d08a1660c18ca0fe988be48401acde9a2a2aa762eb760")
+    frame = pd.read_csv(fixture, float_precision="round_trip")
+    assert list(zip(frame.ticker, frame.date)) == [("A", "2009-05-14"), ("A", "2011-05-13")]
+    for _, row in frame.iterrows():
+        before = row.copy()
+        actual = advance_history(row)
+        _assert_same(actual, legacy_advance_history(row))
+        assert actual["n_prior"] == row["n_prior"] + 1
+        assert math.isnan(actual["mean_prior_or_implied"])
+        assert math.isnan(actual["ema12_prior_move"]) == (row["n_prior"] == 4)
+        pd.testing.assert_series_equal(row, before)
 
 
 def _algebra_row():
@@ -48,6 +78,19 @@ def test_independent_arithmetic_keys_and_input_immutability():
     assert row == before
     result["n_prior"] = -1
     _assert_same(advance_history(row), expected)
+
+
+@pytest.mark.parametrize("field", ["mean_prior_move", "ema12_prior_move"])
+def test_comparator_rejects_corrupted_numeric_and_missing_aggregates(field):
+    row = _algebra_row()
+    row["ema12_prior_move"] = float("nan")
+    expected = {"mean_prior_move": 5 / 12, "ema12_prior_move": float("nan")}
+    result = advance_history(row)
+    actual = {key: result[key] for key in expected}
+    _assert_same(actual, expected)
+    actual[field] = 0.0
+    with pytest.raises(AssertionError, match=field):
+        _assert_same(actual, expected)
 
 
 @pytest.mark.parametrize("missing", [None, float("nan"), pd.NA])
