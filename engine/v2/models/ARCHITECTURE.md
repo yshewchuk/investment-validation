@@ -250,6 +250,8 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 ### 7.6 Phase-5 state catalogs (staging-tool ownership)
 
 Catalogs live at `<release_root>/deployment/releases/<release_id>/phase5_release.json`.
+Release IDs are validated before path construction; preservation requires
+a matching, hash-verified staged model manifest.
 `checks.phase5_release.read_manifest` selects a candidate using the root copy;
 production scoring instead selects the release named by `DEPLOYED`.
 
@@ -258,8 +260,8 @@ production scoring instead selects the release named by `DEPLOYED`.
 | Selected release-local catalog exists | It is authoritative; schema, self-hash and release identity must validate |
 | Release-local catalog absent | A valid legacy root catalog is usable only for its own matching release ID; reads do not migrate files |
 | Local catalog corrupt or unreadable | Refuse; never fall back to a valid root copy |
-| Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; refuse bad or unresolvable legacy inputs rather than guess |
-| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched |
+| Replacing the root candidate or copying a legacy incumbent | Preserve its valid catalog under its own release ID; validate and retain any existing local catalog over a stale root copy; refuse bad or unresolvable inputs |
+| Catalog publication interrupted | Individual files are replaced atomically; staged files may remain, but deployment pointers are untouched; retries may repeat completed writes; concurrent writers have no safety guarantee |
 | Repeated staging under one release ID | Existing rewrite semantics remain; different release IDs retain separate catalogs |
 | Historical catalog was already overwritten before migration | It cannot be recovered from a model manifest; rebuilding that catalog is required |
 
