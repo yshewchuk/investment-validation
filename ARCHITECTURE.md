@@ -182,6 +182,11 @@ can.
 
 ### 2.1 Two splits that are load-bearing, not cosmetic
 
+The features component also defines a designed, unimplemented bounded
+daily-state input adapter over one pinned snapshot. Its source clock is the
+EOD session, with no receipt/publication timestamp; it is a raw input
+prerequisite, not complete causal panel construction or nightly integration.
+
 - **`contracts` (0.0) vs. `foundation` (0.5).** Both are "layer 0" in prose,
   but `foundation` imports `contracts`, so they cannot be peers in an
   enforced strictly-less-than check.
