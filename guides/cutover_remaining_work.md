@@ -13,13 +13,14 @@ The three core scoring-plumbing PRs (release reader, `SourceBundle`
 assembler, batch dispatch — plan PR-1/2/3) are merged, and PR-7a's
 shadow-submission check runs on every real supervisor tick. Since Cutover
 PR-7b's `input_mode="snapshot"` flip, the real nightly's "score" stage
-always pins a snapshot, so an eligible tick does not silently no-op: it
-reaches the still-missing raw-row producer and raises `VALIDATION_FAILED`
-("cutover PR-6 (raw-row producer) is not built yet"), which the caller
-catches and backs off like any other transient failure. The raw-row
-producer that turns a real night's events into per-event inputs ("cutover
-PR-6", tracked in #199, split into slices 6a-6f) has slice 6a merged and
-slice 6b open (#239); 6c-6f have no PR open.
+always pins a snapshot, so this no longer silently no-ops under a default
+"legacy" mode: each tick attempt that clears its own bounded
+backoff/attempt-limit gate reaches the still-missing raw-row producer and
+raises `VALIDATION_FAILED` ("cutover PR-6 (raw-row producer) is not built
+yet"), which the caller catches, reports and backs off like any other
+transient failure. The raw-row producer that turns a real night's events
+into per-event inputs ("cutover PR-6", tracked in #199, split into slices
+6a-6f) has slice 6a merged and slice 6b open (#239); 6c-6f have no PR open.
 
 The redone native_parity comparison job (plan PR-4, re-scoped 2026-09-28 to
 run as a real supervisor-submitted job) is now fully merged, including the
@@ -61,9 +62,10 @@ unstarted item below has no PR open.
    assembler needs. Slice 6a (events scan + enumeration) is merged; 6b
    (calendar row) is in code review at #239; 6c-6f have no PR open. Since
    the real nightly's "score" stage always pins a snapshot (Cutover PR-7b),
-   this raises "not built yet" on every eligible real tick rather than
-   quietly no-oping. *Note: this is a different "PR-6" than the plan's
-   original S4C job-kind-wiring PR-6 — see the naming note below.*
+   each attempt that clears the shadow submission's own backoff/
+   attempt-limit gate raises "not built yet" rather than quietly no-oping.
+   *Note: this is a different "PR-6" than the plan's original S4C
+   job-kind-wiring PR-6 — see the naming note below.*
 5. **native_score_batch shadow submission (PR-7a)** — Code merged, active
    but blocked. #88, #126. Called every real tick; reaches step 4's gap
    (see above) until the raw-row producer lands.
