@@ -714,10 +714,10 @@ def _default_plan(root: Path, as_of: str, tickers=(), context_tickers=(), clock=
     ``expected_shadow_snapshot_id`` is the exact snapshot id ``_submit_plan``'s
     ``ensure_snapshot_fn`` call just verified is fresh for ``as_of`` (``None``
     for any caller outside that path, e.g. a direct `ops plan` invocation) --
-    threaded through as ``args.expected_snapshot_id``, not yet read by
-    ``cli._plan_command``/``pin_snapshot_inputs`` (PR-7b-3 adds that CAS check;
-    this slice only threads the value through). ``expected_population`` is the
-    operator's population document when present (``full_population`` derived
+    threaded through ``cli._plan_command`` as ``args.expected_snapshot_id``
+    to ``pin_snapshot_inputs``, which rejects a different loaded snapshot.
+    ``expected_population`` is the operator's population document when present
+    (``full_population`` derived
     the universe from the same file); absent, ``universe``/``context`` are
     both empty, and ``cli._snapshot_inputs``/``pin_snapshot_inputs`` now
     refuse at PLAN time with ``INVALID_REQUEST`` (Cutover PR-7b-2: before the
