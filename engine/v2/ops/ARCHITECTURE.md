@@ -1468,23 +1468,14 @@ stages follow — but that one convention does not by itself cover every
 diagnostic or native batch output writer in this package.
 
 **The one documented root-isolation exemption is worker-*source*
-fingerprinting.** `build_legacy_job_requests` computes `implementation_ref`
-from `worker_source_manifest(Path(__file__).resolve().parents[3])`, a code
-closure keyed to where `nightly.py` sits on disk, independent of the plan's
-`source_root`/`catalog_path`/`objects_root` — it answers "what worker code
-is running," never "which data root," so it is never redirected by a
-request's or plan's root. `submit_computed_moves_refresh_if_ready` runs
-inside a live `Service` instead, which already has its own authoritative
-worker-source root (`self.code_source`, what `Service._launch` validates
-`implementation_ref` against); it takes `code_source` as a caller-supplied
-parameter and fingerprints that, never a self-derived root of its own. The
-distinction is plan builder vs. `Service` submitter, not a rule unique to
-`build_legacy_job_requests`: other plan builders that run outside a live
-`Service` (`training.py`'s and `experiments.py`'s own plan builders,
-`worker_source_manifest`-based, and `cli.py`'s own further call sites) may
-self-derive their own fingerprinting root the same way, since they have no
-live `Service` to draw one from. Only a stage that runs *inside* `Service`
-must take `code_source` as a parameter instead of self-deriving.
+fingerprinting**, and it applies only to that — never to a data or artifact
+root. A plan builder that runs outside a live `Service`
+(`build_legacy_job_requests`, and `training.py`'s/`experiments.py`'s own
+plan builders) may self-derive its own worker-source fingerprint root,
+since it has no live `Service` to draw one from. A stage that runs *inside*
+`Service` (`submit_computed_moves_refresh_if_ready`) must instead take
+`code_source` as a caller-supplied parameter and fingerprint that, never a
+root of its own.
 
 `native_score_batch.py` adds **no runtime fitting** (root doc §2's
 layer-6.0 rule): `run_native_score_batch_worker` runs `score_batch` inside
@@ -1564,35 +1555,21 @@ reach it the same tick-loop way `computed_moves_refresh`/
 `native_parity`'s only caller is `run_shadow_nightly`'s own whole-graph
 walk, and its node above (`"native_parity": ("score",)`) stays as drawn.
 
-**Production job submission does not walk this diagram's graph at all.**
-`build_legacy_job_requests`'s only production caller, `cli.py`, always
-passes `include_prerequisites=False`, so `_stage_sequence` returns a
-second, separately hand-maintained tuple, `_DAG_STAGES` — whose stage
-names diverge from this diagram's (`decision_replay`/`decision_evidence`/
-`decision_commit` where this graph has `decision_validation`/
-`decision_commit`; `ledger_export` for `export`; `engineering_gate` for
-`engineering`) — and which never contains `native_parity`,
-`computed_moves_refresh`, or `native_score_batch` at all: in production
-each is simply absent from the submitted stage list. `NO_JOB_STAGES`
-(`frozenset({"native_parity"})`) is filtered out of any
-prerequisite-inclusive `plan["order"]` walk unconditionally;
-`_stage_sequence` then has separate, explicit by-name filters only for
-`computed_moves_refresh` and `native_score_batch` (`native_parity` needs no
-such filter — `NO_JOB_STAGES` already removes it). None of the three reach
-production submission through `_stage_sequence`/`build_legacy_job_requests`
-at all; the only path is `supervisor.Service`'s own tick loop, and today
-that path's actual reach differs per stage: `computed_moves_refresh`'s
-sidecar (`Service._reconcile_computed_moves_refresh`) does reach
-`submission.submit`; `native_score_batch` has a tick-loop sidecar but does
-not reach `submission.submit` today — see "Outputs"/"Failure semantics"
-for its no-op and `VALIDATION_FAILED` conditions; `native_parity` has no automatic
-production submission sidecar yet (see
-"`native_parity`" above) — nothing wires it into `submission.submit`/
-`submit_graph` from any operator command or tick-loop sidecar today. The
-generic `submission.submit` API could still enqueue a bound `native_parity`
-job if a caller built one directly, exactly as `board_requests` above is a
-library function nothing calls yet; `run_shadow_nightly`'s shadow walk is
-its only actual caller today.
+**Production job submission does not walk this diagram's graph at all** —
+it uses the separately maintained `_DAG_STAGES`, which never contains
+`native_parity`, `computed_moves_refresh`, or `native_score_batch`. None of
+the three reach production submission that way; the only path for any of
+them is `supervisor.Service`'s own tick loop, and each stage's actual
+reach differs: `computed_moves_refresh`'s sidecar
+(`Service._reconcile_computed_moves_refresh`) does reach
+`submission.submit`; `native_score_batch` has a sidecar that does not
+reach `submission.submit` today (see "Outputs"/"Failure semantics" for its
+no-op and `VALIDATION_FAILED` conditions); `native_parity` has no automatic
+production submission sidecar at all (see "`native_parity`" above) —
+`run_shadow_nightly`'s shadow walk is its only actual caller today, though
+the generic `submission.submit` API could enqueue a bound job if a caller
+built one directly, exactly as `board_requests` above is a library
+function nothing calls yet.
 
 ### CLI → catalog → coordinator effect
 
