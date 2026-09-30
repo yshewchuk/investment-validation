@@ -85,7 +85,9 @@ implemented — see #192.
 
 ## 3. Inputs
 
-**Forward serving-fold contract (design; not implemented).** Monthly folds
+**Forward serving-fold contract.** Offline descriptor authoring is described
+below; runtime loading, selection and scoring integration remain design only.
+Monthly folds
 are separate from the full-refit champion bindings. A `ServingFoldRef`
 identifies one release-owned `tier4_folds:size` estimator object, its model,
 feature order, output, month start, full Tier-3 panel byte hash and declared
@@ -113,6 +115,25 @@ that binding through `FrozenInference`; no second prediction engine is added.
 | Missing, duplicate, future, wrong-panel or incompatible fold | `MODEL_NOT_READY`; no older-model or training fallback |
 | Corrupt, oversized, escaped-path or header/descriptor mismatch | `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
+
+**Offline descriptor authoring (6d-1).** `ServingFoldDescriptor` in
+`serving_folds.py` is an immutable typed document under each size fold catalog
+object. It records parent release/model-manifest identity, model, ordered
+features, output/clock, exact month, full panel SHA-256, estimator member,
+embedded pool fields/count and explicit interval policy. The enclosing catalog
+hash binds catalog identity without a self-reference inside the descriptor.
+`tools.phase5_prepare_release` obtains `SizeFoldPolicy` from the registered size
+producer; `tools.phase5_serving_folds` validates bounded cache bytes and emits
+metadata before catalog publication. No fitting or inference occurs here.
+
+| Offline authoring condition | Outcome |
+|---|---|
+| Explicit policy and coherent size cache | Emit descriptor covered by the catalog self-hash; repeat inputs yield identical metadata |
+| Header/model/features/full panel/month disagreement, missing or malformed pool, oversized bytes | Refuse publication; never infer metadata from a filename prefix alone |
+| No explicit policy in a programmatic legacy caller | Preserve the existing catalog shape; it cannot supply the future fold path |
+| Other fold roles | Keep existing opaque catalog objects; this descriptor contract covers size only |
+| Failed preparation | No deployment-pointer changes; ordinary staging may leave unreferenced files; retry is permitted |
+| Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
 - **`current_release_inventory` (`inventory.py`)**: the champion registry
   (`engine.models.registry`) and the real files under `data/models/*` —
