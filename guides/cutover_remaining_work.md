@@ -37,9 +37,9 @@ and decide slice 2B(c)'s scope → configure the production release root. The
 dashboard side itself (projection, API route, page) is already built and
 needs no further PRs; it just has nothing to show yet. Everything after that
 (LegacyScoreBridge replacement, native decisions-predictions, the 10-session
-qualification) is Phase 7 work that hasn't started. Slice 6b had an owner
-who stopped before opening a PR; every unstarted item below currently has no
-owner or open PR.
+qualification) is Phase 7 work that hasn't started. Slice 6b is not started
+and has no PR open; every unstarted item below currently has no owner or
+open PR.
 
 ## Critical path to the dual dashboard
 
@@ -56,8 +56,8 @@ owner or open PR.
 4. **Raw-row producer ("cutover PR-6", 6 slices)** — 6a done, 6b-6f not
    started. #212 (merged), #199 (tracking issue). Enumerates real board
    requests and stages the per-event rows the assembler needs. Slice 6a
-   (events scan + enumeration) is merged; 6b (calendar row) had an owner who
-   stopped without opening a PR; 6c-6f are unstarted. The shadow-submission
+   (events scan + enumeration) is merged; 6b (calendar row) is not started
+   and has no PR open; 6c-6f are unstarted. The shadow-submission
    path currently either no-ops or raises a "not built yet" error, confirmed
    in code. *Note: this is a different "PR-6" than the plan's original S4C
    job-kind-wiring PR-6 — see the naming note below.*
