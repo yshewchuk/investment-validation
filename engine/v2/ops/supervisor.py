@@ -234,6 +234,18 @@ class Service:
         #: real-identity attempt count.
         self._native_score_batch_lookup_memo = None
         self._last_native_score_batch_problem = None
+        #: Real-identity attempt memo only, never a lookup failure (CodeRabbit
+        #: round 2, same defect class as the _native_score_batch memo pair).
+        self._native_parity_memo = None
+        #: Lookup-failure backoff memo; see _native_parity_identity_or_none's docstring.
+        self._native_parity_lookup_memo = None
+        #: One slot keyed by native_score_batch_job_id: a CONFIRMED records/
+        #: refusals schema_version mismatch, never a read/decode failure (see
+        #: submit_native_parity_if_ready's docstring). Checked BEFORE all
+        #: self._native_parity_memo's own machinery: a tick carrying this SAME
+        #: job id returns at zero cost; a DIFFERENT id clears it implicitly.
+        self._native_parity_schema_mismatch_job_id = None
+        self._last_native_parity_problem = None
 
     def start(self):
         if not self.lock.acquire():
@@ -273,6 +285,7 @@ class Service:
         self._reconcile_publication_status()
         self._reconcile_computed_moves_refresh()
         self._reconcile_native_score_batch_shadow()
+        self._reconcile_native_parity()
         return bool(self.running or claim)
 
     def _reconcile_publication_status(self):
@@ -710,6 +723,193 @@ class Service:
             self._native_score_batch_memo = None
         else:
             self._native_score_batch_backoff(memo, now)
+
+    def _native_parity_backoff(self, memo, now):
+        """Cutover PR-4 redo slice 2B(b): identical schedule to
+        _computed_moves_backoff/_native_score_batch_backoff, applied to
+        self._native_parity_memo instead -- its own slot, for the same reason
+        _native_score_batch_backoff exists: _computed_moves_backoff hardcodes
+        self._computed_moves_memo and would silently write this sidecar's
+        attempts into the wrong memo."""
+        memo["attempts"] += 1
+        memo["not_before"] = now + self._COMPUTED_MOVES_BACKOFF_SECONDS[
+            min(memo["attempts"] - 1, len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]
+        self._native_parity_memo = memo
+
+    def _report_native_parity_problem(self, exc):
+        """Dedup-by-(code, message) report, identical pattern to
+        _report_computed_moves_problem (Cutover PR-4 redo slice 2B(b))."""
+        problem = exc.problem if isinstance(exc, OpsError) else make_problem(
+            "VALIDATION_FAILED", "native_parity reconciliation failed")
+        problem_key = (problem.code, problem.message)
+        if problem_key == self._last_native_parity_problem:
+            return
+        self._last_native_parity_problem = problem_key
+        print(json.dumps({"event": "native_parity_reconcile_failed",
+                          "problem": {field: to_document(problem)[field]
+                                      for field in ("code", "category", "retryable", "message")}}))
+
+    def _native_parity_identity_or_none(self, now):
+        """The two CHEAP checks (plain indexed SELECTs, no artifact read)
+        _reconcile_native_parity needs every tick --
+        nightly._native_parity_identity (the paired succeeded
+        native_score_batch/score identity) and whether a job already exists
+        under that identity's key -- split out to mirror
+        _computed_moves_identity_or_none's own shape and failure semantics
+        exactly. See _native_score_batch_identity_or_none's own docstring for
+        the shared lookup-failure rationale, argued once there and not
+        re-argued here: a raise from either check is reported and backed off
+        here, in a SEPARATE memo slot (self._native_parity_lookup_memo), never
+        touching self._native_parity_memo's own real-identity attempt count --
+        and deliberately WITHOUT the _COMPUTED_MOVES_MAX_ATTEMPTS cap the
+        caller applies to a real identity, so a transient catalog lock retries
+        forever at the schedule's slowest cadence instead of silently
+        disabling this stage for the rest of the process's life.
+
+        Returns the real identity tuple when the caller should proceed, or
+        None when it should return immediately -- covering a throttled prior
+        lookup failure (still inside its own not_before), a caught exception
+        (reported and backed off here), "no identity yet", and "already
+        submitted" (a job exists under that key); the last two clear
+        self._native_parity_memo themselves. A successful lookup -- whatever
+        it returns -- always resets self._native_parity_lookup_memo to None,
+        so a later failure starts a fresh backoff sequence rather than
+        resuming an old one."""
+        from engine.v2.ops.nightly import _native_parity_identity, _native_parity_key
+        from engine.v2.ops.submission import job_id_for
+
+        lookup_memo = self._native_parity_lookup_memo
+        if lookup_memo is not None and now < lookup_memo["not_before"]:
+            return None
+        try:
+            identity = _native_parity_identity(self.conn)
+            exists = identity is not None and self.conn.execute(
+                "SELECT 1 FROM jobs WHERE job_id = ?",
+                (job_id_for("shadow", _native_parity_key(identity[0], identity[1])),)
+            ).fetchone() is not None
+        except Exception as exc:
+            lookup_memo = lookup_memo or {"attempts": 0, "not_before": 0.0}
+            lookup_memo["attempts"] += 1
+            lookup_memo["not_before"] = now + self._COMPUTED_MOVES_BACKOFF_SECONDS[
+                min(lookup_memo["attempts"] - 1, len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]
+            self._native_parity_lookup_memo = lookup_memo
+            self._report_native_parity_problem(exc)
+            return None
+        self._last_native_parity_problem = None
+        self._native_parity_lookup_memo = None
+        if identity is None or exists:
+            self._native_parity_memo = None
+            return None
+        return identity
+
+    def _native_parity_attempt_memo(self, identity, native_score_batch_job_id, now):
+        """The three gates _reconcile_native_parity checks before it may spend
+        an attempt, split out for the function-line budget (the same reason
+        _computed_moves_backoff/_native_score_batch_backoff exist). Returns the
+        memo to attempt under, or ``None`` when this tick must return without
+        touching the expensive path at all:
+
+        1. a parked schema mismatch FIRST -- an identity carrying the same
+           native_score_batch_job_id as self._native_parity_schema_mismatch_job_id
+           returns at strictly zero cost: no artifact read, no attempt spent,
+           and self._native_parity_memo not even read (see
+           _reconcile_native_parity's own docstring for why that wait state is
+           permanent per job id, and submit_native_parity_if_ready's own
+           docstring for what makes a mismatch CONFIRMED);
+        2. a new identity resets attempts/backoff (a stale memo for a
+           different job never gates this one);
+        3. the SAME _COMPUTED_MOVES_MAX_ATTEMPTS cap and not_before window
+           _reconcile_computed_moves_refresh applies, reused rather than
+           duplicated."""
+        if native_score_batch_job_id == self._native_parity_schema_mismatch_job_id:
+            return None
+        memo = self._native_parity_memo
+        if memo is None or memo.get("identity") != identity:
+            memo = {"identity": identity, "attempts": 0, "not_before": 0.0}
+        if (memo["attempts"] >= self._COMPUTED_MOVES_MAX_ATTEMPTS
+                or now < memo["not_before"]):
+            self._native_parity_memo = memo
+            return None
+        return memo
+
+    def _reconcile_native_parity(self):
+        """Cutover PR-4 redo slice 2B(b): the ONLY place a ``native_parity``
+        job is ever submitted -- called every tick(), right alongside
+        _reconcile_computed_moves_refresh and _reconcile_native_score_batch_shadow,
+        never through build_legacy_job_requests, so a broken parity submission
+        can never abort a required legacy stage. See
+        nightly.submit_native_parity_if_ready and ARCHITECTURE.md
+        "Outputs"/"Failure semantics" for the full account.
+
+        _native_parity_identity_or_none runs the two CHEAP checks (see its own
+        docstring for their failure semantics) and returns either a real
+        identity to proceed with, or None to return immediately.
+
+        Past that, _native_parity_attempt_memo checks the ONE short-circuit
+        ahead of all memo/backoff machinery: an identity whose
+        native_score_batch_job_id equals
+        self._native_parity_schema_mismatch_job_id returns None immediately, at
+        strictly zero cost -- no artifact file read, no attempt spent,
+        self._native_parity_memo not even looked at.
+        submit_native_parity_if_ready's OWN docstring accounts for what makes a
+        mismatch CONFIRMED (a stale records.json/refusals.json schema_version
+        tag, never a read or decode error) and why that is a permanent wait
+        state for that job id -- its artifacts can never change schema
+        underneath it -- and a DIFFERENT job id clears it implicitly, with no
+        separate reset step anywhere.
+
+        Only past both does this method reach the EXPENSIVE path --
+        submit_native_parity_if_ready -- and only if self._native_parity_memo
+        (keyed by THIS identity) still has attempts/backoff room. A submitted
+        job clears the memo; a None back or a retryable OpsError schedules the
+        next backoff via _COMPUTED_MOVES_BACKOFF_SECONDS, EXCEPT a confirmed
+        non-retryable OpsError (problem.retryable is False -- e.g. a malformed
+        committed artifact that can never change), which spends the FULL
+        attempt budget immediately instead of walking a schedule toward a cap
+        it can never avoid. Every exception is caught and reported the same
+        redacted way _reconcile_publication_status reports its own, never
+        crashing the tick."""
+        from engine.v2.ops.nightly import submit_native_parity_if_ready
+        from engine.v2.ops.snapshot_stages import _catalog_path
+        from engine.v2.ops.submission import NamespacePolicy
+
+        now = self.clock.monotonic()
+        identity = self._native_parity_identity_or_none(now)
+        if identity is None:
+            return
+        _as_of, _scope_hash, _score_job_id, native_score_batch_job_id = identity
+        memo = self._native_parity_attempt_memo(identity, native_score_batch_job_id, now)
+        if memo is None:
+            return
+        policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+        try:
+            receipt = submit_native_parity_if_ready(
+                self.conn, self.registry, policy, self.store,
+                catalog_path=_catalog_path(self.conn), objects_root=str(self.root),
+                code_source=self.code_source, clock=self.clock)
+        except OpsError as exc:
+            if exc.problem.details.get("reason") == "schema_mismatch":
+                self._native_parity_schema_mismatch_job_id = exc.problem.details.get(
+                    "native_score_batch_job_id", native_score_batch_job_id)
+                self._last_native_parity_problem = None
+                return
+            if not exc.problem.retryable:
+                memo["attempts"] = self._COMPUTED_MOVES_MAX_ATTEMPTS
+                self._native_parity_memo = memo
+                self._report_native_parity_problem(exc)
+                return
+            self._native_parity_backoff(memo, now)
+            self._report_native_parity_problem(exc)
+            return
+        except Exception as exc:
+            self._native_parity_backoff(memo, now)
+            self._report_native_parity_problem(exc)
+            return
+        self._last_native_parity_problem = None
+        if receipt is not None:
+            self._native_parity_memo = None
+        else:
+            self._native_parity_backoff(memo, now)
 
     def _clock_check(self):
         wall, mono = self.clock.now(), self.clock.monotonic()

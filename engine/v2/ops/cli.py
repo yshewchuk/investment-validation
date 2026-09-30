@@ -466,7 +466,8 @@ def _snapshot_inputs(args, root, conn, clock, context_tickers, population):
     return pin_snapshot_inputs(conn, ArtifactStore(root), args.snapshot_scope,
                                tickers=context_tickers, year_start=args.year_start,
                                year_end=args.year_end, expected_population=population, clock=clock,
-                               session=args.as_of)
+                               session=args.as_of,
+                               expected_snapshot_id=getattr(args, "expected_snapshot_id", None))
 
 
 def _read_refresh_plan(args):

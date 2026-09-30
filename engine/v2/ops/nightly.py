@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from engine.v2.foundation import content_hash
+from engine.v2.foundation.artifacts import ArtifactError
 from engine.v2.ops.calendar_moves_jobs import (
     COMPUTED_MOVES_REFRESH_ACTION,
     NATIVE_COMPUTED_MOVES_ACCOUNT,
@@ -1090,6 +1091,12 @@ def _native_score_batch_document_schema_ok(conn, store, native_score_batch_job_i
                        details=details)
         try:
             document = json.loads(store.read_verified(artifact(conn, store, row[0])))
+        except ArtifactError as exc:
+            if exc.code != "INTEGRITY_FAILED":
+                raise
+            raise fail("VALIDATION_FAILED",
+                       "native_score_batch " + name + ".json failed artifact verification",
+                       details=details) from None
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise fail("VALIDATION_FAILED",
                        "native_score_batch " + name + ".json is not valid JSON",
