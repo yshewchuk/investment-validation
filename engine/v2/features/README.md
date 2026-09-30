@@ -53,6 +53,11 @@ fixtures.
 
 ## Testing
 
+`regime.add_regime_features` accepts explicit event and market frames, returning
+regime values with their actual observation dates. It has no production caller.
+Its real captured-source parity test is marked `needs_corpus`; the payload stays
+private and can be selected with `V2_REGIME_CORPUS_CSV`.
+
 Tier 0 (`component_contracts.md` §15.3): seconds, from frozen fixtures, no
 panel load, no network, no fitting. Fixtures live in the private
 `fixtures/tier0/` corpus (`checks/tier0_corpus.py`), never in this repo — they

@@ -48,6 +48,25 @@ wiring anything to call it.
 
 ## Inputs
 
+`regime.add_regime_features(events, market, *, as_of_column="date")` is
+pure regime arithmetic over explicit DataFrames. `market` supplies normalized,
+chronologically ordered, timezone-naive `date` values and float-convertible
+`close` values; `events` supplies normalized `date` and an optional decision
+column. Source parsing, ordering, provenance and date validation belong to callers.
+The anchor is strictly before the event AND on-or-before the decision when
+provided. A fresh event frame preserves index/order and adds the nine legacy
+`spy_*` return/drawdown/volatility fields plus the actual source `regime_asof`.
+Returns/drawdown and annualized simple-return volatility retain percent units;
+volatility uses sample standard deviation (`ddof=1`), and relative volatility
+is a unitless ratio minus one. No market read, implicit clock or cache exists.
+
+| Regime input condition | Outcome |
+|---|---|
+| No eligible source row, including an empty market | NaN features and NaT anchor |
+| Insufficient history for one window | That feature stays NaN; eligible source date remains the anchor |
+| Empty events with required columns | Empty result with feature/anchor columns |
+| Missing columns or invalid scalar conversion | Existing pandas/NumPy/Python error propagates |
+
 - `panel_math.history_features`/`_causal_ema`: a ticker's prior realized
   moves and their absolute values, as plain float sequences — no I/O, no
   source dependency.
@@ -104,13 +123,15 @@ wiring anything to call it.
 - Consumer: `engine.v2.scoring` imports `default_feature_registry` to
   resolve feature scopes and recipe identities before scoring
   (`engine/v2/scoring/application.py`).
-- `panel_math` has no consumer yet. The chain it is built for is: **Part D**
+- `regime` uses `panel_math._anchor_index` plus NumPy/pandas; it has no
+  filesystem/network access or legacy imports. Its only callers are tests.
+  Neither input frame is mutated. Production forward-panel assembly is absent.
+- `panel_math` supplies anchoring to `regime`. The remaining chain is: **Part D**
   (`engine/v2/ops/native_feature_job.py`, a new job kind, not yet built) —
   the future caller of the whole chain — → Part C, a per-row feature
   orchestrator in this package (not yet built, planned as
-  `board_features.py`) → `panel_math` (this change, Part A) plus a sibling
-  market-state module (Part A2, not yet built) that reuses
-  `panel_math._anchor_index`. Until those land and are wired into the
+  `board_features.py`) → `panel_math` plus `regime` and remaining market-state
+  blocks. Until the orchestrator and job land and are wired into the
   nightly graph, `panel_math` is inert: it has unit tests of its own but
   cannot affect a board row.
 - The correctness check planned to exercise `panel_math` beyond its unit
@@ -214,6 +235,5 @@ not apply" by construction rather than a policy choice:
                      └──────────────────────────┘
 ```
 
-`panel_math` has no caller inside `engine.v2` yet (dashed relationship
-above); the future orchestrator/job that will call it are separate,
-later parts of the same build.
+`regime` calls `panel_math._anchor_index` within this package; the future
+orchestrator/job that will call these pure blocks remains separate work.
