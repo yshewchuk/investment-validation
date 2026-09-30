@@ -692,7 +692,7 @@ validation. The EXACT `snapshot_id` this call verified is threaded through
 → `cli._snapshot_inputs` → `pin_snapshot_inputs(expected_snapshot_id=None)`).
 The optional guard compares the already-loaded `SnapshotRef.snapshot_id`,
 without a second head resolution. A mismatch raises `INPUT_CHANGED` before
-materialization or artifact registration; equality keeps that resolved ref.
+materialization request construction or registration; equality keeps that ref.
 Omitting the expected id preserves direct and legacy caller behavior.
 `nightly_raw_rows.scan_forward_board_requests` scans the pinned snapshot's
 `earnings_events` and returns `BoardRequest`s for the forward window, with
