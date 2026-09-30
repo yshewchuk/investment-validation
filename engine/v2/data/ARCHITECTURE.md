@@ -212,15 +212,16 @@ Root doc §5 invariants this package is responsible for:
   (`legacy_mapping.py`'s one `Path(__file__)` use resolves a sibling
   package resource, not a project root).
 - **Nothing published carries a local path or raw exception text — not
-  fully enforced.** `errors.py` performs no automatic redaction; call sites
-  are meant to exclude legacy paths and row-derived values, but at least
-  one does not: `reference_catalog.py` puts a raw legacy path
-  (`item.legacy_path`) in a `Problem`'s `details`, and that value survives
-  unchanged through `engine.v2.ops.snapshot_promotion`'s translation
-  (`_translate` forwards `details` verbatim) into
-  `catalog.record_failed_import`'s durably persisted
-  `data_import_receipts.problem_json` row — tracked as issue
-  [#202](https://github.com/yshewchuk/investment-validation/issues/202).
+  fully enforced.** `errors.py` performs no automatic redaction; each call
+  site is responsible for excluding legacy paths and row-derived values
+  from a `Problem`'s `details` itself. `reference_catalog.py`'s unknown-kind
+  refusal reports a fixed `"<unknown>"` marker (issue #202);
+  `reference_inputs.py`'s `publish_reference_inputs` reports only a count
+  for its two missing-input refusals (issue #217) — neither echoes a
+  caller-controlled or legacy-path value any more. The same file's
+  `champion_entries`/`_artifact_path`/`_tier4_caches` still put a raw
+  legacy path or registry-derived string in `details` — tracked as issue
+  [#218](https://github.com/yshewchuk/investment-validation/issues/218).
 - **Atomic snapshot commit, compare-and-swap head, never last-writer-wins.**
   Zero rows changed on the head update is `SNAPSHOT_CONFLICT`. Only
   `data_snapshot_heads` is mutable; every other `data_*` table is

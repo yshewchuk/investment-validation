@@ -27,7 +27,10 @@ write path.
 
 - Pure analysis cores moved verbatim from the legacy research tools.
 - One `resolve_pinned`/`resolve` call per run, with the resulting
-  `snapshot_id` threaded through every read and into the output.
+  `snapshot_id` threaded through every read and into the output — except
+  `experiment_trades.load_trades`'s returned frame, which matches the legacy
+  loader's frame contract exactly and so carries no `snapshot_id` column
+  (see `ARCHITECTURE.md`'s Outputs/Invariants).
 - Plan and price events against one resolved `SnapshotRef`, at a grid of fill
   alphas, with the same arithmetic the legacy replay uses.
 - Publish replay output as the `trades` table through the generic incremental
@@ -68,7 +71,12 @@ The replay half: `replay.replay`, `replay.replay_one`, `_replay_run.run`,
 `_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
 `_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES -->
+`experiment_trades.load_trades` is a second kind of entrypoint: a plain
+library call (no `tools/v2_*.py` CLI of its own) for a caller that already
+holds a `Repository` and a resolved `SnapshotRef` — today only
+`experiments/common_v2.py`.
+
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades -->
 
 ## Consumers
 
@@ -79,8 +87,9 @@ failure rather than a stale sentence.
 _Nothing inside `engine/` imports this package. Its consumers are the CLI
 leaves `tools/v2_signal_screen.py`, `tools/v2_fill_quality.py`,
 `tools/v2_polygon_fills.py`, `tools/v2_replay.py`,
-`tools/v2_build_trades.py` and `tools/v2_reconcile_trades.py`, which the
-layering hook does not parse (they are not `engine.*` modules)._
+`tools/v2_build_trades.py` and `tools/v2_reconcile_trades.py`, plus
+`experiments/common_v2.py` (for `experiment_trades.load_trades` only) —
+none of which the layering hook parses (none is an `engine.*` module)._
 
 <!-- consumers: none -->
 
