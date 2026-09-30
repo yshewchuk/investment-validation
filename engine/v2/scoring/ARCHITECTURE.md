@@ -312,7 +312,12 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   | staged manifest's own hash disagrees (`_manifest_hash_matches`, checked before trusting `manifest.release`) | `ModelNotReady("model_release", "release_hash disagrees with manifest")` — accepts either hash version, since replay of an older-hashed release must keep resolving; `deployment.promote`/`rollback` enforce a stricter write-side rule this read path never applies |
   | `resolve_production_release_binding()` only: no/blank `MODEL_RELEASE_ROOT` | `ModelNotReady("release_root", "no production release root is configured")` |
   | once resolved, any member (model binding, payoff/recalibration/analog artifact) missing, wrong status, hash mismatch, or fails its typed load | `ModelNotReady(member_id, ...)`, naming the exact member (e.g. `"model:gate:STR-THRU"`) |
-  | `phase5_release.json` catalog: bad self-hash, wrong `schema_version`, or `release_id` != the live pointer's | `ModelNotReady("phase5_release.json", ...)` before any state-family row is read — a known single-catalog-per-root limitation, not a defect this module introduces ([issue #49](https://github.com/yshewchuk/investment-validation/issues/49): catalog survival across a rollback) |
+  | Release-local `phase5_release.json`: unreadable, bad self-hash, wrong schema or release ID | `ModelNotReady("phase5_release.json", ...)` before any state-family row is read; a valid root copy never overrides this refusal |
+  | Release-local catalog absent | Read the legacy root catalog only if its schema, self-hash and release ID match; otherwise `ModelNotReady` |
+
+  Catalogs beside each staged model manifest survive promotion and rollback.
+  The release-root compatibility copy selects a staged candidate for tooling;
+  production selects only the catalog for the resolved live release ID.
 
   A hash mismatch never falls back to a different object, an older cached
   value, or a default anywhere in this module — `ModelNotReady` is the only
