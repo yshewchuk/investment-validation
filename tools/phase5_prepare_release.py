@@ -57,16 +57,20 @@ from checks.phase5_release import (  # noqa: E402
     manifest_body,
     member_row,
     modules_available,
+    object_relpath,
     preserve_legacy_manifest,
     sha256_bytes,
     validate_legacy_manifest,
     write_manifest,
     write_object,
 )
+from engine.v2.foundation import CONTENT_HASH_PREFIX, to_document  # noqa: E402
 from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ArtifactMember, ModelBinding, ModelRelease  # noqa: E402
 from engine.v2.models.releases import ModelReleaseInventory  # noqa: E402
 from engine.v2.models.serving_folds import SizeFoldPolicy  # noqa: E402
+from tools.phase5_pinned_panel import COPY_PREFIX, PinnedPanelContext, verify_panel_copy  # noqa: E402
+from tools.phase5_serving_folds import describe_size_fold, descriptor_from_preflight, preflight_size_fold  # noqa: E402
 
 JOBLIB_ADAPTER = "joblib-estimator.v1"
 #: Output name per role for the frozen binding, following the Phase 4 native
@@ -335,11 +339,42 @@ def _copy_incumbent(source: Path, dest: Path) -> None:
     preserve_legacy_manifest(dest.parent, legacy)
 
 
+def _pinned_preflight(release: ModelRelease, states: list[StateBuild],
+                      pinned_panel: PinnedPanelContext) -> tuple[dict[str, str], dict]:
+    identity, validated = verify_panel_copy(pinned_panel), {}
+    for build in (b for b in states if b.spec.member_id == "tier4_folds:size"):
+        policy, payloads = build.size_fold_policy, build.payloads
+        if policy is None and payloads:
+            raise PrepareRefused(f"{COPY_PREFIX}refused: size folds carry no pinned policy")
+        if policy is not None and policy.panel_sha256 != identity["panel_copy_sha256"]:
+            raise PrepareRefused(f"{COPY_PREFIX}refused: size policy does not match the pinned panel")
+        for name, data in sorted(payloads.items() if policy else ()):
+            if not isinstance(data, bytes):
+                raise PrepareRefused(f"{COPY_PREFIX}refused: size fold is not bytes")
+            if name in validated:
+                raise PrepareRefused(f"{COPY_PREFIX}refused: duplicate size fold filename")
+            try:
+                validated[name] = preflight_size_fold(data, name, policy, release)
+            except ValueError as exc:
+                raise PrepareRefused(f"{COPY_PREFIX}refused: {exc}") from exc
+    return identity, validated
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
-                  incumbent: Path | None = None) -> Path:
+                  incumbent: Path | None = None, pinned_panel: PinnedPanelContext | None = None) -> Path:
     """Stage the model bindings, write the state objects, write the manifest."""
+    if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
+        raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
+    if pinned_panel is not None:
+        states = [dataclasses.replace(build, payloads=dict(build.payloads)) for build in states]
+        release = dataclasses.replace(release, bindings=tuple(
+            dataclasses.replace(binding, members=tuple(dataclasses.replace(
+                member, path=object_relpath(member.content_hash)) for member in binding.members))
+            for binding in release.bindings))
+        identity, validated = _pinned_preflight(release, states, pinned_panel)
+        sources = {**dict(sources or {}), **identity}
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)
@@ -354,11 +389,10 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
             objects.append({"name": name, "path": rel, "content_hash": digest,
                             "bytes": len(data)})
             if build.spec.member_id == "tier4_folds:size" and build.size_fold_policy is not None:
-                from engine.v2.foundation import to_document
-                from tools.phase5_serving_folds import describe_size_fold
-
-                objects[-1]["serving_fold"] = to_document(
-                    describe_size_fold(data, name, build.size_fold_policy, staged))
+                descriptor = (describe_size_fold(data, name, build.size_fold_policy, staged)
+                              if pinned_panel is None else descriptor_from_preflight(
+                                  validated[name], build.size_fold_policy, staged))
+                objects[-1]["serving_fold"] = to_document(descriptor)
         rows.append(member_row(build.spec, build.status, objects, build.detail))
     body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
     return write_manifest(out, body)
@@ -390,7 +424,15 @@ def _refuse_data_dir(out: Path) -> None:
         raise PrepareRefused(f"--out may not be inside {data}")
 
 
-def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[StateBuild]]:
+def _pinned_context(args) -> PinnedPanelContext | None:
+    values = (args.panel_catalog, args.panel_snapshot_id, args.panel_artifact_root)
+    if any(value is None for value in values) and not all(value is None for value in values):
+        raise PrepareRefused(f"{COPY_PREFIX}refused: pinned panel flags are all-or-none")
+    return None if all(value is None for value in values) else PinnedPanelContext(*values)
+
+
+def _real_inputs(args, pinned_panel: PinnedPanelContext | None = None
+                 ) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[StateBuild]]:
     from engine import paths
     from engine.data.features import tier4
     from engine.v2.models.inventory import current_release_inventory
@@ -402,7 +444,12 @@ def _real_inputs(args) -> tuple[ModelRelease, ModelReleaseInventory, dict, list[
     release, payloads = model_release(
         inventory, resolve=lambda ref: Path(ref) if Path(ref).is_absolute() else paths.ROOT / ref)
     snapshot = args.tier3_snapshot
-    if snapshot == "auto":
+    if pinned_panel is not None:
+        digest = verify_panel_copy(pinned_panel)["panel_copy_sha256"]
+        if snapshot != "auto" and snapshot.removeprefix(CONTENT_HASH_PREFIX) != digest:
+            raise PrepareRefused(f"{COPY_PREFIX}refused: --tier3-snapshot does not match the pinned panel")
+        snapshot = digest
+    elif snapshot == "auto":
         from engine.data import store
 
         snapshot = store.file_sha256(paths.PANEL)
@@ -444,12 +491,21 @@ def main(argv=None) -> int:
     parser.add_argument("--fold-month", help="restrict Tier-4 folds to one YYYYMM")
     parser.add_argument("--incumbent", type=Path,
                         help="an existing deployment store to copy in before staging")
+    parser.add_argument("--panel-catalog", type=Path)
+    parser.add_argument("--panel-snapshot-id")
+    parser.add_argument("--panel-artifact-root", type=Path)
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args(argv)
     try:
+        pinned = _pinned_context(args)
         _refuse_data_dir(args.out)
-        release, inventory, payloads, states = _real_inputs(args)
+        release, inventory, payloads, states = _real_inputs(args, pinned)
         plan = _plan(release, states)
+        if args.plan_only and pinned is not None:
+            _pinned_preflight(release, states, pinned)
+        manifest = (None if pinned is None or args.plan_only else write_release(
+            args.out, release, inventory, payloads, states, incumbent=args.incumbent,
+            pinned_panel=pinned))
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out / "plan.json").write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
         for row in plan["states"]:
@@ -459,8 +515,8 @@ def main(argv=None) -> int:
         if args.plan_only:
             print(f"plan only: {args.out / 'plan.json'}")
             return 0
-        manifest = write_release(args.out, release, inventory, payloads, states,
-                                 incumbent=args.incumbent)
+        if manifest is None:
+            manifest = write_release(args.out, release, inventory, payloads, states, incumbent=args.incumbent)
         print(f"staged: {manifest}")
     except (PrepareRefused, deployment.DeploymentError, ValueError) as exc:
         print(f"refused: {type(exc).__name__}: {exc}", file=sys.stderr)
