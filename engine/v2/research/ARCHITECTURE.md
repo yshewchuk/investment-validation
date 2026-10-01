@@ -331,30 +331,18 @@ uncaught traceback instead.
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
   there is nothing to invalidate).
-  `replay()`'s own `index is None` path loads its `ChainIndex` over the
-  UNFILTERED plan's `chain_keys` first, then derives the availability set
-  `filter_plan_by_availability` needs from that same `ChainIndex`'s own
-  keys, instead of a separate `_chains.read_chain_keys` scan of the whole
-  table (`read_chain_keys` still exists for a caller that wants
-  availability without the data) — one `read_chains_for_years` call per
-  required year instead of one key-scan plus one data-load per year.
-  `_build_run.run` shares one such `ChainIndex` — built from the union of
-  every requested strategy's `chain_keys` via `replay.shared_chain_index`
-  — across all of its `replay()` calls, so a multi-strategy run reads each
-  required year once for the whole run, not once per year per strategy.
-  A `replay()` call given an explicit `index=` (shared or not) skips both the key-scan and
-  the load entirely; any planned event missing from that index is skipped
-  per-event inside `replay_one` instead, so both paths price the identical
-  set of events and yield byte-identical trades. The two paths' `skipped`
-  COUNTS can differ only for a `decided_early` structure's event that is
-  missing more than one of its decision/entry/exit chains at once:
-  `filter_plan_by_availability` always attributes that event to
-  `no_entry_chain` first (checking entry before exit before decision),
-  while `replay_one`'s own per-event check (`_chain_rows`) checks decision
-  before entry before exit — a pre-existing precedence difference between
-  the two, not something this change introduces. A `decided_early`
-  structure's event missing only one chain, and every event of a structure
-  that is not `decided_early`, gets the same skip-reason label either way.
+  `replay()`'s own `index is None` path gets its chain availability from
+  its own loaded `ChainIndex` (`replay.shared_chain_index`'s union of
+  planned `chain_keys`, for `_build_run.run`'s multi-strategy case too),
+  not from a separate `_chains.read_chain_keys` scan — one
+  `read_chains_for_years` call per required year, shared across every
+  strategy in a `_build_run.run` call, instead of one key-scan plus one
+  data-load per year per strategy. An explicit `index=` skips chain
+  reads entirely. `trades` is identical either way; the `skipped` count
+  breakdown can differ for a `decided_early` structure's event missing more
+  than one chain at once, since `filter_plan_by_availability` and
+  `replay_one` check entry/exit/decision in different orders (pre-existing,
+  not introduced here).
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since
