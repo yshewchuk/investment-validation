@@ -7,15 +7,18 @@ replay identify distinct populations; combining both can duplicate events.
 
 ## Caller contract
 
-`Scorer` accepts a single `trade_provenance` string. The default remains
-`engine.replay`, preserving the legacy board and training callers. An
-explicit value selects exactly that tag; it does not infer a population
+`Scorer` accepts an optional single `trade_provenance` string. Omission
+retains the existing `engine.replay` filter and empty-population behavior.
+An explicit string selects exactly that tag; it does not infer a population
 from row contents, select multiple tags, or rewrite provenance values.
 
 `gate_forecast_analog.build_dataset` forwards the same selector through
 its analog attachment to `Scorer`. The pinned EXP-147 runner, also used by
 EXP-184, supplies `experiment_trades.PROVENANCE` for its native replay
 input. The loader keeps its source rows and their original native tag.
+This compatibility boundary covers only the inherited research runner;
+other callers omit the selector. Legacy modules do not import v2 for its
+provenance constant: that import belongs only in the experiment runner.
 
 The call path is the experiment runner, `build_dataset`, `_attach_analogs`,
 `Scorer`, bucket enrichment, and `match_frame`. Analog matching retains its
@@ -25,8 +28,12 @@ unchanged by population selection.
 
 ## Refusals and repeatability
 
-A requested provenance absent from a nonempty explicit input must fail
-before matching. Missing history for an individual event remains the
+An explicit selector producing zero rows must fail before enrichment or
+matching, including an already-empty injected frame and an explicit
+request for `engine.replay`. The dataset builder also refuses an empty
+base gate frame under an explicit selector, before its early return can
+bypass population validation. Omission retains the previous empty-frame
+behavior. Missing history for an individual event remains the
 existing thin-analog outcome; it is distinct from discarding the entire
 input population through an incompatible provenance filter.
 
