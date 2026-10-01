@@ -58,7 +58,7 @@ data:
   quota_calls: 0
 
 data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
-v2_snapshot_id: snap_86b4ea43ab86eb1af139b25a1f2600c8
+v2_snapshot_id: snap_66fae174c4f34477fb1b9098993993fe
 walk_forward:
   unit: year
   min_train_years: 2
