@@ -331,17 +331,18 @@ uncaught traceback instead.
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
   there is nothing to invalidate).
-  `replay()`'s own `index is None` path reads `option_chains` once, not
-  twice: it loads a `ChainIndex` over the UNFILTERED plan's `chain_keys`
-  first, then derives the availability set `filter_plan_by_availability`
-  needs from that same `ChainIndex`'s own keys, instead of a separate
-  `_chains.read_chain_keys` scan of the whole table (`read_chain_keys`
-  still exists for a caller that wants availability without the data).
+  `replay()`'s own `index is None` path loads its `ChainIndex` over the
+  UNFILTERED plan's `chain_keys` first, then derives the availability set
+  `filter_plan_by_availability` needs from that same `ChainIndex`'s own
+  keys, instead of a separate `_chains.read_chain_keys` scan of the whole
+  table (`read_chain_keys` still exists for a caller that wants
+  availability without the data) — one `read_chains_for_years` call per
+  required year instead of one key-scan plus one data-load per year.
   `_build_run.run` shares one such `ChainIndex` — built from the union of
   every requested strategy's `chain_keys` via `replay.shared_chain_index`
-  — across all of its `replay()` calls, so a multi-strategy run scans
-  `option_chains` once in total, not once per strategy. A `replay()` call
-  given an explicit `index=` (shared or not) skips both the key-scan and
+  — across all of its `replay()` calls, so a multi-strategy run reads each
+  required year once for the whole run, not once per year per strategy.
+  A `replay()` call given an explicit `index=` (shared or not) skips both the key-scan and
   the load entirely; any planned event missing from that index is skipped
   per-event inside `replay_one` instead, so both paths price the identical
   set of events and yield byte-identical trades. The two paths' `skipped`
