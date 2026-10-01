@@ -55,13 +55,15 @@ def run(repository, *, strategies: Sequence[str], years=None,
     results = [replay.replay(repository, snapshot, strategy, events, calendar=calendar,
                              index=index)
                for strategy in strategies]
+    # Drop the shared ChainIndex now — nothing after this point reads it, and
+    # to_trades_table(results) should not hold it resident during conversion.
+    del index
     engine_rows = to_trades_table(results)
     if len(engine_rows):
         engine_rows["provenance"] = PROVENANCE
         engine_rows["snapshot_id"] = snapshot.snapshot_id
-    # Drop the spent per-strategy results before the trades read stacks on their ChainIndex memory.
+    # Drop the spent per-strategy results before the trades read stacks on their memory.
     del results
-    del index
     existing = read_existing_trades(repository, snapshot)
     revisions = revisions_for_rebuild(existing, engine_rows, set(strategies), years=years)
     # The existing table only fed revisions; drop it before publish reads its own prior-rows copy.
