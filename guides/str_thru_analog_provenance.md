@@ -48,3 +48,33 @@ snapshot. Panel, forecast and market-state dependencies on the remaining
 legacy path require a recorded content manifest and unchanged before/after
 hashes. This population correction does not establish full v2 provenance
 for those inputs, or prove that quoted-price fill assumptions were executed.
+
+## Bounded native repricing reads
+
+The same pinned experiment also requests option chains for shifted entry
+and exit dates. The native chain reader must retain only those exact
+ticker/date pairs while constructing its index. Reading every requested
+year into pandas before filtering can exceed the admitted resource cap.
+
+The bounded reader processes one requested year at a time and applies
+the existing exact pair mask to each scan batch before accumulating it.
+An optional internal batch filter on the research read adapters carries
+this behavior; omission preserves existing callers. Independent ticker
+and date memberships may prune a scan, but their cross product never
+defines the resulting index population. Query predicates use the existing
+validated storage encoding rather than introducing a new query contract.
+
+The result preserves requested keys, each group row order, duplicate rows,
+dtypes, key normalization, absent-key behavior and replay pricing. Required
+index groups remain resident; transient unmatched work is limited to one
+batch rather than all requested years. This is a residency argument, not
+a measured RSS guarantee, and does not imply resumability or a new cache.
+Existing query-limit refusals and split behavior remain intact.
+
+Verification compares old and bounded results over multiple years with
+cross-pair distractors, duplicates, missing keys and date normalization.
+It covers default readers, overflow splits and a bounded transient-work
+counter. The existing experiment must then finish candidate and incumbent
+evaluated reports under the unchanged admission caps before private run
+acceptance. Source landing still follows the existing review and legacy
+compatibility constraints; no model promotion is part of this change.
