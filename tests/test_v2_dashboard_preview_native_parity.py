@@ -62,13 +62,23 @@ def _dashboard_bundle(tmp_path: Path) -> tuple[Path, Path]:
     return bundle, health
 
 
-def _fixture_report_path(tmp_path: Path) -> Path:
-    """A real report built by the production comparator, one engineered mismatch."""
+def _fixture_report_path(tmp_path: Path, captured=None) -> Path:
+    """A real report built by the production comparator, one engineered mismatch.
+
+    ``captured`` (optional) is appended verbatim as the exporter's optional
+    ``captured_comparison`` block; the rest of the document still comes from
+    the real comparator.
+    """
     legacy_rows = {"AAPL-2026-01-01": _row()}
     native_rows = {"AAPL-2026-01-01": _row(forecast_p10=1.0)}
     report = compare_native_vs_legacy(legacy_rows, native_rows, PARITY_DIMENSIONS)
-    return write_parity_report(
+    path = write_parity_report(
         apply_native_refusals(report, {}), tmp_path / "native_parity_report.json")
+    if captured is not None:
+        document = json.loads(path.read_text())
+        document["captured_comparison"] = captured
+        path.write_text(json.dumps(document))
+    return path
 
 
 def _run_launcher(tmp_path, monkeypatch, *extra_args):
@@ -127,6 +137,7 @@ def test_native_parity_json_available_with_real_report(tmp_path, monkeypatch):
         body = json.loads(response.read())
         assert body["status"] == "available"
         assert body["mismatched_row_count"] >= 1
+        assert "captured_comparison" not in body
     finally:
         _stop(server, thread)
 
@@ -147,5 +158,136 @@ def test_native_parity_json_requires_auth(tmp_path, monkeypatch):
         with pytest.raises(HTTPError) as error:
             _get_native_parity_json(server, token=None)
         assert error.value.code == 401
+    finally:
+        _stop(server, thread)
+
+
+_CAPTURED_GROUPS = ("forecasts", "simulation", "financial_diagnostics", "verdicts", "analogs")
+
+
+def _captured_block():
+    """Synthetic exporter-shaped captured block; no private capture fixtures."""
+    return {
+        "schema_version": "captured_native_comparison.v1.0",
+        "scope": "selected_saved_replay",
+        "full_population_verified": False,
+        "cutover_qualified": False,
+        "current_board": False,
+        "identity": {
+            "ticker": "AAPL", "strategy": "STR-THRU", "event_date": "2026-01-01",
+            "session": "AMC", "as_of": "2026-01-02", "entry_date": "2026-01-05",
+            "exit_date": "2026-02-02",
+        },
+        "clocks": {
+            "corpus_as_of": "2026-01-02",
+            "requested_decision_at": "2026-01-02T15:30:00-05:00",
+            "decision_as_of": "2026-01-02",
+            "quote_as_of": "2026-01-02T00:00:00Z",
+            "event_date": "2026-01-01",
+            "session": "AMC",
+        },
+        "provenance": {
+            "corpus_hash": "sha256-corpus", "fixture_id": "AAPL-2026-01-01",
+            "payload_hash": "sha256-payload", "legacy_request_hash": "sha256-legacy-req",
+            "native_request_hash": "sha256-native-req", "trace_hash": "sha256-trace",
+            "same_input_receipt": "sha256-receipt", "frozen_release_id": "rel-1",
+            "native_snapshot_ref": "snap-1",
+        },
+        "legacy": {group: {"field_a": 1.0, "field_b": None} for group in _CAPTURED_GROUPS},
+        "native": {group: {"field_a": 1.25, "field_b": 0.0} for group in _CAPTURED_GROUPS},
+        "checks": [{"name": "unused", "passed": True}],
+        "numeric_comparisons": [{"field": "field_a", "delta": 0.25}],
+        "runtime_stage_count": 3,
+    }
+
+
+def _get_page(server):
+    return urlopen(f"http://127.0.0.1:{server.server_port}/native_parity", timeout=5).read()
+
+
+def test_native_parity_json_projects_captured_comparison(tmp_path, monkeypatch):
+    report_path = _fixture_report_path(tmp_path, captured=_captured_block())
+    server, thread, _ = _run_launcher(
+        tmp_path, monkeypatch, "--native-parity-report-path", str(report_path))
+    try:
+        body = json.loads(_get_native_parity_json(server).read())
+        assert body["status"] == "available"
+        captured = body["captured_comparison"]
+        assert captured["scope"] == "selected_saved_replay"
+        assert captured["current_board"] is False
+        assert captured["full_population_verified"] is False
+        assert captured["cutover_qualified"] is False
+        assert len(captured["clocks"]) == 6
+        assert len(captured["provenance"]) == 9
+        assert captured["identity"]["strategy"] == "STR-THRU"
+        assert len(captured["rows"]) == 10
+        assert captured["rows"][0] == {"group": "forecasts", "field": "field_a",
+                                       "legacy": 1.0, "native": 1.25}
+        assert captured["rows"][1]["legacy"] is None
+        assert captured["rows"][1]["native"] == 0.0
+    finally:
+        _stop(server, thread)
+
+
+def test_native_parity_json_invalid_captured_block_is_unavailable(tmp_path, monkeypatch):
+    block = _captured_block()
+    block["current_board"] = 0
+    report_path = _fixture_report_path(tmp_path, captured=block)
+    server, thread, _ = _run_launcher(
+        tmp_path, monkeypatch, "--native-parity-report-path", str(report_path))
+    try:
+        with pytest.raises(HTTPError) as error:
+            _get_native_parity_json(server)
+        assert error.value.code == 503
+        body = json.loads(error.value.read())
+        assert body["status"] == "unavailable"
+        assert body["reason_code"] == "NATIVE_PARITY_REPORT_MALFORMED"
+    finally:
+        _stop(server, thread)
+
+
+def test_native_parity_json_preserves_html_like_captured_values(tmp_path, monkeypatch):
+    hostile = '<img src=x onerror="alert(1)">'
+    block = _captured_block()
+    block["identity"]["ticker"] = hostile
+    block["provenance"]["fixture_id"] = hostile
+    block["legacy"]["forecasts"][hostile] = None
+    block["native"]["forecasts"][hostile] = 0.0
+    report_path = _fixture_report_path(tmp_path, captured=block)
+    server, thread, _ = _run_launcher(
+        tmp_path, monkeypatch, "--native-parity-report-path", str(report_path))
+    try:
+        captured = json.loads(_get_native_parity_json(server).read())["captured_comparison"]
+        assert captured["identity"]["ticker"] == hostile
+        assert captured["provenance"]["fixture_id"] == hostile
+        rows = {(row["group"], row["field"]): row for row in captured["rows"]}
+        assert rows[("forecasts", hostile)]["legacy"] is None
+        assert rows[("forecasts", hostile)]["native"] == 0.0
+    finally:
+        _stop(server, thread)
+
+
+def test_native_parity_page_constructs_captured_section_with_text_only(tmp_path, monkeypatch):
+    server, thread, _ = _run_launcher(tmp_path, monkeypatch)
+    try:
+        page = _get_page(server).decode()
+        assert "Selected saved replay comparison" in page
+        assert "not the current board" in page
+        assert "not full population verified" in page
+        assert "not cutover qualified" in page
+        assert "j.captured_comparison" in page
+        for heading in ("'identity'", "'clocks'", "'provenance'"):
+            assert heading in page
+        assert "['field','legacy','native']" in page
+        assert "innerHTML" not in page
+        assert "e.textContent=text" in page
+        table_js = page.split("function tableEl")[1].split("function section")[0]
+        assert "tr.appendChild(el('td', String(c)))" in table_js
+        captured_js = page.split("function capturedSection(c){")[1].split("function applyFilter")[0]
+        assert "div.appendChild(tableEl(['field','legacy','native']," in captured_js
+        assert "r=>[r.field,r.legacy,r.native]" in captured_js
+        assert "??" not in captured_js
+        assert "||0" not in captured_js
+        assert "|| 0" not in captured_js
     finally:
         _stop(server, thread)

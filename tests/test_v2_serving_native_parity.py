@@ -360,3 +360,277 @@ def test_malformed_refusal_code_null_returns_unavailable(tmp_path):
     assert status == HTTPStatus.SERVICE_UNAVAILABLE
     assert body["status"] == "unavailable"
     assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+_CAPTURED_GROUPS = ("forecasts", "simulation", "financial_diagnostics", "verdicts", "analogs")
+_CAPTURED_PROVENANCE_FIELDS = ("corpus_hash", "fixture_id", "payload_hash",
+                               "legacy_request_hash", "native_request_hash", "trace_hash",
+                               "same_input_receipt", "frozen_release_id",
+                               "native_snapshot_ref")
+
+
+def _captured_block():
+    """A synthetic block shaped exactly like the exporter's v1 capture."""
+    return {
+        "schema_version": "captured_native_comparison.v1.0",
+        "scope": "selected_saved_replay",
+        "full_population_verified": False,
+        "cutover_qualified": False,
+        "current_board": False,
+        "identity": {
+            "ticker": "AAPL", "strategy": "STR-THRU", "event_date": "2026-01-01",
+            "session": "AMC", "as_of": "2026-01-02", "entry_date": "2026-01-05",
+            "exit_date": "2026-02-02",
+        },
+        "clocks": {
+            "corpus_as_of": "2026-01-02",
+            "requested_decision_at": "2026-01-02T15:30:00-05:00",
+            "decision_as_of": "2026-01-02",
+            "quote_as_of": "2026-01-02T00:00:00Z",
+            "event_date": "2026-01-01",
+            "session": "AMC",
+        },
+        "provenance": {
+            "corpus_hash": "sha256-corpus", "fixture_id": "AAPL-2026-01-01",
+            "payload_hash": "sha256-payload", "legacy_request_hash": "sha256-legacy-req",
+            "native_request_hash": "sha256-native-req", "trace_hash": "sha256-trace",
+            "same_input_receipt": "sha256-receipt", "frozen_release_id": "rel-1",
+            "native_snapshot_ref": "snap-1",
+        },
+        "legacy": {group: {"field_a": 1.0, "field_b": None} for group in _CAPTURED_GROUPS},
+        "native": {group: {"field_a": 1.25, "field_b": 0.0} for group in _CAPTURED_GROUPS},
+        "checks": [{"name": "unused", "passed": True}],
+        "numeric_comparisons": [{"field": "field_a", "delta": 0.25}],
+        "runtime_stage_count": 3,
+    }
+
+
+def _captured_report(tmp_path, block):
+    path, _ = _full_report(tmp_path)
+    report = json.loads(path.read_text())
+    report["captured_comparison"] = block
+    path.write_text(json.dumps(report))
+    return path
+
+
+def _assert_captured_malformed(tmp_path, block):
+    status, body = native_parity_summary(_captured_report(tmp_path, block))
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_captured_block_absent_preserves_existing_summary(tmp_path):
+    path, _ = _full_report(tmp_path)
+    status, body = native_parity_summary(path)
+    assert status == HTTPStatus.OK
+    assert body["status"] == "available"
+    assert "captured_comparison" not in body
+
+
+def test_valid_captured_block_projects_bounded_paired_rows(tmp_path):
+    block = _captured_block()
+    status, body = native_parity_summary(_captured_report(tmp_path, block))
+    assert status == HTTPStatus.OK
+    assert body["status"] == "available"
+    captured = body["captured_comparison"]
+    assert set(captured) == {"schema_version", "scope", "full_population_verified",
+                             "cutover_qualified", "current_board", "identity", "clocks",
+                             "provenance", "rows"}
+    assert captured["schema_version"] == "captured_native_comparison.v1.0"
+    assert captured["scope"] == "selected_saved_replay"
+    assert captured["full_population_verified"] is False
+    assert captured["cutover_qualified"] is False
+    assert captured["current_board"] is False
+    assert captured["identity"] == block["identity"]
+    assert captured["clocks"] == block["clocks"]
+    assert captured["provenance"] == block["provenance"]
+    assert len(captured["clocks"]) == 6
+    assert len(captured["provenance"]) == 9
+    assert captured["provenance"]["legacy_request_hash"] != \
+        captured["provenance"]["native_request_hash"]
+    rows = captured["rows"]
+    assert len(rows) == 10
+    assert [row["group"] for row in rows] == sorted(
+        [row["group"] for row in rows], key=_CAPTURED_GROUPS.index)
+    for group in _CAPTURED_GROUPS:
+        fields = [row["field"] for row in rows if row["group"] == group]
+        assert fields == sorted(fields)
+    assert rows[0] == {"group": "forecasts", "field": "field_a",
+                       "legacy": 1.0, "native": 1.25}
+    assert rows[1] == {"group": "forecasts", "field": "field_b",
+                       "legacy": None, "native": 0.0}
+
+
+def test_captured_null_stays_distinct_from_zero_and_values_are_not_rounded(tmp_path):
+    block = _captured_block()
+    block["legacy"]["verdicts"]["field_a"] = 0.30000000000000004
+    block["native"]["verdicts"]["field_a"] = 1000000000000000001
+    status, body = native_parity_summary(_captured_report(tmp_path, block))
+    assert status == HTTPStatus.OK
+    rows = {(row["group"], row["field"]): row
+            for row in body["captured_comparison"]["rows"]}
+    assert rows[("verdicts", "field_a")]["legacy"] == 0.30000000000000004
+    assert rows[("verdicts", "field_a")]["native"] == 1000000000000000001
+    assert rows[("verdicts", "field_b")]["legacy"] is None
+    assert rows[("verdicts", "field_b")]["native"] == 0.0
+    assert rows[("analogs", "field_b")]["legacy"] is None
+
+
+def test_captured_block_present_null_is_malformed(tmp_path):
+    _assert_captured_malformed(tmp_path, None)
+
+
+def test_captured_block_wrong_schema_version_is_malformed(tmp_path):
+    block = _captured_block()
+    block["schema_version"] = "captured_native_comparison.v1.1"
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_wrong_scope_is_malformed(tmp_path):
+    block = _captured_block()
+    block["scope"] = "current_board"
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_wrong_nested_type_is_malformed(tmp_path):
+    block = _captured_block()
+    block["identity"] = "AAPL"
+    _assert_captured_malformed(tmp_path, block)
+    block = _captured_block()
+    block["legacy"]["forecasts"] = [1.0]
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_wrong_strategy_is_malformed(tmp_path):
+    block = _captured_block()
+    block["identity"]["strategy"] = "STR-OTHER"
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_missing_identity_clock_or_provenance_field_is_malformed(tmp_path):
+    for section, fields in (("identity", ("ticker",)),
+                            ("clocks", ("quote_as_of",)),
+                            ("provenance", _CAPTURED_PROVENANCE_FIELDS)):
+        block = _captured_block()
+        for name in fields:
+            block = _captured_block()
+            del block[section][name]
+            _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_extra_provenance_key_is_malformed(tmp_path):
+    block = _captured_block()
+    block["provenance"]["extra"] = "sha256-extra"
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_clock_contradiction_is_malformed(tmp_path):
+    for clock, value in (("decision_as_of", "2026-01-03"),
+                         ("event_date", "2026-01-09"),
+                         ("session", "REG")):
+        block = _captured_block()
+        block["clocks"][clock] = value
+        _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_empty_string_identity_is_malformed(tmp_path):
+    block = _captured_block()
+    block["identity"]["ticker"] = ""
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_flag_int_zero_or_true_is_malformed(tmp_path):
+    for flag, value in (("current_board", 0), ("cutover_qualified", 0),
+                        ("full_population_verified", 0), ("current_board", True),
+                        ("current_board", None)):
+        block = _captured_block()
+        block[flag] = value
+        _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_bool_or_nonfinite_value_is_malformed(tmp_path):
+    for value in (True, False, float("nan"), float("inf"), float("-inf")):
+        block = _captured_block()
+        block["native"]["simulation"]["field_a"] = value
+        _assert_captured_malformed(tmp_path, block)
+    block = _captured_block()
+    block["legacy"]["simulation"]["field_a"] = "1.0"
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_group_or_field_misalignment_is_malformed(tmp_path):
+    block = _captured_block()
+    del block["native"]["forecasts"]["field_b"]
+    _assert_captured_malformed(tmp_path, block)
+    block = _captured_block()
+    del block["legacy"]["analogs"]
+    _assert_captured_malformed(tmp_path, block)
+    block = _captured_block()
+    block["native"]["verdicts"] = {}
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_block_overlong_string_or_name_is_malformed(tmp_path):
+    block = _captured_block()
+    block["identity"]["ticker"] = "x" * 513
+    _assert_captured_malformed(tmp_path, block)
+    block = _captured_block()
+    long_name = "f" * 129
+    block["legacy"]["forecasts"][long_name] = 1.0
+    block["native"]["forecasts"][long_name] = 1.0
+    _assert_captured_malformed(tmp_path, block)
+
+
+def _aligned_group_rows(block, per_group, extra_field=None):
+    """Aligned legacy/native numeric fields, ``per_group`` per each of the five groups."""
+    fields = {f"f{i:03d}": 1.0 for i in range(per_group)}
+    for side in ("legacy", "native"):
+        block[side] = {group: dict(fields) for group in _CAPTURED_GROUPS}
+    if extra_field is not None:
+        block["legacy"]["forecasts"][extra_field] = 1.0
+        block["native"]["forecasts"][extra_field] = 1.0
+    return block
+
+
+def test_captured_block_overlarge_row_count_is_malformed(tmp_path):
+    _assert_captured_malformed(tmp_path, _aligned_group_rows(_captured_block(), 21))
+    status, body = native_parity_summary(
+        _captured_report(tmp_path, _aligned_group_rows(_captured_block(), 20)))
+    assert status == HTTPStatus.OK
+    rows = body["captured_comparison"]["rows"]
+    assert len(rows) == 100
+    assert all(sum(1 for row in rows if row["group"] == group) == 20
+               for group in _CAPTURED_GROUPS)
+    _assert_captured_malformed(
+        tmp_path, _aligned_group_rows(_captured_block(), 20, "f100"))
+
+
+def test_captured_block_arbitrary_precision_int_is_preserved(tmp_path):
+    block = _captured_block()
+    block["native"]["simulation"]["field_a"] = 10 ** 400
+    status, body = native_parity_summary(_captured_report(tmp_path, block))
+    assert status == HTTPStatus.OK
+    assert body["status"] == "available"
+    rows = {(row["group"], row["field"]): row
+            for row in body["captured_comparison"]["rows"]}
+    assert rows[("simulation", "field_a")]["native"] == 10 ** 400
+
+
+def test_captured_block_html_like_strings_survive_unchanged(tmp_path):
+    hostile = '<img src=x onerror="alert(1)">'
+    block = _captured_block()
+    block["identity"]["ticker"] = hostile
+    block["provenance"]["corpus_hash"] = hostile
+    block["legacy"]["verdicts"][hostile] = None
+    block["native"]["verdicts"][hostile] = 0.0
+    status, body = native_parity_summary(_captured_report(tmp_path, block))
+    assert status == HTTPStatus.OK
+    captured = body["captured_comparison"]
+    assert captured["identity"]["ticker"] == hostile
+    assert captured["provenance"]["corpus_hash"] == hostile
+    assert set(captured["identity"]) == set(block["identity"])
+    assert set(captured["provenance"]) == set(_CAPTURED_PROVENANCE_FIELDS)
+    rows = {(row["group"], row["field"]): row for row in captured["rows"]}
+    assert rows[("verdicts", hostile)]["legacy"] is None
+    assert rows[("verdicts", hostile)]["native"] == 0.0

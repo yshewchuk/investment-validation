@@ -407,6 +407,23 @@ function section(category, title, node){
   div.appendChild(node);
   return div;
 }
+function capturedSection(c){
+  const div=el('div');
+  div.appendChild(el('h2','Selected saved replay comparison'));
+  div.appendChild(el('p','scope: '+c.scope+' -- evidence for one selected saved replay only; not the current board, not full population verified, not cutover qualified.'));
+  div.appendChild(el('h3','identity'));
+  div.appendChild(tableEl(['field','value'], Object.entries(c.identity)));
+  div.appendChild(el('h3','clocks'));
+  div.appendChild(tableEl(['field','value'], Object.entries(c.clocks)));
+  div.appendChild(el('h3','provenance'));
+  div.appendChild(tableEl(['field','value'], Object.entries(c.provenance)));
+  for(const group of [...new Set(c.rows.map(r=>r.group))]){
+    div.appendChild(el('h3',group));
+    div.appendChild(tableEl(['field','legacy','native'],
+      c.rows.filter(r=>r.group===group).map(r=>[r.field,r.legacy,r.native])));
+  }
+  return div;
+}
 function applyFilter(value){
   for(const node of document.querySelectorAll('[data-category]')){
     node.style.display=(value==='all'||value===node.dataset.category)?'':'none';
@@ -441,6 +458,9 @@ async function load(){
       tableEl(['side','count'], [['legacy',j.only_legacy_count],['native',j.only_native_count]])));
     sections.appendChild(section('refused','refusal reasons',
       tableEl(['reason','count'], Object.entries(j.native_refused_reasons||{}))));
+    if(j.captured_comparison){
+      sections.appendChild(capturedSection(j.captured_comparison));
+    }
     controls.style.display='';
     document.querySelector('#filter').addEventListener('change', e=>applyFilter(e.target.value));
   }catch(e){
