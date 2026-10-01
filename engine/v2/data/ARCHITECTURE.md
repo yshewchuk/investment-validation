@@ -104,8 +104,8 @@ receipt bytes, then refuses: no genuine source/finality validator is installed.
 
 | Condition | Admission outcome |
 |---|---|
-| Exact pinned members, genuine source finality and verified publication at or before cutoff | Evidence can admit that session/domain |
-| Exact pinned scope, genuine source finality and verified publication at or before cutoff, with successful exact-scope completion and no output objects | Admit the proven empty domain; missing, unavailable or unstarted source proof refuses |
+| Exact pinned members, genuine source completion and finality, and verified publication at or before cutoff | Evidence can admit that session/domain |
+| Exact pinned scope, genuine source completion and finality, and verified publication at or before cutoff, with successful exact-scope completion and no output objects | Admit the proven empty domain; missing, unavailable or unstarted source proof refuses |
 | Missing proof, unsupported producer, incomplete coverage or ambiguous evidence | Refuse; do not substitute a later/stale session |
 | Receipt/object hash, contract, session, membership or producer identity mismatch | Refuse before returning quote rows |
 | Publication after cutoff or malformed/ambiguous clock | Refuse; import time cannot repair the evidence |
