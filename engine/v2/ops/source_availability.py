@@ -26,6 +26,7 @@ from datetime import date, datetime
 from typing import NoReturn
 
 from engine.v2.contracts import SnapshotRef
+from engine.v2.data.errors import DataError
 from engine.v2.foundation import ArtifactError, format_timestamp, parse_timestamp
 from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import fail
@@ -58,7 +59,13 @@ def verify_eod_availability(conn, store, repository, snapshot, *, table_name,
         raise fail("INVALID_REQUEST", "session_date is after the decision_at UTC day")
     if not isinstance(snapshot, SnapshotRef):
         raise fail("INVALID_REQUEST", "snapshot must be a SnapshotRef")
-    resolved = repository.resolve_full(snapshot.snapshot_id)
+    try:
+        resolved = repository.resolve_full(snapshot.snapshot_id)
+    except DataError as err:
+        if err.code != "SNAPSHOT_NOT_FOUND":
+            raise
+        raise fail("VALIDATION_FAILED",
+                   "the pinned snapshot is not registered") from err
     if resolved.snapshot != snapshot:
         raise fail("VALIDATION_FAILED", "the pinned snapshot does not resolve to itself")
     manifest = resolved.table_manifests.get(_SUPPORTED_TABLE)

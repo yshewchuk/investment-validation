@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.data import catalog, manifests  # noqa: E402
+from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactError  # noqa: E402
 from engine.v2.ops.checkpoints import artifact, register_artifact, registered_artifact  # noqa: E402
@@ -239,6 +240,21 @@ def test_same_id_different_content_refuses(tmp_path, mutate):
     assert supplied.snapshot_id == snapshot.snapshot_id
     assert _refuses(conn, store, supplied, "VALIDATION_FAILED") \
         == "the pinned snapshot does not resolve to itself"
+
+
+def test_unknown_snapshot_id_refuses_as_validation_failure(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    evidence = _register(conn, clock, store)
+    snapshot = _commit(conn, clock, store, availability=(evidence.artifact_id,),
+                       finality=(evidence.artifact_id,))
+    unknown = dataclasses.replace(snapshot, snapshot_id="snap_" + "0" * 32)
+    with pytest.raises(OpsError) as err:
+        verify_eod_availability(conn, store, Repository(conn), unknown, table_name=_TABLE,
+                                session_date=_SESSION, decision_at=_DECISION)
+    assert err.value.code == "VALIDATION_FAILED"
+    assert err.value.problem.message == "the pinned snapshot is not registered"
+    assert isinstance(err.value.__cause__, DataError)
+    assert err.value.__cause__.code == "SNAPSHOT_NOT_FOUND"
 
 
 def test_moved_head_leaves_pinned_snapshot_authoritative(tmp_path):
