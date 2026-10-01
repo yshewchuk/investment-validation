@@ -690,12 +690,12 @@ Omitting the expected id preserves direct and legacy caller behavior.
 `nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward
 events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
 `nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)`
-returns `CalendarRowInputs(calendar_revision, calendar_row)`, copying the
-exact pinned event ID. Revision means the earnings dataset version (`EventRef`),
-not `SnapshotRef.calendar_version`, which may be a placeholder.
-Entry/exit/expiry, spot and calendar-observed-through are staged inputs; validation covers shape, not sourcing or strategy.
-No match → `EVENT_NOT_FOUND`; multiple matches → `IDENTITY_CONFLICT`;
-Invalid staged/key input or blank persisted event ID/dataset revision → `INVALID_REQUEST`; repository failures propagate.
+returns `CalendarRowInputs(calendar_revision, calendar_row)` with the exact event ID and earnings dataset revision (`EventRef`), not the snapshot calendar placeholder.
+Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validation covers shape, not strategy or sourcing.
+No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged/key/identity input → `INVALID_REQUEST`; repository failures propagate.
+`source_availability.verify_eod_availability` admits an exact pinned EOD session only through manifest-bound source/finality receipts and verified coordinator publication before the independent decision cutoff.
+It verifies producer/attempt/fence, receipt/object hashes and complete relevant membership; missing or contradictory proof refuses admission. Reconstructed midnight/import clocks do not qualify.
+Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone.
 
 ## Inputs
 
