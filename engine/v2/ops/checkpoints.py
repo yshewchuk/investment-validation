@@ -25,12 +25,21 @@ def register_artifact(conn, ref, attempt_id, clock):
                  (ref.artifact_id, dumps(ref), attempt_id, format_timestamp(clock.now())))
 
 
-def artifact(conn, store, artifact_id):
+def registered_artifact(conn, artifact_id):
+    """Authoritative catalog registration for ``artifact_id``.
+
+    Metadata only: it decodes the stored ``ArtifactRef`` and never asks the
+    store to verify bytes, so it makes no byte-integrity claim.
+    """
     row = conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
                        (artifact_id,)).fetchone()
     if row is None:
         raise fail("INTEGRITY_FAILED", "required artifact is missing")
-    ref = load_json(ArtifactRef, row[0])
+    return load_json(ArtifactRef, row[0])
+
+
+def artifact(conn, store, artifact_id):
+    ref = registered_artifact(conn, artifact_id)
     store.verify(ref)
     return ref
 

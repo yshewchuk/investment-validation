@@ -1,50 +1,50 @@
-# Serving architecture
+# `engine/v2/serving` architecture
+
 ## Purpose
-Layer 7 in the [root architecture](../../../ARCHITECTURE.md): authorize, filter,
-paginate and serialize saved records and immutable releases for dashboard consumers.
+Layer 7 in the [root architecture](../../../ARCHITECTURE.md): authenticated
+API/projection contracts over saved records, financial display values and release publication.
+Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 ## Primary contracts and public interfaces
-`operations.create_server` serves authenticated health, release and projection JSON
-and dashboard pages. `api.create_app` exposes bounded release/event/score reads.
-`bridge.build_bridges` maps verified score and bundle documents to display records;
-`projections.build_candidate` publishes an immutable release and its SQLite index.
-The package [README](README.md) declares the complete supported import interface.
+The [README](README.md) lists the checked public exports: operations server,
+FastAPI read API, legacy bundle/score loaders, bridge and projection/index helpers.
+`native_parity_summary` projects retained report evidence without comparing again.
 
 ## Inputs
-Verified score documents, rendered bundles, artifact stores, a serving index,
-health documents and a configured parity report. Resolve one release per read.
-
+Verified saved score documents, legacy bundle bytes, immutable artifacts, serving
+SQLite index, health/model/calibration documents and retained parity reports.
+API/projection requests authenticate; compatibility HTML is public. Scoped reads carry pins; current discovery is unpinned.
 ## Outputs
-HTTP documents/pages, immutable artifacts and transactional index rows.
-`native_parity_summary` aggregates the stored comparator report.
-Its optional comparison presents paired Legacy/Native values for one selected saved replay.
-Original numbers/nulls and gate verdicts stay unchanged; exact decimal text preserves large integers.
-Identity, corpus/request/decision/quote/event clocks and both-side provenance stay
-distinct. This evidence does not qualify a current board or population cutover.
+Bounded saved-record JSON reads, typed refusals, immutable candidate releases and
+projection bindings. Operations transport can return queued command job identities.
+The existing operations HTML/JavaScript shells and pinned legacy bundle hosting
+remain a compatibility exception; their presentation still requires React migration.
 
-## Dependencies and callers
-Serving uses contracts, foundation and data abstractions below its layer, local
-projection helpers and immutable files. Dashboard preview calls `create_server`;
-the API also has a direct module launcher. Serving imports no ops/parity peer or
-legacy scorer; exporter verification remains outside the serving request path.
-
+## Dependencies
+Lower-layer contracts/foundation and saved data access; serving does not import
+layer-7 ops peers. Offline tools compose publication with ops. The dashboard preview
+calls `operations.create_server`; the React typed client calls the HTTP API.
+No request starts provider ingestion, fitting, scoring or financial simulation.
 ## External systems and libraries
-SQLite, filesystem, stdlib HTTP, FastAPI/uvicorn; auth secrets never enter diagnostics.
+FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
+storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
 | Condition | Outcome |
 |---|---|
-| Missing parity file | Successful `no_report` document |
-| Malformed report, including present invalid captured comparison | Unavailable with the existing path-free malformed reason |
-| Captured comparison absent | Existing aggregate response/page remains available |
-| Valid selected comparison | Bounded paired rows, original provenance and retained-replay scope |
-| Invalid bundle or index findings | Typed refusal; no release index row |
-| Repeated candidate publication | Content identity makes index publication idempotent |
+| Missing identity, invalid release/filter-bound cursor or corrupt legacy input | Explicit typed refusal. |
+| Projection findings fail / accepted candidate repeated | Diagnostic receipt only, no release / atomic, idempotent index commit. |
+| Current changes or cached API read | Honor client pin per request; release-scoped cache/ETags cannot substitute another release. |
+| Parity report missing/unavailable | Explicit state; read-only projection has no internal cache/retry/write transaction; caller may retry. |
 
-## Invariants and diagram
-No financial fallback/reconciliation, inference, provider call or release mutation on GET.
-Browser cells use safe text construction, including provenance.
+## Invariants
+Reject new application markup, inline DOM scripts and page builders here; hosting
+built assets is transport. Keep saved financial values, clocks and provenance;
+saved replay evidence does not imply current nightly/full-population qualification.
+Existing compatibility views do not establish ownership of new application screens.
+## Diagrams
 ```mermaid
 flowchart LR
-  report[Stored report] --> summary[Read-only summary] --> page[Existing parity JSON/page]
+  React[React typed client] -->|cookie; release pin| API[authenticated JSON API]
+  API --> Projection[saved-record projections] --> Saved[index and immutable artifacts]
 ```

@@ -73,6 +73,44 @@ interface section; this names only the load-bearing entry points.
 
 ## Inputs
 
+### EOD availability evidence
+
+`DatasetManifest.availability_evidence_refs` pins content-addressed source
+receipts; `SnapshotRef.finality_receipt_refs` pins the corresponding finality
+evidence. These existing identity carriers are shared by quote and daily-state
+admission. Import/reference receipt registration is not source availability.
+
+An EOD source receipt names its table contract, exact session, exact output
+`ObjectRef`/full byte hashes, source evidence, and producer attempt/fence. It
+binds source finality validation and the coordinator-published checkpoint
+whose artifact membership contains those outputs. The coordinator publication
+clock is an availability upper bound only after genuine source completion
+validation; a successful arbitrary worker is insufficient. Caller-provided
+timestamps, file mtimes, legacy snapshot dates and fitted prices supply no proof.
+Existing checkpoints have empty validation references and a pre-transaction
+timestamp; neither field alone is an EOD availability/finality attestation.
+The receipt is referenced by the resulting manifest and therefore contains no
+resulting dataset/snapshot ID. Admission verifies that association through the
+actual pinned manifest and complete relevant fragment membership instead.
+
+Receipt bytes use `ArtifactStore` publication and full-hash verification.
+Source objects retain their existing contract/fragment/object identity chain.
+Producer/attempt/fence and decision-clock checks belong to operations;
+this layer supplies immutable membership and object reads, with no dependency
+on operations. Reconstructed quote sessions have no per-row availability
+clock or finality receipt, and their synthesized midnight is never substituted.
+The current operations preflight verifies pinned identities and candidate
+receipt bytes, then refuses: no genuine source/finality validator is installed.
+
+| Condition | Admission outcome |
+|---|---|
+| Exact pinned members, genuine source completion and finality, and verified publication at or before cutoff | Evidence can admit that session/domain |
+| Exact pinned scope, genuine source completion and finality, and verified publication at or before cutoff, with successful exact-scope completion and no output objects | Admit the proven empty domain; missing, unavailable or unstarted source proof refuses |
+| Missing proof, unsupported producer, incomplete coverage or ambiguous evidence | Refuse; do not substitute a later/stale session |
+| Receipt/object hash, contract, session, membership or producer identity mismatch | Refuse before returning quote rows |
+| Publication after cutoff or malformed/ambiguous clock | Refuse; import time cannot repair the evidence |
+| Naive, non-canonical, future or contradictory evidence clocks | Refuse; accept only canonical timezone-aware UTC instants |
+
 Legacy files, read only through `legacy_adapter.py` (Tier-2 curated tables,
 `panel.parquet`/`tier4_forecasts.parquet`, the model registry, structure/
 champion artifacts, the calendar CSV, the chooser pool, the legacy
@@ -85,6 +123,18 @@ plus an `ArtifactStore` for fragment bytes; a `GenericTableCandidate`'s
 accessor only.
 
 ## Outputs
+
+**Original panel COPY identity.** Offline size-fold authoring uses `Repository`
+and the existing object verifier to bind the named committed snapshot's
+`feature_panel` dataset version to one original object and full byte hash.
+The application's committed catalog and configured content-addressed store are
+the trust anchor; a caller hash is only a matching expectation. Equivalent rows
+rewritten as different Parquet bytes do not preserve this identity.
+Missing/substituted membership, unsupported panel layout or corrupt bytes refuse
+before pinned authoring. No current-head or live legacy path supplies a fallback.
+This proves membership and bytes, not the original producer read-set. Imported
+completeness flags, empty evidence references and import registration time do not
+prove that corrected upstream data reached the panel. No fitting belongs here.
 
 A committed snapshot (new/reused `data_*` rows, an import receipt, and,
 unless already at head, a compare-and-swapped `data_snapshot_heads` row —
@@ -126,6 +176,9 @@ pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
+
+`engine.v2.features.daily_state_inputs` reads bounded pinned `daily_market`
+rows; its EOD source session does not establish receipt-time availability.
 
 ## External systems and libraries
 

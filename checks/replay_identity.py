@@ -67,6 +67,7 @@ __all__ = [
 CODE_ROOTS = (("engine", "**/*.py"),)
 REPLAY_V2_PACKAGES = (
     "engine/v2/contracts",
+    "engine/v2/data",
     "engine/v2/diagnosis",
     "engine/v2/domain/generation",
     "engine/v2/domain/valuation",

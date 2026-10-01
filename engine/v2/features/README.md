@@ -32,7 +32,16 @@ underscore convention, and an import of a name absent from this list fails
 `recipes` provides `FeatureRegistry` and `default_feature_registry`; `context`
 provides `FeatureContextPlanner` and causal `FeatureFrame` construction.
 
-<!-- public-interface: recipes, FeatureRegistry, default_feature_registry, regime.add_regime_features -->
+`runup_math.add_runup_features(frame, prices_by_ticker, as_of_column)` computes
+shared streak and price-history inputs from caller-selected event/price frames.
+
+`daily_state_inputs.scan_daily_state_inputs(repository, snapshot, *, ticker,
+history_start, decision_session)` reads one ticker's bounded `daily_market` rows
+from a pinned snapshot and returns `daily_state_inputs.DailyStateInputs`. The
+result is session-only: it is not a complete forward panel or a qualified
+board, and no production raw-row assembler calls it yet.
+
+<!-- public-interface: recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs -->
 
 ## Consumers
 

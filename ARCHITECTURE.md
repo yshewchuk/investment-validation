@@ -64,11 +64,17 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/serving/` | [`engine/v2/serving/ARCHITECTURE.md`](engine/v2/serving/ARCHITECTURE.md) |
 | `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
 | `engine/v2/diagnosis/` | (pending) |
-| `engine/v2/dashboard/`, `ui/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
+| `engine/v2/dashboard/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
+| `ui/` | [`ui/ARCHITECTURE.md`](ui/ARCHITECTURE.md) |
 | `engine/dashboard/` (legacy) | [`engine/dashboard/ARCHITECTURE.md`](engine/dashboard/ARCHITECTURE.md) (legacy — minimal record; removed at cutover) |
 | legacy `engine/**` (undivided) | (legacy — removed at cutover; no component doc) |
 
 ## 1. Two trees
+
+Pinned offline size-fold authoring verifies COPY consistency with a committed
+snapshot's original panel bytes. This does not establish complete training-read
+or corrected-source REBUILD provenance; those claims require genuine producer
+evidence. See the models and data component contracts.
 
 - **`engine/*` (legacy).** Runs the production board today: the legacy
   nightly, ledger and dashboard. It is frozen, not refactored — effort spent
@@ -178,9 +184,38 @@ can.
 | 7.0 | `engine/v2/serving/` | data half of `dashboard/render.py`, `earnings_app.py` | Bounded/paginated reads over saved records, the §6.4 financial display values, immutable release publication. |
 | 7.0 | `engine/v2/ops/` | new supervisor/catalog, `dashboard/nightly.py`, `bounded_run.py` | Durable jobs, leases, retry history, resource admission, the nightly job graph — see §4 and `engine/v2/ops/ARCHITECTURE.md`. |
 | 7.5 | `engine/v2/diagnosis/` | `dashboard/selfcheck.py`, the parity comparators | **Sink**: reads every layer's artifacts; imported by nothing. Re-exports `engine/v2/parity`'s comparator under its historical module names. |
-| 8.0 | `engine/v2/dashboard/`, `ui/` | formatting half of `render.py`, `dashboard/static/` | UI only. `only_imports=(7.0,)` — stricter than "below 8": it may import layer 7 *and nothing else*, not layers 0-6 directly. See `engine/v2/dashboard/ARCHITECTURE.md`. |
+| 8.0 | `engine/v2/dashboard/`, `ui/` | formatting half of `render.py`, `dashboard/static/` | UI only. The Python dashboard enforces `only_imports=(7.0,)`: layer 7 only, not layers 0-6. React `ui/` consumes serving HTTP contracts; that Python import check does not cover TypeScript. See [dashboard architecture](engine/v2/dashboard/ARCHITECTURE.md) and [React architecture](ui/ARCHITECTURE.md). |
+
+### UI and serving boundary
+
+Application rendering, components, layout and navigation belong in the existing
+React app under `ui/`. `engine/v2/serving` owns authenticated API contracts,
+saved-record projections, release resolution and command transport; it does
+not own new application HTML, inline DOM scripts or page builders. Hosting
+built assets or immutable legacy bundle bytes does not transfer presentation
+ownership to the server. Financial values come from saved engine/projection
+records; the UI formats them and maps stored chart values to pixels.
+
+```mermaid
+flowchart LR
+  React[ui React components] --> Client[ui typed API client]
+  Client -->|same-origin cookie; pinned release| API[serving authenticated JSON API]
+  API --> Projection[saved-record projections]
+  Projection --> Records[immutable release records and artifacts]
+```
+
+Current `engine/v2/serving/operations.py` HTML pages and pinned legacy bundle previews
+are a compatibility exception, described in the [serving architecture](engine/v2/serving/ARCHITECTURE.md).
+Their application views still require migration to React; extending that HTML
+is not delivery of the React app. This boundary is a review criterion, not a
+claim that existing compatibility presentation has already been removed.
 
 ### 2.1 Two splits that are load-bearing, not cosmetic
+
+The features component also provides a bounded daily-state input adapter
+over one pinned snapshot. Its source clock is the
+EOD session, with no receipt/publication timestamp; it is a raw input
+prerequisite, not complete causal panel construction or nightly integration.
 
 - **`contracts` (0.0) vs. `foundation` (0.5).** Both are "layer 0" in prose,
   but `foundation` imports `contracts`, so they cannot be peers in an
@@ -398,13 +433,9 @@ or a new consumer must update that package's README in the same change.
   wired through `engine/v2/dashboard/preview.py`'s optional
   `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
   for that route/CLI contract.
-  `engine/v2/serving` has no
-  `ARCHITECTURE.md` of its own yet (this doc's "Component docs" table lists
-  it `(pending)`); per that section's own rule a pending component is
-  documented only at this root doc's level until a follow-up PR gives it a
-  file of its own — a whole-component doc for `engine/v2/serving` (14
-  existing files, none of them touched by this task) is exactly that
-  follow-up, not a side effect of adding one function.
+  The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
+  records whole-package ownership, interfaces and its boundary with React;
+  this report projection remains a read over retained evidence.
 
 ### 4.1 Production flow
 
@@ -438,6 +469,19 @@ is shadow-only end to end,
 and nothing on this diagram writes to the legacy board.
 
 ## 5. Invariants
+
+EOD source availability is a separate admission contract from session identity.
+Pinned object hashes prove which bytes were read; an observation day, import
+timestamp or reconstructed midnight does not prove EOD availability or finality.
+Source admission reuses content-addressed artifacts and the dataset manifest
+availability references. A receipt binds the exact source objects and producer
+validation evidence; the pinned manifest supplies dataset/snapshot membership.
+The receipt does not contain the resulting dataset/snapshot identity, avoiding
+an identity cycle. Same-day quote admission requires genuine source completion
+and finality, with verified coordinator publication at or before the independent
+decision clock. Missing proof refuses admission, including otherwise valid reconstructed
+legacy rows. This contract also applies to daily-state inputs; it does not
+change their arithmetic or imply that source receipt production is available.
 
 - **Native vs. legacy provenance.** A native row never carries a
   legacy-derived value or a legacy reference under a native label.
