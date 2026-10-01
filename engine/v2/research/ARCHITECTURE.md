@@ -186,8 +186,16 @@ listed above are one consumer; `experiments/common_v2.py` is another, for
 `experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
 and `_chains.load_chain_index`; the pinned EXP-147 confirmatory-validation
 runner is a third, for `experiment_trades.PROVENANCE` alone (its native
-replay tag, selecting that runner's analog population) — none of the three
-is parsed by the layering hook (it only parses `engine*` importers, and
+replay tag, selecting that runner's analog population).
+`experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
+slice 2) is a fourth: it reads
+`_chains.filter_plan_by_availability`/`read_chain_keys`, `_plan.plan_events`,
+`_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
+and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
+grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`
+is a fifth, reading `_replay_run.events_frame` for its known-session event
+universe before handing it to `price_candidate_grid`. None of the five are
+parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
 ## External systems and libraries

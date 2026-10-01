@@ -14,17 +14,20 @@ import argparse
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-HERE = Path(__file__).resolve().parent
-RESULTS = HERE / "results"
-sys.path.insert(0, str(ROOT))
+_BOOTSTRAP_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
+from engine import paths  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactStore, SystemClock  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.research import _replay_run  # noqa: E402
 from experiments import lib  # noqa: E402
 from experiments.v2_candidate_grid import price_candidate_grid  # noqa: E402
+
+ROOT = paths.ROOT
+HERE = ROOT / "experiments" / "EXP-186_menu7prime_twinp_candidates_v2"
+RESULTS = HERE / "results"
 
 
 def main() -> None:
