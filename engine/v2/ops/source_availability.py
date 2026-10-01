@@ -26,8 +26,8 @@ from datetime import date, datetime
 from typing import NoReturn
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import format_timestamp, parse_timestamp
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.foundation import ArtifactError, format_timestamp, parse_timestamp
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import fail
 
 __all__ = ["verify_eod_availability"]
@@ -35,6 +35,7 @@ __all__ = ["verify_eod_availability"]
 _SUPPORTED_TABLE = "option_chains"
 _MAX_EVIDENCE_BYTES = 1 << 20
 _UNAVAILABLE = "registered source completion/finality verifier is unavailable"
+_TAMPERED = "availability evidence failed full-byte verification"
 _SESSION_FORM = "session_date must be a canonical ISO date string"
 _DECISION_FORM = "decision_at must be a canonical UTC timestamp"
 
@@ -115,9 +116,15 @@ def _check_carrier(refs, carrier: str) -> None:
 
 
 def _verify_evidence(conn, store, artifact_id: str) -> None:
-    """Registration plus full bytes, refusing oversized candidates before any
-    read allocates them. The bytes prove identity only, never availability."""
-    ref = artifact(conn, store, artifact_id)
+    """Registered metadata, size bound, then full bytes. The metadata lookup
+    makes no byte-integrity claim, and oversized candidates are refused before
+    any read allocates them. The bytes prove identity only, never availability."""
+    ref = registered_artifact(conn, artifact_id)
     if ref.byte_size > _MAX_EVIDENCE_BYTES:
         raise fail("VALIDATION_FAILED", "availability evidence exceeds the 1 MiB limit")
-    store.read_verified(ref)
+    try:
+        store.read_verified(ref)
+    except ArtifactError as err:
+        if err.code == "INTEGRITY_FAILED":
+            raise fail("INTEGRITY_FAILED", _TAMPERED) from err
+        raise

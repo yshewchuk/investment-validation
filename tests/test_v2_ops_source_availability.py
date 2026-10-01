@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 from engine.v2.data import catalog, manifests  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactError  # noqa: E402
-from engine.v2.ops.checkpoints import register_artifact  # noqa: E402
+from engine.v2.ops.checkpoints import artifact, register_artifact, registered_artifact  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.source_availability import verify_eod_availability  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
@@ -43,6 +43,7 @@ _PRIOR_SESSION = "2024-01-04"
 _FUTURE_SESSION = "2024-01-06"
 _DECISION = "2024-01-05T21:00:00.000000Z"
 _UNAVAILABLE = "registered source completion/finality verifier is unavailable"
+_TAMPERED = "availability evidence failed full-byte verification"
 _EVIDENCE_SCHEMA = "quote_availability_evidence.v1"
 
 _CHAINS = contract_for("option_chains")
@@ -353,20 +354,46 @@ def test_modified_artifact_bytes_fail_full_byte_verification(tmp_path):
     os.chmod(path, 0o644)
     original = path.read_bytes()
     path.write_bytes(original + b"!")
-    with pytest.raises(ArtifactError) as err:
+    with pytest.raises(OpsError) as err:
         verify_eod_availability(conn, store, Repository(conn), snapshot, table_name=_TABLE,
                                 session_date=_SESSION, decision_at=_DECISION)
     assert err.value.code == "INTEGRITY_FAILED"
+    assert err.value.problem.message == _TAMPERED
+    assert isinstance(err.value.__cause__, ArtifactError)
     path.write_bytes(original)
     assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") == _UNAVAILABLE
 
 
-def test_oversized_candidate_refused_before_read_verified(tmp_path, monkeypatch):
+def test_registered_accessor_returns_ref_without_byte_integrity(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    evidence = _register(conn, clock, store, _SOURCE_CLAIM)
+    snapshot = _commit(conn, clock, store, availability=(evidence.artifact_id,),
+                       finality=(evidence.artifact_id,))
+    path = store.verify(evidence)
+    os.chmod(path, 0o644)
+    original = path.read_bytes()
+    path.write_bytes(original + b"!")
+    try:
+        assert registered_artifact(conn, evidence.artifact_id) == evidence
+        with pytest.raises(ArtifactError) as err:
+            artifact(conn, store, evidence.artifact_id)
+        assert err.value.code == "INTEGRITY_FAILED"
+        assert _refuses(conn, store, snapshot, "INTEGRITY_FAILED") == _TAMPERED
+    finally:
+        path.write_bytes(original)
+    assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") == _UNAVAILABLE
+
+
+def test_oversized_candidate_refused_before_any_byte_access(tmp_path, monkeypatch):
     conn, clock, store = catalog_and_store(tmp_path)
     oversized = _register(conn, clock, store, b"x" * ((1 << 20) + 1))
     snapshot = _commit(conn, clock, store, availability=(oversized.artifact_id,),
                        finality=(oversized.artifact_id,))
-    calls = _watch_reads(store, monkeypatch)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("oversized evidence must not touch store bytes")
+
+    monkeypatch.setattr(store, "verify", boom)
+    monkeypatch.setattr(store, "read_verified", boom)
     assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") \
         == "availability evidence exceeds the 1 MiB limit"
-    assert calls == []
