@@ -103,9 +103,11 @@ clock or finality receipt, and their synthesized midnight is never substituted.
 | Condition | Admission outcome |
 |---|---|
 | Exact pinned members, genuine source finality and verified publication before cutoff | Evidence can admit that session/domain |
+| Exact pinned scope, genuine source finality and verified publication before cutoff, with successful exact-scope completion and no output objects | Admit the proven empty domain; missing, unavailable or unstarted source proof refuses |
 | Missing proof, unsupported producer, incomplete coverage or ambiguous evidence | Refuse; do not substitute a later/stale session |
 | Receipt/object hash, contract, session, membership or producer identity mismatch | Refuse before returning quote rows |
 | Publication after cutoff or malformed/ambiguous clock | Refuse; import time cannot repair the evidence |
+| Naive, non-canonical, future or contradictory evidence clocks | Refuse; accept only canonical timezone-aware UTC instants |
 
 Legacy files, read only through `legacy_adapter.py` (Tier-2 curated tables,
 `panel.parquet`/`tier4_forecasts.parquet`, the model registry, structure/
