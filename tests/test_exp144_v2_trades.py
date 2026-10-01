@@ -128,3 +128,17 @@ def test_add_champion_decisions_selects_on_the_stored_threshold():
     assert list(out["champion_pwin"]) == list(scores["incumbent_complete_case_pwin"])
     # the candidate's own columns are untouched by the copy
     assert "selected_champion" not in scores.columns
+
+
+def test_add_champion_decisions_treats_a_nan_score_as_not_selected():
+    module = _exp144()
+    scores = pd.DataFrame({
+        "event_id": ["E-NAN"],
+        "incumbent_complete_case": [float("nan")],
+        "incumbent_complete_case_pwin": [float("nan")],
+    })
+
+    out = module.add_champion_decisions(scores, STORED_THRESHOLD)
+
+    assert list(out["selected_champion"]) == [False]
+    assert pd.isna(out["champion_pwin"]).all()

@@ -117,6 +117,29 @@ def test_exp185_runner_manifest_is_registered():
     assert "gate_midfill_str_runup" in manifest["registry_effects"]
 
 
+def test_exp185_wrapper_patches_here_and_results_before_main():
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[1]
+    wrapper_dir = root / (
+        "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered"
+    )
+    source = wrapper_dir / "run.py"
+    module_spec = importlib.util.spec_from_file_location("exp185_wrapper_under_test", source)
+    wrapper = importlib.util.module_from_spec(module_spec)
+    assert module_spec.loader is not None
+    module_spec.loader.exec_module(wrapper)
+
+    # HERE/RESULTS are not the wrapper's own top-level names -- run.py sets
+    # them on the EXP-144 module it loads (the ``module`` name in its
+    # namespace), which is the object ``main()`` would run against. HERE also
+    # happens to exist as a plain wrapper-level assignment, so asserting on
+    # ``wrapper.module`` is what actually checks the patch, not the
+    # coincidental same-named local.
+    assert wrapper.module.HERE == wrapper_dir
+    assert wrapper.module.RESULTS == wrapper_dir / "results"
+
+
 def test_exp185_is_a_registered_runner():
     from engine.v2.ops.legacy_adapter import REGISTERED_RUNNERS
 

@@ -87,6 +87,11 @@ def load_trades(v2_snapshot_id):
         snapshot_id=v2_snapshot_id,
     )
     frame = frame[frame["variant"] == VARIANT].copy()
+    if frame.empty:
+        raise SystemExit(
+            f"[{STRATEGY}] v2 snapshot {v2_snapshot_id!r} has no {VARIANT!r} rows after "
+            "filtering -- refusing to continue with an empty trades frame"
+        )
     frame = frame[columns]
     for column in ("event_date", "entry_date", "exit_date", "expiry"):
         frame[column] = pd.to_datetime(frame[column])
