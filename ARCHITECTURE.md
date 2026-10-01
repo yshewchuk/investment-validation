@@ -447,8 +447,8 @@ availability references. A receipt binds the exact source objects and producer
 validation evidence; the pinned manifest supplies dataset/snapshot membership.
 The receipt does not contain the resulting dataset/snapshot identity, avoiding
 an identity cycle. Same-day quote admission requires genuine source completion
-and a verified coordinator publication bound before the independent decision
-clock. Missing proof refuses admission, including otherwise valid reconstructed
+and a verified coordinator publication bound at or before the independent
+decision clock. Missing proof refuses admission, including otherwise valid reconstructed
 legacy rows. This contract also applies to daily-state inputs; it does not
 change their arithmetic or imply that source receipt production is available.
 
