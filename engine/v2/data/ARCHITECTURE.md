@@ -86,30 +86,17 @@ accessor only.
 
 ## Outputs
 
-**Original panel COPY identity (offline consumer design).** A caller verifying
-an offline size-fold declaration resolves the supplied committed snapshot through
-`Repository`, preserving its `feature_panel` dataset-version identity. The
-supported panel layout is one original object whose full serialized-byte hash
-is verified through the existing artifact/object primitives. Scanning rows and
-writing equivalent Parquet does not preserve this identity. Resolution and
-object verification occur anew; no current-head lookup or legacy global path
-substitution supplies the original panel identity.
-The trust anchor is the application's existing committed catalog and configured
-content-addressed artifact store. A caller hash is only a matching expectation,
-never authority for snapshot membership or a new catalog proof.
-
-This verifies catalog membership and copied bytes, not the original producer
-read-set. Snapshot import currently binds curated tables and original panel
-objects; its declared completeness is not evidence that corrections in those
-tables reached the panel. A complete preparation or REBUILD claim requires a
-genuine producer receipt covering every actual source and reference object and
-the selected output bytes. Existing dataset availability/coverage and snapshot
-finality evidence carriers may pin such evidence, but empty references and
-import registration time do not certify reads or source availability. Evidence
-must avoid an identity cycle when a manifest includes its receipt hash.
-Unsupported panel layouts, membership substitutions and corrupt objects refuse
-before an offline consumer publishes pinned descriptors. No producer or fitting
-code belongs in this data-layer verification seam.
+**Original panel COPY identity.** Offline size-fold authoring uses `Repository`
+and the existing object verifier to bind the named committed snapshot's
+`feature_panel` dataset version to one original object and full byte hash.
+The application's committed catalog and configured content-addressed store are
+the trust anchor; a caller hash is only a matching expectation. Equivalent rows
+rewritten as different Parquet bytes do not preserve this identity.
+Missing/substituted membership, unsupported panel layout or corrupt bytes refuse
+before pinned authoring. No current-head or live legacy path supplies a fallback.
+This proves membership and bytes, not the original producer read-set. Imported
+completeness flags, empty evidence references and import registration time do not
+prove that corrected upstream data reached the panel. No fitting belongs here.
 
 A committed snapshot (new/reused `data_*` rows, an import receipt, and,
 unless already at head, a compare-and-swapped `data_snapshot_heads` row —

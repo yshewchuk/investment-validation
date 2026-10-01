@@ -70,15 +70,10 @@ request body and, if durable, in the operator guides instead — see
 
 ## 1. Two trees
 
-Offline fold authoring distinguishes verified COPY artifact consistency from
-complete training-preparation provenance. A pinned size descriptor uses the
-resolved snapshot and exact original panel object bytes, never a global panel
-path or an equivalent-row rewrite. Existing cache headers and import receipts
-do not prove corrected-source rebuilding. Such a claim requires an independently
-verified producer receipt covering the actual complete read-set and output.
-The focused consumer contract and refusal boundary are documented in the
-[models component](engine/v2/models/ARCHITECTURE.md) and
-[data component](engine/v2/data/ARCHITECTURE.md).
+Pinned offline size-fold authoring verifies COPY consistency with a committed
+snapshot's original panel bytes. This does not establish complete training-read
+or corrected-source REBUILD provenance; those claims require genuine producer
+evidence. See the models and data component contracts.
 
 - **`engine/*` (legacy).** Runs the production board today: the legacy
   nightly, ledger and dashboard. It is frozen, not refactored — effort spent

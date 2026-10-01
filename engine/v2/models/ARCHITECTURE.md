@@ -136,50 +136,28 @@ metadata before catalog publication. No fitting or inference occurs here.
 | Failed preparation | No deployment-pointer changes; ordinary staging may leave unreferenced files; retry is permitted |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
-**Pinned COPY verification for offline size-fold authoring (design).** The
-existing `tools.phase5_prepare_release` descriptor consumer accepts an explicit
-committed snapshot/catalog and artifact-store context. It resolves and verifies
-that snapshot, requires one original `feature_panel` object, and verifies its
-full serialized-byte SHA-256 before authoring any pinned size descriptor.
-The selected dataset version, object identity and full hash remain separate
-from the snapshot identity. A rewritten Parquet with equivalent rows cannot
-inherit an old fold declaration. The existing producer policy and bounded
-cache-header checks must agree with that exact original object hash, registered
-model, ordered features, output, decision clock and exact fold month.
-The pinned claim is explicit manifest metadata: COPY mode plus snapshot,
-dataset-version, object and full hash identities. Unpinned legacy authoring
-cannot emit it. Registered policy is checked against the verified release
-binding/inventory, not a caller hash used as a policy lookup key. Preflight and
-staging consume the same immutable cache bytes and recheck their full hash;
-panel identity is reverified at the authoring boundary, without a stat cache.
-
-This is a useful COPY consumer success path: an existing compatible size-fold
-cache can be described against a verified original panel object without fitting,
-loading a live panel or rewriting the object. The resulting claim is artifact
-and policy consistency with copied original bytes. It does not certify the
-historical producer read-set or prove that corrected upstream tables were used
-to build those bytes. An ordinary import receipt, a self-hashed caller document
-or a cache header cannot supply either stronger claim.
+**Pinned offline COPY authoring.** `tools.phase5_prepare_release` accepts an
+explicit committed snapshot/catalog and artifact-store context. Existing size
+descriptors are checked against its one verified original `feature_panel`
+object, full byte hash and registered release binding/policy. Snapshot, dataset
+version, object and hash remain distinct identities. The manifest carries an
+explicit pinned COPY claim; legacy unpinned callers cannot emit that claim.
+Preflight and staging consume the same immutable bounded cache bytes and verify
+their hash; panel identity is reverified at authoring. No fitting, pool recreation
+or live-panel fallback occurs in pinned mode.
 
 | Pinned authoring condition | Outcome |
 |---|---|
-| Verified snapshot, one verified original panel object and matching size cache/policy | Author COPY-consistent size descriptor; preserve the full byte hash |
-| Missing or substituted snapshot/object, unsupported panel layout, corrupt bytes or header/policy mismatch | Refuse before release staging; no partial pinned descriptor publication |
-| Corrected-source REBUILD or complete training-preparation claim without verified producer evidence | Refuse that claim; do not relabel existing COPY evidence |
-| Legacy caller without pinned context | Retain existing unpinned behavior; it cannot claim pinned verification |
+| Verified original panel and matching bounded size cache/policy | Author COPY-consistent descriptor with separate pinned identities |
+| Missing/substituted snapshot/object, unsupported layout, corrupt bytes or policy/header/model/features/output/clock/month disagreement | Refuse before staging or pinned publication |
+| Equivalent-row rewrite with different bytes | Cannot reuse the old full-hash fold declaration |
+| Complete preparation or corrected-source REBUILD assertion without genuine producer evidence | Refuse stronger claim; COPY remains byte/policy consistency only |
+| No pinned context | Preserve legacy behavior without a pinned claim |
 
-**Complete preparation evidence boundary (design).** A genuine producer owns
-the complete preparation read-set and observes reads from pinned source objects.
-Its receipt binds source dataset/object identities, original and output panel
-byte hashes, reference inputs, producer fingerprint, model/features/output/clock
-and fold cutoff. A verifier independently resolves membership and checks the
-actual objects and produced bytes; hashing caller assertions is insufficient.
-COPY and REBUILD are distinct modes. Source evidence is pinned by the manifest
-without a circular reference to the resulting snapshot or dataset identity.
-Current imported caches lack this proof. Training frame-value, membership and
-label receipts remain useful checks but do not establish source-read causality.
-Runtime scoring never emits preparation receipts, rebuilds panels, fits models
-or synthesizes held-out pools. Inference raw-row staging is a separate owner.
+Cache headers, self-hashed caller assertions and import receipts do not prove
+actual training reads. Complete preparation evidence requires independently
+verified producer/source-read/output causality; current imported caches lack it.
+Training frame-value, membership and label receipts do not supply that proof.
 
 **Verified serving-fold ownership (6d-2).** `load_serving_fold` validates one
 descriptor against a verified parent manifest and catalog identity, returning
