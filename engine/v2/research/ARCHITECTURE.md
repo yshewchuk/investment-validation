@@ -51,7 +51,7 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 one; the library entrypoints below are this package's real public interface:
 
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
-`replay.replay_one`, `replay.shared_chain_index`, `_replay_run.run`,
+`replay.replay_one`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
 `_chains.load_chain_index`, `_trades_table.to_trades_table`, `_build_run.run`,
 `reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
@@ -332,17 +332,18 @@ uncaught traceback instead.
   are gone, on purpose — a pinned snapshot never changes under a run, so
   there is nothing to invalidate).
   `replay()`'s own `index is None` path gets its chain availability from
-  its own loaded `ChainIndex` (`replay.shared_chain_index`'s union of
-  planned `chain_keys`, for `_build_run.run`'s multi-strategy case too),
-  not from a separate `_chains.read_chain_keys` scan — one
-  `read_chains_for_years` call per required year, shared across every
-  strategy in a `_build_run.run` call, instead of one key-scan plus one
-  data-load per year per strategy. An explicit `index=` skips chain
-  reads entirely. `trades` is identical either way; the `skipped` count
-  breakdown can differ for a `decided_early` structure's event missing more
-  than one chain at once, since `filter_plan_by_availability` and
-  `replay_one` check entry/exit/decision in different orders (pre-existing,
-  not introduced here).
+  its own loaded `ChainIndex`, not from a separate `_chains.read_chain_keys`
+  scan — one `load_chain_index` call (narrowed by its own key-pushdown
+  filter) instead of a whole-table key scan plus that load. An explicit
+  `index=` skips chain reads entirely. `trades` is identical either way;
+  the `skipped` count breakdown can differ for a `decided_early`
+  structure's event missing more than one chain at once, since
+  `filter_plan_by_availability` and `replay_one` check entry/exit/decision
+  in different orders (pre-existing, not introduced here). A caller with
+  several strategies over the same events (`_build_run.run` today) still
+  repeats this per strategy — sharing one `ChainIndex` across strategies is
+  deferred to #276, gated on a measured multi-strategy peak before
+  committing to the memory tradeoff.
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since

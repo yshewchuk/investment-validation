@@ -58,7 +58,6 @@ __all__ = [
     "ReplayResult",
     "replay_one",
     "replay",
-    "shared_chain_index",
 ]
 
 #: Fill alphas every replayed trade is priced at. Worst / mid / best are the
@@ -424,38 +423,6 @@ def replay(
         f"in {result.elapsed_s:.0f}s"
     )
     return result
-
-
-def shared_chain_index(
-    repository,
-    snapshot_ref,
-    strategies: Sequence[str],
-    events: pd.DataFrame,
-    *,
-    calendar: TradingCalendar | None = None,
-) -> ChainIndex:
-    """One ``ChainIndex`` covering every one of ``strategies``' planned needs.
-
-    Plans ``events`` once per strategy (the same planning ``replay()`` does
-    internally — cheap, no IO) purely to union their ``chain_keys``, then
-    loads a single ``ChainIndex`` over that union. A caller passes the
-    result as ``replay()``'s ``index=`` for every strategy in the same run
-    (e.g. ``_build_run.run``), so ``option_chains`` is scanned once for the
-    whole run instead of once per strategy.
-
-    Raises the same ``KeyError`` as ``replay()`` for an unknown strategy
-    name. An empty ``strategies`` or an events frame that plans no rows for
-    any strategy returns an empty ``ChainIndex`` (``load_chain_index``'s own
-    empty-input behavior), never a refusal.
-    """
-    calendar = _calendar(calendar, repository, snapshot_ref)
-    keys: set[tuple[str, pd.Timestamp]] = set()
-    for strategy in strategies:
-        if strategy not in STRUCTURES:
-            raise KeyError(f"unknown strategy {strategy!r}; known: {sorted(STRUCTURES)}")
-        plan = plan_events(STRUCTURES[strategy](), events, calendar=calendar)
-        keys |= plan.chain_keys
-    return load_chain_index(repository, snapshot_ref, keys)
 
 
 def _variant_label(structure: Structure) -> str:

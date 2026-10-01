@@ -50,19 +50,13 @@ def run(repository, *, strategies: Sequence[str], years=None,
     snapshot = resolve(repository, scope=scope, snapshot_id=snapshot_id)
     events = filter_events(read_event_rows(repository, snapshot), years=years)
     calendar = _pricing.trading_calendar_from_snapshot(repository, snapshot)
-    index = replay.shared_chain_index(repository, snapshot, strategies, events,
-                                      calendar=calendar)
-    results = [replay.replay(repository, snapshot, strategy, events, calendar=calendar,
-                             index=index)
+    results = [replay.replay(repository, snapshot, strategy, events, calendar=calendar)
                for strategy in strategies]
-    # Drop the shared ChainIndex now — nothing after this point reads it, and
-    # to_trades_table(results) should not hold it resident during conversion.
-    del index
     engine_rows = to_trades_table(results)
     if len(engine_rows):
         engine_rows["provenance"] = PROVENANCE
         engine_rows["snapshot_id"] = snapshot.snapshot_id
-    # Drop the spent per-strategy results before the trades read stacks on their memory.
+    # Drop the spent per-strategy results before the trades read stacks on their ChainIndex memory.
     del results
     existing = read_existing_trades(repository, snapshot)
     revisions = revisions_for_rebuild(existing, engine_rows, set(strategies), years=years)
