@@ -76,6 +76,18 @@ above), `_trades_revisions.py`.
 
 ## Inputs
 
+The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
+optional `batch_filter` callback. They invoke it immediately after each Arrow
+batch becomes a pandas frame, before retaining frames; it returns narrowed
+rows or `None` for no rows. Omitting it or passing `None` preserves existing
+reads. `_chains.load_chain_index` uses it to keep exact requested ticker/date
+pairs while reading one manifest year at a time; stored dates retain their
+original timestamp semantics and requested dates use the existing normalization.
+Failed capped attempts discard their filtered frames before narrower retries;
+successful frames retain ordering and duplicates. Scan caps and terminal error
+codes are unchanged; retry errors no longer retain the prior overflow traceback.
+This bounds retained unmatched rows, not total process RSS.
+
 - `--catalog` (sqlite path) and `--store-root` (`ArtifactStore` root):
   required by every CLI; opened once per run via
   `engine.v2.ops.bootstrap.open_catalog` / `engine.v2.foundation.ArtifactStore`.

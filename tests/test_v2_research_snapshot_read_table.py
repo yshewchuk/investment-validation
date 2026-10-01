@@ -12,7 +12,9 @@ names (``_chains.read_chain_keys`` / ``_chains.load_chain_index``).
 from __future__ import annotations
 
 import dataclasses
+import gc
 import sys
+import weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -444,6 +446,42 @@ def test_batch_filter_survives_a_late_month_overflow_without_duplicates(tmp_path
     assert len(frame) == 3  # each 2024-01-10 row exactly once
     assert frame["strike"].is_unique
     assert seen and min(seen) > 0  # the filter saw (and discarded from) batches
+    conn.close()
+
+
+def test_failed_month_scan_frames_are_freed_before_the_first_day_retry(tmp_path):
+    """A late month overflow must not pin the frames its failed scan retained
+    through the day retries: once the ``except`` variable is released, the
+    failed scan's traceback cannot keep those frames alive, so the first
+    re-read of an already-seen row observes every filtered frame collected."""
+    conn, store, snap = _commit_chains(
+        tmp_path,
+        {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
+        maximum_result_rows=4,
+    )
+    repository = Repository(conn, store)
+
+    retained: list[weakref.ref] = []
+    seen: set[tuple] = set()
+    checked = False
+
+    def keep_first_day(frame: pd.DataFrame) -> pd.DataFrame:
+        nonlocal checked
+        keys = set(zip(frame["obs_date"], frame["strike"]))
+        if not checked and keys & seen:  # the day retry re-reads a seen row
+            gc.collect()
+            assert retained and all(ref() is None for ref in retained)
+            checked = True
+        seen.update(keys)
+        narrowed = _keep_only(frame, "2024-01-10")
+        retained.append(weakref.ref(narrowed))
+        return narrowed
+
+    frame = read_table(repository, snap, "option_chains", _COLUMNS + ("strike",),
+                       partition_keys=["2024"], batch_filter=keep_first_day)
+    assert checked
+    assert len(frame) == 3
+    assert frame["strike"].is_unique
     conn.close()
 
 

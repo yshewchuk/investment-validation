@@ -241,6 +241,7 @@ def _split_by_calendar(repository, snapshot_ref: SnapshotRef, table_name: str, c
     """
     frames: list[pd.DataFrame] = []
     for month in _calendar_intervals(interval, "month"):
+        retry_days: list[TimeInterval] | None = None
         try:
             month_frames = _scan_interval(
                 repository, snapshot_ref, table_name, contract, columns,
@@ -251,7 +252,9 @@ def _split_by_calendar(repository, snapshot_ref: SnapshotRef, table_name: str, c
             days = _calendar_intervals(month, "day")
             if not days:
                 raise
-            for day in days:
+            retry_days = days
+        if retry_days is not None:
+            for day in retry_days:
                 frames.extend(_scan_interval(
                     repository, snapshot_ref, table_name, contract, columns,
                     predicates, day, batch_filter=batch_filter))
