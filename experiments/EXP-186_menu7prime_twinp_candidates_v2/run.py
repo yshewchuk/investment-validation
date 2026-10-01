@@ -28,6 +28,13 @@ from experiments.v2_candidate_grid import price_candidate_grid  # noqa: E402
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--catalog", required=True, type=Path)
+    parser.add_argument("--store-root", required=True, type=Path)
+    # Accepted for CLI convention/compatibility only; this slice writes no ledger row.
+    parser.add_argument("--no-ledger", action="store_true")
+    args = parser.parse_args()
+
     spec = lib.load_spec(HERE / "spec.yaml")
     snapshot_id = spec.get("v2_snapshot_id")
     if not snapshot_id:
@@ -36,10 +43,6 @@ def main() -> None:
             "the v2 chains snapshot as \"latest\"; set it explicitly once the pinned "
             "snapshot exists."
         )
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--catalog", required=True, type=Path)
-    parser.add_argument("--store-root", required=True, type=Path)
-    args = parser.parse_args()
 
     conn = open_catalog(args.catalog, clock=SystemClock())
     try:

@@ -30,32 +30,44 @@ from tests.test_v2_research_replay import (  # noqa: E402
 )
 
 
-def _wide_chain(ticker, obs_date, *, call=(2.0, 2.4), put=(1.0, 1.4), spot=100.0):
-    """Same row contract as ``tests.test_v2_research_replay._chain``, but a
-    five-strike ladder wide enough for TWIN-P ``steps=1`` and ``steps=2``."""
+def _wide_chain(ticker, obs_date, *, level=1.0, spot=100.0):
+    """Seventeen $2-spaced strikes (84..116) around ``spot`` -- wide and
+    dense enough for TWIN-P's full seven-leg layout (offsets at 1x/2x/4x the
+    grid-step distance) at BOTH ``steps=1`` and ``steps=2``. Put/call mid is
+    convex in distance from spot and the half-spread widens with that same
+    distance, so every (step, alpha) prices to a genuinely nonzero net debit
+    rather than a flat/degenerate one. ``level`` scales every quote, so the
+    entry (2024-05-02) and exit (2024-05-03) observations can differ.
+    """
     rows = []
     obs = pd.Timestamp(obs_date)
+    strikes = [84.0 + 2.0 * i for i in range(17)]  # 84..116, $2 steps, spot at index 8
     for expiry, dte in ((pd.Timestamp("2024-05-03"), 2), (pd.Timestamp("2024-05-24"), 23)):
-        for strike in (80.0, 90.0, 100.0, 110.0, 120.0):
-            for right, (bid, ask) in (("C", call), ("P", put)):
-                scale = 1.0 if dte < 10 else 2.0
-                rows.append(
-                    {
-                        "ticker": ticker, "obs_date": obs, "expiry": expiry, "dte": dte,
-                        "strike": strike, "right": right,
-                        "bid": bid * scale, "ask": ask * scale,
-                        "spot": spot, "quote_repaired": False,
-                    }
-                )
+        dte_scale = 1.0 if dte < 10 else 2.0
+        for strike in strikes:
+            steps_from_spot = abs(strike - spot) / 2.0
+            put_mid = level * dte_scale * (2.0 + 0.20 * steps_from_spot ** 2)
+            call_mid = level * dte_scale * (2.0 + 0.20 * steps_from_spot ** 2)
+            half_spread = dte_scale * (0.10 + 0.02 * steps_from_spot)
+            rows.append({
+                "ticker": ticker, "obs_date": obs, "expiry": expiry, "dte": dte,
+                "strike": strike, "right": "P",
+                "bid": put_mid - half_spread, "ask": put_mid + half_spread,
+                "spot": spot, "quote_repaired": False,
+            })
+            rows.append({
+                "ticker": ticker, "obs_date": obs, "expiry": expiry, "dte": dte,
+                "strike": strike, "right": "C",
+                "bid": call_mid - half_spread, "ask": call_mid + half_spread,
+                "spot": spot, "quote_repaired": False,
+            })
     return pd.DataFrame(rows)
 
 
-def _wide_chain_rows(exit_call=(3.0, 3.4), exit_put=(2.0, 2.4)) -> list[dict]:
+def _wide_chain_rows(exit_level=1.5) -> list[dict]:
     rows: list[dict] = []
-    for obs_date in ("2024-05-02", "2024-05-03"):
-        call = (2.0, 2.4) if obs_date == "2024-05-02" else exit_call
-        put = (1.0, 1.4) if obs_date == "2024-05-02" else exit_put
-        frame = _wide_chain("TEST", obs_date, call=call, put=put)
+    for obs_date, level in (("2024-05-02", 1.0), ("2024-05-03", exit_level)):
+        frame = _wide_chain("TEST", obs_date, level=level)
         frame["year"] = 2024
         rows.extend(frame.to_dict("records"))
     rows.sort(key=lambda row: (row["ticker"], row["obs_date"], row["expiry"],
