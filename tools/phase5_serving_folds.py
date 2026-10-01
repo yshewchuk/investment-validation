@@ -9,18 +9,31 @@ import hashlib
 import io
 import math
 import re
+from dataclasses import dataclass
 from datetime import date
 
-from engine.v2.models import ArtifactMember
+from engine.v2.models import ArtifactMember, ModelRelease
 from engine.v2.models.deployment import StagedManifest
 from engine.v2.models.serving_folds import ServingFoldDescriptor, SizeFoldPolicy
 
 MAX_FOLD_BYTES = 32 * 1024 * 1024
 
 
-def describe_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
-                       manifest: StagedManifest) -> ServingFoldDescriptor:
-    """Validate authoring inputs without fitting; refuse with fixed messages."""
+@dataclass(frozen=True)
+class ValidatedSizeFold:
+    """Immutable header/pool metadata only; never carries estimator or pool arrays."""
+
+    fold_start: str
+    decision_clock_id: str
+    digest: str
+    pool_count: int
+    policy: SizeFoldPolicy
+    release: ModelRelease
+
+
+def preflight_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
+                        release: ModelRelease) -> ValidatedSizeFold:
+    """Pure authoring validation of bounded bytes against a release; refuse with fixed messages."""
     if len(data) > MAX_FOLD_BYTES:
         raise ValueError("serving fold exceeds byte limit")
     if (not isinstance(policy.panel_sha256, str)
@@ -33,7 +46,7 @@ def describe_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
                 and (type(policy.interval_floor) not in (int, float)
                      or not math.isfinite(policy.interval_floor)))):
         raise ValueError("invalid size serving policy")
-    bindings = [b for b in manifest.release.bindings if b.role == "size" and b.strategy_id == "*"]
+    bindings = [b for b in release.bindings if b.role == "size" and b.strategy_id == "*"]
     if (len(bindings) != 1 or bindings[0].model_id != policy.model_id
             or bindings[0].feature_order != policy.feature_order
             or bindings[0].output_names != ("forecast_abs_move",)):
@@ -69,9 +82,36 @@ def describe_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
             raise ValueError("invalid paired arrays")
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("invalid serving fold held-out pool") from exc
-    digest = hashlib.sha256(data).hexdigest()
+    return ValidatedSizeFold(fold_start=fold.isoformat(),
+                             decision_clock_id=bindings[0].decision_clock_id,
+                             digest=hashlib.sha256(data).hexdigest(), pool_count=len(pools[0]),
+                             policy=policy, release=release)
+
+
+def _descriptor_from_validated(validated: ValidatedSizeFold,
+                               manifest: StagedManifest) -> ServingFoldDescriptor:
+    """Trusted construction from retained validated metadata; refuses a different staged release."""
+    if manifest.release != validated.release:
+        raise ValueError("staged release disagrees with validated fold")
     return ServingFoldDescriptor(
         parent_release_id=manifest.release.release_id, parent_release_hash=manifest.release_hash,
-        policy=policy, fold_start=fold.isoformat(), decision_clock_id=bindings[0].decision_clock_id,
-        estimator=ArtifactMember(name="estimator", path=f"objects/{digest}",
-                                 content_hash=f"sha256:{digest}"), pool_count=len(pools[0]))
+        policy=validated.policy, fold_start=validated.fold_start,
+        decision_clock_id=validated.decision_clock_id,
+        estimator=ArtifactMember(name="estimator", path=f"objects/{validated.digest}",
+                                 content_hash=f"sha256:{validated.digest}"),
+        pool_count=validated.pool_count)
+
+
+def descriptor_from_preflight(validated: ValidatedSizeFold, policy: SizeFoldPolicy,
+                              manifest: StagedManifest) -> ServingFoldDescriptor:
+    """Describe staged folds only under the exact validated policy; no independent substitution."""
+    if policy != validated.policy:
+        raise ValueError("descriptor policy disagrees with validated fold")
+    return _descriptor_from_validated(validated, manifest)
+
+
+def describe_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
+                       manifest: StagedManifest) -> ServingFoldDescriptor:
+    """Validate authoring inputs without fitting; refuse with fixed messages."""
+    return _descriptor_from_validated(preflight_size_fold(data, name, policy, manifest.release),
+                                      manifest)

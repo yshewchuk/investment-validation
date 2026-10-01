@@ -1,6 +1,7 @@
 """Offline declarations from a captured size-cache header, synthetic bounded values."""
 import dataclasses
 import copy
+import hashlib
 import io
 import json
 
@@ -126,6 +127,24 @@ def test_malformed_cache_refuses(cache, staged, defect):
     assert "/" not in str(error.value)
 
 
+def test_preflight_is_pure_on_real_release(cache, staged):
+    raw, name, policy = _bytes(cache), _name(cache), _policy(cache)
+    release = _inputs(cache)[0]
+    validated = folds.preflight_size_fold(raw, name, policy, release)
+    assert validated.fold_start == cache["fold_start"]
+    assert validated.decision_clock_id == "entry-close"
+    assert validated.digest == hashlib.sha256(raw).hexdigest()
+    assert validated.pool_count == 2
+    assert not hasattr(validated, "estimator") and not hasattr(validated, "pool_pred")
+    assert folds.descriptor_from_preflight(validated, policy, staged) == \
+        folds.describe_size_fold(raw, name, policy, staged)
+    for defect, message in ((dict(tier3_snapshot="f" * 64), "header disagrees"),
+                            (dict(pool_pred=[0.1]), "held-out pool"),
+                            (dict(model_id="wrong"), "header disagrees")):
+        with pytest.raises(ValueError, match=message):
+            folds.preflight_size_fold(_bytes(dict(cache, **defect)), name, policy, release)
+
+
 def test_bound_checked_before_deserialization(cache, staged, monkeypatch):
     raw = _bytes(cache)
     monkeypatch.setattr(folds, "MAX_FOLD_BYTES", len(raw) - 1)
@@ -199,3 +218,72 @@ def test_policy_binding_disagreement_refuses(cache, staged):
     bad_floor = dataclasses.replace(_policy(cache), interval_floor=float("nan"))
     with pytest.raises(ValueError, match="invalid size serving policy"):
         folds.describe_size_fold(_bytes(cache), _name(cache), bad_floor, staged)
+
+
+def test_descriptor_binds_validated_policy_and_release(cache, staged):
+    raw, name, policy = _bytes(cache), _name(cache), _policy(cache)
+    validated = folds.preflight_size_fold(raw, name, policy, staged.release)
+    assert validated.policy == policy and validated.release == staged.release
+    assert folds.descriptor_from_preflight(validated, policy, staged) == \
+        folds.describe_size_fold(raw, name, policy, staged)
+    with pytest.raises(ValueError, match="policy disagrees"):
+        folds.descriptor_from_preflight(validated, dataclasses.replace(policy, interval_floor=1.0), staged)
+    swaps = (dataclasses.replace(staged.release, release_id="r2"),
+             dataclasses.replace(staged.release, bindings=tuple(
+                 dataclasses.replace(b, decision_clock_id="next-open") for b in staged.release.bindings)),
+             dataclasses.replace(staged.release, bindings=tuple(
+                 dataclasses.replace(b, model_id="wrong") for b in staged.release.bindings)))
+    for swapped in swaps:
+        manifest = dataclasses.replace(staged, release=swapped)
+        with pytest.raises(ValueError, match="release disagrees"):
+            folds.descriptor_from_preflight(validated, policy, manifest)
+        with pytest.raises(ValueError, match="release disagrees"):
+            folds._descriptor_from_validated(validated, manifest)
+
+
+@pytest.mark.parametrize("defect", ["panelhash", "intervalpolicy", "emptyfeatures", "duplicatefeatures"])
+def test_preflight_refuses_invalid_policy(cache, staged, defect):
+    features = tuple(cache["features"])
+    change = {"panelhash": dict(panel_sha256="f" * 63),
+              "intervalpolicy": dict(interval_policy="size-heldout.v0"),
+              "emptyfeatures": dict(feature_order=()),
+              "duplicatefeatures": dict(feature_order=(features[0], features[0]))}[defect]
+    with pytest.raises(ValueError, match="invalid size serving policy"):
+        folds.preflight_size_fold(_bytes(cache), _name(cache),
+                                  dataclasses.replace(_policy(cache), **change), staged.release)
+
+
+@pytest.mark.parametrize("defect", ["zero", "multiple", "features", "outputs"])
+def test_preflight_refuses_binding_defects(cache, staged, defect):
+    binding = staged.release.bindings[0]
+    if defect == "zero":
+        bindings = ()
+    elif defect == "multiple":
+        bindings = (binding, binding)
+    elif defect == "features":
+        bindings = (dataclasses.replace(binding, feature_order=tuple(reversed(binding.feature_order))),)
+    else:
+        bindings = (dataclasses.replace(binding, output_names=("forecast_return",)),)
+    with pytest.raises(ValueError, match="release binding"):
+        folds.preflight_size_fold(_bytes(cache), _name(cache), _policy(cache),
+                                  dataclasses.replace(staged.release, bindings=bindings))
+
+
+def test_describe_size_fold_decodes_exactly_once(cache, staged, monkeypatch):
+    loads, real = [], joblib.load
+    monkeypatch.setattr(joblib, "load",
+                        lambda *args, **kwargs: loads.append(args) or real(*args, **kwargs))
+    descriptor = folds.describe_size_fold(_bytes(cache), _name(cache), _policy(cache), staged)
+    assert len(loads) == 1
+    assert descriptor.pool_count == 2
+
+
+def test_preflight_retains_only_frozen_metadata(cache, staged):
+    validated = folds.preflight_size_fold(_bytes(cache), _name(cache), _policy(cache), staged.release)
+    assert not hasattr(validated, "estimator") and not hasattr(validated, "pool_pred")
+    assert not any(isinstance(getattr(validated, field.name), (np.ndarray, NoPrediction))
+                   for field in dataclasses.fields(validated))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        validated.policy.model_id = "mutated"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        validated.release.release_id = "mutated"
