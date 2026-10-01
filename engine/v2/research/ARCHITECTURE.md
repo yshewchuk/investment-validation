@@ -83,6 +83,8 @@ rows or `None` for no rows. Omitting it or passing `None` preserves existing
 reads. `_chains.load_chain_index` uses it to keep exact requested ticker/date
 pairs while reading one manifest year at a time; stored dates retain their
 original timestamp semantics and requested dates use the existing normalization.
+Independent ticker and date memberships may prune a scan batch, but only the
+exact pair mask — never their cross product — defines the retained rows.
 Failed capped attempts discard their filtered frames before narrower retries;
 successful frames retain ordering and duplicates. Scan caps and terminal error
 codes are unchanged; a narrower retry runs outside the failed attempt's handler.
