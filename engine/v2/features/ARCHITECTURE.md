@@ -78,6 +78,42 @@ caller yet; adding this arithmetic alone does not change a nightly or board.
 
 ## Inputs
 
+### Pinned daily-state input boundary (implemented)
+
+`scan_daily_state_inputs(repository, snapshot, *, ticker, history_start,
+decision_session)` binds the existing `panel_math.daily_state_lookup` to a
+bounded read of one ticker from `daily_market` in the supplied `SnapshotRef`.
+This contract is implemented in `daily_state_inputs.py`. No production raw-row
+assembler calls it yet, and it does not establish a complete forward panel or
+qualified board.
+
+The caller supplies explicit naive calendar dates, with `history_start <=
+decision_session`; intraday and timezone-aware values refuse. The read uses
+the supplied snapshot/table-contract identity, one ticker predicate, an
+inclusive start and exclusive next-day end, primary-key order, and fixed
+resource bounds. No head lookup, provider pull, training or legacy path occurs.
+Rows outside that identity/date scope, duplicate dates, and invalid source
+dates refuse before arithmetic. Repository integrity and limit refusals
+propagate. Missing tables refuse; no eligible IV-surface row is an explicit
+empty result with no source session, rather than a fabricated feature row.
+
+The result carries immutable raw market values, the actual selected EOD
+`source_session`, and snapshot/dataset identities. The existing lookup owns
+the inclusive decision-session selection, `src_iv` eligibility, percent/log
+units, absent-key null behavior, and positional 1/5/10-row differences.
+Insufficient supplied history leaves the corresponding lag keys absent.
+No arithmetic or missing-value policy is changed by this adapter.
+
+`daily_market.date` is an EOD observation session. Its contract has no receipt
+or publication timestamp or finality marker, so snapshot membership and a
+session cutoff cannot prove intraday knowledge or original receipt causality.
+`source_session` is neither an event date nor a whole-panel `panel_anchor`.
+The raw-row boundary must cover every contributing history/regime/runup
+observation before assigning that latter bound. Model forecasts, retained
+scores, quote/expiry selection, complete panel assembly and nightly wiring
+are outside this boundary; its consumer is the native raw-row producer,
+before `NightlyEventInputs` assembly.
+
 `regime.add_regime_features(events, market, *, as_of_column="date")` is
 pure regime arithmetic over explicit DataFrames. `market` supplies normalized,
 chronologically ordered, timezone-naive `date` values and float-convertible
