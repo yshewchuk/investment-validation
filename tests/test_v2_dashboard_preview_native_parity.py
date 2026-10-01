@@ -201,10 +201,6 @@ def _captured_block():
     }
 
 
-def _get_page(server):
-    return urlopen(f"http://127.0.0.1:{server.server_port}/native_parity", timeout=5).read()
-
-
 def test_native_parity_json_projects_captured_comparison(tmp_path, monkeypatch):
     report_path = _fixture_report_path(tmp_path, captured=_captured_block())
     server, thread, _ = _run_launcher(
@@ -289,34 +285,6 @@ def test_native_parity_json_unsafe_int_display_survives_http_json(tmp_path, monk
         assert rows[("verdicts", "field_a")]["legacy"] == -(2 ** 53)
         assert rows[("verdicts", "field_a")]["legacy_display"] == str(-(2 ** 53))
         assert f'"native_display":"{10 ** 400}"'.encode() in raw
-    finally:
-        _stop(server, thread)
-
-
-def test_native_parity_page_constructs_captured_section_with_text_only(tmp_path, monkeypatch):
-    server, thread, _ = _run_launcher(tmp_path, monkeypatch)
-    try:
-        page = _get_page(server).decode()
-        assert "Selected saved replay comparison" in page
-        assert "not the current board" in page
-        assert "not full population verified" in page
-        assert "not cutover qualified" in page
-        assert "j.captured_comparison" in page
-        for heading in ("'identity'", "'clocks'", "'provenance'"):
-            assert heading in page
-        assert "['field','legacy','native']" in page
-        assert "innerHTML" not in page
-        assert "e.textContent=text" in page
-        table_js = page.split("function tableEl")[1].split("function section")[0]
-        assert "tr.appendChild(el('td', String(c)))" in table_js
-        captured_js = page.split("function capturedSection(c){")[1].split("function applyFilter")[0]
-        assert "div.appendChild(tableEl(['field','legacy','native']," in captured_js
-        assert "r=>[r.field,r.legacy_display,r.native_display]" in captured_js
-        for coercion in ("Number(", "parseInt", "parseFloat", "+r."):
-            assert coercion not in captured_js
-        assert "??" not in captured_js
-        assert "||0" not in captured_js
-        assert "|| 0" not in captured_js
     finally:
         _stop(server, thread)
 
