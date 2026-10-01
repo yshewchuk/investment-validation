@@ -28,6 +28,16 @@ this module's own partition-key equality), so a reader that needs only specific
 keys (``fill_quality`` needs only the traded contracts' chain rows) never reads
 a whole table to discard most of it.
 
+A caller's ``batch_filter`` (optional, default ``None`` — omitted and explicit
+``None`` behave identically) is applied to each Arrow batch the moment it
+becomes pandas, *before* any batch or partition accumulation, so unmatched
+rows never outlive the batch that carried them. It can only narrow what
+accumulates, never prune a scan on its own: scan pruning stays with the
+validated/encoded ``key_filter`` predicates. A scan attempt that yields
+batches and then raises ``RESULT_LIMIT_EXCEEDED`` has its retained rows
+discarded before any narrower-interval retry, so a late overflow can never
+leave duplicate rows behind.
+
 Frames are assembled with ``batch.to_pandas()`` per Arrow batch and one
 ``pd.concat``; converting each batch to a list of Python dicts first would
 cost multiples of the frame it produces, so this module does not.
@@ -69,17 +79,21 @@ def next_representable(value: str) -> str:
 
 
 def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
-               *, partition_keys=None, key_filter=()) -> pd.DataFrame:
+               *, partition_keys=None, key_filter=(), batch_filter=None) -> pd.DataFrame:
     """Every row of ``table_name`` in ``snapshot_ref``, projected to ``columns``.
 
     ``partition_keys`` restricts the read to those manifest partitions (the
     Tier-2 tables are partitioned by year). ``key_filter`` is a tuple of
     ``KeyPredicate`` values carried into every scan, so a caller that needs
-    only specific keys reads only rows that can match them. A table absent
-    from the snapshot refuses with ``CONTRACT_MISMATCH``; a partition that
-    overflows the cap and must fall back to calendar splitting still needs its
-    fragments' recorded time bounds and refuses with ``CONTRACT_MISMATCH``
-    when they are missing rather than scanning a guess.
+    only specific keys reads only rows that can match them. ``batch_filter``,
+    when given, is called on each batch frame right after ``to_pandas()`` and
+    before it accumulates, and must return the frame narrowed to the rows the
+    caller wants (``None`` may be returned for "keep nothing"); a ``None`` or
+    omitted ``batch_filter`` changes nothing. A table absent from the snapshot
+    refuses with ``CONTRACT_MISMATCH``; a partition that overflows the cap and
+    must fall back to calendar splitting still needs its fragments' recorded
+    time bounds and refuses with ``CONTRACT_MISMATCH`` when they are missing
+    rather than scanning a guess.
     """
     if table_name not in snapshot_ref.table_versions:
         raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
@@ -93,7 +107,8 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
     for partition in dict.fromkeys(record.partition_key for record in records):
         group = [record for record in records if record.partition_key == partition]
         frames.extend(_scan_partition(repository, snapshot_ref, table_name, contract, columns,
-                                      group, key_filter=tuple(key_filter)))
+                                      group, key_filter=tuple(key_filter),
+                                      batch_filter=batch_filter))
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
         return pd.DataFrame(columns=list(columns))
@@ -101,7 +116,8 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
 
 
 def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
-                    columns, records: list, *, key_filter) -> list[pd.DataFrame]:
+                    columns, records: list, *, key_filter,
+                    batch_filter=None) -> list[pd.DataFrame]:
     """One partition's rows: one full-partition scan first, split only on overflow.
 
     The first attempt scans the whole partition scoped to its own key, with NO
@@ -113,6 +129,11 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
     ``RESULT_LIMIT_EXCEEDED`` instead of silently dropping its null-valued
     rows. A day that still exceeds the cap propagates the error — the table
     needs finer partitions than this rule can supply.
+
+    The full-scan attempt returns its (already batch-filtered) frames only on
+    success, so a late ``RESULT_LIMIT_EXCEEDED`` — one raised after batches
+    were yielded — leaves none of them retained, and the narrower-interval
+    retry cannot duplicate those rows.
 
     An unfiltered, non-nullable partition whose manifest row count already
     exceeds the cap skips the doomed full-scan attempt and splits directly,
@@ -126,7 +147,8 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
     if partition_filter is None:
         return _split_by_calendar(
             repository, snapshot_ref, table_name, contract, columns,
-            _partition_interval(contract, table_name, records), tuple(key_filter))
+            _partition_interval(contract, table_name, records), tuple(key_filter),
+            batch_filter=batch_filter)
     predicates = (*key_filter, partition_filter)
     if (not key_filter
             and not _observation_column_is_nullable(contract)
@@ -134,10 +156,11 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
                     > contract.maximum_result_rows):
         return _split_by_calendar(
             repository, snapshot_ref, table_name, contract, columns,
-            _partition_interval(contract, table_name, records), predicates)
+            _partition_interval(contract, table_name, records), predicates,
+            batch_filter=batch_filter)
     try:
-        return [_scan_interval(repository, snapshot_ref, table_name, contract,
-                               columns, predicates, None)]
+        return _scan_interval(repository, snapshot_ref, table_name, contract, columns,
+                              predicates, None, batch_filter=batch_filter)
     except errors.DataError as exc:
         if exc.code != "RESULT_LIMIT_EXCEEDED":
             raise
@@ -153,7 +176,8 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
                 details={"table_name": table_name, "partition_key": records[0].partition_key})
     return _split_by_calendar(
         repository, snapshot_ref, table_name, contract, columns,
-        _partition_interval(contract, table_name, records), predicates)
+        _partition_interval(contract, table_name, records), predicates,
+        batch_filter=batch_filter)
 
 
 def _partition_filter(contract, table_name: str, records: list) -> KeyPredicate | None:
@@ -203,18 +227,24 @@ def _observation_column_is_nullable(contract) -> bool:
 
 
 def _split_by_calendar(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
-                       columns, interval: TimeInterval, predicates: tuple) -> list[pd.DataFrame]:
+                       columns, interval: TimeInterval, predicates: tuple,
+                       *, batch_filter=None) -> list[pd.DataFrame]:
     """Calendar month scans over ``interval`` (its days on month overflow).
 
     Every scan carries ``predicates`` — the caller's ``key_filter`` plus the
     partition-key equality — so no month or day read can escape its partition.
-    A day that still exceeds the cap propagates ``RESULT_LIMIT_EXCEEDED``.
+    A month scan that yields batches and then overflows late retains none of
+    them: its frames are local to the failed call and the day-by-day retry
+    starts from an empty list, so no row is duplicated between the failed
+    month scan and its narrower retries. A day that still exceeds the cap
+    propagates ``RESULT_LIMIT_EXCEEDED``.
     """
     frames: list[pd.DataFrame] = []
     for month in _calendar_intervals(interval, "month"):
         try:
-            frames.append(_scan_interval(repository, snapshot_ref, table_name, contract,
-                                         columns, predicates, month))
+            month_frames = _scan_interval(
+                repository, snapshot_ref, table_name, contract, columns,
+                predicates, month, batch_filter=batch_filter)
         except errors.DataError as exc:
             if exc.code != "RESULT_LIMIT_EXCEEDED":
                 raise
@@ -222,15 +252,27 @@ def _split_by_calendar(repository, snapshot_ref: SnapshotRef, table_name: str, c
             if not days:
                 raise
             for day in days:
-                frames.append(_scan_interval(repository, snapshot_ref, table_name, contract,
-                                             columns, predicates, day))
+                frames.extend(_scan_interval(
+                    repository, snapshot_ref, table_name, contract, columns,
+                    predicates, day, batch_filter=batch_filter))
+            continue
+        frames.extend(month_frames)
     return frames
 
 
 def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
-                   columns, key_filter, interval: TimeInterval | None) -> pd.DataFrame:
-    """One bounded scan over ``interval`` (or the whole partition when ``None``),
-    as a frame of ``columns``."""
+                   columns, key_filter, interval: TimeInterval | None,
+                   *, batch_filter=None) -> list[pd.DataFrame]:
+    """One bounded scan over ``interval`` (or the whole partition when ``None``).
+
+    Each Arrow batch becomes pandas, passes through ``batch_filter`` when one
+    is given, and only the surviving (non-empty) frames are returned — so rows
+    the filter rejects never outlive their batch, and batches that match
+    nothing contribute nothing. The returned frames are local to this call: a
+    ``RESULT_LIMIT_EXCEEDED`` raised after batches were yielded keeps none of
+    them, so callers retry narrower intervals from a clean slate. The scan's
+    own error contracts are unchanged.
+    """
     result_cap = contract.maximum_result_rows
     batch_cap = min(contract.maximum_batch_rows, result_cap)
     query = DataQuery(
@@ -238,10 +280,14 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
         table_contract_ref=snapshot_ref.table_versions[table_name].table_contract_ref,
         columns=tuple(columns), key_filter=tuple(key_filter), time_interval=interval,
         order_by=contract.primary_key, max_batch_rows=batch_cap, max_result_rows=result_cap)
-    batches = [batch.to_pandas() for batch in repository.scan(query, table_name=table_name)]
-    if not batches:
-        return pd.DataFrame(columns=list(columns))
-    return pd.concat(batches, ignore_index=True)
+    frames: list[pd.DataFrame] = []
+    for batch in repository.scan(query, table_name=table_name):
+        frame = batch.to_pandas()
+        if batch_filter is not None:
+            frame = batch_filter(frame)
+        if frame is not None and not frame.empty:
+            frames.append(frame)
+    return frames
 
 
 def _calendar_intervals(interval: TimeInterval, step: str) -> list[TimeInterval]:

@@ -68,30 +68,88 @@ def read_chain_keys(repository, snapshot_ref) -> set[tuple[str, pd.Timestamp]]:
     return set(zip(frame["ticker"].astype(str), pd.to_datetime(frame["obs_date"])))
 
 
-def read_chains_for_years(repository, snapshot_ref, years) -> pd.DataFrame:
-    """option_chains rows for ``years``, projected to ``_CHAIN_COLUMNS``."""
+def read_chains_for_years(repository, snapshot_ref, years, batch_filter=None) -> pd.DataFrame:
+    """option_chains rows for ``years``, projected to ``_CHAIN_COLUMNS``.
+
+    ``batch_filter`` is an optional per-batch predicate forwarded to the read
+    adapters (default ``None`` — omitted and explicit ``None`` behave
+    identically to the pre-existing whole-year read).
+    """
     return read_table(repository, snapshot_ref, "option_chains", _CHAIN_COLUMNS,
-                      partition_keys=[str(y) for y in years])
+                      partition_keys=[str(y) for y in years], batch_filter=batch_filter)
+
+
+def _chain_batch_filter(tickers, wanted):
+    """A per-batch exact ``(ticker, obs_date)`` pair filter for ``wanted``.
+
+    The membership semantics are the ones :func:`load_chain_index` has always
+    applied to the assembled frame — requested dates normalized, stored dates
+    only ``pd.to_datetime``-converted (never normalized, so a non-midnight
+    observation cannot broaden a match), exact pair membership — moved to run
+    on each batch before anything accumulates. The coarse ticker membership
+    only narrows work within the batch; the exact pair check is what decides
+    membership.
+    """
+    def filter_batch(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        frame = frame[frame["ticker"].isin(tickers)]
+        if frame.empty:
+            return frame
+        pairs = pd.MultiIndex.from_arrays([frame["ticker"],
+                                           pd.to_datetime(frame["obs_date"])])
+        return frame[pairs.isin(wanted)]
+    return filter_batch
 
 
 def load_chain_index(repository, snapshot_ref, keys) -> ChainIndex:
-    """Load exactly the chains a plan needs, one year partition at a time.
+    """Load exactly the chains a plan needs, one requested year at a time.
 
     Rewrite of ``engine/replay.py``'s ``load_chain_index``. ``keys`` is
     REQUIRED (no store-wide default); years are derived from ``keys``,
     matching the legacy function's own
     ``years = sorted({d.year for _, d in wanted})``.
+
+    Each year is read as its own bounded scan and every Arrow batch is
+    filtered to the exact requested ``(ticker, obs_date)`` pairs
+    (:func:`_chain_batch_filter`) before it accumulates, so unmatched rows
+    live no longer than the batch carrying them; the required groups stay
+    resident (no cache, no resumability). Years are visited in the manifest's
+    first-seen partition order — the order ``_scan.read_table`` traverses in
+    the previous whole read, where ``partition_keys`` only filtered membership
+    — and each already-filtered frame is kept, then they are concatenated once
+    and grouped once, exactly like that previous whole-read version: a group
+    that (abnormally) occurs in more than one year partition keeps every row,
+    and row order within each group, duplicates, dtypes, reset indexes,
+    absent-key behavior and downstream replay pricing are unchanged.
     """
     wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
     if not wanted:
         return ChainIndex({})
     years = sorted({d.year for _, d in wanted})
+    wanted_years = {str(year) for year in years}
+    manifest_years = list(dict.fromkeys(
+        int(record.partition_key)
+        for record in repository.fragment_records(snapshot_ref, "option_chains")
+        if record.partition_key in wanted_years))
+    years = manifest_years + [year for year in years if year not in manifest_years]
     tickers = {t for t, _ in wanted}
-    frame = read_chains_for_years(repository, snapshot_ref, years)
-    frame = frame[frame["ticker"].isin(tickers)]
-    frame["obs_date"] = pd.to_datetime(frame["obs_date"])
-    key_index = pd.MultiIndex.from_arrays([frame["ticker"], frame["obs_date"]])
-    frame = frame[key_index.isin(wanted)]
+    batch_filter = _chain_batch_filter(tickers, wanted)
+    frames: list[pd.DataFrame] = []
+    for year in years:
+        frame = read_chains_for_years(repository, snapshot_ref, (year,),
+                                      batch_filter=batch_filter)
+        frame = frame[frame["ticker"].isin(tickers)]
+        frame["obs_date"] = pd.to_datetime(frame["obs_date"])
+        key_index = pd.MultiIndex.from_arrays([frame["ticker"], frame["obs_date"]])
+        frame = frame[key_index.isin(wanted)]
+        if not frame.empty:  # an absent year's fallback frame is all-object
+            frames.append(frame)
+        _log(f"chain index: year {year}: {len(frame):,} rows")
+    if not frames:
+        _log(f"chain index: 0 of {len(wanted):,} requested keys present")
+        return ChainIndex({})
+    frame = pd.concat(frames, ignore_index=True)
     groups = {(str(k[0]), pd.Timestamp(k[1])): g.reset_index(drop=True)
               for k, g in frame.groupby(["ticker", "obs_date"], sort=False)}
     _log(f"chain index: {len(groups):,} of {len(wanted):,} requested keys present")
