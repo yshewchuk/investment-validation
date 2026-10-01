@@ -129,7 +129,7 @@ def test_malformed_cache_refuses(cache, staged, defect):
 
 def test_preflight_is_pure_on_real_release(cache, staged):
     raw, name, policy = _bytes(cache), _name(cache), _policy(cache)
-    release = _inputs(cache)[0]
+    release = staged.release
     validated = folds.preflight_size_fold(raw, name, policy, release)
     assert validated.fold_start == cache["fold_start"]
     assert validated.decision_clock_id == "entry-close"
