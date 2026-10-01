@@ -124,6 +124,18 @@ accessor only.
 
 ## Outputs
 
+**Original panel COPY identity.** Offline size-fold authoring uses `Repository`
+and the existing object verifier to bind the named committed snapshot's
+`feature_panel` dataset version to one original object and full byte hash.
+The application's committed catalog and configured content-addressed store are
+the trust anchor; a caller hash is only a matching expectation. Equivalent rows
+rewritten as different Parquet bytes do not preserve this identity.
+Missing/substituted membership, unsupported panel layout or corrupt bytes refuse
+before pinned authoring. No current-head or live legacy path supplies a fallback.
+This proves membership and bytes, not the original producer read-set. Imported
+completeness flags, empty evidence references and import registration time do not
+prove that corrected upstream data reached the panel. No fitting belongs here.
+
 A committed snapshot (new/reused `data_*` rows, an import receipt, and,
 unless already at head, a compare-and-swapped `data_snapshot_heads` row —
 `SnapshotImportReceipt`); a failed/conflict receipt in its own transaction,

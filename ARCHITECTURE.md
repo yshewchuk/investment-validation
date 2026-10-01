@@ -71,6 +71,11 @@ request body and, if durable, in the operator guides instead — see
 
 ## 1. Two trees
 
+Pinned offline size-fold authoring verifies COPY consistency with a committed
+snapshot's original panel bytes. This does not establish complete training-read
+or corrected-source REBUILD provenance; those claims require genuine producer
+evidence. See the models and data component contracts.
+
 - **`engine/*` (legacy).** Runs the production board today: the legacy
   nightly, ledger and dashboard. It is frozen, not refactored — effort spent
   lowering its complexity is effort spent on a tree with a deletion date.
