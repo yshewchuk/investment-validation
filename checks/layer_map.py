@@ -308,21 +308,31 @@ PACKAGES: tuple[Package, ...] = (
     ),
     Package(
         dotted="engine.v2.research",
-        layer=6.0,
-        label="6",
-        owner="Snapshot-pinned research tooling — native replay and trade publishing",
+        layer=7.0,
+        label="—",
+        owner="Research tooling — snapshot-pinned native replay and trade "
+              "publishing, plus offline analysis CLIs, all reading a pinned "
+              "v2 snapshot (not a §4 owner-table row; added Phase 6 slice 6, "
+              "decision UD-4)",
         replaces=("engine/replay.py over a committed snapshot",
-                  "engine/build_trades.py's v2 write path"),
+                  "engine/build_trades.py's v2 write path",
+                  "the store-reaching halves of tools/signal_screen.py, "
+                  "tools/fill_quality.py and engine/data/pulls/polygon_fills.py's read path"),
         responsibilities=(
             "Plan and price events against one resolved SnapshotRef at the fill "
             "alpha grid, with pricing moved into the package rather than reached "
             "through a legacy adapter.",
             "Publish replay output as the trades table through the generic "
             "incremental write path, pinned to the snapshot that produced it.",
+            "Pure analysis cores moved verbatim from the legacy research tools.",
+            "One resolve_pinned/resolve call per run, with the resulting "
+            "snapshot_id threaded through every read and into the output.",
         ),
         non_responsibilities=(
             ("Read the legacy mutable store", "engine.v2.data.Repository"),
             ("Decide whether to trade", "engine.v2.scoring"),
+            ("Mutate the trades ledger or fetch from a network provider",
+             "engine/build_trades.py and engine/data/pulls (legacy, unchanged)"),
         ),
         orchestrator=True,
     ),
@@ -446,24 +456,6 @@ PACKAGES: tuple[Package, ...] = (
         non_responsibilities=(
             ("Decide whether a difference is acceptable", "a person, from the receipt"),
             ("Repair the data it found wrong", "the package that produced it"),
-        ),
-    ),
-    Package(
-        dotted="engine.v2.research",
-        layer=7.0,
-        label="—",
-        owner="Research tooling — offline analysis CLIs reading a pinned v2 snapshot "
-              "(not a §4 owner-table row; added Phase 6 slice 6, decision UD-4)",
-        replaces=("the store-reaching halves of tools/signal_screen.py, "
-                  "tools/fill_quality.py and engine/data/pulls/polygon_fills.py's read path",),
-        responsibilities=(
-            "Pure analysis cores moved verbatim from the legacy research tools.",
-            "One resolve_pinned/resolve call per run, with the resulting "
-            "snapshot_id threaded through every read and into the output.",
-        ),
-        non_responsibilities=(
-            ("Mutate the trades ledger or fetch from a network provider",
-             "engine/build_trades.py and engine/data/pulls (legacy, unchanged)"),
         ),
     ),
 )
