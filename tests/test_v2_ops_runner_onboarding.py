@@ -97,3 +97,30 @@ def test_exp184_runner_manifest_is_registered():
     assert registered in closure
     assert "experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py" in closure
     assert manifest["report_path"] == "REPORT.md"
+
+
+def test_exp185_runner_manifest_is_registered():
+    root = Path(__file__).resolve().parents[1]
+    registered = (
+        "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py"
+    )
+    manifest = runner_manifest(root, registered)
+    assert manifest["schema_version"] == "runner_capability_manifest.v1.0"
+    assert manifest["no_ledger_support"] is True
+    assert manifest["spec_hash"].startswith("sha256:")
+    closure = manifest["source_closure"]
+    assert registered in closure
+    assert (
+        "experiments/EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline/run.py" in closure
+    )
+    assert manifest["report_path"] == "REPORT.md"
+    assert "gate_midfill_str_runup" in manifest["registry_effects"]
+
+
+def test_exp185_is_a_registered_runner():
+    from engine.v2.ops.legacy_adapter import REGISTERED_RUNNERS
+
+    assert (
+        "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered/run.py"
+        in REGISTERED_RUNNERS
+    )

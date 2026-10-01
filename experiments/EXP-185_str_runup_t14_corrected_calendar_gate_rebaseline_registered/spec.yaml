@@ -1,5 +1,5 @@
-id: EXP-144
-title: "STR-RUNUP T14 corrected-calendar gate rebaseline"
+id: EXP-185
+title: "STR-RUNUP T14 corrected-calendar gate rebaseline (v2 runner, registered)"
 strategy: STR-RUNUP
 type: confirmatory_model_challenger
 price_source: >
@@ -112,7 +112,7 @@ data:
   quota_calls: 0
   data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
 
-v2_snapshot_id: null
+v2_snapshot_id: snap_66fae174c4f34477fb1b9098993993fe
 walk_forward:
   unit: year
   min_train_years: 0
@@ -124,4 +124,4 @@ max_deployed_fraction: 1.0
 mc_draw_order: shared
 has_short_leg: false
 promotion_target: gate_midfill_str_runup
-preregistered_at: "2026-09-07T12:53:19+00:00"
+preregistered_at: "2026-10-01T00:00:00+00:00"
