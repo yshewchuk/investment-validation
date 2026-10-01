@@ -94,6 +94,9 @@ is verified through the existing artifact/object primitives. Scanning rows and
 writing equivalent Parquet does not preserve this identity. Resolution and
 object verification occur anew; no current-head lookup or legacy global path
 substitution supplies the original panel identity.
+The trust anchor is the application's existing committed catalog and configured
+content-addressed artifact store. A caller hash is only a matching expectation,
+never authority for snapshot membership or a new catalog proof.
 
 This verifies catalog membership and copied bytes, not the original producer
 read-set. Snapshot import currently binds curated tables and original panel

@@ -146,6 +146,12 @@ from the snapshot identity. A rewritten Parquet with equivalent rows cannot
 inherit an old fold declaration. The existing producer policy and bounded
 cache-header checks must agree with that exact original object hash, registered
 model, ordered features, output, decision clock and exact fold month.
+The pinned claim is explicit manifest metadata: COPY mode plus snapshot,
+dataset-version, object and full hash identities. Unpinned legacy authoring
+cannot emit it. Registered policy is checked against the verified release
+binding/inventory, not a caller hash used as a policy lookup key. Preflight and
+staging consume the same immutable cache bytes and recheck their full hash;
+panel identity is reverified at the authoring boundary, without a stat cache.
 
 This is a useful COPY consumer success path: an existing compatible size-fold
 cache can be described against a verified original panel object without fitting,
