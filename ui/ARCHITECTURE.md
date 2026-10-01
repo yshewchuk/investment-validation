@@ -19,8 +19,8 @@ and links to the same pinned compatibility release. No engine records are writte
 
 ## Dependencies
 React components use typed client/hooks; the browser calls serving over HTTP.
-No direct scoring, model, ledger, evaluation or provider access. Browser users
-enter through `App`; integration/browser tests exercise the same API contract.
+No direct scoring/model/ledger/evaluation/provider access; browser users enter
+through `App`; integration/browser tests exercise the same API contract.
 
 ## External systems and libraries
 React, TypeScript and Vite; browser fetch with the same-origin `operations_token`
@@ -40,7 +40,6 @@ Format saved financial values; do not fit, rescore, derive financial evidence or
 fetch vendors. Preserve saved replay clocks and provenance without relabelling.
 Existing operations HTML/legacy previews are compatibility exceptions with
 migration outstanding, not evidence that a React application view is shipped.
-
 ## Diagrams
 ```mermaid
 flowchart LR
