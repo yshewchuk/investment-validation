@@ -423,13 +423,9 @@ or a new consumer must update that package's README in the same change.
   wired through `engine/v2/dashboard/preview.py`'s optional
   `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
   for that route/CLI contract.
-  `engine/v2/serving` has no
-  `ARCHITECTURE.md` of its own yet (this doc's "Component docs" table lists
-  it `(pending)`); per that section's own rule a pending component is
-  documented only at this root doc's level until a follow-up PR gives it a
-  file of its own — a whole-component doc for `engine/v2/serving` (14
-  existing files, none of them touched by this task) is exactly that
-  follow-up, not a side effect of adding one function.
+  The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
+  records whole-package ownership, interfaces and its boundary with React;
+  this report projection remains a read over retained evidence.
 
 ### 4.1 Production flow
 
