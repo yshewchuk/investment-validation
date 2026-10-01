@@ -371,7 +371,14 @@ def test_modified_artifact_bytes_fail_full_byte_verification(tmp_path):
     path = store.verify(evidence)
     os.chmod(path, 0o644)
     original = path.read_bytes()
-    path.write_bytes(original + b"!")
+    corrupted = bytes([original[0] ^ 0xFF]) + original[1:]
+    assert corrupted != original
+    assert len(corrupted) == len(original) == evidence.byte_size
+    path.write_bytes(corrupted)
+    tampered = path.read_bytes()
+    assert tampered == corrupted
+    assert len(tampered) == evidence.byte_size
+    assert tampered != original
     with pytest.raises(OpsError) as err:
         verify_eod_availability(conn, store, Repository(conn), snapshot, table_name=_TABLE,
                                 session_date=_SESSION, decision_at=_DECISION)
@@ -379,6 +386,26 @@ def test_modified_artifact_bytes_fail_full_byte_verification(tmp_path):
     assert err.value.problem.message == _TAMPERED
     assert isinstance(err.value.__cause__, ArtifactError)
     path.write_bytes(original)
+    assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") == _UNAVAILABLE
+
+
+def test_missing_evidence_object_refuses_with_sanitized_validation_failure(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    evidence = _register(conn, clock, store, _SOURCE_CLAIM)
+    snapshot = _commit(conn, clock, store, availability=(evidence.artifact_id,),
+                       finality=(evidence.artifact_id,))
+    path = store.verify(evidence)
+    original = path.read_bytes()
+    os.unlink(path)
+    try:
+        with pytest.raises(OpsError) as err:
+            verify_eod_availability(conn, store, Repository(conn), snapshot, table_name=_TABLE,
+                                    session_date=_SESSION, decision_at=_DECISION)
+        assert err.value.code == "VALIDATION_FAILED"
+        assert err.value.problem.message == "availability evidence object is unavailable"
+        assert isinstance(err.value.__cause__, ArtifactError)
+    finally:
+        path.write_bytes(original)
     assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") == _UNAVAILABLE
 
 

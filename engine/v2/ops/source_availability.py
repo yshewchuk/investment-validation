@@ -134,4 +134,5 @@ def _verify_evidence(conn, store, artifact_id: str) -> None:
     except ArtifactError as err:
         if err.code == "INTEGRITY_FAILED":
             raise fail("INTEGRITY_FAILED", _TAMPERED) from err
-        raise
+        raise fail("VALIDATION_FAILED",
+                   "availability evidence object is unavailable") from err
