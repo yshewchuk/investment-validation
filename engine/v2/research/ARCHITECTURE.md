@@ -182,10 +182,13 @@ modules' callers, outside this PR's one concern.
 
 Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
-listed above are one consumer; `experiments/common_v2.py` is the other, for
+listed above are one consumer; `experiments/common_v2.py` is another, for
 `experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index` — neither is parsed by the layering hook (it
-only parses `engine*` importers, and `experiments/` is outside it too).
+and `_chains.load_chain_index`; the pinned EXP-147 confirmatory-validation
+runner is a third, for `experiment_trades.PROVENANCE` alone (its native
+replay tag, selecting that runner's analog population) — none of the three
+is parsed by the layering hook (it only parses `engine*` importers, and
+`experiments/` is outside it too).
 
 ## External systems and libraries
 
