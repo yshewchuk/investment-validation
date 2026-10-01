@@ -1,0 +1,39 @@
+id: EXP-186
+title: "Menu-7 TWIN-P candidates: the v2 pricing-only candidate grid"
+hypothesis: >
+  Pricing-only slice of the DYN-SV v2 refresh design (GitHub issue #266):
+  on one pinned v2 snapshot, sweeping TWIN-P's grid-position step over 1..6
+  and emitting every (event, step, fill_alpha) priced row reproduces, per
+  step, exactly the rows a direct engine.v2.research.replay.replay_one call
+  produces on the same plan and chain index. No selection, no simulation
+  (exp_pnl_sim), and no forecast-dependent columns (width_over_forecast,
+  anchor_over_spot) -- those are a later slice.
+type: exploratory
+strategy: "TWIN-P"
+price_source: >
+  Pinned v2 snapshot option_chains bid/ask, priced by
+  engine.v2.research.replay.replay_one through one batched
+  experiments.common_v2.load_v2_chain_quotes read per grid. No new pricing
+  models, no external calls. quota_calls: 0.
+primary_spec:
+  structure: "STRUCTURES['TWIN-P'](steps=N) for N in 1..6 -- grid-position count, not a dollar width"
+  fills: "full ALPHA_GRID {0.0, 0.25, 0.5, 0.75, 1.0}; every priced row emitted"
+  calendar: "pinned v2 snapshot daily_market via trading_calendar_from_snapshot"
+  chain_reads: "one load_v2_chain_quotes call shared across every step"
+  out_of_scope: "argmax/best-candidate selection, exp_pnl_sim simulation, and width_over_forecast/anchor_over_spot geometry"
+grid: {}
+data:
+  events: "engine.v2.research._replay_run.events_frame on the pinned v2 snapshot"
+  chains: "pinned v2 snapshot option_chains"
+  quota_calls: 0
+data_snapshot: null
+v2_snapshot_id: null
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: true
+promotion_target: null
+preregistered_at: "2026-10-01T00:00:00+00:00"
