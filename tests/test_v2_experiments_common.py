@@ -93,6 +93,12 @@ def test_make_v2_repricer_reuses_cached_chains_across_shift_calls(tmp_path, monk
 
     # Repeating the FIRST call's exact shift gives byte-identical output.
     third = repricer(_trades("2024-05-01", "2024-05-02"), shift_days=1)
+    assert third.attrs["coverage"] == 1.0
+    assert len(third) == 1
+    third_row = third.iloc[0]
+    assert third_row["entry_cost"] == pytest.approx(3.4)
+    assert third_row["exit_value"] == pytest.approx(5.4)
+    assert third_row["ret"] == pytest.approx(2.0 / 3.4)
     pd.testing.assert_frame_equal(third.reset_index(drop=True), first.reset_index(drop=True))
 
     assert len(calls) == 1, f"expected exactly one chain scan, got {len(calls)}: {calls}"
