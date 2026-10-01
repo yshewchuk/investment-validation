@@ -109,7 +109,8 @@ def _attach_forecast(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _attach_analogs(
-    frame: pd.DataFrame, trades: pd.DataFrame, context=None
+    frame: pd.DataFrame, trades: pd.DataFrame, context=None,
+    trade_provenance: str | None = None,
 ) -> pd.DataFrame:
     """Join per-event matched analog statistics, computed causally.
 
@@ -138,7 +139,10 @@ def _attach_analogs(
     # correct for the board, but here it would both duplicate an unbounded
     # `context` and undo the bounding `model_evidence` passes to stay alive.
     resolved = context or FeatureContext.load()
-    scorer = Scorer(trades=trades, context=resolved, analog_daily=resolved.daily)
+    scorer = Scorer(
+        trades=trades, context=resolved, analog_daily=resolved.daily,
+        trade_provenance=trade_provenance,
+    )
     bucketed = bucket_frame(scorer.trades)
     matched = match_frame(
         bucketed, scorer.matcher, strategy=STRATEGY, alpha=GATE_ALPHA,
@@ -157,15 +161,33 @@ def build_dataset(
     daily: pd.DataFrame | None = None,
     alpha: float = GATE_ALPHA,
     context=None,
+    trade_provenance: str | None = None,
 ) -> pd.DataFrame:
     """The incumbent's feature frame (:func:`gate.build_dataset`) plus forecast
     and analog columns joined on. ``context`` is passed through to
-    :func:`_attach_analogs` to bound what its Scorer loads."""
+    :func:`_attach_analogs` to bound what its Scorer loads.
+
+    ``trade_provenance`` selects the trades that populate the analog layer;
+    omitted, it keeps the incumbent's ``engine.replay`` behavior — an empty gate
+    frame simply returns empty, as before. When an explicit selection is asked
+    for but the base gate frame is empty there is no population to attach analogs
+    to, so this refuses rather than silently returning the old empty-frame
+    result. The value is forwarded to :func:`_attach_analogs` and thence to
+    ``Scorer``.
+    """
     base = gate_mod.build_dataset(trades, panel=panel, daily=daily, alpha=alpha)
     if base.empty:
+        if trade_provenance is not None:
+            raise ValueError(
+                "build_dataset was asked to select trade provenance "
+                f"{trade_provenance!r}, but the gate feature frame is empty — "
+                "refusing to return an empty dataset for an explicit selection"
+            )
         return base
     base = _attach_forecast(base)
-    base = _attach_analogs(base, trades, context=context)
+    base = _attach_analogs(
+        base, trades, context=context, trade_provenance=trade_provenance
+    )
     return base
 
 

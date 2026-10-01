@@ -18,6 +18,7 @@ import pytest
 from engine.models.training import chooser as chooser_mod
 from engine.models.training import common
 from engine.models.training import gate as gate_mod
+from engine.models.training import gate_forecast_analog as ga
 from engine.models.training import implied_t1 as implied_mod
 from engine.models.training import runup_move as runup_mod
 from engine.models.training import size_model as size_mod
@@ -346,6 +347,79 @@ class TestGate:
         assert len(out) == 1
         assert out["ret"].iloc[0] == 0.1
         assert out["entry_cost_pct"].iloc[0] == pytest.approx(4.0)
+
+
+class TestGateForecastAnalogProvenance:
+    """``gate_forecast_analog`` forwards the trade-provenance selector to its
+    ``Scorer`` and refuses an explicit selection when there is no gate frame to
+    attach analogs to. Omission keeps the incumbent's empty-frame return.
+
+    The real ``Scorer`` population behavior lives in ``test_score.py``; these
+    are the two things unique to this layer — the empty-base refusal branch and
+    the argument actually reaching ``Scorer``. The latter drives ``_attach_analogs``
+    with the scoring stack stubbed so it exercises the forwarding, not the
+    (heavy, store-reading) analog match itself.
+    """
+
+    NATIVE = "engine.v2.research.replay"
+
+    def _no_mid_fill(self):
+        # gate.build_dataset keeps only the mid (alpha=0.5) slice; with none of
+        # those rows the base feature frame is empty, and it returns empty rather
+        # than raising (engine/models/training/gate.py:88-90).
+        return pd.DataFrame({"fill_alpha": [0.0, 1.0]})
+
+    def _empty_inputs(self):
+        return (
+            pd.DataFrame({"ticker": [], "date": [], "implied_move": []}),
+            pd.DataFrame({"ticker": [], "date": [], "src_iv": []}),
+        )
+
+    def test_empty_base_omitted_returns_empty(self):
+        panel, daily = self._empty_inputs()
+        out = ga.build_dataset(self._no_mid_fill(), panel=panel, daily=daily)
+        assert out.empty
+
+    def test_empty_base_explicit_refuses(self):
+        panel, daily = self._empty_inputs()
+        with pytest.raises(ValueError, match="gate feature frame is empty"):
+            ga.build_dataset(
+                self._no_mid_fill(), panel=panel, daily=daily,
+                trade_provenance=self.NATIVE,
+            )
+
+    def test_attach_analogs_forwards_provenance_to_scorer(self, monkeypatch):
+        import engine.score as score_mod
+
+        captured: dict[str, object] = {}
+
+        class RecordingScorer:
+            def __init__(self, *, trades, context, analog_daily, trade_provenance=None):
+                captured["trade_provenance"] = trade_provenance
+                self.trades = trades
+                self.matcher = types.SimpleNamespace()
+
+        def fake_match(bucketed, matcher, **kwargs):
+            return bucketed.assign(
+                analog_mean=0.0, analog_win_rate=0.0, analog_n=0
+            )
+
+        monkeypatch.setattr(score_mod, "Scorer", RecordingScorer)
+        monkeypatch.setattr(ga, "bucket_frame", lambda df: df)
+        monkeypatch.setattr(ga, "match_frame", fake_match)
+
+        frame = pd.DataFrame({"event_id": ["e1", "e2"]})
+        trades = pd.DataFrame(
+            {"event_id": ["e1", "e2"], "provenance": [self.NATIVE, self.NATIVE]}
+        )
+        context = types.SimpleNamespace(daily=pd.DataFrame())
+
+        ga._attach_analogs(frame, trades, context=context, trade_provenance=self.NATIVE)
+        assert captured["trade_provenance"] == self.NATIVE
+
+        captured.clear()
+        ga._attach_analogs(frame, trades, context=context)
+        assert captured["trade_provenance"] is None
 
 
 class TestChooser:

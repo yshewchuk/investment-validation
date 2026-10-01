@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 from engine import paths  # noqa: E402
 from engine.evaluate import evaluate  # noqa: E402
 from engine.models.training import gate_forecast_analog as ga  # noqa: E402
+from engine.v2.research import experiment_trades  # noqa: E402
 from experiments import common, common_v2, lib  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -51,7 +52,7 @@ def main() -> None:
     print(f"[{spec['id']}] {len(trades):,} rows / "
           f"{trades['event_id'].nunique():,} events", flush=True)
 
-    dataset = ga.build_dataset(trades)
+    dataset = ga.build_dataset(trades, trade_provenance=experiment_trades.PROVENANCE)
     print(f"[{spec['id']}] dataset: {len(dataset):,} rows, "
           f"{len(ga.FEATURES)} features", flush=True)
 
