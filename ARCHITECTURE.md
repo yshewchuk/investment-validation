@@ -179,7 +179,7 @@ can.
 | 7.0 | `engine/v2/serving/` | data half of `dashboard/render.py`, `earnings_app.py` | Bounded/paginated reads over saved records, the §6.4 financial display values, immutable release publication. |
 | 7.0 | `engine/v2/ops/` | new supervisor/catalog, `dashboard/nightly.py`, `bounded_run.py` | Durable jobs, leases, retry history, resource admission, the nightly job graph — see §4 and `engine/v2/ops/ARCHITECTURE.md`. |
 | 7.5 | `engine/v2/diagnosis/` | `dashboard/selfcheck.py`, the parity comparators | **Sink**: reads every layer's artifacts; imported by nothing. Re-exports `engine/v2/parity`'s comparator under its historical module names. |
-| 8.0 | `engine/v2/dashboard/`, `ui/` | formatting half of `render.py`, `dashboard/static/` | UI only. `only_imports=(7.0,)` — stricter than "below 8": it may import layer 7 *and nothing else*, not layers 0-6 directly. See `engine/v2/dashboard/ARCHITECTURE.md`. |
+| 8.0 | `engine/v2/dashboard/`, `ui/` | formatting half of `render.py`, `dashboard/static/` | UI only. `only_imports=(7.0,)` — stricter than "below 8": it may import layer 7 *and nothing else*, not layers 0-6 directly. See [dashboard architecture](engine/v2/dashboard/ARCHITECTURE.md) and [React architecture](ui/ARCHITECTURE.md). |
 
 ### UI and serving boundary
 
@@ -199,7 +199,7 @@ flowchart LR
   Projection --> Records[immutable release records and artifacts]
 ```
 
-Current `serving/operations.py` HTML pages and pinned legacy bundle previews
+Current `engine/v2/serving/operations.py` HTML pages and pinned legacy bundle previews
 are a compatibility exception, described in the [serving architecture](engine/v2/serving/ARCHITECTURE.md).
 Their application views still require migration to React; extending that HTML
 is not delivery of the React app. This boundary is a review criterion, not a

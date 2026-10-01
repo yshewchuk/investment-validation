@@ -34,7 +34,7 @@ storage. Authentication supports bearer or cookie; React uses same-origin cookie
 |---|---|
 | Missing identity, invalid release/filter-bound cursor or corrupt legacy input | Explicit typed refusal. |
 | Projection findings fail / accepted candidate repeated | Diagnostic receipt only, no release / atomic, idempotent index commit. |
-| Current changes or cached API read | Keep session pin; release-scoped cache/ETags cannot substitute another release. |
+| Current changes or cached API read | Honor client pin per request; release-scoped cache/ETags cannot substitute another release. |
 | Parity report missing/unavailable | Explicit state; read-only projection has no internal cache/retry/write transaction; caller may retry. |
 
 ## Invariants

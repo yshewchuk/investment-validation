@@ -3,7 +3,7 @@
 ## Purpose
 Layer 8 presentation in the [root architecture](../ARCHITECTURE.md): the existing
 React/TypeScript app owns application components, layout, navigation and rendering.
-It replaces the application presentation half of the legacy dashboard.
+Its presentation scope includes the legacy dashboard views still awaiting migration.
 ## Primary contracts and public interfaces
 `src/App.tsx` composes board/event/score views; `src/routes.ts` handles routes.
 `src/api/client.ts` is the sole fetch boundary to the authenticated serving API.
