@@ -13,7 +13,7 @@ FastAPI read API, legacy bundle/score loaders, bridge and projection/index helpe
 ## Inputs
 Verified saved score documents, legacy bundle bytes, immutable artifacts, serving
 SQLite index, health/model/calibration documents and retained parity reports.
-Requests carry authentication, filters/cursors and explicit release identity.
+Authenticate requests; release-scoped reads carry explicit pins; current discovery is unpinned.
 ## Outputs
 Bounded saved-record JSON reads, typed refusals, immutable candidate releases and
 projection bindings. Operations transport can return queued command job identities.
