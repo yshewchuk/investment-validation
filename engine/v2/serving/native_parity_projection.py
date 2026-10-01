@@ -203,6 +203,36 @@ def _captured_number(value: Any) -> Any:
     return value
 
 
+_MAX_SAFE_INTEGER = 2 ** 53 - 1
+
+
+def _captured_display(value: Any) -> Any:
+    """JSON-safe rendering form of an already-validated captured number.
+
+    The browser's ``Response.json`` converts the payload to IEEE-754, so a
+    JSON integer beyond ``2**53 - 1`` would silently lose exactness (and a
+    400-digit one become ``Infinity``). Null, zero, finite floats and safe
+    ints keep the original value; only an ``int`` whose absolute value
+    exceeds the safe range becomes its exact base-10 ``str``. Bools never
+    reach here -- ``_captured_number`` has already refused them -- and the
+    original ``legacy``/``native`` fields always keep the source value.
+    """
+    if isinstance(value, int) and abs(value) > _MAX_SAFE_INTEGER:
+        return str(value)
+    return value
+
+
+def _captured_row(group: str, field: str, legacy_value: Any,
+                  native_value: Any) -> dict[str, Any]:
+    """Validate each side once; emit the original and additive display fields."""
+    legacy = _captured_number(legacy_value)
+    native = _captured_number(native_value)
+    return {"group": group, "field": field,
+            "legacy": legacy, "native": native,
+            "legacy_display": _captured_display(legacy),
+            "native_display": _captured_display(native)}
+
+
 def _captured_aligned_group(group: str, left: Any, right: Any) -> None:
     """One legacy/native group: a non-empty aligned object of bounded names."""
     if (not isinstance(left, dict) or not isinstance(right, dict)
@@ -233,9 +263,7 @@ def _captured_rows(legacy: Any, native: Any) -> list[dict[str, Any]]:
         _captured_aligned_group(group, legacy[group], native[group])
     if sum(len(legacy[group]) for group in _CAPTURED_GROUPS) > _ROW_LIMIT:
         raise ValueError("captured comparison row count exceeds the bound")
-    return [{"group": group, "field": field,
-             "legacy": _captured_number(legacy[group][field]),
-             "native": _captured_number(native[group][field])}
+    return [_captured_row(group, field, legacy[group][field], native[group][field])
             for group in _CAPTURED_GROUPS for field in sorted(legacy[group])]
 
 
@@ -245,7 +273,11 @@ def _project_captured_comparison(block: Any) -> dict[str, Any]:
     Raises ``ValueError`` (the existing malformed-report refusal) on any
     deviation from the v1 schema. Never re-verifies provenance, never
     recomputes a hash or compares the two request hashes, and never rounds,
-    deltas or substitutes a captured numeric value. The raw
+    deltas or substitutes a captured numeric value. The additive
+    ``legacy_display``/``native_display`` row fields carry the original
+    value, or the exact base-10 string of an int beyond the browser's
+    safe-integer range, so unsafe integer display values remain decimal
+    strings through browser parsing. The raw
     ``checks``/``numeric_comparisons``/``runtime_stage_count`` diagnostics
     are not exposed as comparison logic.
     """

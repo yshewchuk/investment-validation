@@ -420,7 +420,7 @@ function capturedSection(c){
   for(const group of [...new Set(c.rows.map(r=>r.group))]){
     div.appendChild(el('h3',group));
     div.appendChild(tableEl(['field','legacy','native'],
-      c.rows.filter(r=>r.group===group).map(r=>[r.field,r.legacy,r.native])));
+      c.rows.filter(r=>r.group===group).map(r=>[r.field,r.legacy_display,r.native_display])));
   }
   return div;
 }

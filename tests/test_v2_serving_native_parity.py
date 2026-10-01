@@ -457,9 +457,13 @@ def test_valid_captured_block_projects_bounded_paired_rows(tmp_path):
         fields = [row["field"] for row in rows if row["group"] == group]
         assert fields == sorted(fields)
     assert rows[0] == {"group": "forecasts", "field": "field_a",
-                       "legacy": 1.0, "native": 1.25}
+                       "legacy": 1.0, "native": 1.25,
+                       "legacy_display": 1.0, "native_display": 1.25}
     assert rows[1] == {"group": "forecasts", "field": "field_b",
-                       "legacy": None, "native": 0.0}
+                       "legacy": None, "native": 0.0,
+                       "legacy_display": None, "native_display": 0.0}
+    assert all(set(row) == {"group", "field", "legacy", "native",
+                            "legacy_display", "native_display"} for row in rows)
 
 
 def test_captured_null_stays_distinct_from_zero_and_values_are_not_rounded(tmp_path):
@@ -472,9 +476,14 @@ def test_captured_null_stays_distinct_from_zero_and_values_are_not_rounded(tmp_p
             for row in body["captured_comparison"]["rows"]}
     assert rows[("verdicts", "field_a")]["legacy"] == 0.30000000000000004
     assert rows[("verdicts", "field_a")]["native"] == 1000000000000000001
+    assert rows[("verdicts", "field_a")]["legacy_display"] == 0.30000000000000004
+    assert rows[("verdicts", "field_a")]["native_display"] == "1000000000000000001"
     assert rows[("verdicts", "field_b")]["legacy"] is None
     assert rows[("verdicts", "field_b")]["native"] == 0.0
+    assert rows[("verdicts", "field_b")]["legacy_display"] is None
+    assert rows[("verdicts", "field_b")]["native_display"] == 0.0
     assert rows[("analogs", "field_b")]["legacy"] is None
+    assert rows[("analogs", "field_b")]["legacy_display"] is None
 
 
 def test_captured_block_present_null_is_malformed(tmp_path):
@@ -615,6 +624,52 @@ def test_captured_block_arbitrary_precision_int_is_preserved(tmp_path):
     rows = {(row["group"], row["field"]): row
             for row in body["captured_comparison"]["rows"]}
     assert rows[("simulation", "field_a")]["native"] == 10 ** 400
+    assert rows[("simulation", "field_a")]["native_display"] == str(10 ** 400)
+
+
+_MAX_SAFE_INTEGER = 2 ** 53 - 1
+
+
+def test_captured_display_is_exact_decimal_only_beyond_safe_integers(tmp_path):
+    block = _captured_block()
+    block["legacy"]["forecasts"]["field_a"] = _MAX_SAFE_INTEGER
+    block["native"]["forecasts"]["field_a"] = -_MAX_SAFE_INTEGER
+    block["legacy"]["simulation"]["field_a"] = _MAX_SAFE_INTEGER + 1
+    block["native"]["simulation"]["field_a"] = -(_MAX_SAFE_INTEGER + 1)
+    block["legacy"]["financial_diagnostics"]["field_a"] = 1000000000000000001
+    block["native"]["financial_diagnostics"]["field_a"] = 10 ** 400
+    block["legacy"]["verdicts"]["field_a"] = 0
+    block["native"]["verdicts"]["field_a"] = 0.5
+    status, body = native_parity_summary(_captured_report(tmp_path, block))
+    assert status == HTTPStatus.OK
+    rows = {(row["group"], row["field"]): row
+            for row in body["captured_comparison"]["rows"]}
+    edge = rows[("forecasts", "field_a")]
+    assert edge["legacy"] == _MAX_SAFE_INTEGER
+    assert edge["legacy_display"] == _MAX_SAFE_INTEGER
+    assert type(edge["legacy_display"]) is int
+    assert edge["native"] == -_MAX_SAFE_INTEGER
+    assert edge["native_display"] == -_MAX_SAFE_INTEGER
+    assert type(edge["native_display"]) is int
+    beyond = rows[("simulation", "field_a")]
+    assert beyond["legacy"] == _MAX_SAFE_INTEGER + 1
+    assert beyond["legacy_display"] == str(_MAX_SAFE_INTEGER + 1)
+    assert beyond["native"] == -(_MAX_SAFE_INTEGER + 1)
+    assert beyond["native_display"] == str(-(_MAX_SAFE_INTEGER + 1))
+    huge = rows[("financial_diagnostics", "field_a")]
+    assert huge["legacy"] == 1000000000000000001
+    assert huge["legacy_display"] == "1000000000000000001"
+    assert huge["native"] == 10 ** 400
+    assert huge["native_display"] == str(10 ** 400)
+    safe = rows[("verdicts", "field_a")]
+    assert safe["legacy"] == 0
+    assert safe["legacy_display"] == 0
+    assert type(safe["legacy_display"]) is int
+    assert safe["native"] == 0.5
+    assert safe["native_display"] == 0.5
+    nulls = rows[("analogs", "field_b")]
+    assert nulls["legacy"] is None
+    assert nulls["legacy_display"] is None
 
 
 def test_captured_block_html_like_strings_survive_unchanged(tmp_path):

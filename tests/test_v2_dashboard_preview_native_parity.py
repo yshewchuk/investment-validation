@@ -222,9 +222,15 @@ def test_native_parity_json_projects_captured_comparison(tmp_path, monkeypatch):
         assert captured["identity"]["strategy"] == "STR-THRU"
         assert len(captured["rows"]) == 10
         assert captured["rows"][0] == {"group": "forecasts", "field": "field_a",
-                                       "legacy": 1.0, "native": 1.25}
+                                       "legacy": 1.0, "native": 1.25,
+                                       "legacy_display": 1.0, "native_display": 1.25}
+        assert all(set(row) == {"group", "field", "legacy", "native",
+                                "legacy_display", "native_display"}
+                   for row in captured["rows"])
         assert captured["rows"][1]["legacy"] is None
         assert captured["rows"][1]["native"] == 0.0
+        assert captured["rows"][1]["legacy_display"] is None
+        assert captured["rows"][1]["native_display"] == 0.0
     finally:
         _stop(server, thread)
 
@@ -267,6 +273,26 @@ def test_native_parity_json_preserves_html_like_captured_values(tmp_path, monkey
         _stop(server, thread)
 
 
+def test_native_parity_json_unsafe_int_display_survives_http_json(tmp_path, monkeypatch):
+    block = _captured_block()
+    block["native"]["simulation"]["field_a"] = 10 ** 400
+    block["legacy"]["verdicts"]["field_a"] = -(2 ** 53)
+    report_path = _fixture_report_path(tmp_path, captured=block)
+    server, thread, _ = _run_launcher(
+        tmp_path, monkeypatch, "--native-parity-report-path", str(report_path))
+    try:
+        raw = _get_native_parity_json(server).read()
+        rows = {(row["group"], row["field"]): row
+                for row in json.loads(raw)["captured_comparison"]["rows"]}
+        assert rows[("simulation", "field_a")]["native"] == 10 ** 400
+        assert rows[("simulation", "field_a")]["native_display"] == str(10 ** 400)
+        assert rows[("verdicts", "field_a")]["legacy"] == -(2 ** 53)
+        assert rows[("verdicts", "field_a")]["legacy_display"] == str(-(2 ** 53))
+        assert f'"native_display":"{10 ** 400}"'.encode() in raw
+    finally:
+        _stop(server, thread)
+
+
 def test_native_parity_page_constructs_captured_section_with_text_only(tmp_path, monkeypatch):
     server, thread, _ = _run_launcher(tmp_path, monkeypatch)
     try:
@@ -285,7 +311,9 @@ def test_native_parity_page_constructs_captured_section_with_text_only(tmp_path,
         assert "tr.appendChild(el('td', String(c)))" in table_js
         captured_js = page.split("function capturedSection(c){")[1].split("function applyFilter")[0]
         assert "div.appendChild(tableEl(['field','legacy','native']," in captured_js
-        assert "r=>[r.field,r.legacy,r.native]" in captured_js
+        assert "r=>[r.field,r.legacy_display,r.native_display]" in captured_js
+        for coercion in ("Number(", "parseInt", "parseFloat", "+r."):
+            assert coercion not in captured_js
         assert "??" not in captured_js
         assert "||0" not in captured_js
         assert "|| 0" not in captured_js
