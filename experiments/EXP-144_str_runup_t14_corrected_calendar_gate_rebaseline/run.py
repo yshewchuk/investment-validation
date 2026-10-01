@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 import sys
@@ -17,15 +18,16 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
 SIM_DIR = ROOT / "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate"
+V2_CATALOG = ROOT / "private" / "ops" / "catalog.sqlite"
+V2_STORE_ROOT = ROOT / "private" / "ops"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SIM_DIR))
 
-from engine.data import store  # noqa: E402
 from engine.evaluate import Gate, evaluate  # noqa: E402
 from engine.features import FeatureContext  # noqa: E402
 from engine.models.registry import load_registry  # noqa: E402
 from engine.models.training import gate as gate_mod  # noqa: E402
-from experiments import common, lib  # noqa: E402
+from experiments import common, common_v2, lib  # noqa: E402
 import simulation as sim  # noqa: E402
 
 
@@ -60,21 +62,43 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=1, default=str))
 
 
-def load_trades():
+def require_v2_snapshot_id(spec):
+    """The pre-registered v2 snapshot id, or refuse rather than resolve
+    "latest" -- same discipline as EXP-147's run.py (experiments/common_v2.py
+    callers must always pass an explicit snapshot_id)."""
+    v2_snapshot_id = spec.get("v2_snapshot_id")
+    if not v2_snapshot_id:
+        raise SystemExit(
+            f"[{spec['id']}] spec.yaml is missing v2_snapshot_id -- refusing to resolve "
+            "the v2 trades snapshot as \"latest\"; set it explicitly once the pinned "
+            "snapshot exists."
+        )
+    return v2_snapshot_id
+
+
+def load_trades(v2_snapshot_id):
     columns = [
         "trade_id", "kind", "strategy", "variant", "ticker", "event_id",
         "event_date", "legs", "entry_date", "exit_date", "strike", "expiry",
         "fill_alpha", "entry_cost", "exit_value", "ret", "provenance",
     ]
-    frame = store.read_table("trades", columns=columns)
-    frame = frame[
-        (frame["strategy"] == STRATEGY)
-        & (frame["variant"] == VARIANT)
-        & (frame["provenance"].astype(str) == "engine.replay")
-    ].copy()
+    frame = common_v2.load_v2_trades(
+        STRATEGY, catalog=V2_CATALOG, store_root=V2_STORE_ROOT,
+        snapshot_id=v2_snapshot_id,
+    )
+    frame = frame[frame["variant"] == VARIANT].copy()
+    if frame.empty:
+        raise SystemExit(
+            f"[{STRATEGY}] v2 snapshot {v2_snapshot_id!r} has no {VARIANT!r} rows after "
+            "filtering -- refusing to continue with an empty trades frame"
+        )
+    frame = frame[columns]
     for column in ("event_date", "entry_date", "exit_date", "expiry"):
         frame[column] = pd.to_datetime(frame[column])
-    log(f"Loaded {frame.event_id.nunique():,} exact T-14 events and {len(frame):,} fill rows")
+    log(
+        f"Loaded {frame.event_id.nunique():,} exact T-14 events and "
+        f"{len(frame):,} fill rows (v2 snapshot {v2_snapshot_id})"
+    )
     return frame
 
 
@@ -346,6 +370,21 @@ def add_decisions(scores):
         cutoffs.extend(rows)
     out["selected_ungated"] = True
     return out, cutoffs
+
+
+def add_champion_decisions(scores, stored_threshold):
+    """The registered gate_midfill_str_runup's own selection rule (the fixed
+    stored_threshold, not EXP-144's trailing six-month 80th-percentile
+    discipline) applied to the already-reproduced incumbent_complete_case
+    scores -- see incumbent_reproduction() above, which proves those scores
+    match the registry's exact n/n_passed counts. This gives PrecomputedGate
+    an arm="champion" to co-evaluate on the identical v2 trades as the
+    candidate -- the same role EXP-147's champion/ run_dir plays for
+    gate_midfill_str_thru."""
+    out = scores.copy()
+    out["selected_champion"] = out["incumbent_complete_case"] >= stored_threshold
+    out["champion_pwin"] = out["incumbent_complete_case_pwin"]
+    return out
 
 
 def incumbent_reproduction(scores, spec):
@@ -681,6 +720,7 @@ def main():
     if int(args.draws) != int(spec["primary_spec"]["draws_per_event"]):
         raise ValueError("draw count differs from preregistration")
 
+    v2_snapshot_id = require_v2_snapshot_id(spec)
     registry = load_registry(missing_ok=False)
     incumbent = registry.champion("gate", STRATEGY)
     expected = float(spec["incumbent"]["stored_threshold"])
@@ -691,13 +731,16 @@ def main():
     if tuple(incumbent.features) != BASE_FEATURES:
         raise RuntimeError("registered STR-RUNUP feature contract changed")
 
-    trades = load_trades()
+    trades = load_trades(v2_snapshot_id)
     dataset = build_dataset(trades, force=args.force)
     sim_data = simulation_ready(dataset)
     scores, diagnostics = generate_scores(
         dataset, sim_data, args.draws, force=args.force
     )
     scores, cutoffs = add_decisions(scores)
+    scores = add_champion_decisions(
+        scores, float(spec["incumbent"]["stored_threshold"])
+    )
     oos = scores[scores["year"] >= 2020].copy()
     reproduction = incumbent_reproduction(scores, spec)
     oos.to_parquet(RESULTS / "oos_scores.parquet", index=False)
@@ -784,6 +827,42 @@ def main():
     evaluations[PRIMARY] = primary
     if not args.no_ledger:
         lib.record_evaluation(HERE, spec, primary.results)
+
+    champion_spec = copy.deepcopy(spec)
+    champion_spec["title"] = (
+        f"{spec['title']} -- champion re-evaluation "
+        "(gate_midfill_str_runup, stored threshold)"
+    )
+    champion_spec["grid_cell"] = True
+    champion_run_dir = HERE / "champion"
+    if not args.no_ledger:
+        from datetime import datetime, timezone
+
+        lib.ledger_append([{
+            "id": champion_spec.get("id", ""),
+            "spec_hash": lib.spec_hash(champion_spec),
+            "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+            "stage": "planned",
+            "oos_mean_mid": "",
+            "sharpe_trade": "",
+            "promoted": "False",
+        }])
+    champion_result = evaluate(
+        champion_spec, eval_trades,
+        gate=PrecomputedGate(oos, "champion").gate(), run_dir=champion_run_dir,
+        spy_daily=spy, fractions=(0.02, 0.05), mc_paths=1000, seed=144,
+        write_report=True, input_files=[RESULTS / "oos_scores.parquet"],
+    )
+    if not args.no_ledger:
+        lib.record_evaluation(
+            champion_run_dir, champion_spec, champion_result.results
+        )
+    log(f"champion report: {champion_result.report_path}")
+    log(
+        f"champion: n={champion_result.metrics['n']:,}, "
+        f"mean={champion_result.metrics['mean']:+.2%}"
+    )
+
     summary = {
         "spec_hash": lib.spec_hash(spec),
         "counts": counts,
