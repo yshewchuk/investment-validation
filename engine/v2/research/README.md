@@ -66,7 +66,8 @@ modules (`_snapshot`, `_pricing`, `_plan`, `_chains`, `_trades_table`,
 `_trades_revisions`, `_trades_publish`, `_replay_run`, `_build_run`) are
 internal too.
 
-The replay half: `replay.replay`, `replay.replay_one`, `_replay_run.run`,
+The replay half: `replay.replay`, `replay.replay_one`,
+`replay.shared_chain_index`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
 `_chains.load_chain_index`, `_trades_table.to_trades_table`, `_build_run.run`,
 `reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
@@ -83,7 +84,7 @@ imported only by the pinned
 `experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py` runner
 to select its analog population (see `guides/str_thru_analog_provenance.md`).
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE -->
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.shared_chain_index, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE -->
 
 ## Consumers
 
