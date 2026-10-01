@@ -712,7 +712,7 @@ def test_ops_catalog_is_split_into_disjoint_role_shards():
     assert set(flat) == {f"engine/v2/ops/{n}" for n in [
         "__init__.py", "bootstrap.py", "catalog.py", "checkpoints.py", "errors.py",
         "lifecycle.py", "migrations.py", "scheduler.py", "schema.py", "schema_runtime.py",
-        "store_barrier.py", "submission.py"]}
+        "source_availability.py", "store_barrier.py", "submission.py"]}
     for s in shards:  # each shard keeps the job-stack pool it was timed out with
         assert pilot.test_files(CFG, s)
 
