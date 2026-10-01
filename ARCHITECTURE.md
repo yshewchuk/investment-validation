@@ -444,6 +444,19 @@ and nothing on this diagram writes to the legacy board.
 
 ## 5. Invariants
 
+EOD source availability is a separate admission contract from session identity.
+Pinned object hashes prove which bytes were read; an observation day, import
+timestamp or reconstructed midnight does not prove EOD availability or finality.
+Source admission reuses content-addressed artifacts and the dataset manifest
+availability references. A receipt binds the exact source objects and producer
+validation evidence; the pinned manifest supplies dataset/snapshot membership.
+The receipt does not contain the resulting dataset/snapshot identity, avoiding
+an identity cycle. Same-day quote admission requires genuine source completion
+and finality, with verified coordinator publication at or before the independent
+decision clock. Missing proof refuses admission, including otherwise valid reconstructed
+legacy rows. This contract also applies to daily-state inputs; it does not
+change their arithmetic or imply that source receipt production is available.
+
 - **Native vs. legacy provenance.** A native row never carries a
   legacy-derived value or a legacy reference under a native label.
   `engine/v2/scoring/frozen_inputs.py`'s `validate_answer_free` is the

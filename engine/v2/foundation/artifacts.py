@@ -188,11 +188,31 @@ class ArtifactStore:
         return self.root.joinpath(*parts)
 
     def read_verified(self, ref: ArtifactRef) -> bytes:
-        """Read an object's bytes, hashing exactly the bytes returned."""
+        """Read an object's bytes, hashing exactly the bytes returned.
+
+        The registered ``ref.byte_size`` is the sole allocation authority:
+        each request is bounded to the remaining bytes plus one, and a read
+        that overshoots the bound fails before its bytes are appended, so a
+        backing file that grew past its reference is never fully accumulated.
+        """
         fd = _open_beneath(self.root, self._object_parts(ref))
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ArtifactError("INTEGRITY_FAILED", f"{ref.storage_key} is not a regular file")
             os.set_blocking(fd, True)
-            data = b"".join(iter(lambda: os.read(fd, _CHUNK), b""))
+            chunks: list[bytes] = []
+            read = 0
+            bound = ref.byte_size
+            while True:
+                part = os.read(fd, min(_CHUNK, max(bound - read + 1, 0)))
+                if not part:
+                    break
+                read += len(part)
+                if read > bound:
+                    raise ArtifactError("INTEGRITY_FAILED",
+                                        f"{ref.storage_key} exceeds its registered byte size")
+                chunks.append(part)
+            data = b"".join(chunks)
         finally:
             os.close(fd)
         if len(data) != ref.byte_size or \

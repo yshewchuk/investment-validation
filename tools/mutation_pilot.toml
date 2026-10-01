@@ -771,6 +771,7 @@ why = "Submission identity and checkpoint reuse: idempotency by (namespace, key,
 mutate = [
     "engine/v2/ops/submission.py",
     "engine/v2/ops/checkpoints.py",
+    "engine/v2/ops/source_availability.py",
 ]
 tests = [
     "tests/test_v2_dashboard_publish.py",
@@ -794,6 +795,7 @@ tests = [
     "tests/test_v2_ops_resolved_session.py",
     "tests/test_v2_ops_same_session_replan.py",
     "tests/test_v2_ops_scope_separation.py",
+    "tests/test_v2_ops_source_availability.py",
     "tests/test_v2_ops_store_barrier.py",
 ]
 
