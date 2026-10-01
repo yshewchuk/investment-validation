@@ -5,9 +5,11 @@ completion/finality verifier does not exist yet, and no readable evidence
 artifact, matching clock, empty domain or checkpoint-shaped document may be
 mistaken for proof. These tests drive the real data catalog, the real
 ``Repository`` and the real ``ArtifactStore`` with public synthetic
-option_chains fixtures; the only substitution anywhere is a narrow
+option_chains fixtures; the only substitutions anywhere are a narrow
 ``read_verified`` call counter used to pin the oversized-candidate allocation
-boundary, never proof logic.
+boundary, and a narrow ``os.read`` spy that wraps the real reader to record
+requested lengths and actual bytes returned against the registered bound —
+never proof logic.
 """
 from __future__ import annotations
 
@@ -413,3 +415,104 @@ def test_oversized_candidate_refused_before_any_byte_access(tmp_path, monkeypatc
     monkeypatch.setattr(store, "read_verified", boom)
     assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") \
         == "availability evidence exceeds the 1 MiB limit"
+
+
+def _enlarge(path, original, extra_bytes):
+    """Grow the real backing file past the registered bound; the ref is untouched."""
+    os.chmod(path, 0o644)
+    path.write_bytes(original + b"!" * extra_bytes)
+
+
+def test_backing_file_grown_past_registered_ref_refuses_before_full_accumulation(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    evidence = _register(conn, clock, store, _SOURCE_CLAIM)
+    snapshot = _commit(conn, clock, store, availability=(evidence.artifact_id,),
+                       finality=(evidence.artifact_id,))
+    path = store.verify(evidence)
+    original = path.read_bytes()
+    _enlarge(path, original, (1 << 20) + 1)
+    assert path.stat().st_size > (1 << 20)
+    try:
+        with pytest.raises(OpsError) as err:
+            verify_eod_availability(conn, store, Repository(conn), snapshot, table_name=_TABLE,
+                                    session_date=_SESSION, decision_at=_DECISION)
+        assert err.value.code == "INTEGRITY_FAILED"
+        assert err.value.problem.message == _TAMPERED
+        assert isinstance(err.value.__cause__, ArtifactError)
+        assert err.value.__cause__.code == "INTEGRITY_FAILED"
+    finally:
+        os.chmod(path, 0o644)
+        path.write_bytes(original)
+    assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") == _UNAVAILABLE
+
+
+def test_registered_bound_caps_every_read_request_and_total_accumulation(tmp_path, monkeypatch):
+    conn, clock, store = catalog_and_store(tmp_path)
+    evidence = _register(conn, clock, store, _SOURCE_CLAIM)
+    path = store.verify(evidence)
+    original = path.read_bytes()
+    _enlarge(path, original, (1 << 20) + 1)
+
+    requests: list[int] = []
+    returned: list[int] = []
+    real_read = os.read
+
+    def spy(fd, size):
+        requests.append(size)
+        chunk = real_read(fd, size)
+        returned.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(os, "read", spy)
+    try:
+        with pytest.raises(ArtifactError) as err:
+            store.read_verified(evidence)
+    finally:
+        monkeypatch.undo()
+        os.chmod(path, 0o644)
+        path.write_bytes(original)
+    assert err.value.code == "INTEGRITY_FAILED"
+    bound = evidence.byte_size
+    seen = 0
+    for requested, got in zip(requests, returned):
+        assert requested <= bound - seen + 1
+        seen += got
+    assert seen <= bound + 1
+    assert sum(returned) < (1 << 20)
+    assert store.read_verified(evidence) == original
+
+
+def test_growth_after_open_is_caught_by_the_one_byte_probe(tmp_path, monkeypatch):
+    conn, clock, store = catalog_and_store(tmp_path)
+    evidence = _register(conn, clock, store, _SOURCE_CLAIM)
+    path = store.verify(evidence)
+    original = path.read_bytes()
+    os.chmod(path, 0o644)
+
+    requests: list[int] = []
+    returned: list[int] = []
+    real_read = os.read
+
+    def spy(fd, size):
+        if len(requests) == 1:
+            # the fd is already open at the registered size; bytes appear now
+            with open(path, "ab") as sink:
+                sink.write(b"!" * ((1 << 20) + 1))
+        requests.append(size)
+        chunk = real_read(fd, size)
+        returned.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(os, "read", spy)
+    try:
+        with pytest.raises(ArtifactError) as err:
+            store.read_verified(evidence)
+    finally:
+        monkeypatch.undo()
+        path.write_bytes(original)
+    assert err.value.code == "INTEGRITY_FAILED"
+    bound = evidence.byte_size
+    assert requests == [bound + 1, 1]
+    assert returned == [bound, 1]
+    assert sum(returned) == bound + 1
+    assert store.read_verified(evidence) == original
