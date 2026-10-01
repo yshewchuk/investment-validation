@@ -112,7 +112,7 @@ def _validated_partition_keys(contract, table_name: str, keys) -> list[str]:
 
 def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str],
                partition_keys: Sequence[str] | None = None,
-               batch_filter=None) -> pd.DataFrame:
+               batch_filter=None, key_filter=()) -> pd.DataFrame:
     """One table's pinned rows, projected to ``columns``, as a frame.
 
     ``partition_keys``, when given, restricts the scan to the contract's
@@ -120,7 +120,8 @@ def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str]
     ``iter_table(..., years=...)`` partition filter. ``batch_filter``, when
     given, is forwarded to ``_scan.read_table`` and applied to every batch
     frame before it accumulates; omitted and explicit ``None`` behave
-    identically.
+    identically. ``key_filter``, when given, is forwarded straight through to
+    ``_scan.read_table``; omitted or ``()`` changes nothing.
 
     The actual scan is delegated to ``_scan.read_table``, which bounds each
     partition's read and splits it into calendar months, then days, on
@@ -142,7 +143,8 @@ def read_table(repository, snapshot_ref, table_name: str, columns: Sequence[str]
             "partition column"
         )
     frame = _scan.read_table(repository, snapshot_ref, table_name, columns,
-                             partition_keys=keys, batch_filter=batch_filter)
+                             partition_keys=keys, batch_filter=batch_filter,
+                             key_filter=key_filter)
     if frame.empty:
         return pd.DataFrame({name: pd.Series(dtype="object") for name in columns})
     return frame
