@@ -1966,3 +1966,126 @@ class TestCoarseLadderFlag:
         result = scorer.score(request(), chain_index=dense_chain)
         assert "NO_CHAIN" in result.flags
         assert "COARSE_LADDER" not in result.flags
+
+
+class TestTradeProvenanceSelector:
+    """``Scorer(trade_provenance=...)`` picks the analog population by ONE exact
+    tag. Omitted keeps the incumbent's ``engine.replay`` behavior — a zero-row
+    result stays zero-row rather than raising. Explicit refuses a malformed or
+    zero-row selection before it can enrich/match.
+
+    The native v2 tag is held as a literal here on purpose: the Scorer must treat
+    whatever string it is handed as an opaque exact-equality key (never a special
+    tag), and the wiring to the real ``experiment_trades.PROVENANCE`` constant is
+    the pinned-runner test's job. This is the actual-population test — a real
+    ``Scorer`` over a real (synthetic) trade frame, not a re-implementation of
+    the selection.
+    """
+
+    NATIVE = "engine.v2.research.replay"
+    LEGACY = "engine.replay"
+
+    def _scorer(self, registry, panel, daily, calendar, trades, **kwargs):
+        context = FeatureContext(panel=panel, daily=daily, calendar=calendar)
+        return Scorer(
+            registry=registry, trades=trades, context=context,
+            snapshot="snap-prov", analog_daily=daily, **kwargs,
+        )
+
+    def _native(self, trades):
+        out = trades.copy()
+        out["provenance"] = self.NATIVE
+        return out
+
+    def _mixed(self, trades):
+        return pd.concat([trades, self._native(trades)], ignore_index=True)
+
+    def test_omitted_keeps_only_legacy_rows(
+        self, registry, panel, daily, calendar, trades
+    ):
+        # Default path unchanged: the native half is filtered out, exactly as
+        # before this selector existed.
+        scorer = self._scorer(registry, panel, daily, calendar, self._mixed(trades))
+        assert not scorer.trades.empty
+        assert set(scorer.trades["provenance"].astype(str)) == {self.LEGACY}
+
+    def test_explicit_native_populates_the_scorer(
+        self, registry, panel, daily, calendar, trades
+    ):
+        # The observed defect: a native-only population survived as nothing under
+        # the hardcoded legacy filter. Asked for by tag, every row must survive.
+        scorer = self._scorer(
+            registry, panel, daily, calendar, self._native(trades),
+            trade_provenance=self.NATIVE,
+        )
+        assert not scorer.trades.empty
+        assert set(scorer.trades["provenance"].astype(str)) == {self.NATIVE}
+
+    def test_omitted_on_native_only_stays_empty_without_raising(
+        self, registry, panel, daily, calendar, trades
+    ):
+        # Omission preserves prior behavior, including the empty case.
+        scorer = self._scorer(registry, panel, daily, calendar, self._native(trades))
+        assert scorer.trades.empty
+
+    def test_explicit_selects_only_the_requested_tag(
+        self, registry, panel, daily, calendar, trades
+    ):
+        scorer = self._scorer(
+            registry, panel, daily, calendar, self._mixed(trades),
+            trade_provenance=self.NATIVE,
+        )
+        tags = set(scorer.trades["provenance"].astype(str))
+        assert tags == {self.NATIVE}
+        assert self.LEGACY not in tags
+
+    def test_input_and_persisted_tags_are_untouched(
+        self, registry, panel, daily, calendar, trades
+    ):
+        mixed = self._mixed(trades)
+        before = mixed["provenance"].astype(str).tolist()
+        scorer = self._scorer(
+            registry, panel, daily, calendar, mixed, trade_provenance=self.NATIVE,
+        )
+        assert mixed["provenance"].astype(str).tolist() == before
+        assert set(mixed["provenance"].astype(str)) == {self.LEGACY, self.NATIVE}
+        assert (scorer.trades["provenance"].astype(str) == self.NATIVE).all()
+
+    def test_explicit_absent_tag_refuses(
+        self, registry, panel, daily, calendar, trades
+    ):
+        with pytest.raises(ValueError, match="no trades carry provenance"):
+            self._scorer(
+                registry, panel, daily, calendar, trades,
+                trade_provenance="does.not.exist",
+            )
+
+    def test_explicit_legacy_request_on_native_only_refuses(
+        self, registry, panel, daily, calendar, trades
+    ):
+        # Naming a population means it must not silently vanish: the same tag
+        # that returns empty when omitted raises when requested explicitly.
+        with pytest.raises(ValueError, match="no trades carry provenance"):
+            self._scorer(
+                registry, panel, daily, calendar, self._native(trades),
+                trade_provenance=self.LEGACY,
+            )
+
+    def test_explicit_empty_injected_trades_refuses(
+        self, registry, panel, daily, calendar, trades
+    ):
+        empty = trades.iloc[0:0]
+        assert "provenance" in empty.columns
+        with pytest.raises(ValueError, match="no trades carry provenance"):
+            self._scorer(registry, panel, daily, calendar, empty,
+                         trade_provenance=self.LEGACY)
+
+    def test_non_string_selector_is_rejected(
+        self, registry, panel, daily, calendar, trades
+    ):
+        # Exact single-tag equality only: no empty string, no list/set/tuple,
+        # no non-string that could be coerced into a multi-value selection.
+        for bad in ("", ["engine.replay"], {"engine.replay"}, ("engine.replay",), 7):
+            with pytest.raises(ValueError, match="single non-empty string"):
+                self._scorer(registry, panel, daily, calendar, trades,
+                             trade_provenance=bad)
