@@ -18,6 +18,17 @@ plus operational fields) with **no** `title`/`status` alias —
 `ApiError.status` in `client.ts` comes from the HTTP response itself, never
 the body.
 
+The [component architecture](ARCHITECTURE.md) and
+[serving architecture](../engine/v2/serving/ARCHITECTURE.md) define ownership:
+new application rendering, components, layout and navigation belong in this
+existing React app. The [serving package](../engine/v2/serving/README.md) owns
+authenticated API/projection contracts, release identity and command transport.
+Review must flag application page builders or inline DOM scripts added there.
+Keep cookie authentication and explicit release pins in the typed client; display
+saved financial values and evidence without fitting or fetching provider data.
+Existing operations HTML and pinned legacy previews remain compatibility views
+whose application presentation still requires migration to React.
+
 ## Commands
 
 ```bash
