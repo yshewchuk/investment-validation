@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import re
 import shutil
@@ -360,6 +361,14 @@ def _pinned_preflight(release: ModelRelease, states: list[StateBuild],
     return identity, validated
 
 
+def _destination_digest(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
@@ -386,6 +395,9 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
         objects = []
         for name, data in sorted(build.payloads.items()):
             digest, rel = write_object(out, data)
+            if pinned_panel is not None and build.spec.member_id == "tier4_folds:size":
+                if _destination_digest(deployment_root(out) / rel) != validated[name].digest:
+                    raise PrepareRefused(f"{COPY_PREFIX}refused: size fold object bytes differ")
             objects.append({"name": name, "path": rel, "content_hash": digest,
                             "bytes": len(data)})
             if build.spec.member_id == "tier4_folds:size" and build.size_fold_policy is not None:

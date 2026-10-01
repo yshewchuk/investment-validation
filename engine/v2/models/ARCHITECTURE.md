@@ -142,14 +142,17 @@ descriptors are checked against its one verified original `feature_panel`
 object, full byte hash and registered release binding/policy. Snapshot, dataset
 version, object and hash remain distinct identities. The manifest carries an
 explicit pinned COPY claim; legacy unpinned callers cannot emit that claim.
-Preflight and staging consume the same immutable bounded cache bytes and verify
-their hash; panel identity is reverified at authoring. No fitting, pool recreation
-or live-panel fallback occurs in pinned mode.
+Preflight and staging consume the same immutable bounded cache bytes. Publication
+verifies stored cache bytes against the preflight hash and refuses disagreement;
+panel identity is reverified at authoring. Snapshot, cache and policy checks
+precede output creation, plan writing, incumbent copy and staging. No fitting,
+pool recreation or live-panel fallback occurs in pinned mode.
 
 | Pinned authoring condition | Outcome |
 |---|---|
 | Verified original panel and matching bounded size cache/policy | Author COPY-consistent descriptor with separate pinned identities |
-| Missing/substituted snapshot/object, unsupported layout, corrupt bytes or policy/header/model/features/output/clock/month disagreement | Refuse before staging or pinned publication |
+| Missing/substituted snapshot/object, unsupported layout, corrupt input bytes or policy/header/model/features/output/clock/month disagreement | Refuse before output effects or staging |
+| Published destination bytes disagree with the preflight hash | Refuse descriptor/catalog publication; never repair or relabel |
 | Equivalent-row rewrite with different bytes | Cannot reuse the old full-hash fold declaration |
 | Complete preparation or corrected-source REBUILD assertion without genuine producer evidence | Refuse stronger claim; COPY remains byte/policy consistency only |
 | No pinned context | Preserve legacy behavior without a pinned claim |

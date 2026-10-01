@@ -403,3 +403,63 @@ def test_cli_pinned_panel_verifies_catalog_and_ignores_global_panel(mode, tmp_pa
     assert descriptor.policy.panel_sha256 == digest == hashlib.sha256(source_bytes).hexdigest()
     assert descriptor.estimator.content_hash == obj["content_hash"]
     assert descriptor.estimator.path == obj["path"]
+
+
+def test_rerun_over_corrupt_stored_size_fold_object_refuses_without_repair(tmp_path, cache):
+    """A pinned rerun never trusts a reused destination: corrupt stored bytes
+    refuse with a fixed COPY message, the published catalogs keep their exact
+    bytes and the corrupted object is not silently repaired or replaced."""
+    context, _store, _snapshot, _records, _panel = build_pinned(tmp_path, ALL_ONE)
+    cache["tier3_snapshot"] = verify_panel_copy(context)["panel_copy_sha256"]
+    name, raw, policy = _name(cache), _bytes(cache), _policy(cache)
+    states = prep.build_states({"tier4_folds:size": {name: raw}}, size_fold_policy=policy)
+    args = _inputs(cache)
+    out = tmp_path / "out"
+    local = prep.write_release(out, *args, states, pinned_panel=context)
+    body = layout.read_manifest(out)
+    row = next(row for row in body["members"] if row["member_id"] == "tier4_folds:size")
+    obj = row["objects"][0]
+    object_path = layout.deployment_root(out) / obj["path"]
+    assert object_path.read_bytes() == raw
+    object_path.chmod(object_path.stat().st_mode | 0o200)
+    object_path.write_bytes(raw + b" corrupted after publication")
+    corrupted = object_path.read_bytes()
+    catalogs = {path: path.read_bytes() for path in (local, out / layout.MANIFEST_NAME)}
+    with pytest.raises(REFUSALS) as excinfo:
+        prep.write_release(out, *args, states, pinned_panel=context)
+    message = str(excinfo.value)
+    assert message.startswith(COPY_PREFIX)
+    assert "refused" in message
+    assert str(out) not in message and obj["path"] not in message
+    assert {path: path.read_bytes() for path in catalogs} == catalogs
+    assert object_path.read_bytes() == corrupted
+
+
+def test_planted_corrupt_writer_cannot_publish_descriptor_or_catalog(tmp_path, cache, monkeypatch):
+    """A write_object returning the expected digest/path while corrupting the
+    destination is caught by the byte check before any descriptor is attached,
+    so no phase5 catalog -- root or release-local -- is ever published."""
+    context, _store, _snapshot, _records, _panel = build_pinned(tmp_path, ALL_ONE)
+    cache["tier3_snapshot"] = verify_panel_copy(context)["panel_copy_sha256"]
+    name, raw, policy = _name(cache), _bytes(cache), _policy(cache)
+    states = prep.build_states({"tier4_folds:size": {name: raw}}, size_fold_policy=policy)
+    out = tmp_path / "out"
+    real_write = prep.write_object
+
+    def corrupting_write(root, payload):
+        digest, rel = real_write(root, payload)
+        dest = layout.deployment_root(root) / rel
+        dest.chmod(dest.stat().st_mode | 0o200)
+        dest.write_bytes(payload + b" planted")
+        return digest, rel
+
+    monkeypatch.setattr(prep, "write_object", corrupting_write)
+    with pytest.raises(REFUSALS) as excinfo:
+        prep.write_release(out, *_inputs(cache), states, pinned_panel=context)
+    message = str(excinfo.value)
+    assert message.startswith(COPY_PREFIX)
+    assert "refused" in message
+    assert str(out) not in message
+    assert not list(out.rglob(layout.MANIFEST_NAME))
+    planted = layout.deployment_root(out) / layout.object_relpath(layout.sha256_bytes(raw))
+    assert planted.read_bytes() == raw + b" planted"
