@@ -18,7 +18,7 @@ health documents and a configured parity report. Resolve one release per read.
 HTTP documents/pages, immutable artifacts and transactional index rows.
 `native_parity_summary` aggregates the stored comparator report.
 Its optional comparison presents paired Legacy/Native values for one selected saved replay.
-Numeric/null originals stay unchanged; decimal display text preserves integers beyond browser precision.
+Original numbers/nulls and gate verdicts stay unchanged; exact decimal text preserves large integers.
 Identity, corpus/request/decision/quote/event clocks and both-side provenance stay
 distinct. This evidence does not qualify a current board or population cutover.
 

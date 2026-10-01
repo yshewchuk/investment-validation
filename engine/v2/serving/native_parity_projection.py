@@ -48,6 +48,7 @@ _CAPTURED_PROVENANCE_FIELDS = ("corpus_hash", "fixture_id", "payload_hash",
                                "same_input_receipt", "frozen_release_id",
                                "native_snapshot_ref")
 _CAPTURED_GROUPS = ("forecasts", "simulation", "financial_diagnostics", "verdicts", "analogs")
+_CAPTURED_BOOL_FIELDS = frozenset({("verdicts", "gate_pass")})
 _STRING_LIMIT = 512
 _NAME_LIMIT = 128
 _ROW_LIMIT = 100
@@ -213,20 +214,37 @@ def _captured_display(value: Any) -> Any:
     JSON integer beyond ``2**53 - 1`` would silently lose exactness (and a
     400-digit one become ``Infinity``). Null, zero, finite floats and safe
     ints keep the original value; only an ``int`` whose absolute value
-    exceeds the safe range becomes its exact base-10 ``str``. Bools never
-    reach here -- ``_captured_number`` has already refused them -- and the
-    original ``legacy``/``native`` fields always keep the source value.
+    exceeds the safe range becomes its exact base-10 ``str``. The exporter's
+    canonical boolean verdict (``verdicts.gate_pass``) passes through here
+    unchanged -- bools are never numeric inputs -- and the original
+    ``legacy``/``native`` fields always keep the source value.
     """
     if isinstance(value, int) and abs(value) > _MAX_SAFE_INTEGER:
         return str(value)
     return value
 
 
+def _captured_value(group: str, field: str, value: Any) -> Any:
+    """One captured row value under the schema's exact per-field typing.
+
+    Every group/field is numeric except the single canonical boolean gate
+    verdict: at ``verdicts.gate_pass`` only ``True``/``False``/``None`` are
+    accepted -- numeric ``0``/``1``, floats and strings are refused so a
+    bool can never masquerade as a number and vice versa. ``False`` in any
+    other field/group is refused by the strict ``_captured_number``.
+    """
+    if (group, field) in _CAPTURED_BOOL_FIELDS:
+        if value is None or isinstance(value, bool):
+            return value
+        raise ValueError("captured comparison boolean verdict is not true/false/null")
+    return _captured_number(value)
+
+
 def _captured_row(group: str, field: str, legacy_value: Any,
                   native_value: Any) -> dict[str, Any]:
     """Validate each side once; emit the original and additive display fields."""
-    legacy = _captured_number(legacy_value)
-    native = _captured_number(native_value)
+    legacy = _captured_value(group, field, legacy_value)
+    native = _captured_value(group, field, native_value)
     return {"group": group, "field": field,
             "legacy": legacy, "native": native,
             "legacy_display": _captured_display(legacy),

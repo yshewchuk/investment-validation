@@ -319,3 +319,26 @@ def test_native_parity_page_constructs_captured_section_with_text_only(tmp_path,
         assert "|| 0" not in captured_js
     finally:
         _stop(server, thread)
+
+
+def test_native_parity_json_projects_boolean_gate_pass_verdict_over_http(tmp_path, monkeypatch):
+    block = _captured_block()
+    block["legacy"]["verdicts"]["gate_pass"] = True
+    block["native"]["verdicts"]["gate_pass"] = False
+    report_path = _fixture_report_path(tmp_path, captured=block)
+    server, thread, _ = _run_launcher(
+        tmp_path, monkeypatch, "--native-parity-report-path", str(report_path))
+    try:
+        raw = _get_native_parity_json(server).read()
+        captured = json.loads(raw)["captured_comparison"]
+        rows = {(row["group"], row["field"]): row for row in captured["rows"]}
+        verdict = rows[("verdicts", "gate_pass")]
+        assert verdict["legacy"] is True and verdict["native"] is False
+        assert verdict["legacy_display"] is True and verdict["native_display"] is False
+        assert captured["identity"] == block["identity"]
+        assert captured["clocks"] == block["clocks"]
+        assert captured["provenance"] == block["provenance"]
+        assert (b'{"field":"gate_pass","group":"verdicts","legacy":true,'
+                b'"legacy_display":true,"native":false,"native_display":false}') in raw
+    finally:
+        _stop(server, thread)

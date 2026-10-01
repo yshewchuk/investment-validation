@@ -689,3 +689,51 @@ def test_captured_block_html_like_strings_survive_unchanged(tmp_path):
     rows = {(row["group"], row["field"]): row for row in captured["rows"]}
     assert rows[("verdicts", hostile)]["legacy"] is None
     assert rows[("verdicts", hostile)]["native"] == 0.0
+
+
+def _gate_pass_block(legacy_value, native_value):
+    block = _captured_block()
+    block["legacy"]["verdicts"]["gate_pass"] = legacy_value
+    block["native"]["verdicts"]["gate_pass"] = native_value
+    return block
+
+
+def _verdicts_gate_pass_row(body):
+    return {(row["group"], row["field"]): row
+            for row in body["captured_comparison"]["rows"]}[("verdicts", "gate_pass")]
+
+
+def test_captured_gate_pass_boolean_pair_passes_through_unchanged(tmp_path):
+    status, body = native_parity_summary(
+        _captured_report(tmp_path, _gate_pass_block(True, False)))
+    assert status == HTTPStatus.OK
+    verdict = _verdicts_gate_pass_row(body)
+    assert verdict["legacy"] is True and verdict["native"] is False
+    assert verdict["legacy_display"] is True and verdict["native_display"] is False
+    assert type(verdict["legacy_display"]) is bool
+    assert type(verdict["native_display"]) is bool
+
+
+def test_captured_gate_pass_null_is_accepted_distinctly(tmp_path):
+    status, body = native_parity_summary(
+        _captured_report(tmp_path, _gate_pass_block(None, False)))
+    assert status == HTTPStatus.OK
+    verdict = _verdicts_gate_pass_row(body)
+    assert verdict["legacy"] is None and verdict["legacy_display"] is None
+    assert verdict["native"] is False and verdict["native_display"] is False
+
+
+def test_captured_gate_pass_rejects_non_boolean_values(tmp_path):
+    for value in (0, 1, 0.0, 1.0, "true", "false", "", [True], {"a": 1}):
+        _assert_captured_malformed(tmp_path, _gate_pass_block(value, value))
+
+
+def test_captured_bool_rejected_outside_the_boolean_verdict_field(tmp_path):
+    for group, field in (("forecasts", "gate_pass"), ("analogs", "gate_pass"),
+                         ("verdicts", "gate_score"), ("verdicts", "field_a"),
+                         ("simulation", "field_a")):
+        for value in (True, False):
+            block = _captured_block()
+            block["legacy"][group][field] = value
+            block["native"][group][field] = value
+            _assert_captured_malformed(tmp_path, block)
