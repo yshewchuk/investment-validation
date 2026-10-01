@@ -78,13 +78,14 @@ caller yet; adding this arithmetic alone does not change a nightly or board.
 
 ## Inputs
 
-### Pinned daily-state input boundary (design)
+### Pinned daily-state input boundary (implemented)
 
 `scan_daily_state_inputs(repository, snapshot, *, ticker, history_start,
 decision_session)` binds the existing `panel_math.daily_state_lookup` to a
 bounded read of one ticker from `daily_market` in the supplied `SnapshotRef`.
-This contract is not implemented yet. No production raw-row assembler calls
-it, and it does not establish a complete forward panel or qualified board.
+This contract is implemented in `daily_state_inputs.py`. No production raw-row
+assembler calls it yet, and it does not establish a complete forward panel or
+qualified board.
 
 The caller supplies explicit naive calendar dates, with `history_start <=
 decision_session`; intraday and timezone-aware values refuse. The read uses

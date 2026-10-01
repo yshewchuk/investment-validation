@@ -182,8 +182,8 @@ can.
 
 ### 2.1 Two splits that are load-bearing, not cosmetic
 
-The features component also defines a designed, unimplemented bounded
-daily-state input adapter over one pinned snapshot. Its source clock is the
+The features component also provides a bounded daily-state input adapter
+over one pinned snapshot. Its source clock is the
 EOD session, with no receipt/publication timestamp; it is a raw input
 prerequisite, not complete causal panel construction or nightly integration.
 

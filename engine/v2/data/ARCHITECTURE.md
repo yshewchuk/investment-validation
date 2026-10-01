@@ -127,6 +127,9 @@ pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
 directly.
 
+`engine.v2.features.daily_state_inputs` reads bounded pinned `daily_market`
+rows; its EOD source session does not establish receipt-time availability.
+
 ## External systems and libraries
 
 `sqlite3` (the shared ops/ledger/data catalog file — `catalog.py` runs its
