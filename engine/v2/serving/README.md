@@ -1,5 +1,7 @@
 # `engine/v2/serving`
 
+Contract: [Serving architecture](ARCHITECTURE.md).
+
 ## Ownership
 
 Implements the **API/projection layer — filter, paginate, authorize, serialize computed records** row of the §4 owner table of
@@ -37,6 +39,13 @@ extending them does not deliver the React application.
   refused/incomparable counts with reasons. No comparison of its own. Full
   field list and failure semantics: root `ARCHITECTURE.md` §4 "Native parity
   summary projection".
+
+`CAPTURED_COMPARISON_V1` is the public schema literal for the optional retained
+comparison in `native_parity_summary`. Rows preserve original values; consumers
+render `legacy_display`/`native_display` for exact integers beyond the JavaScript
+safe range. This bounded JSON projection adds no application rendering.
+
+<!-- public-interface: CAPTURED_COMPARISON_V1 -->
 
 ## Non-responsibilities
 

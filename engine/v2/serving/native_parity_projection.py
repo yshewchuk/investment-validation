@@ -25,6 +25,7 @@ from typing import Any
 __all__ = [
     "NATIVE_PARITY_SUMMARY_V1",
     "NATIVE_PARITY_REPORT_MALFORMED",
+    "CAPTURED_COMPARISON_V1",
     "native_parity_summary",
 ]
 
@@ -33,6 +34,24 @@ NATIVE_PARITY_REPORT_MALFORMED = "NATIVE_PARITY_REPORT_MALFORMED"
 
 _REQUIRED_LIST_FIELDS = ("compared", "only_legacy", "only_native", "mismatches")
 _OPTIONAL_LIST_FIELDS = ("native_refused", "native_refused_unmatched")
+
+CAPTURED_COMPARISON_V1 = "captured_native_comparison.v1.0"
+_CAPTURED_SCOPE = "selected_saved_replay"
+_CAPTURED_STRATEGY = "STR-THRU"
+_CAPTURED_FLAGS = ("full_population_verified", "cutover_qualified", "current_board")
+_CAPTURED_IDENTITY_FIELDS = ("ticker", "strategy", "event_date", "session", "as_of",
+                             "entry_date", "exit_date")
+_CAPTURED_CLOCK_FIELDS = ("corpus_as_of", "requested_decision_at", "decision_as_of",
+                          "quote_as_of", "event_date", "session")
+_CAPTURED_PROVENANCE_FIELDS = ("corpus_hash", "fixture_id", "payload_hash",
+                               "legacy_request_hash", "native_request_hash", "trace_hash",
+                               "same_input_receipt", "frozen_release_id",
+                               "native_snapshot_ref")
+_CAPTURED_GROUPS = ("forecasts", "simulation", "financial_diagnostics", "verdicts", "analogs")
+_CAPTURED_BOOL_FIELDS = frozenset({("verdicts", "gate_pass")})
+_STRING_LIMIT = 512
+_NAME_LIMIT = 128
+_ROW_LIMIT = 100
 
 
 def _field_mismatch_counts(mismatches: list[dict[str, Any]]) -> dict[str, int]:
@@ -162,6 +181,156 @@ def _load_report(handle) -> dict[str, Any]:
     return report
 
 
+def _captured_string(value: Any, limit: int, label: str) -> str:
+    if not isinstance(value, str) or not (1 <= len(value) <= limit):
+        raise ValueError(f"captured comparison {label} is not a bounded non-empty string")
+    return value
+
+
+def _captured_number(value: Any) -> Any:
+    """Accept null and finite JSON numbers; reject bools, strings and non-finite floats.
+
+    Finiteness is a strict open interval against the float infinities, so
+    NaN -- which fails every comparison -- is rejected too. The check runs
+    only on floats: arbitrary-precision JSON integers are finite and must
+    be preserved exactly.
+    """
+    if value is None:
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("captured comparison value is neither null nor a finite number")
+    if isinstance(value, float) and not (float("-inf") < value < float("inf")):
+        raise ValueError("captured comparison value is neither null nor a finite number")
+    return value
+
+
+_MAX_SAFE_INTEGER = 2 ** 53 - 1
+
+
+def _captured_display(value: Any) -> Any:
+    """JSON-safe rendering form of an already-validated captured number.
+
+    The browser's ``Response.json`` converts the payload to IEEE-754, so a
+    JSON integer beyond ``2**53 - 1`` would silently lose exactness (and a
+    400-digit one become ``Infinity``). Null, zero, finite floats and safe
+    ints keep the original value; only an ``int`` whose absolute value
+    exceeds the safe range becomes its exact base-10 ``str``. The exporter's
+    canonical boolean verdict (``verdicts.gate_pass``) passes through here
+    unchanged -- bools are never numeric inputs -- and the original
+    ``legacy``/``native`` fields always keep the source value.
+    """
+    if isinstance(value, int) and abs(value) > _MAX_SAFE_INTEGER:
+        return str(value)
+    return value
+
+
+def _captured_value(group: str, field: str, value: Any) -> Any:
+    """One captured row value under the schema's exact per-field typing.
+
+    Every group/field is numeric except the single canonical boolean gate
+    verdict: at ``verdicts.gate_pass`` only ``True``/``False``/``None`` are
+    accepted -- numeric ``0``/``1``, floats and strings are refused so a
+    bool can never masquerade as a number and vice versa. ``False`` in any
+    other field/group is refused by the strict ``_captured_number``.
+    """
+    if (group, field) in _CAPTURED_BOOL_FIELDS:
+        if value is None or isinstance(value, bool):
+            return value
+        raise ValueError("captured comparison boolean verdict is not true/false/null")
+    return _captured_number(value)
+
+
+def _captured_row(group: str, field: str, legacy_value: Any,
+                  native_value: Any) -> dict[str, Any]:
+    """Validate each side once; emit the original and additive display fields."""
+    legacy = _captured_value(group, field, legacy_value)
+    native = _captured_value(group, field, native_value)
+    return {"group": group, "field": field,
+            "legacy": legacy, "native": native,
+            "legacy_display": _captured_display(legacy),
+            "native_display": _captured_display(native)}
+
+
+def _captured_aligned_group(group: str, left: Any, right: Any) -> None:
+    """One legacy/native group: a non-empty aligned object of bounded names."""
+    if (not isinstance(left, dict) or not isinstance(right, dict)
+            or not left or set(left) != set(right)):
+        raise ValueError(f"captured comparison group {group!r} is not an aligned object")
+    if any(not isinstance(field, str) or not (1 <= len(field) <= _NAME_LIMIT)
+           for field in left):
+        raise ValueError(f"captured comparison group {group!r} has a bad field name")
+
+
+def _captured_metadata_section(block: dict[str, Any], key: str,
+                               fields: tuple[str, ...]) -> dict[str, Any]:
+    """An exact-key metadata object of bounded non-empty strings; return it."""
+    section = block.get(key)
+    if not isinstance(section, dict) or set(section) != set(fields):
+        raise ValueError(f"captured comparison {key} key set is not exact")
+    for name in fields:
+        _captured_string(section[name], _STRING_LIMIT, f"{key} {name!r}")
+    return section
+
+
+def _captured_rows(legacy: Any, native: Any) -> list[dict[str, Any]]:
+    if (not isinstance(legacy, dict) or not isinstance(native, dict)
+            or set(legacy) != set(_CAPTURED_GROUPS)
+            or set(native) != set(_CAPTURED_GROUPS)):
+        raise ValueError("captured comparison groups are not the exact five")
+    for group in _CAPTURED_GROUPS:
+        _captured_aligned_group(group, legacy[group], native[group])
+    if sum(len(legacy[group]) for group in _CAPTURED_GROUPS) > _ROW_LIMIT:
+        raise ValueError("captured comparison row count exceeds the bound")
+    return [_captured_row(group, field, legacy[group][field], native[group][field])
+            for group in _CAPTURED_GROUPS for field in sorted(legacy[group])]
+
+
+def _project_captured_comparison(block: Any) -> dict[str, Any]:
+    """Validate the exporter's optional captured block and project paired rows.
+
+    Raises ``ValueError`` (the existing malformed-report refusal) on any
+    deviation from the v1 schema. Never re-verifies provenance, never
+    recomputes a hash or compares the two request hashes, and never rounds,
+    deltas or substitutes a captured numeric value. The additive
+    ``legacy_display``/``native_display`` row fields carry the original
+    value, or the exact base-10 string of an int beyond the browser's
+    safe-integer range, so unsafe integer display values remain decimal
+    strings through browser parsing. The raw
+    ``checks``/``numeric_comparisons``/``runtime_stage_count`` diagnostics
+    are not exposed as comparison logic.
+    """
+    if not isinstance(block, dict):
+        raise ValueError("captured comparison is not a JSON object")
+    if block.get("schema_version") != CAPTURED_COMPARISON_V1:
+        raise ValueError("captured comparison schema_version is not the v1 literal")
+    if block.get("scope") != _CAPTURED_SCOPE:
+        raise ValueError("captured comparison scope is not the selected-replay literal")
+    for flag in _CAPTURED_FLAGS:
+        if block.get(flag) is not False:
+            raise ValueError(f"captured comparison flag {flag!r} is not exactly false")
+    identity = _captured_metadata_section(block, "identity", _CAPTURED_IDENTITY_FIELDS)
+    if identity["strategy"] != _CAPTURED_STRATEGY:
+        raise ValueError("captured comparison identity strategy is not STR-THRU")
+    clocks = _captured_metadata_section(block, "clocks", _CAPTURED_CLOCK_FIELDS)
+    for clock, field in (("decision_as_of", "as_of"), ("event_date", "event_date"),
+                         ("session", "session")):
+        if clocks[clock] != identity[field]:
+            raise ValueError(f"captured comparison clock {clock!r} contradicts identity")
+    provenance = _captured_metadata_section(block, "provenance", _CAPTURED_PROVENANCE_FIELDS)
+    rows = _captured_rows(block.get("legacy"), block.get("native"))
+    return {
+        "schema_version": CAPTURED_COMPARISON_V1,
+        "scope": _CAPTURED_SCOPE,
+        "full_population_verified": False,
+        "cutover_qualified": False,
+        "current_board": False,
+        "identity": {name: identity[name] for name in _CAPTURED_IDENTITY_FIELDS},
+        "clocks": {name: clocks[name] for name in _CAPTURED_CLOCK_FIELDS},
+        "provenance": {name: provenance[name] for name in _CAPTURED_PROVENANCE_FIELDS},
+        "rows": rows,
+    }
+
+
 def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> tuple[HTTPStatus, dict]:
     """Load ``report_path`` and return a compact, dashboard-ready summary.
 
@@ -204,13 +373,16 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
         native_refused_unmatched = report.get("native_refused_unmatched", [])
         partial = not (has_refused and has_refused_unmatched)
         reason_counts = _reason_counts(native_refused + native_refused_unmatched)
+        captured = (
+            _project_captured_comparison(report["captured_comparison"])
+            if "captured_comparison" in report else None)
     except (OSError, json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError):
         return HTTPStatus.SERVICE_UNAVAILABLE, {
             "schema_version": NATIVE_PARITY_SUMMARY_V1,
             "status": "unavailable",
             "reason_code": NATIVE_PARITY_REPORT_MALFORMED,
         }
-    return HTTPStatus.OK, {
+    summary = {
         "schema_version": NATIVE_PARITY_SUMMARY_V1,
         "status": "available",
         "partial": partial,
@@ -227,3 +399,6 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
         "native_refused_unmatched_count": len(native_refused_unmatched),
         "native_refused_reasons": reason_counts,
     }
+    if captured is not None:
+        summary["captured_comparison"] = captured
+    return HTTPStatus.OK, summary
