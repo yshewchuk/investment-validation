@@ -30,12 +30,12 @@ FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
-Missing/unknown identities and invalid cursors refuse explicitly; cursors bind
-release and normalized filters. Corrupt/traversing legacy inputs are refused.
-Projection findings may publish a diagnostic receipt but no accepted release;
-accepted index rows commit atomically and repeat candidate builds are idempotent.
-Current release is resolved once for a session; reads do not silently switch pins.
-Parity missing/unavailable states are explicit, never a fabricated passing result.
+| Condition | Outcome |
+|---|---|
+| Missing identity, invalid release/filter-bound cursor or corrupt legacy input | Explicit typed refusal. |
+| Projection findings fail / accepted candidate repeated | Diagnostic receipt only, no release / atomic, idempotent index commit. |
+| Current changes or cached API read | Keep session pin; release-scoped cache/ETags cannot substitute another release. |
+| Parity report missing/unavailable | Explicit state; read-only projection has no internal cache/retry/write transaction; caller may retry. |
 
 ## Invariants
 Reject new application markup, inline DOM scripts and page builders here; hosting

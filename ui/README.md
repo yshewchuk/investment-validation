@@ -18,8 +18,6 @@ plus operational fields) with **no** `title`/`status` alias —
 `ApiError.status` in `client.ts` comes from the HTTP response itself, never
 the body.
 
-## Commands
-
 The [component architecture](ARCHITECTURE.md) and
 [serving architecture](../engine/v2/serving/ARCHITECTURE.md) define ownership:
 new application rendering, components, layout and navigation belong in this
@@ -30,6 +28,8 @@ Keep cookie authentication and explicit release pins in the typed client; displa
 saved financial values and evidence without fitting or fetching provider data.
 Existing operations HTML and pinned legacy previews remain compatibility views
 whose application presentation still requires migration to React.
+
+## Commands
 
 ```bash
 npm install                 # needs the npm registry; stop and report if unreachable

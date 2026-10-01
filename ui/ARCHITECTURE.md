@@ -27,10 +27,11 @@ React, TypeScript and Vite; browser fetch with the same-origin `operations_token
 cookie. Build output is static assets; serving those bytes is transport.
 
 ## Failure semantics
-Loading, empty, unauthenticated and unknown release/event/score states are explicit.
-The page pins a release once; polling current only announces a change. Request
-cache keys carry the pin; reload opts into a new release. Detail failures do not
-replace the board. This client has no durable transaction or partial publication.
+| Condition | Outcome |
+|---|---|
+| Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
+| Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
+| Retry or navigation | Reads keep pinned identity; no durable transaction or partial publication. |
 
 ## Invariants
 All new application rendering belongs here. Serving returns data/API responses
