@@ -14,8 +14,8 @@ helpers — following ``tests/test_v2_research_experiment_trades.py``.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
-import re
 import sys
 from pathlib import Path
 
@@ -101,15 +101,42 @@ def test_pinned_runner_builds_the_native_v2_provenance():
     ``ga.build_dataset`` call passes it. The Scorer actually selecting on that
     tag is covered in ``test_score.py``; the forwarding from ``build_dataset``
     to ``Scorer`` in ``test_training.py``.
+
+    The call-site check is structural (AST-based) rather than a text-search.
     """
     # Imported from the public v2 module, and the same constant the loader uses.
     assert getattr(_exp147_run, "experiment_trades", None) is experiment_trades
     assert _exp147_run.experiment_trades.PROVENANCE == PROVENANCE
 
     # The build_dataset call site passes that constant through the selector.
-    source = _RUN_PY.read_text()
-    call = re.sub(r"\s+", "", source)
-    assert "ga.build_dataset(trades,trade_provenance=experiment_trades.PROVENANCE)" in call
+    tree = ast.parse(_RUN_PY.read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "build_dataset"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ga"
+    ]
+    assert len(calls) == 1, (
+        f"expected exactly one ga.build_dataset(...) call in run.py, found {len(calls)}"
+    )
 
-    # It never inlines a provenance string as the selector (only the constant).
-    assert 'trade_provenance="' not in source
+    keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+    assert "trade_provenance" in keywords, (
+        "the ga.build_dataset(...) call in run.py is missing the trade_provenance keyword"
+    )
+
+    # It never inlines a provenance string as the selector (only the constant):
+    # only the exact experiment_trades.PROVENANCE attribute access satisfies this.
+    value = keywords["trade_provenance"]
+    assert (
+        isinstance(value, ast.Attribute)
+        and value.attr == "PROVENANCE"
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "experiment_trades"
+    ), (
+        "trade_provenance must be passed as experiment_trades.PROVENANCE, "
+        "not an inline literal or a different name"
+    )

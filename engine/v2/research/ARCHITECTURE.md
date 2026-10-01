@@ -85,7 +85,7 @@ pairs while reading one manifest year at a time; stored dates retain their
 original timestamp semantics and requested dates use the existing normalization.
 Failed capped attempts discard their filtered frames before narrower retries;
 successful frames retain ordering and duplicates. Scan caps and terminal error
-codes are unchanged; retry errors no longer retain the prior overflow traceback.
+codes are unchanged; a narrower retry runs outside the failed attempt's handler.
 This bounds retained unmatched rows, not total process RSS.
 
 - `--catalog` (sqlite path) and `--store-root` (`ArtifactStore` root):
@@ -369,7 +369,7 @@ uncaught traceback instead.
 `_snapshot.read_table` delegates each requested partition's read (or, with
 no `partition_keys` given, every partition the snapshot has) to
 `_scan.read_table`, instead of issuing one capped, unsplit `DataQuery` of
-its own. It keeps its own signature (`partition_keys` only, no
+its own. It keeps its own signature (`partition_keys` and `batch_filter`, no
 `key_filter`), its own pre-`_scan` guard for "no declared partition column,
 or no partition values available at all" (the bare `ValueError` case
 above, issue #70, unchanged), and its own empty-result frame shape
