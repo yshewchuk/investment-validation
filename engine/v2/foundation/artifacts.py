@@ -197,6 +197,8 @@ class ArtifactStore:
         """
         fd = _open_beneath(self.root, self._object_parts(ref))
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ArtifactError("INTEGRITY_FAILED", f"{ref.storage_key} is not a regular file")
             os.set_blocking(fd, True)
             chunks: list[bytes] = []
             read = 0

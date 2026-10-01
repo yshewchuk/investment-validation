@@ -8,8 +8,11 @@ mistaken for proof. These tests drive the real data catalog, the real
 option_chains fixtures; the only substitutions anywhere are a narrow
 ``read_verified`` call counter used to pin the oversized-candidate allocation
 boundary, and a narrow ``os.read`` spy that wraps the real reader to record
-requested lengths and actual bytes returned against the registered bound —
-never proof logic.
+requested lengths and actual bytes returned against the registered bound. A
+non-regular backing file is tested with narrow spies that raise if
+``os.set_blocking`` or ``os.read`` were reached, so a missing regular-file
+guard in ``read_verified`` fails at once instead of blocking on a planted
+FIFO. Spies never substitute for proof logic, file type or fstat.
 """
 from __future__ import annotations
 
@@ -543,3 +546,48 @@ def test_growth_after_open_is_caught_by_the_one_byte_probe(tmp_path, monkeypatch
     assert returned == [bound, 1]
     assert sum(returned) == bound + 1
     assert store.read_verified(evidence) == original
+
+
+@pytest.mark.parametrize("plant", ["fifo", "directory"])
+def test_nonregular_backing_file_refuses_before_blocking_or_read(tmp_path, monkeypatch, plant):
+    """Real FIFO/directory planted in place of the actual object bytes; the
+    guards are spies that raise if reached, so a missing regular-file check
+    fails immediately instead of hanging on an unwritten FIFO."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    evidence = _register(conn, clock, store, _SOURCE_CLAIM)
+    snapshot = _commit(conn, clock, store, availability=(evidence.artifact_id,),
+                       finality=(evidence.artifact_id,))
+    path = store.verify(evidence)
+    original = path.read_bytes()
+    os.chmod(path, 0o644)
+    os.unlink(path)
+    if plant == "fifo":
+        os.mkfifo(path)
+    else:
+        path.mkdir()
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError(f"a {plant} backing must be refused before block/read")
+
+    monkeypatch.setattr(os, "set_blocking", boom)
+    monkeypatch.setattr(os, "read", boom)
+    try:
+        with pytest.raises(ArtifactError) as err:
+            store.read_verified(evidence)
+        assert err.value.code == "INTEGRITY_FAILED"
+        assert "is not a regular file" in str(err.value)
+        with pytest.raises(OpsError) as refused:
+            verify_eod_availability(conn, store, Repository(conn), snapshot, table_name=_TABLE,
+                                    session_date=_SESSION, decision_at=_DECISION)
+        assert refused.value.code == "INTEGRITY_FAILED"
+        assert refused.value.problem.message == _TAMPERED
+        assert isinstance(refused.value.__cause__, ArtifactError)
+    finally:
+        monkeypatch.undo()
+        if plant == "fifo":
+            path.unlink()
+        else:
+            path.rmdir()
+        path.write_bytes(original)
+    assert store.read_verified(evidence) == original
+    assert _refuses(conn, store, snapshot, "VALIDATION_FAILED") == _UNAVAILABLE
