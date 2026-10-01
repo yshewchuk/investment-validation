@@ -343,9 +343,17 @@ uncaught traceback instead.
   `option_chains` once in total, not once per strategy. A `replay()` call
   given an explicit `index=` (shared or not) skips both the key-scan and
   the load entirely; any planned event missing from that index is skipped
-  per-event inside `replay_one`, with the same skip-reason labels
-  `filter_plan_by_availability` would have produced, so both paths yield
-  byte-identical trades and skip counts.
+  per-event inside `replay_one` instead, so both paths price the identical
+  set of events and yield byte-identical trades. The two paths' `skipped`
+  COUNTS can differ only for a `decided_early` structure's event that is
+  missing more than one of its decision/entry/exit chains at once:
+  `filter_plan_by_availability` always attributes that event to
+  `no_entry_chain` first (checking entry before exit before decision),
+  while `replay_one`'s own per-event check (`_chain_rows`) checks decision
+  before entry before exit — a pre-existing precedence difference between
+  the two, not something this change introduces. A `decided_early`
+  structure's event missing only one chain, and every event of a structure
+  that is not `decided_early`, gets the same skip-reason label either way.
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since
