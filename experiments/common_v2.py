@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Iterable
 
 import pandas as pd
 
@@ -16,7 +17,7 @@ from engine.v2.research import _pricing, experiment_trades
 from engine.v2.research._chains import ChainIndex, load_chain_index
 from engine.v2.research.replay import replay_one
 
-__all__ = ["load_v2_trades", "make_v2_repricer"]
+__all__ = ["load_v2_trades", "make_v2_repricer", "load_v2_chain_quotes"]
 
 
 def load_v2_trades(strategy: str, *, catalog: Path | str, store_root: Path | str,
@@ -111,3 +112,25 @@ def make_v2_repricer(
         return out
 
     return repricer
+
+
+def load_v2_chain_quotes(
+    keys: Iterable[tuple[str, pd.Timestamp]], *,
+    catalog: Path | str, store_root: Path | str, snapshot_id: str,
+) -> ChainIndex:
+    """Raw ``option_chains`` quotes for ``(ticker, obs_date)`` ``keys``, read
+    from one pinned v2 snapshot. Read-only infrastructure for a planned
+    future experiment; it has no caller yet. A pure pass-through with NO new
+    error handling: SNAPSHOT_NOT_FOUND -- unknown ``snapshot_id``
+    (``Repository.resolve``, as in :func:`load_v2_trades`); missing or
+    unavailable keys, an empty ``keys``, or any other read failure raise
+    (or return) whatever ``load_chain_index`` already does. The catalog
+    connection is closed in ``finally`` even when ``load_chain_index``
+    raises."""
+    conn = open_catalog(Path(catalog), clock=SystemClock())
+    try:
+        repository = Repository(conn, ArtifactStore(Path(store_root)))
+        snapshot = repository.resolve(snapshot_id)
+        return load_chain_index(repository, snapshot, set(keys))
+    finally:
+        conn.close()
