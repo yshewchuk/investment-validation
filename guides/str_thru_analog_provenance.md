@@ -19,8 +19,9 @@ selection are unchanged by population selection.
 
 The pinned EXP-147/EXP-184 runner supplies `experiment_trades.PROVENANCE`
 for its native replay input; this compatibility boundary covers only that
-inherited runner — other callers omit the selector, and legacy modules
-never import v2 for the provenance constant.
+inherited runner — other runtime callers omit the selector (tests exercise
+explicit selection directly), and legacy modules never import v2 for the
+provenance constant.
 
 ## Refusals and repeatability
 
