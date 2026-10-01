@@ -10,6 +10,15 @@ Replaces (§4.4): `the data half of dashboard/render.py`, `dashboard/earnings_ap
 
 ## Responsibilities
 
+The [component architecture](ARCHITECTURE.md) defines the boundary with the
+[React app](../../../ui/README.md): serving owns authenticated saved-data/API
+contracts and command transport. Components, layout, navigation and application
+rendering belong in `ui/`. Review must reject new application markup, inline DOM
+scripts or page builders in serving. Serving built static assets is transport,
+not ownership of their presentation. Existing `operations.py` HTML and immutable
+legacy bundle previews remain compatibility exceptions with migration outstanding;
+extending them does not deliver the React application.
+
 - Bounded, paginated reads over saved score records.
 - The financial display values §6.4 moves out of rendering.
 - Immutable release publication, one release per read.
