@@ -35,9 +35,8 @@ from engine.v2.research._chains import (
     ChainIndex,
     filter_plan_by_availability,
     load_chain_index,
-    read_chain_keys,
 )
-from engine.v2.research._plan import SKIP_REASONS, plan_events
+from engine.v2.research._plan import SKIP_REASONS, ReplayPlan, plan_events
 from engine.v2.research._pricing import (
     MIN_MEANINGFUL_COST,
     STRUCTURES,
@@ -59,6 +58,7 @@ __all__ = [
     "ReplayResult",
     "replay_one",
     "replay",
+    "shared_chain_index",
 ]
 
 #: Fill alphas every replayed trade is priced at. Worst / mid / best are the
@@ -317,6 +317,40 @@ class ReplayResult:
         }
 
 
+def _price_plan(
+    structure: Structure,
+    plan: ReplayPlan,
+    index: ChainIndex,
+    *,
+    strategy: str,
+    alphas: Sequence[float],
+    include_legs: bool,
+    progress_every: int,
+    started: float,
+) -> tuple[list[dict], dict]:
+    """Price every row of ``plan.frame`` against ``index``, in order.
+
+    Returns ``(rows, skipped)``: the priced rows (one per alpha per priced
+    event) and ``plan.skipped`` extended with one count per
+    ``replay_one`` skip reason. Pulled out of ``replay()`` to keep it under
+    the function-line budget (pure move, no behavior change).
+    """
+    rows: list[dict] = []
+    skipped = dict(plan.skipped)
+    for i, plan_row in enumerate(plan.frame.to_dict("records")):
+        priced, reason = replay_one(structure, plan_row, index, alphas=alphas,
+                                   include_legs=include_legs)
+        if reason is not None:
+            skipped[reason] = skipped.get(reason, 0) + 1
+        rows.extend(priced)
+        if progress_every and i and i % progress_every == 0:
+            _log(
+                f"{strategy}: {i:,}/{len(plan.frame):,} events, "
+                f"{len(rows):,} rows, {time.time() - started:.0f}s"
+            )
+    return rows, skipped
+
+
 def replay(
     repository,
     snapshot_ref,
@@ -334,9 +368,10 @@ def replay(
     """Plan, load, and price every event for one strategy.
 
     Rewrite of ``engine/replay.py``'s ``replay``: same orchestration body,
-    with ``load_chain_index``/``filter_plan_by_availability``/
-    ``read_chain_keys`` bound to ``(repository, snapshot_ref)`` in place of the
-    legacy store calls.
+    with ``load_chain_index``/``filter_plan_by_availability`` bound to
+    ``(repository, snapshot_ref)`` in place of the legacy store calls; the
+    ``index is None`` path derives availability from the loaded
+    ``ChainIndex``'s own keys instead of a separate ``read_chain_keys`` scan.
     """
     started = time.time()
     if structure is None:
@@ -352,7 +387,8 @@ def replay(
     )
     planned_total = int(len(plan.frame))
     if index is None and len(plan.frame):
-        plan = filter_plan_by_availability(plan, read_chain_keys(repository, snapshot_ref))
+        index = load_chain_index(repository, snapshot_ref, plan.chain_keys)
+        plan = filter_plan_by_availability(plan, set(index.keys))
         _log(f"{strategy}/{variant}: {len(plan.frame):,} events have both chains")
     if plan.frame.empty:
         return ReplayResult(strategy, variant, _empty_trades(), plan.skipped,
@@ -361,19 +397,10 @@ def replay(
     if index is None:
         index = load_chain_index(repository, snapshot_ref, plan.chain_keys)
 
-    rows: list[dict] = []
-    skipped = dict(plan.skipped)
-    for i, plan_row in enumerate(plan.frame.to_dict("records")):
-        priced, reason = replay_one(structure, plan_row, index, alphas=alphas,
-                                   include_legs=include_legs)
-        if reason is not None:
-            skipped[reason] = skipped.get(reason, 0) + 1
-        rows.extend(priced)
-        if progress_every and i and i % progress_every == 0:
-            _log(
-                f"{strategy}: {i:,}/{len(plan.frame):,} events, "
-                f"{len(rows):,} rows, {time.time() - started:.0f}s"
-            )
+    rows, skipped = _price_plan(
+        structure, plan, index, strategy=strategy, alphas=alphas,
+        include_legs=include_legs, progress_every=progress_every, started=started,
+    )
 
     trades = pd.DataFrame(rows) if rows else _empty_trades()
     if len(trades):
@@ -397,6 +424,38 @@ def replay(
         f"in {result.elapsed_s:.0f}s"
     )
     return result
+
+
+def shared_chain_index(
+    repository,
+    snapshot_ref,
+    strategies: Sequence[str],
+    events: pd.DataFrame,
+    *,
+    calendar: TradingCalendar | None = None,
+) -> ChainIndex:
+    """One ``ChainIndex`` covering every one of ``strategies``' planned needs.
+
+    Plans ``events`` once per strategy (the same planning ``replay()`` does
+    internally — cheap, no IO) purely to union their ``chain_keys``, then
+    loads a single ``ChainIndex`` over that union. A caller passes the
+    result as ``replay()``'s ``index=`` for every strategy in the same run
+    (e.g. ``_build_run.run``), so ``option_chains`` is scanned once for the
+    whole run instead of once per strategy.
+
+    Raises the same ``KeyError`` as ``replay()`` for an unknown strategy
+    name. An empty ``strategies`` or an events frame that plans no rows for
+    any strategy returns an empty ``ChainIndex`` (``load_chain_index``'s own
+    empty-input behavior), never a refusal.
+    """
+    calendar = _calendar(calendar, repository, snapshot_ref)
+    keys: set[tuple[str, pd.Timestamp]] = set()
+    for strategy in strategies:
+        if strategy not in STRUCTURES:
+            raise KeyError(f"unknown strategy {strategy!r}; known: {sorted(STRUCTURES)}")
+        plan = plan_events(STRUCTURES[strategy](), events, calendar=calendar)
+        keys |= plan.chain_keys
+    return load_chain_index(repository, snapshot_ref, keys)
 
 
 def _variant_label(structure: Structure) -> str:

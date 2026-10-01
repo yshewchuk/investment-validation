@@ -50,7 +50,10 @@ def run(repository, *, strategies: Sequence[str], years=None,
     snapshot = resolve(repository, scope=scope, snapshot_id=snapshot_id)
     events = filter_events(read_event_rows(repository, snapshot), years=years)
     calendar = _pricing.trading_calendar_from_snapshot(repository, snapshot)
-    results = [replay.replay(repository, snapshot, strategy, events, calendar=calendar)
+    index = replay.shared_chain_index(repository, snapshot, strategies, events,
+                                      calendar=calendar)
+    results = [replay.replay(repository, snapshot, strategy, events, calendar=calendar,
+                             index=index)
                for strategy in strategies]
     engine_rows = to_trades_table(results)
     if len(engine_rows):
