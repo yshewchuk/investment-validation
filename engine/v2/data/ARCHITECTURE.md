@@ -95,10 +95,12 @@ actual pinned manifest and complete relevant fragment membership instead.
 
 Receipt bytes use `ArtifactStore` publication and full-hash verification.
 Source objects retain their existing contract/fragment/object identity chain.
-The operations verifier owns producer/attempt/fence and decision-clock checks;
+Producer/attempt/fence and decision-clock checks belong to operations;
 this layer supplies immutable membership and object reads, with no dependency
 on operations. Reconstructed quote sessions have no per-row availability
 clock or finality receipt, and their synthesized midnight is never substituted.
+The current operations preflight verifies pinned identities and candidate
+receipt bytes, then refuses: no genuine source/finality validator is installed.
 
 | Condition | Admission outcome |
 |---|---|

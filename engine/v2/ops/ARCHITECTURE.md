@@ -693,8 +693,8 @@ events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_ver
 returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
 Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validation covers shape, not strategy or sourcing.
 No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged/key/identity input → `INVALID_REQUEST`; repository failures propagate.
-EOD admission requires an exact pinned session, manifest-bound source/finality receipts and verified coordinator publication/completion at or before the independent decision cutoff.
-Admission checks producer/attempt/fence, receipt/object hashes and complete relevant membership; missing or contradictory proof refuses. Reconstructed midnight/import clocks do not qualify. This documentation-only change supplies no verifier.
+`source_availability.verify_eod_availability(conn, store, repository, snapshot, *, table_name, session_date, decision_at)` validates canonical clocks, exact pinned identity and catalog-bound candidate receipt bytes, then always refuses; no source/finality validator is installed.
+Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone.
 
 ## Inputs
