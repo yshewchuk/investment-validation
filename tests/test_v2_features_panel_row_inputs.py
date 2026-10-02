@@ -411,3 +411,17 @@ def test_16_zero_day_computed_moves_window_returns_empty_not_a_query_error():
     result = scan_panel_row(repo, snapshot, _key(),
                             history_start=_DECISION, decision_session=_DECISION)
     assert result.panel_row["n_prior"] == 0
+
+
+def test_17_zero_day_window_still_validates_missing_computed_moves_table():
+    """The zero-day short-circuit skips only the query, never the validation."""
+    batches = _default_batches()
+    # One in-window daily_market row so the read reaches _read_computed_moves.
+    batches[("daily_market", "AAA")] = _dm_rows("AAA", ["2024-02-14"])
+    snapshot = _snapshot(with_computed=False)
+    repo = _FakeRepository(snapshot, _contracts(), batches)
+    with pytest.raises(DataError) as exc:
+        scan_panel_row(repo, snapshot, _key(),
+                       history_start=_DECISION, decision_session=_DECISION)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"table_name": COMPUTED_MOVES_TABLE_NAME}
