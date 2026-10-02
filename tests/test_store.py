@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import importlib
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -313,7 +312,7 @@ class TestFinalizeDedupe:
         assert removed == 0
         assert store.table_stats("option_chains").rows == len(frame)
 
-    def test_bucket_count_matches_the_default_on_many_small_duplicate_parts(self, store):
+    def test_many_small_duplicate_parts_dedupe_correctly(self, store):
         # 30 tiny batches, each a mix of brand-new rows and repeats of earlier
         # ones with a changed `bid` -- duplicates spread across many parts,
         # the shape the real nightly sees.
