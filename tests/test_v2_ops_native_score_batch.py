@@ -571,6 +571,51 @@ def test_decode_producer_refusals_rejects_wrong_schema_version():
         })
 
 
+def test_decode_producer_refusals_rejects_malformed_item():
+    schema_version = "native_score_batch_producer_refusals.v1.0"
+    for item in (
+        None,
+        {"code": "EVENT_NOT_FOUND", "detail": "x"},
+        {"key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01"},
+         "code": "EVENT_NOT_FOUND", "detail": "x"},
+        {"key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+                 "session": "am"}, "detail": "x"},
+        {"key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+                 "session": "am"}, "code": "EVENT_NOT_FOUND"},
+    ):
+        with pytest.raises(ValueError):
+            _decode_producer_refusals(
+                {"schema_version": schema_version, "refusals": [item]})
+
+
+def test_decode_producer_refusals_rejects_mislabeled_invalid_key_field():
+    doc = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "TEST", "strategy": "STR-THRU",
+                    "event_date": "2026-01-15", "session": "am"},
+            "code": "INVALID_KEY_FIELD", "detail": "x",
+        }],
+    }
+    with pytest.raises(ValueError):
+        _decode_producer_refusals(doc)
+
+
+def test_decode_producer_refusals_truncates_long_detail():
+    doc = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "TEST", "strategy": "STR-THRU",
+                    "event_date": "2026-01-15", "session": "am"},
+            "code": "EVENT_NOT_FOUND", "detail": "x" * 1000,
+        }],
+    }
+    decoded = _decode_producer_refusals(doc)
+    assert len(decoded) == 1
+    assert len(decoded[0].detail) == 500
+    assert decoded[0].detail == ("x" * 1000)[:500]
+
+
 def test_run_native_score_batch_worker_scores_under_no_fit_guard(tmp_path, monkeypatch):
     """CodeRabbit round 5 (PR #66): assert directly that fitting is forbidden
     at the score_batch call site, so a mutation that drops the no_fit_guard

@@ -1350,8 +1350,11 @@ stored receipt, rather than raising a permanent refusal.
 
 Batch-level (raises, no per-row attempt): a malformed `binding`/`events`
 argument, two events sharing one key, an unresolvable release, a
-`request_hash` collision across two different keys, or an invalid
-batch-level `as_of`/`snapshot_id`/`calendar_revision`.
+`request_hash` collision across two different keys, an invalid
+`as_of`/`snapshot_id`/`calendar_revision`, a malformed
+`producer_refusals.json` (bad `schema_version`, non-list `"refusals"`, or a
+missing `key`/`code`/`detail`), or a merged producer refusal keyed to an
+existing record (the same collision check below).
 
 Per row (collected as a refusal, never sinks the batch):
 
@@ -1372,10 +1375,7 @@ The four re-wrapped/malformed codes above always carry a fixed `detail`
 string, never staged input or an exception message (`refusals.json` is a
 published output). The release is resolved once per attempt and reused for
 every row. Assembly is a pure function of its inputs (no clock, no RNG) —
-a newly promoted release genuinely changing the output is by design. A
-merged `producer_refusals.json` refusal (above) keyed to an existing
-record raises that same `ValueError`: `refusals.json` never claims a key
-`records.json` already claims.
+a newly promoted release genuinely changing the output is by design.
 
 ### Native parity (`run_native_parity_worker`, `native_parity_report.py`)
 

@@ -479,6 +479,13 @@ def _keyed_by_board_request(items: Any) -> dict[str, Any]:
     return keyed
 
 
+#: A producer refusal's detail is upstream, pipeline-generated text (the
+#: same trust level as events.json, not external/adversarial input), but
+#: refusals.json is a published artifact -- cap it defensively so one
+#: malformed producer detail can never dump an unbounded blob into it.
+_MAX_PRODUCER_DETAIL_LENGTH = 500
+
+
 def _decode_producer_refusals(doc: Mapping[str, Any]) -> tuple[NativeScoreBatchRowRefusal, ...]:
     """Decode ``producer_refusals.json``'s v1.0 document into the same typed
     per-row refusal shape ``run_native_score_batch_worker``'s own per-row
@@ -499,12 +506,35 @@ def _decode_producer_refusals(doc: Mapping[str, Any]) -> tuple[NativeScoreBatchR
     if not isinstance(items, list):
         raise ValueError("producer_refusals.json's \"refusals\" must be a list")
     decoded = []
-    for item in items:
-        raw_key = item["key"]
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} must be an object")
+        raw_key = item.get("key")
+        if not isinstance(raw_key, Mapping):
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} has no \"key\" object")
+        for field_name in ("ticker", "strategy", "event_date", "session"):
+            if field_name not in raw_key:
+                raise ValueError(
+                    f"producer_refusals.json refusal at index {index} key is "
+                    f"missing {field_name!r}")
+        if "code" not in item:
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} is missing \"code\"")
+        if "detail" not in item:
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} is missing \"detail\"")
         key = BoardRequest(
             ticker=str(raw_key["ticker"]), strategy=str(raw_key["strategy"]),
             event_date=pd.Timestamp(raw_key["event_date"]), session=str(raw_key["session"]))
-        decoded.append(NativeScoreBatchRowRefusal(key, str(item["code"]), str(item["detail"])))
+        code = str(item["code"])
+        if code == "INVALID_KEY_FIELD" and not any(
+                "|" in value for value in (key.ticker, key.strategy, key.session)):
+            raise ValueError(
+                "producer refusal claims INVALID_KEY_FIELD for an encodable key")
+        detail = str(item["detail"])[:_MAX_PRODUCER_DETAIL_LENGTH]
+        decoded.append(NativeScoreBatchRowRefusal(key, code, detail))
     return tuple(decoded)
 
 
@@ -604,7 +634,7 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     )
     producer_refusals_path = root / "producer_refusals.json"
     if producer_refusals_path.exists():
-        producer_doc = json.loads(producer_refusals_path.read_text())
+        producer_doc = json.loads(producer_refusals_path.read_text(encoding="utf-8"))
         refusals = refusals + _decode_producer_refusals(producer_doc)
     fields_by_request = {request_hash(request): inputs
                          for request, inputs in assembled.values()}
