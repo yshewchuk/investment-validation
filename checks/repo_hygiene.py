@@ -376,16 +376,17 @@ def read_worktree_blob(root: Path, rel: str, *, strict: bool = False) -> bytes:
     """Read the worktree file. A read failure is an empty blob by default;
     ``strict=True`` raises ``OSError`` instead, except that a path absent
     from the worktree (a tracked file deleted, not yet staged) stays an
-    empty blob -- that is missing by design, not a read failure."""
+    empty blob -- that is missing by design, not a read failure (a symlink
+    whose target is missing is present, so it still raises)."""
     path = root / rel
     try:
         return path.read_bytes()
-    except FileNotFoundError:
-        return b""
-    except OSError:
-        if strict:
-            raise
-        return b""
+    except OSError as exc:
+        if not strict:
+            return b""
+        if isinstance(exc, FileNotFoundError) and not path.is_symlink():
+            return b""
+        raise
 
 
 # --------------------------------------------------------------------------
