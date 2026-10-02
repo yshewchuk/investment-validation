@@ -1,13 +1,15 @@
-"""Issue #252 — one option_chains scan per strategy, not two.
+"""Issue #252 — narrow availability read and filtered chain-index load.
 
-``replay()``'s availability check now uses ``_chains.read_chain_keys_for``
+``replay()``'s availability check uses ``_chains.read_chain_keys_for``
 (narrowed to the plan's own keys) in place of the legacy whole-table
 ``read_chain_keys``, filtering the plan BEFORE calling ``load_chain_index``
 exactly like the pre-existing code did — so ``load_chain_index`` still only
 ever loads the filtered, surviving set of keys. This test pins that: a
 single-strategy replay never touches the whole-table ``read_chain_keys``,
-calls the narrow ``read_chain_keys_for`` exactly once, and still prices the
-available event while skipping the one missing its exit chain.
+calls the narrow ``read_chain_keys_for`` exactly once, calls
+``load_chain_index`` with exactly the two surviving ``TEST`` keys (not the
+rejected ``MISS`` one), and still prices the available event while
+skipping the one missing its exit chain.
 """
 from __future__ import annotations
 
@@ -52,7 +54,7 @@ def _two_events() -> pd.DataFrame:
     )
 
 
-def test_replay_availability_comes_from_the_chain_index_not_read_chain_keys(
+def test_replay_uses_narrow_availability_read_and_filtered_chain_index_load(
     tmp_path, monkeypatch
 ):
     conn, clock, store = catalog_and_store(tmp_path)
@@ -94,7 +96,10 @@ def test_replay_availability_comes_from_the_chain_index_not_read_chain_keys(
 
     assert len(calls) == 1
     assert len(load_calls) == 1
-    assert all(ticker != "MISS" for ticker, _ in load_calls[0])
+    assert load_calls[0] == {
+        ("TEST", pd.Timestamp("2024-05-02")),
+        ("TEST", pd.Timestamp("2024-05-03")),
+    }
     assert len(result.trades) >= 1
     tickers = set(result.trades["ticker"].astype(str))
     assert "TEST" in tickers
