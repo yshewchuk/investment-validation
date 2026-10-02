@@ -202,10 +202,10 @@ def check(files: dict[str, bytes], readmes: dict[str, str | None]) -> Report:
 def _sources(root: Path, use_worktree: bool) -> tuple[dict[str, bytes], dict[str, str | None]]:
     blobs: dict[str, bytes] = {}
     for rel in tracked_paths(root):
-        blobs[rel] = read_worktree_blob(root, rel)
+        blobs[rel] = read_worktree_blob(root, rel, strict=True)
     if not use_worktree:
         for rel in staged_paths(root):
-            blobs[rel] = read_staged_blob(root, rel)
+            blobs[rel] = read_staged_blob(root, rel, strict=True)
     files = {rel: blob for rel, blob in blobs.items() if rel.endswith(".py")}
     readmes: dict[str, str | None] = {}
     for pkg in PACKAGES:
