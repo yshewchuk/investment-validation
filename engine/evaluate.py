@@ -1457,6 +1457,7 @@ def evaluate(
     *,
     gate: Gate | None = None,
     run_dir: Path | None = None,
+    report_dir: Path | None = None,
     repricer: Callable[[pd.DataFrame, int], pd.DataFrame] | None = None,
     tail_shock: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
     spy_daily: pd.DataFrame | None = None,
@@ -1477,7 +1478,9 @@ def evaluate(
     fill alpha). ``gate`` is the walk-forward selector, if the candidate has
     one. ``run_dir`` attaches the run to an experiment folder — required for
     promotion-eligible results, which is where pre-registration is enforced and
-    the artifacts land. ``repricer`` / ``tail_shock`` unlock the slippage,
+    the artifacts land. ``report_dir`` redirects only the report and its
+    figures (default: ``run_dir``), so several arms evaluated against one
+    experiment folder keep separate reports. ``repricer`` / ``tail_shock`` unlock the slippage,
     stale-date, and tail-injection stresses; without them those stages report
     N/A (tail injection then FAILs the checklist for short-leg specs, which is
     the point).
@@ -1713,7 +1716,8 @@ def evaluate(
         sections = extra_sections(result) if callable(extra_sections) else extra_sections
         report = Report.from_eval(result, input_files=input_files,
                                   extra_sections=sections or ())
-        out_dir = (Path(run_dir) if run_dir is not None else paths.REPORTS / str(spec.get("id")))
+        out_dir = Path(report_dir) if report_dir is not None else (
+            Path(run_dir) if run_dir is not None else paths.REPORTS / str(spec.get("id")))
         result.report_path = report.write(out_dir)
 
     return result

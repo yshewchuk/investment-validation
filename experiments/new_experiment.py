@@ -12,7 +12,9 @@ Creates::
       run.py         # template wired to engine.evaluate
       results/       # run artifacts land here (run_log.jsonl, metrics, cache)
       figures/       # report figures
-      REPORT.md      # written by the evaluation, never by hand
+      REPORT.md      # the primary's report, written by the evaluation, never by hand
+      arms/<hash>/   # each grid cell's own REPORT.md + figures/ (secondary)
+      ARMS.md        # written by run.py: names the primary, links every arm
 
 and appends the PLANNED row to ``experiments/LEDGER.csv``.
 
@@ -77,7 +79,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from engine.evaluate import evaluate  # noqa: E402
 from experiments import lib  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -99,24 +100,10 @@ def main() -> None:
     spec = lib.load_spec(HERE / "spec.yaml")
     trades = build_trades()
 
-    # Grid: the primary spec runs first and is the headline; each grid cell
-    # then runs as a secondary spec (its own ledger row, labeled in the
-    # report appendix).
-    result = evaluate(spec, trades, run_dir=HERE)
-    lib.record_evaluation(HERE, spec, result.results)
-
-    grid = spec.get("grid") or {{}}
-    for key, values in grid.items():
-        for value in values:
-            cell = dict(spec)
-            cell["primary_spec"] = dict(spec["primary_spec"])
-            cell["primary_spec"][key] = value
-            # Grid cells legitimately differ from the registered primary spec;
-            # the label exempts them from the spec-hash continuity check —
-            # they are secondary results, never the headline.
-            cell["grid_cell"] = True
-            cell_result = evaluate(cell, trades, run_dir=HERE)
-            lib.record_evaluation(HERE, cell, cell_result.results)
+    # The primary spec runs first and keeps REPORT.md; each grid cell then
+    # runs as a secondary arm with its own report/figure directory under
+    # arms/ (its own ledger row too). ARMS.md indexes them all.
+    result = lib.evaluate_with_grid(spec, trades, HERE)
 
     print(f"report: {{result.report_path}}")
 

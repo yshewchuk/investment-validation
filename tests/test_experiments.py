@@ -7,6 +7,7 @@ stamp and the EXP-101 floor that keeps the 0-50 range reserved.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -466,3 +467,87 @@ class TestScaffoldQuotesTheStrategy:
                           exp_id="EXP-902", strategy="CND-P", root=tmp_path,
                           ledger_path=tmp_path / "LEDGER.csv")
         assert lib.load_spec(folder / "spec.yaml")["strategy"] == "CND-P"
+
+
+class TestGridArmsKeepSeparateReports:
+    """#167: secondary grid cells must not overwrite the primary's REPORT.md."""
+
+    SPEC = {
+        "id": "EXP-903", "title": "grid probe", "primary_spec": {"x": 1},
+        "grid": {"x": [2, 3]}, "walk_forward": {"min_train_years": 1},
+        "preregistered_at": "2020-01-01T00:00:00+00:00",
+    }
+
+    def _trades(self):
+        from tests.test_evaluate import make_trades
+
+        rng = np.random.default_rng(4)
+        return make_trades(rng.normal(0.01, 0.1, 60), alphas=(0.0, 0.5, 1.0))
+
+    def _run(self, run_dir, spec, tmp_path):
+        return lib.evaluate_with_grid(spec, self._trades(), run_dir,
+                                      ledger_path=tmp_path / "LEDGER.csv",
+                                      mc_paths=30, stress=False)
+
+    def test_primary_report_survives_the_secondary_arms(self, tmp_path, monkeypatch):
+        import engine.evaluate as ev
+
+        run_dir = tmp_path / "grid"
+        before = {}
+        real = ev.evaluate
+
+        def spy(spec, trades, **kw):
+            # Snapshot the primary's artifacts as each secondary starts.
+            if spec.get("grid_cell") and not before:
+                before.update({p.relative_to(run_dir): p.read_bytes()
+                               for p in [run_dir / "REPORT.md",
+                                         *(run_dir / "figures").iterdir()]})
+            return real(spec, trades, **kw)
+
+        monkeypatch.setattr(ev, "evaluate", spy)
+        result = self._run(run_dir, self.SPEC, tmp_path)
+
+        assert before and any(k.parts[0] == "figures" for k in before)
+        assert result.report_path == run_dir / "REPORT.md"
+        for rel, content in before.items():
+            assert (run_dir / rel).read_bytes() == content
+
+        arms = sorted((run_dir / "arms").iterdir())
+        assert len(arms) == 2
+        for arm in arms:
+            assert (arm / "REPORT.md").exists()
+            assert (arm / "figures").is_dir()
+
+        index = (run_dir / "ARMS.md").read_text()
+        assert "**primary**" in index and "(REPORT.md)" in index
+        assert index.count("**secondary**") == 2
+        for arm in arms:
+            assert f"(arms/{arm.name}/REPORT.md)" in index
+
+    def test_a_failed_arm_leaves_no_stale_index(self, tmp_path, monkeypatch):
+        import engine.evaluate as ev
+
+        run_dir = tmp_path / "grid"
+        self._run(run_dir, self.SPEC, tmp_path)
+        assert (run_dir / "ARMS.md").exists()
+
+        real = ev.evaluate
+
+        def boom(spec, trades, **kw):
+            if spec.get("grid_cell"):
+                raise RuntimeError("arm failed")
+            return real(spec, trades, **kw)
+
+        monkeypatch.setattr(ev, "evaluate", boom)
+        with pytest.raises(RuntimeError, match="arm failed"):
+            self._run(run_dir, self.SPEC, tmp_path)
+        assert not (run_dir / "ARMS.md").exists()
+
+    def test_a_caller_report_dir_is_refused_before_anything_is_written(self, tmp_path):
+        run_dir = tmp_path / "grid"
+        with pytest.raises(ValueError, match="report_dir"):
+            lib.evaluate_with_grid(self.SPEC, self._trades(), run_dir,
+                                   ledger_path=tmp_path / "LEDGER.csv",
+                                   report_dir=tmp_path / "elsewhere")
+        assert not run_dir.exists()
+        assert not (tmp_path / "LEDGER.csv").exists()
