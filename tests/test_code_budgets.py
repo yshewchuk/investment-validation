@@ -259,3 +259,98 @@ def test_install_refuses_to_clobber_an_unrecognized_hook(tmp_path):
     assert result["written"] is False
     assert "force" in result["reason"]
     assert install_hooks.install(tmp_path, force=True)["written"] is True
+
+
+# --------------------------------------------------------------------------
+# a read failure is a check error, never an empty file (#182)
+# --------------------------------------------------------------------------
+
+
+def _tracked_repo(tmp_path: Path, rel: str) -> Path:
+    repo = tmp_path / "repo"
+    (repo / rel).parent.mkdir(parents=True)
+    (repo / rel).write_text("x = 1\n")
+    for args in (["init", "-q"], ["add", rel]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    return repo
+
+
+def _unreadable(monkeypatch, name: str) -> None:
+    real = Path.read_bytes
+
+    def read_bytes(self):
+        if self.name == name:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_strict_worktree_read_raises_on_failure_but_not_on_missing(tmp_path, monkeypatch):
+    from checks.repo_hygiene import read_worktree_blob
+
+    repo = _tracked_repo(tmp_path, "engine/v2/m.py")
+    _unreadable(monkeypatch, "m.py")
+    assert read_worktree_blob(repo, "engine/v2/m.py") == b""
+    with pytest.raises(PermissionError):
+        read_worktree_blob(repo, "engine/v2/m.py", strict=True)
+    assert read_worktree_blob(repo, "engine/v2/gone.py", strict=True) == b""
+    monkeypatch.undo()
+    (repo / "engine/v2/m.py").unlink()
+    assert read_worktree_blob(repo, "engine/v2/m.py", strict=True) == b""
+
+
+def test_strict_worktree_read_raises_on_dangling_symlink(tmp_path):
+    from checks.repo_hygiene import read_worktree_blob
+
+    repo = _tracked_repo(tmp_path, "engine/v2/m.py")
+    (repo / "engine/v2/link.py").symlink_to("missing_target.py")
+    assert read_worktree_blob(repo, "engine/v2/link.py") == b""
+    with pytest.raises(FileNotFoundError):
+        read_worktree_blob(repo, "engine/v2/link.py", strict=True)
+
+
+def test_package_readmes_staged_overlay_skips_the_replaced_worktree_read(tmp_path, monkeypatch):
+    repo = _tracked_repo(tmp_path, "engine/v2/m.py")
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "init"], check=True, capture_output=True)
+    (repo / "engine/v2/m.py").write_text("x = 2\n")
+    subprocess.run(["git", "-C", str(repo), "add", "engine/v2/m.py"],
+                   check=True, capture_output=True)
+    _unreadable(monkeypatch, "m.py")
+    files, _ = pr._sources(repo, use_worktree=False)
+    assert files["engine/v2/m.py"] == b"x = 2\n"
+    with pytest.raises(PermissionError):
+        pr._sources(repo, use_worktree=True)
+
+
+def test_strict_read_of_unreadable_architecture_doc_raises(tmp_path, monkeypatch):
+    from checks.repo_hygiene import read_worktree_blob
+
+    repo = _tracked_repo(tmp_path, "engine/v2/ARCHITECTURE.md")
+    _unreadable(monkeypatch, "ARCHITECTURE.md")
+    with pytest.raises(PermissionError):
+        read_worktree_blob(repo, "engine/v2/ARCHITECTURE.md", strict=True)
+
+
+def test_strict_staged_read_raises_on_failure(tmp_path):
+    from checks.repo_hygiene import read_staged_blob
+
+    repo = _tracked_repo(tmp_path, "engine/v2/m.py")
+    assert read_staged_blob(repo, "engine/v2/nope.py") == b""
+    with pytest.raises(subprocess.CalledProcessError):
+        read_staged_blob(repo, "engine/v2/nope.py", strict=True)
+
+
+def test_code_budgets_read_failure_fails_the_check(tmp_path, monkeypatch):
+    repo = _tracked_repo(tmp_path, "engine/v2/m.py")
+    _unreadable(monkeypatch, "m.py")
+    with pytest.raises(PermissionError):
+        cb.main(["--repo-root", str(repo), "--all"])
+
+
+def test_package_readmes_read_failure_fails_the_check(tmp_path, monkeypatch):
+    repo = _tracked_repo(tmp_path, "engine/v2/m.py")
+    _unreadable(monkeypatch, "m.py")
+    with pytest.raises(PermissionError):
+        pr.main(["--repo-root", str(repo), "--all"])

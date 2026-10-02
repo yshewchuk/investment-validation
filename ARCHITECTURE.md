@@ -286,6 +286,10 @@ claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence. A change that adds a new public name
 or a new consumer must update that package's README in the same change.
 
+The README and code-budget checks read files strictly: a file that cannot be
+read fails the check with the read error rather than scoring as an empty file.
+Only a tracked path absent from the worktree reads as empty.
+
 ## 4. Production entrypoints and the job graph
 
 - **Legacy nightly — `engine.dashboard.nightly`.** The board in production
