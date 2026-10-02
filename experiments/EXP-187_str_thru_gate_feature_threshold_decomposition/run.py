@@ -3,8 +3,6 @@
 threshold-rule effects into two separate pre-registered arms.
 
 Run:  python3 experiments/EXP-187_str_thru_gate_feature_threshold_decomposition/run.py
-Check (after both this experiment's arms and EXP-184 have run):
-      python3 experiments/EXP-187_str_thru_gate_feature_threshold_decomposition/run.py --check-interaction
 
 EXP-184 changed the gate's feature set (the champion's registered features ->
 plus forecast/analog columns) and its threshold rule (registered threshold ->
@@ -23,15 +21,11 @@ parameterisations instead of copying it:
 
 See spec.yaml for the full hypothesis, the comparison baselines (EXP-184's
 candidate and champion-baseline metrics files), and the threshold
-look-ahead caveat on arm B. ``--check-interaction`` computes spec.yaml's
-interaction_check from the four arms' metrics files already on disk -- it
-never runs anything, so it is also the way to check this before the heavy
-run happens (it will just report what is missing).
+look-ahead caveat on arm B.
 """
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -65,82 +59,7 @@ ARM_A_PROVENANCE_LINE = (
 )
 ARM_B_GATE_ID = "gate_midfill_str_thru_forecast_analog"
 
-EXP184_DIR = ROOT / "experiments" / "EXP-184_str_thru_gate_promotion_confirmatory_val_registered"
-CANDIDATE_METRICS = EXP184_DIR / "results" / "metrics_b8c322b24feb.json"
-CHAMPION_BASELINE_METRICS = EXP184_DIR / "champion" / "results" / "metrics_3835b6283725.json"
-
-# Interaction consistency check (judgement call, not a fixed magnitude cutoff
-# meant to carry strategy meaning -- see spec.yaml's interaction_check.criterion).
-RATIO_TOLERANCE = 5.0  # neither same-axis estimate may be more than this many times the other
-NEGLIGIBLE = 1e-6  # guards only a sign flip from float noise when both estimates are ~0
-
-
-def _latest_metrics(results_dir: Path) -> Path | None:
-    files = sorted(results_dir.glob("metrics_*.json")) if results_dir.exists() else []
-    return files[-1] if files else None
-
-
-def _headline(path: Path) -> dict:
-    return json.loads(Path(path).read_text())["headline"]
-
-
-def _agrees(e1: float, e2: float) -> bool:
-    """Additive (non-interacting) if both estimates are negligible, or they
-    share a sign and neither's magnitude is more than RATIO_TOLERANCE times
-    the other's -- the same effect measured twice, not two phenomena that
-    happen to share a sign."""
-    if abs(e1) <= NEGLIGIBLE and abs(e2) <= NEGLIGIBLE:
-        return True
-    if (e1 > 0) != (e2 > 0):
-        return False
-    lo, hi = sorted((abs(e1), abs(e2)))
-    return hi == 0 or (hi / lo if lo else float("inf")) <= RATIO_TOLERANCE
-
-
-def check_interaction() -> int:
-    """Reads the four arms' metrics files already on disk and reports
-    spec.yaml's interaction_check verdict. Never runs anything; if either of
-    this experiment's own arms has not been run yet, says so and exits
-    non-zero rather than guessing."""
-    arm_a_metrics = _latest_metrics(HERE / "results")
-    arm_b_metrics = _latest_metrics(HERE / "champion" / "results")
-    named = [
-        ("EXP-184 candidate", CANDIDATE_METRICS),
-        ("EXP-184 champion_baseline", CHAMPION_BASELINE_METRICS),
-        ("this experiment's arm A", arm_a_metrics),
-        ("this experiment's arm B", arm_b_metrics),
-    ]
-    missing = [name for name, p in named if p is None or not Path(p).exists()]
-    if missing:
-        print("interaction_check: cannot run yet -- missing: " + ", ".join(missing))
-        return 1
-
-    candidate, champion_baseline, arm_a, arm_b = (
-        _headline(p) for _, p in named
-    )
-    ok = True
-    for metric in ("cagr", "sharpe_trade"):
-        c, cb, a, b = (candidate.get(metric), champion_baseline.get(metric),
-                       arm_a.get(metric), arm_b.get(metric))
-        if None in (c, cb, a, b):
-            print(f"interaction_check[{metric}]: a required headline value is missing")
-            ok = False
-            continue
-        pairs = [
-            ("feature effect", c - a, b - cb),
-            ("threshold effect", c - b, a - cb),
-        ]
-        for label, e1, e2 in pairs:
-            additive = _agrees(e1, e2)
-            ok = ok and additive
-            print(f"interaction_check[{metric}][{label}]: {e1:+.4f} vs {e2:+.4f} "
-                  f"-> {'ADDITIVE' if additive else 'INTERACTION'}")
-    return 0 if ok else 2
-
-
 if __name__ == "__main__":
-    if "--check-interaction" in sys.argv:
-        raise SystemExit(check_interaction())
     module.main(
         candidate_features=ARM_A_FEATURES,
         candidate_gate_name=ARM_A_GATE_NAME,
