@@ -388,3 +388,26 @@ def test_15_null_spy_spot_raises_contract_mismatch():
     with pytest.raises(DataError) as exc:
         _scan(batches=batches)
     assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def test_16_zero_day_computed_moves_window_returns_empty_not_a_query_error():
+    """``history_start == min(event_date, decision)`` means a zero-row window.
+
+    ``_window`` only requires ``history_start <= decision_session``, so a caller
+    may pass them equal; with ``_DECISION < _EVENT`` that makes
+    ``_read_computed_moves``'s ``start_inclusive == end_exclusive``. The real
+    repository's ``DataQuery`` validation (``documents._check_time_interval``,
+    reached through ``Repository.scan`` -> ``decode_document``) rejects equal
+    bounds with TIME_BOUNDS_OUT_OF_ORDER, but the in-memory ``_FakeRepository``
+    skips encode/decode validation and so cannot reproduce that. This pins the
+    scan_panel_row-level contract -- an empty history, never a raise -- for that
+    zero-day window. The default ``daily_market`` rows (02-04/02-05) would fall
+    outside a 02-14 start and trip daily_state_inputs' own window check first,
+    so one in-window row is supplied to reach the computed_moves read."""
+    batches = _default_batches()
+    batches[("daily_market", "AAA")] = _dm_rows("AAA", ["2024-02-14"])
+    snapshot = _snapshot()
+    repo = _FakeRepository(snapshot, _contracts(), batches)
+    result = scan_panel_row(repo, snapshot, _key(),
+                            history_start=_DECISION, decision_session=_DECISION)
+    assert result.panel_row["n_prior"] == 0

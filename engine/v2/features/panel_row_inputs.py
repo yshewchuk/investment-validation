@@ -129,6 +129,10 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
                          ) -> list[dict[str, object]]:
     """``key.ticker``'s computed_moves rows strictly before the scored event and
     the decision session, whichever of the two is earlier."""
+    start = history_start.date().isoformat()
+    end = min(key.event_date, decision).date().isoformat()
+    if start == end:
+        return []
     contract = data_repository.table_contract(snapshot, _COMPUTED_MOVES_TABLE)
     version = _pinned_version(snapshot, _COMPUTED_MOVES_TABLE)
     query = DataQuery(
@@ -138,8 +142,8 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         key_filter=(KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),),
         time_interval=TimeInterval(
             column="event_date",
-            start_inclusive=history_start.date().isoformat(),
-            end_exclusive=min(key.event_date, decision).date().isoformat(),
+            start_inclusive=start,
+            end_exclusive=end,
         ),
         order_by=tuple(contract.primary_key),
         max_batch_rows=min(contract.maximum_batch_rows, _BATCH_LIMIT),
