@@ -13,10 +13,10 @@ The [README](README.md) lists the checked exports. By module:
   `python3 -m engine.v2.serving.api`.
 - `projections`: `connect`, `ensure_schema`, `resolve_event_refs`, `build_candidate`,
   `get_release`, `list_events`, `event_scores`, `get_event`, `get_score_detail`,
-  `event_query_hash`, `projection_binding`, `verify_projection_binding`.
+  `event_query_hash`.
 - `bridge.build_bridges`; `legacy_bundle.load_legacy_bundle` / `load_score_document`.
-- Read-only documents served by `operations`: `analog_projection`,
-  `derivation_projection`, `native_parity_projection.native_parity_summary`.
+- Read-only documents served by `operations`: `analog_projection.analog_document`,
+  `derivation_projection.derivation_document`, `native_parity_projection.native_parity_summary`.
 - Row builders: `native_render.native_display_row`,
   `native_shadow_render.shadow_serving_row_source`, `score_projection.legacy_score_projection`.
 
@@ -36,10 +36,13 @@ Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.de
 `native_shadow_render` also import `scoring` for offline row building; no HTTP path does.
 Never imports `engine.v2.ops` (equal-layer peer) or legacy `engine.*`: ops-side pointers,
 reports and transaction/migration patterns are read as inert JSON or reimplemented.
-Callers: `engine/v2/dashboard` (`operations.create_server`; layer 8 imports layer 7 only);
-offline tools `v2_dashboard_project` (projections, legacy bundle, shadow render),
-`v2_dashboard_verified_input` (legacy bundle) and `v2_route_probe` (`route_table`); the
-React client calls the HTTP API. Offline tools compose publication with ops.
+Production entrypoints: `python3 -m engine.v2.serving.api` (`api.main` -> `create_app`);
+dashboard `preview.run` -> `_server.build_server` -> `operations.create_server` (layer 8
+imports layer 7 only); the React client calls the HTTP API. Offline `tools/`:
+`v2_dashboard_project` builds a candidate from the serving loaders, projections and shadow
+row source and emits a projection binding for the ops publisher (it does not publish);
+`v2_dashboard_verified_input` builds a source-verified `PreviewInput` from a delivered
+release (ops catalog plus `load_legacy_bundle`); `v2_route_probe` probes `route_table`.
 Serving requests do not execute provider ingestion, fitting, scoring or financial simulation
 inline. Configured action callbacks may enqueue refresh or what-if jobs for asynchronous execution.
 
