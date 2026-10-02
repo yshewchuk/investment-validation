@@ -139,7 +139,12 @@ cutoff, not just the event-date one, so a `decision_session` earlier than
 `key.event_date` can never see a row the real nightly timeline would not
 yet have, feeding `panel_math`; rows with `skipped=true`
 carry no `realized_move_pct` and are excluded from that feed, never treated
-as a zero move); a new bounded
+as a zero move; the bound is on data dates only — `event_date` — never on
+`computed_at`, the row's own calculation timestamp: a backfilled or
+corrected row legitimately carries a `computed_at` after its `event_date`
+(and, for an old enough `event_date`, after `decision_session` too), so
+filtering on it would discard genuine prior history, not future-leak it);
+a new bounded
 `daily_market` read for the fixed ticker `"SPY"` (feeding `regime`, not
 reused from `scan_daily_state_inputs` — a different, derived shape);
 `price_history_query.get_price_series`, as of `decision_session` — its
