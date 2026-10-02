@@ -9,12 +9,20 @@ compared arms. This re-runs ONLY that configuration through the harness under
 its own pre-registration, so a promotion decision cites a clean single
 hypothesis test rather than the winner of a 7-way search. Pre-registration
 lives in spec.yaml; engine.evaluate enforces it.
+
+``main()`` takes optional keyword overrides so other experiments (e.g.
+EXP-187) can reuse this runner with a different candidate feature set and/or
+a different registered champion to compare against, without copying the
+file. Called with no arguments (as EXP-184's wrapper does), behaviour is
+BYTE-FOR-BYTE unchanged: the candidate is gate_forecast_analog's full
+feature set and the champion comparator is gate_midfill_str_thru.
 """
 from __future__ import annotations
 
 import copy
 import sys
 from pathlib import Path
+from typing import Sequence
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -31,7 +39,14 @@ V2_CATALOG = paths.ROOT / "private" / "ops" / "catalog.sqlite"
 V2_STORE_ROOT = paths.ROOT / "private" / "ops"
 
 
-def main() -> None:
+def main(
+    *,
+    candidate_features: Sequence[str] | None = None,
+    candidate_gate_name: str | None = None,
+    candidate_feature_line: str | None = None,
+    candidate_provenance_line: str | None = None,
+    champion_gate_id: str = "gate_midfill_str_thru",
+) -> None:
     import argparse
 
     parser = argparse.ArgumentParser()
@@ -56,8 +71,21 @@ def main() -> None:
     print(f"[{spec['id']}] dataset: {len(dataset):,} rows, "
           f"{len(ga.FEATURES)} features", flush=True)
 
+    features = list(candidate_features) if candidate_features is not None else list(ga.FEATURES)
+    gate_name = candidate_gate_name or (ga.STRATEGY + "_forecast_analog")
+    feature_line = candidate_feature_line or (
+        f"engine.models.training.gate_forecast_analog: {len(ga.FEATURES)} "
+        f"features — the incumbent's registered 41 plus "
+        f"{', '.join(ga.EXTRA_FEATURES)}."
+    )
+    provenance_line = candidate_provenance_line or (
+        "Live serving verified byte-identical to this training data's "
+        "forecast column and to the board's own analog layer before "
+        "this experiment ran — see engine/score.py "
+        "Scorer._forecast_for_gate / _gate_feature_frame."
+    )
     gate, gate_state = common.make_trained_gate(
-        ga.STRATEGY + "_forecast_analog", dataset, list(ga.FEATURES),
+        gate_name, dataset, features,
         top_fraction=ga.TOP_FRACTION,
     )
     spy = common.load_spy_daily()
@@ -71,17 +99,12 @@ def main() -> None:
             {
                 "title": "Gate construction (promotion candidate)",
                 "body": [
-                    f"engine.models.training.gate_forecast_analog: {len(ga.FEATURES)} "
-                    f"features — the incumbent's registered 41 plus "
-                    f"{', '.join(ga.EXTRA_FEATURES)}.",
+                    feature_line,
                     "No stored threshold: each walk-forward fold chose its own "
                     f"top-{ga.TOP_FRACTION:.0%} quantile on that fold's training "
                     "predictions (experiments.common.make_trained_gate).",
                     f"Fold interactions recorded: {len(gate_state.stats)}.",
-                    "Live serving verified byte-identical to this training data's "
-                    "forecast column and to the board's own analog layer before "
-                    "this experiment ran — see engine/score.py "
-                    "Scorer._forecast_for_gate / _gate_feature_frame.",
+                    provenance_line,
                 ],
             },
             {
@@ -107,22 +130,22 @@ def main() -> None:
           f"sharpe_trade={result.results['headline'].get('sharpe_trade')}",
           flush=True)
 
-    # Champion re-evaluation: a promotion decision needs gate_midfill_str_thru
-    # scored on the SAME v2 snapshot, trades, repricer, walk-forward and MC
-    # settings as the candidate above -- not the stored EXP-145 metrics, which
-    # were computed on the pre-v2 legacy trades universe and are not a valid
-    # comparison once the candidate runs on a different trades universe.
+    # Champion re-evaluation: a promotion decision needs the named champion
+    # comparator scored on the SAME v2 snapshot, trades, repricer, walk-forward
+    # and MC settings as the candidate above -- not the stored EXP-145 metrics,
+    # which were computed on the pre-v2 legacy trades universe and are not a
+    # valid comparison once the candidate runs on a different trades universe.
     # common.make_registered_gate applies the registry's own stored threshold,
     # refit per fold, exactly like EXP-145's arm1_incumbent_model.
     champion_gate, champion_state = common.make_registered_gate(
-        STRATEGY, dataset, gate_id="gate_midfill_str_thru",
+        STRATEGY, dataset, gate_id=champion_gate_id,
     )
 
     def champion_extra_sections(result):
         return [{
             "title": "Champion re-evaluation (same v2 snapshot)",
             "body": [
-                "engine.models.training.gate (registered gate_midfill_str_thru), "
+                f"engine.models.training.gate (registered {champion_gate_id}), "
                 "refit per fold with the registry's stored threshold "
                 "(experiments.common.make_registered_gate), evaluated on the "
                 f"identical v2 snapshot {v2_snapshot_id!r}, trades, repricer, "
@@ -132,7 +155,7 @@ def main() -> None:
         }]
 
     champion_spec = copy.deepcopy(spec)
-    champion_spec["title"] = f"{spec['title']} — champion re-evaluation (gate_midfill_str_thru)"
+    champion_spec["title"] = f"{spec['title']} — champion re-evaluation ({champion_gate_id})"
     # Legitimately differs from the PLANNED row's hash (different gate, same
     # trades/harness/settings) -- grid_cell=True is the harness's own exemption
     # for exactly this, the same pattern EXP-145's run_arm() uses per arm.
