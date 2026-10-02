@@ -691,13 +691,12 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 
 **Cutover PR-6 (not yet implemented — design and code-slice split in the
 PR body, not restated here).** `_reconcile_native_score_batch_shadow`
-will stage each admitted `board_requests()` key's `calendar_row`/
+will build every admitted `board_requests()` key's `calendar_row`/
 `panel_row`/`panel_anchor` (panel-row staging: `engine/v2/features/
-ARCHITECTURE.md`) and `quote_rows` itself, one build per `(ticker,
-event_date, session)` triple reused across its strategy variants;
-`tier4_row` stays `{}` (every key is a forward event,
-`../scoring/ARCHITECTURE.md` "Inputs"). Open prerequisites it must
-resolve or safely defer: `source_availability.verify_eod_availability`
+ARCHITECTURE.md`) and `quote_rows`; `tier4_row` stays `{}` (every key is
+a forward event, `../scoring/ARCHITECTURE.md` "Inputs"). Open
+prerequisites it must resolve or safely defer:
+`source_availability.verify_eod_availability`
 ([#260](https://github.com/yshewchuk/investment-validation/issues/260))
 and intraday `event_date` admission
 ([#243](https://github.com/yshewchuk/investment-validation/issues/243)).

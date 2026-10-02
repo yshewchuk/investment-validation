@@ -119,35 +119,18 @@ before `NightlyEventInputs` assembly.
 `scan_panel_row(repository, snapshot, key, *, decision_session,
 history_start)` is the raw-row producer's one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
-pair. It performs four reads off the pinned snapshot, each through
-`Repository` like `nightly_raw_rows`'s own reads: the daily-state
-boundary above (`scan_daily_state_inputs` for `key.ticker`); `ticker`'s
-own `computed_moves` rows strictly before `key.event_date` (the scored
-event, never `decision_session`, which can be later)
-(`realized_move_pct`/`implied_move_pct`, ordered by `event_date`) to
-build `panel_math.history_features`'s `prior_moves`/`prior_abs` and feed
-`advance_history`/`add_implied_history`; a new, separate bounded
-`daily_market` scan for the fixed ticker `"SPY"` returning its raw
-`date`/`close` columns directly (never `scan_daily_state_inputs`, whose
-`DailyStateInputs` result is derived/lagged values, not the chronological
-`date`/`close` DataFrame `regime.add_regime_features`'s `market` argument
-requires) — this scan does not exist yet and is this slice's own new
-code, shaped like `nightly_raw_rows`'s own `DataQuery`/`KeyPredicate`
-reads; and, for `STR-RUNUP` only, `price_history_query.get_price_series` (a
-`PriceQuery` with both `session_date` and `observation_ceiling` set to
-`decision_session`, one read per ticker) for `runup_math.
-add_runup_features`'s `prices_by_ticker` — its own `date <= session_date`
-filter, applied after the as-of vintage selection, is what keeps a
-same-or-earlier-dated row from ever being a *future* one. `scan_panel_row`
-converts the returned `tuple[PriceSeriesRow, ...]` into
-`add_runup_features`'s one-ticker DataFrame itself (`date`/`close_adj`
-columns, in the tuple's existing date order — no re-sort, no join); the
-source date of whichever row that leaves sets `runup_asof`. `panel_anchor`
-is the
-loosest of every contributing call's own source date (`source_session`,
-`regime_asof`, `runup_asof` when staged), never a caller-asserted value.
-It never assigns `tier4_row` or `quote_rows` — those stay the raw-row
-producer's own job (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6").
+pair; `panel_anchor` is the loosest of its contributing reads' own source
+dates, never a caller-asserted value. It never assigns `tier4_row` or
+`quote_rows` — those stay the raw-row producer's own job
+(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). Its pinned-snapshot
+dependencies: `scan_daily_state_inputs` (`key.ticker`); `computed_moves`
+(`key.ticker`, feeding `panel_math`); a new bounded `daily_market` read
+for the fixed ticker `"SPY"` (feeding `regime`, not reused from
+`scan_daily_state_inputs` — a different, derived shape); and, for
+`STR-RUNUP` only, `price_history_query.get_price_series`. Read
+sequencing, the `PriceQuery` construction and the
+`PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
+contract — see the PR body.
 
 | Condition (R1-R6) | Outcome |
 |---|---|
