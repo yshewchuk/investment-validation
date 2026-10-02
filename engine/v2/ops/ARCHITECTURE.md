@@ -689,28 +689,18 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone.
 
-**Cutover PR-6 (design — raw-row producer; code-slice split in the PR
-body).** `_reconcile_native_score_batch_shadow` stages each admitted
-`board_requests()` key's `calendar_row`/`panel_row`/`panel_anchor`
-(panel-row staging: `engine/v2/features/ARCHITECTURE.md`) and
-`quote_rows` itself, reusing one build per `(ticker, event_date, session)`
-triple across its sharing strategy variants; `tier4_row` is always `{}`
-(every key is a forward event, `../scoring/ARCHITECTURE.md` "Inputs").
-`quote_rows` are read off the pinned snapshot's `option_chains` table
-directly, never through `source_availability.verify_eod_availability`
-(permanently refusing until
-[#260](https://github.com/yshewchuk/investment-validation/issues/260)
-lands) — the shadow/smoke-only, staged-only effects (above) keep this
-un-admitted use off the legacy board, deferring #260 safely here but not
-resolving it; #260 stays REQUIRED before any affirmative EOD admission
-elsewhere. A non-midnight `event_date`
-([#243](https://github.com/yshewchuk/investment-validation/issues/243))
-and any other per-key gap becomes a named refusal, never a batch abort or
-a silent drop; a repository/table-contract-level break still fails the
-whole attempt, and an empty window submits an empty batch. No cache
-beyond the committed artifacts; no producer-internal retry (a failed
-attempt retries whole); no partial write (one artifact write per file);
-the same snapshot/`as_of` always rebuild the same `events.json` (R1-R6).
+**Cutover PR-6 (not yet implemented — design and code-slice split in the
+PR body, not restated here).** `_reconcile_native_score_batch_shadow`
+will stage each admitted `board_requests()` key's `calendar_row`/
+`panel_row`/`panel_anchor` (panel-row staging: `engine/v2/features/
+ARCHITECTURE.md`) and `quote_rows` itself, one build per `(ticker,
+event_date, session)` triple reused across its strategy variants;
+`tier4_row` stays `{}` (every key is a forward event,
+`../scoring/ARCHITECTURE.md` "Inputs"). Open prerequisites it must
+resolve or safely defer: `source_availability.verify_eod_availability`
+([#260](https://github.com/yshewchuk/investment-validation/issues/260))
+and intraday `event_date` admission
+([#243](https://github.com/yshewchuk/investment-validation/issues/243)).
 
 ## Inputs
 
@@ -1403,7 +1393,7 @@ job.
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
-| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request raises `VALIDATION_FAILED` today (the raw-row producer is not built) — "Cutover PR-6" above designs the real build: a per-key gap becomes that key's named refusal, a repository/contract-level break still raises `VALIDATION_FAILED` | the specific succeeded score job read, not session alone |
+| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request raises `VALIDATION_FAILED` today (the raw-row producer, "Cutover PR-6" above, is not built) | the specific succeeded score job read, not session alone |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | design only, not yet implemented — see [#192](https://github.com/yshewchuk/investment-validation/issues/192) | — |

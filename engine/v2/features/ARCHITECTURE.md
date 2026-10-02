@@ -119,20 +119,25 @@ before `NightlyEventInputs` assembly.
 `scan_panel_row(repository, snapshot, key, *, decision_session,
 history_start)` is the raw-row producer's one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
-pair. It performs three reads off the pinned snapshot, each through
+pair. It performs four reads off the pinned snapshot, each through
 `Repository` like `nightly_raw_rows`'s own reads: the daily-state
 boundary above (`scan_daily_state_inputs` for `key.ticker`); `ticker`'s
-own `computed_moves` rows strictly before `decision_session`
+own `computed_moves` rows strictly before `key.event_date` (the scored
+event, never `decision_session`, which can be later)
 (`realized_move_pct`/`implied_move_pct`, ordered by `event_date`) to
 build `panel_math.history_features`'s `prior_moves`/`prior_abs` and feed
-`advance_history`/`add_implied_history`; and `daily_market` for the fixed
+`advance_history`/`add_implied_history`; `daily_market` for the fixed
 ticker `"SPY"` as `regime.add_regime_features`'s `market` argument (the
-same `scan_daily_state_inputs`-shaped read, parameterized by ticker). For
-`STR-RUNUP` only, `runup_math.add_runup_features` runs over the same
-`"SPY"`-free price series already read. `panel_anchor` is the loosest of
-every contributing call's own source date (`source_session`,
-`regime_asof`, the runup price anchor), never a caller-asserted value.
-Insufficient history leaves the corresponding `panel_math` keys absent;
+same `scan_daily_state_inputs`-shaped read, parameterized by ticker); and,
+for `STR-RUNUP` only, `price_history_query.get_price_series` (a
+`PriceQuery` whose `observation_ceiling` is `decision_session`, one read
+per ticker) for `runup_math.add_runup_features`'s `prices_by_ticker` —
+its own as-of rule (latest retrieval at or before the ceiling, else the
+ticker's earliest) sets the price source date `runup_asof` reports.
+`panel_anchor` is the loosest of every contributing call's own source
+date (`source_session`, `regime_asof`, `runup_asof` when staged), never a
+caller-asserted value. Insufficient history leaves the corresponding
+`panel_math` keys absent;
 `regime`'s own fields stay present with `NaN` for the same condition
 (its own Inputs table below). This raises the same
 `CONTRACT_MISMATCH`/missing-table refusals each underlying read already
