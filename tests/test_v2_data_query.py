@@ -17,9 +17,12 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts.data import (  # noqa: E402
     ChainQuery,
+    ColumnContract,
     DataQuery,
     DependencyPlan,
     KeyPredicate,
+    TableContract,
+    TableContractRef,
     TimeInterval,
 )
 from engine.v2.data import objects, query as query_mod  # noqa: E402
@@ -613,6 +616,175 @@ def test_null_array_for_returns_typed_nulls():
     array = query_mod.null_array_for("int64", 3)
     assert array.to_pylist() == [None, None, None]
     assert str(array.type) == "int64"
+
+
+# --------------------------------------------------------------------------
+# compile_row_matcher: a per-query-compiled row predicate whose normalization
+# is O(values), not O(rows x values). Every case below asserts BOTH that the
+# compiled matcher agrees with ``row_matches`` (they must never drift) AND
+# the independently-known expected boolean -- including rows sitting exactly
+# ON an interval bound, which pins the inclusive/exclusive edges.
+#
+# Perf note for the guard test at the bottom of this section: the OLD shape
+# (``row_matches`` called once per row) rebuilt each predicate's ``wanted``
+# set from scratch on every row, so N rows over a timestamp predicate of M
+# values normalized M bounds N times (O(N*M) -- the chain-index scan blowup
+# this fix removes). The compiled path normalizes the M values exactly once,
+# no matter how many rows it then filters.
+# --------------------------------------------------------------------------
+
+
+_H = "sha256:" + "0" * 64
+
+
+def _synthetic_contract() -> TableContract:
+    """A tiny two-column contract (one string, one timestamp) built by hand
+    -- ``compile_row_matcher`` is pure, so no data files are involved."""
+    return TableContract(
+        contract_id="tc_synth", definition_hash=_H, table_name="synthetic",
+        semantic_version="1.0",
+        columns=(ColumnContract(name="ticker", physical_type="string", nullable=False),
+                 ColumnContract(name="obs_date", physical_type="timestamp[us]", nullable=False)),
+        primary_key=("ticker", "obs_date"), duplicate_policy="reject", foreign_keys=(),
+        partition_columns=(), filterable_columns=("ticker", "obs_date"),
+        orderable_columns=("ticker", "obs_date"), observation_time_column="obs_date",
+        finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
+        coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
+        maximum_batch_rows=1000, maximum_result_rows=1000)
+
+
+def _synthetic_query(contract: TableContract, **overrides) -> DataQuery:
+    base = dict(
+        snapshot_id="snap_synth",
+        table_contract_ref=TableContractRef(contract_id=contract.contract_id,
+                                            definition_hash=contract.definition_hash),
+        columns=("ticker", "obs_date"), key_filter=(),
+        order_by=("ticker", "obs_date"), max_batch_rows=100, max_result_rows=100)
+    base.update(overrides)
+    return DataQuery(**base)
+
+
+def _row(ticker, obs_date) -> dict:
+    return {"ticker": ticker, "obs_date": obs_date}
+
+
+def test_compile_row_matcher_agrees_with_row_matches_on_representative_cases():
+    from datetime import datetime
+    contract = _synthetic_contract()
+    ts_predicate = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in",
+        # one value per _normalize_bound branch: bare date, naive wire form,
+        # tz-aware Z form.
+        values=("2024-01-02", "2024-03-04T00:00:00.000000", "2024-05-06T00:00:00Z")),))
+    queries = {
+        "in_string": _synthetic_query(contract, key_filter=(KeyPredicate(
+            column="ticker", operator="in", values=("AAA", "BBB")),)),
+        "in_timestamp_three_bound_forms": ts_predicate,
+        "interval_start_only": _synthetic_query(contract, time_interval=TimeInterval(
+            column="obs_date", start_inclusive="2024-01-02")),
+        "interval_end_only": _synthetic_query(contract, time_interval=TimeInterval(
+            column="obs_date", end_exclusive="2024-01-02")),
+        "interval_both": _synthetic_query(contract, time_interval=TimeInterval(
+            column="obs_date", start_inclusive="2024-01-02", end_exclusive="2024-01-03")),
+        "interval_neither": _synthetic_query(contract, time_interval=TimeInterval(
+            column="obs_date")),
+    }
+    boundary = datetime(2024, 1, 2)  # exactly ON every interval bound above
+    rows = {
+        "AAA on boundary": _row("AAA", boundary),
+        "CCC off list": _row("CCC", boundary),
+        "AAA naive ts in values": _row("AAA", datetime(2024, 3, 4)),
+        "AAA aware-form ts in values": _row("AAA", datetime(2024, 5, 6)),
+        "AAA ts not in values": _row("AAA", datetime(2024, 2, 2)),
+        "AAA before boundary": _row("AAA", datetime(2024, 1, 1)),
+        "AAA after boundary": _row("AAA", datetime(2024, 1, 3)),
+        "None ticker": _row(None, boundary),
+        "missing ticker key": {"obs_date": boundary},
+        "None obs_date": _row("AAA", None),
+    }
+    expected = {
+        "in_string": {"AAA on boundary": True, "CCC off list": False,
+                      "AAA naive ts in values": True, "AAA aware-form ts in values": True,
+                      "AAA ts not in values": True, "AAA before boundary": True,
+                      "AAA after boundary": True, "None ticker": False,
+                      "missing ticker key": False, "None obs_date": True},
+        "in_timestamp_three_bound_forms": {"AAA on boundary": True, "CCC off list": True,
+                                           "AAA naive ts in values": True,
+                                           "AAA aware-form ts in values": True,
+                                           "AAA ts not in values": False,
+                                           "AAA before boundary": False,
+                                           "AAA after boundary": False, "None ticker": True,
+                                           "missing ticker key": True, "None obs_date": False},
+        # start_inclusive includes the boundary row itself; end_exclusive excludes it.
+        "interval_start_only": {"AAA on boundary": True, "CCC off list": True,
+                                "AAA naive ts in values": True, "AAA aware-form ts in values": True,
+                                "AAA ts not in values": True, "AAA before boundary": False,
+                                "AAA after boundary": True, "None ticker": True,
+                                "missing ticker key": True, "None obs_date": False},
+        "interval_end_only": {"AAA on boundary": False, "CCC off list": False,
+                              "AAA naive ts in values": False, "AAA aware-form ts in values": False,
+                              "AAA ts not in values": False, "AAA before boundary": True,
+                              "AAA after boundary": False, "None ticker": False,
+                              "missing ticker key": False, "None obs_date": False},
+        "interval_both": {"AAA on boundary": True, "CCC off list": True,
+                          "AAA naive ts in values": False, "AAA aware-form ts in values": False,
+                          "AAA ts not in values": False, "AAA before boundary": False,
+                          "AAA after boundary": False, "None ticker": True,
+                          "missing ticker key": True, "None obs_date": False},
+        "interval_neither": {"AAA on boundary": True, "CCC off list": True,
+                             "AAA naive ts in values": True, "AAA aware-form ts in values": True,
+                             "AAA ts not in values": True, "AAA before boundary": True,
+                             "AAA after boundary": True, "None ticker": True,
+                             "missing ticker key": True, "None obs_date": False},
+    }
+    for name, query in queries.items():
+        matches = query_mod.compile_row_matcher(contract, query)
+        for row_name, row in rows.items():
+            compiled = matches(row)
+            assert compiled == query_mod.row_matches(row, contract, query), (name, row_name)
+            assert compiled is expected[name][row_name], (name, row_name)
+
+
+def test_compile_row_matcher_none_columns_never_match():
+    """Nulls keep today's "missing value never matches" semantics in both
+    paths: a None predicate column AND a None interval column refuse."""
+    from datetime import datetime
+    contract = _synthetic_contract()
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="ticker", operator="in", values=("AAA",)),),
+        time_interval=TimeInterval(column="obs_date", start_inclusive="2024-01-01"))
+    matches = query_mod.compile_row_matcher(contract, query)
+    null_predicate = _row(None, datetime(2024, 1, 2))
+    null_interval = _row("AAA", None)
+    assert query_mod.row_matches(null_predicate, contract, query) is False
+    assert matches(null_predicate) is False
+    assert query_mod.row_matches(null_interval, contract, query) is False
+    assert matches(null_interval) is False
+
+
+def test_compile_row_matcher_normalizes_predicate_values_once_per_query(monkeypatch):
+    """The perf guard: ONE compile + N >= 50 matcher calls over a timestamp
+    ``in`` predicate of M >= 20 values may touch ``_normalize_bound`` at most
+    M times total (the old per-row shape was O(N*M) -- see the section
+    comment above); row filtering itself must not re-normalize at all."""
+    from datetime import datetime
+    contract = _synthetic_contract()
+    n_rows, m_values = 60, 25
+    values = tuple(f"2024-01-{day:02d}" for day in range(1, m_values + 1))
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in", values=values),))
+    calls = []
+    real = query_mod._normalize_bound
+
+    def counting(value):
+        calls.append(value)
+        return real(value)
+
+    monkeypatch.setattr(query_mod, "_normalize_bound", counting)
+    matches = query_mod.compile_row_matcher(contract, query)
+    rows = [_row("AAA", datetime(2024, 1, (i % m_values) + 1)) for i in range(n_rows)]
+    assert all(matches(row) for row in rows)
+    assert len(calls) <= m_values
 
 
 # --------------------------------------------------------------------------

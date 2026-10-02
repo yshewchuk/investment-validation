@@ -353,9 +353,10 @@ class Repository:
         path = objects.verify_object_path(self._store, record.object_ref)
         parquet_file = self._open_parquet(path)
         present, missing = self._match_columns(contract, needed, parquet_file.schema_arrow)
+        matches = query_mod.compile_row_matcher(contract, query)
         for batch in self._iter_batches(parquet_file, present, batch_cap):
             for row in self._decode_rows(batch, needed, present, missing):
-                if query_mod.row_matches(row, contract, query):
+                if matches(row):
                     yield query_mod.order_key(row, contract), row
 
     def _open_parquet(self, path) -> pq.ParquetFile:
