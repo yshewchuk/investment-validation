@@ -689,11 +689,32 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone.
 
-**Cutover PR-6 (not yet implemented — design and code-slice split in the
-PR body, not restated here).** `_reconcile_native_score_batch_shadow`
+**Cutover PR-6 slice 2 (implemented): `nightly_quote_rows.scan_quote_rows`.**
+`scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) ->
+QuoteRowInputs(quote_rows, quote_status)` stages one `BoardRequest`'s
+`quote_rows` straight off the pinned snapshot's `option_chains` table — the
+SHADOW-only, explicitly un-admitted read this doc's "#260, resolved for
+SHADOW only" design note (PR body) describes, safe because
+`native_score_batch` carries no `store_domains` and can never reach the
+legacy board. One bounded scan reads exactly `(key.ticker,
+decision_session)` — equality, never a lookback, mirroring
+`chains.get_chain`'s own `obs_date`/`session_date` convention — and the
+requested `expiry` narrows the fetched rows in Python (a chain's own
+expiry is data, not a key predicate). No surviving row returns
+`quote_status="empty"`, never a raise; a null stored `bid`/`ask` is carried
+through as `None` (`quote_domain_map`'s own job to validate, not this
+reader's). Malformed key/`expiry`/`decision_session` raise
+`INVALID_REQUEST`; `decision_session` after `expiry` raises
+`QUERY_NOT_BOUNDED`; a missing `option_chains` table raises
+`CONTRACT_MISMATCH` (`Repository.table_contract`'s own typed refusal).
+
+**Cutover PR-6 slices 1/3/4/5 (not yet implemented — design and
+code-slice split in the PR body, not restated here).**
+`_reconcile_native_score_batch_shadow`
 will build every admitted `board_requests()` key's `calendar_row`/
 `panel_row`/`panel_anchor` (panel-row staging: `engine/v2/features/
-ARCHITECTURE.md`) and `quote_rows`; `tier4_row` stays `{}` (every key is
+ARCHITECTURE.md`) and `quote_rows` (now staged by slice 2, above);
+`tier4_row` stays `{}` (every key is
 a forward event, `../scoring/ARCHITECTURE.md` "Inputs"). It, not the
 caller, sources every `calendar_row` field `nightly_raw_rows.
 scan_calendar_row` declares as caller-staged (entry/exit/expiry/spot/
