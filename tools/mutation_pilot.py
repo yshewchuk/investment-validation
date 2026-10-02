@@ -1088,8 +1088,8 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     full_suite allowlist, an unrecognized/unreached path, or any failure
     building the graph or scanning for unresolved imports -- never a
     silent narrow selection on an error).
-    An empty `changed` returns [] (no diff -> nothing to run), the one
-    intentional zero-selection case, matching changed_modules.
+    An empty `changed` returns [] (no diff -> nothing to run), matching
+    changed_modules; a docs-only diff no test reads returns [] too.
 
     Fan-out limits: the #155 fail-safe set (DYNAMIC or tainted tests) is
     added only when the diff touches a non-test python file; a collected
@@ -1098,7 +1098,8 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     that doc (`_doc_reader_tests`). A diff of only those selects a narrow set.
 
     #155 (unresolved dynamic import) handling: a test file that is ITSELF
-    classified DYNAMIC (_is_dynamic_file) is always selected, and so is a
+    classified DYNAMIC (_is_dynamic_file) is selected whenever the diff
+    touches a non-test python file, and so is a
     test file that reaches, via a real import edge, some OTHER file that
     has a genuine unresolved import ATTEMPT (a "helper" with its own
     unresolved import) -- both via _closure_from_roots's `tainted` return.
