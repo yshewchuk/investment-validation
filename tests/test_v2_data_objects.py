@@ -545,3 +545,17 @@ def test_unreadable_stat_tuple_is_retried_then_refused(counted_object, monkeypat
         verify_object_path(store, obj)
     assert err.value.code == "OBJECT_CORRUPT"
 
+
+@pytest.mark.parametrize("levels_up", [1, 2])
+def test_ancestor_replaced_by_symlink_is_not_a_cache_hit(counted_object, levels_up):
+    store, obj, path, calls = counted_object
+    verify_object_path(store, obj)
+    ancestor = path.parents[levels_up - 1]
+    moved = ancestor.with_name(ancestor.name + "-moved")
+    ancestor.rename(moved)
+    ancestor.symlink_to(moved, target_is_directory=True)  # file's own stat tuple is unchanged
+    with pytest.raises(DataError) as err:
+        verify_object_path(store, obj)
+    assert err.value.code == "OBJECT_CORRUPT"
+    assert len(calls) == 2
+

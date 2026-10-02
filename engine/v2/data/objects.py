@@ -98,6 +98,7 @@ _EPOCH = datetime(1970, 1, 1)
 #: module docstring's fan-out note).
 _S_IFMT = 0o170000
 _S_IFREG = 0o100000
+_S_IFDIR = 0o040000
 
 #: pyarrow's own spellings for two contract physical types. Every other
 #: pyarrow type string — including a timestamp's unit — passes through
@@ -310,7 +311,7 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
     key = (str(store.root), ref.content_hash, ref.byte_size)
     for _ in range(_VERIFY_ATTEMPTS):
         before = _stat_tuple(path)
-        if before is not None and _VERIFIED.get(key) == before:
+        if before is not None and _VERIFIED.get(key) == before and _real_directories(path):
             return path
         try:
             verified = store.verify(ref)
@@ -325,6 +326,17 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
             _VERIFIED[key] = before
             return verified
     raise errors.fail("OBJECT_CORRUPT", "published object changed while it was being verified")
+
+
+def _real_directories(path) -> bool:
+    """True if ``path``'s two parent directories (``objects/`` and its fan-out
+    directory) are real directories, never symlinks — the ancestor check
+    ``ArtifactStore.verify`` makes that a cache hit must not skip."""
+    try:
+        return all((os.lstat(p).st_mode & _S_IFMT) == _S_IFDIR
+                   for p in (path.parent, path.parent.parent))
+    except OSError:
+        return False
 
 
 def _stat_tuple(path) -> tuple[int, int, int, int, int] | None:
