@@ -30,12 +30,18 @@ FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
-| Condition | Outcome |
+Every refusal is typed; none is an untyped traceback. API errors share one `Problem`
+envelope (`code`, `category`, `retryable`); HTTP statuses are in parentheses.
+| Concern | Outcome |
 |---|---|
-| Missing identity, invalid release/filter-bound cursor or corrupt legacy input | Explicit typed refusal. |
-| Projection findings fail / accepted candidate repeated | Diagnostic receipt only, no release / atomic, idempotent index commit. |
-| Current changes or cached API read | Honor client pin per request; release-scoped cache/ETags cannot substitute another release. |
-| Parity report missing/unavailable | Explicit state; read-only projection has no internal cache/retry/write transaction; caller may retry. |
+| Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Score/event routes without a release pin: `RELEASE_ID_REQUIRED` (400); never a cross-release search. |
+| Missing input: data | Unknown release/event/score: 404. No current release: `NO_CURRENT_RELEASE` (503, retryable). Binding that fails re-verification: `CURRENT_BINDING_INVALID` (500, not retryable). Bad filter/limit: `INVALID_REQUEST` (422). |
+| Missing input: files | Absent, indirect or unreadable health file: 503. Missing, unreadable or outdated analog index: 503 with a `reason_code`. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
+| Cache | `current` is `no-store` with a strong ETag (304 on match). Release-scoped reads are immutable and cached per release; a cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). |
+| Retry | None inside serving: no read retries and no job is started by a GET. Callers retry only when `retryable`. Command POSTs return a queued job identity or a typed refusal; a failing handler is 500. |
+| Transaction | The serving index uses short `BEGIN IMMEDIATE` transactions; any error rolls back. A schema newer than the code, or an edited migration: `INTEGRITY_FAILED`. The operations analog read opens the index `mode=ro` and never migrates; the API opens it through `connect`, which applies pending migrations. |
+| Partial write | `build_candidate` publishes findings, details and manifest as content-addressed immutable objects before the index transaction; a crash leaves only unreferenced objects, never a release row. Findings not ok: receipt published, `PROJECTION_REFUSED`, no release. |
+| Idempotency | `release_id` derives from content and index writes are `INSERT OR IGNORE`: a repeated candidate writes no new rows. |
 
 ## Invariants
 Reject new application markup, inline DOM scripts and page builders here; hosting
