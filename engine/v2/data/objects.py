@@ -311,7 +311,7 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
     key = (str(store.root), ref.content_hash, ref.byte_size)
     for _ in range(_VERIFY_ATTEMPTS):
         before = _stat_tuple(path)
-        if before is not None and _VERIFIED.get(key) == before and _real_directories(path):
+        if before is not None and _VERIFIED.get(key) == before and _real_directories(path, store.root):
             return path
         try:
             verified = store.verify(ref)
@@ -328,13 +328,14 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
     raise errors.fail("OBJECT_CORRUPT", "published object changed while it was being verified")
 
 
-def _real_directories(path) -> bool:
-    """True if ``path``'s two parent directories (``objects/`` and its fan-out
-    directory) are real directories, never symlinks — the ancestor check
-    ``ArtifactStore.verify`` makes that a cache hit must not skip."""
+def _real_directories(path, root) -> bool:
+    """True if the store ``root`` and ``path``'s two parent directories
+    (``objects/`` and its fan-out directory) are real directories, never
+    symlinks — the check ``ArtifactStore.verify`` makes at every component,
+    which a cache hit must not skip."""
     try:
         return all((os.lstat(p).st_mode & _S_IFMT) == _S_IFDIR
-                   for p in (path.parent, path.parent.parent))
+                   for p in (root, path.parent.parent, path.parent))
     except OSError:
         return False
 

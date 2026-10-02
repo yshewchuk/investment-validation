@@ -269,8 +269,9 @@ a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.
 `resolve` rebuilds from catalog rows every call (no cache). `objects.verify_object_path`
 fully re-hashes an object on its first open in a process and skips the re-hash
 on a later open only while the file's stat tuple (device, inode, size, mtime
-and ctime, in nanoseconds) equals the one recorded when its hash last matched and its parent
-directories are still real directories (never symlinks);
+and ctime, in nanoseconds) equals the one recorded when its hash last matched
+and the store root and the object's parent directories are still real
+directories (never symlinks);
 any drift, a failed verify or a non-regular file forces a full verify, and a
 file whose stat tuple is unavailable or changes while it is hashed is
 re-verified a bounded number of times, then refused as `OBJECT_CORRUPT`. The

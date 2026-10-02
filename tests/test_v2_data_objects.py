@@ -546,7 +546,7 @@ def test_unreadable_stat_tuple_is_retried_then_refused(counted_object, monkeypat
     assert err.value.code == "OBJECT_CORRUPT"
 
 
-@pytest.mark.parametrize("levels_up", [1, 2])
+@pytest.mark.parametrize("levels_up", [1, 2, 3])  # fan-out directory, objects/, store root
 def test_ancestor_replaced_by_symlink_is_not_a_cache_hit(counted_object, levels_up):
     store, obj, path, calls = counted_object
     verify_object_path(store, obj)
