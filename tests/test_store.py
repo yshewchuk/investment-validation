@@ -329,13 +329,16 @@ class TestFinalizeDedupe:
 
     def test_bucket_count_does_not_change_the_result(self, store):
         # The same duplicate-laden table, finalized with different
-        # bucket_count values, must produce byte-identical partitions: which
+        # bucket_count values, must produce the same LOGICAL table: which
         # bucket a key lands in must never change which row survives or the
-        # final row order.
+        # final row order. (Not a byte-for-byte file comparison: the
+        # streaming writer emits one parquet row group per non-empty
+        # bucket, so the physical layout legitimately differs with
+        # bucket_count even though the content does not.)
         frame = make_chains(years=(2023, 2024), per_year=10)
         dup = frame.copy()
         dup["bid"] = -1.0  # sentinel: must never survive keep="first"
-        hashes = []
+        results = []
         for bucket_count in (1, 3, 16):
             with store.PartitionedWriter("option_chains", max_buffered_rows=3) as writer:
                 writer.add(frame)
@@ -345,8 +348,9 @@ class TestFinalizeDedupe:
                 ["ticker", "obs_date", "expiry", "strike", "right"]
             ).reset_index(drop=True)
             assert (out["bid"] != -1.0).all()
-            hashes.append(store.table_stats("option_chains").content_hash)
-        assert len(set(hashes)) == 1
+            results.append(out)
+        for other in results[1:]:
+            pd.testing.assert_frame_equal(results[0], other)
 
     def test_finalize_never_materializes_the_full_raw_year_as_one_frame(self, store, monkeypatch):
         # Deterministic, non-wall-clock proof that the fix is structural: no
@@ -378,15 +382,11 @@ class TestFinalizeDedupe:
             finally:
                 monkeypatch.setattr(store.pd, "concat", real_concat)
         assert sizes, "finalize() made no pd.concat call to inspect"
-        assert max(sizes) < raw_total
-        # Exactly one concat call is allowed to approach the full table size
-        # (the final assembly of the already-deduplicated buckets); every
-        # other call must be bucket-sized, not year-sized -- this is what
-        # actually proves bucketing happened, as opposed to the weaker
-        # "something, somewhere, was smaller than the raw total".
-        largest, second_largest = sorted(sizes)[-1], sorted(sizes)[-2]
-        assert largest == max(sizes)
-        assert second_largest <= raw_total // 2
+        # The final assembly is now a streaming write, not a concat of
+        # every deduplicated bucket -- so EVERY pd.concat call finalize()
+        # makes must be bucket-sized, not year-sized. No exception for "the
+        # one big final call" any more, because there isn't one.
+        assert max(sizes) <= raw_total // 2
 
 
 class TestSchemaEvolution:

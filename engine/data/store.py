@@ -118,33 +118,75 @@ def write_partition(df: pd.DataFrame, name: str, year: int, part: int = 0) -> Pa
     return path
 
 
-def _dedupe_parts(
-    parts: list[Path], key_cols: list[str], bucket_count: int
-) -> tuple[pd.DataFrame, int]:
-    """Concatenate ``parts`` and drop duplicate primary keys, without ever
-    holding the whole (duplicate-inflated) year in memory as one frame.
+def _dedupe_and_write(
+    parts: list[Path], key_cols: list[str], bucket_count: int, name: str, year: int
+) -> int:
+    """Deduplicate ``parts`` by primary key and write the single compacted
+    partition file directly -- without ever holding the whole raw
+    (duplicate-inflated) year, OR the whole deduplicated year, as one frame.
 
-    Every row is routed into one of ``bucket_count`` temp files by a hash of
-    its primary key, so two copies of the same key always land in the same
-    bucket — the per-bucket dedupe below is therefore exactly equivalent to
-    deduping the whole year at once. Each bucket is then read back and
-    deduplicated on its own: a fraction of the year's rows, not the whole
-    table. ``keep="first"`` and parts are processed in their existing sorted
-    order, so which row survives is unchanged — the earliest-fed batch wins,
-    exactly as before.
+    Rows are range-partitioned by ``key_cols[0]`` (the primary key's most
+    significant column, e.g. ``ticker``) into ``bucket_count`` temp files:
+    two rows sharing a primary key always share ``key_cols[0]`` too, so two
+    copies of the same key always land in the same bucket -- deduping
+    bucket-by-bucket is exactly equivalent to deduping the whole year at
+    once. ``keep="first"`` and parts are processed in their existing sorted
+    order, so which row survives is unchanged -- the earliest-fed batch
+    wins, exactly as before.
 
-    Returns ``(frame, removed)`` with ``frame`` NOT yet sorted by key; the
-    caller sorts once, after this returns, instead of once per bucket.
+    Buckets are then processed in ascending ``key_cols[0]`` order and
+    streamed into the output one at a time through a single
+    ``pyarrow.parquet.ParquetWriter``: each bucket is fully sorted by the
+    complete primary key before it is written, and no bucket's key range
+    overlaps another's, so the concatenation of row groups the writer
+    produces is already in full, correct primary-key order -- no final
+    cross-bucket concat or sort is needed. The largest frame this function
+    ever builds, in either phase, is one bucket's rows: a fraction of the
+    year, never the whole year, deduplicated or not.
+
+    Falls back to a single in-memory concat + dedupe + sort + write when
+    pyarrow is unavailable (``HAVE_PARQUET`` is False) -- the streaming
+    writer needs pyarrow directly, not just the pandas/parquet round-trip
+    the rest of this module tolerates running without.
+
+    Returns the number of rows removed.
     """
+    range_col = key_cols[0]
+    out_path = _partition_file(paths.curated_partition(name, year), 0)
+
+    if not HAVE_PARQUET:
+        frame = pd.concat([_read_part(p, None) for p in parts], ignore_index=True)
+        before = len(frame)
+        frame = frame.drop_duplicates(subset=key_cols, keep="first")
+        frame.sort_values(key_cols, kind="stable", inplace=True)
+        write_partition(frame, name, year, 0)
+        return before - len(frame)
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    values: set = set()
+    for part in parts:
+        values.update(pd.unique(_read_part(part, [range_col])[range_col]))
+    ordered = sorted(values)
+    n_groups = max(1, min(bucket_count, len(ordered)))
+    groups = [
+        g.tolist()
+        for g in np.array_split(np.array(ordered, dtype=object), n_groups)
+        if len(g)
+    ]
+
+    before_total = 0
+    after_total = 0
+    tmp_out = out_path.with_name(out_path.name + ".tmp")
+    writer = None
+    schema = None
     with tempfile.TemporaryDirectory(prefix="finalize-bucket-", dir=paths.DATA) as work_str:
         work = Path(work_str)
         for part_index, part in enumerate(parts):
             chunk = _read_part(part, None)
-            bucket_idx = (
-                pd.util.hash_pandas_object(chunk[key_cols], index=False) % bucket_count
-            ).to_numpy()
-            for b in range(bucket_count):
-                sub = chunk[bucket_idx == b]
+            for b, group in enumerate(groups):
+                sub = chunk[chunk[range_col].isin(group)]
                 if len(sub):
                     _write_frame(
                         sub.reset_index(drop=True),
@@ -152,21 +194,39 @@ def _dedupe_parts(
                     )
             del chunk
 
-        deduped: list[pd.DataFrame] = []
-        before_total = 0
-        for b in range(bucket_count):
-            sub_files = sorted(work.glob(f"bucket-{b:04d}-*{SUFFIX}"))
-            if not sub_files:
-                continue
-            bucket_frame = pd.concat(
-                [_read_part(f, None) for f in sub_files], ignore_index=True
-            )
-            before_total += len(bucket_frame)
-            deduped.append(bucket_frame.drop_duplicates(subset=key_cols, keep="first"))
+        try:
+            for b in range(len(groups)):
+                sub_files = sorted(work.glob(f"bucket-{b:04d}-*{SUFFIX}"))
+                if not sub_files:
+                    continue
+                bucket_frame = pd.concat(
+                    [_read_part(f, None) for f in sub_files], ignore_index=True
+                )
+                before_total += len(bucket_frame)
+                bucket_frame = bucket_frame.drop_duplicates(subset=key_cols, keep="first")
+                bucket_frame.sort_values(key_cols, kind="stable", inplace=True)
+                after_total += len(bucket_frame)
+                table = pa.Table.from_pandas(
+                    bucket_frame.reset_index(drop=True),
+                    schema=schema,
+                    preserve_index=False,
+                )
+                del bucket_frame
+                if writer is None:
+                    schema = table.schema
+                    writer = pq.ParquetWriter(tmp_out, schema)
+                writer.write_table(table)
+                del table
+        finally:
+            if writer is not None:
+                writer.close()
 
-    frame = pd.concat(deduped, ignore_index=True)
-    deduped.clear()
-    return frame, before_total - len(frame)
+    # `parts` is never empty (the caller already checks) and every part
+    # file holds at least one row (the writer never flushes an empty
+    # frame), so `groups` always has at least one non-empty bucket and
+    # `writer` is always set by this point -- no FileNotFoundError here.
+    os.replace(tmp_out, out_path)
+    return before_total - after_total
 
 
 class PartitionedWriter:
@@ -281,11 +341,12 @@ class PartitionedWriter:
         so which row survives is a function of the source set rather than of
         scheduling. Returns the number of rows removed.
 
-        Dedup runs through :func:`_dedupe_parts`, which hash-buckets rows by
-        primary key into ``bucket_count`` temp files and deduplicates each
-        bucket on its own, so the largest frame this builds before the final
-        assembly is roughly one year's rows divided by ``bucket_count`` —
-        never the whole (duplicate-inflated) year at once.
+        Dedup runs through :func:`_dedupe_and_write`, which range-partitions
+        rows by primary key into ``bucket_count`` temp files, deduplicates
+        each bucket on its own, and streams the result straight into the
+        output file one bucket at a time. The largest frame this ever
+        builds, in either phase, is one bucket's rows — never the whole
+        raw year, and never the whole deduplicated year either.
 
         This also compacts the numbered part files a streamed write leaves
         behind, which makes later reads cheaper and the content hash stable
@@ -316,13 +377,13 @@ class PartitionedWriter:
                 continue
             key_cols = list(self.schema.primary_key)
             if dedupe and key_cols:
-                frame, year_removed = _dedupe_parts(parts, key_cols, bucket_count)
+                year_removed = _dedupe_and_write(parts, key_cols, bucket_count, self.name, year)
             else:
                 frame = pd.concat([_read_part(p, None) for p in parts], ignore_index=True)
+                frame.sort_values(key_cols, kind="stable", inplace=True)
+                write_partition(frame, self.name, year, 0)
                 year_removed = 0
-            frame.sort_values(key_cols, kind="stable", inplace=True)
             removed += year_removed
-            write_partition(frame, self.name, year, 0)
             for stale in parts:
                 if stale.name != _part_name(0):
                     stale.unlink(missing_ok=True)
