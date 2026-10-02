@@ -300,6 +300,20 @@ def test_10_non_skipped_null_realized_move_raises_contract_mismatch():
     assert "realized_move_pct" in exc.value.problem.message
 
 
+def test_11_computed_moves_rows_are_sorted_before_feeding_history():
+    batches = _default_batches()
+    # Fed out of order on purpose; the real chronological order is 01-10, 01-11, 01-12.
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = _computed_rows([
+        ("2024-01-12", 3.0, False),
+        ("2024-01-10", 2.0, False),
+        ("2024-01-11", -1.0, False),
+    ])
+    panel = _scan(batches=batches).panel_row
+    expected = panel_math.history_features([2.0, -1.0, 3.0], [2.0, 1.0, 3.0])
+    assert panel["ema2_prior_move"] == expected["ema2_prior_move"]
+    assert panel["mean_prior_move"] == expected["mean_prior_move"]
+
+
 def test_history_keys_are_the_panel_math_superset():
     panel = _scan().panel_row
     for key in panel_math.history_features([2.0, -1.0], [2.0, 1.0]):
