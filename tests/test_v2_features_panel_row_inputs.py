@@ -148,7 +148,7 @@ def _default_batches():
 
 def _spy_rows():
     days = [str(d.date()) for d in pd.date_range(end=_REGIME_SOURCE, periods=20, freq="D")]
-    return [{"ticker": "SPY", "date": pd.Timestamp(day), "close": 500.0 + i,
+    return [{"ticker": "SPY", "date": pd.Timestamp(day), "spot": 500.0 + i,
              "src_iv": "orats", "implied_move": 1.0}
             for i, day in enumerate(days)]
 
@@ -352,3 +352,29 @@ def test_12_computed_moves_capped_at_decision_session_not_just_event_date():
     # Excluded by the cap, not absent: five sessions later (still before the
     # event) the same row is ordinary prior history.
     assert _panel_at(_DECISION + pd.Timedelta(days=5))["n_prior"] == 1
+
+
+def test_13_signed_streak_reflects_prior_computed_moves():
+    """Three same-signed prior moves put the current event at streak length 3.
+
+    Before the multi-row-frame fix, _runup_from_prices fed add_runup_features a
+    one-row frame whose group row 0 always resets the streak, so this value was
+    0.0 unconditionally regardless of input."""
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = _computed_rows([
+        ("2024-02-11", 1.0, False),
+        ("2024-02-12", 2.0, False),
+        ("2024-02-13", 3.0, False),
+    ])
+    panel = _scan(batches=batches).panel_row
+    assert panel["signed_streak"] == 3.0
+
+
+def test_14_spy_columns_exist_in_the_real_daily_market_contract():
+    """_SPY_COLUMNS must name real daily_market columns -- the fake
+    repository's scan() does not validate this, so without this test a
+    revert back to the old "close" bug would still pass every other test
+    in this file."""
+    from engine.v2.features import panel_row_inputs
+    real_columns = {column.name for column in contract_for("daily_market").columns}
+    assert set(panel_row_inputs._SPY_COLUMNS) <= real_columns

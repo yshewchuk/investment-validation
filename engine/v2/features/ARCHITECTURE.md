@@ -134,7 +134,10 @@ that does not name a superset-only key in its `feature_names` simply
 never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
 pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
 (`key.ticker`); `computed_moves` (`key.ticker`, restricted to rows where
-`event_date < key.event_date`, feeding `panel_math`; rows with `skipped=true`
+`event_date < min(key.event_date, decision_session)` — the decision-session
+cutoff, not just the event-date one, so a `decision_session` earlier than
+`key.event_date` can never see a row the real nightly timeline would not
+yet have, feeding `panel_math`; rows with `skipped=true`
 carry no `realized_move_pct` and are excluded from that feed, never treated
 as a zero move); a new bounded
 `daily_market` read for the fixed ticker `"SPY"` (feeding `regime`, not

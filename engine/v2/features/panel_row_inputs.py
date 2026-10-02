@@ -50,7 +50,7 @@ _RESULT_LIMIT = 10000
 _RUNUP_LOOKBACK_SESSIONS = 400
 
 _COMPUTED_COLUMNS = ("ticker", "event_date", "realized_move_pct", "skipped")
-_SPY_COLUMNS = ("ticker", "date", "close")
+_SPY_COLUMNS = ("ticker", "date", "spot")
 _REGIME_COLUMNS = (
     "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5", "spy_vol20",
     "spy_vol60", "spy_vol252", "spy_vol20_rel252",
@@ -169,8 +169,9 @@ def _read_spy_market(data_repository: repository.Repository, snapshot: SnapshotR
     return _consume(data_repository, query, _DAILY_MARKET_TABLE)
 
 
-def _history_from_computed_moves(rows: list[dict[str, object]]) -> dict[str, float | None]:
-    """Non-skipped prior moves in ascending ``event_date`` order -> ``history_features``."""
+def _kept_prior_moves(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Non-skipped computed_moves rows, ascending event_date; raises on a
+    null move (a repository-integrity violation outside skipped=true)."""
     kept = sorted((row for row in rows if not row["skipped"]),
                   key=lambda row: pd.Timestamp(row["event_date"]))
     for row in kept:
@@ -178,6 +179,11 @@ def _history_from_computed_moves(rows: list[dict[str, object]]) -> dict[str, flo
             raise errors.fail("CONTRACT_MISMATCH",
                               "non-skipped computed_moves row has a null realized_move_pct",
                               details={"table_name": _COMPUTED_MOVES_TABLE})
+    return kept
+
+
+def _history_from_kept_moves(kept: list[dict[str, object]]) -> dict[str, float | None]:
+    """Non-skipped prior moves in ascending ``event_date`` order -> ``history_features``."""
     prior_moves = [row["realized_move_pct"] for row in kept]
     prior_abs = [abs(value) for value in prior_moves]
     return panel_math.history_features(prior_moves, prior_abs)
@@ -190,7 +196,7 @@ def _regime_from_spy(spy_rows: list[dict[str, object]], key: Any,
         ordered = sorted(spy_rows, key=lambda row: pd.Timestamp(row["date"]))
         market = pd.DataFrame(
             {"date": pd.to_datetime([row["date"] for row in ordered]),
-             "close": [float(row["close"]) for row in ordered]},
+             "close": [float(row["spot"]) for row in ordered]},
         )
     else:
         market = pd.DataFrame({"date": [], "close": []})
@@ -202,7 +208,8 @@ def _regime_from_spy(spy_rows: list[dict[str, object]], key: Any,
 
 def _runup_from_prices(data_repository: repository.Repository, snapshot: SnapshotRef,
                        key: Any, decision: pd.Timestamp,
-                       history: dict[str, float | None]
+                       history: dict[str, float | None],
+                       kept_prior_moves: list[dict[str, object]]
                        ) -> tuple[dict[str, float], object]:
     """The 7 legacy runup floats and the separate ``runup_asof`` anchor."""
     query = PriceQuery(
@@ -219,17 +226,31 @@ def _runup_from_prices(data_repository: repository.Repository, snapshot: Snapsho
     # add_runup_features's own convention is DataFrame-NaN for an absent numeric;
     # history_features uses None, so feed NaN into the frame rather than let a
     # None survive into float(...) (which would raise). The merged panel_row keeps
-    # the untouched history None values from _history_from_computed_moves.
-    frame = pd.DataFrame({
-        "ticker": [key.ticker],
-        "date": [key.event_date],
-        "decision": [decision],
-        "move": [float("nan")],
-        "n_prior": [history["n_prior"]],
-        "ema12_prior_abs_move": [_as_float_or_nan(history["ema12_prior_abs_move"])],
-        "mean_prior_abs_move": [_as_float_or_nan(history["mean_prior_abs_move"])],
+    # the untouched history None values from _history_from_kept_moves.
+    # One row per kept prior event plus the current event last: _signed_streak
+    # resets row 0 of every group, so a one-row frame would pin signed_streak to
+    # 0 regardless of prior history. add_runup_features sorts by
+    # ["ticker", "date"], every kept prior event_date is strictly before
+    # key.event_date (the bounded computed_moves read caps at
+    # min(event_date, decision), exclusive), and there is one ticker -- so
+    # iloc[-1] is always the current event regardless of input order.
+    frame_rows = [
+        {"ticker": key.ticker, "date": pd.Timestamp(row["event_date"]),
+         "decision": decision, "move": float(row["realized_move_pct"]),
+         "n_prior": float("nan"), "ema12_prior_abs_move": float("nan"),
+         "mean_prior_abs_move": float("nan")}
+        for row in kept_prior_moves
+    ]
+    frame_rows.append({
+        "ticker": key.ticker, "date": pd.Timestamp(key.event_date),
+        "decision": decision, "move": float("nan"),
+        "n_prior": history["n_prior"],
+        "ema12_prior_abs_move": _as_float_or_nan(history["ema12_prior_abs_move"]),
+        "mean_prior_abs_move": _as_float_or_nan(history["mean_prior_abs_move"]),
     })
-    row = runup_math.add_runup_features(frame, {key.ticker: prices}, "decision").iloc[0]
+    frame = pd.DataFrame(frame_rows)
+    result = runup_math.add_runup_features(frame, {key.ticker: prices}, "decision")
+    row = result.iloc[-1]
     features = {column: float(row[column]) for column in _RUNUP_COLUMNS}
     return features, row["runup_asof"]
 
@@ -274,13 +295,14 @@ def scan_panel_row(
     )
 
     computed_rows = _read_computed_moves(repository, snapshot, key, start, decision)
-    history = _history_from_computed_moves(computed_rows)
+    kept_moves = _kept_prior_moves(computed_rows)
+    history = _history_from_kept_moves(kept_moves)
 
     spy_rows = _read_spy_market(repository, snapshot, start, decision)
     regime_features, regime_asof = _regime_from_spy(spy_rows, key, decision)
 
     runup_features, runup_asof = _runup_from_prices(
-        repository, snapshot, key, decision, history,
+        repository, snapshot, key, decision, history, kept_moves,
     )
 
     panel_anchor = _anchor(daily_state.source_session, regime_asof, runup_asof)
