@@ -179,6 +179,12 @@ def _dedupe_and_write(
         if len(g)
     ]
 
+    # Upper bound of every group except the last; groups are contiguous
+    # ranges of the sorted distinct values, so one searchsorted call per
+    # part assigns every row to its bucket -- instead of filtering the
+    # whole chunk once per bucket.
+    boundaries = [group[-1] for group in groups[:-1]]
+
     before_total = 0
     after_total = 0
     tmp_out = out_path.with_name(out_path.name + ".tmp")
@@ -188,8 +194,9 @@ def _dedupe_and_write(
         work = Path(work_str)
         for part_index, part in enumerate(parts):
             chunk = _read_part(part, None)
-            for b, group in enumerate(groups):
-                sub = chunk[chunk[range_col].isin(group)]
+            bucket_idx = np.searchsorted(boundaries, chunk[range_col].to_numpy(), side="left")
+            for b in range(len(groups)):
+                sub = chunk[bucket_idx == b]
                 if len(sub):
                     _write_frame(
                         sub.reset_index(drop=True),
