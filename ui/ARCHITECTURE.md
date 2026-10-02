@@ -7,11 +7,7 @@ Its presentation scope includes the legacy dashboard views still awaiting migrat
 ## Primary contracts and public interfaces
 `src/App.tsx` composes board/event/score views; `src/routes.ts` handles routes.
 `src/api/client.ts` is the sole fetch boundary to the authenticated serving API.
-Wire shapes and shipped views are detailed in the [README](README.md). Planned,
-documentation-only until its own code PR: a `#/native_parity` route (not
-release-scoped — the report has no `release_id`) for the native-vs-legacy
-side-by-side screen, over the SAME cookie auth and `client.ts` fetch
-boundary — no second auth model (`engine/v2/serving/ARCHITECTURE.md`).
+Wire shapes and shipped views are detailed in the [README](README.md).
 
 ## Inputs
 Saved JSON release metadata, paginated events, score details and operations data
@@ -36,7 +32,6 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
 | Retry or navigation | Reads keep pinned identity; no durable transaction or partial publication. |
-| Planned: parity `no_report`/`stale`/`unavailable` | Explicit per-status banner: `no_report` shows nothing has run yet, no counts (the summary carries none); `stale` still renders every count and mismatch, flagged; `unavailable` shows an error, no counts — never merged into the generic error/empty state. |
 
 ## Invariants
 All new application rendering belongs here. Serving returns data/API responses

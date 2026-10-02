@@ -428,12 +428,9 @@ Only a tracked path absent from the worktree reads as empty.
   comparator (§5) — but the artifact itself can be stale, or was produced
   under a different tolerance policy than whichever is in effect when this
   projection is read; this projection does not re-verify either. The report
-  also carries no run identity of its own today (no `as_of`/`generated_at`),
-  so a reader cannot tell which night produced it without the catalog. The
-  target schema, `native_parity_report.v1.2` (`engine/v2/ops/ARCHITECTURE.md`,
-  documentation-only pending its own code PR), adds both, stamped only at the
-  report-writing step so `compare_native_vs_legacy` itself stays
-  wall-clock-free (§5's content-hash rule).
+  also carries no run identity of its own today — no `as_of`/`generated_at`
+  field — so a reader cannot tell which night produced it without the
+  catalog (design discussion: PR #327).
   `Service.tick()`'s sidecar submits a `native_parity` job once its
   paired inputs are ready, so `"no_report"` stays the answer whenever
   nothing has completed yet, not a degraded one.
@@ -452,8 +449,7 @@ Only a tracked path absent from the worktree reads as empty.
   per dimension); `worst_rows` (the rows with the most mismatched fields,
   most first, ties broken by row key); and
   `native_refused_count`/`native_refused_unmatched_count`/`native_refused_reasons`
-  (refusal-code counts); once `v1.2` lands, also `as_of`/`generated_at` and a
-  `"stale"` status (below). Failure semantics:
+  (refusal-code counts). Failure semantics:
 
   | Condition | Outcome |
   |---|---|
@@ -461,20 +457,13 @@ Only a tracked path absent from the worktree reads as empty.
   | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
-  | Planned (`v1.2`): valid report whose `as_of` predates the paired nightly's current `as_of` | `status: "stale"` (200); counts and mismatches are still returned, flagged, never withheld |
 
   The one consumer today is the read-only operations preview server's
   `GET /native_parity`/`GET /native_parity.json` routes
   (`engine/v2/serving/operations.py`), which read this document unchanged,
   wired through `engine/v2/dashboard/preview.py`'s optional
   `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
-  for that route/CLI contract. A second, authenticated consumer is planned:
-  `engine/v2/serving/api.py`'s `GET /api/v1/native_parity*` route family
-  (`engine/v2/serving/ARCHITECTURE.md`) for the React side-by-side screen
-  (`ui/ARCHITECTURE.md`) — documentation-only until its own code PRs land.
-  The operations routes above are unchanged by that work: AGENTS.md's
-  UI-ownership rule treats extending a compatibility page as transport, not
-  React delivery.
+  for that route/CLI contract.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;
   this report projection remains a read over retained evidence.

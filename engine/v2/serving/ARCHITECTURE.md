@@ -9,12 +9,7 @@ Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 The [README](README.md) lists the checked exports (the only names other packages may import). By module:
 - `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as
-  `python3 -m engine.v2.serving.api`. Planned, documentation-only until its
-  own code PR: `GET /api/v1/native_parity` (summary), `GET
-  /api/v1/native_parity/mismatches` and `GET /api/v1/native_parity/unpaired`
-  (paginated per-row/per-field and unpaired-key detail) for the React
-  side-by-side screen (`ui/ARCHITECTURE.md`); the operations preview's
-  existing `GET /native_parity`/`GET /native_parity.json` are unchanged.
+  `python3 -m engine.v2.serving.api`.
 - `projections`: `connect`, `ensure_schema`, `resolve_event_refs`, `build_candidate`,
   `get_release`, `list_events`, `event_scores`, `get_event`, `get_score_detail`,
   `event_query_hash`, `ServingIndexError`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`.
@@ -41,9 +36,6 @@ remain a compatibility exception; their presentation still requires React migrat
 Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.deployment`
 (`operations`) and `registry.strategies` (`derivation_projection`). `native_render` and
 `native_shadow_render` also import `scoring` for offline row building; no HTTP path does.
-Planned: `api` imports `native_parity_projection` directly for the route family above
-(same package, no layering change) and stays off `engine.v2.ops`/`engine.v2.parity`
-exactly like `operations.py` does today.
 Never imports `engine.v2.ops` (equal-layer peer) or legacy `engine.*`: ops-side pointers,
 reports and transaction/migration patterns are read as inert JSON or reimplemented.
 Serving launch paths: `python3 -m engine.v2.serving.api` (`api.main` -> `create_app`);
@@ -75,8 +67,7 @@ configured`) and with typed JSON documents carrying a `reason_code` for index/pa
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Event-scores and score-detail routes without a release pin: `RELEASE_ID_REQUIRED` (400); no route searches across releases. `GET /events` without a pin uses the current release. |
 | Missing input: data | Unknown release/event/score: 404. No current release: `NO_CURRENT_RELEASE` (503, retryable). Binding that fails re-verification: `CURRENT_BINDING_INVALID` (500, not retryable). Bad filter/limit: `INVALID_REQUEST` (422). |
 | Missing input: files | Absent, indirect or unreadable health file: 503. Analog index missing, failing to open, or outdated: 503 with a `reason_code`; a failure after open is not translated. Parity report absent is `no_report` (200); malformed is `unavailable` (503). Legacy bundle: `LegacyBundleError` with a code, never coerced or dropped. |
-| Missing input: native parity (planned `/api/v1/native_parity*`) | Reuses the SAME report path config `operations.create_server`'s `native_parity_report_path` already names (one file, one reader — `native_parity_projection.native_parity_summary`), never a second ops identity lookup; `as_of`/`generated_at`/`stale` come only from fields stamped into the report itself (root doc §4), not from the catalog. Same codes as the existing projection — `no_report` (200), `unavailable` (503, `NATIVE_PARITY_REPORT_MALFORMED`) — in the shared `Problem` envelope instead of operations' plain text, plus `stale` (200) once the report carries an `as_of`. Mismatch/unpaired detail routes 404 on an unknown row key; cursor rules match `/events` (below). |
-| Cache | `/releases/current` is `no-store` with a strong ETag (304 on match). `/releases/{id}`, event-scores and score detail are immutable with an ETag (304 on match). `/events`: current reads are `no-store` without an ETag; explicit-release reads are immutable with an ETag but never 304. A cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). Planned native parity: `no-store`, no ETag — the report has no immutable content identity, only a mutable path. |
+| Cache | `/releases/current` is `no-store` with a strong ETag (304 on match). `/releases/{id}`, event-scores and score detail are immutable with an ETag (304 on match). `/events`: current reads are `no-store` without an ETag; explicit-release reads are immutable with an ETag but never 304. A cursor bound to another release or filter set: `CURSOR_MISMATCH` (409). |
 | Retry | None inside serving: no read retries and no job is started by a GET. Callers retry only when `retryable`. Command POSTs pass through the configured callback's status and body (a queued job identity or typed refusal is the callback's contract); a callback exception is 500. |
 | Transaction | The serving index uses short `BEGIN IMMEDIATE` transactions; any error rolls back. A schema newer than the code, or an edited migration: `INTEGRITY_FAILED`. The operations analog read opens the index `mode=ro` and never migrates; the API opens it through `connect`, which applies pending migrations. |
 | Partial write | `build_candidate` publishes findings, details and manifest as content-addressed immutable objects before the index transaction; a crash before the index commit leaves only unreferenced objects (a rerun keeps any release row already committed); after the commit the complete release row is durable. Findings not ok: receipt published, `PROJECTION_REFUSED`, no release. |
