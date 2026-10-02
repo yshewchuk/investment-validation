@@ -296,6 +296,8 @@ def test_10_non_skipped_null_realized_move_raises_contract_mismatch():
     with pytest.raises(DataError) as exc:
         _scan(batches=batches)
     assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"table_name": COMPUTED_MOVES_TABLE_NAME}
+    assert "realized_move_pct" in exc.value.problem.message
 
 
 def test_history_keys_are_the_panel_math_superset():
