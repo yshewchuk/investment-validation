@@ -92,11 +92,22 @@ def test_replay_availability_comes_from_the_chain_index_not_read_chain_keys(
 
     monkeypatch.setattr(replay, "load_chain_index", _load_spy)
 
+    priced_with: list = []
+    real_price_plan = replay._price_plan
+
+    def _price_plan_spy(structure, plan, index, **kwargs):
+        priced_with.append(index)
+        return real_price_plan(structure, plan, index, **kwargs)
+
+    monkeypatch.setattr(replay, "_price_plan", _price_plan_spy)
+
     result = replay.replay(repository, snap, "STR-THRU", _two_events(),
                            calendar=_calendar())
 
     assert len(load_calls) == 1
     assert len(restricted) == 1
+    assert len(priced_with) == 1
+    assert priced_with[0] is restricted[0]
     assert ("MISS", pd.Timestamp("2024-05-02")) not in set(restricted[0].keys)
     assert len(result.trades) >= 1
     tickers = set(result.trades["ticker"].astype(str))
