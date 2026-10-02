@@ -70,7 +70,8 @@ The replay half: `replay.replay`, `replay.replay_one`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
 `_chains.load_chain_index`, `_trades_table.to_trades_table`, `_build_run.run`,
 `reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
-`_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`.
+`_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`,
+`_pricing.execution_variant_label`.
 
 `experiment_trades.load_trades` is a second kind of entrypoint: a plain
 library call (no `tools/v2_*.py` CLI of its own) for a caller that already
@@ -82,8 +83,12 @@ third, carved out of `_pricing`'s otherwise-internal contents the same way
 imported only by the pinned
 `experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py` runner
 to select its analog population (see `guides/str_thru_analog_provenance.md`).
+`_pricing.execution_variant_label` is a fifth, carved out for
+`experiments/v2_candidate_grid.py`'s `price_candidate_grid` (issue #266
+slice 2), which labels each priced grid-position step with the same
+execution-variant string `replay()` itself uses.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE -->
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label -->
 
 ## Consumers
 
@@ -96,10 +101,15 @@ leaves `tools/v2_signal_screen.py`, `tools/v2_fill_quality.py`,
 `tools/v2_polygon_fills.py`, `tools/v2_replay.py`,
 `tools/v2_build_trades.py` and `tools/v2_reconcile_trades.py`, plus
 `experiments/common_v2.py` (for `experiment_trades.load_trades`,
-`_pricing.trading_calendar_from_snapshot` and `_chains.load_chain_index`)
-and the pinned
+`_pricing.trading_calendar_from_snapshot` and `_chains.load_chain_index`),
+the pinned
 `experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py` runner
-(for `experiment_trades.PROVENANCE`)
+(for `experiment_trades.PROVENANCE`), `experiments/v2_candidate_grid.py`
+(`price_candidate_grid`, issue #266 slice 2 — for
+`_chains.filter_plan_by_availability`/`read_chain_keys`,
+`_plan.plan_events`, `_pricing.STRUCTURES`/`execution_variant_label`/
+`trading_calendar_from_snapshot`, and `replay.ALPHA_GRID`/`replay_one`),
+and `experiments/EXP-186_.../run.py` (for `_replay_run.events_frame`)
 — none of which the layering hook parses (none is an `engine.*` module)._
 
 <!-- consumers: none -->
