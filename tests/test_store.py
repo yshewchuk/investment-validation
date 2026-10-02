@@ -312,6 +312,109 @@ class TestFinalizeDedupe:
         assert removed == 0
         assert store.table_stats("option_chains").rows == len(frame)
 
+    def test_many_small_duplicate_parts_dedupe_correctly(self, store):
+        # 30 tiny batches, each a mix of brand-new rows and repeats of earlier
+        # ones with a changed `bid` -- duplicates spread across many parts,
+        # the shape the real nightly sees.
+        rng_frame = make_chains(years=(2024,), per_year=40)
+        with store.PartitionedWriter("option_chains", max_buffered_rows=1) as writer:
+            for i in range(len(rng_frame)):
+                writer.add(rng_frame.iloc[[i]])
+                writer.add(rng_frame.iloc[[i]])  # immediate duplicate of the row just added
+            removed = writer.finalize(dedupe=True, bucket_count=4)
+        assert removed == len(rng_frame)
+        out = store.read_table("option_chains")
+        assert len(out) == len(rng_frame)
+        assert_schema(out, "option_chains", check_keys=True)
+
+    def test_bucket_count_does_not_change_the_result(self, store):
+        # The same duplicate-laden table, finalized with different
+        # bucket_count values, must produce the same LOGICAL table: which
+        # bucket a key lands in must never change which row survives or the
+        # final row order. (Not a byte-for-byte file comparison: the
+        # streaming writer emits one parquet row group per non-empty
+        # bucket, so the physical layout legitimately differs with
+        # bucket_count even though the content does not.) Compared against
+        # an INDEPENDENTLY built expected frame, not just against each
+        # other -- every bucket_count agreeing on the same wrong answer
+        # would otherwise still pass.
+        key_cols = ["ticker", "obs_date", "expiry", "strike", "right"]
+        frame = make_chains(years=(2023, 2024), per_year=10)
+        dup = frame.copy()
+        dup["bid"] = -1.0  # sentinel: must never survive keep="first"
+
+        # Independent ground truth: `frame` is fed before `dup`, and every
+        # row in `dup` duplicates a primary key already in `frame`, so
+        # keep="first" means the deduplicated table IS exactly `frame`
+        # (coerced to the table's own schema, to match dtypes read_table()
+        # returns) -- built without going through PartitionedWriter.finalize()
+        # or _dedupe_and_write at all. Sorted YEAR-MAJOR (ascending year,
+        # each year's rows fully sorted by key_cols within it), matching
+        # what finalize() actually produces: it sorts one year at a time,
+        # never across years, so a global sort across both years would mask
+        # a real ordering defect rather than check for one.
+        coerced = store.coerce(frame, "option_chains")
+        expected = pd.concat(
+            [
+                coerced[coerced["year"] == year].sort_values(key_cols, kind="stable")
+                for year in sorted(coerced["year"].unique())
+            ],
+            ignore_index=True,
+        )
+
+        # Prove the comparison itself isn't vacuous before relying on it.
+        corrupted = expected.copy()
+        corrupted.loc[0, "bid"] = -999.0
+        with pytest.raises(AssertionError):
+            pd.testing.assert_frame_equal(expected, corrupted)
+
+        for bucket_count in (1, 3, 16):
+            with store.PartitionedWriter("option_chains", max_buffered_rows=3) as writer:
+                writer.add(frame)
+                writer.add(dup)
+                writer.finalize(dedupe=True, bucket_count=bucket_count)
+            out = store.read_table("option_chains")
+            assert (out["bid"] != -1.0).all()
+            pd.testing.assert_frame_equal(out, expected)
+
+    def test_finalize_never_materializes_the_full_raw_year_as_one_frame(self, store, monkeypatch):
+        if not store.HAVE_PARQUET:
+            pytest.skip("bounded-concat streaming path requires pyarrow")
+        # Deterministic, non-wall-clock proof that the fix is structural: no
+        # pd.concat call inside finalize() is ever handed the whole year's
+        # raw (duplicate-inflated) row count at once. Old code's single
+        # `pd.concat([_read_part(p, None) for p in parts], ignore_index=True)`
+        # is exactly the call this would catch.
+        frame = make_chains(years=(2024,), per_year=30)
+        dup = frame.copy()
+        dup["bid"] = -1.0
+        with store.PartitionedWriter("option_chains", max_buffered_rows=5) as writer:
+            writer.add(frame)
+            writer.add(dup)
+            part_dir = store.paths.curated_partition("option_chains", 2024)
+            raw_total = sum(
+                len(store._read_part(p, None)) for p in store._partition_files(part_dir)
+            )
+            real_concat = store.pd.concat
+            sizes = []
+
+            def spy_concat(objs, *a, **kw):
+                objs = list(objs)
+                sizes.append(sum(len(o) for o in objs))
+                return real_concat(objs, *a, **kw)
+
+            monkeypatch.setattr(store.pd, "concat", spy_concat)
+            try:
+                writer.finalize(dedupe=True, bucket_count=4)
+            finally:
+                monkeypatch.setattr(store.pd, "concat", real_concat)
+        assert sizes, "finalize() made no pd.concat call to inspect"
+        # The final assembly is now a streaming write, not a concat of
+        # every deduplicated bucket -- so EVERY pd.concat call finalize()
+        # makes must be bucket-sized, not year-sized. No exception for "the
+        # one big final call" any more, because there isn't one.
+        assert max(sizes) <= raw_total // 2
+
 
 class TestSchemaEvolution:
     """A partition older than the schema must still be readable."""
