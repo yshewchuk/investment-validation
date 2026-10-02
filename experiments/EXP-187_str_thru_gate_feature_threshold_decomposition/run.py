@@ -58,11 +58,14 @@ ARM_A_FEATURE_LINE = (
     "EXP-184's threshold-rule change."
 )
 ARM_A_PROVENANCE_LINE = (
-    "No forecast or analog columns are read for this arm. EXP-184's "
-    "candidate (per-fold top-20% on the full forecast+analog feature set) "
-    "and this arm (per-fold top-20% on the base feature set) are evaluated "
-    "on the identical v2 snapshot, trades, repricer, walk-forward and MC "
-    "settings -- see spec.yaml's comparison_baselines."
+    "ga.build_dataset still joins the forecast and analog columns (the "
+    "shared dataset is identical for both arms); this arm simply does not "
+    "use those columns for fitting or scoring -- its feature list is the "
+    "base set only. EXP-184's candidate (per-fold top-20% on the full "
+    "forecast+analog feature set) and this arm (per-fold top-20% on the "
+    "base feature set) are evaluated on the identical v2 snapshot, trades, "
+    "repricer, walk-forward and MC settings -- see spec.yaml's "
+    "comparison_baselines."
 )
 ARM_B_GATE_ID = "gate_midfill_str_thru_forecast_analog"
 
