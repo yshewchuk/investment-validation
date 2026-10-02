@@ -126,10 +126,14 @@ own `computed_moves` rows strictly before `key.event_date` (the scored
 event, never `decision_session`, which can be later)
 (`realized_move_pct`/`implied_move_pct`, ordered by `event_date`) to
 build `panel_math.history_features`'s `prior_moves`/`prior_abs` and feed
-`advance_history`/`add_implied_history`; `daily_market` for the fixed
-ticker `"SPY"` as `regime.add_regime_features`'s `market` argument (the
-same `scan_daily_state_inputs`-shaped read, parameterized by ticker); and,
-for `STR-RUNUP` only, `price_history_query.get_price_series` (a
+`advance_history`/`add_implied_history`; a new, separate bounded
+`daily_market` scan for the fixed ticker `"SPY"` returning its raw
+`date`/`close` columns directly (never `scan_daily_state_inputs`, whose
+`DailyStateInputs` result is derived/lagged values, not the chronological
+`date`/`close` DataFrame `regime.add_regime_features`'s `market` argument
+requires) — this scan does not exist yet and is this slice's own new
+code, shaped like `nightly_raw_rows`'s own `DataQuery`/`KeyPredicate`
+reads; and, for `STR-RUNUP` only, `price_history_query.get_price_series` (a
 `PriceQuery` with both `session_date` and `observation_ceiling` set to
 `decision_session`, one read per ticker) for `runup_math.
 add_runup_features`'s `prices_by_ticker` — its own `date <= session_date`
@@ -145,7 +149,7 @@ producer's own job (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6").
 |---|---|
 | snapshot has no `daily_market`/`computed_moves` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
 | snapshot has no `price_history` table (`STR-RUNUP` only — this read is never made for another strategy) | `CONTRACT_MISMATCH`, propagated unchanged |
-| `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: its keys stay absent; `regime`'s fields are unaffected (independent read) |
+| `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: every key is still present (`n_prior=0`, the mean/EMA keys `None`), never absent; `regime`'s fields are unaffected (independent read) |
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for this ticker (`STR-RUNUP` only) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
