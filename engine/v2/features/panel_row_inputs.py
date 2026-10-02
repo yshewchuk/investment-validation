@@ -10,7 +10,10 @@ The four always-made pinned-snapshot dependencies:
 
 * ``scan_daily_state_inputs`` (``key.ticker``);
 * a bounded ``computed_moves`` read (``key.ticker``, rows strictly before
-  ``key.event_date``), feeding ``panel_math.history_features``;
+  ``min(key.event_date, decision_session)`` -- the decision-session cutoff,
+  not just the event-date one), feeding ``panel_math.history_features`` with
+  the non-skipped rows only (``skipped=true`` rows are excluded before that
+  call, never treated as a zero move);
 * a new bounded ``daily_market`` read for the fixed ticker ``"SPY"``, feeding
   ``regime.add_regime_features`` (a different, raw chronological shape than the
   derived/lagged ``scan_daily_state_inputs`` mapping, so not reused from it);
