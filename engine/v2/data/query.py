@@ -262,7 +262,11 @@ def compile_batch_matcher(contract: TableContract, query: DataQuery
 
     Returns ``None`` when a ``key_filter`` predicate's ``values`` cannot be
     represented in its column's declared Arrow type (e.g. a string value
-    against a declared ``int64`` column) -- decided once here, from
+    against a declared ``int64`` column) -- and, more generally, whenever
+    ANY exception is raised while compiling/normalizing a predicate for
+    this query, not only an Arrow type-representation error: a future
+    failure mode this package has not enumerated degrades to the row path
+    instead of crashing the scan -- decided once here, from
     ``contract``/``query`` alone, never from the data a caller later feeds
     the returned closure. A caller that gets ``None`` back must fall back to
     ``compile_row_matcher`` tested against every decoded row (the only path
@@ -281,7 +285,7 @@ def compile_batch_matcher(contract: TableContract, query: DataQuery
         predicates = [_compile_batch_predicate(contract, p) for p in query.key_filter]
         interval = (None if query.time_interval is None
                     else _compile_batch_interval(contract, query.time_interval))
-    except (pa.ArrowException, OverflowError):
+    except Exception:
         return None
 
     def _mask(columns: dict[str, pa.Array], num_rows: int) -> pa.Array:
@@ -315,10 +319,8 @@ def _compile_batch_predicate(contract: TableContract, predicate: KeyPredicate
 def _compile_batch_interval(contract: TableContract, interval: TimeInterval
                             ) -> tuple[str, Callable[[pa.Array], pa.Array]]:
     physical = _physical_type(contract, interval.column)
-    start = (None if interval.start_inclusive is None
-             else _batch_timestamp(_normalize_bound(interval.start_inclusive)))
-    end = (None if interval.end_exclusive is None
-           else _batch_timestamp(_normalize_bound(interval.end_exclusive)))
+    start = None if interval.start_inclusive is None else _parsed_bound(interval.start_inclusive)
+    end = None if interval.end_exclusive is None else _parsed_bound(interval.end_exclusive)
 
     def _apply(array: pa.Array) -> pa.Array:
         comparable = _batch_comparable(array, physical)
@@ -375,24 +377,14 @@ def _floor_ns_to_us(array: pa.Array) -> pa.Array:
 def _batch_value_set(physical_type: str, values) -> pa.Array:
     """The ``value_set`` :func:`_compile_batch_predicate` feeds ``is_in``,
     in the same comparable form :func:`_batch_comparable` casts a column
-    to. Raises a pyarrow ``ArrowException`` -- or, for an ``int64`` column
-    given a Python ``int`` outside the C ``long`` range, a plain
-    ``OverflowError`` -- caught by :func:`compile_batch_matcher`, never by
-    this function -- when a value cannot be represented in the column's
-    declared Arrow type."""
+    to. May raise during compilation -- a pyarrow ``ArrowException`` when a
+    value cannot be represented in the column's declared Arrow type, a
+    plain ``OverflowError`` for an ``int64`` column given a Python ``int``
+    outside the C ``long`` range, or anything else -- caught broadly by
+    :func:`compile_batch_matcher`, never by this function."""
     if physical_type.startswith("timestamp"):
-        return pa.array([_batch_timestamp(_normalize_bound(v)) for v in values],
-                        type=pa.timestamp("us"))
+        return pa.array([_parsed_bound(v) for v in values], type=pa.timestamp("us"))
     return pa.array(values, type=ARROW_TYPES[physical_type])
-
-
-def _batch_timestamp(normalized: str):
-    """A ``_normalize_bound``-normalized wire string, parsed back to the
-    Python ``datetime`` pyarrow compares a microsecond-resolution timestamp
-    array against. Never fails: every caller's ``normalized`` string is
-    already exactly ``time_formats.NAIVE_TIMESTAMP_FORMAT``, produced by
-    ``_normalize_bound`` itself."""
-    return datetime.strptime(normalized, time_formats.NAIVE_TIMESTAMP_FORMAT)
 
 
 def order_key(row: dict, contract: TableContract) -> tuple:
@@ -413,6 +405,30 @@ def _comparable_value(value, physical_type: str):
     if value is not None and physical_type.startswith("timestamp"):
         return time_formats.format_naive_timestamp(value)
     return value
+
+
+def _parsed_bound(value: str) -> datetime:
+    """The parsed ``datetime`` behind :func:`_normalize_bound`, before it
+    is formatted to the shared wire string. The vectorized batch path
+    (:func:`_batch_value_set`, :func:`_compile_batch_interval`) calls this
+    directly instead of calling ``_normalize_bound`` and then reparsing its
+    formatted string with ``strptime`` -- that round trip is not always
+    safe: ``strftime``'s ``%Y`` does not reliably zero-pad a year below
+    1000 on every platform, so a bound like ``"0001-01-01"`` can normalize
+    to an unpadded wire string that a 4-digit-year ``strptime`` reparse
+    then refuses with a ``ValueError`` -- a real, platform-dependent
+    failure this avoids entirely by never formatting to a string and
+    reparsing it in the first place. Same ``CONTRACT_MISMATCH`` refusal on
+    an unparseable bound as :func:`_normalize_bound`."""
+    if time_formats.is_naive_timestamp(value):
+        return datetime.strptime(value, time_formats.NAIVE_TIMESTAMP_FORMAT)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise fail("CONTRACT_MISMATCH", "a time bound is not a parseable date or timestamp") from None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _normalize_bound(value: str) -> str:
@@ -437,10 +453,4 @@ def _normalize_bound(value: str) -> str:
     """
     if time_formats.is_naive_timestamp(value):
         return value
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        raise fail("CONTRACT_MISMATCH", "a time bound is not a parseable date or timestamp") from None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return time_formats.format_naive_timestamp(parsed)
+    return time_formats.format_naive_timestamp(_parsed_bound(value))

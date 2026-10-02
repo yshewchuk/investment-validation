@@ -933,6 +933,32 @@ def test_compile_batch_matcher_far_out_of_ns_range_interval_bounds_never_overflo
         assert bool(mask[0]) == row_matcher(decoded_row)
 
 
+def test_compile_batch_matcher_low_year_interval_bound_compiles_on_the_fast_path():
+    """#286 follow-up 5: a ``TimeInterval`` bound at year 1 -- exactly the
+    value whose ``strftime``/``strptime`` format-then-reparse round trip
+    the old batch path could not be trusted on (``%Y`` does not reliably
+    zero-pad a year below 1000 on every platform) -- must compile on the
+    vectorized fast path, not degrade to the row-path fallback: the batch
+    path now shares the parsed ``datetime`` directly (``_parsed_bound``)
+    and never reparses a formatted wire string. The mask must still agree
+    with the row path: a modern 2024 row is well after year 1, so both
+    include it."""
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp("2024-01-02 00:00:00.123456789")
+    array = pa.array([instant], type=pa.timestamp("ns"))
+    decoded_row = _row("AAA", instant.to_pydatetime())
+    query = _synthetic_query(contract, time_interval=TimeInterval(
+        column="obs_date", start_inclusive="0001-01-01"))
+    batch_matcher = query_mod.compile_batch_matcher(contract, query)
+    assert batch_matcher is not None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    assert row_matcher(decoded_row) is True
+    mask = batch_matcher({"obs_date": array}, 1).to_pylist()
+    assert bool(mask[0]) is True
+    assert bool(mask[0]) == row_matcher(decoded_row)
+
+
 def test_compile_batch_matcher_near_minimum_ns_instant_floors_like_the_row_path():
     """A ns timestamp within a microsecond of the MINIMUM representable
     ``timestamp[ns]`` instant must floor to its own microsecond wire form
