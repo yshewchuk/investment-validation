@@ -101,20 +101,39 @@ def test_price_candidate_grid_matches_direct_replay_one_per_step(tmp_path):
         plan, _chains.read_chain_keys(repository, snapshot_ref))
     index = _chains.load_chain_index(repository, snapshot_ref, plan.chain_keys)
     expected = {}
+    expected_variant = {}
     for step in (1, 2):
         structure = _pricing.STRUCTURES["TWIN-P"](steps=step)
-        expected[step] = sum(
-            len(replay_one(structure, row, index)[0])
+        expected_variant[step] = _pricing.execution_variant_label(structure)
+        expected[step] = [
+            priced_row
             for row in plan.frame.to_dict("records")
-        )
+            for priced_row in replay_one(structure, row, index)[0]
+        ]
+    assert expected_variant[1] != expected_variant[2]
 
     grid = _grid(tmp_path, snapshot.snapshot_id, events, steps=(1, 2))
     conn.close()
 
-    assert all(count > 0 for count in expected.values())
+    assert all(len(rows) > 0 for rows in expected.values())
     counts = {int(step): int(size) for step, size in grid.groupby("steps").size().items()}
-    assert counts == expected
+    assert counts == {step: len(rows) for step, rows in expected.items()}
     assert set(grid["strategy"]) == {"TWIN-P"}
+
+    key = ["ticker", "event_id", "event_date", "fill_alpha"]
+    for step in (1, 2):
+        step_slice = grid[grid["steps"] == step]
+        assert (step_slice["variant"] == expected_variant[step]).all()
+        expected_df = pd.DataFrame(expected[step])
+        shared = list(expected_df.columns)
+        expected_sorted = expected_df.sort_values(key, kind="mergesort").reset_index(drop=True)
+        grid_sorted = (
+            step_slice[shared]
+            .sort_values(key, kind="mergesort")
+            .reset_index(drop=True)
+        )
+        pd.testing.assert_frame_equal(expected_sorted, grid_sorted,
+                                      rtol=1e-12, atol=1e-12)
 
 
 def test_price_candidate_grid_reads_chains_once_for_the_whole_grid(tmp_path, monkeypatch):
