@@ -1091,6 +1091,12 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     An empty `changed` returns [] (no diff -> nothing to run), the one
     intentional zero-selection case, matching changed_modules.
 
+    Fan-out limits: the #155 fail-safe set (DYNAMIC or tainted tests) is
+    added only when the diff touches a non-test python file; a collected
+    test file is a leaf (selects itself and its static importers), and a doc
+    path (`is_doc_changed_path`) selects only the tests whose closure names
+    that doc (`_doc_reader_tests`). A diff of only those selects a narrow set.
+
     #155 (unresolved dynamic import) handling: a test file that is ITSELF
     classified DYNAMIC (_is_dynamic_file) is always selected, and so is a
     test file that reaches, via a real import edge, some OTHER file that
@@ -1126,23 +1132,81 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
               file=sys.stderr, flush=True)
         return None
     closures: dict[str, set[str]] = {}
-    selected: set[str] = set()
+    failsafe: set[str] = set()
     for t in tests:
         closure, tainted = _closure_from_roots(
             {t} | _conftest_ancestors(t, tracked_set), graph, unresolved,
             taint_exempt={t})
         closures[t] = closure
         if t in dyn or tainted:
-            selected.add(t)
-    for path in changed_set:
+            failsafe.add(t)
+    tests_set = set(tests)
+    selected: set[str] = set()
+    docs: list[str] = []
+    needs_failsafe = False
+    for path in sorted(changed_set):
         hit = {t for t in tests if path in closures[t]}
+        selected |= hit
+        if path in tests_set:
+            continue  # a collected test file is a leaf: it affects only itself + its importers
         if hit:
-            selected |= hit
-            continue
-        if is_inert_changed_path(cfg, path):
-            continue
-        return None
+            needs_failsafe = True
+        elif is_doc_changed_path(cfg, path):
+            docs.append(path)
+        else:
+            return None
+    if needs_failsafe:
+        selected |= failsafe
+    if docs:
+        selected |= _doc_reader_tests(docs, tests, closures)
     return sorted(selected)
+
+
+def is_doc_changed_path(cfg: dict, path: str) -> bool:
+    """True if `path` is documentation for test selection: on the `inert`
+    allowlist, or any `*.md` outside `inert_skip`. Wider than
+    is_inert_changed_path on purpose: that one gates mutation-module skipping,
+    this one only picks which tests read the doc (`_doc_reader_tests`)."""
+    if any(fnmatch.fnmatchcase(path, pat)
+           for pat in cfg.get("pr_selection", {}).get("inert_skip", [])):
+        return False
+    return is_inert_changed_path(cfg, path) or path.endswith(".md")
+
+
+def _string_literals(source: str) -> list[str]:
+    """Every string constant in `source` except docstrings: a path a file
+    reads at runtime is a string literal, while a docstring or comment merely
+    mentioning a doc is not a read."""
+    tree = ast.parse(source)
+    skip: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                skip.add(id(first.value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skip]
+
+
+def _doc_reader_tests(docs: list[str], tests: list[str],
+                      closures: dict[str, set[str]]) -> set[str]:
+    """Tests that can read a changed doc: those whose import closure (python
+    files only) holds a non-docstring string literal naming the doc's file
+    name. An unreadable or unparsable closure file counts as a match, never a
+    silent skip."""
+    names = {d.rsplit("/", 1)[-1] for d in docs}
+    named: dict[str, bool] = {}
+
+    def names_a_doc(rel: str) -> bool:
+        if rel not in named:
+            try:
+                src = (REPO / rel).read_text(encoding="utf-8")
+                named[rel] = any(n in lit for lit in _string_literals(src) for n in names)
+            except (OSError, UnicodeDecodeError, SyntaxError):
+                named[rel] = True
+        return named[rel]
+
+    return {t for t in tests if any(names_a_doc(rel) for rel in closures[t])}
 
 
 # -- work copy ---------------------------------------------------------------
