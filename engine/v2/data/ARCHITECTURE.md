@@ -60,17 +60,22 @@ interface section; this names only the load-bearing entry points.
   I/O). `query.compile_batch_matcher(contract, query)` is the entry point
   `repository.Repository._fragment_rows` calls once per fragment to
   vectorize `key_filter` equality/set-membership (pyarrow `compute.is_in`)
-  on a string/int64/bool/float64 column, returning a boolean mask
-  `_fragment_rows` uses to drop non-matching rows via `RecordBatch.filter`
-  *before* they are decoded to per-row Python dicts, so only surviving
-  rows pay that cost. Any `time_interval`, any predicate on a timestamp
-  column, or a predicate value not representable in its column's
-  declared Arrow type makes the function return `None` at compile time,
-  decided from `contract`/`query` alone, never from the data, and the
-  whole query falls back to `compile_row_matcher`. `_fragment_rows` also
-  falls back per fragment if the compiled mask itself raises when
-  evaluated against a real batch — a case compile-time refusal cannot
-  fully rule out. A null column value never matches, on both paths.
+  on a `string`/`int64`/timestamp column (a timestamp column is floored
+  and widened to microsecond resolution first, exactly like the row
+  path's own wire form), returning a boolean mask `_fragment_rows` uses
+  to drop non-matching rows via `RecordBatch.filter` *before* they are
+  decoded to per-row Python dicts, so only surviving rows pay that cost.
+  Any `time_interval`, any predicate on a `bool`/`float64` column
+  (`is_in` compares a float's raw bit pattern, so `-0.0` never matches a
+  `0` value_set entry even though the row path's plain Python equality
+  treats them equal), or a predicate value not representable in its
+  column's declared Arrow type makes the function return `None` at
+  compile time, decided from `contract`/`query` alone, never from the
+  data, and the whole query falls back to `compile_row_matcher`.
+  `_fragment_rows` also falls back per fragment if the compiled mask
+  itself raises when evaluated against a real batch — a case
+  compile-time refusal cannot fully rule out. A null column value never
+  matches, on both paths.
 
   `compile_row_matcher(contract, query)` is the one row-matching entry
   point for every query this file does not vectorize, and for any caller
