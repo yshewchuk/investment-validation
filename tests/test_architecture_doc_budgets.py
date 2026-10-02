@@ -222,6 +222,25 @@ def test_default_mode_reads_staged_not_worktree(tmp_path, monkeypatch):
     assert adb.check_files(all_base, all_new).ok
 
 
+def test_unreadable_architecture_doc_raises_rather_than_scoring_empty(tmp_path, monkeypatch):
+    for v in _LEAK:
+        monkeypatch.delenv(v, raising=False)
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "ARCHITECTURE.md").write_text("x\n" * 100)
+    _git(["add", "ARCHITECTURE.md"], repo)
+    real = Path.read_bytes
+
+    def read_bytes(self):
+        if self.name == "ARCHITECTURE.md":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    with pytest.raises(PermissionError):
+        adb._sources(repo, use_worktree=True, base_ref="HEAD")
+
+
 def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monkeypatch):
     for v in _LEAK:
         monkeypatch.delenv(v, raising=False)

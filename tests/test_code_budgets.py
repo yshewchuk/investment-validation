@@ -297,6 +297,15 @@ def test_strict_worktree_read_raises_on_failure_but_not_on_missing(tmp_path, mon
     assert read_worktree_blob(repo, "engine/v2/gone.py", strict=True) == b""
 
 
+def test_strict_read_of_unreadable_architecture_doc_raises(tmp_path, monkeypatch):
+    from checks.repo_hygiene import read_worktree_blob
+
+    repo = _tracked_repo(tmp_path, "engine/v2/ARCHITECTURE.md")
+    _unreadable(monkeypatch, "ARCHITECTURE.md")
+    with pytest.raises(PermissionError):
+        read_worktree_blob(repo, "engine/v2/ARCHITECTURE.md", strict=True)
+
+
 def test_strict_staged_read_raises_on_failure(tmp_path):
     from checks.repo_hygiene import read_staged_blob
 
