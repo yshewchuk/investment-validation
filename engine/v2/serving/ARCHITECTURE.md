@@ -56,14 +56,11 @@ flowchart LR
 Offline publication, composed by the projection tool (the one caller allowed to join serving and ops):
 ```mermaid
 flowchart LR
-  Bundle[legacy bundle + score.json] --> Load[legacy_bundle loaders]
-  Plan[optional shadow plan] --> Rows[shadow row source]
-  Load --> Rows --> Bridge[build_bridges]
-  Refs[resolve_event_refs over Repository] --> Bridge
-  Bridge --> Objs[publish findings, details, manifest]
-  Objs -->|findings ok| Tx[one index transaction]
-  Objs -->|findings not ok| Refused[receipt only; PROJECTION_REFUSED]
-  Tx --> Binding[projection_binding JSON] --> Ops[ops publisher input]
+  In[score document + bundle rows + event refs] --> Findings[findings artifact: diagnostic reference]
+  Findings -->|findings not ok| Refused[PROJECTION_REFUSED; nothing else written]
+  Findings -->|findings ok| Publish[details + manifest published]
+  Publish --> Commit[index committed in one transaction]
+  Commit --> Binding[projection_binding for the ops publisher]
 ```
 Operations listener: `create_server` serves health files, the release pointer and release bytes,
 the analog, derivation and parity documents, and forwards `POST` commands to injected callbacks.
