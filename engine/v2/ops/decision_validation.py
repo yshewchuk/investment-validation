@@ -31,13 +31,15 @@ def _add(findings, field, reason):
 
 
 def _finite_share(value):
-    """Return ``value`` as a float, or ``None`` unless it is a finite real
+    """Return ``value`` unchanged, or ``None`` unless it is a finite real
     number (bool, str, None, NaN and infinities are all refused: every range
     comparison against NaN is false, so NaN would otherwise pass).
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if math.isfinite(value) else None
+    # An int is always finite; ``math.isfinite`` would raise OverflowError on
+    # one too large for a float, so only floats are probed.
+    return value if isinstance(value, int) or math.isfinite(value) else None
 
 
 def _validate_plan(plan, findings):

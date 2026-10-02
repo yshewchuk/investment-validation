@@ -37,6 +37,13 @@ def test_out_of_range_share_is_outside_floor(field, bad):
         {"field": "finality." + field, "reason": "outside_finality_floor"}]
 
 
+@pytest.mark.parametrize("field", ["daily_share", "chain_share"])
+@pytest.mark.parametrize("huge", [10**400, -10**400])
+def test_oversized_int_share_is_out_of_range_not_a_crash(field, huge):
+    assert _findings(**{field: huge}) == [
+        {"field": "finality." + field, "reason": "outside_finality_floor"}]
+
+
 @pytest.mark.parametrize("good", [0.80, 0.9, 1.0, 1])
 def test_valid_boundaries_pass(good):
     assert _findings(daily_share=good, chain_share=good) == []
