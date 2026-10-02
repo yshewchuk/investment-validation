@@ -10,6 +10,7 @@ slice and do not appear here.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -31,6 +32,10 @@ from experiments.common_v2 import load_v2_chain_quotes
 __all__ = ["price_candidate_grid"]
 
 
+def _log(message: str) -> None:
+    print(f"  [v2_candidate_grid] {message}", flush=True)
+
+
 def _empty_grid() -> pd.DataFrame:
     """The documented empty result: the two identity columns, zero rows."""
     return pd.DataFrame(
@@ -42,6 +47,7 @@ def price_candidate_grid(
     strategy: str, events: pd.DataFrame, *,
     catalog: Path | str, store_root: Path | str, snapshot_id: str,
     steps: Sequence[int] = (1, 2, 3, 4, 5, 6), alphas=ALPHA_GRID,
+    progress_every: int = 2000,
 ) -> pd.DataFrame:
     """Price ONE strategy family across grid-position ``steps`` on one snapshot.
 
@@ -62,7 +68,12 @@ def price_candidate_grid(
       behavior returns for that (step, plan_row) pair: the grid adds no new
       skip or error path, it just calls ``replay_one`` once per pair the way
       ``replay()`` calls it once per plan row.
+
+    ``progress_every`` mirrors :func:`engine.v2.research.replay.replay`'s own
+    convention and default: one progress line every N (step, event) pairs
+    while the grid is pricing (0 or None disables it).
     """
+    started = time.time()
     conn = open_catalog(Path(catalog), clock=SystemClock())
     try:
         repository = Repository(conn, ArtifactStore(Path(store_root)))
@@ -86,15 +97,23 @@ def price_candidate_grid(
     )
     plan_rows = plan.frame.to_dict("records")
     rows: list[dict] = []
+    total = len(steps) * len(plan_rows)
+    count = 0
     for step in steps:
         structure = STRUCTURES[strategy](steps=int(step))
         variant = execution_variant_label(structure)
         for plan_row in plan_rows:
+            count += 1
             priced, _reason = replay_one(structure, plan_row, index, alphas=alphas)
             for row in priced:
                 row["steps"] = int(step)
                 row["variant"] = variant
                 rows.append(row)
+            if progress_every and count and count % progress_every == 0:
+                _log(
+                    f"{strategy}: {count:,}/{total:,} (step x event) pairs, "
+                    f"{len(rows):,} rows, {time.time() - started:.0f}s"
+                )
 
     if not rows:
         return _empty_grid()
