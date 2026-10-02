@@ -244,15 +244,27 @@ class TestCarryOverGuards:
                 tier3_snapshot="snap", log=lambda _m: None,
             )
 
-    def test_events_added_inside_the_carried_prefix_refuse_the_carry_over(self, panel, built):
-        # A backfill at date D that added events; carrying the prefix over would
-        # leave holes in a table consumers rely on being total.
-        thinned = built[built["event_date"] != built["event_date"].min()]
-        with pytest.raises(Tier4Error, match="permanent holes"):
-            build_forecasts(
-                panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=thinned,
-                tier3_snapshot="snap", log=lambda _m: None,
-            )
+    def test_an_unscored_gap_is_backfilled_as_a_null_row_not_refused(self, panel, built):
+        # A backfill that adds a ticker's full history, including events
+        # before FIRST_FOLD: those have no fold to recompute, but a full
+        # rebuild never gives them a forecast either, so the only correct
+        # repair is the same null row a full rebuild would write.
+        gap_date = built["event_date"].min()
+        gap_ticker = built.loc[built["event_date"] == gap_date, "ticker"].iloc[0]
+        thinned = built[
+            ~((built["ticker"] == gap_ticker) & (built["event_date"] == gap_date))
+        ]
+
+        backfilled = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=thinned,
+            tier3_snapshot="snap", log=lambda _m: None,
+        )
+
+        assert len(backfilled) == len(panel)
+        pd.testing.assert_frame_equal(
+            backfilled.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
 
 
 class TestPrefixGapBackfill:
@@ -264,11 +276,11 @@ class TestPrefixGapBackfill:
     2021 dates).
 
     The sibling test
-    ``TestCarryOverGuards.test_events_added_inside_the_carried_prefix_refuse_the_carry_over``
+    ``TestCarryOverGuards.test_an_unscored_gap_is_backfilled_as_a_null_row_not_refused``
     locks in the OTHER half of this behaviour: a gap in an UNSCORED prefix row
-    (older than ``FIRST_FOLD``) still refuses and raises, because there is no
-    fold to recompute for it. This class covers the SCORED case, which the fix
-    now backfills instead of refusing.
+    (older than ``FIRST_FOLD``) is filled with the same null row a full rebuild
+    would give it, since no fold ever existed to recompute it. This class covers
+    the SCORED case, which widens ``since`` backward instead.
     """
 
     def test_a_gap_in_the_carried_prefix_is_backfilled_not_refused(self, panel, built):
@@ -323,6 +335,42 @@ class TestPrefixGapBackfill:
         # forecasts even though the one restored row looks right. Same risk
         # TestSinceEquivalence exists to catch for the ordinary incremental
         # path.
+        pd.testing.assert_frame_equal(
+            backfilled.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
+
+    def test_a_mixed_unscored_and_scored_gap_matches_a_full_rebuild(self, panel, built):
+        """A universe backfill adds a ticker's whole history at once, so the
+        SAME incremental build can be missing an unscored (pre-FIRST_FOLD)
+        key and a scored key that needs widening, together. Each half is
+        covered by its own test above; this is the case that actually broke
+        the nightly (2026-09-26 onward) and the one the fix must get right
+        when both happen in the same call: the widened pass must still see
+        the just-healed unscored row, or it is silently dropped as an
+        out-of-window gap instead of kept as a null row.
+        """
+        since = "2015-01-01"
+        unscored_date = built["event_date"].min()
+        unscored_ticker = built.loc[built["event_date"] == unscored_date, "ticker"].iloc[0]
+
+        scored = built[built["pred_abs_move"].notna()]
+        scored_date = scored.loc[scored["event_date"] < pd.Timestamp(since), "event_date"].max()
+        scored_ticker = scored.loc[scored["event_date"] == scored_date, "ticker"].iloc[0]
+
+        thinned = built[
+            ~(
+                ((built["ticker"] == unscored_ticker) & (built["event_date"] == unscored_date))
+                | ((built["ticker"] == scored_ticker) & (built["event_date"] == scored_date))
+            )
+        ]
+
+        backfilled = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
+            tier3_snapshot="snap", log=lambda _m: None,
+        )
+
+        assert len(backfilled) == len(panel)
         pd.testing.assert_frame_equal(
             backfilled.sort_values(["event_date", "ticker"]).reset_index(drop=True),
             built.sort_values(["event_date", "ticker"]).reset_index(drop=True),

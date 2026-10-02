@@ -776,13 +776,16 @@ def _carried_prefix(
       would leave the table labelled with two model ids and comparable to
       neither.
 
-    The third — Tier 3 gained events inside the retained prefix — used to
-    always raise too. It still does for a gap that predates ``FIRST_FOLD``:
-    an unscored row has no fold to recompute, so widening ``since`` could
-    never fix it, and a hole there means the existing table is corrupt in a
-    way this function cannot repair. For a SCORED gap (>= ``FIRST_FOLD``) it
-    now widens ``cut`` backward to close it instead, bounded by
-    ``BACKFILL_WINDOW_MONTHS`` — see guides/tier4_feature_models.md §6a.
+    The third — Tier 3 gained events inside the retained prefix — splits at
+    ``FIRST_FOLD``. A gap at or after ``FIRST_FOLD`` has a fold to recompute, so
+    it widens ``cut`` backward to close it, bounded by
+    ``BACKFILL_WINDOW_MONTHS`` (see guides/tier4_feature_models.md §6a). A gap
+    OLDER than ``FIRST_FOLD`` has no fold to recompute — but it has no forecast
+    in a full rebuild either: ``folds`` is bounded below by ``FIRST_FOLD``, so a
+    full build gives any pre-``FIRST_FOLD`` key the same null row as any other
+    unscorable event, regardless of why that key is new to the table. Carrying
+    such a key over as that same null row is exactly what a full rebuild would
+    do, so this fills it and continues instead of refusing.
     """
     _, _, _, _, _, model_id_col, fold_col = column_group(model.produces)
     have = existing[existing["event_date"] < cut]
@@ -817,15 +820,27 @@ def _carried_prefix(
 
     unscored = missing[missing["event_date"] < FIRST_FOLD]
     if len(unscored):
-        raise Tier4Error(
-            f"Tier 3 has {len(unscored):,} unscored event(s) before "
-            f"{FIRST_FOLD.date()} (of {len(missing):,} missing before {cut.date()}) "
-            "that the existing Tier-4 table does not cover — carrying the "
-            "prefix over would leave permanent holes. Rebuild in full, or "
-            "move --since earlier."
+        log(
+            f"{model.produces}: {len(unscored):,} event(s) before "
+            f"{FIRST_FOLD.date()} are new to Tier 3 and unscored by construction "
+            "(no fold exists before FIRST_FOLD) — filling the same null row a "
+            "full rebuild would give any unscorable event, not widening since "
+            "there is no fold to recompute"
         )
+        have = pd.concat(
+            [have, _normalize_group(unscored, model.produces)], ignore_index=True
+        )
+        merged = prefix_keys.merge(
+            have, on=["ticker", "event_date"], how="left", indicator=True
+        )
+        missing = merged[merged["_merge"] == "left_only"][["ticker", "event_date"]]
+        if missing.empty:
+            stale = len(have) - len(prefix_keys)
+            if stale > 0:
+                log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
+            return merged.drop(columns=["_merge"]), cut, missing.copy()
 
-    # Every missing key is scored (>= FIRST_FOLD, so it has a fold to
+    # Every remaining missing key is scored (>= FIRST_FOLD, so it has a fold to
     # recompute) — widen `cut` backward to close the gap, bounded.
     earliest_gap = pd.Timestamp(missing["event_date"].min())
     widened = pd.Timestamp(fold_start_of([earliest_gap]).iloc[0])
@@ -835,7 +850,7 @@ def _carried_prefix(
     effective_cut = max(widened, floor)
 
     prefix_keys2 = keys[keys["event_date"] < effective_cut]
-    have2 = existing[existing["event_date"] < effective_cut]
+    have2 = have[have["event_date"] < effective_cut]
     merged2 = prefix_keys2.merge(
         have2, on=["ticker", "event_date"], how="left", indicator=True
     )
