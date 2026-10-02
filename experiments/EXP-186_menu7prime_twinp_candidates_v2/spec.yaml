@@ -27,7 +27,7 @@ data:
   chains: "pinned v2 snapshot option_chains"
   quota_calls: 0
 data_snapshot: null
-v2_snapshot_id: null
+v2_snapshot_id: snap_15a35450a6eff5dbfc8f724b76a31f24
 walk_forward:
   unit: year
   min_train_years: 2
