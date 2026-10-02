@@ -59,7 +59,7 @@ evaluation:
     - "n_selected by year, ungated share, deployment (peak/worst cash/constrained entries), for each arm"
   multiplicity: "EXP-145 found the full forecast+analog feature set with a per-fold threshold the best of seven compared arms (exploratory). EXP-184 re-ran it as a single pre-registered confirmatory test, but that test still changed two things (features and threshold rule) at once. This experiment is the decomposition: two further pre-registered arms on the same hypothesis family, so a promotion decision can cite which change drove EXP-184's result. The ledger records this spec's own hash separately from EXP-145's and EXP-184's; no row here stands in for either."
 
-falsification: "Falsified as a clean, non-interacting decomposition per interaction_check above (a sign disagreement, or a same-axis magnitude ratio over 5x, between the two same-axis effect estimates, on CAGR or trade Sharpe). This experiment makes no promotion decision and writes no registry entry regardless of outcome."
+falsification: "Falsified as a clean, non-interacting decomposition if interaction_check's criterion above calls either axis an interaction on CAGR or trade Sharpe -- a sign disagreement where at least one of the two same-axis effect estimates is not negligible, or a same-axis magnitude ratio over 5x (two estimates that are both negligible are additive by that same criterion, even if their signs differ). This experiment makes no promotion decision and writes no registry entry regardless of outcome."
 
 data:
   trades: "Tier-2 engine.replay STR-THRU trades (store.read_table('trades'))"
