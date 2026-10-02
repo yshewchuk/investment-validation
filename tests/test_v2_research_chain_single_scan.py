@@ -79,10 +79,22 @@ def test_replay_availability_comes_from_the_chain_index_not_read_chain_keys(
     monkeypatch.setattr(_chains, "read_chain_keys_for", _spy)
     monkeypatch.setattr(replay, "read_chain_keys_for", _spy, raising=False)
 
+    load_calls: list = []
+    real_load = replay.load_chain_index
+
+    def _load_spy(repository, snapshot_ref, keys):
+        keys = set(keys)
+        load_calls.append(keys)
+        return real_load(repository, snapshot_ref, keys)
+
+    monkeypatch.setattr(replay, "load_chain_index", _load_spy)
+
     result = replay.replay(repository, snap, "STR-THRU", _two_events(),
                            calendar=_calendar())
 
     assert len(calls) == 1
+    assert len(load_calls) == 1
+    assert all(ticker != "MISS" for ticker, _ in load_calls[0])
     assert len(result.trades) >= 1
     tickers = set(result.trades["ticker"].astype(str))
     assert "TEST" in tickers

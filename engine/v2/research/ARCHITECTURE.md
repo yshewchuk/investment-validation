@@ -341,9 +341,7 @@ uncaught traceback instead.
   retained-row shape as before this change, a narrower key scan ahead of
   it instead of a whole-table one. An explicit `index=` skips chain reads
   entirely. A caller with several strategies over the same events
-  (`_build_run.run` today) still repeats this per strategy — sharing one
-  `ChainIndex` across strategies is deferred to #276, gated on a measured
-  multi-strategy peak before committing to that tradeoff.
+  (`_build_run.run`) repeats this per strategy.
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since
