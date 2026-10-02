@@ -536,10 +536,10 @@ def test_run_native_score_batch_worker_without_producer_refusals_file_matches_ab
             _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     absent_root = tmp_path / "staging_absent"
     empty_root = tmp_path / "staging_empty"
-    assert (json.loads((absent_root / "refusals.json").read_text())
-            == json.loads((empty_root / "refusals.json").read_text()))
-    assert (json.loads((absent_root / "records.json").read_text())
-            == json.loads((empty_root / "records.json").read_text()))
+    assert (absent_root / "refusals.json").read_bytes() == (
+        empty_root / "refusals.json").read_bytes()
+    assert (absent_root / "records.json").read_bytes() == (
+        empty_root / "records.json").read_bytes()
 
 
 def test_run_native_score_batch_worker_producer_refusal_colliding_with_record_raises(tmp_path):
@@ -555,6 +555,25 @@ def test_run_native_score_batch_worker_producer_refusal_colliding_with_record_ra
             "code": "EVENT_NOT_FOUND",
             "detail": "no matching calendar event",
         }],
+    }))
+    with pytest.raises(ValueError):
+        run_native_score_batch_worker(
+            _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+
+
+def test_run_native_score_batch_worker_duplicate_unkeyable_producer_refusal_raises(tmp_path):
+    _stage_release(tmp_path)
+    root = tmp_path / "staging"
+    root.mkdir()
+    (root / "events.json").write_text(json.dumps([_event_doc()]))
+    bad_key = {"ticker": "TE|ST", "strategy": "STR-THRU",
+               "event_date": "2026-02-01", "session": "am"}
+    (root / "producer_refusals.json").write_text(json.dumps({
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [
+            {"key": bad_key, "code": "INVALID_KEY_FIELD", "detail": "first"},
+            {"key": bad_key, "code": "INVALID_KEY_FIELD", "detail": "second"},
+        ],
     }))
     with pytest.raises(ValueError):
         run_native_score_batch_worker(

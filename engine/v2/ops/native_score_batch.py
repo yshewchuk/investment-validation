@@ -636,6 +636,16 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     if producer_refusals_path.exists():
         producer_doc = json.loads(producer_refusals_path.read_text(encoding="utf-8"))
         refusals = refusals + _decode_producer_refusals(producer_doc)
+    seen_unkeyable_identities: set[tuple[str, str, str | None, str]] = set()
+    for refusal in refusals:
+        if refusal.code != "INVALID_KEY_FIELD":
+            continue
+        identity = (refusal.key.ticker, refusal.key.strategy,
+                    _iso(refusal.key.event_date), refusal.key.session)
+        if identity in seen_unkeyable_identities:
+            raise ValueError(
+                f"duplicate unkeyable refusal identity: {identity!r}")
+        seen_unkeyable_identities.add(identity)
     fields_by_request = {request_hash(request): inputs
                          for request, inputs in assembled.values()}
     batch_id = content_hash({
