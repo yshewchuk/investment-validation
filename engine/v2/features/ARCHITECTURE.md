@@ -114,13 +114,20 @@ scores, quote/expiry selection, complete panel assembly and nightly wiring
 are outside this boundary; its consumer is the native raw-row producer,
 before `NightlyEventInputs` assembly.
 
-### Panel-row staging boundary (design — cutover PR-6)
+### Panel-row staging boundary (implemented)
 
 `scan_panel_row(repository, snapshot, key, *, decision_session,
-history_start)` is the raw-row producer's one call for one
+history_start)` is implemented in `panel_row_inputs.py`. No production
+raw-row producer calls it yet (`engine/v2/ops/ARCHITECTURE.md` "Cutover
+PR-6"); it is the raw-row producer's one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
-pair; `panel_anchor` is the loosest of its contributing reads' own source
-dates, never a caller-asserted value. It never assigns `tier4_row` or
+pair; `panel_anchor` is the latest (freshest) of its contributing reads'
+own source dates, never a caller-asserted value — its consumer
+(`../scoring/ARCHITECTURE.md`'s `nightly_source_bundle.py`) trusts it as
+an observation-freshness upper bound, which only the latest, not the
+earliest, contributing date can be: the earliest would let an
+intervening freshness cutoff pass even though a later-dated input is
+actually fresher than that cutoff. It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
 (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
 changes which reads it makes or which keys the result carries — every
@@ -132,15 +139,25 @@ that does not name a superset-only key in its `feature_names` simply
 never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
 pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
 (`key.ticker`); `computed_moves` (`key.ticker`, restricted to rows where
-`event_date < key.event_date`, feeding `panel_math`); a new bounded
+`event_date < min(key.event_date, decision_session)` — the decision-session
+cutoff, not just the event-date one, so a `decision_session` earlier than
+`key.event_date` can never see a row the real nightly timeline would not
+yet have, feeding `panel_math`; rows with `skipped=true`
+carry no `realized_move_pct` and are excluded from that feed, never treated
+as a zero move; the bound is on data dates only — `event_date` — never on
+`computed_at`, the row's own calculation timestamp: a backfilled or
+corrected row legitimately carries a `computed_at` after its `event_date`
+(and, for an old enough `event_date`, after `decision_session` too), so
+filtering on it would discard genuine prior history, not future-leak it);
+a new bounded
 `daily_market` read for the fixed ticker `"SPY"` (feeding `regime`, not
 reused from `scan_daily_state_inputs` — a different, derived shape);
 `price_history_query.get_price_series`, as of `decision_session` — its
 selected source date sets `runup_asof` and is one input to the
-`panel_anchor` composite bound (line 122-123: the loosest of every
-contributing read's own source date, never this read alone); when no
-`STR-RUNUP` history resolves, `runup_asof` stays unset and `panel_anchor`
-is the loosest of the remaining reads'. Query construction and the
+`panel_anchor` composite bound (the latest of every contributing read's
+own source date, never this read alone); when no `STR-RUNUP` history
+resolves, `runup_asof` stays unset and `panel_anchor` is the latest of
+the remaining reads'. Query construction and the
 `PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
 contract — see the PR body.
 
@@ -149,6 +166,7 @@ contract — see the PR body.
 | snapshot has no `daily_market`/`computed_moves` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
 | snapshot has no `price_history` table | `CONTRACT_MISMATCH`, propagated unchanged |
 | `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: every key is still present (`n_prior=0`, the mean/EMA keys `None`), never absent; `regime`'s fields are unaffected (independent read) |
+| a non-skipped `computed_moves` row has a null `realized_move_pct` (a repository-integrity violation — the contract allows that only when `skipped=true`) | `CONTRACT_MISMATCH`, refused before `panel_math.history_features` runs, never silently coerced |
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for this ticker | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
@@ -239,8 +257,10 @@ is a unitless ratio minus one. No market read, implicit clock or cache exists.
   resolve feature scopes and recipe identities before scoring
   (`engine/v2/scoring/application.py`).
 - `regime` uses `panel_math._anchor_index` plus NumPy/pandas; it has no
-  filesystem/network access or legacy imports. Its only callers are tests.
-  Neither input frame is mutated. Production forward-panel assembly is absent.
+  filesystem/network access or legacy imports. `panel_row_inputs.scan_panel_row`
+  calls `regime.add_regime_features` (its one production-adjacent caller so
+  far; production forward-panel assembly itself is still absent); every
+  other caller is a test. Neither input frame is mutated.
 - `panel_math` supplies anchoring to `regime`; both have focused parity tests.
   Neither has a production forward-panel caller.
 
