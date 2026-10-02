@@ -114,10 +114,12 @@ scores, quote/expiry selection, complete panel assembly and nightly wiring
 are outside this boundary; its consumer is the native raw-row producer,
 before `NightlyEventInputs` assembly.
 
-### Panel-row staging boundary (design — cutover PR-6)
+### Panel-row staging boundary (implemented)
 
 `scan_panel_row(repository, snapshot, key, *, decision_session,
-history_start)` is the raw-row producer's one call for one
+history_start)` is implemented in `panel_row_inputs.py`. No production
+raw-row producer calls it yet (`engine/v2/ops/ARCHITECTURE.md` "Cutover
+PR-6"); it is the raw-row producer's one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
 pair; `panel_anchor` is the loosest of its contributing reads' own source
 dates, never a caller-asserted value. It never assigns `tier4_row` or
