@@ -131,12 +131,14 @@ reused unchanged across every strategy sharing that triple; a strategy
 that does not name a superset-only key in its `feature_names` simply
 never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
 pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
-(`key.ticker`); `computed_moves` (`key.ticker`, feeding `panel_math`); a
-new bounded `daily_market` read for the fixed ticker `"SPY"` (feeding
-`regime`, not reused from `scan_daily_state_inputs` — a different,
-derived shape); `price_history_query.get_price_series`. Read sequencing,
-the `PriceQuery` construction and the `PriceSeriesRow`-to-DataFrame
-conversion are implementation detail, not contract — see the PR body.
+(`key.ticker`); `computed_moves` (`key.ticker`, restricted to rows where
+`event_date < key.event_date`, feeding `panel_math`); a new bounded
+`daily_market` read for the fixed ticker `"SPY"` (feeding `regime`, not
+reused from `scan_daily_state_inputs` — a different, derived shape);
+`price_history_query.get_price_series`, as of `decision_session` — its
+selected source date sets both `runup_asof` and `panel_anchor`. Query
+construction and the `PriceSeriesRow`-to-DataFrame conversion are
+implementation detail, not contract — see the PR body.
 
 | Condition (R1-R6) | Outcome |
 |---|---|
