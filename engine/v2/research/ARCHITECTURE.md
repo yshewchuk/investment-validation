@@ -51,11 +51,11 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 one; the library entrypoints below are this package's real public interface:
 
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
-`replay.replay_one`, `_replay_run.run`,
-`_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
-`_chains.load_chain_index`, `_trades_table.to_trades_table`, `_build_run.run`,
-`reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
-`_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`.
+`replay.replay_one`, `_replay_run.run`, `_replay_run.events_frame`,
+`_plan.plan_events`, `_chains.ChainIndex`, `_chains.load_chain_index`,
+`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
+`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
+`_pricing.trading_calendar_from_snapshot`, `_pricing.execution_variant_label`.
 
 `experiment_trades.load_trades(repository, snapshot, strategy)` is a second
 kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
@@ -67,12 +67,16 @@ is a third: carved out of `_pricing.py`'s otherwise-internal contents the
 same way `_pricing.STRUCTURES` already is, for the same caller — a repricer
 built over a pinned snapshot needs the identical trading calendar `replay()`
 itself derives, not a second implementation and not the legacy CSV fallback
-(see Invariants).
+(see Invariants). `_pricing.execution_variant_label` is a fourth, carved out
+for `experiments/v2_candidate_grid.py`'s `price_candidate_grid` (issue #266
+slice 2), which labels each priced grid-position step with the same
+execution-variant string `replay()` itself uses, rather than reimplementing
+that labeling.
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
-snapshot-read helpers), `_pricing.py` (except the two names carved out
-above), `_trades_revisions.py`.
+snapshot-read helpers), `_pricing.py` (except the names carved out above),
+`_trades_revisions.py`.
 
 ## Inputs
 
