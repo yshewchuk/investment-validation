@@ -397,13 +397,38 @@ def _stubborn_tree(pids: Path) -> list[str]:
     return [sys.executable, "-c", code]
 
 
+def _read_proc_stat(pid: int) -> bytes:
+    return Path(f"/proc/{pid}/stat").read_bytes()
+
+
 def _pid_live(pid: int) -> bool:
-    """True while ``pid`` exists and is not a zombie."""
+    """True while ``pid`` exists and is not a zombie.
+
+    A process that exits between being listed and its stat being read has
+    exited: the kernel reports that as ``FileNotFoundError`` once reaped and
+    as ``ProcessLookupError`` (ESRCH) while it is being torn down.
+    """
     try:
-        stat = Path(f"/proc/{pid}/stat").read_bytes()
-    except FileNotFoundError:
+        stat = _read_proc_stat(pid)
+    except (FileNotFoundError, ProcessLookupError):
         return False
     return stat.rpartition(b")")[2].split()[0] not in (b"Z", b"X")
+
+
+@pytest.mark.parametrize("vanish", [FileNotFoundError, ProcessLookupError])
+def test_pid_live_treats_a_vanished_process_as_exited(monkeypatch, vanish):
+    def gone(pid):
+        raise vanish(3, "No such process")
+
+    monkeypatch.setattr(sys.modules[__name__], "_read_proc_stat", gone)
+    assert _pid_live(4_000_000) is False
+
+
+def test_pid_live_sees_a_running_process_and_a_zombie(monkeypatch):
+    assert _pid_live(os.getpid()) is True
+    monkeypatch.setattr(sys.modules[__name__], "_read_proc_stat",
+                        lambda pid: b"1 (x) Z 0 0")
+    assert _pid_live(1) is False
 
 
 def _lock_free(path: Path) -> bool:
