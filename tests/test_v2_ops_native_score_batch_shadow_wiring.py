@@ -145,59 +145,52 @@ def test_identity_orders_by_created_at_not_scope_hash(tmp_path):
     meaning -- so whichever of two same-session jobs (e.g. a legacy-mode
     run followed by a snapshot-mode rerun) happened to hash higher won, not
     whichever ran later. This builds two real succeeded "score" jobs in the
-    SAME session with different ``scope_hash`` (different ticker sets),
-    searching ticker candidates (computing each candidate's real
-    idempotency key through the same ``build_legacy_job_requests`` path,
-    never a hand-written hash) until the SECOND, later-created job has the
-    LOWER scope_hash -- guaranteeing hash order and creation order
-    disagree -- then asserts the later-created job wins.
+    SAME session with different ``scope_hash`` (different ticker sets), each
+    from its real ``build_legacy_job_requests`` request graph (never a
+    hand-written hash), and submits the HIGHER-hash job first and the
+    LOWER-hash job second -- so hash order and creation order disagree by
+    construction -- then asserts the later-created job wins.
 
-    Every candidate (including the first job) is built from the SAME
-    ``plan`` object, never a fresh ``build_nightly_plan`` call per job:
-    ``build_nightly_plan`` stamps ``decision_clock`` from a real
-    ``SystemClock`` when no ``clock=`` is passed, so two separate calls
-    fold two different wall-clock instants into ``scope_hash`` via
-    ``plan_identity`` -- making hashes from different calls incomparable
-    and the ``<`` comparison below flaky by chance (~50%). Reusing one
-    ``plan`` keeps ``decision_clock`` fixed, so only ``tickers`` varies
-    each candidate's hash.
+    Two candidates are enough: ordering them by their verified hashes makes
+    the disagreement certain, so no search over many candidates is needed
+    (each request-graph build recomputes the full worker source manifest, so
+    a 200-candidate search cost minutes). Each graph is built once and the
+    same requests are both hashed and submitted. Both are built from the
+    SAME ``plan`` object: ``build_nightly_plan`` stamps ``decision_clock``
+    from a real ``SystemClock`` when no ``clock=`` is passed, so hashes
+    from separate plans fold in different instants and are incomparable.
     """
     conn, clock, _ = catalog(tmp_path)
     session = "2026-01-01"
     plan = nightly.build_nightly_plan(ROOT, session)
 
-    def _mark(tickers):
+    candidates = []
+    for tickers in (("FIRST",), ("LATER",)):
         requests = nightly.build_legacy_job_requests(plan, tickers=tickers,
                                                        year_start=2025, year_end=2026)
-        submit_graph(conn, registry(), _POLICY, requests, clock=clock)
         score = next(r for r in requests if r.idempotency_key.endswith(":score"))
-        job_id = job_id_for("shadow", score.idempotency_key)
-        conn.execute("UPDATE jobs SET state = 'succeeded', updated_at = ? WHERE job_id = ?",
-                     (clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"), job_id))
-        conn.commit()
-        return score.idempotency_key
+        _, scope_hash = nightly._session_scope_from_score_key(score.idempotency_key)
+        candidates.append((scope_hash, requests, score.idempotency_key))
 
-    candidate_tickers = [("FIRST",)] + [(f"CAND{candidate}",) for candidate in range(200)]
-    candidate_hashes = []
-    for tickers in candidate_tickers:
-        requests = nightly.build_legacy_job_requests(plan, tickers=tickers,
-                                                       year_start=2025, year_end=2026)
-        score_request = next(r for r in requests if r.idempotency_key.endswith(":score"))
-        _, candidate_hash = nightly._session_scope_from_score_key(score_request.idempotency_key)
-        candidate_hashes.append((candidate_hash, tickers))
-
-    first_hash, first_tickers = max(candidate_hashes, key=lambda item: item[0])
-    later_hash, later_tickers = min(candidate_hashes, key=lambda item: item[0])
+    (first_hash, first_requests, first_key), (later_hash, later_requests, later_key) = sorted(
+        candidates, key=lambda item: item[0], reverse=True)
     assert later_hash < first_hash, "candidate hashes must be distinct"
 
-    first_key = _mark(first_tickers)
+    def _submit_succeeded(requests, score_key):
+        submit_graph(conn, registry(), _POLICY, requests, clock=clock)
+        conn.execute("UPDATE jobs SET state = 'succeeded', updated_at = ? WHERE job_id = ?",
+                     (clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                      job_id_for("shadow", score_key)))
+        conn.commit()
+
+    _submit_succeeded(first_requests, first_key)
     clock.advance(60)
-    later_key = _mark(later_tickers)
-    assert later_hash < first_hash  # hash order alone would pick `first`
+    _submit_succeeded(later_requests, later_key)
 
     identity = nightly._native_score_batch_identity(conn)
 
     assert identity[:2] == (session, later_hash)  # time order (the fix) picks `later`
+    assert identity[1] != first_hash  # the old max(scope_hash) selector would pick `first`
 
 
 def test_identity_skips_row_with_missing_created_at(tmp_path):
