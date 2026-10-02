@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -463,10 +464,15 @@ def test_flipped_byte_with_restored_mtime_is_still_detected(counted_object):
     store, obj, path, calls = counted_object
     verify_object_path(store, obj)
     before = path.stat()
+    # Let the clock move past the cached ctime so the edit below gets a distinct one.
+    time.sleep(0.05)
     data = bytearray(path.read_bytes())
     data[0] ^= 0xFF
     path.write_bytes(bytes(data))
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    if (after.st_mtime_ns, after.st_ctime_ns) == (before.st_mtime_ns, before.st_ctime_ns):
+        pytest.skip("filesystem timestamps too coarse to tell this edit apart")
     with pytest.raises(DataError) as err:
         verify_object_path(store, obj)
     assert err.value.code == "OBJECT_CORRUPT"
