@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from engine import pnl_sim
+from tests.planned_exit_support import legacy_expected_pnl
 from engine.v2.contracts import ScoreRequest
 from engine.v2.domain.generation import generate, price
 from engine.v2.scoring import application
@@ -171,12 +172,13 @@ def test_planned_exit_simulation_matches_legacy_kernel_and_is_deterministic():
         0.5,
     )
     history = pd.DataFrame(_residuals())
-    expected = pnl_sim.expected_pnl(
+    expected = legacy_expected_pnl(
         exit_legs=[
             {
                 "strike": leg.strike,
                 "qty": leg.quantity,
                 "side": "sell" if leg.side == "buy" else "buy",
+                "right": leg.right,
             }
             for leg in priced.legs
         ],

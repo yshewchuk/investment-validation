@@ -53,8 +53,8 @@ load-bearing entrypoints:
   running one frozen-model binding and raising `FrozenStageRefusal(code,
   detail, reason_codes=...)` (code always `"MODEL_NOT_READY"`) — the refusal
   shape every module in this package that resolves a frozen artifact reuses.
-- `frozen_batch.py` / `frozen_inputs.py` — the production frozen batch
-  boundary (`score_frozen_batch`) and inference-input builder
+- `frozen_batch.py` / `frozen_inputs.py` — the frozen-batch API
+  (`score_frozen_batch`) and inference-input builder
   (`build_inference_requests`, `validate_answer_free`).
 - `nightly_source_bundle.py` — `assemble_nightly_source_bundle()`,
   `quote_domain_map()`, `validated_as_of()`, `NightlySourceBundleRefusal` —
@@ -292,6 +292,19 @@ produces the same `ScoreRecord`, `identity.py`). Other typed refusals:
 (`application.py`, below), `NightlySourceBundleRefusal`
 (`nightly_source_bundle.py`, below).
 
+**Planned-exit simulation values each leg by its own right.** The
+`planned_exit` simulation (`stages._planned_exit_simulation`) prices a call
+leg as a call and a put leg as a put (`C`/`CALL`, `P`/`PUT`, case-insensitive),
+at the one shared exit horizon, with zero rates and dividends. The call is the
+put kernel plus `spot - strike` (put-call parity), so both rights share the
+volatility floor and the intrinsic-at-expiry boundary. A priced leg with a
+nonzero quantity and finite strike whose right is neither refuses the whole
+simulation: `UNSUPPORTED_SIMULATION_LEG:right` is flagged, no `exp_pnl_sim`
+(or other simulated field) is produced, and nothing is defaulted to a put.
+Legacy `engine.pnl_sim.expected_pnl` prices every leg as a put, so bit-for-bit
+parity with it holds for put-only legs; a structure with a call leg
+(e.g. the STR-THRU straddle) is valued by this contract, not by that helper.
+
 **STR-RUNUP's `runup_move` forecast field (issue #94, resolved).** Every
 mechanism that produces this strategy's forecast populates two fields, never
 one conflated name: `runup_move_raw_d14` (the model's own native-horizon
@@ -323,8 +336,13 @@ request)`:
 | `release` declares `bindings` but none match this request | filtered tuple returned as-is, even empty — never falls back to unscoped |
 | a binding missing `decision_clock_id` or `strategy_id` | carries no scope information, always included |
 
-`frozen_batch.score_frozen_batch` is the production boundary this scoping
-protects. `tools/capture_tier0_corpus.py::_frozen_runtime` submits every
+`frozen_batch.score_frozen_batch` is the frozen-batch API boundary this
+scoping protects; no production entrypoint calls it yet. Its preflight
+resolves a binding's strategy with the same rule
+(`application.binding_serves_strategy`: the request's own strategy or `"*"`),
+so a wildcard binding on the matching clock is accepted and any other
+strategy mismatch is still refused before inference.
+`tools/capture_tier0_corpus.py::_frozen_runtime` submits every
 binding with a valid captured feature row without pre-filtering by
 `strategy_id`/`decision_clock_id`, so it relies entirely on this scoping
 rather than its own. `native_score_batch` goes through `score_one`, never

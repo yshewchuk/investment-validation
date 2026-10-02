@@ -1341,6 +1341,25 @@ def _black_scholes_put(spot: np.ndarray, strike: float, years: float,
     )
 
 
+def _black_scholes_call(spot: np.ndarray, strike: float, years: float,
+                        vol: np.ndarray) -> np.ndarray:
+    """Call value by put-call parity, ``C = P + S - K``.
+
+    Exact under this model's zero rates and dividends, and it inherits the
+    put kernel's vol floor and intrinsic-at-expiry behavior unchanged.
+    """
+    return (
+        _black_scholes_put(spot, strike, years, vol)
+        + (spot - float(strike))
+    )
+
+
+_LEG_VALUERS = {
+    "P": _black_scholes_put, "PUT": _black_scholes_put,
+    "C": _black_scholes_call, "CALL": _black_scholes_call,
+}
+
+
 def _residual_arrays(raw: Any) -> tuple[np.ndarray, ...]:
     """The compatibility-path paired pool, as legacy ``ResidualPool`` holds it.
 
@@ -1538,13 +1557,18 @@ def _planned_exit_simulation(
     )
     vol_exit = (pre_iv30 / 100.0) * (1.0 + crush / 100.0)
     value = np.zeros(move.size)
-    for leg in pricing.legs:
-        if not isfinite(float(leg.strike)) or float(leg.quantity) == 0.0:
-            continue
+    valued = [
+        leg for leg in pricing.legs
+        if isfinite(float(leg.strike)) and float(leg.quantity) != 0.0
+    ]
+    if any(str(leg.right).upper() not in _LEG_VALUERS for leg in valued):
+        _add_flag(flags, "UNSUPPORTED_SIMULATION_LEG:right")
+        return {}
+    for leg in valued:
         side = 1.0 if str(leg.side).lower() == "buy" else -1.0
         value += (
             side * float(leg.quantity)
-            * _black_scholes_put(
+            * _LEG_VALUERS[str(leg.right).upper()](
                 spot_exit, float(leg.strike), dte / 365.0, vol_exit,
             )
         )

@@ -1,6 +1,7 @@
 """Pure validation of copy-only legacy decision candidates and evidence."""
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 
 from engine.v2.foundation import canonical_json, content_hash
@@ -27,6 +28,18 @@ def _stamp(value):
 
 def _add(findings, field, reason):
     findings.append({"field": field, "reason": reason})
+
+
+def _finite_share(value):
+    """Return ``value`` unchanged, or ``None`` unless it is a finite real
+    number (bool, str, None, NaN and infinities are all refused: every range
+    comparison against NaN is false, so NaN would otherwise pass).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    # An int is always finite; ``math.isfinite`` would raise OverflowError on
+    # one too large for a float, so only floats are probed.
+    return value if isinstance(value, int) or math.isfinite(value) else None
 
 
 def _validate_plan(plan, findings):
@@ -59,16 +72,16 @@ def _validate_finality(finality, plan, findings):
         _add(findings, "finality", "not_final_for_session")
     try:
         covered = int(finality.get("covered") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         covered = 0
     if finality.get("market_wide") is not True or covered <= 0:
         _add(findings, "finality", "insufficient_coverage")
     for field in ("daily_share", "chain_share"):
-        try:
-            if float(finality.get(field)) < 0.80 or float(finality.get(field)) > 1:
-                _add(findings, "finality." + field, "outside_finality_floor")
-        except (TypeError, ValueError):
+        share = _finite_share(finality.get(field))
+        if share is None:
             _add(findings, "finality." + field, "invalid")
+        elif share < 0.80 or share > 1:
+            _add(findings, "finality." + field, "outside_finality_floor")
 
 
 def _validate_receipt_bindings(receipts, bindings, plan, findings):

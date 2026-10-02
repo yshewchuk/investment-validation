@@ -275,7 +275,7 @@ def _collect(root: Path, args) -> dict[str, bytes]:
     else:
         rels = staged_paths(root)
         reader = read_staged_blob
-    return {rel: reader(root, rel) for rel in rels if rel.endswith(".py")}
+    return {rel: reader(root, rel, strict=True) for rel in rels if rel.endswith(".py")}
 
 
 def main(argv: list[str] | None = None) -> int:

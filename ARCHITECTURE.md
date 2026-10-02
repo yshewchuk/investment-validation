@@ -102,6 +102,23 @@ evidence. See the models and data component contracts.
   `(pending)` entry above): `tools/*` documents itself inline, in extensive
   module-level comments beside the code they describe, rather than in a
   separate file.
+  - **Experiment grid runs** (`experiments/lib.evaluate_with_grid`, called by
+    the `run.py` that `experiments/new_experiment.py` scaffolds): evaluates the
+    preregistered primary spec, then each `grid` cell as a secondary arm
+    (`grid_cell: true`). Inputs: the spec, the priced trade frame and the
+    experiment folder. Outputs: the primary's `REPORT.md` and `figures/` stay at
+    the folder root; each secondary writes its own report and figures under
+    `arms/<spec-hash prefix>/`, so no secondary can overwrite the headline
+    evidence; `ARMS.md` names the primary and links every arm. Every arm
+    appends one `ran` row to the experiment ledger and its metrics to the
+    folder's `results/`. Failure semantics: arms run sequentially and any
+    error aborts the run; `ARMS.md` is removed at the start and written only
+    after every arm has finished, so it never indexes a partial run. Reports
+    already written by completed arms stay in place until a re-run rewrites
+    them; the ledger is append-only, so a re-run keeps existing rows and adds
+    new `ran` rows. `engine.evaluate` takes an optional `report_dir` that
+    redirects only the report and figures, never the run log that
+    preregistration reads.
   - **Mutation-testing PR module selection** (`tools/mutation_pilot.py`,
     shared by both `.github/workflows/mutation.yml` and
     `mutation-mutmut.yml`): on a pull_request run, `changed_modules` selects
@@ -285,6 +302,10 @@ that check. Its `Consumers` list is checked against the real import graph: a
 claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence. A change that adds a new public name
 or a new consumer must update that package's README in the same change.
+
+The README and code-budget checks read files strictly: a file that cannot be
+read fails the check with the read error rather than scoring as an empty file.
+Only a tracked path absent from the worktree reads as empty.
 
 ## 4. Production entrypoints and the job graph
 

@@ -212,12 +212,12 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
   already uses (`worker.py:167-168`, `:198-200`).
 
-`nightly.GRAPH` gains a `"native_score_batch": ("score",)` node (`#88`),
-and `"native_parity"`'s own existing node (`nightly.py:58`) widens from
-`("score",)` to `("score", "native_score_batch")` — topological
-documentation only, for `run_shadow_nightly`'s whole-graph test-only
-walk; no submission path reads either edge (the same "documentation, not
-a submission source" rule Part 4 already established for
+`nightly.GRAPH` has a `"native_score_batch": ("score",)` node (`#88`),
+while `"native_parity"` remains `("score",)` (`nightly.py:124`). Widening
+that node to `("score", "native_score_batch")` is separate topological
+documentation work for `run_shadow_nightly`'s whole-graph test-only
+walk; runtime parity submission already binds both jobs directly. No
+submission path reads either edge (the rule Part 4 established for
 `computed_moves_refresh`'s own node).
 
 - **`nightly.legacy_parity_rows(score_document: Mapping[str, Any]) ->
@@ -604,27 +604,19 @@ schedule it now, well before Phase 7.
 `native_score_batch` is registered as a job kind
 (`stages.py::_native_score_batch_kind`) and has a production caller —
 `supervisor.Service`'s tick sidecar, alongside legacy scoring, with no
-authority change — but no job is ever actually submitted: since cutover
-PR-7b's own flip of `nightly_trigger`'s scheduled plan to
-`input_mode="snapshot"`, the selected `"score"` job now pins a snapshot,
-so `submit_native_score_batch_shadow_if_ready` raises `VALIDATION_FAILED`
-(the raw-row producer, [#199](https://github.com/yshewchuk/investment-validation/issues/199),
-is not built yet) rather than silently returning nothing — only a
-`legacy`-input-mode plan built directly via `ops plan` (not the scheduled
-trigger) still gets a silent no-op (see "Failure semantics" below). Three
-symbols, mirroring
-`computed_moves_refresh`'s own shape:
-`supervisor.Service._reconcile_native_score_batch_shadow` (tick-loop
-sidecar, called from `Service.tick`); `nightly.submit_native_score_batch_shadow_if_ready`
-(the builder the sidecar calls); `nightly._native_score_batch_identity` (a
+authority change. Three symbols, mirroring `computed_moves_refresh`'s own
+shape: `supervisor.Service._reconcile_native_score_batch_shadow`
+(tick-loop sidecar, called from `Service.tick`);
+`nightly.submit_native_score_batch_shadow_if_ready` (the builder the
+sidecar calls — see "Cutover PR-6" below for what it does once a
+`"score"` job pins a snapshot); `nightly._native_score_batch_identity` (a
 cheap catalog-only identity check parsing the paired `"score"` job's own
 idempotency key to recover `(session, scope_hash, snapshot_pinned)`, or
 `None`). `nightly.GRAPH` gains a `"native_score_batch": ("score",)` node
 (topological documentation only — no submission path reads it) and
-`OPTIONAL` gains `"native_score_batch"`. `native_board_universe.board_requests`
-still has no real caller — that enumeration step is
-[#199](https://github.com/yshewchuk/investment-validation/issues/199)'s
-raw-row producer.
+`OPTIONAL` gains `"native_score_batch"`. A `legacy`-input-mode plan built
+directly via `ops plan` (not the scheduled trigger) still gets a silent
+no-op (see "Failure semantics" below).
 
 **Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a
 snapshot before scoring.** `nightly_trigger._default_plan` runs in
@@ -697,6 +689,22 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone.
 
+**Cutover PR-6 (not yet implemented — design and code-slice split in the
+PR body, not restated here).** `_reconcile_native_score_batch_shadow`
+will build every admitted `board_requests()` key's `calendar_row`/
+`panel_row`/`panel_anchor` (panel-row staging: `engine/v2/features/
+ARCHITECTURE.md`) and `quote_rows`; `tier4_row` stays `{}` (every key is
+a forward event, `../scoring/ARCHITECTURE.md` "Inputs"). It, not the
+caller, sources every `calendar_row` field `nightly_raw_rows.
+scan_calendar_row` declares as caller-staged (entry/exit/expiry/spot/
+calendar-observed-through) — see the PR body for exactly which existing
+reader/resolver supplies each — so no field is ever left unsourced. Open
+prerequisites it must resolve or safely defer:
+`source_availability.verify_eod_availability`
+([#260](https://github.com/yshewchuk/investment-validation/issues/260))
+and intraday `event_date` admission
+([#243](https://github.com/yshewchuk/investment-validation/issues/243)).
+
 ## Inputs
 
 - Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan`
@@ -764,10 +772,8 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
   contract. Every failure mode here (unset/blank env var, no pointer, or a
   release that fails hash verification) is Failure semantics R1 below.
 - **Per-event raw rows** (`calendar_row`/`panel_row`/`panel_anchor`/
-  `tier4_row`/`quote_rows`): end-to-end staging remains unimplemented
-  ([#199](https://github.com/yshewchuk/investment-validation/issues/199));
-  helpers have no production caller (forward forecast design: `../scoring/ARCHITECTURE.md`).
-  Pinned submission raises `VALIDATION_FAILED`; direct legacy plans remain a no-op (R1).
+  `tier4_row`/`quote_rows`): built by the raw-row producer — see "Cutover
+  PR-6" above for the per-key condition/outcome account (R1).
 
 `SourceBundle` construction (`assemble_nightly_source_bundle`,
 `source_inputs.build_native_score_inputs`) happens inside the worker, not
@@ -1013,10 +1019,8 @@ material": `BoardRequest`'s own fields and
 today's production default.** `#88`'s own R1 (above, "Per-event raw
 rows") found that in the production default `"legacy"` input mode, the
 selected `"score"` job pins no snapshot, so PR-7a's shadow batch "does not
-submit at all, full stop" until either a future PR changes the production
-input mode or the still-missing raw-row producer gets its own way to
-source its inputs — named there as cutover PR-6/PR-7b (snapshot-mode
-inputs), NOT designed here or by `#88`. This redo does not solve that gap
+submit at all, full stop" until a future PR changes the production input
+mode — NOT designed here or by `#88`. This redo does not solve that gap
 either: `_native_parity_identity` (above) simply keeps returning `None`
 (R1, "Failure semantics" below) for as long as no `native_score_batch` job
 ever succeeds — the SAME graceful "nothing to do yet" outcome it already
@@ -1189,13 +1193,10 @@ deliberately not checked before fetching — only at commit time, as
 costs only the fetches this run already made, staged durably and reused as
 cache on the next attempt.
 
-**Cutover PR-7a: where the native `ScoreRecord`s will land.** Today's
-production path never reaches a successful `native_score_batch` attempt
-(the unpinned-snapshot branch returns before any job is built, and the
-pinned-snapshot branch raises `VALIDATION_FAILED` because
-[#199](https://github.com/yshewchuk/investment-validation/issues/199)'s
-raw-row producer does not exist), so nothing below happens in production
-today; this describes the destination once #199 lands.
+**Cutover PR-7a/PR-6: where the native `ScoreRecord`s will land.** The
+unpinned-snapshot branch still returns before any job is built; the
+pinned-snapshot branch reaches a real `native_score_batch` attempt once
+the raw-row producer (above) stages `events.json`.
 
 - **Durable address.** `job_<native_score_batch job_id>#records` (and
   `#refusals`) — resolvable through `input_bindings.resolve_bindings`
@@ -1269,10 +1270,9 @@ per the root doc's §1); `experiments/*` runners submitting plans;
 `checks/rearchitecture_*.py` verification scripts; and the
 `tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package above
 layer 7.0 imports this package, and no legacy `engine/**` module does
-either, except that one documented dashboard caller. `board_requests` has
-no production caller today — exercised only by its own tests — pending the
-still-missing raw-row producer
-([#199](https://github.com/yshewchuk/investment-validation/issues/199)).
+either, except that one documented dashboard caller. `board_requests`'s
+real caller is the raw-row producer ("Cutover PR-6" above), once
+implemented.
 
 ## External systems and libraries
 
@@ -1396,7 +1396,7 @@ job.
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
-| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request with no raw-row producer yet raises `VALIDATION_FAILED` | the specific succeeded score job read, not session alone |
+| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request raises `VALIDATION_FAILED` today (the raw-row producer, "Cutover PR-6" above, is not built) | the specific succeeded score job read, not session alone |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | design only, not yet implemented — see [#192](https://github.com/yshewchuk/investment-validation/issues/192) | — |
@@ -1515,14 +1515,12 @@ whole-graph walk. Automatic *production* submission reaches them only
 through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` /
 `Service._reconcile_native_score_batch_shadow`); `_stage_sequence` filters
 both out of every job-submission stage list by name (see "Outputs").
-`native_score_batch`'s
-sidecar never actually reaches `submission.submit` today:
-`submit_native_score_batch_shadow_if_ready` returns a normal no-op if the
-selected `"score"` job pinned no snapshot (never a JobSpec, never a raise),
-and raises `VALIDATION_FAILED` only for a new eligible snapshot-pinned job,
-since the raw-row producer that would build `events.json`
-([#199](https://github.com/yshewchuk/investment-validation/issues/199))
-does not exist yet — see "Outputs"/"Failure semantics" for both cases.
+`native_score_batch`'s sidecar returns a normal no-op if the selected
+`"score"` job pinned no snapshot (never a JobSpec, never a raise); for a
+new eligible snapshot-pinned job it raises `VALIDATION_FAILED` today
+(the raw-row producer is not built) and will instead reach
+`submission.submit` through that producer once "Cutover PR-6" above is
+implemented — see "Outputs"/"Failure semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
 (`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through
@@ -1616,7 +1614,8 @@ flowchart LR
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
-    BR -.->|"still-missing raw-row producer\n(#199)"| NC[(nightly.submit_native_score_batch_shadow_if_ready)]
+    OUT --> RRP["raw-row producer\n(Cutover PR-6, design)"]
+    RRP --> NC[(nightly.submit_native_score_batch_shadow_if_ready)]
 ```
 
 `board_requests` itself only consumes an `events_table` a caller passes
@@ -1627,16 +1626,9 @@ which belongs to `computed_moves_store._scan_once` instead, a different
 boundary. It is reachable today for `nightly_trigger._default_plan`'s
 scheduled `"score"` job specifically (see "Primary contracts"); a plan
 built directly with the lower-level plan builder can still default to
-`legacy` input mode instead. What is still missing is the dashed edge: the
-raw-row producer
-([#199](https://github.com/yshewchuk/investment-validation/issues/199))
-that would enumerate `board_requests` and stage each one's raw rows into
-`events.json` (see "Inputs"/"Cutover PR-7a's input sourcing"). Until it
-lands, a snapshot-pinned `"score"` job reaches this missing producer and
-`submit_native_score_batch_shadow_if_ready` raises `VALIDATION_FAILED`
-without submitting a batch (see "Outputs"/"Failure semantics" for
-its condition-outcome table); `board_requests` has no production caller
-today for the same reason (see "Dependencies" → "Callers").
+`legacy` input mode instead. The raw-row producer ("Cutover PR-6" above)
+is `board_requests`' real caller once implemented (see "Dependencies" →
+"Callers").
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 

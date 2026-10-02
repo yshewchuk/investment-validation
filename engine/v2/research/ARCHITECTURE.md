@@ -51,11 +51,14 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 one; the library entrypoints below are this package's real public interface:
 
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
-`replay.replay_one`, `_replay_run.run`, `_replay_run.events_frame`,
-`_plan.plan_events`, `_chains.ChainIndex`, `_chains.load_chain_index`,
-`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
-`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
-`_pricing.trading_calendar_from_snapshot`.
+`replay.replay_one`, `replay.ALPHA_GRID`, `_replay_run.run`,
+`_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
+`_chains.load_chain_index`, `_chains.filter_plan_by_availability`,
+`_chains.read_chain_keys`, `_chains.read_chain_keys_for`,
+`_trades_table.to_trades_table`, `_build_run.run`,
+`reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
+`_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`,
+`_pricing.execution_variant_label`.
 
 `experiment_trades.load_trades(repository, snapshot, strategy)` is a second
 kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
@@ -67,12 +70,16 @@ is a third: carved out of `_pricing.py`'s otherwise-internal contents the
 same way `_pricing.STRUCTURES` already is, for the same caller — a repricer
 built over a pinned snapshot needs the identical trading calendar `replay()`
 itself derives, not a second implementation and not the legacy CSV fallback
-(see Invariants).
+(see Invariants). `_pricing.execution_variant_label` is a fourth, carved out
+for `experiments/v2_candidate_grid.py`'s `price_candidate_grid` (issue #266
+slice 2), which labels each priced grid-position step with the same
+execution-variant string `replay()` itself uses, rather than reimplementing
+that labeling.
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
-snapshot-read helpers), `_pricing.py` (except the two names carved out
-above), `_trades_revisions.py`.
+snapshot-read helpers), `_pricing.py` (except the names carved out above),
+`_trades_revisions.py`.
 
 ## Inputs
 
@@ -186,8 +193,16 @@ listed above are one consumer; `experiments/common_v2.py` is another, for
 `experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
 and `_chains.load_chain_index`; the pinned EXP-147 confirmatory-validation
 runner is a third, for `experiment_trades.PROVENANCE` alone (its native
-replay tag, selecting that runner's analog population) — none of the three
-is parsed by the layering hook (it only parses `engine*` importers, and
+replay tag, selecting that runner's analog population).
+`experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
+slice 2) is a fourth: it reads
+`_chains.filter_plan_by_availability`/`read_chain_keys_for`, `_plan.plan_events`,
+`_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
+and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
+grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`
+is a fifth, reading `_replay_run.events_frame` for its known-session event
+universe before handing it to `price_candidate_grid`. None of the five are
+parsed by the layering hook (it only parses `engine*` importers, and
 `experiments/` is outside it too).
 
 ## External systems and libraries
@@ -331,6 +346,11 @@ uncaught traceback instead.
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
   there is nothing to invalidate).
+  With `index=None`, replay scopes chain availability and loaded chain
+  data to the plan's own years, tickers and dates. The resulting
+  `ChainIndex` contains only available plan keys. An explicit `index=`
+  bypasses chain reads. `_build_run.run` creates an independent replay
+  for each strategy.
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since
