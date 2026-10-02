@@ -35,6 +35,7 @@ from engine.v2.research._chains import (
     ChainIndex,
     filter_plan_by_availability,
     load_chain_index,
+    read_chain_keys_for,
 )
 from engine.v2.research._plan import SKIP_REASONS, ReplayPlan, plan_events
 from engine.v2.research._pricing import (
@@ -369,8 +370,11 @@ def replay(
     Rewrite of ``engine/replay.py``'s ``replay``: same orchestration body,
     with ``load_chain_index``/``filter_plan_by_availability`` bound to
     ``(repository, snapshot_ref)`` in place of the legacy store calls; the
-    ``index is None`` path derives availability from the loaded
-    ``ChainIndex``'s own keys instead of a separate ``read_chain_keys`` scan.
+    ``index is None`` path's availability scan uses
+    ``_chains.read_chain_keys_for`` (narrowed to this plan's own keys) in
+    place of the legacy whole-table ``read_chain_keys``, so ``load_chain_index``
+    still only ever loads the filtered, surviving set of keys — same
+    retained-row shape as before, a narrower key scan ahead of it.
     """
     started = time.time()
     if structure is None:
@@ -386,12 +390,14 @@ def replay(
     )
     planned_total = int(len(plan.frame))
     if index is None and len(plan.frame):
-        index = load_chain_index(repository, snapshot_ref, plan.chain_keys)
-        plan = filter_plan_by_availability(plan, set(index.keys))
+        available = read_chain_keys_for(repository, snapshot_ref, plan.chain_keys)
+        plan = filter_plan_by_availability(plan, available)
         _log(f"{strategy}/{variant}: {len(plan.frame):,} events have both chains")
     if plan.frame.empty:
         return ReplayResult(strategy, variant, _empty_trades(), plan.skipped,
                             planned_total, 0, time.time() - started)
+    if index is None:
+        index = load_chain_index(repository, snapshot_ref, plan.chain_keys)
 
     rows, skipped = _price_plan(
         structure, plan, index, strategy=strategy, alphas=alphas,

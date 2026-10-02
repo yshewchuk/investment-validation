@@ -331,19 +331,19 @@ uncaught traceback instead.
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
   there is nothing to invalidate).
-  `replay()`'s own `index is None` path gets its chain availability from
-  its own loaded `ChainIndex`, not from a separate `_chains.read_chain_keys`
-  scan — one `load_chain_index` call (narrowed by its own key-pushdown
-  filter) instead of a whole-table key scan plus that load. An explicit
-  `index=` skips chain reads entirely. `trades` is identical either way;
-  the `skipped` count breakdown can differ for a `decided_early`
-  structure's event missing more than one chain at once, since
-  `filter_plan_by_availability` and `replay_one` check entry/exit/decision
-  in different orders (pre-existing, not introduced here). A caller with
-  several strategies over the same events (`_build_run.run` today) still
-  repeats this per strategy — sharing one `ChainIndex` across strategies is
-  deferred to #276, gated on a measured multi-strategy peak before
-  committing to the memory tradeoff.
+  `replay()`'s own `index is None` path checks availability with
+  `_chains.read_chain_keys_for(plan.chain_keys)` — narrowed to the plan's
+  own years/tickers/dates via the same key-pushdown `load_chain_index` uses,
+  projected to two columns only — in place of the legacy whole-table
+  `_chains.read_chain_keys`, filtering the plan BEFORE `load_chain_index`
+  runs exactly as the pre-existing code did. `load_chain_index` therefore
+  still only ever loads the filtered, surviving set of keys — same
+  retained-row shape as before this change, a narrower key scan ahead of
+  it instead of a whole-table one. An explicit `index=` skips chain reads
+  entirely. A caller with several strategies over the same events
+  (`_build_run.run` today) still repeats this per strategy — sharing one
+  `ChainIndex` across strategies is deferred to #276, gated on a measured
+  multi-strategy peak before committing to that tradeoff.
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since
