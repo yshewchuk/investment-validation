@@ -151,7 +151,8 @@ evidence. See the models and data component contracts.
     doesn't track may be omitted from a PR's narrowed run, backstopped by the full
     suite on every push to `main`. [#184](https://github.com/yshewchuk/investment-validation/issues/184)
     measures how often. Fan-out limits: a diff of only docs (any `*.md` outside `inert_skip`) selects
-    just the tests whose import closure names the doc in a non-docstring string literal; a collected
+    the tests whose import closure holds a non-docstring string literal naming the doc (an
+    unreadable or unparsable closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
     `full_suite` paths, an unrecognized path, a deleted test file, or a graph failure still select
