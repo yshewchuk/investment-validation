@@ -288,6 +288,16 @@ def test_9_strategy_never_changes_the_result():
     _rows_equal(one.panel_row, other.panel_row)
 
 
+def test_10_non_skipped_null_realized_move_raises_contract_mismatch():
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = _computed_rows([
+        ("2024-01-10", None, False),  # repository-integrity violation
+    ])
+    with pytest.raises(DataError) as exc:
+        _scan(batches=batches)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+
+
 def test_history_keys_are_the_panel_math_superset():
     panel = _scan().panel_row
     for key in panel_math.history_features([2.0, -1.0], [2.0, 1.0]):

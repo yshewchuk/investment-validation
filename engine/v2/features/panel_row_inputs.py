@@ -171,6 +171,11 @@ def _history_from_computed_moves(rows: list[dict[str, object]]) -> dict[str, flo
     """Non-skipped prior moves in ascending ``event_date`` order -> ``history_features``."""
     kept = sorted((row for row in rows if not row["skipped"]),
                   key=lambda row: pd.Timestamp(row["event_date"]))
+    for row in kept:
+        if row["realized_move_pct"] is None:
+            raise errors.fail("CONTRACT_MISMATCH",
+                              "non-skipped computed_moves row has a null realized_move_pct",
+                              details={"table_name": _COMPUTED_MOVES_TABLE})
     prior_moves = [row["realized_move_pct"] for row in kept]
     prior_abs = [abs(value) for value in prior_moves]
     return panel_math.history_features(prior_moves, prior_abs)
