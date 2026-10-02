@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -133,6 +134,52 @@ def test_price_candidate_grid_matches_direct_replay_one_per_step(tmp_path):
             .reset_index(drop=True)
         )
         pd.testing.assert_frame_equal(expected_sorted, grid_sorted,
+                                      rtol=1e-12, atol=1e-12)
+
+
+def test_price_candidate_grid_comparison_catches_a_corrupted_value(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    snapshot = _commit(conn, clock, store, chain_rows=_wide_chain_rows(),
+                       event_rows=_event_rows(), receipt_id="r1")
+    events = _events()
+
+    repository = Repository(conn, store)
+    snapshot_ref = repository.resolve(snapshot.snapshot_id)
+    calendar = _pricing.trading_calendar_from_snapshot(repository, snapshot_ref)
+    plan = _plan.plan_events(
+        _pricing.STRUCTURES["TWIN-P"](steps=1), events, calendar=calendar)
+    plan = _chains.filter_plan_by_availability(
+        plan, _chains.read_chain_keys(repository, snapshot_ref))
+    index = _chains.load_chain_index(repository, snapshot_ref, plan.chain_keys)
+    expected = {}
+    for step in (1, 2):
+        structure = _pricing.STRUCTURES["TWIN-P"](steps=step)
+        expected[step] = [
+            priced_row
+            for row in plan.frame.to_dict("records")
+            for priced_row in replay_one(structure, row, index)[0]
+        ]
+
+    grid = _grid(tmp_path, snapshot.snapshot_id, events, steps=(1, 2))
+    conn.close()
+
+    key = ["ticker", "event_id", "event_date", "fill_alpha"]
+    step_slice = grid[grid["steps"] == 1]
+    expected_df = pd.DataFrame(expected[1])
+    assert "entry_cost" in expected_df.columns
+    shared = list(expected_df.columns)
+    expected_sorted = expected_df.sort_values(key, kind="mergesort").reset_index(drop=True)
+    grid_sorted = (
+        step_slice[shared]
+        .sort_values(key, kind="mergesort")
+        .reset_index(drop=True)
+    )
+    corrupted = grid_sorted.copy()
+    corrupted.loc[corrupted.index[0], "entry_cost"] = (
+        corrupted.loc[corrupted.index[0], "entry_cost"] + 1.0
+    )
+    with pytest.raises(AssertionError):
+        pd.testing.assert_frame_equal(expected_sorted, corrupted,
                                       rtol=1e-12, atol=1e-12)
 
 
