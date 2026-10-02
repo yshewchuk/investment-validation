@@ -70,7 +70,7 @@ The replay half: `replay.replay`, `replay.replay_one`, `replay.ALPHA_GRID`,
 `_replay_run.run`, `_replay_run.events_frame`, `_plan.plan_events`,
 `_chains.ChainIndex`, `_chains.load_chain_index`,
 `_chains.filter_plan_by_availability`, `_chains.read_chain_keys`,
-`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
+`_chains.read_chain_keys_for`, `_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
 `_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
 `_pricing.trading_calendar_from_snapshot`, `_pricing.execution_variant_label`.
 
@@ -89,7 +89,7 @@ to select its analog population (see `guides/str_thru_analog_provenance.md`).
 slice 2), which labels each priced grid-position step with the same
 execution-variant string `replay()` itself uses.
 
-<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label -->
+<!-- public-interface: signal_screen.run, fill_quality.run, polygon_fills.run, replay.replay, replay.replay_one, replay.ALPHA_GRID, _replay_run.run, _replay_run.events_frame, _plan.plan_events, _chains.ChainIndex, _chains.load_chain_index, _chains.filter_plan_by_availability, _chains.read_chain_keys, _chains.read_chain_keys_for, _trades_table.to_trades_table, _build_run.run, reconcile_trades.run, _trades_publish.publish, build_trades.coverage, _pricing.STRUCTURES, experiment_trades.load_trades, _pricing.trading_calendar_from_snapshot, experiment_trades.PROVENANCE, _pricing.execution_variant_label -->
 
 ## Consumers
 
@@ -107,7 +107,7 @@ the pinned
 `experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py` runner
 (for `experiment_trades.PROVENANCE`), `experiments/v2_candidate_grid.py`
 (`price_candidate_grid`, issue #266 slice 2 — for
-`_chains.filter_plan_by_availability`/`read_chain_keys`,
+`_chains.filter_plan_by_availability`/`read_chain_keys_for`,
 `_plan.plan_events`, `_pricing.STRUCTURES`/`execution_variant_label`/
 `trading_calendar_from_snapshot`, and `replay.ALPHA_GRID`/`replay_one`),
 and `experiments/EXP-186_.../run.py` (for `_replay_run.events_frame`)

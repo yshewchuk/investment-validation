@@ -54,7 +54,8 @@ one; the library entrypoints below are this package's real public interface:
 `replay.replay_one`, `replay.ALPHA_GRID`, `_replay_run.run`,
 `_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
 `_chains.load_chain_index`, `_chains.filter_plan_by_availability`,
-`_chains.read_chain_keys`, `_trades_table.to_trades_table`, `_build_run.run`,
+`_chains.read_chain_keys`, `_chains.read_chain_keys_for`,
+`_trades_table.to_trades_table`, `_build_run.run`,
 `reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
 `_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`,
 `_pricing.execution_variant_label`.
@@ -195,7 +196,7 @@ runner is a third, for `experiment_trades.PROVENANCE` alone (its native
 replay tag, selecting that runner's analog population).
 `experiments/v2_candidate_grid.py` (`price_candidate_grid`, issue #266
 slice 2) is a fourth: it reads
-`_chains.filter_plan_by_availability`/`read_chain_keys`, `_plan.plan_events`,
+`_chains.filter_plan_by_availability`/`read_chain_keys_for`, `_plan.plan_events`,
 `_pricing.STRUCTURES`/`execution_variant_label`/`trading_calendar_from_snapshot`,
 and `replay.ALPHA_GRID`/`replay_one` to price one strategy family across a
 grid-position sweep on one pinned snapshot. `experiments/EXP-186_.../run.py`

@@ -19,7 +19,7 @@ import pandas as pd
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, SystemClock
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.research._chains import filter_plan_by_availability, read_chain_keys
+from engine.v2.research._chains import filter_plan_by_availability, read_chain_keys_for
 from engine.v2.research._plan import plan_events
 from engine.v2.research._pricing import (
     STRUCTURES,
@@ -73,6 +73,8 @@ def price_candidate_grid(
     convention and default: one progress line every N (step, event) pairs
     while the grid is pricing (0 or None disables it).
     """
+    if not steps:
+        return _empty_grid()
     started = time.time()
     conn = open_catalog(Path(catalog), clock=SystemClock())
     try:
@@ -83,7 +85,7 @@ def price_candidate_grid(
         plan = plan_events(probe, events, calendar=calendar)
         if not plan.frame.empty:
             plan = filter_plan_by_availability(
-                plan, read_chain_keys(repository, snapshot)
+                plan, read_chain_keys_for(repository, snapshot, plan.chain_keys)
             )
     finally:
         conn.close()
