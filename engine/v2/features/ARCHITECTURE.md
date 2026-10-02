@@ -143,9 +143,11 @@ producer's own job (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6").
 
 | Condition (R1-R6) | Outcome |
 |---|---|
-| snapshot has no `daily_market`/`computed_moves`/`price_history` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
-| `daily_market`/`computed_moves` table exists but has no row for this ticker (or `"SPY"`) | an empty/absent source: the owning helper's own documented no-history behavior — `panel_math` keys absent, `regime` fields `NaN` (its own Inputs table) |
-| `price_history` table exists but has no row for this ticker (`STR-RUNUP` only) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
+| snapshot has no `daily_market`/`computed_moves` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
+| snapshot has no `price_history` table (`STR-RUNUP` only — this read is never made for another strategy) | `CONTRACT_MISMATCH`, propagated unchanged |
+| `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: its keys stay absent; `regime`'s fields are unaffected (independent read) |
+| `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
+| `price_history` has no row for this ticker (`STR-RUNUP` only) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
 | retry with the same pinned snapshot/key/`decision_session` | identical result; no cache beyond the pinned reads themselves, no write, nothing to roll back |
 
