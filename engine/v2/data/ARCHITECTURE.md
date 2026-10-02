@@ -227,7 +227,7 @@ and retryability come from that table, never guessed at a call site.
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
-| `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash |
+| `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
 | `UNSUPPORTED_CONTRACT` | validation | no | an operation on a table contract this code path does not implement |
@@ -266,11 +266,21 @@ the prior receipt even if the head moved since).
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.
-No cache — `resolve` rebuilds from catalog rows every call, and
-`objects.verify_object_path` re-hashes on every open unconditionally (no
-stat-tuple cache yet: issue
-[#194](https://github.com/yshewchuk/investment-validation/issues/194)). No
-retry, no partial write (read-only). One read-only transaction covers a
+`resolve` rebuilds from catalog rows every call (no cache). `objects.verify_object_path`
+fully re-hashes an object on its first open in a process and skips the re-hash
+on a later open only while the file's stat tuple (device, inode, size, mtime
+and ctime, in nanoseconds) equals the one recorded when its hash last matched
+and the store root and the object's parent directories are still real
+directories (never symlinks);
+any drift, a failed verify or a non-regular file forces a full verify, and a
+file whose stat tuple is unavailable or changes while it is hashed is
+re-verified a bounded number of times, then refused as `OBJECT_CORRUPT`. The
+cache is in-memory and per process, bounded (emptied when full), and keyed by
+store root, content hash and byte size. Integrity guarantee: every change visible in the stat tuple is
+detected on the next open; a tamper that preserves all five fields within one
+process lifetime is not (objects are immutable, read-only files, so that needs
+out-of-band access to the store). No retry beyond that bounded re-verify, no
+partial write (read-only). One read-only transaction covers a
 whole `resolve` walk. Idempotent: every row is append-only.
 
 ## Invariants

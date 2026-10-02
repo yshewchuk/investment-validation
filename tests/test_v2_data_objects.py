@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts.data import ObjectRef, TableContract, TableContractRef  # noqa: E402
 from engine.v2.contracts.jobs import LegacyFileRef  # noqa: E402
+from engine.v2.data import objects as objects_module  # noqa: E402
 from engine.v2.data.documents import decode_document  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.legacy_mapping import build_legacy_mapping  # noqa: E402
@@ -31,6 +33,7 @@ from engine.v2.data.objects import (  # noqa: E402
     inspect_fragment,
     logical_partition_hash,
     publish_legacy_file,
+    verify_object_path,
 )
 from engine.v2.foundation import ArtifactStore  # noqa: E402
 
@@ -428,3 +431,131 @@ def test_fault_during_copy_raises_and_a_retry_publishes_the_same_object(tmp_path
     second = publish_legacy_file(store, "att_2", source_root, file_ref)
     assert first == second
     assert first.content_hash == f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+# --------------------------------------------------------------------------
+# verify_object_path — stat-tuple short-circuit (issue #194)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def counted_object(tmp_path, monkeypatch):
+    """A published object plus a list recording every full ``store.verify`` (re-hash)."""
+    monkeypatch.setattr(objects_module, "_VERIFIED", {})
+    store = ArtifactStore(tmp_path)
+    obj = _publish_bytes(store, b"object bytes for the stat-tuple cache" * 64)
+    calls: list[str] = []
+    original = store.verify
+    monkeypatch.setattr(store, "verify", lambda ref: calls.append(ref.storage_key) or original(ref))
+    path = store.root / "objects" / obj.content_hash.removeprefix("sha256:")[:2] / \
+        obj.content_hash.removeprefix("sha256:")
+    path.chmod(0o644)
+    return store, obj, path, calls
+
+
+def test_unchanged_object_is_hashed_once(counted_object):
+    store, obj, path, calls = counted_object
+    assert verify_object_path(store, obj) == path
+    assert verify_object_path(store, obj) == path
+    assert len(calls) == 1
+
+
+def test_flipped_byte_with_restored_mtime_is_still_detected(counted_object):
+    store, obj, path, calls = counted_object
+    verify_object_path(store, obj)
+    before = path.stat()
+    # Let the clock move past the cached ctime so the edit below gets a distinct one.
+    time.sleep(0.05)
+    data = bytearray(path.read_bytes())
+    data[0] ^= 0xFF
+    path.write_bytes(bytes(data))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    if (after.st_mtime_ns, after.st_ctime_ns) == (before.st_mtime_ns, before.st_ctime_ns):
+        pytest.skip("filesystem timestamps too coarse to tell this edit apart")
+    with pytest.raises(DataError) as err:
+        verify_object_path(store, obj)
+    assert err.value.code == "OBJECT_CORRUPT"
+    assert len(calls) == 2
+
+
+def test_mtime_drift_forces_a_full_verify(counted_object):
+    store, obj, path, calls = counted_object
+    verify_object_path(store, obj)
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 5_000_000_000))
+    assert verify_object_path(store, obj) == path
+    assert len(calls) == 2
+    verify_object_path(store, obj)
+    assert len(calls) == 2
+
+
+def test_resized_object_is_detected_and_failure_is_not_cached(counted_object):
+    store, obj, path, calls = counted_object
+    verify_object_path(store, obj)
+    original = path.read_bytes()
+    path.write_bytes(original + b"x")
+    for expected_calls in (2, 3):
+        with pytest.raises(DataError) as err:
+            verify_object_path(store, obj)
+        assert err.value.code == "OBJECT_CORRUPT"
+        assert len(calls) == expected_calls
+
+
+def _verify_that_touches(store, path, times):
+    """``store.verify`` stand-in that bumps the file's mtime during its first ``times`` runs."""
+    real_verify, left = store.verify, [times]
+
+    def verify(ref):
+        result = real_verify(ref)
+        if left[0]:
+            left[0] -= 1
+            os.utime(path, ns=(0, path.stat().st_mtime_ns + 1_000_000_000))
+        return result
+
+    return verify
+
+
+def test_file_changing_during_verify_is_reverified_then_refused(counted_object, monkeypatch):
+    store, obj, path, _calls = counted_object
+    monkeypatch.setattr(store, "verify", _verify_that_touches(store, path, 2))
+    assert verify_object_path(store, obj) == path  # holds still on the third attempt
+    monkeypatch.setattr(objects_module, "_VERIFIED", {})
+    monkeypatch.setattr(store, "verify", _verify_that_touches(store, path, 99))
+    with pytest.raises(DataError) as err:
+        verify_object_path(store, obj)
+    assert err.value.code == "OBJECT_CORRUPT"
+
+
+def test_unreadable_stat_tuple_is_retried_then_refused(counted_object, monkeypatch):
+    store, obj, path, calls = counted_object
+    real_stat_tuple, misses = objects_module._stat_tuple, [1]
+
+    def flaky(p):
+        if misses[0]:
+            misses[0] -= 1
+            return None
+        return real_stat_tuple(p)
+
+    monkeypatch.setattr(objects_module, "_stat_tuple", flaky)
+    assert verify_object_path(store, obj) == path  # the retry gets a stable pair of tuples
+    assert len(calls) == 2
+    monkeypatch.setattr(objects_module, "_VERIFIED", {})
+    monkeypatch.setattr(objects_module, "_stat_tuple", lambda p: None)
+    with pytest.raises(DataError) as err:
+        verify_object_path(store, obj)
+    assert err.value.code == "OBJECT_CORRUPT"
+
+
+@pytest.mark.parametrize("levels_up", [1, 2, 3])  # fan-out directory, objects/, store root
+def test_ancestor_replaced_by_symlink_is_not_a_cache_hit(counted_object, levels_up):
+    store, obj, path, calls = counted_object
+    verify_object_path(store, obj)
+    ancestor = path.parents[levels_up - 1]
+    moved = ancestor.with_name(ancestor.name + "-moved")
+    ancestor.rename(moved)
+    ancestor.symlink_to(moved, target_is_directory=True)  # file's own stat tuple is unchanged
+    with pytest.raises(DataError) as err:
+        verify_object_path(store, obj)
+    assert err.value.code == "OBJECT_CORRUPT"
+    assert len(calls) == 2
+

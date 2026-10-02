@@ -84,6 +84,13 @@ LOGICAL_ROWS_ALGORITHM = "logical_rows.v1"
 NAN_POLICY = "legacy_nan_is_null.v1"
 
 _CHUNK = 1 << 20
+#: Objects whose full re-hash last matched, keyed by (store root, content hash,
+#: byte size) and valued by the stat tuple then observed (see
+#: :func:`verify_object_path`). Bounded; emptied when full.
+_VERIFIED: dict[tuple[str, str, int], tuple[int, int, int, int, int]] = {}
+_VERIFIED_MAX = 4096
+#: Full verifies attempted while the file keeps changing underneath one.
+_VERIFY_ATTEMPTS = 3
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _EPOCH = datetime(1970, 1, 1)
@@ -91,6 +98,7 @@ _EPOCH = datetime(1970, 1, 1)
 #: module docstring's fan-out note).
 _S_IFMT = 0o170000
 _S_IFREG = 0o100000
+_S_IFDIR = 0o040000
 
 #: pyarrow's own spellings for two contract physical types. Every other
 #: pyarrow type string — including a timestamp's unit — passes through
@@ -283,18 +291,64 @@ def _inspect_path(path, contract: TableContract, contract_ref: TableContractRef,
 
 
 def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
-    """Re-hash ``object_ref`` against ``store`` (TD-1: no cache, every open) and
-    return its path. Shared by :func:`inspect_fragment` and the repository's
-    scan path (P2-4), so the two never diverge on how an object is opened.
+    """Verify ``object_ref`` against ``store`` and return its path. Shared by
+    :func:`inspect_fragment` and the repository's scan path (P2-4), so the two
+    never diverge on how an object is opened.
+
+    The first open of an object in this process re-hashes it in full. A later
+    open skips the re-hash only while the file's stat tuple — device, inode,
+    size, mtime and ctime in nanoseconds — is exactly what it was when that
+    hash last matched; any drift forces a full re-hash. A file that changes while
+    it is being hashed is re-verified, and refused (``OBJECT_CORRUPT``) if it
+    never holds still. The cache is in-memory
+    and per process, so a fresh process always starts with a full verify.
     """
     digest = object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
     ref = ArtifactRef(artifact_id=object_ref.object_id, content_hash=object_ref.content_hash,
                       schema_ref=PARQUET_FRAGMENT_SCHEMA_REF, byte_size=object_ref.byte_size,
                       storage_key=f"objects/{digest[:2]}/{digest}")
+    path = store.root / ref.storage_key
+    key = (str(store.root), ref.content_hash, ref.byte_size)
+    for _ in range(_VERIFY_ATTEMPTS):
+        before = _stat_tuple(path)
+        if before is not None and _VERIFIED.get(key) == before and _real_directories(path, store.root):
+            return path
+        try:
+            verified = store.verify(ref)
+        except ArtifactError as exc:
+            _VERIFIED.pop(key, None)
+            raise errors.fail("OBJECT_CORRUPT",
+                              "published object bytes do not match its recorded hash") from exc
+        # Unchanged while hashed: the hash covers the bytes now on disk.
+        if before is not None and _stat_tuple(path) == before:
+            if len(_VERIFIED) >= _VERIFIED_MAX:
+                _VERIFIED.clear()
+            _VERIFIED[key] = before
+            return verified
+    raise errors.fail("OBJECT_CORRUPT", "published object changed while it was being verified")
+
+
+def _real_directories(path, root) -> bool:
+    """True if the store ``root`` and ``path``'s two parent directories
+    (``objects/`` and its fan-out directory) are real directories, never
+    symlinks — the check ``ArtifactStore.verify`` makes at every component,
+    which a cache hit must not skip."""
     try:
-        return store.verify(ref)
-    except ArtifactError as exc:
-        raise errors.fail("OBJECT_CORRUPT", "published object bytes do not match its recorded hash") from exc
+        return all((os.lstat(p).st_mode & _S_IFMT) == _S_IFDIR
+                   for p in (root, path.parent.parent, path.parent))
+    except OSError:
+        return False
+
+
+def _stat_tuple(path) -> tuple[int, int, int, int, int] | None:
+    """``(dev, ino, size, mtime_ns, ctime_ns)`` of a regular file, else ``None``."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if (info.st_mode & _S_IFMT) != _S_IFREG:
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 def inspect_staged_file(path, contract: TableContract, contract_ref: TableContractRef,
