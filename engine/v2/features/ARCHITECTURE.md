@@ -136,9 +136,13 @@ pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
 `daily_market` read for the fixed ticker `"SPY"` (feeding `regime`, not
 reused from `scan_daily_state_inputs` — a different, derived shape);
 `price_history_query.get_price_series`, as of `decision_session` — its
-selected source date sets both `runup_asof` and `panel_anchor`. Query
-construction and the `PriceSeriesRow`-to-DataFrame conversion are
-implementation detail, not contract — see the PR body.
+selected source date sets `runup_asof` and is one input to the
+`panel_anchor` composite bound (line 122-123: the loosest of every
+contributing read's own source date, never this read alone); when no
+`STR-RUNUP` history resolves, `runup_asof` stays unset and `panel_anchor`
+is the loosest of the remaining reads'. Query construction and the
+`PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
+contract — see the PR body.
 
 | Condition (R1-R6) | Outcome |
 |---|---|
