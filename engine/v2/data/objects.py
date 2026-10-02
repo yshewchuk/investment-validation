@@ -86,7 +86,7 @@ NAN_POLICY = "legacy_nan_is_null.v1"
 _CHUNK = 1 << 20
 #: Objects whose full re-hash last matched, keyed by (store root, content hash,
 #: byte size) and valued by the stat tuple then observed (see
-#: :func:`verify_object_path`). Bounded; the oldest entry is evicted first.
+#: :func:`verify_object_path`). Bounded; emptied when full.
 _VERIFIED: dict[tuple[str, str, int], tuple[int, int, int, int, int]] = {}
 _VERIFIED_MAX = 4096
 #: Full verifies attempted while the file keeps changing underneath one.
@@ -322,7 +322,7 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
             return verified
         if _stat_tuple(path) == before:  # unchanged while hashed: the hash covers these bytes
             if len(_VERIFIED) >= _VERIFIED_MAX:
-                _VERIFIED.pop(next(iter(_VERIFIED)))
+                _VERIFIED.clear()
             _VERIFIED[key] = before
             return verified
     raise errors.fail("OBJECT_CORRUPT", "published object changed while it was being verified")
