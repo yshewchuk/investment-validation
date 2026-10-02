@@ -138,8 +138,12 @@ reads; and, for `STR-RUNUP` only, `price_history_query.get_price_series` (a
 `decision_session`, one read per ticker) for `runup_math.
 add_runup_features`'s `prices_by_ticker` — its own `date <= session_date`
 filter, applied after the as-of vintage selection, is what keeps a
-same-or-earlier-dated row from ever being a *future* one; the source date
-of whichever row that leaves sets `runup_asof`. `panel_anchor` is the
+same-or-earlier-dated row from ever being a *future* one. `scan_panel_row`
+converts the returned `tuple[PriceSeriesRow, ...]` into
+`add_runup_features`'s one-ticker DataFrame itself (`date`/`close_adj`
+columns, in the tuple's existing date order — no re-sort, no join); the
+source date of whichever row that leaves sets `runup_asof`. `panel_anchor`
+is the
 loosest of every contributing call's own source date (`source_session`,
 `regime_asof`, `runup_asof` when staged), never a caller-asserted value.
 It never assigns `tier4_row` or `quote_rows` — those stay the raw-row
@@ -153,7 +157,7 @@ producer's own job (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6").
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for this ticker (`STR-RUNUP` only) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
-| retry with the same pinned snapshot/key/`decision_session` | identical result; no cache beyond the pinned reads themselves, no write, nothing to roll back |
+| retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; no cache beyond the pinned reads themselves, no write, nothing to roll back |
 
 `regime.add_regime_features(events, market, *, as_of_column="date")` is
 pure regime arithmetic over explicit DataFrames. `market` supplies normalized,
