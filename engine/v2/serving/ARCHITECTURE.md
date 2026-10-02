@@ -6,19 +6,21 @@ API/projection contracts over saved records, financial display values and releas
 Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 ## Primary contracts and public interfaces
-The [README](README.md) lists the checked exports. By module:
-- `operations`: `create_server` (authenticated HTTP listener); `route_table`,
-  `STATIC_ROUTES`, `PARAMETERIZED_ROUTES` (the one route enumeration).
+The [README](README.md) lists the checked exports (the only names other packages may import). By module:
+- `operations.create_server` (authenticated HTTP listener).
 - `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as
   `python3 -m engine.v2.serving.api`.
 - `projections`: `connect`, `ensure_schema`, `resolve_event_refs`, `build_candidate`,
   `get_release`, `list_events`, `event_scores`, `get_event`, `get_score_detail`,
   `event_query_hash`.
-- `bridge.build_bridges`; `legacy_bundle.load_legacy_bundle` / `load_score_document`.
-- Read-only documents served by `operations`: `analog_projection.analog_document`,
-  `derivation_projection.derivation_document`, `native_parity_projection.native_parity_summary`.
-- Row builders: `native_render.native_display_row`,
-  `native_shadow_render.shadow_serving_row_source`, `score_projection.legacy_score_projection`.
+- `bridge.build_bridges`; `legacy_bundle.load_legacy_bundle` / `load_score_document`;
+  `score_projection.legacy_score_projection`.
+
+Internal to serving (not in the README list, so not importable elsewhere): the route
+enumeration `operations.route_table` (with `STATIC_ROUTES`, `PARAMETERIZED_ROUTES`), the
+read-only documents `analog_projection.analog_document`, `derivation_projection.derivation_document`
+and `native_parity_projection.native_parity_summary`, and the row builders
+`native_render.native_display_row` and `native_shadow_render.shadow_serving_row_source`.
 
 ## Inputs
 Verified saved score documents, legacy bundle bytes, immutable artifacts, serving
