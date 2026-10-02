@@ -71,7 +71,7 @@ interface section; this names only the load-bearing entry points.
   `row_matches(row, contract, query)` stays available as the one-row form
   and is defined in terms of `compile_row_matcher` so the two can never
   diverge; it re-normalizes on every call and must not be used inside a
-  per-row loop. Production reachability: `python3 -m engine.v2.ops` →
+  per-row loop. Production reachability: `python3 -m engine.v2.ops serve` →
   `Service.tick()` → `_reconcile_computed_moves_refresh()` →
   `submit_computed_moves_refresh_if_ready()` →
   `_build_native_computed_moves_plan()` →
