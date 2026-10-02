@@ -2629,12 +2629,104 @@ def test_select_pr_tests_dynamic_test_file_is_always_selected(tmp_path, monkeypa
         "import importlib\n"
         "name = 'engine.b'\n"
         "importlib.import_module(name)\n")
-    (tmp_path / "tests" / "test_c.py").write_text("X = 1\n")
-    tracked = ["engine/b.py", "tests/test_a.py", "tests/test_c.py"]
+    (tmp_path / "tests" / "test_c.py").write_text("from engine import b\n")
+    (tmp_path / "tests" / "test_d.py").write_text("X = 1\n")
+    tracked = ["engine/b.py", "tests/test_a.py", "tests/test_c.py", "tests/test_d.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    selected = pilot.select_pr_tests(_SELECT_CFG, ["NOTES.md"], graph=graph)
-    assert selected == ["tests/test_a.py"]
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected == ["tests/test_a.py", "tests/test_c.py"]
+
+
+def _write_repo(root, files):
+    for rel, body in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(body)
+    return sorted(files)
+
+
+def test_select_pr_tests_doc_change_skips_the_fail_safe_set_and_selects_doc_readers(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_dyn.py": "import importlib\nimportlib.import_module(__name__ + 'x')\n",
+        "tests/test_reader.py": "from pathlib import Path\nDOC = Path('sub/ARCHITECTURE.md')\n",
+        "tests/test_chatty.py": '"""Mentions ARCHITECTURE.md only in a docstring."""\n# ARCHITECTURE.md\n',
+        "tests/test_plain.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(_SELECT_CFG, ["sub/ARCHITECTURE.md"], graph=graph) == [
+        "tests/test_reader.py"]
+
+
+def test_select_pr_tests_doc_reader_found_through_an_imported_helper(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "checks/doc_check.py": "NAME = 'ARCHITECTURE.md'\n",
+        "tests/test_uses_check.py": "from checks import doc_check\n",
+        "tests/test_plain.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(_SELECT_CFG, ["ARCHITECTURE.md"], graph=graph) == [
+        "tests/test_uses_check.py"]
+
+
+def test_select_pr_tests_any_md_outside_inert_skip_is_a_doc(tmp_path, monkeypatch):
+    cfg = {"pr_selection": {"inert": [], "inert_skip": ["static/*.md"], "full_suite": []}}
+    tracked = _write_repo(tmp_path, {"tests/test_plain.py": "X = 1\n"})
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(cfg, ["pkg/README.md"], graph=graph) == []
+    assert pilot.select_pr_tests(cfg, ["static/x.md"], graph=graph) is None
+
+
+def test_select_pr_tests_new_test_file_selects_itself_not_the_full_suite(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "tests/test_dyn.py": "import importlib\nimportlib.import_module(__name__ + 'x')\n",
+        "tests/test_new.py": "X = 1\n",
+        "tests/test_plain.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(_SELECT_CFG, ["tests/test_new.py"], graph=graph) == [
+        "tests/test_new.py"]
+
+
+def test_select_pr_tests_new_test_file_plus_changed_import_adds_the_fail_safe_set(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {
+        "engine/b.py": "Y = 1\n",
+        "tests/test_dyn.py": "import importlib\nimportlib.import_module(__name__ + 'x')\n",
+        "tests/test_new.py": "from engine import b\n",
+        "tests/test_plain.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(
+        _SELECT_CFG, ["engine/b.py", "tests/test_new.py"], graph=graph) == [
+        "tests/test_dyn.py", "tests/test_new.py"]
+
+
+def test_select_pr_tests_deleted_test_file_still_selects_the_full_suite(tmp_path, monkeypatch):
+    tracked = _write_repo(tmp_path, {"tests/test_plain.py": "X = 1\n"})
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert pilot.select_pr_tests(_SELECT_CFG, ["tests/test_gone.py"], graph=graph) is None
+
+
+def test_select_pr_tests_shared_fixture_and_pins_still_select_the_full_suite(tmp_path, monkeypatch):
+    cfg = {"pr_selection": {"inert": [], "inert_skip": [], "full_suite": [
+        "tests/conftest.py", "requirements.txt", ".github/workflows/*"]}}
+    tracked = _write_repo(tmp_path, {"tests/test_plain.py": "X = 1\n"})
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    for path in ("tests/conftest.py", "requirements.txt", ".github/workflows/tests.yml"):
+        assert pilot.select_pr_tests(cfg, [path, "docs/x.md"], graph=graph) is None
+
+
+def test_real_repo_architecture_doc_change_selects_a_narrow_set():
+    selected = pilot.select_pr_tests(CFG, ["ARCHITECTURE.md"])
+    assert selected is not None
+    assert "tests/test_architecture_docs.py" in selected
+    assert len(selected) < 50
 
 
 def test_select_pr_tests_helper_with_unresolved_dynamic_import_taints_its_importer(tmp_path, monkeypatch):
@@ -2812,13 +2904,15 @@ def test_select_pr_tests_conftest_as_root_does_not_taint_every_test(tmp_path, mo
     # via a real EDGE (not root membership) should.
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "conftest.py").write_text("import sys\nsys.path.insert(0, '.')\n")
-    (tmp_path / "tests" / "test_a.py").write_text("X = 1\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "x.py").write_text("Z = 1\n")
+    (tmp_path / "tests" / "test_a.py").write_text("from engine import x\n")
     (tmp_path / "tests" / "test_b.py").write_text("Y = 1\n")
-    tracked = ["tests/conftest.py", "tests/test_a.py", "tests/test_b.py"]
+    tracked = ["engine/x.py", "tests/conftest.py", "tests/test_a.py", "tests/test_b.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    selected = pilot.select_pr_tests(_SELECT_CFG, ["NOTES.md"], graph=graph)
-    assert selected == []
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/x.py"], graph=graph)
+    assert selected == ["tests/test_a.py"]
 
 
 def test_select_pr_tests_re_compile_helper_does_not_taint_its_importer(tmp_path, monkeypatch):
@@ -2842,8 +2936,8 @@ def test_select_pr_tests_re_compile_helper_does_not_taint_its_importer(tmp_path,
     graph = pilot.build_import_graph(tracked)
     assert "tests/helper.py" in pilot.dynamic_files(graph)  # sanity: still broadly DYNAMIC
     assert "tests/helper.py" not in pilot.unresolved_import_files(tracked)  # but not an import attempt
-    selected = pilot.select_pr_tests(_SELECT_CFG, ["NOTES.md"], graph=graph)
-    assert selected == []  # neither test tainted; NOTES.md is inert and reaches nothing
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["tests/helper.py"], graph=graph)
+    assert selected == ["tests/test_a.py"]  # test_b not tainted into the selection
 
 
 def test_select_pr_tests_importlib_reload_of_a_known_import_is_not_unresolved(tmp_path, monkeypatch):
