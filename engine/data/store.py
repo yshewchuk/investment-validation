@@ -21,6 +21,7 @@ import gzip
 import hashlib
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -54,6 +55,11 @@ except ImportError:  # pragma: no cover
     HAVE_PARQUET = False
 
 SUFFIX = ".parquet" if HAVE_PARQUET else ".csv.gz"
+
+# PartitionedWriter.finalize()'s default hash-bucket count: bounds the
+# largest frame finalize() ever builds before the final assembly to roughly
+# (year's row count) / this value, instead of the whole year at once.
+FINALIZE_BUCKET_COUNT = 16
 
 
 def table_format() -> str:
@@ -110,6 +116,56 @@ def write_partition(df: pd.DataFrame, name: str, year: int, part: int = 0) -> Pa
     path = _partition_file(part_dir, part)
     _write_frame(df.reset_index(drop=True), path)
     return path
+
+
+def _dedupe_parts(
+    parts: list[Path], key_cols: list[str], bucket_count: int
+) -> tuple[pd.DataFrame, int]:
+    """Concatenate ``parts`` and drop duplicate primary keys, without ever
+    holding the whole (duplicate-inflated) year in memory as one frame.
+
+    Every row is routed into one of ``bucket_count`` temp files by a hash of
+    its primary key, so two copies of the same key always land in the same
+    bucket — the per-bucket dedupe below is therefore exactly equivalent to
+    deduping the whole year at once. Each bucket is then read back and
+    deduplicated on its own: a fraction of the year's rows, not the whole
+    table. ``keep="first"`` and parts are processed in their existing sorted
+    order, so which row survives is unchanged — the earliest-fed batch wins,
+    exactly as before.
+
+    Returns ``(frame, removed)`` with ``frame`` NOT yet sorted by key; the
+    caller sorts once, after this returns, instead of once per bucket.
+    """
+    with tempfile.TemporaryDirectory(prefix="finalize-bucket-") as work_str:
+        work = Path(work_str)
+        for part_index, part in enumerate(parts):
+            chunk = _read_part(part, None)
+            bucket_idx = (
+                pd.util.hash_pandas_object(chunk[key_cols], index=False) % bucket_count
+            ).to_numpy()
+            for b in range(bucket_count):
+                sub = chunk[bucket_idx == b]
+                if len(sub):
+                    _write_frame(
+                        sub.reset_index(drop=True),
+                        work / f"bucket-{b:04d}-{part_index:04d}{SUFFIX}",
+                    )
+            del chunk
+
+        deduped: list[pd.DataFrame] = []
+        before_total = 0
+        for b in range(bucket_count):
+            sub_files = sorted(work.glob(f"bucket-{b:04d}-*{SUFFIX}"))
+            if not sub_files:
+                continue
+            bucket_frame = pd.concat(
+                [_read_part(f, None) for f in sub_files], ignore_index=True
+            )
+            before_total += len(bucket_frame)
+            deduped.append(bucket_frame.drop_duplicates(subset=key_cols, keep="first"))
+
+    frame = pd.concat(deduped, ignore_index=True)
+    return frame, before_total - len(frame)
 
 
 class PartitionedWriter:
@@ -209,23 +265,39 @@ class PartitionedWriter:
     def close(self) -> None:
         self.flush()
 
-    def finalize(self, *, dedupe: bool = True) -> int:
+    def finalize(
+        self, *, dedupe: bool = True, bucket_count: int = FINALIZE_BUCKET_COUNT
+    ) -> int:
         """Compact each year into one part file, optionally deduplicating.
 
         A streamed build cannot enforce primary-key uniqueness as it goes: two
         source payloads can legitimately carry the same contract (entry-date and
         calendar pulls overlap on a trade date), and they may land in different
         batches. Uniqueness is therefore a whole-table property, resolved here
-        in a second pass — one year at a time, so peak memory stays at one
-        partition rather than one table.
+        in a second pass — one year at a time.
 
         The first occurrence wins, and batches are fed in sorted source order,
         so which row survives is a function of the source set rather than of
         scheduling. Returns the number of rows removed.
 
+        Dedup runs through :func:`_dedupe_parts`, which hash-buckets rows by
+        primary key into ``bucket_count`` temp files and deduplicates each
+        bucket on its own, so the largest frame this builds before the final
+        assembly is roughly one year's rows divided by ``bucket_count`` —
+        never the whole (duplicate-inflated) year at once.
+
         This also compacts the numbered part files a streamed write leaves
         behind, which makes later reads cheaper and the content hash stable
         against changes in flush timing.
+
+        Failure semantics: the new partition is written and atomically
+        replaces part 0 (`write_partition`'s existing tmp-file + `os.replace`)
+        BEFORE any stale numbered part file is removed. A crash at any point
+        up to and including that replace leaves every pre-finalize part file
+        exactly as it was; a crash after it leaves the new part-0 plus any
+        not-yet-removed stale numbered parts, which the next read still
+        reads correctly (stale parts hold a subset of what part-0 now holds
+        in full). Finalize is therefore safe to re-run after any crash.
         """
         self.flush()
         removed = 0
@@ -234,17 +306,18 @@ class PartitionedWriter:
             parts = _partition_files(part_dir)
             if not parts:
                 continue
-            frame = pd.concat([_read_part(p, None) for p in parts], ignore_index=True)
-            before = len(frame)
-            if dedupe and self.schema.primary_key:
-                frame = frame.drop_duplicates(
-                    subset=list(self.schema.primary_key), keep="first"
-                )
-            frame = frame.sort_values(list(self.schema.primary_key), kind="stable")
-            removed += before - len(frame)
-            for stale in parts:
-                stale.unlink(missing_ok=True)
+            key_cols = list(self.schema.primary_key)
+            if dedupe and key_cols:
+                frame, year_removed = _dedupe_parts(parts, key_cols, bucket_count)
+            else:
+                frame = pd.concat([_read_part(p, None) for p in parts], ignore_index=True)
+                year_removed = 0
+            frame = frame.sort_values(key_cols, kind="stable")
+            removed += year_removed
             write_partition(frame, self.name, year, 0)
+            for stale in parts:
+                if stale.name != _part_name(0):
+                    stale.unlink(missing_ok=True)
             self._parts[year] = 1
         self.rows_written -= removed
         return removed
