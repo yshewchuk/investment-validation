@@ -499,3 +499,28 @@ def test_resized_object_is_detected_and_failure_is_not_cached(counted_object):
             verify_object_path(store, obj)
         assert err.value.code == "OBJECT_CORRUPT"
         assert len(calls) == expected_calls
+
+
+def _verify_that_touches(store, path, times):
+    """``store.verify`` stand-in that bumps the file's mtime during its first ``times`` runs."""
+    real_verify, left = store.verify, [times]
+
+    def verify(ref):
+        result = real_verify(ref)
+        if left[0]:
+            left[0] -= 1
+            os.utime(path, ns=(0, path.stat().st_mtime_ns + 1_000_000_000))
+        return result
+
+    return verify
+
+
+def test_file_changing_during_verify_is_reverified_then_refused(counted_object, monkeypatch):
+    store, obj, path, _calls = counted_object
+    monkeypatch.setattr(store, "verify", _verify_that_touches(store, path, 2))
+    assert verify_object_path(store, obj) == path  # holds still on the third attempt
+    monkeypatch.setattr(objects_module, "_VERIFIED", {})
+    monkeypatch.setattr(store, "verify", _verify_that_touches(store, path, 99))
+    with pytest.raises(DataError) as err:
+        verify_object_path(store, obj)
+    assert err.value.code == "OBJECT_CORRUPT"

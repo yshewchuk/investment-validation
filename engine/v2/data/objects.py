@@ -89,6 +89,8 @@ _CHUNK = 1 << 20
 #: :func:`verify_object_path`). Bounded; the oldest entry is evicted first.
 _VERIFIED: dict[tuple[str, str, int], tuple[int, int, int, int, int]] = {}
 _VERIFIED_MAX = 4096
+#: Full verifies attempted while the file keeps changing underneath one.
+_VERIFY_ATTEMPTS = 3
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _EPOCH = datetime(1970, 1, 1)
@@ -295,7 +297,9 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
     The first open of an object in this process re-hashes it in full. A later
     open skips the re-hash only while the file's stat tuple — device, inode,
     size, mtime and ctime in nanoseconds — is exactly what it was when that
-    hash last matched; any drift forces a full re-hash. The cache is in-memory
+    hash last matched; any drift forces a full re-hash. A file that changes while
+    it is being hashed is re-verified, and refused (``OBJECT_CORRUPT``) if it
+    never holds still. The cache is in-memory
     and per process, so a fresh process always starts with a full verify.
     """
     digest = object_ref.content_hash.removeprefix(CONTENT_HASH_PREFIX)
@@ -304,20 +308,24 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
                       storage_key=f"objects/{digest[:2]}/{digest}")
     path = store.root / ref.storage_key
     key = (str(store.root), ref.content_hash, ref.byte_size)
-    before = _stat_tuple(path)
-    if before is not None and _VERIFIED.get(key) == before:
-        return path
-    try:
-        verified = store.verify(ref)
-    except ArtifactError as exc:
-        _VERIFIED.pop(key, None)
-        raise errors.fail("OBJECT_CORRUPT", "published object bytes do not match its recorded hash") from exc
-    # Remember the stat tuple only if the file did not change while it was hashed.
-    if before is not None and _stat_tuple(path) == before:
-        if len(_VERIFIED) >= _VERIFIED_MAX:
-            _VERIFIED.pop(next(iter(_VERIFIED)))
-        _VERIFIED[key] = before
-    return verified
+    for _ in range(_VERIFY_ATTEMPTS):
+        before = _stat_tuple(path)
+        if before is not None and _VERIFIED.get(key) == before:
+            return path
+        try:
+            verified = store.verify(ref)
+        except ArtifactError as exc:
+            _VERIFIED.pop(key, None)
+            raise errors.fail("OBJECT_CORRUPT",
+                              "published object bytes do not match its recorded hash") from exc
+        if before is None:
+            return verified
+        if _stat_tuple(path) == before:  # unchanged while hashed: the hash covers these bytes
+            if len(_VERIFIED) >= _VERIFIED_MAX:
+                _VERIFIED.pop(next(iter(_VERIFIED)))
+            _VERIFIED[key] = before
+            return verified
+    raise errors.fail("OBJECT_CORRUPT", "published object changed while it was being verified")
 
 
 def _stat_tuple(path) -> tuple[int, int, int, int, int] | None:
