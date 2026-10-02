@@ -16,7 +16,7 @@ The [README](README.md) lists the checked exports (the only names other packages
 - `bridge.build_bridges`; `legacy_bundle.load_legacy_bundle` / `load_score_document`;
   `score_projection.legacy_score_projection`.
 
-Internal to serving (not in the README list, so not importable elsewhere): the route
+Not in the README's checked list, so not part of the public interface: the route
 enumeration `operations.route_table` (with `STATIC_ROUTES`, `PARAMETERIZED_ROUTES`), the
 read-only documents `analog_projection.analog_document`, `derivation_projection.derivation_document`
 and `native_parity_projection.native_parity_summary`, and the row builders
@@ -45,8 +45,9 @@ operator-invoked dashboard preview `preview.run` -> `_server.build_server` ->
 row source and emits a projection binding for the ops publisher (it does not publish);
 `v2_dashboard_verified_input` builds a source-verified `PreviewInput` from a delivered
 release (ops catalog plus `load_legacy_bundle`); `v2_route_probe` probes `route_table`.
-Serving requests do not execute provider ingestion, fitting, scoring or financial simulation
-inline. Configured action callbacks may enqueue refresh or what-if jobs for asynchronous execution.
+Serving itself does not execute provider ingestion, fitting, scoring or financial simulation.
+`create_server` invokes injected action callbacks inline and does not require them to enqueue
+work, so callbacks must only enqueue refresh or what-if jobs and return.
 
 ## External systems and libraries
 FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
