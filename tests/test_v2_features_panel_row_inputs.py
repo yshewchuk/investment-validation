@@ -318,3 +318,37 @@ def test_history_keys_are_the_panel_math_superset():
     panel = _scan().panel_row
     for key in panel_math.history_features([2.0, -1.0], [2.0, 1.0]):
         assert key in panel
+
+
+def test_12_computed_moves_capped_at_decision_session_not_just_event_date():
+    """A row after decision_session is not "prior" even when it precedes the event."""
+    snapshot = _snapshot()
+    batches = _default_batches()
+    # The scored event moves to 02-20 so a day strictly between it and _DECISION exists.
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = _computed_rows([("2024-02-17", 3.0, False)])
+
+    class _WindowedRepository(_FakeRepository):
+        """The shared fake, but honoring the emitted window for ``computed_moves``
+        (which the base fake ignores, returning every row for the ticker)."""
+
+        def scan(self, query, *, table_name):
+            rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
+            interval = query.time_interval
+            if table_name == COMPUTED_MOVES_TABLE_NAME and interval is not None:
+                start = pd.Timestamp(interval.start_inclusive)
+                end = pd.Timestamp(interval.end_exclusive)
+                rows = [row for row in rows
+                        if start <= pd.Timestamp(row[interval.column]) < end]
+            yield _Batch(rows)
+
+    def _panel_at(decision_session):
+        repo = _WindowedRepository(snapshot, _contracts(), batches)
+        key = BoardRequest(ticker="AAA", strategy="STR-X",
+                           event_date=pd.Timestamp("2024-02-20"), session="AMC")
+        return scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                              decision_session=decision_session).panel_row
+
+    assert _panel_at(_DECISION)["n_prior"] == 0
+    # Excluded by the cap, not absent: five sessions later (still before the
+    # event) the same row is ordinary prior history.
+    assert _panel_at(_DECISION + pd.Timedelta(days=5))["n_prior"] == 1

@@ -122,8 +122,10 @@ def _consume(data_repository: repository.Repository, query: DataQuery,
 
 
 def _read_computed_moves(data_repository: repository.Repository, snapshot: SnapshotRef,
-                         key: Any, history_start: pd.Timestamp) -> list[dict[str, object]]:
-    """``key.ticker``'s computed_moves rows strictly before the scored event."""
+                         key: Any, history_start: pd.Timestamp, decision: pd.Timestamp
+                         ) -> list[dict[str, object]]:
+    """``key.ticker``'s computed_moves rows strictly before the scored event and
+    the decision session, whichever of the two is earlier."""
     contract = data_repository.table_contract(snapshot, _COMPUTED_MOVES_TABLE)
     version = _pinned_version(snapshot, _COMPUTED_MOVES_TABLE)
     query = DataQuery(
@@ -134,7 +136,7 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         time_interval=TimeInterval(
             column="event_date",
             start_inclusive=history_start.date().isoformat(),
-            end_exclusive=key.event_date.date().isoformat(),
+            end_exclusive=min(key.event_date, decision).date().isoformat(),
         ),
         order_by=tuple(contract.primary_key),
         max_batch_rows=min(contract.maximum_batch_rows, _BATCH_LIMIT),
@@ -271,7 +273,7 @@ def scan_panel_row(
         history_start=start, decision_session=decision,
     )
 
-    computed_rows = _read_computed_moves(repository, snapshot, key, start)
+    computed_rows = _read_computed_moves(repository, snapshot, key, start, decision)
     history = _history_from_computed_moves(computed_rows)
 
     spy_rows = _read_spy_market(repository, snapshot, start, decision)
