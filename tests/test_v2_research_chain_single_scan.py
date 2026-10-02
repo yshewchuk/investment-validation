@@ -1,16 +1,13 @@
 """Issue #252 — one option_chains scan per strategy, not two.
 
-``replay()`` now derives availability from a single ``load_chain_index``
-call over the plan's own (unfiltered) keys, then prunes that same
-``ChainIndex`` down to the filtered plan's surviving keys with
-``ChainIndex.restrict`` before pricing — one scan, retaining exactly the
-same rows the old two-scan (``read_chain_keys`` then a filtered
-``load_chain_index``) code kept. This test pins that: a single-strategy
-replay never touches the whole-table ``read_chain_keys``, calls
-``load_chain_index`` exactly once (with the unfiltered keys — the MISS
-entry included), and the restricted index handed to pricing holds no MISS
-data, while the available event still prices and the one missing its exit
-chain is skipped.
+``replay()``'s availability check now uses ``_chains.read_chain_keys_for``
+(narrowed to the plan's own keys) in place of the legacy whole-table
+``read_chain_keys``, filtering the plan BEFORE calling ``load_chain_index``
+exactly like the pre-existing code did — so ``load_chain_index`` still only
+ever loads the filtered, surviving set of keys. This test pins that: a
+single-strategy replay never touches the whole-table ``read_chain_keys``,
+calls the narrow ``read_chain_keys_for`` exactly once, and still prices the
+available event while skipping the one missing its exit chain.
 """
 from __future__ import annotations
 
@@ -72,15 +69,15 @@ def test_replay_availability_comes_from_the_chain_index_not_read_chain_keys(
     monkeypatch.setattr(_chains, "read_chain_keys", _boom)
     monkeypatch.setattr(replay, "read_chain_keys", _boom, raising=False)
 
-    real_restrict = _chains.ChainIndex.restrict
-    restricted: list = []
+    calls: list = []
+    real_read_chain_keys_for = _chains.read_chain_keys_for
 
-    def _restrict_spy(self, keys):
-        result = real_restrict(self, keys)
-        restricted.append(result)
-        return result
+    def _spy(*args, **kwargs):
+        calls.append(args)
+        return real_read_chain_keys_for(*args, **kwargs)
 
-    monkeypatch.setattr(_chains.ChainIndex, "restrict", _restrict_spy)
+    monkeypatch.setattr(_chains, "read_chain_keys_for", _spy)
+    monkeypatch.setattr(replay, "read_chain_keys_for", _spy, raising=False)
 
     load_calls: list = []
     real_load = replay.load_chain_index
@@ -92,23 +89,12 @@ def test_replay_availability_comes_from_the_chain_index_not_read_chain_keys(
 
     monkeypatch.setattr(replay, "load_chain_index", _load_spy)
 
-    priced_with: list = []
-    real_price_plan = replay._price_plan
-
-    def _price_plan_spy(structure, plan, index, **kwargs):
-        priced_with.append(index)
-        return real_price_plan(structure, plan, index, **kwargs)
-
-    monkeypatch.setattr(replay, "_price_plan", _price_plan_spy)
-
     result = replay.replay(repository, snap, "STR-THRU", _two_events(),
                            calendar=_calendar())
 
+    assert len(calls) == 1
     assert len(load_calls) == 1
-    assert len(restricted) == 1
-    assert len(priced_with) == 1
-    assert priced_with[0] is restricted[0]
-    assert ("MISS", pd.Timestamp("2024-05-02")) not in set(restricted[0].keys)
+    assert all(ticker != "MISS" for ticker, _ in load_calls[0])
     assert len(result.trades) >= 1
     tickers = set(result.trades["ticker"].astype(str))
     assert "TEST" in tickers
