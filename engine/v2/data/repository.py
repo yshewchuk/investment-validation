@@ -352,9 +352,16 @@ class Repository:
         and filter. The filter runs vectorized on each decoded Arrow batch
         (``query.compile_batch_matcher``) before any row becomes a Python
         dict, so only surviving rows pay that cost; a query
-        ``compile_batch_matcher`` cannot express falls back to the per-row
-        ``query.compile_row_matcher`` path this package used before
-        (task brief #286)."""
+        ``compile_batch_matcher`` cannot express (task brief #286
+        follow-up: any ``time_interval``, any timestamp-typed predicate)
+        falls back to the per-row ``query.compile_row_matcher`` path this
+        package used before, decided once for the whole fragment up front.
+        A batch matcher that compiled but raises when actually EVALUATED
+        against a real batch -- a failure mode ``compile_batch_matcher``
+        cannot rule out from ``contract``/``query`` alone -- gets the same
+        fallback: caught here, decided the first time it happens, and kept
+        for the rest of this fragment's batches (lazily compiling the row
+        matcher only then, if it was not already compiled)."""
         path = objects.verify_object_path(self._store, record.object_ref)
         parquet_file = self._open_parquet(path)
         present, missing = self._match_columns(contract, needed, parquet_file.schema_arrow)
@@ -362,7 +369,11 @@ class Repository:
         row_matcher = None if batch_matcher is not None else query_mod.compile_row_matcher(contract, query)
         for batch in self._iter_batches(parquet_file, present, batch_cap):
             if batch_matcher is not None:
-                batch = self._filter_batch(batch, contract, present, query, batch_matcher)
+                try:
+                    batch = self._filter_batch(batch, contract, present, query, batch_matcher)
+                except Exception:
+                    batch_matcher = None
+                    row_matcher = query_mod.compile_row_matcher(contract, query)
             for row in self._decode_rows(batch, needed, present, missing):
                 if row_matcher is not None and not row_matcher(row):
                     continue

@@ -252,57 +252,79 @@ def compile_row_matcher(contract: TableContract, query: DataQuery) -> Callable[[
 
 def compile_batch_matcher(contract: TableContract, query: DataQuery
                           ) -> Callable[[dict[str, pa.Array], int], pa.Array] | None:
-    """The vectorized form of :func:`compile_row_matcher`: a per-query-
-    compiled predicate evaluated directly on a decoded Arrow batch (pyarrow
-    ``compute.is_in``/comparisons) instead of once per decoded row. Same
-    eager, once-per-query normalization and the same ``CONTRACT_MISMATCH``
-    refusal on an unparseable bound; a null column value never matches, on
-    both paths -- every case ``compile_row_matcher`` accepts, this agrees
-    with exactly (phase-2 guide §8.2 steps 6-7, task brief #286).
+    """The vectorized form of :func:`compile_row_matcher`, narrowed
+    (task brief #286 follow-up) to the one case provably byte-identical to
+    the row path without reinterpreting a value: ``key_filter``
+    equality/set-membership (pyarrow ``compute.is_in``) on a column whose
+    own Arrow array needs no transform to compare -- ``string``,
+    ``int64``, ``bool``, ``float64``. Returns ``None``, falling the WHOLE
+    query back to :func:`compile_row_matcher`, whenever:
 
-    Returns ``None`` when a ``key_filter`` predicate's ``values`` cannot be
-    represented in its column's declared Arrow type (e.g. a string value
-    against a declared ``int64`` column) -- and, more generally, whenever
-    ANY exception is raised while compiling/normalizing a predicate for
-    this query, not only an Arrow type-representation error: a future
-    failure mode this package has not enumerated degrades to the row path
-    instead of crashing the scan -- decided once here, from
-    ``contract``/``query`` alone, never from the data a caller later feeds
-    the returned closure. A caller that gets ``None`` back must fall back to
-    ``compile_row_matcher`` tested against every decoded row (the only path
-    before this function existed), which never performs this typed Arrow
-    construction and so never refuses on a type mismatch.
+    * ``query.time_interval`` is set at all, even with neither bound set
+      (a range comparison needs the same bound-parsing and microsecond
+      truncation the row path's ``_normalize_bound``/``_comparable_value``
+      already carry, AND a time column declared a non-timestamp physical
+      type -- e.g. a string-typed ``observation_time_column`` -- makes
+      even a range comparison's own meaning, chronological vs. lexical, a
+      per-column decision this function does not make);
+    * any ``key_filter`` predicate targets a ``timestamp[ns]``/
+      ``timestamp[us]`` column (same reasoning: there is no transform-free
+      vectorized form for a timestamp column);
+    * a predicate's ``values`` cannot be represented in its column's
+      declared Arrow type (e.g. a string value against a declared
+      ``int64`` column), or ANY other exception is raised while compiling
+      a predicate for this query -- a future failure mode this package has
+      not enumerated degrades to the row path instead of crashing the scan.
 
-    The returned closure takes ``columns`` (every ``key_filter``/
-    ``time_interval`` column name mapped to that column's full Arrow array
-    for one batch -- a caller supplies a typed-null array, e.g.
-    :func:`null_array_for`, for a column absent from the physical fragment)
-    and ``num_rows`` (the batch's row count, used only when there is
-    nothing to filter), and returns a boolean mask with no nulls: True iff
-    the row at that index satisfies every predicate and the interval.
+    This is a compile-time decision from ``contract``/``query`` alone,
+    never from the data a caller later feeds the returned closure. A
+    caller that gets ``None`` back must fall back to
+    ``compile_row_matcher`` tested against every decoded row -- the only
+    path before this vectorization, and the only path for every query this
+    function declines. A caller must ALSO fall back per fragment if the
+    returned closure itself raises when called against real batch data
+    (``repository.Repository._fragment_rows`` does this): this function's
+    own refusal covers only what it can decide from ``contract``/``query``
+    alone, not every way real Arrow data could defeat ``is_in`` at
+    evaluation time.
+
+    The returned closure takes ``columns`` (every ``key_filter`` column
+    name mapped to that column's full Arrow array for one batch -- a
+    caller supplies a typed-null array, e.g. :func:`null_array_for`, for a
+    column absent from the physical fragment) and ``num_rows`` (the
+    batch's row count, used only when there is nothing to filter), and
+    returns a boolean mask with no nulls: True iff the row at that index
+    satisfies every predicate.
     """
+    if query.time_interval is not None:
+        return None
     try:
-        predicates = [_compile_batch_predicate(contract, p) for p in query.key_filter]
-        interval = (None if query.time_interval is None
-                    else _compile_batch_interval(contract, query.time_interval))
+        compiled = [_compile_batch_predicate(contract, p) for p in query.key_filter]
     except Exception:
+        return None
+    if any(c is None for c in compiled):
         return None
 
     def _mask(columns: dict[str, pa.Array], num_rows: int) -> pa.Array:
         result = pa.array([True] * num_rows, type=pa.bool_())
-        for column, apply_predicate in predicates:
+        for column, apply_predicate in compiled:
             result = pc.and_(result, apply_predicate(columns[column]))
-        if interval is not None:
-            column, apply_interval = interval
-            result = pc.and_(result, apply_interval(columns[column]))
         return result
 
     return _mask
 
 
 def _compile_batch_predicate(contract: TableContract, predicate: KeyPredicate
-                             ) -> tuple[str, Callable[[pa.Array], pa.Array]]:
+                             ) -> tuple[str, Callable[[pa.Array], pa.Array]] | None:
+    """Compiles one ``key_filter`` predicate for the vectorized mask, or
+    returns ``None`` when its column is a timestamp --
+    :func:`compile_batch_matcher` treats that exactly like an
+    unrepresentable predicate value: fall back the WHOLE query to the row
+    path, since there is no transform-free vectorized comparison for a
+    timestamp column (task brief #286 follow-up)."""
     physical = _physical_type(contract, predicate.column)
+    if physical.startswith("timestamp"):
+        return None
     value_set = _batch_value_set(physical, predicate.values)
 
     def _apply(array: pa.Array) -> pa.Array:
@@ -310,80 +332,21 @@ def _compile_batch_predicate(contract: TableContract, predicate: KeyPredicate
         # input to ``is_in`` (it compares unequal to every concrete
         # value_set member) -- passed explicitly so this never silently
         # starts matching nulls on a pyarrow upgrade.
-        return pc.is_in(_batch_comparable(array, physical), value_set=value_set,
-                        skip_nulls=True)
+        return pc.is_in(array, value_set=value_set, skip_nulls=True)
 
     return predicate.column, _apply
 
 
-def _compile_batch_interval(contract: TableContract, interval: TimeInterval
-                            ) -> tuple[str, Callable[[pa.Array], pa.Array]]:
-    physical = _physical_type(contract, interval.column)
-    start = None if interval.start_inclusive is None else _parsed_bound(interval.start_inclusive)
-    end = None if interval.end_exclusive is None else _parsed_bound(interval.end_exclusive)
-
-    def _apply(array: pa.Array) -> pa.Array:
-        comparable = _batch_comparable(array, physical)
-        # A null column value never matches an interval, even one with
-        # neither bound set (mirrors ``row_matches``'s own unconditional
-        # ``if value is None: return False`` before either bound check).
-        mask = pc.is_valid(comparable)
-        if start is not None:
-            mask = pc.and_(mask, pc.fill_null(pc.greater_equal(comparable, start), False))
-        if end is not None:
-            mask = pc.and_(mask, pc.fill_null(pc.less(comparable, end), False))
-        return mask
-
-    return interval.column, _apply
-
-
-def _batch_comparable(array: pa.Array, physical_type: str) -> pa.Array:
-    """The vectorized form of :func:`_comparable_value`: a ``timestamp[ns]``
-    column is floored to the shared wire form's microsecond resolution and
-    widened to ``timestamp[us]`` -- byte-identical to
-    ``value.strftime(time_formats.NAIVE_TIMESTAMP_FORMAT)`` on one decoded
-    row for every instant, including a pre-1970 (negative-epoch) one and
-    one far outside ``timestamp[ns]``'s own representable range (e.g. a
-    year-3000 bound). Delegates to :func:`_floor_ns_to_us`, which does this
-    with exact ``int64`` arithmetic -- never ``pc.floor_temporal`` (a real
-    pyarrow bug near the minimum representable ``timestamp[ns]`` instant:
-    confirmed directly to wrap such a value around to the MAXIMUM
-    representable instant instead of flooring it) and never a numpy
-    round-trip (``to_numpy()`` promotes to ``float64`` once a null is
-    present, which cannot hold a full ``int64`` nanosecond tick count
-    exactly). A ``timestamp[us]`` column, or any other physical type,
-    needs no transform: it is already directly comparable, same as the
-    row path."""
-    if physical_type == "timestamp[ns]":
-        return _floor_ns_to_us(array)
-    return array
-
-
-def _floor_ns_to_us(array: pa.Array) -> pa.Array:
-    """Floor a ``timestamp[ns]`` array to microsecond resolution and widen
-    it to ``timestamp[us]``, entirely in ``int64`` Arrow compute (see
-    :func:`_batch_comparable` for why). ``pc.divide`` truncates toward
-    zero; the ``needs_floor_adjust`` step corrects that to a true floor
-    (round toward negative infinity) exactly when the raw nanosecond tick
-    count is negative and the division had a non-zero remainder."""
-    ns_int = pc.cast(array, pa.int64())
-    truncated = pc.divide(ns_int, 1000)
-    remainder = pc.subtract(ns_int, pc.multiply(truncated, 1000))
-    needs_floor_adjust = pc.and_(pc.less(ns_int, 0), pc.not_equal(remainder, 0))
-    floored_us = pc.if_else(needs_floor_adjust, pc.subtract(truncated, 1), truncated)
-    return pc.cast(floored_us, pa.timestamp("us"))
-
-
 def _batch_value_set(physical_type: str, values) -> pa.Array:
     """The ``value_set`` :func:`_compile_batch_predicate` feeds ``is_in``,
-    in the same comparable form :func:`_batch_comparable` casts a column
-    to. May raise during compilation -- a pyarrow ``ArrowException`` when a
-    value cannot be represented in the column's declared Arrow type, a
-    plain ``OverflowError`` for an ``int64`` column given a Python ``int``
+    built directly in the column's own declared Arrow type -- never a
+    timestamp type: :func:`_compile_batch_predicate` already returns
+    ``None`` for a timestamp column before ever calling this. May raise
+    during compilation -- a pyarrow ``ArrowException`` when a value cannot
+    be represented in the column's declared Arrow type, a plain
+    ``OverflowError`` for an ``int64`` column given a Python ``int``
     outside the C ``long`` range, or anything else -- caught broadly by
     :func:`compile_batch_matcher`, never by this function."""
-    if physical_type.startswith("timestamp"):
-        return pa.array([_parsed_bound(v) for v in values], type=pa.timestamp("us"))
     return pa.array(values, type=ARROW_TYPES[physical_type])
 
 
@@ -408,18 +371,11 @@ def _comparable_value(value, physical_type: str):
 
 
 def _parsed_bound(value: str) -> datetime:
-    """The parsed ``datetime`` behind :func:`_normalize_bound`, before it
-    is formatted to the shared wire string. The vectorized batch path
-    (:func:`_batch_value_set`, :func:`_compile_batch_interval`) calls this
-    directly instead of calling ``_normalize_bound`` and then reparsing its
-    formatted string with ``strptime`` -- that round trip is not always
-    safe: ``strftime``'s ``%Y`` does not reliably zero-pad a year below
-    1000 on every platform, so a bound like ``"0001-01-01"`` can normalize
-    to an unpadded wire string that a 4-digit-year ``strptime`` reparse
-    then refuses with a ``ValueError`` -- a real, platform-dependent
-    failure this avoids entirely by never formatting to a string and
-    reparsing it in the first place. Same ``CONTRACT_MISMATCH`` refusal on
-    an unparseable bound as :func:`_normalize_bound`."""
+    """The parsed ``datetime`` behind :func:`_normalize_bound`, factored
+    out so ``_normalize_bound`` itself is just "parse, then format" --
+    its only caller now (task brief #286 follow-up removed the vectorized
+    batch path's timestamp handling entirely). Same ``CONTRACT_MISMATCH``
+    refusal on an unparseable bound."""
     if time_formats.is_naive_timestamp(value):
         return datetime.strptime(value, time_formats.NAIVE_TIMESTAMP_FORMAT)
     try:

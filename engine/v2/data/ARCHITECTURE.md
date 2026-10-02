@@ -59,35 +59,50 @@ interface section; this names only the load-bearing entry points.
   also holds `publish_legacy_file`/`inspect_fragment`, which do filesystem
   I/O). `query.compile_batch_matcher(contract, query)` is the entry point
   `repository.Repository._fragment_rows` calls once per fragment to
-  evaluate every `key_filter` predicate and the `time_interval` directly on
-  a decoded Arrow batch (pyarrow `compute.is_in`/comparisons on the
-  physical column, cast to the shared microsecond wire form for a
-  timestamp column — the same truncation `_comparable_value`'s
-  `strftime` applies to a decoded row), returning a boolean mask
-  `_fragment_rows` uses to drop non-matching rows via `RecordBatch.filter`
-  *before* they are decoded to per-row Python dicts, so only surviving
-  rows pay that cost. Same `_normalize_bound` routing and `CONTRACT_MISMATCH`
-  refusal on an unparseable bound as `compile_row_matcher`; a null column
-  value never matches, on both paths. If a predicate's values cannot be
-  expressed in its column's declared Arrow type, `compile_batch_matcher`
-  returns `None` — decided once from `contract`/`query` alone, never from
-  the data — and `_fragment_rows` falls back to `compile_row_matcher`
-  tested against every decoded row (the only path before this vectorization,
-  still exact for any query the vectorized path cannot express).
+  vectorize ONLY the `key_filter` predicates a column's own Arrow array can
+  satisfy with no reinterpretation — equality/set-membership (pyarrow
+  `compute.is_in`) on a string/int64/bool/float64 column, unchanged, no
+  cast — returning a boolean mask `_fragment_rows` uses to drop
+  non-matching rows via `RecordBatch.filter` *before* they are decoded to
+  per-row Python dicts, so only surviving rows pay that cost. It refuses
+  (`None`) and the whole query falls back to `compile_row_matcher` at
+  compile time whenever: the query has a `time_interval` at all (every
+  range bound, including one with neither bound set), any `key_filter`
+  predicate targets a `timestamp[ns]`/`timestamp[us]` column, or a
+  predicate's values cannot be expressed in its column's declared Arrow
+  type — decided once from `contract`/`query` alone, never from the data.
+  Narrowed deliberately (task brief #286 follow-up) to the one case
+  provably byte-identical to the row path without reinterpreting a value:
+  a timestamp or interval comparison needs the same bound-parsing and
+  microsecond truncation `compile_row_matcher`'s `_normalize_bound`/
+  `_comparable_value` already carry, and a time column declared a
+  non-timestamp physical type (e.g. a string-typed
+  `observation_time_column`) makes a range comparison's own meaning
+  (chronological vs. lexical) a per-column decision this package does not
+  make twice. A null column value never matches, on both paths.
+  `_fragment_rows` also guards EVALUATION, not only compilation: a batch
+  matcher that compiled but raises when actually called against a real
+  batch — a failure mode compile-time validation from `contract`/`query`
+  alone cannot rule out in general — is caught there too, and that
+  fragment's remaining batches decode and filter through
+  `compile_row_matcher` instead, same as a query `compile_batch_matcher`
+  refused outright.
+
   `compile_row_matcher(contract, query)` is the one row-matching entry
-  point for that fallback and for any caller testing more than one row
-  against the same `DataQuery`: it normalizes every `key_filter`
-  predicate's `wanted` values and the `time_interval`'s bounds eagerly,
-  once, at compile time, and returns a closure with no further
-  normalization in its per-row path — the closure is only valid for the
-  `contract`/`query` it was compiled from and carries no state across
-  scans. Both compiled forms must agree on every row (the equivalence
-  fixture in `tests/test_v2_data_query.py` pins this). `repository.
-  Repository._fragment_rows` compiles the batch matcher for every fragment,
-  and additionally compiles the row-matcher fallback when (and only when)
-  batch compilation returns `None` (the scan's `DataQuery` does not change
-  across fragments, so this is O(fragments × predicate values), not
-  O(rows × values)). `row_matches(row, contract,
+  point for every query this file does not vectorize, and for any caller
+  testing more than one row against the same `DataQuery`: it normalizes
+  every `key_filter` predicate's `wanted` values and the `time_interval`'s
+  bounds eagerly, once, at compile time, and returns a closure with no
+  further normalization in its per-row path — the closure is only valid
+  for the `contract`/`query` it was compiled from and carries no state
+  across scans. Both compiled forms must agree on every row the batch form
+  accepts (the equivalence fixture in `tests/test_v2_data_query.py` pins
+  this). `repository.Repository._fragment_rows` compiles the batch
+  matcher for every fragment, and additionally compiles the row-matcher
+  fallback when (and only when) batch compilation returns `None`, or the
+  first time batch evaluation raises on that fragment (the scan's
+  `DataQuery` does not change across fragments, so this is O(fragments ×
+  predicate values), not O(rows × values)). `row_matches(row, contract,
   query)` stays available as the one-row form and is defined in terms of
   `compile_row_matcher` so the two can never diverge; it re-normalizes on
   every call and must not be used inside a per-row loop. Production
