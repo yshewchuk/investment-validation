@@ -146,8 +146,8 @@ def _default_batches():
     }
 
 
-def _spy_rows():
-    days = [str(d.date()) for d in pd.date_range(end=_REGIME_SOURCE, periods=20, freq="D")]
+def _spy_rows(periods=20):
+    days = [str(d.date()) for d in pd.date_range(end=_REGIME_SOURCE, periods=periods, freq="D")]
     return [{"ticker": "SPY", "date": pd.Timestamp(day), "spot": 500.0 + i,
              "src_iv": "orats", "implied_move": 1.0}
             for i, day in enumerate(days)]
@@ -183,7 +183,13 @@ def _rows_equal(a, b):
 
 
 def test_1_happy_path_all_four_reads_and_min_anchor():
-    result = _scan()
+    # add_regime_features needs j >= 21 (22 rows, anchor at the last) for a
+    # non-NaN spy_ret21, so this test widens the SPY batch; every other test
+    # keeps the default 20-row fixture.
+    spy = _spy_rows(periods=22)
+    batches = _default_batches()
+    batches[("daily_market", "SPY")] = spy
+    result = _scan(batches=batches)
     assert isinstance(result, PanelRowInputs)
     panel = result.panel_row
     # One key from each of the four sources.
@@ -194,7 +200,12 @@ def test_1_happy_path_all_four_reads_and_min_anchor():
     # The three contributing dates differ; the anchor is the earliest.
     assert result.panel_anchor == pd.Timestamp(_RUNUP_SOURCE)
     # spy_* and runup_* keys survive as plain floats; the ema fallback is the mean.
-    assert isinstance(panel["spy_ret21"], float)
+    # regime.py's formula, mirrored over the same spots: every SPY date is
+    # strictly before both the event and the decision, so the anchor is the
+    # last row (j = len - 1) and spy_ret21 = (spot / closes[j - 21] - 1) * 100.
+    spots = [row["spot"] for row in spy]
+    expected_ret21 = (spots[-1] / spots[-1 - 21] - 1.0) * 100
+    assert panel["spy_ret21"] == pytest.approx(expected_ret21)
     assert isinstance(panel["signed_streak"], float)
     assert panel["ema12r_abs"] == 1.5  # n_prior < 12 -> falls back to mean_prior_abs_move
 

@@ -133,7 +133,7 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
     version = _pinned_version(snapshot, _COMPUTED_MOVES_TABLE)
     start = history_start.date().isoformat()
     end = min(key.event_date, decision).date().isoformat()
-    if start == end:
+    if start >= end:
         return []
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id,
