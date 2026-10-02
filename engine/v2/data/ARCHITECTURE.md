@@ -71,7 +71,12 @@ interface section; this names only the load-bearing entry points.
   `row_matches(row, contract, query)` stays available as the one-row form
   and is defined in terms of `compile_row_matcher` so the two can never
   diverge; it re-normalizes on every call and must not be used inside a
-  per-row loop.
+  per-row loop. Production reachability: `python3 -m engine.v2.ops` →
+  `Service.tick()` → `_reconcile_computed_moves_refresh()` →
+  `submit_computed_moves_refresh_if_ready()` →
+  `_build_native_computed_moves_plan()` →
+  `computed_moves_store.target_tickers_from_snapshot()` → `_scan_rows()` →
+  `Repository.scan()` → `_fragment_rows()` → `query.compile_row_matcher()`.
 - **Legacy-touching seam** — `legacy_adapter.py`, the package's only module
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
