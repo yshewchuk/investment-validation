@@ -334,23 +334,43 @@ class TestFinalizeDedupe:
         # final row order. (Not a byte-for-byte file comparison: the
         # streaming writer emits one parquet row group per non-empty
         # bucket, so the physical layout legitimately differs with
-        # bucket_count even though the content does not.)
+        # bucket_count even though the content does not.) Compared against
+        # an INDEPENDENTLY built expected frame, not just against each
+        # other -- every bucket_count agreeing on the same wrong answer
+        # would otherwise still pass.
+        key_cols = ["ticker", "obs_date", "expiry", "strike", "right"]
         frame = make_chains(years=(2023, 2024), per_year=10)
         dup = frame.copy()
         dup["bid"] = -1.0  # sentinel: must never survive keep="first"
-        results = []
+
+        # Independent ground truth: `frame` is fed before `dup`, and every
+        # row in `dup` duplicates a primary key already in `frame`, so
+        # keep="first" means the deduplicated, sorted table IS exactly
+        # `frame` (coerced to the table's own schema, to match dtypes
+        # read_table() returns) -- built without going through
+        # PartitionedWriter.finalize() or _dedupe_and_write at all.
+        expected = (
+            store.coerce(frame, "option_chains")
+            .sort_values(key_cols, kind="stable")
+            .reset_index(drop=True)
+        )
+
+        # Prove the comparison itself isn't vacuous before relying on it.
+        corrupted = expected.copy()
+        corrupted.loc[0, "bid"] = -999.0
+        with pytest.raises(AssertionError):
+            pd.testing.assert_frame_equal(expected, corrupted)
+
         for bucket_count in (1, 3, 16):
             with store.PartitionedWriter("option_chains", max_buffered_rows=3) as writer:
                 writer.add(frame)
                 writer.add(dup)
                 writer.finalize(dedupe=True, bucket_count=bucket_count)
             out = store.read_table("option_chains").sort_values(
-                ["ticker", "obs_date", "expiry", "strike", "right"]
+                key_cols, kind="stable"
             ).reset_index(drop=True)
             assert (out["bid"] != -1.0).all()
-            results.append(out)
-        for other in results[1:]:
-            pd.testing.assert_frame_equal(results[0], other)
+            pd.testing.assert_frame_equal(out, expected)
 
     def test_finalize_never_materializes_the_full_raw_year_as_one_frame(self, store, monkeypatch):
         if not store.HAVE_PARQUET:

@@ -199,7 +199,10 @@ def _dedupe_and_write(
 
         try:
             for b in range(len(groups)):
-                sub_files = sorted(work.glob(f"bucket-{b:04d}-*{SUFFIX}"))
+                sub_files = sorted(
+                    work.glob(f"bucket-{b:04d}-*{SUFFIX}"),
+                    key=lambda p: int(p.name.split("-")[-1].split(".")[0]),
+                )
                 if not sub_files:
                     continue
                 bucket_frame = pd.concat(
