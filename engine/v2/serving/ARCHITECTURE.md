@@ -60,7 +60,8 @@ flowchart LR
   Findings -->|findings not ok| Refused[PROJECTION_REFUSED; nothing else written]
   Findings -->|findings ok| Publish[details + manifest published]
   Publish --> Commit[index committed in one transaction]
-  Commit --> Binding[projection_binding for the ops publisher]
+  Commit --> Binding[tool prints projection_binding for the committed release]
+  Binding -.->|operator supplies as a publication input| Ops[ops publisher]
 ```
 Operations listener: `create_server` serves health files, shell/view pages, model-release
 resources, the release pointer and release bytes, the legacy shell, analog, derivation and
