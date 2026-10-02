@@ -542,3 +542,12 @@ class TestGridArmsKeepSeparateReports:
         with pytest.raises(RuntimeError, match="arm failed"):
             self._run(run_dir, self.SPEC, tmp_path)
         assert not (run_dir / "ARMS.md").exists()
+
+    def test_a_caller_report_dir_is_refused_before_anything_is_written(self, tmp_path):
+        run_dir = tmp_path / "grid"
+        with pytest.raises(ValueError, match="report_dir"):
+            lib.evaluate_with_grid(self.SPEC, self._trades(), run_dir,
+                                   ledger_path=tmp_path / "LEDGER.csv",
+                                   report_dir=tmp_path / "elsewhere")
+        assert not run_dir.exists()
+        assert not (tmp_path / "LEDGER.csv").exists()

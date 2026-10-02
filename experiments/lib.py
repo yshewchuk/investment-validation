@@ -283,6 +283,10 @@ def evaluate_with_grid(spec: Mapping[str, Any], trades: pd.DataFrame, run_dir: P
     """
     from engine.evaluate import evaluate
 
+    # The helper owns where each arm's report goes; refuse before any artifact
+    # or ledger row exists rather than fail on the first secondary arm.
+    if "report_dir" in evaluate_kwargs:
+        raise ValueError("evaluate_with_grid assigns report_dir for each arm")
     run_dir = Path(run_dir)
     # Removed first and written last, so a run that dies part-way never leaves
     # an index from an earlier run describing arms this run did not finish.
