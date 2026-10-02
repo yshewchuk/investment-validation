@@ -30,9 +30,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-HERE = Path(__file__).resolve().parent
 SOURCE = ROOT / "experiments" / "EXP-147_str_thru_gate_promotion_confirmatory_val" / "run.py"
 sys.path.insert(0, str(ROOT))
+
+from engine import paths  # noqa: E402
+
+# Evidence (REPORT.md, results/, figures/) follows the configured root, not
+# wherever this checkout happens to sit -- paths.ROOT honours
+# INVESTING_PLAN_ROOT. SOURCE above stays checkout-relative on purpose: it
+# locates EXP-147's sibling script to load, a code location, not evidence.
+HERE = paths.ROOT / "experiments" / "EXP-187_str_thru_gate_feature_threshold_decomposition"
 
 spec = importlib.util.spec_from_file_location("exp187_runner", SOURCE)
 module = importlib.util.module_from_spec(spec)
