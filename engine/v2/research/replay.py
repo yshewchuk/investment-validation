@@ -393,6 +393,7 @@ def replay(
         available = read_chain_keys_for(repository, snapshot_ref, plan.chain_keys)
         plan = filter_plan_by_availability(plan, available)
         _log(f"{strategy}/{variant}: {len(plan.frame):,} events have both chains")
+        del available
     if plan.frame.empty:
         return ReplayResult(strategy, variant, _empty_trades(), plan.skipped,
                             planned_total, 0, time.time() - started)
