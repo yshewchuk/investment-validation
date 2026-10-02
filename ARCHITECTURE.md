@@ -114,8 +114,9 @@ evidence. See the models and data component contracts.
     folder's `results/`. Failure semantics: arms run sequentially and any
     error aborts the run; `ARMS.md` is removed at the start and written only
     after every arm has finished, so it never indexes a partial run. Reports
-    and ledger rows already written by completed arms stay in place, and a
-    re-run rewrites them. `engine.evaluate` takes an optional `report_dir` that
+    already written by completed arms stay in place until a re-run rewrites
+    them; the ledger is append-only, so a re-run keeps existing rows and adds
+    new `ran` rows. `engine.evaluate` takes an optional `report_dir` that
     redirects only the report and figures, never the run log that
     preregistration reads.
   - **Mutation-testing PR module selection** (`tools/mutation_pilot.py`,
