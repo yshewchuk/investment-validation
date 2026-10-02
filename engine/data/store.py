@@ -56,9 +56,11 @@ except ImportError:  # pragma: no cover
 
 SUFFIX = ".parquet" if HAVE_PARQUET else ".csv.gz"
 
-# PartitionedWriter.finalize()'s default hash-bucket count: bounds the
-# largest frame finalize() ever builds before the final assembly to roughly
-# (year's row count) / this value, instead of the whole year at once.
+# PartitionedWriter.finalize()'s default bucket count: rows are
+# range-partitioned into roughly this many groups of distinct primary-key
+# values (not row counts -- one ticker's rows all land in one bucket), so
+# the largest frame finalize() ever builds, in either phase, is one
+# bucket's rows -- never the whole year at once, deduplicated or not.
 FINALIZE_BUCKET_COUNT = 16
 
 

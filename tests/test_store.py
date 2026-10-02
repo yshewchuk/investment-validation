@@ -353,6 +353,8 @@ class TestFinalizeDedupe:
             pd.testing.assert_frame_equal(results[0], other)
 
     def test_finalize_never_materializes_the_full_raw_year_as_one_frame(self, store, monkeypatch):
+        if not store.HAVE_PARQUET:
+            pytest.skip("bounded-concat streaming path requires pyarrow")
         # Deterministic, non-wall-clock proof that the fix is structural: no
         # pd.concat call inside finalize() is ever handed the whole year's
         # raw (duplicate-inflated) row count at once. Old code's single
