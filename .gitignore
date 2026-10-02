@@ -32,6 +32,7 @@
 !/EARNINGS_VOL_PROGRAM_PLAN.md
 !ARCHITECTURE.md
 !/guides/*.md
+!/guides/cloud_briefs/*.md
 !/docs/*.md
 !/engine/**/*.md
 !/checks/*.md
