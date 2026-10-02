@@ -24,6 +24,7 @@ from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.models.residual_artifact import make_paired_residual_pool_artifact
 from engine.v2.scoring import application
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
+from tests.planned_exit_support import legacy_expected_pnl
 
 EVENT = "2026-09-16"
 CONTEXT = {"ticker": "AAA", "event_date": EVENT, "entry_date": EVENT,
@@ -103,9 +104,10 @@ def _legacy(pool, *, alpha=0.5, dte_exit=9.0, event_date=EVENT, pre_iv30=40.0) -
     geometry = generate("STR-THRU", {**CONTEXT, "forecast_abs_move": 7.0})
     priced = price(geometry, {(leg.right, leg.strike, leg.expiry): QUOTES[
         (leg.right, leg.strike, leg.expiry)] for leg in geometry.legs}, alpha)
-    result = pnl_sim.expected_pnl(
+    result = legacy_expected_pnl(
         exit_legs=[{"strike": float(leg.strike), "qty": float(leg.quantity),
-                    "side": "sell" if str(leg.side).lower() == "buy" else "buy"}
+                    "side": "sell" if str(leg.side).lower() == "buy" else "buy",
+                    "right": leg.right}
                    for leg in priced.legs],
         spot=100.0, entry_cost=priced.entry_cost, pre_iv30=pre_iv30,
         pred_abs_move=7.0, pred_iv_crush=-20.0, dte_exit=dte_exit,

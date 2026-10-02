@@ -20,9 +20,9 @@ import pytest
 from engine import pnl_sim
 from engine.v2.contracts import ScoreRequest
 from engine.v2.domain.generation import generate, price
+from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.lineage import DataDependency, Lineage
 from engine.v2.models.no_fit import no_fit_guard
-from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.training.residuals import (
     build_driver_residual_pool_artifact,
     build_paired_residual_pool_artifact,
@@ -30,6 +30,7 @@ from engine.v2.models.training.residuals import (
 from engine.v2.scoring import application
 from engine.v2.scoring.source_inputs import SourceBundle, build_native_score_inputs
 from engine.v2.scoring.stages import STAGE_NAMES, NativeScoreInputs, StageReceipt
+from tests.planned_exit_support import legacy_expected_pnl
 
 LINEAGE = Lineage(data=(DataDependency(table="tier3.panel", end_exclusive="2026-09-01"),))
 KEY = {"move_model_id": "size_v1_4", "crush_model_id": "iv_crush_v1_gbm",
@@ -139,9 +140,10 @@ def test_artifact_path_equals_rows_path_and_legacy_expected_pnl_bit_for_bit():
         for leg in inputs.pricing.legs}, 0.5)
     history = pd.DataFrame(_rows(artifact))
     history["event_date"] = pd.to_datetime(history["event_date"])
-    legacy = pnl_sim.expected_pnl(
+    legacy = legacy_expected_pnl(
         exit_legs=[{"strike": leg.strike, "qty": leg.quantity,
-                    "side": "sell" if leg.side == "buy" else "buy"} for leg in priced.legs],
+                    "side": "sell" if leg.side == "buy" else "buy",
+                    "right": leg.right} for leg in priced.legs],
         spot=100.0, entry_cost=priced.entry_cost, pre_iv30=40.0, pred_abs_move=7.0,
         pred_iv_crush=-20.0, dte_exit=9.0, event_date=pd.Timestamp("2026-09-16").normalize(),
         pool=pnl_sim.ResidualPool(history), key="STR-THRU",
@@ -444,9 +446,10 @@ def test_frozen_pool_large_enough_to_bucket_matches_legacy_expected_pnl():
         for leg in inputs.pricing.legs}, 0.5)
     history = pd.DataFrame(_rows(artifact))
     history["event_date"] = pd.to_datetime(history["event_date"])
-    legacy = pnl_sim.expected_pnl(
+    legacy = legacy_expected_pnl(
         exit_legs=[{"strike": leg.strike, "qty": leg.quantity,
-                    "side": "sell" if leg.side == "buy" else "buy"} for leg in priced.legs],
+                    "side": "sell" if leg.side == "buy" else "buy",
+                    "right": leg.right} for leg in priced.legs],
         spot=100.0, entry_cost=priced.entry_cost, pre_iv30=40.0, pred_abs_move=7.0,
         pred_iv_crush=-20.0, dte_exit=9.0, event_date=pd.Timestamp("2026-09-16").normalize(),
         pool=pnl_sim.ResidualPool(history), key="STR-THRU",
