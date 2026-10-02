@@ -281,7 +281,7 @@ def compile_batch_matcher(contract: TableContract, query: DataQuery
         predicates = [_compile_batch_predicate(contract, p) for p in query.key_filter]
         interval = (None if query.time_interval is None
                     else _compile_batch_interval(contract, query.time_interval))
-    except pa.ArrowException:
+    except (pa.ArrowException, OverflowError):
         return None
 
     def _mask(columns: dict[str, pa.Array], num_rows: int) -> pa.Array:
@@ -337,23 +337,26 @@ def _compile_batch_interval(contract: TableContract, interval: TimeInterval
 
 def _batch_comparable(array: pa.Array, physical_type: str) -> pa.Array:
     """The vectorized form of :func:`_comparable_value`: a timestamp column
-    is cast, truncating (never rounding: ``safe=False``), to the shared
-    wire form's microsecond resolution -- byte-identical to
+    is floored to the shared wire form's microsecond resolution via
+    ``pc.floor_temporal`` -- byte-identical to
     ``value.strftime(time_formats.NAIVE_TIMESTAMP_FORMAT)`` on one decoded
-    row, which already drops anything finer than a microsecond. Every
-    other physical type needs no transform: it is already directly
-    comparable, same as the row path."""
+    row for every instant, including a pre-1970 (negative-epoch) one,
+    where a plain unit-cast truncates toward zero instead of flooring and
+    so rounds the wrong way. Every other physical type needs no
+    transform: it is already directly comparable, same as the row path."""
     if physical_type.startswith("timestamp"):
-        return pc.cast(array, pa.timestamp("us"), safe=False)
+        return pc.floor_temporal(array, unit="microsecond")
     return array
 
 
 def _batch_value_set(physical_type: str, values) -> pa.Array:
     """The ``value_set`` :func:`_compile_batch_predicate` feeds ``is_in``,
     in the same comparable form :func:`_batch_comparable` casts a column
-    to. Raises a pyarrow ``ArrowException`` -- caught by
-    :func:`compile_batch_matcher`, never by this function -- when a value
-    cannot be represented in the column's declared Arrow type."""
+    to. Raises a pyarrow ``ArrowException`` -- or, for an ``int64`` column
+    given a Python ``int`` outside the C ``long`` range, a plain
+    ``OverflowError`` -- caught by :func:`compile_batch_matcher`, never by
+    this function -- when a value cannot be represented in the column's
+    declared Arrow type."""
     if physical_type.startswith("timestamp"):
         return pa.array([_batch_timestamp(_normalize_bound(v)) for v in values],
                         type=pa.timestamp("us"))

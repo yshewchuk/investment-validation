@@ -83,9 +83,11 @@ interface section; this names only the load-bearing entry points.
   `contract`/`query` it was compiled from and carries no state across
   scans. Both compiled forms must agree on every row (the equivalence
   fixture in `tests/test_v2_data_query.py` pins this). `repository.
-  Repository._fragment_rows` compiles one of each per fragment (the scan's
-  `DataQuery` does not change across fragments, so this is O(fragments ×
-  predicate values), not O(rows × values)). `row_matches(row, contract,
+  Repository._fragment_rows` compiles the batch matcher for every fragment,
+  and additionally compiles the row-matcher fallback when (and only when)
+  batch compilation returns `None` (the scan's `DataQuery` does not change
+  across fragments, so this is O(fragments × predicate values), not
+  O(rows × values)). `row_matches(row, contract,
   query)` stays available as the one-row form and is defined in terms of
   `compile_row_matcher` so the two can never diverge; it re-normalizes on
   every call and must not be used inside a per-row loop. Production

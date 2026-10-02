@@ -870,6 +870,39 @@ def test_compile_batch_matcher_truncates_nanoseconds_exactly_like_the_row_path()
     assert bool(mask[0]) == row_matcher(decoded_row)
 
 
+def test_compile_batch_matcher_floors_negative_epoch_nanoseconds_like_the_row_path():
+    """A pre-1970 (negative-epoch) ns timestamp with a non-zero sub-
+    microsecond remainder must floor -- never truncate toward zero -- to
+    the microsecond wire form on both paths: a toward-zero truncation of
+    ``1969-12-31T23:59:59.999999999`` would wrongly round UP to
+    ``1970-01-01T00:00:00.000000``, while ``_batch_comparable``'s
+    ``pc.floor_temporal`` and the row path's ``strftime`` both give the
+    one-microsecond-earlier ``1969-12-31T23:59:59.999999``."""
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp("1969-12-31T23:59:59.999999999")
+    array = pa.array([instant], type=pa.timestamp("ns"))
+    decoded_row = _row("AAA", instant.to_pydatetime())
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in", values=("1969-12-31T23:59:59.999999",)),))
+    batch_matcher = query_mod.compile_batch_matcher(contract, query)
+    assert batch_matcher is not None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    assert row_matcher(decoded_row) is True
+    mask = batch_matcher({"obs_date": array}, 1).to_pylist()
+    assert bool(mask[0]) is True
+    assert bool(mask[0]) == row_matcher(decoded_row)
+    interval_query = _synthetic_query(contract, time_interval=TimeInterval(
+        column="obs_date", end_exclusive="1970-01-01T00:00:00.000000"))
+    batch_interval_matcher = query_mod.compile_batch_matcher(contract, interval_query)
+    assert batch_interval_matcher is not None
+    row_interval_matcher = query_mod.compile_row_matcher(contract, interval_query)
+    assert row_interval_matcher(decoded_row) is True
+    interval_mask = batch_interval_matcher({"obs_date": array}, 1).to_pylist()
+    assert bool(interval_mask[0]) is True
+    assert bool(interval_mask[0]) == row_interval_matcher(decoded_row)
+
+
 def test_compile_batch_matcher_all_null_column_array_never_matches():
     """``null_array_for`` — what ``repository._filter_batch`` feeds the mask
     for a filter column the physical fragment lacks — must never match, for
@@ -933,6 +966,21 @@ def test_compile_batch_matcher_refuses_values_unrepresentable_in_column_type():
         assert query_mod.compile_batch_matcher(contract, query) is None, (column, values)
         row_matcher = query_mod.compile_row_matcher(contract, query)
         assert row_matcher(_row("AAA", None)) is False
+
+
+def test_compile_batch_matcher_refuses_int64_overflow_without_raising():
+    """#286 follow-up: a Python ``int`` outside the C ``long`` range against
+    an ``int64`` column makes ``pa.array(..., type=pa.int64())`` raise a
+    plain ``OverflowError`` -- not a ``pyarrow.lib.ArrowException``
+    subclass -- so the fallback guard must catch that too and return
+    ``None`` (degrading to the per-row path, whose plain ``in`` set check
+    never raises on this value) instead of crashing the scan."""
+    contract = _mixed_types_contract()
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="shares", operator="in", values=(99999999999999999999999,)),))
+    assert query_mod.compile_batch_matcher(contract, query) is None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    assert row_matcher(_row("AAA", None)) is False
 
 
 # --------------------------------------------------------------------------
