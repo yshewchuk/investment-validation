@@ -523,3 +523,22 @@ class TestGridArmsKeepSeparateReports:
         assert index.count("**secondary**") == 2
         for arm in arms:
             assert f"(arms/{arm.name}/REPORT.md)" in index
+
+    def test_a_failed_arm_leaves_no_stale_index(self, tmp_path, monkeypatch):
+        import engine.evaluate as ev
+
+        run_dir = tmp_path / "grid"
+        self._run(run_dir, self.SPEC, tmp_path)
+        assert (run_dir / "ARMS.md").exists()
+
+        real = ev.evaluate
+
+        def boom(spec, trades, **kw):
+            if spec.get("grid_cell"):
+                raise RuntimeError("arm failed")
+            return real(spec, trades, **kw)
+
+        monkeypatch.setattr(ev, "evaluate", boom)
+        with pytest.raises(RuntimeError, match="arm failed"):
+            self._run(run_dir, self.SPEC, tmp_path)
+        assert not (run_dir / "ARMS.md").exists()

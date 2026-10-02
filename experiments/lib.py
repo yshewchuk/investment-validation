@@ -284,6 +284,9 @@ def evaluate_with_grid(spec: Mapping[str, Any], trades: pd.DataFrame, run_dir: P
     from engine.evaluate import evaluate
 
     run_dir = Path(run_dir)
+    # Removed first and written last, so a run that dies part-way never leaves
+    # an index from an earlier run describing arms this run did not finish.
+    (run_dir / ARMS_INDEX).unlink(missing_ok=True)
     result = evaluate(spec, trades, run_dir=run_dir, **evaluate_kwargs)
     record_evaluation(run_dir, spec, result.results, ledger_path=ledger_path)
     arms = [("primary", "preregistered primary", result)]
