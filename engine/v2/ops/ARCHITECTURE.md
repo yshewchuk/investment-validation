@@ -1503,12 +1503,6 @@ flowchart TD
     class settlement,model_evidence,engineering,backup,native_parity,computed_moves_refresh,native_score_batch optional
 ```
 
-`decision_validation` accepts the bound finality document's `daily_share` and
-`chain_share` only as finite real numbers (not booleans, strings, null, NaN or
-infinity) inside `[MIN_FINAL_*_SHARE, 1]`; anything else yields a finding
-(`invalid` when not a finite real, `outside_finality_floor` when out of range),
-so the stage fails `VALIDATION_FAILED` and no success receipt is produced.
-
 Dashed nodes are `OPTIONAL`: their failure degrades the receipt but never
 blocks the graph. This diagram is the *shadow* graph — `run_shadow_nightly`
 is the only function that walks it whole, inline, for every stage
