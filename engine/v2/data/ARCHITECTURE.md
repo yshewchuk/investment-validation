@@ -57,7 +57,21 @@ interface section; this names only the load-bearing entry points.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which
   opens and streams object bytes through an `ArtifactStore`, and `objects.py`
   also holds `publish_legacy_file`/`inspect_fragment`, which do filesystem
-  I/O).
+  I/O). `query.compile_row_matcher(contract, query)` is the one row-matching
+  entry point a scan should call when it will test more than one row against
+  the same `DataQuery`: it normalizes every `key_filter` predicate's `wanted`
+  values and the `time_interval`'s bounds eagerly, once, at compile time
+  (same `_normalize_bound` routing and the same `CONTRACT_MISMATCH` refusal
+  on an unparseable bound as calling `row_matches` would raise), and returns
+  a closure with no further normalization in its per-row path — the closure
+  is only valid for the `contract`/`query` it was compiled from and carries
+  no state across scans. `repository.Repository._fragment_rows` compiles one
+  per fragment (the scan's `DataQuery` does not change across fragments, so
+  this is O(fragments × predicate values), not O(rows × values)).
+  `row_matches(row, contract, query)` stays available as the one-row form
+  and is defined in terms of `compile_row_matcher` so the two can never
+  diverge; it re-normalizes on every call and must not be used inside a
+  per-row loop.
 - **Legacy-touching seam** — `legacy_adapter.py`, the package's only module
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
