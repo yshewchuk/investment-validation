@@ -43,8 +43,27 @@ built assets is transport. Keep saved financial values, clocks and provenance;
 saved replay evidence does not imply current nightly/full-population qualification.
 Existing compatibility views do not establish ownership of new application screens.
 ## Diagrams
+Read path: the React client resolves "current" through one pointer chain, then reads.
 ```mermaid
 flowchart LR
   React[React typed client] -->|cookie; release pin| API[authenticated JSON API]
-  API --> Projection[saved-record projections] --> Saved[index and immutable artifacts]
+  API --> Resolver[publication resolver]
+  Resolver -->|ops CURRENT, bound projection_binding.json| Verify[verify_projection_binding]
+  Verify -->|live index check| Index[(serving index)]
+  API --> Reads[bounded projection reads] --> Index
+  Reads --> Objects[immutable artifact objects]
 ```
+Offline publication, composed by the projection tool (the one caller allowed to join serving and ops):
+```mermaid
+flowchart LR
+  Bundle[legacy bundle + score.json] --> Load[legacy_bundle loaders]
+  Plan[optional shadow plan] --> Rows[shadow row source]
+  Load --> Rows --> Bridge[build_bridges]
+  Refs[resolve_event_refs over Repository] --> Bridge
+  Bridge --> Objs[publish findings, details, manifest]
+  Objs -->|findings ok| Tx[one index transaction]
+  Objs -->|findings not ok| Refused[receipt only; PROJECTION_REFUSED]
+  Tx --> Binding[projection_binding JSON] --> Ops[ops publisher input]
+```
+Operations listener: `create_server` serves health files, the release pointer and release bytes,
+the analog, derivation and parity documents, and forwards `POST` commands to injected callbacks.
