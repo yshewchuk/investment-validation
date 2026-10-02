@@ -50,7 +50,7 @@ flowchart LR
   API --> Resolver[publication resolver]
   Resolver -->|ops CURRENT, bound projection_binding.json| Verify[verify_projection_binding]
   Verify -->|live index check| Index[(serving index)]
-  API --> Reads[bounded projection reads] --> Index
+  API --> Reads[projection reads; bounds vary by route] --> Index
   Reads --> Objects[immutable artifact objects]
 ```
 Offline publication, composed by the projection tool:
