@@ -324,7 +324,10 @@ request)`:
 | a binding missing `decision_clock_id` or `strategy_id` | carries no scope information, always included |
 
 `frozen_batch.score_frozen_batch` is the production boundary this scoping
-protects. `tools/capture_tier0_corpus.py::_frozen_runtime` submits every
+protects; its preflight resolves a binding's strategy with the same rule
+(`application.binding_serves_strategy`: the request's own strategy or `"*"`),
+so a wildcard binding on the matching clock is accepted and any other
+strategy mismatch is still refused before inference. `tools/capture_tier0_corpus.py::_frozen_runtime` submits every
 binding with a valid captured feature row without pre-filtering by
 `strategy_id`/`decision_clock_id`, so it relies entirely on this scoping
 rather than its own. `native_score_batch` goes through `score_one`, never
