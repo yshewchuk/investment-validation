@@ -53,8 +53,8 @@ load-bearing entrypoints:
   running one frozen-model binding and raising `FrozenStageRefusal(code,
   detail, reason_codes=...)` (code always `"MODEL_NOT_READY"`) — the refusal
   shape every module in this package that resolves a frozen artifact reuses.
-- `frozen_batch.py` / `frozen_inputs.py` — the production frozen batch
-  boundary (`score_frozen_batch`) and inference-input builder
+- `frozen_batch.py` / `frozen_inputs.py` — the frozen-batch API
+  (`score_frozen_batch`) and inference-input builder
   (`build_inference_requests`, `validate_answer_free`).
 - `nightly_source_bundle.py` — `assemble_nightly_source_bundle()`,
   `quote_domain_map()`, `validated_as_of()`, `NightlySourceBundleRefusal` —
