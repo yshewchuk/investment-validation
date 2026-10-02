@@ -292,6 +292,19 @@ produces the same `ScoreRecord`, `identity.py`). Other typed refusals:
 (`application.py`, below), `NightlySourceBundleRefusal`
 (`nightly_source_bundle.py`, below).
 
+**Planned-exit simulation values each leg by its own right.** The
+`planned_exit` simulation (`stages._planned_exit_simulation`) prices a call
+leg as a call and a put leg as a put (`C`/`CALL`, `P`/`PUT`, case-insensitive),
+at the one shared exit horizon, with zero rates and dividends. The call is the
+put kernel plus `spot - strike` (put-call parity), so both rights share the
+volatility floor and the intrinsic-at-expiry boundary. A priced leg with a
+nonzero quantity and finite strike whose right is neither refuses the whole
+simulation: `UNSUPPORTED_SIMULATION_LEG:right` is flagged, no `exp_pnl_sim`
+(or other simulated field) is produced, and nothing is defaulted to a put.
+Legacy `engine.pnl_sim.expected_pnl` prices every leg as a put, so bit-for-bit
+parity with it holds for put-only legs; a structure with a call leg
+(e.g. the STR-THRU straddle) is valued by this contract, not by that helper.
+
 **STR-RUNUP's `runup_move` forecast field (issue #94, resolved).** Every
 mechanism that produces this strategy's forecast populates two fields, never
 one conflated name: `runup_move_raw_d14` (the model's own native-horizon
