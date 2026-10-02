@@ -59,8 +59,9 @@ SUFFIX = ".parquet" if HAVE_PARQUET else ".csv.gz"
 # PartitionedWriter.finalize()'s default bucket count: rows are
 # range-partitioned into roughly this many groups of distinct primary-key
 # values (not row counts -- one ticker's rows all land in one bucket), so
-# the largest frame finalize() ever builds, in either phase, is one
-# bucket's rows -- never the whole year at once, deduplicated or not.
+# on the pyarrow-backed path the largest frame finalize() ever builds, in
+# either phase, is one bucket's rows -- never the whole year at once,
+# deduplicated or not. (Only on that path -- see _dedupe_and_write.)
 FINALIZE_BUCKET_COUNT = 16
 
 
@@ -142,9 +143,9 @@ def _dedupe_and_write(
     complete primary key before it is written, and no bucket's key range
     overlaps another's, so the concatenation of row groups the writer
     produces is already in full, correct primary-key order -- no final
-    cross-bucket concat or sort is needed. The largest frame this function
-    ever builds, in either phase, is one bucket's rows: a fraction of the
-    year, never the whole year, deduplicated or not.
+    cross-bucket concat or sort is needed. On this path, the largest frame
+    this function ever builds, in either phase, is one bucket's rows: a
+    fraction of the year, never the whole year, deduplicated or not.
 
     Falls back to a single in-memory concat + dedupe + sort + write when
     pyarrow is unavailable (``HAVE_PARQUET`` is False) -- the streaming
@@ -346,9 +347,11 @@ class PartitionedWriter:
         Dedup runs through :func:`_dedupe_and_write`, which range-partitions
         rows by primary key into ``bucket_count`` temp files, deduplicates
         each bucket on its own, and streams the result straight into the
-        output file one bucket at a time. The largest frame this ever
-        builds, in either phase, is one bucket's rows — never the whole
-        raw year, and never the whole deduplicated year either.
+        output file one bucket at a time -- when pyarrow is available. On
+        that path, the largest frame this ever builds, in either phase, is
+        one bucket's rows — never the whole raw year, and never the whole
+        deduplicated year either. Without pyarrow, :func:`_dedupe_and_write`
+        falls back to one plain concat of the whole year, same as before.
 
         This also compacts the numbered part files a streamed write leaves
         behind, which makes later reads cheaper and the content hash stable
