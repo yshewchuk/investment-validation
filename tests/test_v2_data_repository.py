@@ -26,6 +26,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.contracts.data import (  # noqa: E402
+    DataQuery,
+    KeyPredicate,
+    TimeInterval,
+)
+from engine.v2.data import query as query_mod  # noqa: E402
 from engine.v2.data.catalog import commit_snapshot  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
@@ -33,6 +39,15 @@ from engine.v2.foundation import ArtifactStore  # noqa: E402
 from engine.v2.ops.bootstrap import open_catalog  # noqa: E402
 from engine.v2.ops.catalog import connect as ops_connect  # noqa: E402
 from engine.v2.ops.snapshots import resolve_snapshot_head  # noqa: E402
+from tests.data_scan_support import (  # noqa: E402
+    catalog_and_store,
+    commit_tables,
+    contract_for,
+    contract_ref_for,
+    hand_built_record,
+    publish_and_inspect,
+    table_from_rows,
+)
 from tests.ops_support import FakeClock  # noqa: E402
 from tests.test_v2_data_commit import (  # noqa: E402
     _commit,
@@ -395,4 +410,187 @@ def test_table_contract_and_fragment_records_refuse_unknown_table(tmp_path):
         repo.fragment_records(snap, "not_a_real_table")
     assert err.value.code == "CONTRACT_MISMATCH"
 
+
+# --------------------------------------------------------------------------
+# task brief #286: the vectorized batch filter. A query the batch matcher
+# can express must materialize ZERO row dicts for rows it drops (the whole
+# point of the fix), and the per-row fallback it defers to when
+# ``compile_batch_matcher`` returns ``None`` must agree with it exactly on
+# real data — including rows whose filtered column is null.
+# --------------------------------------------------------------------------
+
+_SEC = contract_for("securities")
+_SEC_REF = contract_ref_for(_SEC)
+_OC = contract_for("option_chains")
+_OC_REF = contract_ref_for(_OC)
+
+
+def _securities_row(ticker: str, year: int) -> dict:
+    return dict(ticker=ticker, year=year, first_date=None, last_date=None, mcap_usd=1.5e9,
+                mcap_log=21.1, mcap_raw=1.5, mcap_unit_era="billions", mcap_quantized=False,
+                n_obs=250, src="orats")
+
+
+def _chain_row(ticker, year: int, day: int, *, with_obs_date: bool = True) -> dict:
+    from datetime import datetime
+    return dict(ticker=ticker, obs_date=datetime(year, 1, day) if with_obs_date else None,
+                year=year, expiry=datetime(year, 2, 16), dte=45, strike=100.0, right="C",
+                bid=1.0, ask=1.2, mid=1.1, iv=30.0, delta=0.5, spot=100.0, src="orats",
+                src_file="f.parquet", chain_kind="entry", volume=None, open_interest=None,
+                bid_size=None, ask_size=None, quote_repaired=False)
+
+
+def test_nonmatching_vectorized_filter_materializes_zero_row_dicts(tmp_path, monkeypatch):
+    """A ``key_filter`` that matches nothing in a surviving fragment removes
+    every row at the Arrow-batch level: ``_decode_rows`` is still reached
+    (the fragment WAS opened — the "AAB" predicate value falls inside the
+    fragment's real key bounds, so pruning alone cannot explain the empty
+    result) but materializes zero Python dicts, and the scan completes with
+    zero rows and no exception."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    record = publish_and_inspect(store, _SEC, _SEC_REF,
+                                 [_securities_row(t, 2024) for t in ("AAA", "BBB", "CCC")], "2024")
+    snap = commit_tables(conn, clock, {"securities": [record]}, {"securities": _SEC})
+    repo = Repository(conn, store)
+
+    decoded_rows: list[dict] = []
+    decode_calls: list[int] = []
+    real_decode = Repository._decode_rows
+
+    def counting_decode(self, batch, needed, present, missing):
+        decode_calls.append(batch.num_rows)
+        for row in real_decode(self, batch, needed, present, missing):
+            decoded_rows.append(row)
+            yield row
+
+    monkeypatch.setattr(Repository, "_decode_rows", counting_decode)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=("ticker", "year"),
+        key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAB",)),),
+        order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+    batches = list(repo.scan(query, table_name="securities"))
+    assert sum(batch.num_rows for batch in batches) == 0
+    assert decoded_rows == []
+    assert decode_calls and all(num_rows == 0 for num_rows in decode_calls)
+
+
+def test_forced_row_fallback_agrees_with_vectorized_filter(tmp_path, monkeypatch):
+    """Same real multi-fragment scan twice: once through the vectorized
+    batch filter (a ``ticker`` ``in`` predicate -- string equality, this
+    package's one vectorized case), once with ``compile_batch_matcher``
+    monkeypatched to always return ``None`` (the per-row path ``repository``
+    used before #286, and the one every OTHER query still takes). A null
+    ticker row may not appear in either result, and the two results must be
+    byte-identical."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    table_2024 = table_from_rows(_OC, [_chain_row("AAA", 2024, 2), _chain_row("ZZZ", 2024, 3),
+                                       _chain_row(None, 2024, 4)])
+    frag_2024 = hand_built_record(
+        store, _OC, _OC_REF, table_2024, partition_key="2024", row_count=3,
+        primary_key_min=("AAA", "2024-01-02T00:00:00.000000", "2024-02-16T00:00:00.000000",
+                         100.0, "C"),
+        primary_key_max=("ZZZ", "2024-01-04T00:00:00.000000", "2024-02-16T00:00:00.000000",
+                         100.0, "C"))
+    table_2025 = table_from_rows(_OC, [_chain_row("AAA", 2025, 2), _chain_row("BBB", 2025, 3)])
+    frag_2025 = hand_built_record(
+        store, _OC, _OC_REF, table_2025, partition_key="2025", row_count=2,
+        primary_key_min=("AAA", "2025-01-02T00:00:00.000000", "2025-02-16T00:00:00.000000",
+                         100.0, "C"),
+        primary_key_max=("BBB", "2025-01-03T00:00:00.000000", "2025-02-16T00:00:00.000000",
+                         100.0, "C"))
+    snap = commit_tables(conn, clock, {"option_chains": [frag_2024, frag_2025]},
+                         {"option_chains": _OC})
+    repo = Repository(conn, store)
+
+    def _query() -> DataQuery:
+        return DataQuery(
+            snapshot_id=snap.snapshot_id, table_contract_ref=_OC_REF,
+            columns=("ticker", "obs_date"),
+            key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "BBB")),),
+            order_by=("ticker", "obs_date", "expiry", "strike", "right"),
+            max_batch_rows=10, max_result_rows=10)
+
+    vectorized = [row for batch in repo.scan(_query(), table_name="option_chains")
+                  for row in batch.to_pylist()]
+    monkeypatch.setattr(query_mod, "compile_batch_matcher",
+                        lambda contract, query: None)
+    fallback = [row for batch in repo.scan(_query(), table_name="option_chains")
+                for row in batch.to_pylist()]
+    assert len(vectorized) == 3  # the two AAA rows plus the 2025 BBB row; null ticker excluded
+    assert sorted(r["ticker"] for r in vectorized) == ["AAA", "AAA", "BBB"]
+    assert fallback == vectorized
+
+
+def test_time_interval_query_always_takes_row_path(tmp_path):
+    """#286 follow-up: a query with a ``time_interval`` always falls back
+    to the per-row path now (``compile_batch_matcher`` refuses any
+    interval at all) -- a null ``obs_date`` row is excluded the same way
+    it always was, via the row path's own ``row.get(column) is None``."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    table_2025 = table_from_rows(_OC, [_chain_row("AAA", 2025, 2),
+                                       _chain_row("BBB", 2025, 3, with_obs_date=False)])
+    frag_2025 = hand_built_record(
+        store, _OC, _OC_REF, table_2025, partition_key="2025", row_count=2,
+        primary_key_min=("AAA", "2025-01-02T00:00:00.000000", "2025-02-16T00:00:00.000000",
+                         100.0, "C"),
+        primary_key_max=("BBB", "2025-01-03T00:00:00.000000", "2025-02-16T00:00:00.000000",
+                         100.0, "C"))
+    snap = commit_tables(conn, clock, {"option_chains": [frag_2025]}, {"option_chains": _OC})
+    repo = Repository(conn, store)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_OC_REF,
+        columns=("ticker", "obs_date"), key_filter=(),
+        time_interval=TimeInterval(column="obs_date", start_inclusive="2024-01-01",
+                                   end_exclusive="2026-01-01"),
+        order_by=("ticker", "obs_date", "expiry", "strike", "right"),
+        max_batch_rows=10, max_result_rows=10)
+    assert query_mod.compile_batch_matcher(_OC, query) is None
+    rows = [row for batch in repo.scan(query, table_name="option_chains")
+            for row in batch.to_pylist()]
+    assert [r["ticker"] for r in rows] == ["AAA"]
+
+
+def test_batch_matcher_evaluation_failure_falls_back_for_that_fragment(tmp_path, monkeypatch):
+    """A batch matcher that compiles successfully but raises when actually
+    EVALUATED against a real batch -- a failure mode compile-time
+    validation from contract/query alone cannot rule out in general --
+    must not crash the scan: repository.py catches it per fragment and
+    falls back to the row matcher for the rest of that fragment, giving
+    the independently-known-correct result (not merely the same result
+    as a second, equally-fallible run of the real matcher -- that
+    agreement is already covered by
+    test_forced_row_fallback_agrees_with_vectorized_filter above)."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    record = publish_and_inspect(store, _SEC, _SEC_REF,
+                                 [_securities_row(t, 2024) for t in ("AAA", "BBB", "CCC")], "2024")
+    snap = commit_tables(conn, clock, {"securities": [record]}, {"securities": _SEC})
+    repo = Repository(conn, store)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=("ticker", "year"),
+        key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "BBB")),),
+        order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+    # Independently known from _securities_row/the query alone, not derived
+    # from any scan: AAA and BBB (year 2024) in ticker order; CCC is
+    # excluded by the key_filter.
+    expected = [{"ticker": "AAA", "year": 2024}, {"ticker": "BBB", "year": 2024}]
+
+    real_compile = query_mod.compile_batch_matcher
+
+    def failing_compile(contract, q):
+        real_mask = real_compile(contract, q)
+        assert real_mask is not None
+        state = {"calls": 0}
+
+        def _raising_mask(columns, num_rows):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise RuntimeError("simulated evaluation failure")
+            return real_mask(columns, num_rows)
+
+        return _raising_mask
+
+    monkeypatch.setattr(query_mod, "compile_batch_matcher", failing_compile)
+    result = [row for batch in repo.scan(query, table_name="securities")
+             for row in batch.to_pylist()]
+    assert result == expected
 

@@ -57,26 +57,51 @@ interface section; this names only the load-bearing entry points.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which
   opens and streams object bytes through an `ArtifactStore`, and `objects.py`
   also holds `publish_legacy_file`/`inspect_fragment`, which do filesystem
-  I/O). `query.compile_row_matcher(contract, query)` is the one row-matching
-  entry point a scan should call when it will test more than one row against
-  the same `DataQuery`: it normalizes every `key_filter` predicate's `wanted`
-  values and the `time_interval`'s bounds eagerly, once, at compile time
-  (same `_normalize_bound` routing and the same `CONTRACT_MISMATCH` refusal
-  on an unparseable bound as calling `row_matches` would raise), and returns
-  a closure with no further normalization in its per-row path — the closure
-  is only valid for the `contract`/`query` it was compiled from and carries
-  no state across scans. `repository.Repository._fragment_rows` compiles one
-  per fragment (the scan's `DataQuery` does not change across fragments, so
-  this is O(fragments × predicate values), not O(rows × values)).
-  `row_matches(row, contract, query)` stays available as the one-row form
-  and is defined in terms of `compile_row_matcher` so the two can never
-  diverge; it re-normalizes on every call and must not be used inside a
-  per-row loop. Production reachability: `python3 -m engine.v2.ops serve` →
-  `Service.tick()` → `_reconcile_computed_moves_refresh()` →
+  I/O). `query.compile_batch_matcher(contract, query)` is the entry point
+  `repository.Repository._fragment_rows` calls once per fragment to
+  vectorize `key_filter` equality/set-membership (pyarrow `compute.is_in`)
+  on a `string`/`int64`/timestamp column (a timestamp column is floored
+  and widened to microsecond resolution first, exactly like the row
+  path's own wire form), returning a boolean mask `_fragment_rows` uses
+  to drop non-matching rows via `RecordBatch.filter` *before* they are
+  decoded to per-row Python dicts, so only surviving rows pay that cost.
+  Any `time_interval`, any predicate on a `bool`/`float64` column
+  (`is_in` compares a float's raw bit pattern, so `-0.0` never matches a
+  `0` value_set entry even though the row path's plain Python equality
+  treats them equal), or a predicate value not representable in its
+  column's declared Arrow type makes the function return `None` at
+  compile time, decided from `contract`/`query` alone, never from the
+  data, and the whole query falls back to `compile_row_matcher`.
+  `_fragment_rows` also falls back per fragment if the compiled mask
+  itself raises when evaluated against a real batch — a case
+  compile-time refusal cannot fully rule out. A null column value never
+  matches, on both paths.
+
+  `compile_row_matcher(contract, query)` is the one row-matching entry
+  point for every query this file does not vectorize, and for any caller
+  testing more than one row against the same `DataQuery`: it normalizes
+  every `key_filter` predicate's `wanted` values and the `time_interval`'s
+  bounds eagerly, once, at compile time, and returns a closure with no
+  further normalization in its per-row path — the closure is only valid
+  for the `contract`/`query` it was compiled from and carries no state
+  across scans. Both compiled forms must agree on every row the batch form
+  accepts (the equivalence fixture in `tests/test_v2_data_query.py` pins
+  this). `repository.Repository._fragment_rows` compiles the batch
+  matcher for every fragment, and additionally compiles the row-matcher
+  fallback when (and only when) batch compilation returns `None`, or the
+  first time batch evaluation raises on that fragment (the scan's
+  `DataQuery` does not change across fragments, so this is O(fragments ×
+  predicate values), not O(rows × values)). `row_matches(row, contract,
+  query)` stays available as the one-row form and is defined in terms of
+  `compile_row_matcher` so the two can never diverge; it re-normalizes on
+  every call and must not be used inside a per-row loop. Production
+  reachability: `python3 -m engine.v2.ops serve` → `Service.tick()` →
+  `_reconcile_computed_moves_refresh()` →
   `submit_computed_moves_refresh_if_ready()` →
   `_build_native_computed_moves_plan()` →
   `computed_moves_store.target_tickers_from_snapshot()` → `_scan_rows()` →
-  `Repository.scan()` → `_fragment_rows()` → `query.compile_row_matcher()`.
+  `Repository.scan()` → `_fragment_rows()` → `query.compile_batch_matcher()`
+  (row-path fallback: `query.compile_row_matcher()`).
 - **Legacy-touching seam** — `legacy_adapter.py`, the package's only module
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
