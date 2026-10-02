@@ -114,6 +114,27 @@ scores, quote/expiry selection, complete panel assembly and nightly wiring
 are outside this boundary; its consumer is the native raw-row producer,
 before `NightlyEventInputs` assembly.
 
+### Panel-row staging boundary (design — cutover PR-6)
+
+`scan_panel_row(repository, snapshot, key, *, decision_session,
+history_start)` is the raw-row producer's one call for one
+`native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
+pair. It composes, in order, the pinned daily-state boundary above
+(one `scan_daily_state_inputs` read of `key.ticker`), `panel_math`'s
+`history_features`/`advance_history`/`add_implied_history` over that
+ticker's own prior rows, and — for `STR-RUNUP` only —
+`runup_math.add_runup_features`; `regime.add_regime_features` folds in the
+nine `spy_*` market-context fields from the pinned snapshot's own market
+series. `panel_anchor` is the loosest of every contributing call's own
+source date (`source_session`, `regime_asof`, the runup price anchor),
+never a caller-asserted value. This module owns no I/O of its own beyond
+the existing `scan_daily_state_inputs` read; it raises the same
+`CONTRACT_MISMATCH`/missing-table refusals that read already raises, and
+degrades to absent feature keys (never a fabricated value) exactly as
+`panel_math`/`regime` already do for insufficient history. It never
+assigns `tier4_row` or `quote_rows` — those stay the raw-row producer's
+own job (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6").
+
 `regime.add_regime_features(events, market, *, as_of_column="date")` is
 pure regime arithmetic over explicit DataFrames. `market` supplies normalized,
 chronologically ordered, timezone-naive `date` values and float-convertible
