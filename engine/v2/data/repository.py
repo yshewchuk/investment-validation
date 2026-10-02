@@ -349,15 +349,40 @@ class Repository:
     def _fragment_rows(self, record: FragmentRecord, contract: TableContract, needed: tuple,
                        query: DataQuery, batch_cap: int):
         """§8.2 step 6-7 for one surviving fragment: open, verify, project,
-        and filter — lazily, one row at a time."""
+        and filter. The filter runs vectorized on each decoded Arrow batch
+        (``query.compile_batch_matcher``) before any row becomes a Python
+        dict, so only surviving rows pay that cost; a query
+        ``compile_batch_matcher`` cannot express falls back to the per-row
+        ``query.compile_row_matcher`` path this package used before
+        (task brief #286)."""
         path = objects.verify_object_path(self._store, record.object_ref)
         parquet_file = self._open_parquet(path)
         present, missing = self._match_columns(contract, needed, parquet_file.schema_arrow)
-        matches = query_mod.compile_row_matcher(contract, query)
+        batch_matcher = query_mod.compile_batch_matcher(contract, query)
+        row_matcher = None if batch_matcher is not None else query_mod.compile_row_matcher(contract, query)
         for batch in self._iter_batches(parquet_file, present, batch_cap):
+            if batch_matcher is not None:
+                batch = self._filter_batch(batch, contract, present, query, batch_matcher)
             for row in self._decode_rows(batch, needed, present, missing):
-                if matches(row):
-                    yield query_mod.order_key(row, contract), row
+                if row_matcher is not None and not row_matcher(row):
+                    continue
+                yield query_mod.order_key(row, contract), row
+
+    def _filter_batch(self, batch: pa.RecordBatch, contract: TableContract, present: list[str],
+                      query: DataQuery, batch_matcher) -> pa.RecordBatch:
+        """The Arrow array ``batch_matcher`` needs for every ``key_filter``/
+        ``time_interval`` column: the real column when the fragment has it,
+        otherwise a typed-null array (§8.2 step 9) the same length as
+        ``batch`` -- a predicate on a column absent from this fragment
+        never matches, same as the row path's ``row.get(column) is None``."""
+        columns = {}
+        for name in self._hidden_columns(query):
+            if name in present:
+                columns[name] = batch.column(name)
+            else:
+                physical = next(c.physical_type for c in contract.columns if c.name == name)
+                columns[name] = query_mod.null_array_for(physical, batch.num_rows)
+        return batch.filter(batch_matcher(columns, batch.num_rows))
 
     def _open_parquet(self, path) -> pq.ParquetFile:
         try:

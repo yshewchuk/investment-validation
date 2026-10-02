@@ -37,6 +37,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from engine.v2.contracts.data import (
     DataQuery,
@@ -52,6 +53,7 @@ from .errors import fail
 __all__ = [
     "ARROW_TYPES",
     "arrow_type_for",
+    "compile_batch_matcher",
     "compile_row_matcher",
     "fragment_may_match",
     "null_array_for",
@@ -246,6 +248,125 @@ def compile_row_matcher(contract: TableContract, query: DataQuery) -> Callable[[
         return True
 
     return _matches
+
+
+def compile_batch_matcher(contract: TableContract, query: DataQuery
+                          ) -> Callable[[dict[str, pa.Array], int], pa.Array] | None:
+    """The vectorized form of :func:`compile_row_matcher`: a per-query-
+    compiled predicate evaluated directly on a decoded Arrow batch (pyarrow
+    ``compute.is_in``/comparisons) instead of once per decoded row. Same
+    eager, once-per-query normalization and the same ``CONTRACT_MISMATCH``
+    refusal on an unparseable bound; a null column value never matches, on
+    both paths -- every case ``compile_row_matcher`` accepts, this agrees
+    with exactly (phase-2 guide §8.2 steps 6-7, task brief #286).
+
+    Returns ``None`` when a ``key_filter`` predicate's ``values`` cannot be
+    represented in its column's declared Arrow type (e.g. a string value
+    against a declared ``int64`` column) -- decided once here, from
+    ``contract``/``query`` alone, never from the data a caller later feeds
+    the returned closure. A caller that gets ``None`` back must fall back to
+    ``compile_row_matcher`` tested against every decoded row (the only path
+    before this function existed), which never performs this typed Arrow
+    construction and so never refuses on a type mismatch.
+
+    The returned closure takes ``columns`` (every ``key_filter``/
+    ``time_interval`` column name mapped to that column's full Arrow array
+    for one batch -- a caller supplies a typed-null array, e.g.
+    :func:`null_array_for`, for a column absent from the physical fragment)
+    and ``num_rows`` (the batch's row count, used only when there is
+    nothing to filter), and returns a boolean mask with no nulls: True iff
+    the row at that index satisfies every predicate and the interval.
+    """
+    try:
+        predicates = [_compile_batch_predicate(contract, p) for p in query.key_filter]
+        interval = (None if query.time_interval is None
+                    else _compile_batch_interval(contract, query.time_interval))
+    except pa.ArrowException:
+        return None
+
+    def _mask(columns: dict[str, pa.Array], num_rows: int) -> pa.Array:
+        result = pa.array([True] * num_rows, type=pa.bool_())
+        for column, apply_predicate in predicates:
+            result = pc.and_(result, apply_predicate(columns[column]))
+        if interval is not None:
+            column, apply_interval = interval
+            result = pc.and_(result, apply_interval(columns[column]))
+        return result
+
+    return _mask
+
+
+def _compile_batch_predicate(contract: TableContract, predicate: KeyPredicate
+                             ) -> tuple[str, Callable[[pa.Array], pa.Array]]:
+    physical = _physical_type(contract, predicate.column)
+    value_set = _batch_value_set(physical, predicate.values)
+
+    def _apply(array: pa.Array) -> pa.Array:
+        # ``skip_nulls=True`` is already pyarrow's own behavior for a null
+        # input to ``is_in`` (it compares unequal to every concrete
+        # value_set member) -- passed explicitly so this never silently
+        # starts matching nulls on a pyarrow upgrade.
+        return pc.is_in(_batch_comparable(array, physical), value_set=value_set,
+                        skip_nulls=True)
+
+    return predicate.column, _apply
+
+
+def _compile_batch_interval(contract: TableContract, interval: TimeInterval
+                            ) -> tuple[str, Callable[[pa.Array], pa.Array]]:
+    physical = _physical_type(contract, interval.column)
+    start = (None if interval.start_inclusive is None
+             else _batch_timestamp(_normalize_bound(interval.start_inclusive)))
+    end = (None if interval.end_exclusive is None
+           else _batch_timestamp(_normalize_bound(interval.end_exclusive)))
+
+    def _apply(array: pa.Array) -> pa.Array:
+        comparable = _batch_comparable(array, physical)
+        # A null column value never matches an interval, even one with
+        # neither bound set (mirrors ``row_matches``'s own unconditional
+        # ``if value is None: return False`` before either bound check).
+        mask = pc.is_valid(comparable)
+        if start is not None:
+            mask = pc.and_(mask, pc.fill_null(pc.greater_equal(comparable, start), False))
+        if end is not None:
+            mask = pc.and_(mask, pc.fill_null(pc.less(comparable, end), False))
+        return mask
+
+    return interval.column, _apply
+
+
+def _batch_comparable(array: pa.Array, physical_type: str) -> pa.Array:
+    """The vectorized form of :func:`_comparable_value`: a timestamp column
+    is cast, truncating (never rounding: ``safe=False``), to the shared
+    wire form's microsecond resolution -- byte-identical to
+    ``value.strftime(time_formats.NAIVE_TIMESTAMP_FORMAT)`` on one decoded
+    row, which already drops anything finer than a microsecond. Every
+    other physical type needs no transform: it is already directly
+    comparable, same as the row path."""
+    if physical_type.startswith("timestamp"):
+        return pc.cast(array, pa.timestamp("us"), safe=False)
+    return array
+
+
+def _batch_value_set(physical_type: str, values) -> pa.Array:
+    """The ``value_set`` :func:`_compile_batch_predicate` feeds ``is_in``,
+    in the same comparable form :func:`_batch_comparable` casts a column
+    to. Raises a pyarrow ``ArrowException`` -- caught by
+    :func:`compile_batch_matcher`, never by this function -- when a value
+    cannot be represented in the column's declared Arrow type."""
+    if physical_type.startswith("timestamp"):
+        return pa.array([_batch_timestamp(_normalize_bound(v)) for v in values],
+                        type=pa.timestamp("us"))
+    return pa.array(values, type=ARROW_TYPES[physical_type])
+
+
+def _batch_timestamp(normalized: str):
+    """A ``_normalize_bound``-normalized wire string, parsed back to the
+    Python ``datetime`` pyarrow compares a microsecond-resolution timestamp
+    array against. Never fails: every caller's ``normalized`` string is
+    already exactly ``time_formats.NAIVE_TIMESTAMP_FORMAT``, produced by
+    ``_normalize_bound`` itself."""
+    return datetime.strptime(normalized, time_formats.NAIVE_TIMESTAMP_FORMAT)
 
 
 def order_key(row: dict, contract: TableContract) -> tuple:
