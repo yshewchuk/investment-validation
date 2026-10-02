@@ -265,3 +265,49 @@ def record_evaluation(exp_dir: Path | str, spec: Mapping[str, Any],
         }],
         path=ledger_path,
     )
+
+
+ARMS_DIR = "arms"
+ARMS_INDEX = "ARMS.md"
+
+
+def evaluate_with_grid(spec: Mapping[str, Any], trades: pd.DataFrame, run_dir: Path | str,
+                       *, ledger_path: Path | None = None, **evaluate_kwargs: Any):
+    """Evaluate the primary spec, then every grid cell as a secondary arm.
+
+    The primary keeps ``run_dir/REPORT.md`` and ``run_dir/figures/``; each
+    secondary writes its report and figures under
+    ``run_dir/arms/<spec_hash[:12]>/``, so no secondary can overwrite the
+    headline evidence. ``run_dir/ARMS.md`` indexes the arms, marking the
+    preregistered primary. Returns the primary's ``EvalResult``.
+    """
+    from engine.evaluate import evaluate
+
+    run_dir = Path(run_dir)
+    result = evaluate(spec, trades, run_dir=run_dir, **evaluate_kwargs)
+    record_evaluation(run_dir, spec, result.results, ledger_path=ledger_path)
+    arms = [("primary", "preregistered primary", result)]
+
+    for key, values in (spec.get("grid") or {}).items():
+        for value in values:
+            cell = dict(spec)
+            cell["primary_spec"] = dict(spec["primary_spec"])
+            cell["primary_spec"][key] = value
+            # Grid cells legitimately differ from the registered primary spec;
+            # the label exempts them from the spec-hash continuity check —
+            # they are secondary results, never the headline.
+            cell["grid_cell"] = True
+            arm_dir = run_dir / ARMS_DIR / spec_hash(cell)[:12]
+            cell_result = evaluate(cell, trades, run_dir=run_dir,
+                                   report_dir=arm_dir, **evaluate_kwargs)
+            record_evaluation(run_dir, cell, cell_result.results, ledger_path=ledger_path)
+            arms.append(("secondary", f"{key}={value}", cell_result))
+
+    lines = [f"# {spec.get('id')} — arms", "",
+             "Exactly one arm is the preregistered primary; every other arm is "
+             "a secondary grid cell and is never the headline.", ""]
+    for role, label, arm in arms:
+        rel = Path(arm.report_path).relative_to(run_dir).as_posix() if arm.report_path else "(no report)"
+        lines.append(f"- **{role}** — {label}: [{rel}]({rel})")
+    (run_dir / ARMS_INDEX).write_text("\n".join(lines) + "\n")
+    return result
