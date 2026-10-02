@@ -73,5 +73,5 @@ def test_replay_availability_comes_from_the_chain_index_not_read_chain_keys(
     tickers = set(result.trades["ticker"].astype(str))
     assert "TEST" in tickers
     assert "MISS" not in tickers
-    assert result.skipped.get("no_exit_chain", 0) >= 1
+    assert result.skipped.get("no_exit_chain", 0) == 1
     conn.close()

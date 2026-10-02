@@ -393,9 +393,6 @@ def replay(
         return ReplayResult(strategy, variant, _empty_trades(), plan.skipped,
                             planned_total, 0, time.time() - started)
 
-    if index is None:
-        index = load_chain_index(repository, snapshot_ref, plan.chain_keys)
-
     rows, skipped = _price_plan(
         structure, plan, index, strategy=strategy, alphas=alphas,
         include_legs=include_legs, progress_every=progress_every, started=started,
