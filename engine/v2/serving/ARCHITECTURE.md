@@ -53,7 +53,7 @@ flowchart LR
   API --> Reads[bounded projection reads] --> Index
   Reads --> Objects[immutable artifact objects]
 ```
-Offline publication, composed by the projection tool (the one caller allowed to join serving and ops):
+Offline publication, composed by the projection tool:
 ```mermaid
 flowchart LR
   In[score document + bundle rows + event refs] --> Findings[findings artifact: diagnostic reference]
