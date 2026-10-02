@@ -6,9 +6,19 @@ API/projection contracts over saved records, financial display values and releas
 Application rendering belongs in the [React app](../../../ui/ARCHITECTURE.md).
 
 ## Primary contracts and public interfaces
-The [README](README.md) lists the checked public exports: operations server,
-FastAPI read API, legacy bundle/score loaders, bridge and projection/index helpers.
-`native_parity_summary` projects retained report evidence without comparing again.
+The [README](README.md) lists the checked exports. By module:
+- `operations`: `create_server` (authenticated HTTP listener); `route_table`,
+  `STATIC_ROUTES`, `PARAMETERIZED_ROUTES` (the one route enumeration).
+- `api`: `create_app` (authenticated read-only JSON API), `ApiError`; run as
+  `python3 -m engine.v2.serving.api`.
+- `projections`: `connect`, `ensure_schema`, `resolve_event_refs`, `build_candidate`,
+  `get_release`, `list_events`, `event_scores`, `get_event`, `get_score_detail`,
+  `event_query_hash`, `projection_binding`, `verify_projection_binding`.
+- `bridge.build_bridges`; `legacy_bundle.load_legacy_bundle` / `load_score_document`.
+- Read-only documents served by `operations`: `analog_projection`,
+  `derivation_projection`, `native_parity_projection.native_parity_summary`.
+- Row builders: `native_render.native_display_row`,
+  `native_shadow_render.shadow_serving_row_source`, `score_projection.legacy_score_projection`.
 
 ## Inputs
 Verified saved score documents, legacy bundle bytes, immutable artifacts, serving
@@ -21,10 +31,17 @@ The existing operations HTML/JavaScript shells and pinned legacy bundle hosting
 remain a compatibility exception; their presentation still requires React migration.
 
 ## Dependencies
-Lower-layer contracts/foundation and saved data access; serving does not import
-layer-7 ops peers. Offline tools compose publication with ops. The dashboard preview
-calls `operations.create_server`; the React typed client calls the HTTP API.
+Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.deployment`
+(`operations`) and `registry.strategies` (`derivation_projection`). `native_render` and
+`native_shadow_render` also import `scoring` for offline row building; no HTTP path does.
+Never imports `engine.v2.ops` (equal-layer peer) or legacy `engine.*`: ops-side pointers,
+reports and transaction/migration patterns are read as inert JSON or reimplemented.
+Callers: `engine/v2/dashboard` (`operations.create_server`; layer 8 imports layer 7 only);
+offline tools `v2_dashboard_project` (projections, legacy bundle, shadow render),
+`v2_dashboard_verified_input` (legacy bundle) and `v2_route_probe` (`route_table`); the
+React client calls the HTTP API. Offline tools compose publication with ops.
 No request starts provider ingestion, fitting, scoring or financial simulation.
+
 ## External systems and libraries
 FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
