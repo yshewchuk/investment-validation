@@ -121,8 +121,13 @@ history_start)` is implemented in `panel_row_inputs.py`. No production
 raw-row producer calls it yet (`engine/v2/ops/ARCHITECTURE.md` "Cutover
 PR-6"); it is the raw-row producer's one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
-pair; `panel_anchor` is the loosest of its contributing reads' own source
-dates, never a caller-asserted value. It never assigns `tier4_row` or
+pair; `panel_anchor` is the latest (freshest) of its contributing reads'
+own source dates, never a caller-asserted value — its consumer
+(`../scoring/ARCHITECTURE.md`'s `nightly_source_bundle.py`) trusts it as
+an observation-freshness upper bound, which only the latest, not the
+earliest, contributing date can be: the earliest would let an
+intervening freshness cutoff pass even though a later-dated input is
+actually fresher than that cutoff. It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
 (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
 changes which reads it makes or which keys the result carries — every
@@ -149,10 +154,10 @@ a new bounded
 reused from `scan_daily_state_inputs` — a different, derived shape);
 `price_history_query.get_price_series`, as of `decision_session` — its
 selected source date sets `runup_asof` and is one input to the
-`panel_anchor` composite bound (line 122-123: the loosest of every
-contributing read's own source date, never this read alone); when no
-`STR-RUNUP` history resolves, `runup_asof` stays unset and `panel_anchor`
-is the loosest of the remaining reads'. Query construction and the
+`panel_anchor` composite bound (the latest of every contributing read's
+own source date, never this read alone); when no `STR-RUNUP` history
+resolves, `runup_asof` stays unset and `panel_anchor` is the latest of
+the remaining reads'. Query construction and the
 `PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
 contract — see the PR body.
 
@@ -252,8 +257,10 @@ is a unitless ratio minus one. No market read, implicit clock or cache exists.
   resolve feature scopes and recipe identities before scoring
   (`engine/v2/scoring/application.py`).
 - `regime` uses `panel_math._anchor_index` plus NumPy/pandas; it has no
-  filesystem/network access or legacy imports. Its only callers are tests.
-  Neither input frame is mutated. Production forward-panel assembly is absent.
+  filesystem/network access or legacy imports. `panel_row_inputs.scan_panel_row`
+  calls `regime.add_regime_features` (its one production-adjacent caller so
+  far; production forward-panel assembly itself is still absent); every
+  other caller is a test. Neither input frame is mutated.
 - `panel_math` supplies anchoring to `regime`; both have focused parity tests.
   Neither has a production forward-panel caller.
 

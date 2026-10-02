@@ -20,7 +20,7 @@ The four always-made pinned-snapshot dependencies:
 * ``price_history_query.get_price_series`` as of ``decision_session``, feeding
   ``runup_math.add_runup_features``.
 
-``panel_anchor`` is the loosest (earliest, most conservative) of whichever
+``panel_anchor`` is the latest (freshest) of whichever
 contributing reads' own source dates resolve -- never a caller-asserted value.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ _RUNUP_COLUMNS = (
 
 @dataclass(frozen=True, slots=True)
 class PanelRowInputs:
-    """The raw panel row (one flat mapping) and the loosest contributing source date."""
+    """The raw panel row (one flat mapping) and the latest contributing source date."""
 
     panel_row: Mapping[str, Any]
     panel_anchor: Any
@@ -274,7 +274,7 @@ def _as_float_or_nan(value: object) -> float:
 
 
 def _anchor(*sources: object) -> pd.Timestamp | None:
-    """The earliest present contributing source date, or ``None`` when all absent."""
+    """The latest present contributing source date, or ``None`` when all absent."""
     present: list[pd.Timestamp] = []
     for source in sources:
         if source is None:
@@ -286,7 +286,7 @@ def _anchor(*sources: object) -> pd.Timestamp | None:
         if pd.isna(stamp):
             continue
         present.append(stamp)
-    return min(present) if present else None
+    return max(present) if present else None
 
 
 def scan_panel_row(
@@ -297,7 +297,7 @@ def scan_panel_row(
     decision_session: object,
     history_start: object,
 ) -> PanelRowInputs:
-    """One ``BoardRequest`` key's full-superset raw panel row and loosest anchor."""
+    """One ``BoardRequest`` key's full-superset raw panel row and latest anchor."""
     start, decision = _window(history_start, decision_session)
 
     daily_state = daily_state_inputs.scan_daily_state_inputs(

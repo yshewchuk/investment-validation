@@ -35,7 +35,7 @@ _EVENT = pd.Timestamp("2024-02-15")
 _DECISION = pd.Timestamp("2024-02-14")
 
 # The three contributing source dates, deliberately all different so the happy
-# path exercises ``min`` (not a tie): daily_state 02-05, regime 02-01, runup 01-20.
+# path exercises ``max`` (not a tie): daily_state 02-05, regime 02-01, runup 01-20.
 _DAILY_STATE_SOURCE = "2024-02-05"
 _REGIME_SOURCE = "2024-02-01"
 _RUNUP_SOURCE = "2024-01-20"
@@ -182,7 +182,7 @@ def _rows_equal(a, b):
 # --------------------------------------------------------------------------
 
 
-def test_1_happy_path_all_four_reads_and_min_anchor():
+def test_1_happy_path_all_four_reads_and_max_anchor():
     # add_regime_features needs j >= 21 (22 rows, anchor at the last) for a
     # non-NaN spy_ret21, so this test widens the SPY batch; every other test
     # keeps the default 20-row fixture.
@@ -197,8 +197,8 @@ def test_1_happy_path_all_four_reads_and_min_anchor():
     assert "n_prior" in panel and panel["n_prior"] == 2
     assert "spy_ret21" in panel
     assert "signed_streak" in panel
-    # The three contributing dates differ; the anchor is the earliest.
-    assert result.panel_anchor == pd.Timestamp(_RUNUP_SOURCE)
+    # The three contributing dates differ; the anchor is the latest.
+    assert result.panel_anchor == pd.Timestamp(_DAILY_STATE_SOURCE)
     # spy_* and runup_* keys survive as plain floats; the ema fallback is the mean.
     # regime.py's formula, mirrored over the same spots: every SPY date is
     # strictly before both the event and the decision, so the anchor is the
@@ -436,3 +436,18 @@ def test_17_zero_day_window_still_validates_missing_computed_moves_table():
                        history_start=_DECISION, decision_session=_DECISION)
     assert exc.value.code == "CONTRACT_MISMATCH"
     assert exc.value.problem.details == {"table_name": COMPUTED_MOVES_TABLE_NAME}
+
+
+def test_18_panel_anchor_is_the_latest_not_the_earliest_source_date():
+    # Vary the price history so runup resolves to 2024-02-13, the latest
+    # contributing date (daily_state is 2024-02-05, regime 2024-02-01). A
+    # freshness cutoff strictly between the earliest and latest (e.g.
+    # 2024-02-07) therefore exists. The anchor must be the latest contributing
+    # date -- under the old `min` behavior this exact fixture returned the
+    # earliest (2024-02-01), which would wrongly let a 02-07 cutoff pass
+    # despite the 02-13 price data, the defect this test guards against.
+    batches = _default_batches()
+    batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = _price_rows(end="2024-02-13")
+    result = _scan(batches=batches)
+    assert result.panel_anchor == pd.Timestamp("2024-02-13")
+    assert result.panel_anchor != pd.Timestamp(_REGIME_SOURCE)
