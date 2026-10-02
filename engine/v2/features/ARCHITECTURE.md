@@ -130,20 +130,23 @@ build `panel_math.history_features`'s `prior_moves`/`prior_abs` and feed
 ticker `"SPY"` as `regime.add_regime_features`'s `market` argument (the
 same `scan_daily_state_inputs`-shaped read, parameterized by ticker); and,
 for `STR-RUNUP` only, `price_history_query.get_price_series` (a
-`PriceQuery` whose `observation_ceiling` is `decision_session`, one read
-per ticker) for `runup_math.add_runup_features`'s `prices_by_ticker` —
-its own as-of rule (latest retrieval at or before the ceiling, else the
-ticker's earliest) sets the price source date `runup_asof` reports.
-`panel_anchor` is the loosest of every contributing call's own source
-date (`source_session`, `regime_asof`, `runup_asof` when staged), never a
-caller-asserted value. Insufficient history leaves the corresponding
-`panel_math` keys absent;
-`regime`'s own fields stay present with `NaN` for the same condition
-(its own Inputs table below). This raises the same
-`CONTRACT_MISMATCH`/missing-table refusals each underlying read already
-raises. It never assigns `tier4_row` or `quote_rows` — those stay the
-raw-row producer's own job (`engine/v2/ops/ARCHITECTURE.md` "Cutover
-PR-6").
+`PriceQuery` with both `session_date` and `observation_ceiling` set to
+`decision_session`, one read per ticker) for `runup_math.
+add_runup_features`'s `prices_by_ticker` — its own `date <= session_date`
+filter, applied after the as-of vintage selection, is what keeps a
+same-or-earlier-dated row from ever being a *future* one; the source date
+of whichever row that leaves sets `runup_asof`. `panel_anchor` is the
+loosest of every contributing call's own source date (`source_session`,
+`regime_asof`, `runup_asof` when staged), never a caller-asserted value.
+It never assigns `tier4_row` or `quote_rows` — those stay the raw-row
+producer's own job (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6").
+
+| Condition (R1-R6) | Outcome |
+|---|---|
+| snapshot has no `daily_market`/`computed_moves`/`price_history` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
+| a read's table exists but has no row for this ticker (or `"SPY"`) | an empty/absent source: the owning helper's own documented no-history behavior — `panel_math` keys absent, `regime` fields `NaN` (its own Inputs table) |
+| `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
+| retry with the same pinned snapshot/key/`decision_session` | identical result; no cache beyond the pinned reads themselves, no write, nothing to roll back |
 
 `regime.add_regime_features(events, market, *, as_of_column="date")` is
 pure regime arithmetic over explicit DataFrames. `market` supplies normalized,
