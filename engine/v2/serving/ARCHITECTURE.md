@@ -46,8 +46,9 @@ row source and emits a projection binding for the ops publisher (it does not pub
 `v2_dashboard_verified_input` builds a source-verified `PreviewInput` from a delivered
 release (ops catalog plus `load_legacy_bundle`); `v2_route_probe` probes `route_table`.
 Serving itself does not execute provider ingestion, fitting, scoring or financial simulation.
-`create_server` invokes injected action callbacks inline and does not require them to enqueue
-work, so callbacks must only enqueue refresh or what-if jobs and return.
+The refresh and what-if POST handlers invoke the injected action callbacks inline; `create_server`
+only stores them and does not require them to enqueue work, so each callback must only enqueue
+its refresh or what-if job and return.
 
 ## External systems and libraries
 FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
