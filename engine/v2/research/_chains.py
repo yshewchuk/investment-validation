@@ -23,7 +23,6 @@ __all__ = [
     "filter_plan_by_availability",
     "load_chain_index",
     "read_chain_keys",
-    "read_chain_keys_for",
     "read_chains_for_years",
 ]
 
@@ -57,6 +56,19 @@ class ChainIndex:
     def keys(self):
         return self._groups.keys()
 
+    def restrict(self, keys) -> "ChainIndex":
+        """A new ``ChainIndex`` holding only the groups ``keys`` names.
+
+        Drops every other group's ``DataFrame`` (letting it be garbage
+        collected) rather than mutating this index in place, so a caller
+        still holding a reference to the original is unaffected. Used to
+        release chain rows belonging only to events a plan ends up
+        rejecting, right after that rejection is known, instead of
+        carrying them through the rest of a run.
+        """
+        wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
+        return ChainIndex({k: v for k, v in self._groups.items() if k in wanted})
+
 
 def read_chain_keys(repository, snapshot_ref) -> set[tuple[str, pd.Timestamp]]:
     """Every (ticker, obs_date) the snapshot's option_chains table holds.
@@ -68,36 +80,6 @@ def read_chain_keys(repository, snapshot_ref) -> set[tuple[str, pd.Timestamp]]:
     """
     frame = read_table(repository, snapshot_ref, "option_chains", ("ticker", "obs_date"))
     return set(zip(frame["ticker"].astype(str), pd.to_datetime(frame["obs_date"])))
-
-
-def read_chain_keys_for(repository, snapshot_ref, keys) -> set[tuple[str, pd.Timestamp]]:
-    """Every ``(ticker, obs_date)`` key from ``keys`` that is actually present.
-
-    Like :func:`read_chain_keys`, but narrowed to ``keys``'s own years,
-    tickers and dates (the same key-pushdown :func:`load_chain_index` uses)
-    instead of a whole-table scan across every year — and projected to only
-    the two key columns, not the full chain row. A caller that already
-    knows which keys it might want (:attr:`ReplayPlan.chain_keys`) uses this
-    to filter BEFORE calling :func:`load_chain_index`, so that call only
-    ever requests the keys that survive filtering — matching
-    ``read_chain_keys`` plus a pre-filtered ``load_chain_index`` call's
-    exact behavior, at a fraction of the scan cost (narrowed, two columns).
-    An empty ``keys`` returns an empty set without reading anything.
-    """
-    wanted = {(str(t), pd.Timestamp(d).normalize()) for t, d in keys}
-    if not wanted:
-        return set()
-    years = sorted({d.year for _, d in wanted})
-    tickers = {t for t, _ in wanted}
-    key_filter = _chain_key_filter(tickers, wanted)
-    frame = read_table(repository, snapshot_ref, "option_chains", ("ticker", "obs_date"),
-                       partition_keys=[str(y) for y in years], key_filter=key_filter)
-    if frame.empty:
-        return set()
-    present = pd.DataFrame({"ticker": frame["ticker"].astype(str),
-                            "obs_date": pd.to_datetime(frame["obs_date"]).dt.normalize()})
-    pairs = pd.MultiIndex.from_frame(present).unique()
-    return {(t, d) for t, d in pairs if (t, d) in wanted}
 
 
 def read_chains_for_years(repository, snapshot_ref, years, batch_filter=None,

@@ -331,17 +331,15 @@ uncaught traceback instead.
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
   there is nothing to invalidate).
-  `replay()`'s own `index is None` path checks availability with
-  `_chains.read_chain_keys_for(plan.chain_keys)` — narrowed to the plan's
-  own years/tickers/dates via the same key-pushdown `load_chain_index` uses,
-  projected to two columns only — in place of the legacy whole-table
-  `_chains.read_chain_keys`, filtering the plan BEFORE `load_chain_index`
-  runs exactly as the pre-existing code did. `load_chain_index` therefore
-  still only ever loads the filtered, surviving set of keys — same
-  retained-row shape as before this change, a narrower key scan ahead of
-  it instead of a whole-table one. An explicit `index=` skips chain reads
-  entirely. A caller with several strategies over the same events
-  (`_build_run.run`) repeats this per strategy.
+  `replay()`'s own `index is None` path loads one `ChainIndex` over the
+  plan's unfiltered keys, derives availability from that index's own keys
+  (in place of a separate `_chains.read_chain_keys` scan), then prunes the
+  same index down to the filtered plan's surviving keys
+  (`ChainIndex.restrict`) before pricing — one scan, the resulting index
+  retaining exactly the rows a filter-then-load two-scan would have kept,
+  not the rows for events the filter rejects. An explicit `index=` skips
+  chain reads entirely. A caller with several strategies over the same
+  events (`_build_run.run`) repeats this per strategy.
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since
