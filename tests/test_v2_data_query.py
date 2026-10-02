@@ -903,6 +903,62 @@ def test_compile_batch_matcher_floors_negative_epoch_nanoseconds_like_the_row_pa
     assert bool(interval_mask[0]) == row_interval_matcher(decoded_row)
 
 
+def test_compile_batch_matcher_far_out_of_ns_range_interval_bounds_never_overflow():
+    """A ``TimeInterval`` bound far outside ``timestamp[ns]``'s ~1677..2262
+    representable range -- year 3000 as ``end_exclusive``, year 1000 as
+    ``start_inclusive`` -- is a valid microsecond wire-form string, so the
+    matcher compiles; the closure must then FILTER, not crash. Without
+    ``_batch_comparable``'s lossless cast to ``timestamp("us")``, pyarrow
+    casts such a bound to ``ns`` to compare against a floored-but-still-ns
+    array and raises ``ArrowInvalid`` on the int64 overflow."""
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp("2024-01-02T00:00:00.123456789")
+    array = pa.array([instant], type=pa.timestamp("ns"))
+    decoded_row = _row("AAA", instant.to_pydatetime())
+    for query in (
+            _synthetic_query(contract, time_interval=TimeInterval(
+                column="obs_date", end_exclusive="3000-01-01T00:00:00.000000")),
+            _synthetic_query(contract, time_interval=TimeInterval(
+                column="obs_date", start_inclusive="1000-01-01T00:00:00.000000")),
+            _synthetic_query(contract, time_interval=TimeInterval(
+                column="obs_date", start_inclusive="1000-01-01T00:00:00.000000",
+                end_exclusive="3000-01-01T00:00:00.000000"))):
+        batch_matcher = query_mod.compile_batch_matcher(contract, query)
+        assert batch_matcher is not None
+        row_matcher = query_mod.compile_row_matcher(contract, query)
+        assert row_matcher(decoded_row) is True
+        mask = batch_matcher({"obs_date": array}, 1).to_pylist()
+        assert bool(mask[0]) is True
+        assert bool(mask[0]) == row_matcher(decoded_row)
+
+
+def test_compile_batch_matcher_near_minimum_ns_instant_floors_like_the_row_path():
+    """A ns timestamp within a microsecond of the MINIMUM representable
+    ``timestamp[ns]`` instant must floor to its own microsecond wire form
+    on both paths. ``pc.floor_temporal`` silently wrapped exactly such a
+    value around to the MAXIMUM representable instant (a real pyarrow bug:
+    its internal arithmetic underflows near that boundary), which would
+    make this ``in`` check compare against the wrong value;
+    ``_floor_ns_to_us``'s exact ``int64`` arithmetic floors it correctly
+    to ``1677-09-21T00:12:43.145224``."""
+    import numpy as np
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp(np.iinfo(np.int64).min + 500)
+    array = pa.array([instant], type=pa.timestamp("ns"))
+    decoded_row = _row("AAA", instant.to_pydatetime())
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in", values=("1677-09-21T00:12:43.145224",)),))
+    batch_matcher = query_mod.compile_batch_matcher(contract, query)
+    assert batch_matcher is not None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    assert row_matcher(decoded_row) is True
+    mask = batch_matcher({"obs_date": array}, 1).to_pylist()
+    assert bool(mask[0]) is True
+    assert bool(mask[0]) == row_matcher(decoded_row)
+
+
 def test_compile_batch_matcher_all_null_column_array_never_matches():
     """``null_array_for`` — what ``repository._filter_batch`` feeds the mask
     for a filter column the physical fragment lacks — must never match, for

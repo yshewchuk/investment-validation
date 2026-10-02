@@ -336,17 +336,40 @@ def _compile_batch_interval(contract: TableContract, interval: TimeInterval
 
 
 def _batch_comparable(array: pa.Array, physical_type: str) -> pa.Array:
-    """The vectorized form of :func:`_comparable_value`: a timestamp column
-    is floored to the shared wire form's microsecond resolution via
-    ``pc.floor_temporal`` -- byte-identical to
+    """The vectorized form of :func:`_comparable_value`: a ``timestamp[ns]``
+    column is floored to the shared wire form's microsecond resolution and
+    widened to ``timestamp[us]`` -- byte-identical to
     ``value.strftime(time_formats.NAIVE_TIMESTAMP_FORMAT)`` on one decoded
-    row for every instant, including a pre-1970 (negative-epoch) one,
-    where a plain unit-cast truncates toward zero instead of flooring and
-    so rounds the wrong way. Every other physical type needs no
-    transform: it is already directly comparable, same as the row path."""
-    if physical_type.startswith("timestamp"):
-        return pc.floor_temporal(array, unit="microsecond")
+    row for every instant, including a pre-1970 (negative-epoch) one and
+    one far outside ``timestamp[ns]``'s own representable range (e.g. a
+    year-3000 bound). Delegates to :func:`_floor_ns_to_us`, which does this
+    with exact ``int64`` arithmetic -- never ``pc.floor_temporal`` (a real
+    pyarrow bug near the minimum representable ``timestamp[ns]`` instant:
+    confirmed directly to wrap such a value around to the MAXIMUM
+    representable instant instead of flooring it) and never a numpy
+    round-trip (``to_numpy()`` promotes to ``float64`` once a null is
+    present, which cannot hold a full ``int64`` nanosecond tick count
+    exactly). A ``timestamp[us]`` column, or any other physical type,
+    needs no transform: it is already directly comparable, same as the
+    row path."""
+    if physical_type == "timestamp[ns]":
+        return _floor_ns_to_us(array)
     return array
+
+
+def _floor_ns_to_us(array: pa.Array) -> pa.Array:
+    """Floor a ``timestamp[ns]`` array to microsecond resolution and widen
+    it to ``timestamp[us]``, entirely in ``int64`` Arrow compute (see
+    :func:`_batch_comparable` for why). ``pc.divide`` truncates toward
+    zero; the ``needs_floor_adjust`` step corrects that to a true floor
+    (round toward negative infinity) exactly when the raw nanosecond tick
+    count is negative and the division had a non-zero remainder."""
+    ns_int = pc.cast(array, pa.int64())
+    truncated = pc.divide(ns_int, 1000)
+    remainder = pc.subtract(ns_int, pc.multiply(truncated, 1000))
+    needs_floor_adjust = pc.and_(pc.less(ns_int, 0), pc.not_equal(remainder, 0))
+    floored_us = pc.if_else(needs_floor_adjust, pc.subtract(truncated, 1), truncated)
+    return pc.cast(floored_us, pa.timestamp("us"))
 
 
 def _batch_value_set(physical_type: str, values) -> pa.Array:
