@@ -30,8 +30,10 @@ FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
-API errors share one `Problem` envelope (`code`, `category`, `retryable`); HTTP statuses
-are in parentheses. Operations routes refuse with plain text for auth, not-configured and
+API errors raised as `ApiError` share one `Problem` envelope (`code`, `category`, `retryable`);
+HTTP statuses are in parentheses. Index integrity failures (`ServingIndexError`, e.g. a schema
+newer than the code supports) are not caught by the API handler, so they are not returned as a
+`Problem` document. Operations routes refuse with plain text for auth, not-configured and
 health-file failures (e.g. `/health.json` 503 `unknown`, `/analogs.json` 503 `analogs not
 configured`) and with typed JSON documents carrying a `reason_code` for index/parity refusals.
 | Concern | Outcome |
