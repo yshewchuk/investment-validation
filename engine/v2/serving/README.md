@@ -1,5 +1,7 @@
 # `engine/v2/serving`
 
+Contract: [Serving architecture](ARCHITECTURE.md).
+
 ## Ownership
 
 Implements the **API/projection layer — filter, paginate, authorize, serialize computed records** row of the §4 owner table of
@@ -9,6 +11,15 @@ Implements the **API/projection layer — filter, paginate, authorize, serialize
 Replaces (§4.4): `the data half of dashboard/render.py`, `dashboard/earnings_app.py`.
 
 ## Responsibilities
+
+The [component architecture](ARCHITECTURE.md) defines the boundary with the
+[React app](../../../ui/README.md): serving owns authenticated saved-data/API
+contracts and command transport. Components, layout, navigation and application
+rendering belong in `ui/`. Review must reject new application markup, inline DOM
+scripts or page builders in serving. Serving built static assets is transport,
+not ownership of their presentation. Existing `operations.py` HTML and immutable
+legacy bundle previews remain compatibility exceptions with migration outstanding;
+extending them does not deliver the React application.
 
 - Bounded, paginated reads over saved score records.
 - The financial display values §6.4 moves out of rendering.
@@ -28,6 +39,13 @@ Replaces (§4.4): `the data half of dashboard/render.py`, `dashboard/earnings_ap
   refused/incomparable counts with reasons. No comparison of its own. Full
   field list and failure semantics: root `ARCHITECTURE.md` §4 "Native parity
   summary projection".
+
+`CAPTURED_COMPARISON_V1` is the public schema literal for the optional retained
+comparison in `native_parity_summary`. Rows preserve original values; consumers
+render `legacy_display`/`native_display` for exact integers beyond the JavaScript
+safe range. This bounded JSON projection adds no application rendering.
+
+<!-- public-interface: CAPTURED_COMPARISON_V1 -->
 
 ## Non-responsibilities
 

@@ -315,6 +315,18 @@ class TestBootstrap:
         second = AnalogMatcher(pool, snapshot="snap-a").match(
             "STR-THRU", buckets, alpha=0.5, request_key="k"
         )
+        # Independent oracle: the bootstrap CI of the mean must sit where the
+        # normal approximation puts it (mean +/- 1.645 standard errors for a
+        # 90% interval), so a shared wrong interval cannot pass by agreeing
+        # with itself.
+        returns = pool["ret"].to_numpy()
+        mean = returns.mean()
+        se = returns.std(ddof=1) / np.sqrt(returns.size)
+        assert first.n == returns.size
+        assert first.mean == pytest.approx(mean)
+        assert first.ci_low == pytest.approx(mean - 1.645 * se, abs=0.25 * se)
+        assert first.ci_high == pytest.approx(mean + 1.645 * se, abs=0.25 * se)
+        # Supplementary repeatability check.
         assert (first.ci_low, first.ci_high) == (second.ci_low, second.ci_high)
 
     def test_the_interval_does_not_depend_on_the_pool_row_order(self):

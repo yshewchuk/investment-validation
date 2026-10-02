@@ -1440,6 +1440,7 @@ class Scorer:
         snapshot: str | None = None,
         verify_artifacts: bool = True,
         analog_daily: pd.DataFrame | None = None,
+        trade_provenance: str | None = None,
     ):
         #: The daily rows the ANALOG population is bucketed against — a
         #: different question from `context.daily`, which is the live scoring
@@ -1470,9 +1471,28 @@ class Scorer:
 
         if trades is None:
             trades = _load_trades_without_legs()
-        engine_rows = trades[trades["provenance"].astype(str) == "engine.replay"]
-        self.trades = self._enrich(engine_rows)
-        del trades, engine_rows
+        if trade_provenance is None:
+            # Omitted: the incumbent's exact legacy replay tag, unchanged. A
+            # zero-row result stays a zero-row population (matching the prior
+            # behavior) rather than raising.
+            selected_rows = trades[trades["provenance"].astype(str) == "engine.replay"]
+        else:
+            # Explicit: one single tag, matched by exact equality only — no
+            # isin/tuple/set, no prefix, no inference. Never mutate the tags.
+            if not isinstance(trade_provenance, str) or not trade_provenance:
+                raise ValueError(
+                    "trade_provenance must be a single non-empty string "
+                    f"(exact tag equality only), got {trade_provenance!r}"
+                )
+            selected_rows = trades[trades["provenance"].astype(str) == trade_provenance]
+            if selected_rows.empty:
+                raise ValueError(
+                    f"no trades carry provenance {trade_provenance!r} (of "
+                    f"{len(trades)} row(s)) — refusing to enrich/match an "
+                    "explicit selection that resolves to zero rows"
+                )
+        self.trades = self._enrich(selected_rows)
+        del trades, selected_rows
         _release_free_pages()
         self.matcher = AnalogMatcher(self.trades, snapshot=self.snapshot)
 

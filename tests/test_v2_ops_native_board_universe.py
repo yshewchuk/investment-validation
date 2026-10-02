@@ -323,4 +323,17 @@ class TestDeterministicOrder:
         ])
         first = board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
         second = board_requests(pd.Timestamp("2026-01-25"), 21, None, events_df)
+        # Independent oracle: a shared wrong result must not pass just because
+        # both calls agree. One event fans out to every native-covered
+        # strategy in alphabetical order, then DYN-SV last, each request
+        # carrying the event's own ticker/date/session.
+        covered = (
+            "BFLY-P", "BFLY-P5", "CND-PS", "CTR5", "RAMP7",
+            "STR-RUNUP", "STR-THRU", "TWIN-P", "TWIN-P5",
+        )
+        assert [r.strategy for r in first] == [*covered, "DYN-SV"]
+        assert {r.ticker for r in first} == {"AAA"}
+        assert {r.event_date for r in first} == {pd.Timestamp("2026-02-01")}
+        assert {r.session for r in first} == {"BMO"}
+        # Supplementary repeatability check.
         assert first == second

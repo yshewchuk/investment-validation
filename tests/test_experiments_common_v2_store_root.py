@@ -14,6 +14,7 @@ helpers — following ``tests/test_v2_research_experiment_trades.py``.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -87,3 +88,55 @@ def test_load_v2_trades_store_root_is_the_ops_root_not_root_objects(tmp_path):
             "STR-THRU", catalog=tmp_path / "catalog.sqlite",
             store_root=ops_root / "objects", snapshot_id=snapshot.snapshot_id)
     assert excinfo.value.code == "OBJECT_CORRUPT"
+
+
+def test_pinned_runner_builds_the_native_v2_provenance():
+    """The EXP-147 runner must hand its analog population the native v2 tag, not
+    the legacy default, and must obtain that tag from the public v2 module rather
+    than an inline literal or a private/legacy source.
+
+    The runner's ``main()`` loads the spec, the pinned v2 snapshot, and the
+    trained gate — none of which a test may execute here. So the wiring is
+    verified at the call site: the module bound the constant, and the
+    ``ga.build_dataset`` call passes it. The Scorer actually selecting on that
+    tag is covered in ``test_score.py``; the forwarding from ``build_dataset``
+    to ``Scorer`` in ``test_training.py``.
+
+    The call-site check is structural (AST-based) rather than a text-search.
+    """
+    # Imported from the public v2 module, and the same constant the loader uses.
+    assert getattr(_exp147_run, "experiment_trades", None) is experiment_trades
+    assert _exp147_run.experiment_trades.PROVENANCE == PROVENANCE
+
+    # The build_dataset call site passes that constant through the selector.
+    tree = ast.parse(_RUN_PY.read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "build_dataset"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ga"
+    ]
+    assert len(calls) == 1, (
+        f"expected exactly one ga.build_dataset(...) call in run.py, found {len(calls)}"
+    )
+
+    keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+    assert "trade_provenance" in keywords, (
+        "the ga.build_dataset(...) call in run.py is missing the trade_provenance keyword"
+    )
+
+    # It never inlines a provenance string as the selector (only the constant):
+    # only the exact experiment_trades.PROVENANCE attribute access satisfies this.
+    value = keywords["trade_provenance"]
+    assert (
+        isinstance(value, ast.Attribute)
+        and value.attr == "PROVENANCE"
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "experiment_trades"
+    ), (
+        "trade_provenance must be passed as experiment_trades.PROVENANCE, "
+        "not an inline literal or a different name"
+    )

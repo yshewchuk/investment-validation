@@ -17,7 +17,8 @@ deployment; the two per-request mappings are keyed *only* by
 missing, nothing extra — unlike ``score_batch`` there is no event-only
 fallback); every mapped inference item must be an ``InferenceRequest`` naming
 the release, and the release binding it selects must be compatible with the
-request's strategy, decision clock and feature order. A request may map to the
+request's strategy (its own or the shared ``"*"`` wildcard, exactly as
+``score_frozen`` scopes it), decision clock and feature order. A request may map to the
 EMPTY tuple: ``frozen_inputs.build_inference_requests`` legitimately returns
 ``()`` when every required feature value came back non-finite, and
 ``score_frozen`` serves that by running no inference at all and emitting its
@@ -49,7 +50,7 @@ from engine.v2.contracts import ScoreBatch, ScoreRecord, ScoreRequest
 from engine.v2.models.contracts import InferenceRequest
 from engine.v2.models.no_fit import no_fit_guard
 
-from .application import score_frozen
+from .application import binding_serves_strategy, score_frozen
 from .identity import request_hash
 from .stages import NativeScoreInputs
 
@@ -200,7 +201,7 @@ def _check_inference_request(request: ScoreRequest, identity: str,
             f"inference request binding {item.binding_id!r} for request {identity} "
             f"matches {len(matches)} release bindings; exactly one is required")
     binding = matches[0]
-    if binding.strategy_id != request.strategy_version:
+    if not binding_serves_strategy(binding.strategy_id, request.strategy_version):
         raise FrozenBatchPreflightError(
             f"binding {binding.binding_id!r} serves strategy "
             f"{binding.strategy_id!r}, not the request strategy "

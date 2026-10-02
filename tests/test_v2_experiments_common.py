@@ -65,3 +65,65 @@ def test_make_v2_repricer_skips_a_trade_whose_shifted_chains_are_missing(tmp_pat
     assert result.empty
     assert result.attrs["coverage"] == 0.0
     conn.close()
+
+
+def test_make_v2_repricer_reuses_cached_chains_across_shift_calls(tmp_path, monkeypatch):
+    conn, repricer = _repricer(tmp_path)
+    original = common_v2.load_chain_index
+    calls: list[set] = []
+
+    def counting_load_chain_index(repository, snapshot, keys):
+        calls.append(set(keys))
+        return original(repository, snapshot, keys)
+
+    monkeypatch.setattr(common_v2, "load_chain_index", counting_load_chain_index)
+
+    first = repricer(_trades("2024-05-01", "2024-05-02"), shift_days=1)
+    assert first.attrs["coverage"] == 1.0
+    assert first.iloc[0]["entry_cost"] == pytest.approx(3.4)
+    assert first.iloc[0]["exit_value"] == pytest.approx(5.4)
+
+    # A shift this repricer has never been called with directly: its keys
+    # were already folded into the cache by the first call above, so this
+    # call makes no new chain scan at all (the fixture has no chain data for
+    # these shifted dates, so coverage is 0.0 -- same as calling a fresh,
+    # uncached repricer with this shift would give).
+    second = repricer(_trades("2024-05-01", "2024-05-02"), shift_days=-1)
+    assert second.attrs["coverage"] == 0.0
+
+    # Repeating the FIRST call's exact shift gives byte-identical output.
+    third = repricer(_trades("2024-05-01", "2024-05-02"), shift_days=1)
+    assert third.attrs["coverage"] == 1.0
+    assert len(third) == 1
+    third_row = third.iloc[0]
+    assert third_row["entry_cost"] == pytest.approx(3.4)
+    assert third_row["exit_value"] == pytest.approx(5.4)
+    assert third_row["ret"] == pytest.approx(2.0 / 3.4)
+    pd.testing.assert_frame_equal(third.reset_index(drop=True), first.reset_index(drop=True))
+
+    assert len(calls) == 1, f"expected exactly one chain scan, got {len(calls)}: {calls}"
+    conn.close()
+
+
+def test_make_v2_repricer_second_call_scans_only_newly_missing_keys(tmp_path, monkeypatch):
+    conn, repricer = _repricer(tmp_path)
+    original = common_v2.load_chain_index
+    requested: list[set] = []
+
+    def counting_load_chain_index(repository, snapshot, keys):
+        requested.append(set(keys))
+        return original(repository, snapshot, keys)
+
+    monkeypatch.setattr(common_v2, "load_chain_index", counting_load_chain_index)
+
+    repricer(_trades("2024-05-01", "2024-05-02"), shift_days=1)
+    assert len(requested) == 1
+    first_request = requested[0]
+
+    # A different trade population introduces a genuinely new key
+    # (2024-05-06); the already-cached keys from the first call are not
+    # requested again.
+    repricer(_trades("2024-05-02", "2024-05-03"), shift_days=1)
+    assert len(requested) == 2
+    assert requested[1].isdisjoint(first_request)
+    conn.close()

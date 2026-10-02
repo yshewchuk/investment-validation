@@ -70,8 +70,9 @@ def _write(root: Path, rel: str, text: str) -> None:
     path.write_text(text)
 
 
-def test_ops_edit_does_not_move_the_hash_but_legacy_and_diagnosis_edits_do(tmp_path):
+def test_ops_edit_does_not_move_the_hash_but_data_legacy_and_diagnosis_edits_do(tmp_path):
     for rel in ("engine/score.py", "engine/v2/__init__.py", "engine/v2/ops/catalog.py",
+                "engine/v2/data/repository.py",
                 "engine/v2/diagnosis/receipt.py", "engine/v2/foundation/canonical.py"):
         _write(tmp_path, rel, "x = 1\n")
     base = identity.code_hash(tmp_path)
@@ -79,8 +80,8 @@ def test_ops_edit_does_not_move_the_hash_but_legacy_and_diagnosis_edits_do(tmp_p
     _write(tmp_path, "engine/v2/ops/catalog.py", "x = 2\n")
     assert identity.code_hash(tmp_path) == base
 
-    for rel in ("engine/score.py", "engine/v2/diagnosis/receipt.py",
-                "engine/v2/foundation/canonical.py"):
+    for rel in ("engine/score.py", "engine/v2/data/repository.py",
+                "engine/v2/diagnosis/receipt.py", "engine/v2/foundation/canonical.py"):
         _write(tmp_path, rel, "x = 3\n")
         moved = identity.code_hash(tmp_path)
         assert moved != base, rel

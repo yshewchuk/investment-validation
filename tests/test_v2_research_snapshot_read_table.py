@@ -12,7 +12,9 @@ names (``_chains.read_chain_keys`` / ``_chains.load_chain_index``).
 from __future__ import annotations
 
 import dataclasses
+import gc
 import sys
+import weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -391,4 +393,117 @@ def test_read_table_day_split_does_not_falsely_refuse_across_a_non_midnight_boun
                        partition_keys=["2024"])
     assert len(frame) == 3
     assert set(frame["event_id"]) == {"E1", "E2", "E3"}
+    conn.close()
+
+
+# --------------------------------------------------------------------------
+# batch_filter: an optional per-batch predicate applied between to_pandas()
+# and accumulation, forwarded through every split path; omitted and explicit
+# None must behave exactly like no argument at all
+# --------------------------------------------------------------------------
+
+
+def _keep_only(frame: pd.DataFrame, obs_date: str) -> pd.DataFrame:
+    return frame[pd.to_datetime(frame["obs_date"]) == pd.Timestamp(obs_date)]
+
+
+def test_read_table_batch_filter_none_behaves_like_omitted(tmp_path):
+    conn, store, snap = _commit_chains(
+        tmp_path,
+        {"2024": _chain_rows("TEST", {"2024-01-10": 2, "2024-02-12": 3}, 2024)},
+        maximum_result_rows=4,
+    )
+    repository = Repository(conn, store)
+
+    omitted = read_table(repository, snap, "option_chains", _COLUMNS,
+                         partition_keys=["2024"])
+    explicit = read_table(repository, snap, "option_chains", _COLUMNS,
+                          partition_keys=["2024"], batch_filter=None)
+    pd.testing.assert_frame_equal(omitted, explicit)
+    conn.close()
+
+
+def test_batch_filter_survives_a_late_month_overflow_without_duplicates(tmp_path):
+    """One month over the cap: the real scan yields batches, then raises. A
+    batch that matched and accumulated in that failed month attempt must be
+    discarded before the day retry — otherwise the retried day re-reads the
+    same rows and the result duplicates them."""
+    conn, store, snap = _commit_chains(
+        tmp_path,
+        {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
+        maximum_result_rows=4,
+    )
+    repository = Repository(conn, store)
+
+    seen: list[int] = []
+
+    def keep_first_day(frame: pd.DataFrame) -> pd.DataFrame:
+        seen.append(len(frame))
+        return _keep_only(frame, "2024-01-10")
+
+    frame = read_table(repository, snap, "option_chains", _COLUMNS + ("strike",),
+                       partition_keys=["2024"], batch_filter=keep_first_day)
+    assert len(frame) == 3  # each 2024-01-10 row exactly once
+    assert frame["strike"].is_unique
+    assert seen and min(seen) > 0  # the filter saw (and discarded from) batches
+    conn.close()
+
+
+def test_failed_month_scan_frames_are_freed_before_the_first_day_retry(tmp_path):
+    """A late month overflow must not pin the frames its failed scan retained
+    through the day retries: once the ``except`` variable is released, the
+    failed scan's traceback cannot keep those frames alive, so the first
+    re-read of an already-seen row observes every filtered frame collected."""
+    conn, store, snap = _commit_chains(
+        tmp_path,
+        {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
+        maximum_result_rows=4,
+    )
+    repository = Repository(conn, store)
+
+    retained: list[weakref.ref] = []
+    seen: set[tuple] = set()
+    checked = False
+
+    def keep_first_day(frame: pd.DataFrame) -> pd.DataFrame:
+        nonlocal checked
+        keys = set(zip(frame["obs_date"], frame["strike"]))
+        if not checked and keys & seen:  # the day retry re-reads a seen row
+            gc.collect()
+            assert retained and all(ref() is None for ref in retained)
+            checked = True
+        seen.update(keys)
+        narrowed = _keep_only(frame, "2024-01-10")
+        retained.append(weakref.ref(narrowed))
+        return narrowed
+
+    frame = read_table(repository, snap, "option_chains", _COLUMNS + ("strike",),
+                       partition_keys=["2024"], batch_filter=keep_first_day)
+    assert checked
+    assert len(frame) == 3
+    assert frame["strike"].is_unique
+    conn.close()
+
+
+def test_batch_filter_forwarded_through_the_nullable_overflow_refusal(tmp_path):
+    """The nullable-observation refusal keeps its original contract even with
+    a batch filter attached: the filter runs on the yielded batches, and the
+    scan still refuses rather than splitting null-observation rows away."""
+    conn, store, snap = _commit_trades(
+        tmp_path,
+        {"2024": _trades_rows(2024, {"T1": "2024-01-10", "T2": "2024-02-12",
+                                     "T3": None, "T4": "2024-01-20",
+                                     "T5": "2024-02-22"})},
+        maximum_result_rows=4,
+    )
+    repository = Repository(conn, store)
+
+    def drop_nothing(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame
+
+    with pytest.raises(DataError) as err:
+        read_table(repository, snap, "trades", ("trade_id", "entry_date"),
+                   partition_keys=["2024"], batch_filter=drop_nothing)
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert "nullable" in str(err.value)
     conn.close()

@@ -76,6 +76,20 @@ above), `_trades_revisions.py`.
 
 ## Inputs
 
+The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
+optional `batch_filter` callback. They invoke it immediately after each Arrow
+batch becomes a pandas frame, before retaining frames; it returns narrowed
+rows or `None` for no rows. Omitting it or passing `None` preserves existing
+reads. `_chains.load_chain_index` uses it to keep exact requested ticker/date
+pairs while reading one manifest year at a time; stored dates retain their
+original timestamp semantics and requested dates use the existing normalization.
+Independent ticker and date memberships may prune a scan batch, but only the
+exact pair mask — never their cross product — defines the retained rows.
+Failed capped attempts discard their filtered frames before narrower retries;
+successful frames retain ordering and duplicates. Scan caps and terminal error
+codes are unchanged; a narrower retry runs outside the failed attempt's handler.
+This bounds retained unmatched rows, not total process RSS.
+
 - `--catalog` (sqlite path) and `--store-root` (`ArtifactStore` root):
   required by every CLI; opened once per run via
   `engine.v2.ops.bootstrap.open_catalog` / `engine.v2.foundation.ArtifactStore`.
@@ -168,10 +182,13 @@ modules' callers, outside this PR's one concern.
 
 Callers: nothing inside `engine/` imports this package (checked against
 `checks/import_layers.py`'s import graph). The `tools/v2_*.py` CLI leaves
-listed above are one consumer; `experiments/common_v2.py` is the other, for
+listed above are one consumer; `experiments/common_v2.py` is another, for
 `experiment_trades.load_trades`, `_pricing.trading_calendar_from_snapshot`
-and `_chains.load_chain_index` — neither is parsed by the layering hook (it
-only parses `engine*` importers, and `experiments/` is outside it too).
+and `_chains.load_chain_index`; the pinned EXP-147 confirmatory-validation
+runner is a third, for `experiment_trades.PROVENANCE` alone (its native
+replay tag, selecting that runner's analog population) — none of the three
+is parsed by the layering hook (it only parses `engine*` importers, and
+`experiments/` is outside it too).
 
 ## External systems and libraries
 
@@ -357,15 +374,31 @@ uncaught traceback instead.
 `_snapshot.read_table` delegates each requested partition's read (or, with
 no `partition_keys` given, every partition the snapshot has) to
 `_scan.read_table`, instead of issuing one capped, unsplit `DataQuery` of
-its own. It keeps its own signature (`partition_keys` only, no
-`key_filter`), its own pre-`_scan` guard for "no declared partition column,
-or no partition values available at all" (the bare `ValueError` case
-above, issue #70, unchanged), and its own empty-result frame shape
+its own. It keeps its own signature plus an optional `key_filter` (issue
+#271, forwarded straight through to `_scan.read_table`; omitted or `()`
+changes nothing), its own pre-`_scan` guard for "no declared partition
+column, or no partition values available at all" (the bare `ValueError`
+case above, issue #70, unchanged), and its own empty-result frame shape
 (`pd.Series(dtype="object")` per requested column). The five direct
 callers (`_chains.read_chain_keys`, `_chains.read_chains_for_years`,
 `_trades_publish.read_event_rows`, `_trades_publish.read_existing_trades`,
 `_replay_run.events_frame`) and the `_chains.load_chain_index` wrapper
-(through `read_chains_for_years`) keep their existing interfaces.
+(through `read_chains_for_years`) keep their existing interfaces, except
+`read_chains_for_years`/`load_chain_index` (issue #271): `load_chain_index`
+now also pushes the wanted `(ticker, obs_date)` pairs' ticker and date sets
+down as `KeyPredicate("in", ...)` `key_filter` entries, the same cartesian-
+superset pattern `fill_quality._chain_key_filter` already uses — never the
+exact pairs, which `KeyPredicate` cannot express. This lets a request for a
+narrow key set scan a whole year partition once instead of always falling
+back to the month/day split: `_scan_partition`'s existing "a predicate can
+bring the true row count under the cap" rule (no `_scan.py` change) now
+applies to these calls, and the `maximum_result_rows` cap is checked
+against the key-filtered row count, not the raw partition size. The exact-
+pair `batch_filter` still narrows further after decoding, so results are
+unchanged; a key set too broad to fit under the cap still falls back to the
+split, exactly as before. `read_chain_keys` has no caller-known keys to
+filter by (it discovers the whole key universe) and is unaffected — it
+still always calendar-splits a partition over the cap.
 
 A partition scan, whether reached through `_snapshot.read_table` or one of
 `_scan.read_table`'s other direct callers (`polygon_fills.read_trades`,

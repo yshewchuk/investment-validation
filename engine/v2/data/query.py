@@ -33,6 +33,7 @@ Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 import pyarrow as pa
@@ -51,6 +52,7 @@ from .errors import fail
 __all__ = [
     "ARROW_TYPES",
     "arrow_type_for",
+    "compile_row_matcher",
     "fragment_may_match",
     "null_array_for",
     "order_key",
@@ -195,12 +197,55 @@ def _time_may_match(record: FragmentRecord, query: DataQuery) -> bool:
 def row_matches(row: dict, contract: TableContract, query: DataQuery) -> bool:
     """True iff a decoded row (native python values, keyed by column name)
     satisfies every ``key_filter`` predicate and the ``time_interval``."""
+    return compile_row_matcher(contract, query)(row)
+
+
+def compile_row_matcher(contract: TableContract, query: DataQuery) -> Callable[[dict], bool]:
+    """A per-query-compiled row predicate: equivalent to calling
+    ``row_matches(row, contract, query)`` for every row, but normalizes each
+    key_filter predicate's ``values`` and the time_interval's bounds ONCE
+    here rather than once per row. Byte-identical semantics to
+    ``row_matches`` -- same None handling, same ``_normalize_bound``/
+    ``_comparable_value`` routing, same refusal on an unparseable bound.
+    Built once per scan (``repository.py`` calls this once, not per row).
+    """
+    predicates = []
     for predicate in query.key_filter:
-        if not _predicate_matches(row, contract, predicate):
-            return False
-    if query.time_interval is not None and not _interval_matches(row, contract, query.time_interval):
-        return False
-    return True
+        physical = _physical_type(contract, predicate.column)
+        if physical.startswith("timestamp"):
+            wanted = {_normalize_bound(v) for v in predicate.values}
+        else:
+            wanted = set(predicate.values)
+        predicates.append((predicate.column, physical, wanted))
+    interval = None
+    if query.time_interval is not None:
+        interval_physical = _physical_type(contract, query.time_interval.column)
+        interval_start = (None if query.time_interval.start_inclusive is None
+                          else _normalize_bound(query.time_interval.start_inclusive))
+        interval_end = (None if query.time_interval.end_exclusive is None
+                        else _normalize_bound(query.time_interval.end_exclusive))
+        interval = (query.time_interval.column, interval_physical, interval_start, interval_end)
+
+    def _matches(row: dict) -> bool:
+        for column, physical, wanted in predicates:
+            value = row.get(column)
+            if value is None:
+                return False
+            if _comparable_value(value, physical) not in wanted:
+                return False
+        if interval is not None:
+            column, physical, start_norm, end_norm = interval
+            value = row.get(column)
+            if value is None:
+                return False
+            comparable = _comparable_value(value, physical)
+            if start_norm is not None and comparable < start_norm:
+                return False
+            if end_norm is not None and comparable >= end_norm:
+                return False
+        return True
+
+    return _matches
 
 
 def order_key(row: dict, contract: TableContract) -> tuple:
@@ -237,8 +282,8 @@ def _normalize_bound(value: str) -> str:
     * a timezone-aware timestamp (``Z``, ``+00:00``, or any other offset)
       is converted to UTC before being dropped to the naive wire form.
 
-    ``_time_may_match`` (fragment pruning), ``_predicate_matches``, and
-    ``_interval_matches`` (row filtering) all route their bounds through
+    ``_time_may_match`` (fragment pruning) and ``compile_row_matcher`` (row
+    filtering) both route their bounds through
     this one function, so a boundary can never be included by one path and
     excluded by another. An unparseable bound refuses typed rather than
     being compared as a raw, mismatched string.
@@ -252,29 +297,3 @@ def _normalize_bound(value: str) -> str:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return time_formats.format_naive_timestamp(parsed)
-
-
-def _predicate_matches(row: dict, contract: TableContract, predicate: KeyPredicate) -> bool:
-    physical = _physical_type(contract, predicate.column)
-    value = row.get(predicate.column)
-    if value is None:
-        return False
-    comparable = _comparable_value(value, physical)
-    if physical.startswith("timestamp"):
-        wanted = {_normalize_bound(v) for v in predicate.values}
-    else:
-        wanted = set(predicate.values)
-    return comparable in wanted
-
-
-def _interval_matches(row: dict, contract: TableContract, interval: TimeInterval) -> bool:
-    physical = _physical_type(contract, interval.column)
-    value = row.get(interval.column)
-    if value is None:
-        return False
-    comparable = _comparable_value(value, physical)
-    if interval.start_inclusive is not None and comparable < _normalize_bound(interval.start_inclusive):
-        return False
-    if interval.end_exclusive is not None and comparable >= _normalize_bound(interval.end_exclusive):
-        return False
-    return True
