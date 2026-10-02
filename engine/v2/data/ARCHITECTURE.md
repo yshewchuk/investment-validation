@@ -59,34 +59,21 @@ interface section; this names only the load-bearing entry points.
   also holds `publish_legacy_file`/`inspect_fragment`, which do filesystem
   I/O). `query.compile_batch_matcher(contract, query)` is the entry point
   `repository.Repository._fragment_rows` calls once per fragment to
-  vectorize ONLY the `key_filter` predicates a column's own Arrow array can
-  satisfy with no reinterpretation — equality/set-membership (pyarrow
-  `compute.is_in`) on a string/int64/bool/float64 column, unchanged, no
-  cast — returning a boolean mask `_fragment_rows` uses to drop
-  non-matching rows via `RecordBatch.filter` *before* they are decoded to
-  per-row Python dicts, so only surviving rows pay that cost. It refuses
-  (`None`) and the whole query falls back to `compile_row_matcher` at
-  compile time whenever: the query has a `time_interval` at all (every
-  range bound, including one with neither bound set), any `key_filter`
-  predicate targets a `timestamp[ns]`/`timestamp[us]` column, or a
-  predicate's values cannot be expressed in its column's declared Arrow
-  type — decided once from `contract`/`query` alone, never from the data.
-  Narrowed deliberately (task brief #286 follow-up) to the one case
-  provably byte-identical to the row path without reinterpreting a value:
-  a timestamp or interval comparison needs the same bound-parsing and
-  microsecond truncation `compile_row_matcher`'s `_normalize_bound`/
-  `_comparable_value` already carry, and a time column declared a
-  non-timestamp physical type (e.g. a string-typed
-  `observation_time_column`) makes a range comparison's own meaning
-  (chronological vs. lexical) a per-column decision this package does not
-  make twice. A null column value never matches, on both paths.
-  `_fragment_rows` also guards EVALUATION, not only compilation: a batch
-  matcher that compiled but raises when actually called against a real
-  batch — a failure mode compile-time validation from `contract`/`query`
-  alone cannot rule out in general — is caught there too, and that
-  fragment's remaining batches decode and filter through
-  `compile_row_matcher` instead, same as a query `compile_batch_matcher`
-  refused outright.
+  vectorize `key_filter` equality/set-membership (pyarrow `compute.is_in`)
+  on a string/int64/bool/float64 column, returning a boolean mask
+  `_fragment_rows` uses to drop non-matching rows via `RecordBatch.filter`
+  *before* they are decoded to per-row Python dicts, so only surviving
+  rows pay that cost. Everything else this package's queries can express
+  — any `time_interval`, any predicate on a timestamp column, or a
+  predicate's values not representable in its column's declared Arrow
+  type (task brief #286 follow-up narrowed this deliberately, after a
+  timestamp/interval vectorization round turned up more correctness
+  edge cases than it was worth) — refuses (`None`) at compile time,
+  decided from `contract`/`query` alone, never from the data, and the
+  whole query falls back to `compile_row_matcher`. `_fragment_rows` also
+  falls back per fragment if the compiled mask itself raises when
+  evaluated against a real batch — a case compile-time refusal cannot
+  fully rule out. A null column value never matches, on both paths.
 
   `compile_row_matcher(contract, query)` is the one row-matching entry
   point for every query this file does not vectorize, and for any caller

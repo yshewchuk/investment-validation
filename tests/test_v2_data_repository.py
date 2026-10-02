@@ -556,7 +556,10 @@ def test_batch_matcher_evaluation_failure_falls_back_for_that_fragment(tmp_path,
     validation from contract/query alone cannot rule out in general --
     must not crash the scan: repository.py catches it per fragment and
     falls back to the row matcher for the rest of that fragment, giving
-    the same result as the normal vectorized run."""
+    the independently-known-correct result (not merely the same result
+    as a second, equally-fallible run of the real matcher -- that
+    agreement is already covered by
+    test_forced_row_fallback_agrees_with_vectorized_filter above)."""
     conn, clock, store = catalog_and_store(tmp_path)
     record = publish_and_inspect(store, _SEC, _SEC_REF,
                                  [_securities_row(t, 2024) for t in ("AAA", "BBB", "CCC")], "2024")
@@ -566,8 +569,10 @@ def test_batch_matcher_evaluation_failure_falls_back_for_that_fragment(tmp_path,
         snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=("ticker", "year"),
         key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "BBB")),),
         order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
-    expected = [row for batch in repo.scan(query, table_name="securities")
-               for row in batch.to_pylist()]
+    # Independently known from _securities_row/the query alone, not derived
+    # from any scan: AAA and BBB (year 2024) in ticker order; CCC is
+    # excluded by the key_filter.
+    expected = [{"ticker": "AAA", "year": 2024}, {"ticker": "BBB", "year": 2024}]
 
     real_compile = query_mod.compile_batch_matcher
 
