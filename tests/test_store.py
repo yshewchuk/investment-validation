@@ -345,14 +345,21 @@ class TestFinalizeDedupe:
 
         # Independent ground truth: `frame` is fed before `dup`, and every
         # row in `dup` duplicates a primary key already in `frame`, so
-        # keep="first" means the deduplicated, sorted table IS exactly
-        # `frame` (coerced to the table's own schema, to match dtypes
-        # read_table() returns) -- built without going through
-        # PartitionedWriter.finalize() or _dedupe_and_write at all.
-        expected = (
-            store.coerce(frame, "option_chains")
-            .sort_values(key_cols, kind="stable")
-            .reset_index(drop=True)
+        # keep="first" means the deduplicated table IS exactly `frame`
+        # (coerced to the table's own schema, to match dtypes read_table()
+        # returns) -- built without going through PartitionedWriter.finalize()
+        # or _dedupe_and_write at all. Sorted YEAR-MAJOR (ascending year,
+        # each year's rows fully sorted by key_cols within it), matching
+        # what finalize() actually produces: it sorts one year at a time,
+        # never across years, so a global sort across both years would mask
+        # a real ordering defect rather than check for one.
+        coerced = store.coerce(frame, "option_chains")
+        expected = pd.concat(
+            [
+                coerced[coerced["year"] == year].sort_values(key_cols, kind="stable")
+                for year in sorted(coerced["year"].unique())
+            ],
+            ignore_index=True,
         )
 
         # Prove the comparison itself isn't vacuous before relying on it.
@@ -366,9 +373,7 @@ class TestFinalizeDedupe:
                 writer.add(frame)
                 writer.add(dup)
                 writer.finalize(dedupe=True, bucket_count=bucket_count)
-            out = store.read_table("option_chains").sort_values(
-                key_cols, kind="stable"
-            ).reset_index(drop=True)
+            out = store.read_table("option_chains")
             assert (out["bid"] != -1.0).all()
             pd.testing.assert_frame_equal(out, expected)
 
