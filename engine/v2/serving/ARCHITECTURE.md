@@ -30,8 +30,10 @@ FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
-Every refusal is typed; none is an untyped traceback. API errors share one `Problem`
-envelope (`code`, `category`, `retryable`); HTTP statuses are in parentheses.
+API errors share one `Problem` envelope (`code`, `category`, `retryable`); HTTP statuses
+are in parentheses. Operations routes refuse with plain text for auth, not-configured and
+health-file failures (e.g. `/health.json` 503 `unknown`, `/analogs.json` 503 `analogs not
+configured`) and with typed JSON documents carrying a `reason_code` for index/parity refusals.
 | Concern | Outcome |
 |---|---|
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Score/event routes without a release pin: `RELEASE_ID_REQUIRED` (400); never a cross-release search. |
