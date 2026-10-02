@@ -36,9 +36,9 @@ Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.de
 `native_shadow_render` also import `scoring` for offline row building; no HTTP path does.
 Never imports `engine.v2.ops` (equal-layer peer) or legacy `engine.*`: ops-side pointers,
 reports and transaction/migration patterns are read as inert JSON or reimplemented.
-Production entrypoints: `python3 -m engine.v2.serving.api` (`api.main` -> `create_app`);
-dashboard `preview.run` -> `_server.build_server` -> `operations.create_server` (layer 8
-imports layer 7 only); the React client calls the HTTP API. Offline `tools/`:
+Serving launch paths: `python3 -m engine.v2.serving.api` (`api.main` -> `create_app`);
+operator-invoked dashboard preview `preview.run` -> `_server.build_server` ->
+`operations.create_server` (layer 8 imports layer 7 only); the React client calls the HTTP API. Offline `tools/`:
 `v2_dashboard_project` builds a candidate from the serving loaders, projections and shadow
 row source and emits a projection binding for the ops publisher (it does not publish);
 `v2_dashboard_verified_input` builds a source-verified `PreviewInput` from a delivered
