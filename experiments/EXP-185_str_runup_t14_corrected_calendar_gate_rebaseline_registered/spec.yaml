@@ -36,6 +36,18 @@ incumbent:
   expected_oos_rows: 2754
   expected_selected_at_stored_threshold: 551
   missing_rule: "decline the event unless every feature is finite"
+  population_event_id_count: 4511
+  population_event_id_sha256: a030c70fb218e5f5822f2b06e275d3979f7ede1e22d706af1fbfe8d07449d140
+  population_note: >
+    Identity of the 2026-09-07 registered OOS (year>=2020) event_id
+    population, pinned against the sibling EXP-144 run's own
+    results/oos_scores.parquet. incumbent_reproduction() in run.py restricts
+    its exact-match checks to this original population (the STR-RUNUP
+    2024-2026 calendar backfill since grew the live population well past
+    it). The row-count check holds exactly on that overlap; the
+    selected-count and learned-threshold checks do not (per-event scores
+    drifted) and are reported in incumbent_reproduction.json rather than
+    enforced.
 
 gate_variants:
   - id: incumbent_complete_case
