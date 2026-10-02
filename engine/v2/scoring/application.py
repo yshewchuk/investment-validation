@@ -495,6 +495,14 @@ def _frozen_role_outputs(binding) -> frozenset[str]:
     return frozenset(outputs)
 
 
+def binding_serves_strategy(binding_strategy_id, strategy) -> bool:
+    """The one strategy-match rule for a frozen release binding: it serves
+    ``strategy`` when it names that strategy or is the shared ``"*"``
+    wildcard. ``score_frozen`` scoping and the frozen batch preflight both
+    resolve a binding's strategy through this."""
+    return binding_strategy_id in (strategy, "*")
+
+
 def _binding_declares_scope(binding) -> bool:
     """True when ``binding`` declares both fields a real ``ModelBinding``
     always has (``decision_clock_id`` and ``strategy_id``). False only for
@@ -533,7 +541,8 @@ def _frozen_scoped_bindings(release, request: ScoreRequest) -> tuple[Any, ...] |
         binding for binding in release.bindings
         if not _binding_declares_scope(binding)
         or (getattr(binding, "decision_clock_id", None) == clock
-            and getattr(binding, "strategy_id", None) in (strategy, "*"))
+            and binding_serves_strategy(getattr(binding, "strategy_id", None),
+                                        strategy))
     )
     _refuse_ambiguous_frozen_bindings(scoped)
     return scoped

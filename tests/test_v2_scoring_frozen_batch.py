@@ -253,6 +253,23 @@ def test_preflight_mismatch_prevents_all_inference(tmp_path, case):
     assert len(ok) == len(requests)  # only the complete, matching batch ever ran
 
 
+def test_wildcard_strategy_binding_passes_preflight_like_score_frozen(tmp_path):
+    """A shared ``strategy_id="*"`` binding on the matching clock is served by
+    ``score_frozen``, so the batch preflight must accept it (and a different
+    non-wildcard strategy stays refused: ``binding-strategy`` above)."""
+    root, hashes, release = _ready(tmp_path)
+    wildcard = replace(release, bindings=tuple(
+        replace(b, strategy_id="*") for b in release.bindings))
+    requests = [_request()]
+    fields = _fields(root, hashes)
+    inference = FrozenInference(root)
+    with both_guards():
+        batch = score_frozen_batch(
+            _batch(requests), **_kwargs(wildcard, inference, requests, fields))
+    assert len(batch) == 1
+    assert batch[0].validation_status == "scored"
+
+
 # ---------------------------------------------------------------------------
 # a legitimately mapped empty inference tuple is a batch, not a batch error
 # ---------------------------------------------------------------------------
