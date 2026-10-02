@@ -138,6 +138,28 @@ def test_incumbent_reproduction_restricts_to_the_pinned_population(tmp_path):
     assert result["selected_matches_expected"] is True
     assert result["full_population"]["event_count"] == 7
 
+    from collections import Counter
+
+    registered_by_year = Counter(
+        scores.loc[scores["event_id"].isin(REGISTERED_IDS), "year"]
+    )
+    all_by_year = Counter(scores["year"])
+    expected_added = {
+        str(year): all_by_year.get(year, 0) - registered_by_year.get(year, 0)
+        for year in sorted(set(all_by_year) | set(registered_by_year))
+    }
+    assert result["full_population"]["added_events_by_year"] == expected_added
+    assert result["full_population"]["selected_at_stored_threshold"] == 5
+
+    corrupted = dict(result["full_population"])
+    corrupted["selected_at_stored_threshold"] += 1
+    assert (
+        corrupted["selected_at_stored_threshold"]
+        != result["full_population"]["selected_at_stored_threshold"]
+    )
+    with pytest.raises(AssertionError):
+        assert corrupted == result["full_population"]
+
 
 def test_incumbent_reproduction_reports_not_raises_on_score_drift_in_the_overlap(
     tmp_path,

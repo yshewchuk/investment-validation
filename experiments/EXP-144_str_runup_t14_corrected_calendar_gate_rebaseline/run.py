@@ -456,6 +456,13 @@ def incumbent_reproduction(scores, spec):
         population_digest,
     )
     restricted = oos_all[oos_all["event_id"].isin(population)]
+    missing_from_today = population - set(oos_all["event_id"])
+    if missing_from_today:
+        raise RuntimeError(
+            "registered population event_ids missing from today's OOS "
+            f"frame: {sorted(missing_from_today)[:10]} "
+            f"({len(missing_from_today)} total)"
+        )
     restricted_scored = restricted["incumbent_complete_case"].dropna()
     full_scored = oos_all["incumbent_complete_case"].dropna()
     learned = float(
