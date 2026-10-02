@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -20,6 +21,13 @@ RESULTS = HERE / "results"
 SIM_DIR = ROOT / "experiments/EXP-142_str_runup_t14_factor_simulation_pnl_gate"
 V2_CATALOG = ROOT / "private" / "ops" / "catalog.sqlite"
 V2_STORE_ROOT = ROOT / "private" / "ops"
+# Built from ROOT, never HERE: EXP-185's wrapper reassigns HERE/RESULTS on this
+# module before calling main(), but this artifact belongs to EXP-144's own dir.
+REGISTERED_POPULATION_PATH = (
+    ROOT / "experiments"
+    / "EXP-144_str_runup_t14_corrected_calendar_gate_rebaseline"
+    / "results" / "oos_scores.parquet"
+)
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SIM_DIR))
 
@@ -387,28 +395,131 @@ def add_champion_decisions(scores, stored_threshold):
     return out
 
 
+def _population_digest(event_ids):
+    """sha256 of a sorted, newline-joined event_id list -- the identity a
+    spec.yaml's incumbent.population_event_id_sha256 pins."""
+    ordered = sorted(str(value) for value in event_ids)
+    return hashlib.sha256("\n".join(ordered).encode("utf-8")).hexdigest()
+
+
+def _load_registered_population(path, expected_count, expected_digest):
+    """The frozen registered OOS event_id population an earlier run's own
+    results artifact still holds. Raises if that artifact's content no
+    longer matches the identity a spec.yaml pinned -- this guard would
+    otherwise silently widen or narrow without anyone noticing."""
+    population = pd.read_parquet(path, columns=["event_id"])
+    ids = population["event_id"].astype(str).unique().tolist()
+    digest = _population_digest(ids)
+    if len(ids) != int(expected_count) or digest != expected_digest:
+        raise RuntimeError(
+            "registered population artifact drifted from the identity "
+            f"pinned in spec.yaml: count {len(ids)} (expected "
+            f"{expected_count}), digest {digest} (expected {expected_digest})"
+        )
+    return set(ids)
+
+
 def incumbent_reproduction(scores, spec):
-    oos = scores[scores["year"] >= 2020]["incumbent_complete_case"].dropna()
-    learned = float(gate_mod.choose_threshold(oos.to_numpy(dtype=float)))
-    stored = float(spec["incumbent"]["stored_threshold"])
-    selected = int((oos >= stored).sum())
+    inc = spec["incumbent"]
+    oos_all = scores[scores["year"] >= 2020]
+    stored = float(inc["stored_threshold"])
+    population_digest = inc.get("population_event_id_sha256")
+    if not population_digest:
+        oos = oos_all["incumbent_complete_case"].dropna()
+        learned = float(gate_mod.choose_threshold(oos.to_numpy(dtype=float)))
+        selected = int((oos >= stored).sum())
+        result = {
+            "oos_rows": int(len(oos)),
+            "learned_threshold": learned,
+            "stored_threshold": stored,
+            "selected_at_stored_threshold": selected,
+            "expected_oos_rows": int(inc["expected_oos_rows"]),
+            "expected_selected": int(
+                inc["expected_selected_at_stored_threshold"]
+            ),
+        }
+        if result["oos_rows"] != result["expected_oos_rows"]:
+            raise RuntimeError(f"incumbent OOS row mismatch: {result}")
+        if selected != result["expected_selected"]:
+            raise RuntimeError(f"incumbent selected-count mismatch: {result}")
+        if abs(learned - stored) > 1e-12:
+            raise RuntimeError(f"incumbent threshold mismatch: {result}")
+        log(f"Incumbent reproduced: {len(oos):,} scores, {selected:,} stored-threshold passes")
+        return result
+
+    # Spec pins the original registered event population: check exact-match
+    # expectations only on that overlap; score drift on it is reported, never
+    # raised on, and today's larger population is expansion-reported only.
+    population = _load_registered_population(
+        REGISTERED_POPULATION_PATH,
+        inc["population_event_id_count"],
+        population_digest,
+    )
+    restricted = oos_all[oos_all["event_id"].isin(population)]
+    restricted_scored = restricted["incumbent_complete_case"].dropna()
+    full_scored = oos_all["incumbent_complete_case"].dropna()
+    learned = float(
+        gate_mod.choose_threshold(restricted_scored.to_numpy(dtype=float))
+    )
+    selected = int((restricted_scored >= stored).sum())
+    expected_oos_rows = int(inc["expected_oos_rows"])
+    expected_selected = int(inc["expected_selected_at_stored_threshold"])
     result = {
-        "oos_rows": int(len(oos)),
+        "population_restricted": True,
+        "population_event_id_count": int(inc["population_event_id_count"]),
+        "oos_rows": int(len(restricted_scored)),
         "learned_threshold": learned,
         "stored_threshold": stored,
         "selected_at_stored_threshold": selected,
-        "expected_oos_rows": int(spec["incumbent"]["expected_oos_rows"]),
-        "expected_selected": int(
-            spec["incumbent"]["expected_selected_at_stored_threshold"]
-        ),
+        "expected_oos_rows": expected_oos_rows,
+        "expected_selected": expected_selected,
+        "threshold_matches_stored": abs(learned - stored) <= 1e-12,
+        "selected_matches_expected": selected == expected_selected,
     }
-    if result["oos_rows"] != result["expected_oos_rows"]:
-        raise RuntimeError(f"incumbent OOS row mismatch: {result}")
-    if selected != result["expected_selected"]:
-        raise RuntimeError(f"incumbent selected-count mismatch: {result}")
-    if abs(learned - stored) > 1e-12:
-        raise RuntimeError(f"incumbent threshold mismatch: {result}")
-    log(f"Incumbent reproduced: {len(oos):,} scores, {selected:,} stored-threshold passes")
+    if result["oos_rows"] != expected_oos_rows:
+        raise RuntimeError(
+            f"incumbent OOS row mismatch on registered population: {result}"
+        )
+    if not result["threshold_matches_stored"] or not result["selected_matches_expected"]:
+        log(
+            "Incumbent population-restricted reproduction: row count "
+            f"matches ({result['oos_rows']:,}); per-event complete-case "
+            "scores on the identical registered event_ids have moved "
+            f"since registration (learned threshold {learned:.8f} vs "
+            f"stored {stored:.8f}, selected {selected:,} vs expected "
+            f"{expected_selected:,}) -- reported, not enforced; see "
+            "incumbent_reproduction.json."
+        )
+    else:
+        log(
+            f"Incumbent reproduced on registered population: "
+            f"{result['oos_rows']:,} scores, {selected:,} "
+            "stored-threshold passes"
+        )
+    full_selected = int((full_scored >= stored).sum())
+    full_learned = float(gate_mod.choose_threshold(full_scored.to_numpy(dtype=float)))
+    by_year_now = oos_all.drop_duplicates("event_id").groupby("year")["event_id"].nunique()
+    by_year_registered = restricted.drop_duplicates("event_id").groupby("year")["event_id"].nunique()
+    years = sorted(set(by_year_now.index) | set(by_year_registered.index))
+    added_by_year = {
+        str(year): int(by_year_now.get(year, 0)) - int(by_year_registered.get(year, 0))
+        for year in years
+    }
+    result["full_population"] = {
+        "event_count": int(oos_all["event_id"].nunique()),
+        "oos_rows": int(len(full_scored)),
+        "selected_at_stored_threshold": full_selected,
+        "learned_threshold": full_learned,
+        "added_events_by_year": added_by_year,
+    }
+    log(
+        "Registered-population expansion (report only): "
+        f"{result['full_population']['event_count']:,} OOS events today "
+        f"vs {len(population):,} registered; added by year "
+        f"{added_by_year}; full-population scored rows "
+        f"{full_selected:,} selected of {full_scored.shape[0]:,}, "
+        f"learned threshold {full_learned:.8f}."
+    )
     return result
 
 
@@ -643,7 +754,7 @@ def report_sections(result, evaluations, ranks, matched, policy, cohorts, reprod
         name, "PASS" if passed else "FAIL"
     ] for name, passed in checks.items()]
     lo90, hi90 = policy["ci90"]
-    return [
+    sections = [
         {
             "title": "Rebaseline decision",
             "body": [
@@ -707,6 +818,37 @@ def report_sections(result, evaluations, ranks, matched, policy, cohorts, reprod
             ],
         },
     ]
+    if reproduction.get("population_restricted"):
+        full = reproduction["full_population"]
+        added_rows = [
+            [str(year), f"{delta:+,}"]
+            for year, delta in sorted(full["added_events_by_year"].items())
+            if delta
+        ]
+        sections.append({
+            "title": "Registered-population expansion (reported, not enforced)",
+            "body": [
+                f"Incumbent reproduction is pinned to the "
+                f"{reproduction['population_event_id_count']:,}-event "
+                "registered OOS population; the row-count check matches "
+                f"exactly ({reproduction['oos_rows']:,}). Per-event scores "
+                "on that identical overlap have since moved (learned "
+                f"threshold {reproduction['learned_threshold']:.8f} vs "
+                f"stored {reproduction['stored_threshold']:.8f}; selected "
+                f"{reproduction['selected_at_stored_threshold']:,} vs "
+                f"expected {reproduction['expected_selected']:,}), so "
+                "those two checks are reported here rather than enforced.",
+                f"The live store has grown to {full['event_count']:,} OOS "
+                f"events ({full['oos_rows']:,} scored, "
+                f"{full['selected_at_stored_threshold']:,} selected at the "
+                "stored threshold, learned threshold "
+                f"{full['learned_threshold']:.8f}).",
+            ],
+            "columns": ["year", "added events"],
+            "align": ["---", "---:"],
+            "rows": added_rows,
+        })
+    return sections
 
 
 def main():
