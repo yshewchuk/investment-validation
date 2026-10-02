@@ -15,7 +15,7 @@ Verified saved score documents, legacy bundle bytes, immutable artifacts, servin
 SQLite index, health/model/calibration documents and retained parity reports.
 API/projection requests authenticate; compatibility HTML is public. Scoped reads carry pins; current discovery is unpinned.
 ## Outputs
-Bounded saved-record JSON reads, typed refusals, immutable candidate releases and
+Saved-record JSON reads (bounds vary by route), typed refusals, immutable candidate releases and
 projection bindings. Operations transport can return queued command job identities.
 The existing operations HTML/JavaScript shells and pinned legacy bundle hosting
 remain a compatibility exception; their presentation still requires React migration.
