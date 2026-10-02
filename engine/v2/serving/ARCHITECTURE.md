@@ -79,21 +79,23 @@ built assets is transport. Keep saved financial values, clocks and provenance;
 saved replay evidence does not imply current nightly/full-population qualification.
 Existing compatibility views do not establish ownership of new application screens.
 ## Diagrams
-Read path: the React client resolves "current" through one pointer chain, then reads.
+Read path: "current" resolves through one pointer chain; pinned routes carry their own release_id.
 ```mermaid
 flowchart LR
-  React[React typed client] -->|cookie; release pin| API[authenticated JSON API]
-  API --> Resolver[publication resolver]
+  React[React typed client] -->|cookie| API[authenticated JSON API]
+  API -->|current discovery - releases/current, events without a pin| Resolver[publication resolver]
   Resolver -->|ops CURRENT, bound projection_binding.json| Verify[verify_projection_binding]
-  Verify -->|live index check| Index[(serving index)]
-  API --> Reads[projection reads; bounds vary by route] --> Index
-  Reads --> Objects[immutable artifact objects]
+  Verify -->|live index check, then release_id| Reads[projection reads; bounds vary by route]
+  API -->|pinned - release_id supplied| Reads
+  Reads --> Index[(serving index)]
+  Index -->|score detail only - detail_artifact_id| Ref[immutable artifact reference]
+  Ref -->|store.read_verified| Objects[immutable artifact objects]
 ```
 Offline publication, composed by the projection tool:
 ```mermaid
 flowchart LR
   In[score document + bundle rows + pinned repository snapshot] --> Findings[findings artifact: diagnostic reference]
-  Findings -->|findings not ok| Refused[PROJECTION_REFUSED; nothing else written]
+  Findings -->|findings not ok| Refused[PROJECTION_REFUSED; findings artifact kept; no details, manifest or index rows]
   Findings -->|findings ok| Publish[details + manifest published]
   Publish --> Commit[index committed in one transaction]
   Commit --> Binding[tool prints projection_binding for the committed release]
@@ -101,4 +103,6 @@ flowchart LR
 ```
 Operations listener: `create_server` serves health files, shell/view pages, model-release
 resources, the release pointer and release bytes, the legacy shell, analog, derivation and
-parity documents, and what-if results. It forwards `POST` commands to injected callbacks.
+parity documents, and what-if results. An authenticated `POST /actions/refresh` or
+`/actions/whatif` with a valid body reaches its injected callback; an unconfigured action returns
+503 (the dashboard preview wires only the refresh callback).
