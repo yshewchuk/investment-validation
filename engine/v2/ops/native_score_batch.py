@@ -479,6 +479,35 @@ def _keyed_by_board_request(items: Any) -> dict[str, Any]:
     return keyed
 
 
+def _decode_producer_refusals(doc: Mapping[str, Any]) -> tuple[NativeScoreBatchRowRefusal, ...]:
+    """Decode ``producer_refusals.json``'s v1.0 document into the same typed
+    per-row refusal shape ``run_native_score_batch_worker``'s own per-row
+    loop already produces, so merging it reuses ``_native_score_batch_documents``'s
+    existing records/refusals collision check UNCHANGED -- see that
+    function's own docstring. A malformed document (wrong/missing
+    ``schema_version``, a non-list ``"refusals"``, or a malformed item) is a
+    whole-call ``ValueError``, matching this module's existing
+    "events.json must be a JSON array" discipline for malformed caller
+    input -- never a silently-dropped item.
+    """
+    if (not isinstance(doc, Mapping)
+            or doc.get("schema_version") != "native_score_batch_producer_refusals.v1.0"):
+        raise ValueError(
+            "producer_refusals.json must be a "
+            "native_score_batch_producer_refusals.v1.0 document")
+    items = doc.get("refusals")
+    if not isinstance(items, list):
+        raise ValueError("producer_refusals.json's \"refusals\" must be a list")
+    decoded = []
+    for item in items:
+        raw_key = item["key"]
+        key = BoardRequest(
+            ticker=str(raw_key["ticker"]), strategy=str(raw_key["strategy"]),
+            event_date=pd.Timestamp(raw_key["event_date"]), session=str(raw_key["session"]))
+        decoded.append(NativeScoreBatchRowRefusal(key, str(item["code"]), str(item["detail"])))
+    return tuple(decoded)
+
+
 def _native_score_batch_documents(
     keys_in_order: Sequence[BoardRequest],
     records: Sequence[Any],
@@ -573,6 +602,10 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
         events=events, feature_names=tuple(parameters["feature_names"]),
         gate_policy=parameters.get("gate_policy") or {},
     )
+    producer_refusals_path = root / "producer_refusals.json"
+    if producer_refusals_path.exists():
+        producer_doc = json.loads(producer_refusals_path.read_text())
+        refusals = refusals + _decode_producer_refusals(producer_doc)
     fields_by_request = {request_hash(request): inputs
                          for request, inputs in assembled.values()}
     batch_id = content_hash({

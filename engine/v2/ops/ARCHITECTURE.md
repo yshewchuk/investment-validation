@@ -84,19 +84,16 @@ so nothing submits a `forward_calendar_refresh` job today.
 (`native_board_universe.BoardRequest`) and
 `engine.v2.scoring.application.score_batch`. `assemble_score_batch_inputs`
 turns one release binding (`ScoringReleaseBinding`) plus a sequence of
-already-staged `NightlyEventInputs` into
-`dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple
-of typed per-row refusals — a pure function; an empty `events` sequence is
-a legitimate no-op. `run_native_score_batch_worker(parameters, root)` is
-the job kind's worker entrypoint: resolves the release once, reads the
-staged `events.json`, calls `assemble_score_batch_inputs`, then
-`engine.v2.scoring.application.score_batch` under
-`engine.v2.models.no_fit.no_fit_guard()`, and writes
-`records.json`/`refusals.json` (refusal codes and the fixed-detail
-contract are in "Failure semantics" below). **Supports `STR-THRU` only** —
-any other strategy refuses per-row. `supervisor.Service`'s tick sidecar
-(below) is its one production caller, though under today's production
-default it never actually submits a job.
+already-staged `NightlyEventInputs` into `dict[BoardRequest,
+tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple of typed per-row
+refusals — a pure function; an empty `events` sequence is a legitimate no-op.
+`run_native_score_batch_worker(parameters, root)` is the worker entrypoint:
+resolves the release once, reads staged `events.json` (plus an optional
+`producer_refusals.json`, merged into the per-row refusals before build — see
+"Failure semantics" below), assembles, scores under `no_fit_guard()`, and
+writes `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any
+other strategy refuses per-row. `supervisor.Service`'s tick sidecar (below) is
+its one production caller, though it never actually submits a job today.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
@@ -1375,7 +1372,10 @@ The four re-wrapped/malformed codes above always carry a fixed `detail`
 string, never staged input or an exception message (`refusals.json` is a
 published output). The release is resolved once per attempt and reused for
 every row. Assembly is a pure function of its inputs (no clock, no RNG) —
-a newly promoted release genuinely changing the output is by design.
+a newly promoted release genuinely changing the output is by design. A
+merged `producer_refusals.json` refusal (above) keyed to an existing
+record raises that same `ValueError`: `refusals.json` never claims a key
+`records.json` already claims.
 
 ### Native parity (`run_native_parity_worker`, `native_parity_report.py`)
 
