@@ -378,3 +378,13 @@ def test_14_spy_columns_exist_in_the_real_daily_market_contract():
     from engine.v2.features import panel_row_inputs
     real_columns = {column.name for column in contract_for("daily_market").columns}
     assert set(panel_row_inputs._SPY_COLUMNS) <= real_columns
+
+
+def test_15_null_spy_spot_raises_contract_mismatch():
+    batches = _default_batches()
+    spy_rows = _spy_rows()
+    spy_rows[3] = {**spy_rows[3], "spot": None}  # daily_market.spot is nullable
+    batches[("daily_market", "SPY")] = spy_rows
+    with pytest.raises(DataError) as exc:
+        _scan(batches=batches)
+    assert exc.value.code == "CONTRACT_MISMATCH"

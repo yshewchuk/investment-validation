@@ -194,10 +194,14 @@ def _regime_from_spy(spy_rows: list[dict[str, object]], key: Any,
     """The 9 legacy ``spy_*`` floats and the separate ``regime_asof`` anchor."""
     if spy_rows:
         ordered = sorted(spy_rows, key=lambda row: pd.Timestamp(row["date"]))
-        market = pd.DataFrame(
-            {"date": pd.to_datetime([row["date"] for row in ordered]),
-             "close": [float(row["spot"]) for row in ordered]},
-        )
+        try:
+            market = pd.DataFrame(
+                {"date": pd.to_datetime([row["date"] for row in ordered]),
+                 "close": [float(row["spot"]) for row in ordered]},
+            )
+        except (TypeError, ValueError, OverflowError):
+            raise errors.fail("CONTRACT_MISMATCH", "daily_market value conversion failed",
+                              details={"table_name": _DAILY_MARKET_TABLE}) from None
     else:
         market = pd.DataFrame({"date": [], "close": []})
     events = pd.DataFrame({"date": [key.event_date], "decision": [decision]})
