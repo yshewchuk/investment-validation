@@ -40,7 +40,8 @@ Callers: `engine/v2/dashboard` (`operations.create_server`; layer 8 imports laye
 offline tools `v2_dashboard_project` (projections, legacy bundle, shadow render),
 `v2_dashboard_verified_input` (legacy bundle) and `v2_route_probe` (`route_table`); the
 React client calls the HTTP API. Offline tools compose publication with ops.
-No request starts provider ingestion, fitting, scoring or financial simulation.
+Serving requests do not execute provider ingestion, fitting, scoring or financial simulation
+inline. Configured action callbacks may enqueue refresh or what-if jobs for asynchronous execution.
 
 ## External systems and libraries
 FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
