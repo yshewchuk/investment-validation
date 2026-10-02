@@ -63,12 +63,9 @@ interface section; this names only the load-bearing entry points.
   on a string/int64/bool/float64 column, returning a boolean mask
   `_fragment_rows` uses to drop non-matching rows via `RecordBatch.filter`
   *before* they are decoded to per-row Python dicts, so only surviving
-  rows pay that cost. Everything else this package's queries can express
-  — any `time_interval`, any predicate on a timestamp column, or a
-  predicate's values not representable in its column's declared Arrow
-  type (task brief #286 follow-up narrowed this deliberately, after a
-  timestamp/interval vectorization round turned up more correctness
-  edge cases than it was worth) — refuses (`None`) at compile time,
+  rows pay that cost. Any `time_interval`, any predicate on a timestamp
+  column, or a predicate value not representable in its column's
+  declared Arrow type makes the function return `None` at compile time,
   decided from `contract`/`query` alone, never from the data, and the
   whole query falls back to `compile_row_matcher`. `_fragment_rows` also
   falls back per fragment if the compiled mask itself raises when
