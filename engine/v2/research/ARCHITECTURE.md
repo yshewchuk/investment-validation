@@ -51,11 +51,11 @@ These CLI files sit outside `checks/import_layers.py`'s hook (it only parses
 one; the library entrypoints below are this package's real public interface:
 
 `signal_screen.run`, `fill_quality.run`, `polygon_fills.run`, `replay.replay`,
-`replay.replay_one`, `_replay_run.run`, `_replay_run.events_frame`,
-`_plan.plan_events`, `_chains.ChainIndex`, `_chains.load_chain_index`,
-`_trades_table.to_trades_table`, `_build_run.run`, `reconcile_trades.run`,
-`_trades_publish.publish`, `build_trades.coverage`, `_pricing.STRUCTURES`,
-`_pricing.trading_calendar_from_snapshot`.
+`replay.replay_one`, `_replay_run.run`,
+`_replay_run.events_frame`, `_plan.plan_events`, `_chains.ChainIndex`,
+`_chains.load_chain_index`, `_trades_table.to_trades_table`, `_build_run.run`,
+`reconcile_trades.run`, `_trades_publish.publish`, `build_trades.coverage`,
+`_pricing.STRUCTURES`, `_pricing.trading_calendar_from_snapshot`.
 
 `experiment_trades.load_trades(repository, snapshot, strategy)` is a second
 kind of entrypoint: a plain library call (no `tools/v2_*.py` CLI of its own),
@@ -331,6 +331,11 @@ uncaught traceback instead.
   reads only (module-level caches the legacy code held for a mutable store
   are gone, on purpose — a pinned snapshot never changes under a run, so
   there is nothing to invalidate).
+  With `index=None`, replay scopes chain availability and loaded chain
+  data to the plan's own years, tickers and dates. The resulting
+  `ChainIndex` contains only available plan keys. An explicit `index=`
+  bypasses chain reads. `_build_run.run` creates an independent replay
+  for each strategy.
 - **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
   are the only two retryable codes this package can raise; a retry is an
   operator re-running the same command (a scope head may have since
