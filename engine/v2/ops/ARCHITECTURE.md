@@ -1403,7 +1403,7 @@ job.
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
-| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request builds real `events.json` via the raw-row producer (Cutover PR-6) and submits — a per-key gap becomes that key's named refusal, a repository/contract-level break still raises `VALIDATION_FAILED` | the specific succeeded score job read, not session alone |
+| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request raises `VALIDATION_FAILED` today (the raw-row producer is not built) — "Cutover PR-6" above designs the real build: a per-key gap becomes that key's named refusal, a repository/contract-level break still raises `VALIDATION_FAILED` | the specific succeeded score job read, not session alone |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | design only, not yet implemented — see [#192](https://github.com/yshewchuk/investment-validation/issues/192) | — |
@@ -1524,9 +1524,10 @@ through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` /
 both out of every job-submission stage list by name (see "Outputs").
 `native_score_batch`'s sidecar returns a normal no-op if the selected
 `"score"` job pinned no snapshot (never a JobSpec, never a raise); for a
-new eligible snapshot-pinned job it reaches `submission.submit` through
-the raw-row producer ("Cutover PR-6" above) — see "Outputs"/"Failure
-semantics" for both cases.
+new eligible snapshot-pinned job it raises `VALIDATION_FAILED` today
+(the raw-row producer is not built) and will instead reach
+`submission.submit` through that producer once "Cutover PR-6" above is
+implemented — see "Outputs"/"Failure semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
 (`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through
