@@ -12,9 +12,9 @@ The [README](README.md) lists the checked exports (the only names other packages
   `python3 -m engine.v2.serving.api`.
 - `projections`: `connect`, `ensure_schema`, `resolve_event_refs`, `build_candidate`,
   `get_release`, `list_events`, `event_scores`, `get_event`, `get_score_detail`,
-  `event_query_hash`.
-- `bridge.build_bridges`; `legacy_bundle.load_legacy_bundle` / `load_score_document`;
-  `score_projection.legacy_score_projection`.
+  `event_query_hash`, `ServingIndexError`, `DEFAULT_PAGE_SIZE`, `MAX_PAGE_SIZE`.
+- `bridge`: `build_bridges`, `LEGACY_DISPLAY_MAPPING_V1`; `legacy_bundle`: `load_legacy_bundle`,
+  `load_score_document`, `LegacyBundleError`; `score_projection.legacy_score_projection`.
 
 Not in the README's checked list, so not part of the public interface: the route
 enumeration `operations.route_table` (with `STATIC_ROUTES`, `PARAMETERIZED_ROUTES`), the
@@ -45,7 +45,8 @@ operator-invoked dashboard preview `preview.run` -> `_server.build_server` ->
 row source and emits a projection binding for the ops publisher (it does not publish);
 `v2_dashboard_verified_input` builds a source-verified `PreviewInput` from a delivered
 release (ops catalog plus `load_legacy_bundle`); `v2_route_probe` probes `route_table`.
-Serving itself does not execute provider ingestion, fitting, scoring or financial simulation.
+Serving requests do not execute provider ingestion, fitting, scoring or financial simulation
+inline. Offline row building may invoke scoring through `native_shadow_render`.
 The refresh and what-if POST handlers invoke the injected action callbacks inline; `create_server`
 only stores them and does not require them to enqueue work, so each callback must only enqueue
 its refresh or what-if job and return.
