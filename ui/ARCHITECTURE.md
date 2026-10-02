@@ -36,7 +36,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
 | Retry or navigation | Reads keep pinned identity; no durable transaction or partial publication. |
-| Planned: parity `no_report`/`stale`/`unavailable` | Explicit per-status banner (counts still render for `no_report`/`stale`; `unavailable` shows an error, no counts) — never merged into the generic error/empty state. |
+| Planned: parity `no_report`/`stale`/`unavailable` | Explicit per-status banner: `no_report` shows nothing has run yet, no counts (the summary carries none); `stale` still renders every count and mismatch, flagged; `unavailable` shows an error, no counts — never merged into the generic error/empty state. |
 
 ## Invariants
 All new application rendering belongs here. Serving returns data/API responses
