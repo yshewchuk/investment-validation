@@ -165,6 +165,7 @@ def _dedupe_parts(
             deduped.append(bucket_frame.drop_duplicates(subset=key_cols, keep="first"))
 
     frame = pd.concat(deduped, ignore_index=True)
+    deduped.clear()
     return frame, before_total - len(frame)
 
 
@@ -319,7 +320,7 @@ class PartitionedWriter:
             else:
                 frame = pd.concat([_read_part(p, None) for p in parts], ignore_index=True)
                 year_removed = 0
-            frame = frame.sort_values(key_cols, kind="stable")
+            frame.sort_values(key_cols, kind="stable", inplace=True)
             removed += year_removed
             write_partition(frame, self.name, year, 0)
             for stale in parts:
