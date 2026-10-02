@@ -379,6 +379,14 @@ class TestFinalizeDedupe:
                 monkeypatch.setattr(store.pd, "concat", real_concat)
         assert sizes, "finalize() made no pd.concat call to inspect"
         assert max(sizes) < raw_total
+        # Exactly one concat call is allowed to approach the full table size
+        # (the final assembly of the already-deduplicated buckets); every
+        # other call must be bucket-sized, not year-sized -- this is what
+        # actually proves bucketing happened, as opposed to the weaker
+        # "something, somewhere, was smaller than the raw total".
+        largest, second_largest = sorted(sizes)[-1], sorted(sizes)[-2]
+        assert largest == max(sizes)
+        assert second_largest <= raw_total // 2
 
 
 class TestSchemaEvolution:

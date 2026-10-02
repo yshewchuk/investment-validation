@@ -136,7 +136,7 @@ def _dedupe_parts(
     Returns ``(frame, removed)`` with ``frame`` NOT yet sorted by key; the
     caller sorts once, after this returns, instead of once per bucket.
     """
-    with tempfile.TemporaryDirectory(prefix="finalize-bucket-") as work_str:
+    with tempfile.TemporaryDirectory(prefix="finalize-bucket-", dir=paths.DATA) as work_str:
         work = Path(work_str)
         for part_index, part in enumerate(parts):
             chunk = _read_part(part, None)
@@ -294,11 +294,18 @@ class PartitionedWriter:
         replaces part 0 (`write_partition`'s existing tmp-file + `os.replace`)
         BEFORE any stale numbered part file is removed. A crash at any point
         up to and including that replace leaves every pre-finalize part file
-        exactly as it was; a crash after it leaves the new part-0 plus any
-        not-yet-removed stale numbered parts, which the next read still
-        reads correctly (stale parts hold a subset of what part-0 now holds
-        in full). Finalize is therefore safe to re-run after any crash.
+        exactly as it was. A crash after the replace but before every stale
+        part is removed leaves the new, fully-deduplicated part-0 plus
+        whichever stale numbered parts have not yet been deleted; a read in
+        that window sees part-0's rows PLUS the stale parts' not-yet-removed
+        (pre-dedupe) rows, which can repeat primary keys part-0 already
+        holds — the same cross-part duplication finalize exists to resolve,
+        not a new failure mode. No crash loses data, and running finalize
+        again resolves any such leftover duplication the same way it always
+        does.
         """
+        if not isinstance(bucket_count, int) or isinstance(bucket_count, bool) or bucket_count < 1:
+            raise ValueError(f"bucket_count must be a positive int, got {bucket_count!r}")
         self.flush()
         removed = 0
         for year in sorted(self._touched):
