@@ -694,7 +694,11 @@ PR body, not restated here).** `_reconcile_native_score_batch_shadow`
 will build every admitted `board_requests()` key's `calendar_row`/
 `panel_row`/`panel_anchor` (panel-row staging: `engine/v2/features/
 ARCHITECTURE.md`) and `quote_rows`; `tier4_row` stays `{}` (every key is
-a forward event, `../scoring/ARCHITECTURE.md` "Inputs"). Open
+a forward event, `../scoring/ARCHITECTURE.md` "Inputs"). It, not the
+caller, sources every `calendar_row` field `nightly_raw_rows.
+scan_calendar_row` declares as caller-staged (entry/exit/expiry/spot/
+calendar-observed-through) — see the PR body for exactly which existing
+reader/resolver supplies each — so no field is ever left unsourced. Open
 prerequisites it must resolve or safely defer:
 `source_availability.verify_eod_availability`
 ([#260](https://github.com/yshewchuk/investment-validation/issues/260))

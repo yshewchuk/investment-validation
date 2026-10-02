@@ -122,23 +122,29 @@ history_start)` is the raw-row producer's one call for one
 pair; `panel_anchor` is the loosest of its contributing reads' own source
 dates, never a caller-asserted value. It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
-(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). Its pinned-snapshot
-dependencies: `scan_daily_state_inputs` (`key.ticker`); `computed_moves`
-(`key.ticker`, feeding `panel_math`); a new bounded `daily_market` read
-for the fixed ticker `"SPY"` (feeding `regime`, not reused from
-`scan_daily_state_inputs` — a different, derived shape); and, for
-`STR-RUNUP` only, `price_history_query.get_price_series`. Read
-sequencing, the `PriceQuery` construction and the
-`PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
-contract — see the PR body.
+(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
+changes which reads it makes or which keys the result carries — every
+call builds the full superset, `STR-RUNUP`'s fields included — so the one
+`panel_row`/`panel_anchor` pair built per `(ticker, event_date, session)`
+triple (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6") is valid and
+reused unchanged across every strategy sharing that triple; a strategy
+that does not name a superset-only key in its `feature_names` simply
+never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
+pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
+(`key.ticker`); `computed_moves` (`key.ticker`, feeding `panel_math`); a
+new bounded `daily_market` read for the fixed ticker `"SPY"` (feeding
+`regime`, not reused from `scan_daily_state_inputs` — a different,
+derived shape); `price_history_query.get_price_series`. Read sequencing,
+the `PriceQuery` construction and the `PriceSeriesRow`-to-DataFrame
+conversion are implementation detail, not contract — see the PR body.
 
 | Condition (R1-R6) | Outcome |
 |---|---|
 | snapshot has no `daily_market`/`computed_moves` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
-| snapshot has no `price_history` table (`STR-RUNUP` only — this read is never made for another strategy) | `CONTRACT_MISMATCH`, propagated unchanged |
+| snapshot has no `price_history` table | `CONTRACT_MISMATCH`, propagated unchanged |
 | `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: every key is still present (`n_prior=0`, the mean/EMA keys `None`), never absent; `regime`'s fields are unaffected (independent read) |
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
-| `price_history` has no row for this ticker (`STR-RUNUP` only) | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
+| `price_history` has no row for this ticker | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
 | retry with the same pinned snapshot/key/`decision_session`/`history_start` | identical result; no cache beyond the pinned reads themselves, no write, nothing to roll back |
 
