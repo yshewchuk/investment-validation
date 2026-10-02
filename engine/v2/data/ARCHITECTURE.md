@@ -271,10 +271,10 @@ fully re-hashes an object on its first open in a process and skips the re-hash
 on a later open only while the file's stat tuple (device, inode, size, mtime
 and ctime, in nanoseconds) equals the one recorded when its hash last matched;
 any drift, a failed verify or a non-regular file forces a full verify, and a
-file whose stat tuple changes while it is hashed is re-verified (up to three
-attempts) then refused as `OBJECT_CORRUPT`. The cache is in-memory and per
-process, bounded (emptied when full), and keyed by store root, content hash
-and byte size. Integrity guarantee: every change visible in the stat tuple is
+file whose stat tuple is unavailable or changes while it is hashed is
+re-verified a bounded number of times, then refused as `OBJECT_CORRUPT`. The
+cache is in-memory and per process, bounded (emptied when full), and keyed by
+store root, content hash and byte size. Integrity guarantee: every change visible in the stat tuple is
 detected on the next open; a tamper that preserves all five fields within one
 process lifetime is not (objects are immutable, read-only files, so that needs
 out-of-band access to the store). No retry beyond that bounded re-verify, no

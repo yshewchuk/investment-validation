@@ -524,3 +524,24 @@ def test_file_changing_during_verify_is_reverified_then_refused(counted_object, 
     with pytest.raises(DataError) as err:
         verify_object_path(store, obj)
     assert err.value.code == "OBJECT_CORRUPT"
+
+
+def test_unreadable_stat_tuple_is_retried_then_refused(counted_object, monkeypatch):
+    store, obj, path, calls = counted_object
+    real_stat_tuple, misses = objects_module._stat_tuple, [1]
+
+    def flaky(p):
+        if misses[0]:
+            misses[0] -= 1
+            return None
+        return real_stat_tuple(p)
+
+    monkeypatch.setattr(objects_module, "_stat_tuple", flaky)
+    assert verify_object_path(store, obj) == path  # the retry gets a stable pair of tuples
+    assert len(calls) == 2
+    monkeypatch.setattr(objects_module, "_VERIFIED", {})
+    monkeypatch.setattr(objects_module, "_stat_tuple", lambda p: None)
+    with pytest.raises(DataError) as err:
+        verify_object_path(store, obj)
+    assert err.value.code == "OBJECT_CORRUPT"
+

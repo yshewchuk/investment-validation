@@ -318,9 +318,8 @@ def verify_object_path(store: ArtifactStore, object_ref: ObjectRef):
             _VERIFIED.pop(key, None)
             raise errors.fail("OBJECT_CORRUPT",
                               "published object bytes do not match its recorded hash") from exc
-        if before is None:
-            return verified
-        if _stat_tuple(path) == before:  # unchanged while hashed: the hash covers these bytes
+        # Unchanged while hashed: the hash covers the bytes now on disk.
+        if before is not None and _stat_tuple(path) == before:
             if len(_VERIFIED) >= _VERIFIED_MAX:
                 _VERIFIED.clear()
             _VERIFIED[key] = before
