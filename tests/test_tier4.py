@@ -472,17 +472,33 @@ class TestPrefixGapBackfill:
                 existing=existing_old, tier3_snapshot="snap", log=lambda _m: None,
             )
 
-    def test_an_unchanged_pool_still_carries_without_recomputing(self, panel, built):
+    def test_an_unchanged_pool_still_carries_without_recomputing(
+        self, panel, built, monkeypatch
+    ):
         """Negative control: the new ``pool_changed`` bookkeeping must not fire
         when nothing was added to the retained prefix. No thinning is needed
         here — passing the SAME panel ``built`` was built from leaves no gap
         for the anti-join to find, so the early return must still carry every
         fold untouched: no ``gap_widened_since`` in the report and no fold
-        recomputed just because the module now tracks the pool.
+        recomputed just because the module now tracks the pool. A spy on
+        ``fit_fold`` proves this directly (output equality alone cannot: this
+        module's deterministic test model would refit an unchanged fold to
+        the IDENTICAL numbers, so a needless recompute would not show up in
+        the output) — no recorded fold stamp may be earlier than ``since``.
         """
+        since = "2015-01-01"
+        real_fit_fold = tier4.fit_fold
+        fit_calls: list = []
+
+        def spy(trainable, model, fold_start):
+            fit_calls.append(fold_start)
+            return real_fit_fold(trainable, model, fold_start)
+
+        monkeypatch.setattr(tier4, "fit_fold", spy)
+
         report: dict = {}
         out = build_forecasts(
-            panel, produces=_ONLY, models=_MODELS, since="2015-01-01",
+            panel, produces=_ONLY, models=_MODELS, since=since,
             existing=built, tier3_snapshot="snap", log=lambda _m: None,
             report=report,
         )
@@ -492,6 +508,10 @@ class TestPrefixGapBackfill:
             built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
         )
         assert "gap_widened_since" not in report.get("pred_abs_move", {})
+        assert fit_calls, "the fit_fold spy recorded no calls — it did not intercept anything"
+        assert all(pd.Timestamp(f) >= pd.Timestamp(since) for f in fit_calls), (
+            "an unchanged pool must never refit a fold before `since`"
+        )
 
     def test_a_gap_outside_the_backfill_window_is_a_named_skip_not_a_crash(self, panel, built):
         """Decision 3 (revised): a gap older than BACKFILL_WINDOW_MONTHS from

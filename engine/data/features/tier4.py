@@ -749,6 +749,7 @@ def _carried_prefix(
     keys: pd.DataFrame,
     cut: pd.Timestamp,
     model,
+    trainable: pd.DataFrame,
     *,
     log: Callable[[str], None] = _log,
 ):
@@ -821,8 +822,7 @@ def _carried_prefix(
         return merged.drop(columns=["_merge"]), cut, missing.copy()
 
     unscored = missing[missing["event_date"] < FIRST_FOLD]
-    pool_changed = len(unscored) > 0
-    if pool_changed:
+    if len(unscored):
         log(
             f"{model.produces}: {len(unscored):,} event(s) before "
             f"{FIRST_FOLD.date()} are new to Tier 3 and unscored by construction "
@@ -837,6 +837,25 @@ def _carried_prefix(
             have, on=["ticker", "event_date"], how="left", indicator=True
         )
         missing = merged[merged["_merge"] == "left_only"][["ticker", "event_date"]]
+
+    # Only an unscored key that is ALSO in the trainable pool can change a
+    # fold's training-row count (n_train counts `trainable` rows). A key
+    # `model.prepare`/the target filter excluded from `trainable` never joins
+    # any fold's pool, in a full rebuild or otherwise, so it must not force a
+    # widen or a refusal.
+    trainable_keys = pd.MultiIndex.from_arrays(
+        [trainable["ticker"], pd.to_datetime(trainable["date"])]
+    )
+    unscored_keys = pd.MultiIndex.from_arrays(
+        [unscored["ticker"], pd.to_datetime(unscored["event_date"])]
+    )
+    pool_changed = bool(unscored_keys.isin(trainable_keys).any())
+
+    if missing.empty and not pool_changed:
+        stale = len(have) - len(prefix_keys)
+        if stale > 0:
+            log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
+        return merged.drop(columns=["_merge"]), cut, missing.copy()
 
     # Any remaining missing key is scored (>= FIRST_FOLD, so it has a fold to
     # recompute), and an unscored fill changes the training pool of every
@@ -975,7 +994,9 @@ def build_producer(
             if existing is None
             else _normalize_group(existing, model.produces)
         )
-        carried, cut, unfilled_gap = _carried_prefix(prior, keys, requested_cut, model, log=log)
+        carried, cut, unfilled_gap = _carried_prefix(
+            prior, keys, requested_cut, model, trainable, log=log
+        )
         if gaps is not None:
             gaps[model.produces] = unfilled_gap
         log(
