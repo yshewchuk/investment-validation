@@ -1117,26 +1117,7 @@ starts working with no change of its own.
   `"native_refused_unmatched"` (a native refusal with no legacy row to
   move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/
   `tolerance_policy_id` fields; `only_legacy` now excludes rows
-  `native_refused` claims. `nightly.submit_native_parity_if_ready` and
-  its tick-loop caller, `Service._reconcile_native_parity`, submit such
-  a job automatically once its inputs are ready.
-
-  Schema `native_parity_report.v1.2` (cutover PR-4 slice 1 of #327, this
-  PR) adds two more things, both additive: top-level `as_of`/`generated_at`
-  — this report's own run identity, stamped by `_stamp_report_identity`
-  once, AFTER `apply_native_refusals`, at the write step in both
-  `run_native_parity_worker` (`as_of` parsed from the job's own
-  `"<as_of>|<scope_hash>"` `expected_ids[0]`, `None` when `expected_ids`
-  is empty) and `native_parity_handler` (`as_of` read from the stage
-  graph's own running `value["session"]`) — and, inside each
-  `mismatches` entry, `values`: a `{field_path: {"legacy": ...,
-  "native": ...}}` map covering only that entry's own `finding_fields`
-  (bounded by how many mismatches already exist, never every field —
-  USER DECISION, 2026-10-02), threaded straight through from
-  `compare_dimension`'s own widened return
-  (`engine/v2/parity/ARCHITECTURE.md`). `as_of`/`generated_at` are never
-  set inside `compare_native_vs_legacy`/`_empty_native_report`, which
-  stay pure and wall-clock-free (R6, parity package).
+  `native_refused` claims. `nightly.submit_native_parity_if_ready` and its tick-loop caller, `Service._reconcile_native_parity`, submit such a job automatically once its inputs are ready. `v1.2` (cutover PR-4 slice 1 of #327, this PR) adds top-level `as_of`/`generated_at` (run identity, stamped by `_stamp_report_identity` at the write step, AFTER `apply_native_refusals`, in both `run_native_parity_worker` and `native_parity_handler` -- never inside `compare_native_vs_legacy`/`_empty_native_report`, which stay wall-clock-free) and, inside each `mismatches` entry, `values` (that entry's own mismatched fields only, `{legacy, native}` -- `engine/v2/parity/ARCHITECTURE.md`).
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the existing `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild`
