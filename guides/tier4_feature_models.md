@@ -279,22 +279,56 @@ the prefix has a repair, and which one applies depends on whether the gap
 predates `FIRST_FOLD`:
 
 * **Unscored gap** (older than `FIRST_FOLD`): no fold ever existed to
-  recompute it, but a full rebuild never scores it either — `folds` is
-  bounded below by `FIRST_FOLD`, so every pre-`FIRST_FOLD` key gets the same
-  null row as any other unscorable event, regardless of why it is new to the
-  table. The run fills it with that same null row, at the current `since`,
-  and continues; there is nothing to recompute, so `since` does not widen.
-* **Scored gap** (`FIRST_FOLD` or later): the run widens `since` backward to
-  the gap's own fold boundary and recomputes from there. The result is
-  bit-for-bit identical to what a full rebuild would have produced for those
-  rows (`TestPrefixGapBackfill`), because it is the same fold-recompute path a
-  normal `--since` build already uses — just starting earlier.
+  recompute the key ITSELF, but a full rebuild never scores it either —
+  `folds` is bounded below by `FIRST_FOLD`, so every pre-`FIRST_FOLD` key gets
+  the same null row as any other unscorable event, regardless of why it is
+  new to the table. The run fills it with that same null row, at the current
+  `since`, and continues.
+
+  The key having no fold of its own does not mean nothing else needs
+  recomputing: it is still a new row in the TRAINABLE pool, dated before
+  `FIRST_FOLD` — and every fold's own cutoff is `FIRST_FOLD` or later, so
+  `n_train = (trainable["date"] < stamp).sum()` would include it for EVERY
+  fold a full rebuild fits, not only the folds a widened `since` would reach.
+  Filling the key's own null row and leaving `since` unchanged — the
+  behaviour before this fix — carried every earlier fold's forecast and
+  residual band forward as if the training pool had not changed, silently.
+  The earliest fold a pre-`FIRST_FOLD` row can affect is `FIRST_FOLD` itself,
+  so this is folded into the SAME widen-and-bound computation the scored gap
+  below uses, not a separate rule.
+* **Scored gap** (`FIRST_FOLD` or later): the new row's own date is itself a
+  lower bound on which folds it can affect, because a fold's training only
+  looks at rows dated before its OWN cutoff — a fold starting before the new
+  row's date never includes it either way. So the run widens `since`
+  backward to the gap's own fold boundary and recomputes from there; nothing
+  earlier needs touching, with or without a simultaneous unscored gap. The
+  result is bit-for-bit identical to what a full rebuild would have produced
+  for those rows (`TestPrefixGapBackfill`), because it is the same
+  fold-recompute path a normal `--since` build already uses — just starting
+  earlier.
 
 A single build can hit both at once — a backfilled ticker's history carries
-pre- and post-`FIRST_FOLD` events together — and the two repairs compose: the
-unscored fill runs first, so a scored gap's widened pass still finds the
+pre- and post-`FIRST_FOLD` events together — and the repairs compose: the
+unscored fill runs first (so a scored gap's widened pass still finds the
 just-filled rows in the carried prefix instead of re-flagging them as an
-out-of-window gap.
+out-of-window gap), and the recompute boundary is the EARLIER of the two
+gaps' own widening targets — `FIRST_FOLD` for the unscored side, the gap's
+fold boundary for the scored side — never the scored one alone.
+
+**Widening to `FIRST_FOLD` is still bounded by `BACKFILL_WINDOW_MONTHS`,
+measured from the requested `since`, like any other widening** — and in a
+mature table that bound is almost always narrower than the distance back to
+`FIRST_FOLD`. When it is, the run cannot both stay inside the bound and
+recompute every fold whose training pool the new row actually joined, so it
+refuses instead of picking one silently: `_carried_prefix` raises
+`Tier4Error`, naming the producer, and tells the operator to run
+`tier4_full.sh` with no `--since`. This is the same refuse-over-silent-carry
+answer the cadence and `model_id` guards already give for an unsafe
+carry-over (below) — restored for this case, rather than the null-row fill
+quietly standing in for it. A build with no unscored gap, or whose `since` is
+itself close enough to `FIRST_FOLD` for the bounded widening to reach it (a
+table still young, or a test fixture with a short history), recomputes in
+full instead of raising.
 
 **The widening is bounded** (`BACKFILL_WINDOW_MONTHS`, measured back from the
 requested `since`). Recomputing an arbitrarily old gap would put unbounded,
@@ -407,11 +441,13 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   `tier4_gap_partial`), so an absent key means specifically "an unclosed gap",
   never a silent unbuilt table.
 * **The carry-over is guarded three ways** (`_carried_prefix`): a cadence
-  change and a different `model_id` still refuse `--since` outright. The
-  third — Tier-3 events appearing inside the retained prefix — never refuses:
-  an UNSCORED gap (older than `FIRST_FOLD`, with no fold to recompute) is
-  filled with the same null row a full rebuild would give it; a SCORED gap
-  widens `since` backward to close it instead, bounded (§6a).
+  change and a different `model_id` refuse `--since` outright. The third —
+  Tier-3 events appearing inside the retained prefix — widens `since`
+  backward to recompute the earliest fold either kind of gap could have
+  changed the training pool of (a SCORED gap's own fold boundary, or
+  `FIRST_FOLD` for an UNSCORED one, since a pre-`FIRST_FOLD` row joins every
+  scored fold's pool), bounded by `BACKFILL_WINDOW_MONTHS`; past that bound
+  it refuses rather than carry a fold it cannot safely recompute (§6a).
 * **`--since` rounds DOWN to its fold boundary**, because a fold is the unit of
   recomputation: half a month cannot be rebuilt without fitting the model its
   other half already used. The rounding recomputes a superset, which is
