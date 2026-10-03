@@ -278,40 +278,22 @@ against the existing table — but its response is different, because a gap in
 the prefix has a repair, and which one applies depends on whether the gap
 predates `FIRST_FOLD`:
 
-* **Unscored gap** (older than `FIRST_FOLD`): no fold ever existed to
-  recompute the key ITSELF, but a full rebuild never scores it either —
-  `folds` is bounded below by `FIRST_FOLD`, so every pre-`FIRST_FOLD` key gets
-  the same null row as any other unscorable event, regardless of why it is
-  new to the table. The run fills it with that same null row, at the current
-  `since`, and continues.
-
-  Whether anything ELSE needs recomputing depends on whether the key is also
-  in the TRAINABLE pool (`training_frames`'s second return value — complete
-  features AND a realized target; `model.prepare`'s own filters can exclude a
-  key that is otherwise a normal Tier-3 event). Only a TRAINABLE pre-
-  `FIRST_FOLD` key changes anything beyond its own null row: every fold's own
-  cutoff is `FIRST_FOLD` or later, so `n_train = (trainable["date"] <
-  stamp).sum()` would include a trainable pre-`FIRST_FOLD` row for EVERY fold
-  a full rebuild fits, not only the folds a widened `since` would reach.
-  Filling such a key's null row and leaving `since` unchanged — the
-  behaviour before this fix — carried every earlier fold's forecast and
-  residual band forward as if the training pool had not changed, silently.
-  The earliest fold a TRAINABLE pre-`FIRST_FOLD` row can affect is
-  `FIRST_FOLD` itself, so this is folded into the SAME widen-and-bound
-  computation the scored gap below uses, not a separate rule. An unscored key
-  that is NOT trainable (e.g. `model.prepare` excludes it) still gets its
-  null row, exactly as before this fix, with no widening at all — nothing
-  about it could possibly change a fold's training pool.
-* **Scored gap** (`FIRST_FOLD` or later): the new row's own date is itself a
-  lower bound on which folds it can affect, because a fold's training only
-  looks at rows dated before its OWN cutoff — a fold starting before the new
-  row's date never includes it either way. So the run widens `since`
-  backward to the gap's own fold boundary and recomputes from there; nothing
-  earlier needs touching, with or without a simultaneous unscored gap. The
-  result is bit-for-bit identical to what a full rebuild would have produced
-  for those rows (`TestPrefixGapBackfill`), because it is the same
-  fold-recompute path a normal `--since` build already uses — just starting
-  earlier.
+* **Unscored gap** (older than `FIRST_FOLD`): no fold exists to recompute
+  the key itself, and a full rebuild never scores it either, so the run
+  fills the same null row any unscorable event gets and continues. The key
+  can still matter beyond that row when it is also in the TRAINABLE pool
+  (`training_frames`'s target-filtered second return; `model.prepare` can
+  exclude a key from it) — a trainable pre-`FIRST_FOLD` key joins `n_train`
+  for EVERY scored fold a full rebuild fits, not only ones a widened `since`
+  reaches, so it folds into the SAME widen-and-bound computation the scored
+  gap below uses, capped at `FIRST_FOLD` (never past it, below). A
+  non-trainable unscored key gets only its null row — nothing about it can
+  change a fold's training pool.
+* **Scored gap** (`FIRST_FOLD` or later): the new row's own date bounds
+  which folds it can affect, so the run widens `since` backward to the
+  gap's own fold boundary and recomputes from there — bit-for-bit identical
+  to a full rebuild (`TestPrefixGapBackfill`), the same fold-recompute path
+  a normal `--since` build already uses, just starting earlier.
 
 A single build can hit both at once — a backfilled ticker's history carries
 pre- and post-`FIRST_FOLD` events together — and the repairs compose: the
@@ -323,40 +305,27 @@ recompute boundary is the EARLIER of the two gaps' own widening targets —
 side — never the scored one alone. A scored gap ALONE (no trainable unscored
 key alongside it) widens exactly as before this fix.
 
-**Widening to `FIRST_FOLD` is still bounded by `BACKFILL_WINDOW_MONTHS`,
-measured from the requested `since`, like any other widening** — and in a
-mature table that bound is almost always narrower than the distance back to
-`FIRST_FOLD`. When it is, the run cannot both stay inside the bound and
-recompute every fold whose training pool the new row actually joined, so a
-build with a TRAINABLE unscored gap refuses instead of picking one silently:
-`_carried_prefix` raises `Tier4Error`, naming the producer, and tells the
-operator to run `tier4_full.sh` with no `--since`. This is the same
-refuse-over-silent-carry answer the cadence and `model_id` guards already
-give for an unsafe carry-over (below) — restored for this one case, rather
-than the null-row fill quietly standing in for it. A build with no trainable
-unscored gap (none at all, or none that are also trainable), or whose
-`since` is itself close enough to `FIRST_FOLD` for the bounded widening to
-reach it (a table still young, or a test fixture with a short history),
-recomputes in full instead of raising. A SCORED gap's own out-of-window case
-is unchanged by this fix — it stays the named, nonfatal skip described below,
-not a refusal; a defect in that path's own failure mode is tracked
-separately (issue #333), not fixed by this refusal.
-
-A requested `since` that already falls before `FIRST_FOLD` needs no widening
-past it at all — `cut` itself is already earlier than every scored fold, so
-a trainable unscored key cannot possibly reach a fold `cut` does not already
-cover. The widen target used here is `min(FIRST_FOLD, cut)`, never
-`FIRST_FOLD` unconditionally, so `effective_cut` never moves LATER than the
-originally requested `cut` and turns already-covered Tier-3 keys into a
-spurious gap.
+**The widen target for a TRAINABLE unscored gap is `min(FIRST_FOLD, cut)`,
+never a bare `FIRST_FOLD`** — `cut` itself can already be earlier than
+`FIRST_FOLD` (a `since` requested before it), and such a key can never
+affect a fold earlier than `cut` already covers, so the target must never
+push `effective_cut` past the requested `cut`. A build with no trainable
+unscored gap keeps the ordinary incremental cut unchanged — no widening at
+all, full or otherwise. A SCORED gap's own out-of-window case is unaffected
+by this fix (below); a defect in that path is tracked separately, issue
+#333.
 
 **The widening is bounded** (`BACKFILL_WINDOW_MONTHS`, measured back from the
 requested `since`). Recomputing an arbitrarily old gap would put unbounded,
 unpredictable runtime into the nightly's critical path — the exact failure
 mode the incremental path exists to avoid. A gap whose earliest date falls
-outside that window is **not** backfilled this run.
+outside that window is **not** backfilled this run — except a TRAINABLE
+unscored gap, which raises `Tier4Error` instead of silently skipping it
+(§6a above), since picking one fold's training pool over another to carry
+has no safe default.
 
-**An out-of-window gap is a named skip, not a null row.** The affected key is
+**An out-of-window gap is a named skip, not a null row** (the trainable
+unscored case above is the one exception — it raises). The affected key is
 left **absent** from the written table — it is in neither the carried prefix
 nor the recomputed scope — rather than given a placeholder NULL-forecast row.
 This is deliberate and is the one narrow exception to §3's "total over Tier 3"
@@ -373,9 +342,9 @@ so as the nightly cut keeps advancing an old gap only falls farther behind it
 — it never "ages into" the window on its own; a full rebuild (or deliberately
 choosing an earlier `--since`) is the only recovery.
 
-The run itself still proceeds on an out-of-window gap — it does not raise —
-and names the skipped keys in the build's report (`out_of_window_gap` per
-producer). The legacy nightly (`engine/dashboard/nightly.py`) turns a non-empty
+The run itself still proceeds on an out-of-window gap that is NOT a
+trainable unscored one — it does not raise — and names the skipped keys in
+the build's report (`out_of_window_gap` per producer). The legacy nightly (`engine/dashboard/nightly.py`) turns a non-empty
 report into a `tier4_gap_partial` flag, counted by **distinct `(ticker,
 event_date)` key, not by summing each producer's list** — the same three
 events show up in every producer's list, and double-counting them would
