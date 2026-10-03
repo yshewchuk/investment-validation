@@ -103,6 +103,7 @@ flowchart LR
 ```
 Operations listener: `create_server` serves health files, shell/view pages, model-release
 resources, the release pointer and release bytes, the legacy shell, analog, derivation and
-parity documents, and what-if results. An authenticated `POST /actions/refresh` or
+documents, and what-if results. Native parity has no operations HTML or JSON
+preview route; its application presentation belongs to React. An authenticated `POST /actions/refresh` or
 `/actions/whatif` with a valid body reaches its injected callback; an unconfigured action returns
 503 (the dashboard preview wires only the refresh callback).

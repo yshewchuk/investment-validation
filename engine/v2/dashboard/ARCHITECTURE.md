@@ -54,25 +54,12 @@ all optional; each unlocks exactly one route (`/models/release.json`,
 `/calibration-health.json`, `POST /actions/refresh`, `GET /analogs.json`
 respectively) and none is ever inferred from `--release-root` or
 `--health-path` — omitting one keeps that route's own explicit "not
-configured" refusal (see Failure semantics). `--native-parity-report-path`
-is optional the same way and unlocks `GET /native_parity.json`, with one
-difference from the others — the file it names need not exist yet
-(`engine.v2.serving.native_parity_projection.native_parity_summary`'s own
-`"no_report"` state, not this launcher's "not configured" 503 — see
-Outputs). Unlike `/calibration-health.json`/`/models/release.json`,
-`--native-parity-report-path` gates only the JSON route: `GET /native_parity`
-itself is a static page shell, always servable regardless of whether the
-flag is set (the same asymmetry `/analogs`/`/analogs.json` already have with
-`--serving-index-path`) — it fetches the JSON client-side and renders
-whatever that route answers, including its own "not configured" refusal.
+configured" refusal (see Failure semantics).
 `--release-root`, `--health-path`, `--model-release-root`,
 `--calibration-health-path` and `--serving-index-path` are serving roots:
 they are read via
 `engine.v2.serving`'s bounded/paginated reads, never by directly reading
-scoring/evaluation/ledger data. `native_parity_summary` reads
-its whole file in one call — `worst_limit` bounds how many rows the
-RETURNED document lists, not how much is read — so it is deliberately left
-out of that "bounded/paginated" claim. `--ops-root` is not a serving read at
+scoring/evaluation/ledger data. `--ops-root` is not a serving read at
 all — it names a job root, not a data root: when configured, `_server.py`'s
 `_refresh_callback` passes it straight to `engine.v2.ops.cli.refresh_action`
 to submit a shadow nightly plan (see Dependencies for what that call does
@@ -87,18 +74,9 @@ score/strategy's persisted analog row ids and count, keyed by
 `release_id`/`event_id` query params, or a refusal — not configured,
 unreadable, outdated, no rows for that event, or missing query params) —
 and, when a refresh root is configured, queued refresh job ids from
-`POST /actions/refresh`. When `--native-parity-report-path` is configured,
-`GET /native_parity.json` serves
-`engine.v2.serving.native_parity_projection.native_parity_summary`'s
-document unchanged (`"no_report"`/`"unavailable"`/`"available"` — see that
-module's own doc); when it is not, that route answers its own 503 "native
-parity not configured" refusal instead. `GET /native_parity` is always
-served regardless: a small page that fetches `/native_parity.json` and
-renders the counts, per-field mismatch breakdown and worst rows, with a
-client-side match/mismatch/incomparable/refused filter over that SAME
-document (no server-side query, no second data source) — the everyday
-"no_report" state and the "not configured"/"unavailable" refusals all
-render as an explicit message, never a blank page.
+`POST /actions/refresh`. Native parity presentation belongs to the React
+app and its authenticated API; this launcher has no parity configuration
+or parity preview routes.
 
 ## Dependencies
 
@@ -139,16 +117,10 @@ no direct filesystem, database or third-party API access of its own.
     is ever called. Neither reaches the serving layer.
   - **Serving-time, in `engine.v2.serving` (not this package)**: an
     omitted *optional* root (`--model-release-root`,
-    `--calibration-health-path`, `--serving-index-path`, and
-    `--native-parity-report-path`)
+    `--calibration-health-path` and `--serving-index-path`)
     is passed straight through to `create_server`, whose own typed
     responses answer the request at call time — e.g. the read-only 503
-    "refresh not configured" when no refresh callback is wired, or 503
-    "native parity not configured" when
-    `--native-parity-report-path` itself was never given (distinct from
-    that same route's own `"no_report"` 200 when the path IS configured but
-    nothing has been written there yet, and distinct from `GET /native_parity`
-    itself, which is served either way — see Outputs).
+    "refresh not configured" when no refresh callback is wired.
     `--ops-root` is the one exception: this package's own
     `_server.py::_refresh_callback` converts it to a bound
     `submit_refresh` callable, or to `None` when the root is missing or
