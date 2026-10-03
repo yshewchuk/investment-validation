@@ -962,7 +962,9 @@ class TestScoredTrainingPoolBoundaries:
         )
         return existing, existing[list(tier4.KEY_COLUMNS)].copy()
 
-    def test_trainable_scored_backfill_outside_window_refuses(self, panel, built):
+    def test_trainable_scored_backfill_outside_window_refuses(
+        self, panel, built, monkeypatch, tmp_path
+    ):
         """A trainable scored backfill outside the bounded window must refuse.
 
         The ordinary panel built the old table (``built``); the augmented panel
@@ -984,7 +986,12 @@ class TestScoredTrainingPoolBoundaries:
         table, so carrying it is observable rather than theoretical. Both
         sides use the same ``snap`` Tier-3 snapshot; the inputs are
         deep-copied before the refusal to prove the failed build left them
-        untouched.
+        untouched. Publication is now tested through the real ``build_table``
+        entry point, not a direct ``build_forecasts`` call: the panel and
+        existing table are patched at the module boundary and the writer is
+        spied, so a silent carry reaches the spy and fails loudly instead of
+        raising ``Tier4Error``, while a sentinel at the target proves nothing
+        was published.
         """
         since = "2014-10-01"
         gap_date = pd.Timestamp("2014-04-15")
@@ -1043,11 +1050,43 @@ class TestScoredTrainingPoolBoundaries:
 
         augmented_before = augmented.copy(deep=True)
         existing_before = built.copy(deep=True)
-        with pytest.raises(Tier4Error, match="(?i)rebuild in full"):
-            build_forecasts(
-                augmented, produces=_ONLY, models=_MODELS, since=since,
-                existing=built, tier3_snapshot="snap", log=lambda _m: None,
+
+        # Drive the real production path: build_table loads the panel, reads
+        # the existing output, and only then builds and publishes. Every
+        # dependency it cannot parameterise is injected at the module
+        # boundary; the refusal itself must still come from the real
+        # build_forecasts/_carried_prefix logic, never from a stub.
+        target = tmp_path / "tier4_forecasts.parquet"
+        sentinel = b"synthetic pre-existing output; a refused build must not publish over it"
+        target.write_bytes(sentinel)
+
+        from engine import features as engine_features
+
+        monkeypatch.setattr(engine_features, "load_panel", lambda *a, **k: augmented)
+        monkeypatch.setattr(tier4, "load_forecasts", lambda path=None: built)
+        real_build_forecasts = tier4.build_forecasts
+
+        def with_test_models(panel, *, since=None, existing=None, report=None):
+            return real_build_forecasts(
+                panel, produces=_ONLY, models=_MODELS, since=since,
+                existing=existing, tier3_snapshot="snap", log=lambda _m: None,
+                report=report,
             )
+
+        monkeypatch.setattr(tier4, "build_forecasts", with_test_models)
+
+        writer_calls: list = []
+
+        def refuse_publication(frame, path=None):
+            writer_calls.append((frame, path))
+            raise AssertionError("a refused build must never reach the writer")
+
+        monkeypatch.setattr(tier4, "write_forecasts", refuse_publication)
+
+        with pytest.raises(Tier4Error, match="(?i)rebuild in full"):
+            tier4.build_table(since=since, out=target)
+        assert writer_calls == [], "the refusal must happen before any publication"
+        assert target.read_bytes() == sentinel, "the existing output must be untouched"
         pd.testing.assert_frame_equal(augmented, augmented_before)
         pd.testing.assert_frame_equal(built, existing_before)
 
