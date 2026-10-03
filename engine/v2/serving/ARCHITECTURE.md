@@ -73,10 +73,10 @@ The API takes an optional configured report path; no path means `no_report`.
 | Report absent | `no_report` (200) |
 | Report malformed or cannot be read safely | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no data |
 | Report `as_of` predates current release `resolved_as_of` | `stale` (200); all retained data still returned |
-| Current release cannot be resolved | Report `available`; freshness indeterminate |
+| Current release cannot be resolved, including a pointer read failure | Report `available`; freshness indeterminate |
 | Detail `row_key` absent from the report | 404 Problem |
 | Cursor belongs to another report or detail filter | `CURSOR_MISMATCH` Problem (409) |
-| Cache/retry/transaction/partial write/idempotency | `no-store`, no ETag; no retries, jobs or writes; identical report and query yield identical data |
+| Cache/retry/transaction/partial write/idempotency | `no-store`, no ETag; no retries, jobs or writes; report-derived summary fields and detail items stay stable for the same report and query; freshness `status` may change with current-release resolution |
 
 API errors raised as `ApiError` share one `Problem` envelope (`code`, `category`, `retryable`);
 HTTP statuses are in parentheses. Index integrity failures (`ServingIndexError`, e.g. a schema

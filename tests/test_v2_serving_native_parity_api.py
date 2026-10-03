@@ -10,7 +10,9 @@ helpers exactly like ``tests/test_v2_serving_publication_binding.py`` does.
 """
 from __future__ import annotations
 
+import builtins
 import json
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -449,6 +451,74 @@ def test_current_release_failure(parity, tmp_path):
             else:
                 assert len(document["items"]) == expected, path
     finally:
+        _stop(server, thread)
+
+
+def test_current_pointer_io_failure_leaves_report_available(parity, tmp_path, monkeypatch):
+    """A real I/O failure reading the ops publisher's ``CURRENT`` is the same
+    availability contract as the resolver's own ``ApiError`` above: the parity
+    report stays available. The failure is injected only for that exact file
+    through ``builtins.open`` so the real ``_publication_resolver`` chain is
+    exercised, never a mocked resolver or freshness check."""
+    publication_root = tmp_path / "publication"
+    publication_root.mkdir()
+    current_path = publication_root / "CURRENT"
+    current_path.write_text("shadow-release-0001\n", encoding="utf-8")
+
+    app = create_app(serving_db=str(tmp_path / "serving.sqlite"),
+                     store_root=str(tmp_path / "objects"),
+                     serving_root=str(tmp_path / "serving"),
+                     token=TOKEN, publication_root=str(publication_root),
+                     native_parity_report_path=str(parity.report_path))
+    server, thread, base = _start(app)
+    injected = []
+    real_open = builtins.open
+
+    def deny_current_candidate(file, *args, **kwargs):
+        if isinstance(file, int):
+            return real_open(file, *args, **kwargs)
+        if os.fspath(file) == str(current_path):
+            injected.append(str(current_path))
+            raise PermissionError(13, "Permission denied", str(current_path))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", deny_current_candidate)
+    try:
+        code, body, headers = _get(base, "/api/v1/native_parity", token=TOKEN)
+        assert code == 200
+        _assert_no_store(headers)
+        summary = json.loads(body)
+        assert summary["status"] == "available"
+        assert summary["as_of"] == AS_OF
+        assert summary["compared_count"] == 3
+        assert summary["matched_row_count"] == 1
+        assert summary["mismatched_row_count"] == 2
+        assert summary["only_legacy_count"] == 2
+        assert summary["only_native_count"] == 2
+
+        code, body, headers = _get(base, "/api/v1/native_parity/mismatches", token=TOKEN,
+                                   params={"limit": "10"})
+        assert code == 200
+        _assert_no_store(headers)
+        document = json.loads(body)
+        assert document["status"] == "available"
+        assert [(item["row_key"], item["dimension"]) for item in document["items"]] == [
+            ("BBB|S|2026-01-02", "forecasts"), ("CCC|S|2026-01-03", "simulation")]
+        assert document["next_cursor"] is None
+
+        for side, expected in (("legacy", ["DDD|S|2026-01-04", "EEE|S|2026-01-05"]),
+                               ("native", ["FFF|S|2026-01-06", "GGG|S|2026-01-07"])):
+            code, body, headers = _get(base, "/api/v1/native_parity/unpaired", token=TOKEN,
+                                       params={"side": side, "limit": "10"})
+            assert code == 200
+            _assert_no_store(headers)
+            document = json.loads(body)
+            assert document["status"] == "available", side
+            assert document["items"] == expected, side
+
+        assert injected == [str(current_path)] * 4
+    finally:
+        monkeypatch.undo()
         _stop(server, thread)
 
 

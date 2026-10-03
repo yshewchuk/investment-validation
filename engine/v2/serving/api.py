@@ -563,7 +563,7 @@ def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> 
         return "available"
     try:
         release_id = resolve_current()
-    except ApiError:
+    except (ApiError, OSError):
         return "available"
     if release_id is None:
         return "available"

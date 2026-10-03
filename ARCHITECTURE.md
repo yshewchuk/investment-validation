@@ -443,7 +443,8 @@ Only a tracked path absent from the worktree reads as empty.
   Output document (`native_parity_summary.v1.0`), when a report is found and
   parses: `status: "available"`; `partial` (`true` when the artifact predates
   the `native_refused`/`native_refused_unmatched` fields); `source_schema_version`;
-  `as_of`/`generated_at`/`tolerance_policy_id` (null when absent from an older report or unstamped diagnostic export);
+  `as_of`/`generated_at` (null when absent from an older report or unstamped diagnostic export);
+  `tolerance_policy_id` (null when absent from an older report);
   `compared_count`/`only_legacy_count`/`only_native_count`;
   `matched_row_count`/`mismatched_row_count` (distinct row keys with zero
   vs. at least one dimension mismatch — `matched_row_count +
