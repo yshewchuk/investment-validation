@@ -110,9 +110,8 @@ def _problem(code: str, category: str, message: str, *, retryable: bool = False,
 
 def _handle_api_error(request: Request, exc: ApiError) -> Response:
     """Render one Problem envelope; native parity responses are never cached or reused."""
-    headers = {}
-    if request.url.path.startswith("/api/v1/native_parity"):
-        headers["Cache-Control"] = "no-store"
+    headers = ({"Cache-Control": "no-store"}
+               if request.url.path.startswith("/api/v1/native_parity") else {})
     return Response(content=canonical_json(exc.problem), media_type="application/json",
                     status_code=exc.status_code, headers=headers)
 
@@ -545,33 +544,11 @@ def _parity_malformed() -> ApiError:
                                   "the native parity report is malformed"))
 
 
-def _parity_mismatch(message: str) -> ApiError:
-    return ApiError(_CURSOR_MISMATCH_STATUS, _problem("CURSOR_MISMATCH", "validation", message))
-
-
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
     """Classify report freshness; an ApiError/OSError resolver means unknown current."""
-
-    def normalized_resolver() -> str | None:
-        try:
-            return resolve_current()
-        except (ApiError, OSError):
-            return None
-
     return native_parity_projection.native_parity_freshness(
-        serving_db, normalized_resolver, as_of, _open, projections.get_release)
-
-
-def _parity_offset(raw: str | None, population: int) -> int:
-    if raw is None:
-        return 0
-    try:
-        offset = int(raw)
-    except ValueError:
-        raise _parity_mismatch("cursor offset is invalid") from None
-    if offset < 0 or offset > population:
-        raise _parity_mismatch("cursor offset is out of range")
-    return offset
+        serving_db, resolve_current, as_of, _open, projections.get_release,
+        (ApiError, OSError))
 
 
 def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, report_path,
@@ -606,15 +583,20 @@ def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, repo
     except LookupError:
         raise ApiError(404, _problem("NATIVE_PARITY_ROW_NOT_FOUND", "validation",
                                      "unknown native parity row key")) from None
-    offset = _parity_offset(raw_cursor, len(items))
-    page = items[offset:offset + limit_value]
-    next_cursor = None
-    if offset + limit_value < len(items):
-        next_cursor = _pack_cursor(cursor_key, release_id, query_hash, str(offset + limit_value))
+    try:
+        offset = 0 if raw_cursor is None else int(raw_cursor)
+        if not 0 <= offset <= len(items):
+            raise ValueError(raw_cursor)
+    except ValueError:
+        raise ApiError(_CURSOR_MISMATCH_STATUS, _problem(
+            "CURSOR_MISMATCH", "validation", "cursor offset is invalid")) from None
+    end = offset + limit_value
+    next_cursor = (_pack_cursor(cursor_key, release_id, query_hash, str(end))
+                   if end < len(items) else None)
     return {"status": summary["status"], "as_of": summary.get("as_of"),
             "generated_at": summary.get("generated_at"),
             "tolerance_policy_id": summary.get("tolerance_policy_id"),
-            "items": page, "next_cursor": next_cursor}
+            "items": items[offset:end], "next_cursor": next_cursor}
 
 
 def _register_native_parity_routes(app, auth, serving_db, resolve_current, cursor_key,

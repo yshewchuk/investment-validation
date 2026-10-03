@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts import Problem  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
-from engine.v2.foundation import ArtifactStore  # noqa: E402
+from engine.v2.foundation import ArtifactStore, content_hash  # noqa: E402
 from engine.v2.ops.native_parity_report import (  # noqa: E402
     _stamp_report_identity,
     compare_native_vs_legacy,
@@ -416,6 +416,29 @@ def test_cursor_mismatch(parity):
     parity.report_path.write_text(json.dumps(document))
 
     _assert_cursor_mismatch(parity.base, mismatches, {"limit": "1", "cursor": first_cursor})
+
+
+def _signed_offset_cursor(parity, raw):
+    document = json.loads(parity.report_path.read_text())
+    query_hash = content_hash({"section": "mismatches", "side": None, "row_key": None})
+    return api_module._pack_cursor(api_module._cursor_key(TOKEN), content_hash(document),
+                                   query_hash, raw)
+
+
+@pytest.mark.parametrize("raw", ("", "nope", "-1", "3"))
+def test_signed_cursor_offsets_are_checked(parity, raw):
+    _assert_cursor_mismatch(parity.base, "/api/v1/native_parity/mismatches",
+                            {"limit": "1", "cursor": _signed_offset_cursor(parity, raw)})
+
+
+def test_signed_cursor_exact_collection_length_is_empty(parity):
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches", token=TOKEN,
+                               params={"limit": "1", "cursor": _signed_offset_cursor(parity, "2")})
+    assert code == 200
+    _assert_no_store(headers)
+    document = json.loads(body)
+    assert document["items"] == []
+    assert document["next_cursor"] is None
 
 
 _BINDING_INVALID_PROBLEM = {
@@ -807,6 +830,19 @@ def _assert_malformed_routes(parity):
         assert problem["code"] == NATIVE_PARITY_REPORT_MALFORMED, path
         assert "items" not in problem, path
         assert "compared_count" not in problem, path
+
+
+@pytest.mark.parametrize("value", (None, True, 1, [], {}))
+def test_nonstring_generated_at_is_refused(parity, value):
+    document = json.loads(json.dumps(parity.report))
+    document["generated_at"] = value
+    parity.report_path.write_text(json.dumps(document))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert summary["status"] == "unavailable"
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+    _assert_malformed_routes(parity)
 
 
 @pytest.mark.parametrize("side", ("legacy", "native"))

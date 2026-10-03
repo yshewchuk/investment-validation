@@ -22,14 +22,8 @@ import sqlite3
 import stat
 from http import HTTPStatus
 
+import engine.v2.parity.dimensions as parity_dimensions
 from engine.v2.foundation import parse_timestamp
-from engine.v2.parity.dimensions import (
-    ANALOG_FIELDS,
-    FINANCIAL_FIELDS,
-    FORECAST_FIELDS,
-    GATE_FIELDS,
-    SIMULATION_FIELDS,
-)
 
 __all__ = [
     "NATIVE_PARITY_SUMMARY_V1",
@@ -62,10 +56,11 @@ _CAPTURED_PROVENANCE_FIELDS = ("corpus_hash", "fixture_id", "payload_hash",
                                "same_input_receipt", "frozen_release_id",
                                "native_snapshot_ref")
 _CAPTURED_GROUPS = ("forecasts", "simulation", "financial_diagnostics", "verdicts", "analogs")
-#: Detail dimension -> the checker's public field group (slice 2 mismatch screen).
 _ITEM_GROUP_FIELDS: dict[str, tuple[str, ...]] = dict(zip(
     _CAPTURED_GROUPS,
-    (FORECAST_FIELDS, SIMULATION_FIELDS, FINANCIAL_FIELDS, GATE_FIELDS, ANALOG_FIELDS),
+    (parity_dimensions.FORECAST_FIELDS, parity_dimensions.SIMULATION_FIELDS,
+     parity_dimensions.FINANCIAL_FIELDS, parity_dimensions.GATE_FIELDS,
+     parity_dimensions.ANALOG_FIELDS),
 ))
 _CAPTURED_BOOL_FIELDS = frozenset({("verdicts", "gate_pass")})
 _STRING_LIMIT = 512
@@ -187,18 +182,15 @@ def _validate_compared(compared: list[object], mismatches: list[dict[str, object
 
 
 def _validate_report_values(mismatches: list[dict[str, object]]) -> None:
-    """Every finding names a field of its dimension's group and carries the
-    supplied ``values`` dict's exact pair."""
+    """Every finding names a field of its dimension's group and carries the supplied values pair."""
     for entry in mismatches:
-        dimension = entry["dimension"]
-        if dimension not in _ITEM_GROUP_FIELDS:
-            raise ValueError("native parity mismatch dimension is unknown")
+        group = _ITEM_GROUP_FIELDS.get(entry["dimension"])
+        if group is None or not set(entry["finding_fields"]).issubset(group):
+            raise ValueError("native parity mismatch dimension or finding field is unknown")
         values = entry.get("values")
         if not isinstance(values, dict):
             raise ValueError("native parity mismatch values is not an object")
         for name in entry["finding_fields"]:
-            if name not in _ITEM_GROUP_FIELDS[dimension]:
-                raise ValueError("native parity mismatch finding field is not in its dimension")
             saved = values.get(name)
             if (not isinstance(saved, dict)
                     or "legacy" not in saved or "native" not in saved):
@@ -215,10 +207,7 @@ def _validate_run_identity(report: dict[str, object]) -> None:
     if has_as_of != has_generated_at:
         raise ValueError("native parity report must carry both as_of and generated_at")
     if has_as_of:
-        generated_at = report["generated_at"]
-        if not isinstance(generated_at, str):
-            raise ValueError("native parity generated_at is not a string")
-        parse_timestamp(generated_at)
+        parse_timestamp(report["generated_at"])
         as_of = report["as_of"]
         if as_of is not None:
             if not isinstance(as_of, str) or len(as_of) != 10:
@@ -405,13 +394,10 @@ def _mismatch_item(entry: dict[str, object]) -> dict[str, object]:
               for name in _ITEM_GROUP_FIELDS.get(entry["dimension"], ())}
     values = entry.get("values")
     for name in entry["finding_fields"]:
+        fields[name] = {"status": "differ"}
         saved = values.get(name) if isinstance(values, dict) else None
-        if (isinstance(saved, dict)
-                and "legacy" in saved and "native" in saved):
-            fields[name] = {"status": "differ",
-                            "legacy": saved["legacy"], "native": saved["native"]}
-        else:
-            fields[name] = {"status": "differ"}
+        if isinstance(saved, dict) and "legacy" in saved and "native" in saved:
+            fields[name].update(legacy=saved["legacy"], native=saved["native"])
     return {"row_key": entry["row_key"], "dimension": entry["dimension"],
             "fields": fields}
 
@@ -435,13 +421,13 @@ def native_parity_items(report: dict, section: str, *,
 
 
 def native_parity_freshness(serving_db, resolve_current, as_of: str | None, open_index,
-                            read_release) -> str:
+                            read_release, resolver_errors: tuple[type[BaseException], ...] = ()) -> str:
     """Only a genuinely earlier run date is stale; unknown current stays available."""
     if as_of is None:
         return "available"
     try:
         release_id = resolve_current()
-    except sqlite3.OperationalError:
+    except (sqlite3.OperationalError,) + tuple(resolver_errors):
         return "available"
     if release_id is None:
         return "available"
@@ -452,41 +438,32 @@ def native_parity_freshness(serving_db, resolve_current, as_of: str | None, open
     try:
         release = read_release(conn, release_id)
     except sqlite3.OperationalError:
-        return "available"
+        release = None
     finally:
         conn.close()
-    if release is not None and as_of < release.resolved_as_of:
-        return "stale"
-    return "available"
+    return "stale" if release is not None and as_of < release.resolved_as_of else "available"
 
 
-def _no_report() -> tuple[HTTPStatus, dict, None]:
-    return HTTPStatus.OK, {
-        "schema_version": NATIVE_PARITY_SUMMARY_V1,
-        "status": "no_report",
-    }, None
-
-
-def _unavailable() -> tuple[HTTPStatus, dict, None]:
-    return HTTPStatus.SERVICE_UNAVAILABLE, {
-        "schema_version": NATIVE_PARITY_SUMMARY_V1,
-        "status": "unavailable",
-        "reason_code": NATIVE_PARITY_REPORT_MALFORMED,
-    }, None
+def _empty_snapshot(unavailable: bool = False) -> tuple[HTTPStatus, dict, None]:
+    summary = {"schema_version": NATIVE_PARITY_SUMMARY_V1,
+               "status": "unavailable" if unavailable else "no_report"}
+    if unavailable:
+        summary["reason_code"] = NATIVE_PARITY_REPORT_MALFORMED
+    return (HTTPStatus.SERVICE_UNAVAILABLE if unavailable else HTTPStatus.OK), summary, None
 
 
 def native_parity_snapshot(report_path: str | os.PathLike | None, *,
                            worst_limit: int = 10) -> tuple[HTTPStatus, dict, dict | None]:
     """``(status, summary, report_or_None)``; report is present only when available."""
     if report_path is None:
-        return _no_report()
+        return _empty_snapshot()
     path = os.fspath(report_path)
     try:
         handle = _open_regular_no_follow(path)
     except FileNotFoundError:
-        return _no_report()
+        return _empty_snapshot()
     except OSError:
-        return _unavailable()
+        return _empty_snapshot(unavailable=True)
     try:
         with handle:
             report = _load_report(handle)
@@ -506,7 +483,7 @@ def native_parity_snapshot(report_path: str | os.PathLike | None, *,
             _project_captured_comparison(report["captured_comparison"])
             if "captured_comparison" in report else None)
     except (OSError, json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError):
-        return _unavailable()
+        return _empty_snapshot(unavailable=True)
     summary = {
         "schema_version": NATIVE_PARITY_SUMMARY_V1,
         "status": "available",
@@ -535,5 +512,4 @@ def native_parity_snapshot(report_path: str | os.PathLike | None, *,
 def native_parity_summary(report_path: str | os.PathLike | None, *,
                           worst_limit: int = 10) -> tuple[HTTPStatus, dict]:
     """Summary-only wrapper over :func:`native_parity_snapshot`'s first two elements."""
-    status, summary, _report = native_parity_snapshot(report_path, worst_limit=worst_limit)
-    return status, summary
+    return native_parity_snapshot(report_path, worst_limit=worst_limit)[:2]

@@ -72,7 +72,8 @@ Pre-v1.2 reports and unstamped diagnostic comparisons retain their legacy
 summary behavior; the API requires complete run identity for v1.2 reports.
 The API takes an optional configured report path; no path means `no_report`.
 Freshness projection uses the API's current resolver, index opener and release reader; the API
-normalizes its resolver's typed HTTP and pointer-read failures. Standalone report
+declares its recoverable resolver exception types, while the projection classifies
+SQLite failures and closes every opened connection. Standalone report
 summary reads do not query the serving index.
 
 | Native parity condition | Outcome |
