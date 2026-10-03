@@ -88,8 +88,18 @@ def test_absent_inactive_file_falls_back_to_raw_current(tmp_path):
 
 
 @pytest.mark.parametrize("stat", ["inactive_file abc\n", "inactive_file -5\n",
-                                  "inactive_file\n", "inactive_file 1 2\n"])
+                                  "inactive_file\n", "inactive_file 1 2\n",
+                                  "inactive_file 3_0\n"])
 def test_malformed_inactive_file_falls_back_to_raw_current(tmp_path, stat):
+    cg = _cgroup(tmp_path, current=800, stat=stat)
+    assert discovery.memory_limits(cg) == (1000, 800)
+
+
+@pytest.mark.parametrize("stat", ["inactive_file +300\n", "inactive_file ٣٠٠\n"])
+def test_int_parsable_but_not_ascii_decimal_falls_back_to_raw_current(tmp_path, stat):
+    # Negative controls for the ASCII-decimal guard: int() accepts a sign,
+    # underscores, and non-ASCII decimal digits, but cgroup memory.stat is
+    # ASCII decimal, so these must keep the raw memory.current.
     cg = _cgroup(tmp_path, current=800, stat=stat)
     assert discovery.memory_limits(cg) == (1000, 800)
 

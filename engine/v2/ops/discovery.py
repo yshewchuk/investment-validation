@@ -20,8 +20,8 @@ def _inactive_file_bytes(directory: Path) -> int | None:
     """The exact ``inactive_file`` value from this directory's ``memory.stat``.
 
     ``None`` when the file is unreadable (including undecodable content), the
-    key is absent, or the value is malformed/non-numeric/negative — callers
-    then keep raw ``memory.current``.
+    key is absent, or the value is malformed/non-ASCII-decimal/negative —
+    callers then keep raw ``memory.current``.
     """
     try:
         lines = (directory / "memory.stat").read_text().splitlines()
@@ -30,8 +30,11 @@ def _inactive_file_bytes(directory: Path) -> int | None:
     for line in lines:
         fields = line.split()
         if len(fields) == 2 and fields[0] == "inactive_file":
+            token = fields[1]
+            if not token.isascii() or not token.isdigit():
+                return None
             try:
-                value = int(fields[1])
+                value = int(token)
             except ValueError:
                 return None
             return value if value >= 0 else None
