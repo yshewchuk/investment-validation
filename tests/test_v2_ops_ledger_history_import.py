@@ -448,6 +448,33 @@ def test_conflicting_direct_insert_after_shadow_commit_still_refuses(tmp_path, c
     assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0
 
 
+def test_matching_shadow_history_after_divergence_is_already_present(tmp_path):
+    root = _root(tmp_path)
+    conn, clock, _ = catalog(root)
+    source = tmp_path / "legacy"
+    payload = _prediction("shadow-first", "2026-08-01")
+    with transaction(conn):
+        set_authority(conn, None, "catalog", _context(payload["row_id"])["clock"])
+        committed = _commit_row_or_diverge(
+            conn, _context(payload["row_id"]), payload, "genref-1", clock=clock)
+    _write(source / "ledger/predictions/2026-08-01.jsonl", [dict(payload, event_id="changed")])
+    import_history(conn, root, source, clock=clock)
+    divergences = [dict(row) for row in conn.execute("SELECT * FROM decision_divergences")]
+    provenance = [dict(row) for row in conn.execute("SELECT * FROM decision_imports")]
+
+    # A separate source matches the authoritative payload, despite earlier divergent bytes.
+    matching_source = tmp_path / "matching-legacy"
+    _write(matching_source / "ledger/predictions/2026-08-01.jsonl", [payload])
+    for dry_run in (True, False):
+        summary = import_history(conn, root, matching_source, dry_run=dry_run, clock=clock)
+        assert summary["families"]["predictions"] == {
+            "files": 1, "lines": 1, "imported": 0, "already_present": 1, "conflicts": [],
+            "divergences": 0, "divergent_row_ids": 0}
+        assert rows(conn) == [committed]
+        assert [dict(row) for row in conn.execute("SELECT * FROM decision_divergences")] == divergences
+        assert [dict(row) for row in conn.execute("SELECT * FROM decision_imports")] == provenance
+
+
 def test_bootstrap_prediction_then_identical_nightly_recommit_is_safe(tmp_path):
     """Not a real-operation scenario (bootstrap's ``--through`` and the
     ``row_id``'s own embedded ``as_of`` keep the two namespaces disjoint in

@@ -268,6 +268,10 @@ def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="rai
             continue
         existing_row = conn.execute("SELECT * FROM decisions WHERE decision_id=?",
                                     (decision_id,)).fetchone()
+        if (existing_row and existing_row["purpose"] != "legacy_import"
+                and existing_row["payload_json"] == canonical_json(payload)):
+            receipts.append(dict(existing_row))
+            continue
         prior_bytes = conn.execute("SELECT original_bytes FROM decision_imports WHERE decision_id=?",
                                    (decision_id,)).fetchall()
         if _row_conflicts(existing_row, prior_bytes, original, payload):
@@ -277,9 +281,6 @@ def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="rai
                 conn, decision_id=decision_id, row_id=row_id, existing_row=existing_row,
                 original=original, payload=payload, source_hash=source_hash, number=number,
                 created_at=created_at, provenance_label=provenance_label))
-            continue
-        if existing_row and existing_row["purpose"] != "legacy_import":
-            receipts.append(dict(existing_row))
             continue
         row_generation_ref = generation_ref
         if row_generation_ref is None and derive_generation_ref and kind == "outcome":
