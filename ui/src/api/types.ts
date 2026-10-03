@@ -172,17 +172,10 @@ export interface EventQuery {
   limit?: number;
 }
 
-/**
- * Native-parity reads for the standalone `#/native-parity` screen: only the
- * summary wire shape is mocked in the browser tests and ui/README.md in
- * this PR; summary follows #327. Detail item spellings must be checked
- * against the merged API slice 2 before ready/auto-merge — merged API
- * contract validation is the dependency gate — and the client never
- * normalizes guessed responses. A malformed report arrives as a 503
- * `NATIVE_PARITY_REPORT_MALFORMED` Problem (`ApiError`), not a body.
- */
-export interface NativeParitySummary {
-  status: "available" | "stale" | "no_report";
+// Native-parity summary follows #327; malformed reads are 503 Problems.
+// Detail item spellings await merged API reconciliation.
+export interface NativeParityReportSummary {
+  status: "available" | "stale";
   as_of: string | null;
   generated_at: string | null;
   tolerance_policy_id: string | null;
@@ -195,6 +188,8 @@ export interface NativeParitySummary {
   native_refused_unmatched_count: number | null;
   native_refused_reasons: Record<string, number>;
 }
+
+export type NativeParitySummary = NativeParityReportSummary | { status: "no_report" };
 
 export interface NativeParityMismatchField {
   field: string;

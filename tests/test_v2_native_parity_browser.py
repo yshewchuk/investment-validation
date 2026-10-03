@@ -12,7 +12,7 @@ pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]
 TOKEN = "browser-secret"
 PROBLEM = {"code": "NO_CURRENT_RELEASE", "category": "unavailable", "retryable": True, "message": "no release"}
 SUMMARY = {"status": "available", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1", "compared_count": 12, "matched_row_count": 10, "mismatched_row_count": 2, "only_legacy_count": 1, "only_native_count": 1, "native_refused_count": 3, "native_refused_unmatched_count": 1, "native_refused_reasons": {"unknown_ticker": 2, "missing_field": 1}}
-NO_REPORT = dict.fromkeys(SUMMARY, None) | {"status": "no_report", "native_refused_reasons": {}}
+NO_REPORT = {"status": "no_report"}
 
 @pytest.fixture(scope="module")
 def dist_dir(ui_dist_dir): return ui_dist_dir
@@ -90,7 +90,7 @@ COUNT_FIELDS = [("parity-compared", "compared_count"), ("parity-matched", "match
     ("parity-native-refused-unmatched", "native_refused_unmatched_count")]
 MALFORMED = {"code": "NATIVE_PARITY_REPORT_MALFORMED", "category": "unavailable", "retryable": True, "message": "malformed report"}
 STALE = dict(SUMMARY, status="stale")
-ZERO = dict(SUMMARY, as_of=None, tolerance_policy_id=None, native_refused_reasons={},
+ZERO = dict(SUMMARY, native_refused_reasons={},
     **{field: 0 for _, field in COUNT_FIELDS})
 
 def test_stale_shows_saved_summary(browser, server):
@@ -127,8 +127,8 @@ def test_zero_saved_counts_render_actual_zero(browser, server):
     expect(page.get_by_test_id("parity-summary")).to_be_visible()
     for testid, field in COUNT_FIELDS:
         expect(page.get_by_test_id(testid)).to_have_text("0")
-    expect(page.get_by_test_id("parity-as-of")).to_have_text("—")
-    expect(page.get_by_test_id("parity-tolerance")).to_have_text("—")
+    expect(page.get_by_test_id("parity-as-of")).to_have_text(ZERO["as_of"])
+    expect(page.get_by_test_id("parity-tolerance")).to_have_text(ZERO["tolerance_policy_id"])
     expect(page.get_by_test_id("parity-refusal-reasons-empty")).to_have_text("No refusal reasons.")
     expect(page.get_by_test_id("parity-refusal-reason")).to_have_count(0)
     expect(page.get_by_test_id("parity-no-report")).to_have_count(0)

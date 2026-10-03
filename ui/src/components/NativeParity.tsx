@@ -37,7 +37,7 @@ function useRead<T>(key: string | null, read: (signal: AbortSignal) => Promise<T
   return stated.key === key ? stated.loaded : { status: "loading" };
 }
 
-function summaryFields(summary: NativeParitySummary): [string, string, string][] {
+function summaryFields(summary: Exclude<NativeParitySummary, { status: "no_report" }>): [string, string, string][] {
   return [
     ["Status", "parity-status", summary.status],
     ["As of", "parity-as-of", fmtText(summary.as_of)],
@@ -73,7 +73,7 @@ function ReadError({ error, prefix, name, label }: {
 
 export function NativeParity({ client }: { client: DataClient }) {
   const summary = useRead("summary", (signal) => client.getNativeParity(signal));
-  const refusalReasons: [string, number][] = summary.status === "ready" ? Object.entries(summary.data.native_refused_reasons) : [];
+  const refusalReasons: [string, number][] = summary.status === "ready" && summary.data.status !== "no_report" ? Object.entries(summary.data.native_refused_reasons) : [];
   return (
     <main className="app">
       <h1>v2 native parity (shadow)</h1>

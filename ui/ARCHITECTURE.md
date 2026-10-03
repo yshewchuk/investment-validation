@@ -34,7 +34,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 |---|---|
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
-| Parity loading, 401 or `no_report` | Explicit loading/auth/no-report state, independent of release resolution. |
+| Parity loading, 401 or `no_report` | Explicit loading/auth/no-report state, independent of release resolution; no-report rendering reads status only. |
 | Parity `stale` | Banner with saved identity, counts and refusal reasons still shown. |
 | Parity `unavailable` | Explicit error; failed data is withheld, never presented as an empty comparison. |
 | Parity zero counts or no refusal reasons | Saved zero counts remain visible; an explicit message identifies absent refusal reasons. |
