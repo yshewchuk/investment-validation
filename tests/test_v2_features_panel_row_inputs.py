@@ -621,3 +621,156 @@ def test_23_panel_row_date_is_the_scored_event_and_satisfies_the_presence_guard(
         _require_staged_inputs_present(calendar_row, without_date, {}, [])
     assert exc.value.code == "MISSING_STAGED_INPUT"
     assert "'date'" in exc.value.detail
+
+
+# --------------------------------------------------------------------------
+# event_date normalization at the scan boundary
+# --------------------------------------------------------------------------
+
+
+def test_24_event_day_decision_reads_identically_for_midnight_and_intraday_event_keys():
+    """A 10:30 ``key.event_date`` names the same calendar event day as midnight,
+    so on an event-day decision both must produce the SAME row -- and neither
+    may observe the event day's own close.
+
+    Board enumeration legitimately preserves the intraday event clock
+    (``native_board_universe``), so this is a real key shape, not a malformed
+    one. The fixture spikes the event day's own SPY close and adjusted close so
+    that an unnormalized key -- whose ``_anchor_index`` bound would be the
+    event-day timestamp, selecting the final bar -- is unmistakably wrong
+    instead of merely different. Both regime and runup math run for real here;
+    neither is mocked.
+    """
+    event_day_decision = pd.Timestamp("2024-02-15")
+
+    def _scan_with(event_date):
+        batches = _default_batches()
+        spy_days = [str(d.date()) for d in pd.date_range(end="2024-02-15", periods=320, freq="D")]
+        spy = [{"ticker": "SPY", "date": pd.Timestamp(day), "spot": 500.0 + i,
+                "src_iv": "orats", "implied_move": 1.0}
+               for i, day in enumerate(spy_days)]
+        spy[-1] = {**spy[-1], "spot": 1500.0}  # the event day's own SPY close, spiked
+        batches[("daily_market", "SPY")] = spy
+        prices = _price_rows(n=320, end="2024-02-15")
+        prices[-1] = {**prices[-1], "close_adj": 4000.0}  # the event day's own close, spiked
+        batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = prices
+        snapshot = _snapshot()
+        repo = _FakeRepository(snapshot, _contracts(), batches)
+        key = BoardRequest(ticker="AAA", strategy="STR-X", event_date=event_date, session="AMC")
+        return scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                              decision_session=event_day_decision)
+
+    midnight = _scan_with(pd.Timestamp("2024-02-15"))
+    intraday = _scan_with(pd.Timestamp("2024-02-15T10:30:00"))
+
+    assert midnight.panel_row["date"] == "2024-02-15"
+    assert intraday.panel_row["date"] == "2024-02-15"
+    _rows_equal(midnight.panel_row, intraday.panel_row)
+    assert midnight.panel_anchor == intraday.panel_anchor == pd.Timestamp("2024-02-14")
+    # The daily-state source is deliberately the older 2024-02-05, so the anchor
+    # above is the two normalized event-day-14 anchors, never the event itself.
+
+    panel = intraday.panel_row
+    # The anchored bar is the PRIOR day: SPY index 318 is 818 vs index 297's 797;
+    # price index 318 is 418 vs index 313's 413 (the fixture starts at 100.0+i).
+    assert panel["spy_ret21"] == pytest.approx((818.0 / 797.0 - 1.0) * 100)
+    assert panel["ret5"] == pytest.approx((418.0 / 413.0 - 1.0) * 100)
+    # Negative control: selecting the spiked final bar of either series gives
+    # completely different values, so neither assertion passes by coincidence.
+    assert panel["spy_ret21"] != pytest.approx((1500.0 / 798.0 - 1.0) * 100)
+    assert panel["ret5"] != pytest.approx((4000.0 / 414.0 - 1.0) * 100)
+
+
+class _NoReadRepository(_FakeRepository):
+    """A fake on which the first contract lookup or scan IS the test failure:
+    it proves a key-level refusal happens before any repository access."""
+
+    def table_contract(self, snapshot_ref, table_name):
+        raise AssertionError(f"event_date refusal must precede the {table_name} contract lookup")
+
+    def scan(self, query, *, table_name):
+        raise AssertionError(f"event_date refusal must precede the {table_name} scan")
+
+
+@pytest.mark.parametrize("event_date", [
+    pd.NaT,
+    None,
+    "not-a-date",
+    20240215,
+    True,
+    pd.Timestamp("2024-02-15T10:30:00Z"),
+])
+def test_25_invalid_directly_constructed_event_date_refuses_before_any_read(event_date):
+    """``board_requests`` validates its own event dates, but a directly
+    constructed ``BoardRequest`` bypasses that; the scan boundary is what
+    refuses numeric, invalid, missing and timezone-aware event dates -- before
+    any read, with the field named."""
+    snapshot = _snapshot()
+    repo = _NoReadRepository(snapshot, _contracts(), {})
+    key = BoardRequest(ticker="AAA", strategy="STR-X", event_date=event_date, session="AMC")
+    with pytest.raises(DataError) as exc:
+        scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                       decision_session=_DECISION)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"field": "event_date"}
+
+
+def test_26_intraday_normalization_is_event_dates_alone():
+    """A valid naive intraday event key still scans; every other date field
+    keeps refusing any clock time exactly as before."""
+    snapshot = _snapshot()
+    key = BoardRequest(ticker="AAA", strategy="STR-X",
+                       event_date=pd.Timestamp("2024-02-15T10:30:00"), session="AMC")
+    repo = _FakeRepository(snapshot, _contracts(), _default_batches())
+    result = scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                            decision_session=_DECISION)
+    assert result.panel_row["date"] == "2024-02-15"
+
+    refusals = [
+        ("history_start", {"history_start": pd.Timestamp("2024-01-02T09:30:00"),
+                           "decision_session": _DECISION}),
+        ("decision_session", {"history_start": _HISTORY_START,
+                              "decision_session": pd.Timestamp("2024-02-14T16:00:00")}),
+    ]
+    for field, window in refusals:
+        repo = _FakeRepository(snapshot, _contracts(), _default_batches())
+        with pytest.raises(DataError) as exc:
+            scan_panel_row(repo, snapshot, _key(), **window)
+        assert exc.value.code == "CONTRACT_MISMATCH"
+        assert exc.value.problem.details == {"field": field}
+
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [
+        {**_computed_rows([("2024-01-10", 2.0, False)])[0],
+         "available_as_of_date": "2024-01-11T09:00:00"}]
+    with pytest.raises(DataError) as exc:
+        _scan(batches=batches)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"field": "available_as_of_date"}
+
+
+def test_27_negative_control_delayed_close_availability_bypass_is_detected(monkeypatch):
+    """Availability-regression control on test_19's teeth: bypass ONLY the
+    outcome availability comparison and its one-prior assertion fails on the
+    spot.
+
+    ``test_19`` is called unchanged, so nothing here weakens it. With
+    ``available_as_of_date`` validation made to return a date at or before every
+    decision, the delayed 2024-02-13 close looks knowable at the 2024-02-14
+    decision, both priors feed history, and ``assert panel["n_prior"] == 1``
+    raises ``assert 2 == 1``. That observed two-versus-one AssertionError proves
+    the availability regression detects a bypassed comparison. No actual
+    mutation tooling ran; production filtering is untouched and the patch is
+    confined to this test."""
+    from engine.v2.features import panel_row_inputs
+
+    original = panel_row_inputs._session_day
+
+    def _bypass(value, field, **kwargs):
+        if field == "available_as_of_date":
+            return _HISTORY_START
+        return original(value, field, **kwargs)
+
+    monkeypatch.setattr(panel_row_inputs, "_session_day", _bypass)
+    with pytest.raises(AssertionError, match=r"assert 2 == 1"):
+        test_19_delayed_close_amc_event_enters_history_only_at_producer_derived_availability()

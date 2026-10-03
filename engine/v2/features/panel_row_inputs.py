@@ -6,15 +6,22 @@ producer's single call for one ``BoardRequest`` key's ``panel_row``/
 raw-row producer's own job), and ``key.strategy`` never changes which reads it
 makes or which keys the result carries -- every call builds the full superset.
 
+``key.event_date`` is validated and normalized to its naive midnight calendar
+day once, here, before any repository read: board enumeration legitimately
+preserves an intraday event clock, and an intraday timestamp means the same
+calendar event day as its midnight form -- both must resolve to the same
+row/bar decisions, so neither may observe the event day's own close. The key is
+never mutated; every helper downstream receives the validated event day.
+
 The four always-made pinned-snapshot dependencies:
 
 * ``scan_daily_state_inputs`` (``key.ticker``);
 * a bounded ``computed_moves`` read (``key.ticker``, rows strictly before
-  ``min(key.event_date, decision_session)`` -- the decision-session cutoff,
-  not just the event-date one -- and whose outcome source was available on or
-  before ``decision_session``), feeding ``panel_math.history_features`` with
-  the non-skipped rows only (``skipped=true`` rows are excluded before that
-  call, never treated as a zero move);
+  ``min(event_day, decision_session)`` -- the decision-session cutoff, not just
+  the event-date one -- and whose outcome source was available on or before
+  ``decision_session``), feeding ``panel_math.history_features`` with the
+  non-skipped rows only (``skipped=true`` rows are excluded before that call,
+  never treated as a zero move);
 * a new bounded ``daily_market`` read for the fixed ticker ``"SPY"``, feeding
   ``regime.add_regime_features`` (a different, raw chronological shape than the
   derived/lagged ``scan_daily_state_inputs`` mapping, so not reused from it);
@@ -78,18 +85,33 @@ def _is_nonblank(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _session_day(value: object, field: str) -> pd.Timestamp:
-    """One explicit naive midnight calendar day, or a typed refusal."""
-    message = f"{field} must be a naive midnight calendar day"
+def _session_day(value: object, field: str, *,
+                 normalize_intraday: bool = False) -> pd.Timestamp:
+    """One explicit naive calendar day, or a typed refusal.
+
+    ``normalize_intraday`` is only ever set for ``key.event_date``, whose
+    producer legitimately carries an intraday event clock: a naive intraday
+    timestamp is then accepted and folded to its midnight calendar day, since
+    both spellings name the same event day. Every other field (and every other
+    caller of this validator) keeps the strict explicit-midnight rule and its
+    exact message; numbers, invalid/missing values and timezone-aware values
+    refuse either way.
+    """
+    if normalize_intraday:
+        message = f"{field} must be a naive calendar date or timestamp"
+    else:
+        message = f"{field} must be a naive midnight calendar day"
     if isinstance(value, numbers.Number):
         raise errors.fail("CONTRACT_MISMATCH", message, details={"field": field})
     try:
         day = pd.Timestamp(value)
     except (TypeError, ValueError, OverflowError):
         raise errors.fail("CONTRACT_MISMATCH", message, details={"field": field}) from None
-    if pd.isna(day) or day.tzinfo is not None or day != day.normalize():
+    if pd.isna(day) or day.tzinfo is not None:
         raise errors.fail("CONTRACT_MISMATCH", message, details={"field": field})
-    return day
+    if not normalize_intraday and day != day.normalize():
+        raise errors.fail("CONTRACT_MISMATCH", message, details={"field": field})
+    return day.normalize() if normalize_intraday else day
 
 
 def _window(history_start: object, decision_session: object) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -127,22 +149,26 @@ def _consume(data_repository: repository.Repository, query: DataQuery,
 
 
 def _read_computed_moves(data_repository: repository.Repository, snapshot: SnapshotRef,
-                         key: Any, history_start: pd.Timestamp, decision: pd.Timestamp
-                         ) -> list[dict[str, object]]:
-    """``key.ticker``'s computed_moves rows strictly before the scored event and
+                         ticker: str, history_start: pd.Timestamp, decision: pd.Timestamp,
+                         event_day: pd.Timestamp) -> list[dict[str, object]]:
+    """``ticker``'s computed_moves rows strictly before the scored event day and
     the decision session, whichever of the two is earlier, and only where the
-    outcome source was available on or before the decision session."""
+    outcome source was available on or before the decision session.
+
+    ``event_day`` is the caller's already-validated, already-midnight-normalized
+    event day.
+    """
     contract = data_repository.table_contract(snapshot, _COMPUTED_MOVES_TABLE)
     version = _pinned_version(snapshot, _COMPUTED_MOVES_TABLE)
     start = history_start.date().isoformat()
-    end = min(key.event_date, decision).date().isoformat()
+    end = min(event_day, decision).date().isoformat()
     if start >= end:
         return []
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id,
         table_contract_ref=version.table_contract_ref,
         columns=_COMPUTED_COLUMNS,
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),),
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),),
         time_interval=TimeInterval(
             column="event_date",
             start_inclusive=start,
@@ -207,9 +233,14 @@ def _history_from_kept_moves(kept: list[dict[str, object]]) -> dict[str, float |
     return panel_math.history_features(prior_moves, prior_abs)
 
 
-def _regime_from_spy(spy_rows: list[dict[str, object]], key: Any,
+def _regime_from_spy(spy_rows: list[dict[str, object]], event_day: pd.Timestamp,
                      decision: pd.Timestamp) -> tuple[dict[str, float], object]:
-    """The 9 legacy ``spy_*`` floats and the separate ``regime_asof`` anchor."""
+    """The 9 legacy ``spy_*`` floats and the separate ``regime_asof`` anchor.
+
+    The event frame is built from the validated ``event_day`` (no other key
+    field is needed): an unnormalized event timestamp would let ``_anchor_index``
+    select the event day's own SPY close.
+    """
     if spy_rows:
         ordered = sorted(spy_rows, key=lambda row: pd.Timestamp(row["date"]))
         try:
@@ -222,20 +253,21 @@ def _regime_from_spy(spy_rows: list[dict[str, object]], key: Any,
                               details={"table_name": _DAILY_MARKET_TABLE}) from None
     else:
         market = pd.DataFrame({"date": [], "close": []})
-    events = pd.DataFrame({"date": [key.event_date], "decision": [decision]})
+    events = pd.DataFrame({"date": [event_day], "decision": [decision]})
     row = regime.add_regime_features(events, market, as_of_column="decision").iloc[0]
     features = {column: float(row[column]) for column in _REGIME_COLUMNS}
     return features, row["regime_asof"]
 
 
 def _runup_from_prices(data_repository: repository.Repository, snapshot: SnapshotRef,
-                       key: Any, decision: pd.Timestamp,
+                       ticker: str, decision: pd.Timestamp, event_day: pd.Timestamp,
                        history: dict[str, float | None],
                        kept_prior_moves: list[dict[str, object]]
                        ) -> tuple[dict[str, float], object]:
-    """The 7 legacy runup floats and the separate ``runup_asof`` anchor."""
+    """The 7 legacy runup floats and the separate ``runup_asof`` anchor, with the
+    current event frame row anchored on the validated ``event_day``."""
     query = PriceQuery(
-        ticker=key.ticker,
+        ticker=ticker,
         session_date=decision.date().isoformat(),
         observation_ceiling=decision.date().isoformat(),
         lookback_sessions=_RUNUP_LOOKBACK_SESSIONS,
@@ -253,25 +285,25 @@ def _runup_from_prices(data_repository: repository.Repository, snapshot: Snapsho
     # resets row 0 of every group, so a one-row frame would pin signed_streak to
     # 0 regardless of prior history. add_runup_features sorts by
     # ["ticker", "date"], every kept prior event_date is strictly before
-    # key.event_date (the bounded computed_moves read caps at
-    # min(event_date, decision), exclusive), and there is one ticker -- so
+    # event_day (the bounded computed_moves read caps at
+    # min(event_day, decision), exclusive), and there is one ticker -- so
     # iloc[-1] is always the current event regardless of input order.
     frame_rows = [
-        {"ticker": key.ticker, "date": pd.Timestamp(row["event_date"]),
+        {"ticker": ticker, "date": pd.Timestamp(row["event_date"]),
          "decision": decision, "move": float(row["realized_move_pct"]),
          "n_prior": float("nan"), "ema12_prior_abs_move": float("nan"),
          "mean_prior_abs_move": float("nan")}
         for row in kept_prior_moves
     ]
     frame_rows.append({
-        "ticker": key.ticker, "date": pd.Timestamp(key.event_date),
+        "ticker": ticker, "date": event_day,
         "decision": decision, "move": float("nan"),
         "n_prior": history["n_prior"],
         "ema12_prior_abs_move": _as_float_or_nan(history["ema12_prior_abs_move"]),
         "mean_prior_abs_move": _as_float_or_nan(history["mean_prior_abs_move"]),
     })
     frame = pd.DataFrame(frame_rows)
-    result = runup_math.add_runup_features(frame, {key.ticker: prices}, "decision")
+    result = runup_math.add_runup_features(frame, {ticker: prices}, "decision")
     row = result.iloc[-1]
     features = {column: float(row[column]) for column in _RUNUP_COLUMNS}
     return features, row["runup_asof"]
@@ -308,23 +340,32 @@ def scan_panel_row(
     decision_session: object,
     history_start: object,
 ) -> PanelRowInputs:
-    """One ``BoardRequest`` key's full-superset raw panel row and latest anchor."""
+    """One ``BoardRequest`` key's full-superset raw panel row and latest anchor.
+
+    ``key.event_date`` is validated (and, for this field only, intraday-normalized)
+    before the first repository read, so a directly constructed invalid key
+    refuses with ``CONTRACT_MISMATCH``/``field=event_date`` without touching the
+    data layer; every later use is the validated ``event_day``, never a reread.
+    """
     start, decision = _window(history_start, decision_session)
+
+    # Refuse/normalize once, here, before any repository access.
+    event_day = _session_day(key.event_date, "event_date", normalize_intraday=True)
 
     daily_state = daily_state_inputs.scan_daily_state_inputs(
         repository, snapshot, ticker=key.ticker,
         history_start=start, decision_session=decision,
     )
 
-    computed_rows = _read_computed_moves(repository, snapshot, key, start, decision)
+    computed_rows = _read_computed_moves(repository, snapshot, key.ticker, start, decision, event_day)
     kept_moves = _kept_prior_moves(computed_rows)
     history = _history_from_kept_moves(kept_moves)
 
     spy_rows = _read_spy_market(repository, snapshot, start, decision)
-    regime_features, regime_asof = _regime_from_spy(spy_rows, key, decision)
+    regime_features, regime_asof = _regime_from_spy(spy_rows, event_day, decision)
 
     runup_features, runup_asof = _runup_from_prices(
-        repository, snapshot, key, decision, history, kept_moves,
+        repository, snapshot, key.ticker, decision, event_day, history, kept_moves,
     )
 
     panel_anchor = _anchor(daily_state.source_session, regime_asof, runup_asof)
@@ -333,6 +374,6 @@ def scan_panel_row(
         **history,
         **regime_features,
         **runup_features,
-        "date": pd.Timestamp(key.event_date).date().isoformat(),
+        "date": event_day.date().isoformat(),
     }
     return PanelRowInputs(panel_row=panel_row, panel_anchor=panel_anchor)
