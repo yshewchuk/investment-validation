@@ -5,13 +5,15 @@ Layer 8 presentation in the [root architecture](../ARCHITECTURE.md): the existin
 React/TypeScript app owns application components, layout, navigation and rendering.
 Its presentation scope includes the legacy dashboard views still awaiting migration.
 ## Primary contracts and public interfaces
-`src/App.tsx` composes board/event/score views; `src/routes.ts` handles routes.
+`src/App.tsx` composes board/event/score and native-parity views; `src/routes.ts` handles routes.
 `src/api/client.ts` is the sole fetch boundary to the authenticated serving API.
 Wire shapes and shipped views are detailed in the [README](README.md).
 
 ## Inputs
 Saved JSON release metadata, paginated events, score details and operations data
 from [serving](../engine/v2/serving/ARCHITECTURE.md), plus route/filter state.
+Native parity reads `/api/v1/native_parity`, `/mismatches` and `/unpaired`
+under that prefix; saved comparisons and unpaired keys are paginated.
 
 ## Outputs
 React DOM and chart pixels, navigation/deep links, loading/error/refusal states
@@ -31,6 +33,10 @@ cookie. Build output is static assets; serving those bytes is transport.
 |---|---|
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
+| Parity loading, 401 or `no_report` | Explicit loading/auth/no-report state, independent of release resolution. |
+| Parity `stale` | Banner with saved identity, counts and detail still shown. |
+| Parity `unavailable` or failed detail read | Explicit error; failed data is withheld, never presented as an empty comparison. |
+| Parity empty population or pagination | Explicit empty state; cursors select bounded saved detail pages. |
 | Retry or navigation | Reads keep pinned identity; no durable transaction or partial publication. |
 
 ## Invariants
@@ -40,6 +46,8 @@ Format saved financial values; do not fit, rescore, derive financial evidence or
 fetch vendors. Preserve saved replay clocks and provenance without relabelling.
 Existing operations HTML/legacy previews are compatibility exceptions with
 migration outstanding, not evidence that a React application view is shipped.
+Native parity presentation is React-only; its former operations preview
+HTML and JSON endpoints are removed without redirects or compatibility shims.
 ## Diagrams
 ```mermaid
 flowchart LR

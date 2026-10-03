@@ -460,12 +460,9 @@ Only a tracked path absent from the worktree reads as empty.
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  The one consumer today is the read-only operations preview server's
-  `GET /native_parity`/`GET /native_parity.json` routes
-  (`engine/v2/serving/operations.py`), which read this document unchanged,
-  wired through `engine/v2/dashboard/preview.py`'s optional
-  `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
-  for that route/CLI contract.
+  The React native-parity screen consumes authenticated `/api/v1/native_parity*`
+  reads. The operations preview parity HTML/JSON routes and their launcher
+  configuration are retired; there is no compatibility shim.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;
   this report projection remains a read over retained evidence.
