@@ -139,16 +139,16 @@ that does not name a superset-only key in its `feature_names` simply
 never selects it (`../scoring/ARCHITECTURE.md` "Inputs"). Its
 pinned-snapshot dependencies, every one always made: `scan_daily_state_inputs`
 (`key.ticker`); `computed_moves` (`key.ticker`, restricted to rows where
-`event_date < min(key.event_date, decision_session)` — the decision-session
-cutoff, not just the event-date one, so a `decision_session` earlier than
-`key.event_date` can never see a row the real nightly timeline would not
-yet have, feeding `panel_math`; rows with `skipped=true`
+`event_date < min(key.event_date, decision_session)` and
+`available_as_of_date <= decision_session`, feeding `panel_math`;
+availability is the day after the actual outcome-source close, so a delayed
+close cannot enter history at an earlier decision. A null availability date
+is unavailable to every decision. Rows with `skipped=true`
 carry no `realized_move_pct` and are excluded from that feed, never treated
-as a zero move; the bound is on data dates only — `event_date` — never on
+as a zero move; the bounds are on data dates only, never on
 `computed_at`, the row's own calculation timestamp: a backfilled or
-corrected row legitimately carries a `computed_at` after its `event_date`
-(and, for an old enough `event_date`, after `decision_session` too), so
-filtering on it would discard genuine prior history, not future-leak it);
+corrected row remains eligible when its outcome was available by the decision,
+even if it was written later);
 a new bounded
 `daily_market` read for the fixed ticker `"SPY"` (feeding `regime`, not
 reused from `scan_daily_state_inputs` — a different, derived shape);
