@@ -34,7 +34,5 @@ First-commit authority is immutable. Corrections append; historical imports are 
 ## Diagrams
 ```mermaid
 flowchart LR
-    Ops[Operations] --> Decisions[Decision authority and imports]
-    Decisions --> Catalog[Append-only catalog facts]
-    Catalog --> Projections[Accounting and compatibility exports]
+    Ops[Operations] --> Decisions[Decision authority and imports] --> Catalog[Append-only catalog facts] --> Projections[Accounting and compatibility exports]
 ```

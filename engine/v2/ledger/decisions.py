@@ -211,6 +211,11 @@ def outcome_generation_ref(payload):
     return stamp.astimezone(timezone.utc).date().isoformat()
 
 
+def _matches_committed_import(existing_row, payload):
+    return (existing_row and existing_row["purpose"] != "legacy_import"
+            and existing_row["payload_json"] == canonical_json(payload))
+
+
 def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="raise",
                  provenance_label=None, generation_ref=None, derive_generation_ref=False):
     """Import exact legacy JSONL bytes; duplicate bytes collapse.
@@ -239,8 +244,7 @@ def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="rai
     differing occurrence as a ``decision_divergences`` row instead --
     see :func:`_record_legacy_divergence`.
 
-    Identical committed content under another purpose is already present:
-    return its receipt without adding a decision or import-provenance row.
+    Identical committed content under another purpose returns without new rows.
 
     A byte-identical RE-import of the exact same ``(source_hash,
     line_number)`` always stays a plain no-op in both modes, and a changed
@@ -268,8 +272,7 @@ def import_lines(conn, source_hash, lines, *, kind, created_at, on_conflict="rai
             continue
         existing_row = conn.execute("SELECT * FROM decisions WHERE decision_id=?",
                                     (decision_id,)).fetchone()
-        if (existing_row and existing_row["purpose"] != "legacy_import"
-                and existing_row["payload_json"] == canonical_json(payload)):
+        if _matches_committed_import(existing_row, payload):
             receipts.append(dict(existing_row))
             continue
         prior_bytes = conn.execute("SELECT original_bytes FROM decision_imports WHERE decision_id=?",
