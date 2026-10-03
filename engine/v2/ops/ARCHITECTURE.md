@@ -39,7 +39,7 @@ derived directly from its `argparse` definitions:
 - `reconcile <job_id> --expected-attempt`
 - `provider-account --account --remaining --live-reserve`
 - `snapshot {plan-import,submit,promote,rollback}`
-- `ledger {import-history,status,calibrate,book}`
+- `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
 - `decisions supersede --row-id --reason --from-json`
 - `price-refresh --session [--dry-run]`
 - `price-history capture --source-root --scope [--dry-run]`

@@ -246,7 +246,11 @@ def _import_one_file(conn, path, family, kind, date_field, *, through, dry_run, 
                       details={"file": path.name, "family": family,
                                "partial_summary": summary}) from exc
         new_divergences = _new_divergences(conn, divergences_before)
-    new_line_count = sum(1 for i in range(1, len(included) + 1) if i not in existing_before)
+        # Count actual provenance writes before a dry-run transaction rolls back.
+        # Identical content committed under another purpose adds no provenance.
+        new_line_count = conn.execute(
+            "SELECT COUNT(*) FROM decision_imports WHERE source_hash=?",
+            (source_hash,)).fetchone()[0] - len(existing_before)
     totals["divergences"] += len(new_divergences)
     divergent_ids.update(row[1] for row in new_divergences)
     totals["divergent_row_ids"] = len(divergent_ids)

@@ -1,5 +1,7 @@
 # `engine/v2/ledger`
 
+See [architecture](ARCHITECTURE.md) for contracts and failure semantics.
+
 ## Ownership
 
 Implements the **Prediction and position ledger — append-only facts** row of the §4 owner table of
