@@ -311,7 +311,7 @@ IDs are content-derived from their deterministic payloads:
 Operational timestamps, attempt IDs, durations, and log refs live in import or
 commit receipts and are excluded from these IDs.
 
-### 5.3 Bounded query contracts
+### 5.3 Bounded query contracts (target contract)
 
 ```text
 KEY_PREDICATE_V1 = "key_predicate.v1.0"

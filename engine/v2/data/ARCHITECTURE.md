@@ -271,7 +271,7 @@ and retryability come from that table, never guessed at a call site.
 | `STALE_EXPECTATION` | validation | no | `explain_dependencies`'s chain-query path sees a stale caller expectation |
 | `CALENDAR_UNAVAILABLE` | validation | no | registered here but raised only by `engine.v2.research`, never from inside this package |
 
-**Pinned scans and registration (R1–R6).**
+**Target contract: pinned scans and registration (R1–R6).**
 
 | Requirement | Outcome |
 |---|---|
@@ -329,7 +329,7 @@ whole `resolve` walk. Idempotent: every row is append-only.
 
 Root doc §5 invariants this package is responsible for:
 
-- **Scan population bound.** Every scan states a finite nonnegative `max_result_rows`,
+- **Scan population bound (target contract).** Every scan states a finite nonnegative `max_result_rows`,
   never above the sum of recorded row counts of the pinned fragments surviving
   its pruning predicates. The running counter raises `RESULT_LIMIT_EXCEEDED`
   before yielding a batch that would exceed that limit. Zero is valid for an
