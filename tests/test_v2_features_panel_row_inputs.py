@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from engine.v2.contracts.data import DatasetVersionRef, SnapshotRef, TableContractRef
+from engine.v2.data.computed_moves import build_rows
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_TABLE_NAME
 from engine.v2.data.errors import DataError
 from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT, PRICE_HISTORY_TABLE_NAME
@@ -124,7 +125,15 @@ def _dm_rows(ticker, days, *, src_iv="orats", implied_move=1.0, close=None):
 
 
 def _computed_rows(rows_spec):
-    return [{"ticker": "AAA", "event_date": day, "realized_move_pct": move, "skipped": skipped}
+    # available_as_of_date follows the COMPUTED_MOVES_CONTRACT null policy:
+    # a non-skipped row is knowable the day after its event, a skipped row
+    # (null realized_move_pct) carries a null availability -- never "assume
+    # available". Delayed-close fixtures override it with producer-derived
+    # dates (see test_19).
+    return [{"ticker": "AAA", "event_date": day, "realized_move_pct": move,
+             "skipped": skipped,
+             "available_as_of_date": None if skipped else
+             (pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat()}
             for day, move, skipped in rows_spec]
 
 
@@ -451,3 +460,128 @@ def test_18_panel_anchor_is_the_latest_not_the_earliest_source_date():
     result = _scan(batches=batches)
     assert result.panel_anchor == pd.Timestamp("2024-02-13")
     assert result.panel_anchor != pd.Timestamp(_REGIME_SOURCE)
+
+
+# --------------------------------------------------------------------------
+# available_as_of_date eligibility
+# --------------------------------------------------------------------------
+
+
+class _WindowedComputedRepository(_FakeRepository):
+    """The shared fake, but honoring the emitted event_date window for
+    ``computed_moves`` (like test_12's local variant), so the availability
+    filter -- not the fake -- is what the eligibility tests exercise."""
+
+    def scan(self, query, *, table_name):
+        rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
+        interval = query.time_interval
+        if table_name == COMPUTED_MOVES_TABLE_NAME and interval is not None:
+            start = pd.Timestamp(interval.start_inclusive)
+            end = pd.Timestamp(interval.end_exclusive)
+            rows = [row for row in rows
+                    if start <= pd.Timestamp(row[interval.column]) < end]
+        yield _Batch(rows)
+
+
+def test_19_delayed_close_amc_event_enters_history_only_at_producer_derived_availability():
+    """A real delayed close: a Tuesday 2024-02-13 AMC event whose measured
+    close slides to Thursday (Wednesday's session is missing) is knowable
+    only on Friday 2024-02-16.
+
+    The availability dates and moves are not hand-written fixtures -- they
+    are derived from the actual producer, ``build_rows``. The expected panel
+    values are hand-computed independently (never via the scanner): at the
+    Wednesday 02-14 decision the delayed row is inside the event_date window
+    but not yet knowable, so history and streak carry only the ordinary
+    +5.0 prior; at a Friday 02-16 decision (availability date == decision,
+    equality enters) both priors count."""
+    closes = {
+        "2024-01-09": 100.0, "2024-01-10": 100.0, "2024-01-11": 105.0,
+        "2024-01-12": 105.0, "2024-02-07": 100.0, "2024-02-08": 100.0,
+        "2024-02-09": 100.0, "2024-02-12": 100.0, "2024-02-13": 100.0,
+        # No Wednesday 2024-02-14 session: the Tuesday AMC print's measured
+        # close is Thursday 2024-02-15, so availability is 2024-02-16.
+        "2024-02-15": 110.0,
+    }
+    days = sorted(closes)
+    events = pd.DataFrame({
+        "event_date": pd.to_datetime(["2024-01-10", "2024-01-11", "2024-02-08",
+                                      "2024-02-09", "2024-02-13"]),
+        "session": ["BMO", "BMO", "BMO", "BMO", "AMC"],
+    })
+    built = build_rows(
+        "AAA", events, pd.to_datetime(days).to_numpy(),
+        [closes[day] for day in days],
+        pd.DataFrame({"date": pd.to_datetime(["2024-01-08"]), "implied_move": [1.0]}),
+        computed_at="2024-03-01T00:00:00+00:00",
+        source_hash=fake_hash("cm-producer"), capture_id="cap-1")
+    by_date = {row["event_date"]: row for row in built}
+
+    delayed, ordinary = by_date["2024-02-13"], by_date["2024-01-11"]
+    assert delayed["available_as_of_date"] == "2024-02-16"
+    assert delayed["realized_move_pct"] == pytest.approx(10.0)
+    assert ordinary["available_as_of_date"] == "2024-01-12"
+    assert ordinary["realized_move_pct"] == pytest.approx(5.0)
+
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [ordinary, delayed]
+    snapshot = _snapshot()
+
+    def _panel_at(decision_session):
+        repo = _WindowedComputedRepository(snapshot, _contracts(), batches)
+        key = BoardRequest(ticker="AAA", strategy="STR-X",
+                           event_date=pd.Timestamp("2024-02-20"), session="AMC")
+        return scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                              decision_session=decision_session).panel_row
+
+    panel = _panel_at(_DECISION)
+    assert panel["n_prior"] == 1
+    assert panel["mean_prior_move"] == pytest.approx(5.0)
+    assert panel["mean_prior_abs_move"] == pytest.approx(5.0)
+    assert panel["signed_streak"] == 1.0
+
+    panel = _panel_at(pd.Timestamp("2024-02-16"))
+    assert panel["n_prior"] == 2
+    assert panel["mean_prior_move"] == pytest.approx(7.5)
+    assert panel["signed_streak"] == 2.0
+
+
+def test_20_late_computed_at_is_irrelevant_when_availability_is_by_decision():
+    """Backfill negative control: a prior row computed long after the
+    decision, but available by it, stays eligible -- eligibility is the
+    availability date, never ``computed_at`` (which production does not even
+    request)."""
+    batches = _default_batches()
+    row = {**_computed_rows([("2024-01-10", 2.0, False)])[0],
+           "computed_at": "2025-06-01T00:00:00+00:00"}
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [row]
+    panel = _scan(batches=batches).panel_row
+    assert panel["n_prior"] == 1
+    assert panel["mean_prior_move"] == pytest.approx(2.0)
+    assert panel["signed_streak"] == 1.0
+
+
+def test_21_null_available_as_of_date_excludes_a_numeric_prior_move():
+    """A non-skipped row with a numeric realized move but a NULL
+    availability date is unavailable to every decision -- never fabricated
+    into "always available"."""
+    batches = _default_batches()
+    row = {**_computed_rows([("2024-01-10", 2.0, False)])[0],
+           "available_as_of_date": None}
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [row]
+    panel = _scan(batches=batches).panel_row
+    assert panel["n_prior"] == 0
+    assert panel["mean_prior_move"] is None
+    assert panel["signed_streak"] == 0.0
+
+
+def test_22_computed_projection_names_available_as_of_date_and_only_real_columns():
+    """The requested computed_moves projection asks for availability and
+    names only real contract columns -- the permissive fake never validates
+    column names against the contract, and ``computed_at`` must stay
+    unrequested."""
+    from engine.v2.features import panel_row_inputs
+    assert "available_as_of_date" in panel_row_inputs._COMPUTED_COLUMNS
+    assert "computed_at" not in panel_row_inputs._COMPUTED_COLUMNS
+    real_columns = {column.name for column in COMPUTED_MOVES_CONTRACT.columns}
+    assert set(panel_row_inputs._COMPUTED_COLUMNS) <= real_columns

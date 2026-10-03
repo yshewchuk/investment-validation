@@ -11,7 +11,8 @@ The four always-made pinned-snapshot dependencies:
 * ``scan_daily_state_inputs`` (``key.ticker``);
 * a bounded ``computed_moves`` read (``key.ticker``, rows strictly before
   ``min(key.event_date, decision_session)`` -- the decision-session cutoff,
-  not just the event-date one), feeding ``panel_math.history_features`` with
+  not just the event-date one -- and whose outcome source was available on or
+  before ``decision_session``), feeding ``panel_math.history_features`` with
   the non-skipped rows only (``skipped=true`` rows are excluded before that
   call, never treated as a zero move);
 * a new bounded ``daily_market`` read for the fixed ticker ``"SPY"``, feeding
@@ -52,7 +53,8 @@ _RESULT_LIMIT = 10000
 #: Generous margin over add_runup_features's 300-session minimum.
 _RUNUP_LOOKBACK_SESSIONS = 400
 
-_COMPUTED_COLUMNS = ("ticker", "event_date", "realized_move_pct", "skipped")
+_COMPUTED_COLUMNS = ("ticker", "event_date", "realized_move_pct", "skipped",
+                     "available_as_of_date")
 _SPY_COLUMNS = ("ticker", "date", "spot")
 _REGIME_COLUMNS = (
     "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5", "spy_vol20",
@@ -128,7 +130,8 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
                          key: Any, history_start: pd.Timestamp, decision: pd.Timestamp
                          ) -> list[dict[str, object]]:
     """``key.ticker``'s computed_moves rows strictly before the scored event and
-    the decision session, whichever of the two is earlier."""
+    the decision session, whichever of the two is earlier, and only where the
+    outcome source was available on or before the decision session."""
     contract = data_repository.table_contract(snapshot, _COMPUTED_MOVES_TABLE)
     version = _pinned_version(snapshot, _COMPUTED_MOVES_TABLE)
     start = history_start.date().isoformat()
@@ -149,7 +152,15 @@ def _read_computed_moves(data_repository: repository.Repository, snapshot: Snaps
         max_batch_rows=min(contract.maximum_batch_rows, _BATCH_LIMIT),
         max_result_rows=min(contract.maximum_result_rows, _RESULT_LIMIT),
     )
-    return _consume(data_repository, query, _COMPUTED_MOVES_TABLE)
+    rows = _consume(data_repository, query, _COMPUTED_MOVES_TABLE)
+    eligible: list[dict[str, object]] = []
+    for row in rows:
+        available = row["available_as_of_date"]
+        if available is None:
+            continue
+        if _session_day(available, "available_as_of_date") <= decision:
+            eligible.append(row)
+    return eligible
 
 
 def _read_spy_market(data_repository: repository.Repository, snapshot: SnapshotRef,
