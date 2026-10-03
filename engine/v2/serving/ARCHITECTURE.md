@@ -63,7 +63,8 @@ marked agree/differ and stored values only for differing fields;
 `/native_parity/unpaired?side=legacy|native` pages unpaired row keys.
 Both detail routes accept an optional `row_key` filter. These authenticated
 reads consume one safely opened report per request and never rerun comparisons.
-The API and compatibility preview share validation of modern report fields.
+The API and compatibility preview share validation of modern report fields,
+including dimension and finding-field membership in the shared field groups.
 Pre-v1.2 reports and unstamped diagnostic comparisons retain their legacy
 summary behavior; the API requires complete run identity for v1.2 reports.
 The API takes an optional configured report path; no path means `no_report`.

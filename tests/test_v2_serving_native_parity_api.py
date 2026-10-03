@@ -722,3 +722,50 @@ def test_pre_v12_report_without_identity_stays_readable(parity):
     assert code == 200
     _assert_no_store(headers)
     assert json.loads(body)["status"] == "available"
+
+
+@pytest.mark.parametrize("case", ("unknown_dimension", "wrong_group_field"))
+def test_shared_reader_refuses_unknown_dimension_or_wrong_group_field(parity, case):
+    document = json.loads(parity.report_path.read_text())
+    mismatch = document["mismatches"][0]
+    assert mismatch["dimension"] == "forecasts", case
+    if case == "unknown_dimension":
+        mismatch["dimension"] = "unknown_dimension"
+    else:
+        name = mismatch["finding_fields"][0]
+        mismatch["finding_fields"][0] = "exp_pnl_sim"
+        mismatch["values"]["exp_pnl_sim"] = mismatch["values"].pop(name)
+    write_parity_report(document, parity.report_path)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE, case
+    assert summary["status"] == "unavailable", case
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED, case
+
+    for path, params in (("/api/v1/native_parity", None),
+                         ("/api/v1/native_parity/mismatches", None),
+                         ("/api/v1/native_parity/unpaired", {"side": "legacy"})):
+        code, body, headers = _get(parity.base, path, token=TOKEN, params=params)
+        assert code == 503, (case, path)
+        _assert_no_store(headers)
+        problem = json.loads(body)
+        assert problem["code"] == NATIVE_PARITY_REPORT_MALFORMED, (case, path)
+        assert "compared_count" not in problem, (case, path)
+        assert "items" not in problem, (case, path)
+
+
+def test_pre_v11_raw_comparison_unknown_dimension_and_field_stays_readable(parity):
+    legacy, native = _source_rows()
+    report = compare_native_vs_legacy(legacy, native, ("forecasts", "simulation"))
+    mismatch = report["mismatches"][0]
+    assert mismatch["dimension"] == "forecasts"
+    name = mismatch["finding_fields"][0]
+    mismatch["finding_fields"][0] = "unknown_field"
+    mismatch["values"]["unknown_field"] = mismatch["values"].pop(name)
+    mismatch["dimension"] = "unknown_dimension"
+    report["schema_version"] = "native_parity_report.v1.1"
+    write_parity_report(report, parity.report_path)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK
+    assert summary["status"] == "available"

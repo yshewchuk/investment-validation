@@ -44,11 +44,6 @@ __all__ = [
 NATIVE_PARITY_SUMMARY_V1 = "native_parity_summary.v1.0"
 NATIVE_PARITY_REPORT_MALFORMED = "NATIVE_PARITY_REPORT_MALFORMED"
 
-#: The producer's stamped schema. A v1.2 report (or any report carrying
-#: either run-identity key) must also carry a policy and each finding's
-#: ``{legacy, native}`` values; a raw v1.2 diagnostic without identity stays
-#: readable here -- the captured exporter's own output -- while the API route
-#: layers its own required-identity refusal on top.
 _V12_SCHEMA = "native_parity_report.v1.2"
 
 _REQUIRED_LIST_FIELDS = ("compared", "only_legacy", "only_native", "mismatches")
@@ -192,12 +187,18 @@ def _validate_compared(compared: list[object], mismatches: list[dict[str, object
 
 
 def _validate_report_values(mismatches: list[dict[str, object]]) -> None:
-    """Every finding carries the supplied ``values`` dict's exact pair."""
+    """Every finding names a field of its dimension's group and carries the
+    supplied ``values`` dict's exact pair."""
     for entry in mismatches:
+        dimension = entry["dimension"]
+        if dimension not in _ITEM_GROUP_FIELDS:
+            raise ValueError("native parity mismatch dimension is unknown")
         values = entry.get("values")
         if not isinstance(values, dict):
             raise ValueError("native parity mismatch values is not an object")
         for name in entry["finding_fields"]:
+            if name not in _ITEM_GROUP_FIELDS[dimension]:
+                raise ValueError("native parity mismatch finding field is not in its dimension")
             saved = values.get(name)
             if (not isinstance(saved, dict)
                     or "legacy" not in saved or "native" not in saved):
@@ -205,16 +206,7 @@ def _validate_report_values(mismatches: list[dict[str, object]]) -> None:
 
 
 def _validate_run_identity(report: dict[str, object]) -> None:
-    """The supplied modern fields, shared by the reader and the API route.
-
-    A schema-v1.2 report OR either run-identity key present is modern:
-    ``tolerance_policy_id`` must be a nonempty string and every finding must
-    carry its ``values`` pair. Supplying one identity key requires both, with
-    ``generated_at`` a parsable timestamp and ``as_of`` null or an ISO date.
-    A raw v1.2 diagnostic with both keys absent stays accepted here -- the
-    API route's own required-identity guard is the only thing that refuses
-    it -- and a pre-v1.2 report without identity keeps its old behaviour.
-    """
+    """Validate modern run identity: both keys, parsable timestamps, policy, values."""
     has_as_of = "as_of" in report
     has_generated_at = "generated_at" in report
     if not (report["schema_version"] == _V12_SCHEMA or has_as_of or has_generated_at):
@@ -225,18 +217,12 @@ def _validate_run_identity(report: dict[str, object]) -> None:
         generated_at = report["generated_at"]
         if not isinstance(generated_at, str):
             raise ValueError("native parity generated_at is not a string")
-        try:
-            parse_timestamp(generated_at)
-        except (ValueError, TypeError):
-            raise ValueError("native parity generated_at is not a timestamp") from None
+        parse_timestamp(generated_at)
         as_of = report["as_of"]
         if as_of is not None:
             if not isinstance(as_of, str) or len(as_of) != 10:
                 raise ValueError("native parity as_of is not an ISO date")
-            try:
-                parse_timestamp(as_of + "T00:00:00.000000Z")
-            except (ValueError, TypeError):
-                raise ValueError("native parity as_of is not an ISO date") from None
+            parse_timestamp(as_of + "T00:00:00.000000Z")
     policy = report.get("tolerance_policy_id")
     if not isinstance(policy, str) or not policy:
         raise ValueError("native parity tolerance_policy_id is missing")
@@ -449,12 +435,7 @@ def native_parity_items(report: dict, section: str, *,
 
 def native_parity_freshness(serving_db, resolve_current, as_of: str | None, open_index,
                             read_release) -> str:
-    """Compare the report's run date with the same resolution /releases/current
-    uses. A null ``as_of`` is available without invoking either callback. No
-    current release, an unknown release row, or a ``sqlite3.OperationalError``
-    from the resolver, the index opener, or the release reader leaves the report
-    available; a genuinely earlier ISO date is stale. Every other exception --
-    including the serving index's own typed refusals -- propagates."""
+    """Only a genuinely earlier run date is stale; unknown current stays available."""
     if as_of is None:
         return "available"
     try:

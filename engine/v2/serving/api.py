@@ -109,8 +109,7 @@ def _problem(code: str, category: str, message: str, *, retryable: bool = False,
 
 
 def _handle_api_error(request: Request, exc: ApiError) -> Response:
-    """One Problem response envelope; native parity responses additionally
-    never let a cache or retry reuse a report read."""
+    """Render one Problem envelope; native parity responses are never cached or reused."""
     headers = {}
     if request.url.path.startswith("/api/v1/native_parity"):
         headers["Cache-Control"] = "no-store"
@@ -541,11 +540,6 @@ def _operations_response(publication_root, response: Response, *, release_id: st
     return document
 
 
-# --------------------------------------------------------------------------
-# native parity report -- read-only projection of the producer's artifact
-# --------------------------------------------------------------------------
-
-
 def _parity_malformed() -> ApiError:
     return ApiError(503, _problem(native_parity_projection.NATIVE_PARITY_REPORT_MALFORMED, "integrity",
                                   "the native parity report is malformed"))
@@ -556,11 +550,7 @@ def _parity_mismatch(message: str) -> ApiError:
 
 
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
-    """Compare the report's run date with current-release resolution.
-
-    The API resolver supplies the current release; its ApiError/OSError become
-    an unknown current. The projection classifies SQLite operational failures;
-    only a genuinely older run date is stale."""
+    """Classify report freshness; an ApiError/OSError resolver means unknown current."""
 
     def normalized_resolver() -> str | None:
         try:

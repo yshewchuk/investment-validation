@@ -462,7 +462,7 @@ Only a tracked path absent from the worktree reads as empty.
   | No file at `report_path` | `status: "no_report"` (200) |
   | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
-  | Supplied modern identity, policy or mismatch values malformed | Same `unavailable` (503) in the shared projection and both transports; null `as_of` remains valid |
+  | Supplied modern identity, policy or mismatch values malformed, or mismatch dimension/field outside the shared field groups | Same `unavailable` (503) in the shared projection and both transports; null `as_of` remains valid |
   | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
