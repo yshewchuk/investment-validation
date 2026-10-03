@@ -486,6 +486,52 @@ def _keyed_by_board_request(items: Any) -> dict[str, Any]:
 _MAX_PRODUCER_DETAIL_LENGTH = 500
 
 
+def _validated_producer_refusal_fields(index: int, item: Any) -> tuple[Mapping[str, Any], str, str]:
+    """Validate one ``producer_refusals.json`` item's shape and field types
+    -- presence, then type/value -- and return ``(raw_key, code, detail)``
+    ready for ``BoardRequest`` construction. Raises ``ValueError`` (a
+    fixed, index-naming message) for any problem; this is the stage split
+    out of :func:`_decode_producer_refusals` to keep that function's own
+    complexity within budget.
+    """
+    if not isinstance(item, Mapping):
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} must be an object")
+    raw_key = item.get("key")
+    if not isinstance(raw_key, Mapping):
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} has no \"key\" object")
+    for field_name in ("ticker", "strategy", "event_date", "session"):
+        if field_name not in raw_key:
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} key is "
+                f"missing {field_name!r}")
+    if "code" not in item:
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} is missing \"code\"")
+    if "detail" not in item:
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} is missing \"detail\"")
+    for field_name in ("ticker", "strategy", "event_date", "session"):
+        if not isinstance(raw_key[field_name], str) or not raw_key[field_name]:
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} key "
+                f"{field_name!r} must be a non-empty string")
+    if not isinstance(item["code"], str) or not item["code"]:
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} \"code\" "
+            f"must be a non-empty string")
+    if not isinstance(item["detail"], str):
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} \"detail\" "
+            f"must be a string")
+    if pd.isna(pd.Timestamp(raw_key["event_date"])):
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} key "
+            f"\"event_date\" must be a parseable date string")
+    return raw_key, str(item["code"]), str(item["detail"])
+
+
 def _decode_producer_refusals(doc: Mapping[str, Any]) -> tuple[NativeScoreBatchRowRefusal, ...]:
     """Decode ``producer_refusals.json``'s v1.0 document into the same typed
     per-row refusal shape ``run_native_score_batch_worker``'s own per-row
@@ -507,33 +553,15 @@ def _decode_producer_refusals(doc: Mapping[str, Any]) -> tuple[NativeScoreBatchR
         raise ValueError("producer_refusals.json's \"refusals\" must be a list")
     decoded = []
     for index, item in enumerate(items):
-        if not isinstance(item, Mapping):
-            raise ValueError(
-                f"producer_refusals.json refusal at index {index} must be an object")
-        raw_key = item.get("key")
-        if not isinstance(raw_key, Mapping):
-            raise ValueError(
-                f"producer_refusals.json refusal at index {index} has no \"key\" object")
-        for field_name in ("ticker", "strategy", "event_date", "session"):
-            if field_name not in raw_key:
-                raise ValueError(
-                    f"producer_refusals.json refusal at index {index} key is "
-                    f"missing {field_name!r}")
-        if "code" not in item:
-            raise ValueError(
-                f"producer_refusals.json refusal at index {index} is missing \"code\"")
-        if "detail" not in item:
-            raise ValueError(
-                f"producer_refusals.json refusal at index {index} is missing \"detail\"")
+        raw_key, code, detail = _validated_producer_refusal_fields(index, item)
         key = BoardRequest(
             ticker=str(raw_key["ticker"]), strategy=str(raw_key["strategy"]),
             event_date=pd.Timestamp(raw_key["event_date"]), session=str(raw_key["session"]))
-        code = str(item["code"])
         if code == "INVALID_KEY_FIELD" and not any(
                 "|" in value for value in (key.ticker, key.strategy, key.session)):
             raise ValueError(
                 "producer refusal claims INVALID_KEY_FIELD for an encodable key")
-        detail = str(item["detail"])[:_MAX_PRODUCER_DETAIL_LENGTH]
+        detail = detail[:_MAX_PRODUCER_DETAIL_LENGTH]
         decoded.append(NativeScoreBatchRowRefusal(key, code, detail))
     return tuple(decoded)
 

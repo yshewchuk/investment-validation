@@ -592,6 +592,9 @@ def test_decode_producer_refusals_rejects_wrong_schema_version():
 
 def test_decode_producer_refusals_rejects_malformed_item():
     schema_version = "native_score_batch_producer_refusals.v1.0"
+    key = {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+           "session": "am"}
+    code_detail = {"code": "EVENT_NOT_FOUND", "detail": "x"}
     for item in (
         None,
         {"code": "EVENT_NOT_FOUND", "detail": "x"},
@@ -601,10 +604,29 @@ def test_decode_producer_refusals_rejects_malformed_item():
                  "session": "am"}, "detail": "x"},
         {"key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
                  "session": "am"}, "code": "EVENT_NOT_FOUND"},
+        {**code_detail, "key": {**key, "ticker": None}},
+        {**code_detail, "key": {**key, "ticker": 123}},
+        {**code_detail, "key": {**key, "ticker": ""}},
+        {**code_detail, "key": {**key}, "code": None},
+        {**code_detail, "key": {**key, "event_date": 1700000000}},
+        {**code_detail, "key": {**key, "event_date": "not-a-real-date"}},
     ):
         with pytest.raises(ValueError):
             _decode_producer_refusals(
                 {"schema_version": schema_version, "refusals": [item]})
+
+
+def test_decode_producer_refusals_rejects_non_string_detail():
+    doc = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+                    "session": "am"},
+            "code": "EVENT_NOT_FOUND", "detail": None,
+        }],
+    }
+    with pytest.raises(ValueError):
+        _decode_producer_refusals(doc)
 
 
 def test_decode_producer_refusals_rejects_mislabeled_invalid_key_field():
