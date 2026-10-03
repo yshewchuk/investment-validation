@@ -7,8 +7,11 @@ path); the legacy module itself is never edited. :func:`build_rows` keeps
 ``build_ticker``'s computation byte-for-byte and changes only its return
 shape -- one row dict per event, matching
 :mod:`engine.v2.data.computed_moves_table`'s columns, including one row per
-SKIPPED event (``skipped=True``, ``realized_move_pct=None``). A skip must be
-visible, not just counted (EXP-117 DEFINITION.md R3's materiality rule).
+SKIPPED event (``skipped=True``, ``realized_move_pct=None``) and, on every
+computable row, ``available_as_of_date`` (the measured close date plus one
+calendar day, YYYY-MM-DD -- null exactly when ``realized_move_pct`` is null:
+a skipped event is not available to any decision). A skip must be visible,
+not just counted (EXP-117 DEFINITION.md R3's materiality rule).
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: no ``engine.v2.ops`` and no
 legacy ``engine.*`` imports -- this module is pure numpy/pandas math, the same
@@ -43,7 +46,8 @@ MAX_GAP_CALENDAR_DAYS = 5
 ADMISSION_EVENTS = 5
 
 
-def session_move(sd, sc, t, session) -> float | None:
+def _session_move_indexed(sd, sc, t, session) -> tuple[float, np.datetime64] | None:
+    """Same computation as session_move, plus the measured close date (sd[j_post])."""
     if session == "BMO":
         j_pre = int(np.searchsorted(sd, t, side="left")) - 1
         j_post = int(np.searchsorted(sd, t, side="left"))
@@ -57,15 +61,22 @@ def session_move(sd, sc, t, session) -> float | None:
     p, q = sc[j_pre], sc[j_post]
     if not np.isfinite(p) or not np.isfinite(q) or p <= 0:
         return None
-    return float((q / p - 1.0) * 100.0)
+    return float((q / p - 1.0) * 100.0), sd[j_post]
 
 
-def _row(ticker: str, event_date: str, *, realized, implied, quarter: int, skipped: bool,
+def session_move(sd, sc, t, session) -> float | None:
+    result = _session_move_indexed(sd, sc, t, session)
+    return result[0] if result is not None else None
+
+
+def _row(ticker: str, event_date: str, *, realized, implied, available_as_of_date,
+         quarter: int, skipped: bool,
          computed_at: str, source_hash: str, capture_id: str) -> dict:
     return {
         "ticker": ticker,
         "event_date": event_date,
         "realized_move_pct": realized,
+        "available_as_of_date": available_as_of_date,
         "implied_move_pct": implied,
         "quarter_ordinal": quarter,
         "skipped": skipped,
@@ -85,6 +96,11 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
     A skipped row's quarter_ordinal is always 0 -- it never occupies a slot in
     the per-year count, matching legacy's silence on skipped events; the
     ordinal is meaningful only when skipped is False.
+    A computable row's ``available_as_of_date`` is the measured close date
+    (``session_move``'s ``sd[j_post]``) plus one calendar day, YYYY-MM-DD --
+    the earliest decision_session at which this event's move was knowable; it
+    is null exactly when ``realized_move_pct`` is null (a skipped event,
+    whatever the reason), never "always available".
     The only changed thing is the return: a list of contract-shaped rows
     instead of one oquants document per ticker. Fewer than five computable
     events returns ``[]`` -- the same admission rule the legacy function
@@ -99,13 +115,16 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
     for r in events.itertuples():
         t = r.event_date.to_datetime64()
         year = int(str(r.event_date)[:4])
-        m = session_move(sd, sc, t, r.session)
-        if m is None:
+        indexed = _session_move_indexed(sd, sc, t, r.session)
+        if indexed is None:
             rows.append(_row(
                 ticker, str(r.event_date)[:10], realized=None, implied=None,
+                available_as_of_date=None,
                 quarter=0, skipped=True, computed_at=computed_at,
                 source_hash=source_hash, capture_id=capture_id))
             continue
+        m, close_date = indexed
+        available_as_of_date = str((pd.Timestamp(close_date) + pd.Timedelta(days=1)).date())
         # panel as-of convention: the last EOD row strictly before the print
         j = int(np.searchsorted(dm_dates, t, side="left")) - 1
         im = float(dm_im[j]) if j >= 0 and np.isfinite(dm_im[j]) else None
@@ -113,6 +132,7 @@ def build_rows(ticker: str, events: pd.DataFrame, sd, sc, daily: pd.DataFrame, *
         computable += 1
         rows.append(_row(
             ticker, str(r.event_date)[:10], realized=m, implied=im,
+            available_as_of_date=available_as_of_date,
             quarter=year_seen[year], skipped=False, computed_at=computed_at,
             source_hash=source_hash, capture_id=capture_id))
 

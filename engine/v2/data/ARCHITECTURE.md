@@ -198,6 +198,12 @@ committed by `engine.v2.ops.computed_moves_store.py`/
 `DATA_FAILURE_CODES`, intended to carry no local path or row value — not
 fully enforced today (Invariants).
 
+**`computed_moves.v2` — point-in-time availability.** `available_as_of_date`
+is the calendar day following the close that made `realized_move_pct`
+knowable. It is null exactly when `realized_move_pct` is null; null means
+unavailable to any decision. Readers must require
+`available_as_of_date <= decision_session`.
+
 ## Dependencies
 
 Layer 1.0 has no `only_imports` restriction (root doc §2), but in practice
@@ -346,6 +352,10 @@ Root doc §5 invariants this package is responsible for:
 - **Whole-partition rewrite, no legacy append order** — `price_history_table.py`/
   `computed_moves_table.py` each cover one ticker's whole history in one
   fragment, so a correction rewrites it rather than appending a byte.
+- **Registered contract definitions are immutable.** `catalog.commit_snapshot`
+  refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
+  `contract_id`; a table picks its next `contract_id`/`semantic_version` per
+  its own `schema_evolution_policy`.
 - **`daily_market` revision identity/ordering.** A revision's id folds in
   its own content hash, so differing content never shares an id. Ranking
   picks the surviving group's highest ordinal (derived from `received_at`,

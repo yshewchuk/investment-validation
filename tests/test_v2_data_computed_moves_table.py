@@ -10,7 +10,7 @@ from engine.v2.data.price_history_table import PRICE_HISTORY_CONTRACT
 
 
 def test_contract_id_and_table_name():
-    assert COMPUTED_MOVES_CONTRACT.contract_id == "computed_moves.v1"
+    assert COMPUTED_MOVES_CONTRACT.contract_id == "computed_moves.v2"
     assert COMPUTED_MOVES_CONTRACT.table_name == "computed_moves"
     assert COMPUTED_MOVES_TABLE_NAME == "computed_moves"
 
@@ -33,3 +33,10 @@ def test_primary_key_columns_are_declared():
     for name in (*COMPUTED_MOVES_CONTRACT.primary_key,
                  *COMPUTED_MOVES_CONTRACT.partition_columns):
         assert name in declared, name
+
+
+def test_available_as_of_date_column_is_nullable_and_documented():
+    columns = {column.name: column for column in COMPUTED_MOVES_CONTRACT.columns}
+    column = columns["available_as_of_date"]
+    assert column.nullable is True
+    assert "not available to any decision" in column.null_policy
