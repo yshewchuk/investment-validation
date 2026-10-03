@@ -114,7 +114,7 @@ def test_empty_native_report_all_legacy_only_legacy():
     assert report["only_native"] == []
     assert report["compared"] == []
     assert report["mismatches"] == []
-    assert report["schema_version"] == "native_parity_report.v1.1"
+    assert report["schema_version"] == "native_parity_report.v1.2"
     assert report["tolerance_policy_id"] == SCORE_RECORD_V1.policy_id
 
 

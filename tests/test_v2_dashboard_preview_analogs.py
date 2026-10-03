@@ -11,7 +11,11 @@ header/cookie is 401, a wrong token is 401); an unknown event is a 404
 ``EVENT_NOT_FOUND``; a missing query parameter is a 400; an unconfigured
 index keeps the explicit 503 refusal; and a GET never migrates: a missing
 index file is a typed 503 ``SERVING_INDEX_MISSING`` and an unmigrated index
-is a typed 503 ``SERVING_INDEX_OUTDATED`` that stays at its old schema.
+is a typed 503 ``SERVING_INDEX_OUTDATED`` that stays at its old schema. Issue
+#306: an index that OPENS but cannot be READ -- corrupt bytes, corrupt stored
+analog row-ids JSON, or a schema that is current for ``index_is_current`` yet
+SELECT-invalid for ``analog_document`` -- is the typed 503
+``SERVING_INDEX_UNREADABLE``, never a traceback leaking exception text.
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ import pytest
 from engine.v2.dashboard import preview
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore
-from engine.v2.serving import projections
+from engine.v2.serving import analog_projection, projections
 from tests.test_v2_serving_projections import (
     _bundle,
     _compact,
@@ -263,5 +267,100 @@ def test_shell_nav_links_to_the_analogs_view(tmp_path, monkeypatch):
         page = urlopen(f"http://127.0.0.1:{server.server_port}/analogs", timeout=5)
         assert page.status == 200
         assert b"History analogs" in page.read()
+    finally:
+        _stop(server, thread)
+
+
+# --------------------------------------------------------------------------
+# issue #306: an index the read path cannot USE is a typed 503, never a crash
+# --------------------------------------------------------------------------
+
+
+def _launcher_index(tmp_path: Path) -> Path:
+    """The serving index path ``_run_launcher`` starts the real launcher on."""
+    return tmp_path / "serving" / "serving.sqlite"
+
+
+def _assert_unreadable_503(server, release) -> str:
+    """One authenticated read over a damaged index: EXACTLY
+    ``index_refusal(SERVING_INDEX_UNREADABLE)`` as a 503 JSON document --
+    never the exception text or a path. Returns the raw body for leak checks."""
+    with pytest.raises(HTTPError) as error:
+        _get_analogs(server, release_id=release.release_id, event_id="e1")
+    assert error.value.code == 503
+    assert error.value.headers["Content-Type"] == "application/json"
+    raw = error.value.read().decode()
+    body = json.loads(raw)
+    status, expected = analog_projection.index_refusal(
+        analog_projection.SERVING_INDEX_UNREADABLE)
+    assert status.value == error.value.code
+    assert body == expected
+    assert body["schema_version"] == "history_analogs_view.v1"
+    assert body["status"] == "unavailable"
+    assert body["reason_code"] == "SERVING_INDEX_UNREADABLE"
+    return raw
+
+
+def test_analogs_json_unreadable_disk_index_is_a_typed_503(tmp_path, monkeypatch):
+    """Corrupt-but-openable index bytes: ``open_read_only`` succeeds, the first
+    statement (``index_is_current``) raises a SQLite error, and the route
+    answers the typed 503 instead of dying mid-response."""
+    server, thread, release_id, release = _run_launcher(tmp_path, monkeypatch)
+    try:
+        index = _launcher_index(tmp_path)
+        with open(index, "r+b") as handle:
+            handle.write(b"\x00" * 16)  # destroy the magic: not a database anymore
+        conn = analog_projection.open_read_only(index)
+        try:
+            with pytest.raises(sqlite3.Error):
+                analog_projection.index_is_current(conn)
+        finally:
+            conn.close()
+        raw = _assert_unreadable_503(server, release)
+        assert str(index) not in raw and "not a database" not in raw
+    finally:
+        _stop(server, thread)
+
+
+@pytest.mark.parametrize("column", ["selected_row_ids", "contributing_row_ids"])
+def test_analogs_json_corrupt_row_ids_json_is_a_typed_503(tmp_path, monkeypatch, column):
+    """One analog row-ids column corrupted INDEPENDENTLY inside an otherwise
+    valid committed index: the schema still passes ``index_is_current``, so the
+    read reaches ``analog_document`` and ``json.loads`` of the stored column
+    raises -- the route still answers the exact typed 503."""
+    server, thread, release_id, release = _run_launcher(tmp_path, monkeypatch)
+    try:
+        writer = sqlite3.connect(_launcher_index(tmp_path), isolation_level=None)
+        try:
+            writer.execute(f"UPDATE serving_score_summary SET {column} = ?", ("{",))
+        finally:
+            writer.close()
+        raw = _assert_unreadable_503(server, release)
+        assert str(tmp_path) not in raw and TOKEN not in raw
+    finally:
+        _stop(server, thread)
+
+
+def test_analogs_json_current_schema_broken_select_is_a_typed_503(tmp_path, monkeypatch):
+    """Schema valid for currency but SELECT-invalid: a table carrying all of
+    migration 3's analog columns yet none of the SELECT's others passes
+    ``index_is_current`` and fails inside ``analog_document`` with a SQLite
+    error -- the same typed 503, not an outdated refusal."""
+    server, thread, release_id, release = _run_launcher(tmp_path, monkeypatch)
+    try:
+        writer = sqlite3.connect(_launcher_index(tmp_path), isolation_level=None)
+        try:
+            writer.execute("ALTER TABLE serving_score_summary RENAME TO "
+                           "serving_score_summary_damaged")
+            writer.execute("CREATE TABLE serving_score_summary (selected_row_ids TEXT, "
+                           "contributing_row_ids TEXT, n_analogs INTEGER)")
+        finally:
+            writer.close()
+        conn = analog_projection.open_read_only(_launcher_index(tmp_path))
+        try:
+            assert analog_projection.index_is_current(conn)
+        finally:
+            conn.close()
+        _assert_unreadable_503(server, release)
     finally:
         _stop(server, thread)
