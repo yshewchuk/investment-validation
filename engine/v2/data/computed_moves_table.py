@@ -39,7 +39,13 @@ COMPUTED_MOVES_TABLE_NAME = "computed_moves"
 _SCHEMA_EVOLUTION_POLICY = (
     "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). "
     "Changed units, key meaning, time meaning, or null policy require a new major "
-    "contract_id/semantic_version; nullable additions require a minor version only."
+    "contract_id/semantic_version. A nullable addition needs only a minor version IF "
+    "its contract_id has nothing committed under it yet; once anything has been "
+    "committed, catalog.commit_snapshot's data_contracts table (keyed by contract_id "
+    "alone) raises IDENTITY_CONFLICT on any second, differently-shaped definition "
+    "under that id regardless of nullability, so a nullable addition to an "
+    "already-committed contract_id needs a new major contract_id/semantic_version too "
+    "(computed_moves.v2/2.0.0 is this table's own example)."
 )
 
 _COLUMNS = (
