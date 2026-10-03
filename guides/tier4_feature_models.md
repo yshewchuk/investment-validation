@@ -320,9 +320,9 @@ gap keeps the ordinary incremental cut unchanged — no widening at all.
 **The widening is bounded** (`BACKFILL_WINDOW_MONTHS`, measured back from the
 requested `since`). Recomputing an arbitrarily old gap would put unbounded,
 unpredictable runtime into the nightly's critical path — the exact failure
-mode the incremental path exists to avoid. A gap whose earliest date falls
-outside that window is **not** backfilled this run. A TRAINABLE gap whose
-widen target cannot be reached instead raises `Tier4Error`, whether scored
+mode the incremental path exists to avoid. A gap whose required recomputation
+target falls outside that window is **not** backfilled this run. A TRAINABLE
+gap whose widen target cannot be reached instead raises `Tier4Error`, whether scored
 or unscored, since carrying a fold against a changed training pool has no
 safe default. Refusal happens before forecast publication; the existing
 table stays unchanged, and retrying the same inputs refuses again until a

@@ -789,6 +789,14 @@ def _carried_prefix(
     ``cut`` back to ``FIRST_FOLD`` exactly as the scored case does, bounded the
     same way. If the bound cannot reach ``FIRST_FOLD``, carrying the folds in
     between would be silently stale, so this refuses instead.
+
+    A SCORED gap that is also trainable is the same hazard with a nearer
+    reach: a row dated D is ``< stamp`` only for folds whose stamps are
+    strictly later than D, so such a gap's own fold can fall outside the
+    bounded window while folds from the next stamp up to the floor were still
+    fit against the old pool. This refuses too — conservatively, whether or
+    not the carried table still stores those folds. A nontrainable scored gap
+    changes no pool and keeps the named, nonfatal skip described in §6a.
     """
     _, _, _, _, _, model_id_col, fold_col = column_group(model.produces)
     have = existing[existing["event_date"] < cut]
@@ -837,11 +845,14 @@ def _carried_prefix(
         )
         missing = merged[merged["_merge"] == "left_only"][["ticker", "event_date"]]
 
-    # Only an unscored key that is ALSO in the trainable pool can change a
-    # fold's training-row count (n_train counts `trainable` rows). A key
-    # `model.prepare`/the target filter excluded from `trainable` never joins
-    # any fold's pool, in a full rebuild or otherwise, so it must not force a
-    # widen or a refusal.
+    # Only a missing key that is ALSO in the trainable pool can change a
+    # fold's training-row count (n_train counts `trainable` rows): an unscored
+    # one joins every scored fold, a scored one joins every fold stamped
+    # strictly after its date. A key `model.prepare`/the target filter
+    # excluded from `trainable` cannot change a training pool or force a
+    # TRAINING-POOL refusal; a nontrainable unscored gap needs only the null
+    # fill, while a nontrainable scored gap still widens to repair its own
+    # missing forecast when reachable.
     trainable_keys = pd.MultiIndex.from_arrays(
         [trainable["ticker"], pd.to_datetime(trainable["date"])]
     )
@@ -897,6 +908,36 @@ def _carried_prefix(
             "carried against a training pool that changed under them. Rebuild "
             "in full (no --since)."
         )
+
+    # A trainable SCORED gap reaches the same hazard, nearer: the row joins
+    # every fold stamped strictly after its date, so its own fold can sit
+    # outside the bounded window while folds after it up to the floor were
+    # still fit against the old pool. Match each remaining missing scored key
+    # by its complete (ticker, event_date) pair — an older nontrainable skip
+    # must not hide a later trainable one — and refuse on any matched key
+    # whose own fold precedes the floor (equality is inside the window).
+    scored_missing = missing[missing["event_date"] >= FIRST_FOLD]
+    matched = scored_missing[
+        pd.MultiIndex.from_arrays(
+            [scored_missing["ticker"], scored_missing["event_date"]]
+        ).isin(trainable_keys)
+    ]
+    if len(matched):
+        outside = fold_start_of(matched["event_date"]).to_numpy() < floor.to_datetime64()
+        if outside.any():
+            first = matched[outside].sort_values("event_date").iloc[0]
+            first_fold = fold_start_of([first["event_date"]]).iloc[0]
+            raise Tier4Error(
+                f"{model.produces}: Tier 3 has a trainable event dated "
+                f"{first['event_date'].date()} ({first['ticker']}, target "
+                f"{model.target!r}) the existing table does not cover, and its "
+                f"own fold {first_fold.date()} is outside the "
+                f"{BACKFILL_WINDOW_MONTHS}-month backfill window from the "
+                f"requested cut {cut.date()} (bounded floor {floor.date()}) — "
+                "folds stamped after that event would be carried against a "
+                "training pool that changed under them. Rebuild in full "
+                "(no --since)."
+            )
 
     prefix_keys2 = keys[keys["event_date"] < effective_cut]
     have2 = have[have["event_date"] < effective_cut]
