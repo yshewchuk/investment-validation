@@ -123,7 +123,15 @@ PR-6"); it is the raw-row producer's one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
 pair. `panel_row.date` is the scored event's ISO calendar date, required by
 the scoring source-bundle consumer; it is never the decision or source-anchor
-date. `panel_anchor` is the latest (freshest) of its contributing reads'
+date. Before any repository read, the boundary validates `key.event_date`
+as a non-missing, timezone-naive date or timestamp and normalizes it to
+midnight. Intraday event timestamps represent the same calendar event day.
+The normalized day supplies the computed-move bound, regime and runup event
+anchors, and output date, so an event-day close remains excluded even for
+an event-day decision. Numeric, invalid, missing, and timezone-aware event
+dates refuse with `CONTRACT_MISMATCH`; decision and history-start inputs
+continue to require explicit naive midnight days.
+`panel_anchor` is the latest (freshest) of its contributing reads'
 own source dates, never a caller-asserted value — its consumer
 (`../scoring/ARCHITECTURE.md`'s `nightly_source_bundle.py`) trusts it as
 an observation-freshness upper bound, which only the latest, not the
@@ -165,6 +173,7 @@ contract — see the PR body.
 
 | Condition (R1-R6) | Outcome |
 |---|---|
+| `key.event_date` is numeric, invalid, missing, or timezone-aware | `CONTRACT_MISMATCH`, refused before any repository read |
 | snapshot has no `daily_market`/`computed_moves` table | `CONTRACT_MISMATCH`, propagated from the underlying read unchanged |
 | snapshot has no `price_history` table | `CONTRACT_MISMATCH`, propagated unchanged |
 | `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: every key is still present (`n_prior=0`, the mean/EMA keys `None`), never absent; `regime`'s fields are unaffected (independent read) |
