@@ -585,3 +585,39 @@ def test_22_computed_projection_names_available_as_of_date_and_only_real_columns
     assert "computed_at" not in panel_row_inputs._COMPUTED_COLUMNS
     real_columns = {column.name for column in COMPUTED_MOVES_CONTRACT.columns}
     assert set(panel_row_inputs._COMPUTED_COLUMNS) <= real_columns
+
+
+# --------------------------------------------------------------------------
+# staged-input presence contract (nightly_source_bundle)
+# --------------------------------------------------------------------------
+
+
+def test_23_panel_row_date_is_the_scored_event_and_satisfies_the_presence_guard():
+    """The assembled panel_row carries the scored event's ISO calendar date.
+
+    Presence-contract regression for the real consumer guard,
+    ``nightly_source_bundle._require_staged_inputs_present``, which refuses
+    ``MISSING_STAGED_INPUT`` on a panel_row without its ``date`` key. The
+    expected date is independent of scanner output, and must be the event
+    date -- never the decision session or any contributing source anchor
+    (the mixed-date fixture puts those at 02-14 / 02-05)."""
+    from engine.v2.scoring.nightly_source_bundle import (
+        NightlySourceBundleRefusal,
+        _CALENDAR_REQUIRED_FIELDS,
+        _require_staged_inputs_present,
+    )
+
+    result = _scan()
+    panel = result.panel_row
+    assert panel["date"] == _EVENT.date().isoformat() == "2024-02-15"
+    assert panel["date"] != _DECISION.date().isoformat()
+    assert panel["date"] != result.panel_anchor.date().isoformat()
+
+    calendar_row = {field: None for field in _CALENDAR_REQUIRED_FIELDS}
+    _require_staged_inputs_present(calendar_row, panel, {}, [])
+
+    without_date = {name: value for name, value in panel.items() if name != "date"}
+    with pytest.raises(NightlySourceBundleRefusal) as exc:
+        _require_staged_inputs_present(calendar_row, without_date, {}, [])
+    assert exc.value.code == "MISSING_STAGED_INPUT"
+    assert "'date'" in exc.value.detail

@@ -333,5 +333,6 @@ def scan_panel_row(
         **history,
         **regime_features,
         **runup_features,
+        "date": pd.Timestamp(key.event_date).date().isoformat(),
     }
     return PanelRowInputs(panel_row=panel_row, panel_anchor=panel_anchor)
