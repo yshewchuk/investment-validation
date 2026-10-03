@@ -37,12 +37,15 @@ pair. The dashboard reads the parity report, so it shows `no_report`.
 
 - [ ] **Raw-row producer, end to end.** Panel, Tier-4 forecast and quote row
   staging, per-row refusal handling, and replacing the raise in `nightly.py`
-  with the real build and submit. No PR open. Open prerequisites:
+  with the real build and submit. No PR open. Shadow-run prerequisite:
   [#243](https://github.com/yshewchuk/investment-validation/issues/243)
-  (intraday earnings-row admission),
-  [#260](https://github.com/yshewchuk/investment-validation/issues/260)
-  (genuine EOD availability and finality evidence). Forward forecast design:
+  (intraday earnings-row admission). Forward forecast design:
   `engine/v2/scoring/ARCHITECTURE.md`.
+- [ ] **Genuine EOD source availability and finality evidence**
+  ([#260](https://github.com/yshewchuk/investment-validation/issues/260))
+  is required before any non-shadow caller and before cutover. Deferred for
+  shadow runs only (see the [#309 design](https://github.com/yshewchuk/investment-validation/pull/309));
+  currently has no owner (no assignee or PR aimed at it).
 - [ ] **First real `native_score_batch` and `native_parity` run** on a pinned
   night; nothing exists to classify tolerances against until then.
 - [ ] **React side-by-side screen.** `ui/` has no parity view; the only parity
