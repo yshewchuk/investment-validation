@@ -79,7 +79,6 @@ from engine.v2.foundation import (
     ArtifactStore,
     canonical_json,
     content_hash,
-    parse_timestamp,
     safe_relative_path,
     to_document,
 )
@@ -556,47 +555,6 @@ def _parity_mismatch(message: str) -> ApiError:
     return ApiError(_CURSOR_MISMATCH_STATUS, _problem("CURSOR_MISMATCH", "validation", message))
 
 
-def _validate_parity_values(mismatches: list) -> None:
-    for entry in mismatches:
-        fields = entry.get("finding_fields")
-        values = entry.get("values")
-        if not isinstance(fields, list) or not isinstance(values, dict):
-            raise _parity_malformed()
-        for name in fields:
-            saved = values.get(name)
-            if not isinstance(saved, dict) or "legacy" not in saved or "native" not in saved:
-                raise _parity_malformed()
-
-
-def _validate_parity_report(report: dict) -> None:
-    """v1.2 identity gate; pre-v1.2 stays valid and null ``as_of`` stays indeterminate."""
-    modern = (report["schema_version"] == "native_parity_report.v1.2"
-              or "as_of" in report or "generated_at" in report)
-    if not modern:
-        return
-    if not {"as_of", "generated_at"} <= report.keys():
-        raise _parity_malformed()
-    generated_at = report["generated_at"]
-    if not isinstance(generated_at, str):
-        raise _parity_malformed()
-    try:
-        parse_timestamp(generated_at)
-    except (ValueError, TypeError):
-        raise _parity_malformed() from None
-    as_of = report["as_of"]
-    if as_of is not None:
-        if not isinstance(as_of, str) or len(as_of) != 10:
-            raise _parity_malformed()
-        try:
-            parse_timestamp(as_of + "T00:00:00.000000Z")
-        except (ValueError, TypeError):
-            raise _parity_malformed() from None
-    policy = report.get("tolerance_policy_id")
-    if not isinstance(policy, str) or not policy:
-        raise _parity_malformed()
-    _validate_parity_values(report.get("mismatches") or [])
-
-
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
     """Compare the report's run date with the same resolution /releases/current
     uses. No current release, no release row, or an ApiError binding failure
@@ -642,7 +600,9 @@ def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, repo
         raise _parity_malformed()
     if report is None:
         return summary if section is None else {"status": "no_report"}
-    _validate_parity_report(report)
+    if (report["schema_version"] == "native_parity_report.v1.2"
+            and not {"as_of", "generated_at"} <= report.keys()):
+        raise _parity_malformed()
     summary["status"] = _native_parity_freshness(serving_db, resolve_current, summary.get("as_of"))
     if section is None:
         return summary

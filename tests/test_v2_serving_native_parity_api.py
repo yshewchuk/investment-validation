@@ -14,6 +14,7 @@ import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http import HTTPStatus
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,10 @@ from engine.v2.ops.native_parity_report import (  # noqa: E402
 from engine.v2.parity.dimensions import FORECAST_FIELDS, SIMULATION_FIELDS  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.api import ApiError, create_app  # noqa: E402
+from engine.v2.serving.native_parity_projection import (  # noqa: E402
+    NATIVE_PARITY_REPORT_MALFORMED,
+    native_parity_summary,
+)
 from tests.test_v2_serving_api import (  # noqa: E402
     _bundle,
     _compact,
@@ -465,3 +470,58 @@ def test_null_as_of(parity):
     assert summary["mismatched_row_count"] == 2
     assert summary["only_legacy_count"] == 2
     assert summary["only_native_count"] == 2
+
+
+# --------------------------------------------------------------------------
+# shared-reader boundary: the modern identity/policy/value checks live in
+# engine/v2/serving/native_parity_projection and the API route keeps only
+# its required-identity refusal for stamped v1.2 reports
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", ("missing_identity_keys", "malformed_as_of",
+                                  "missing_value_pair"))
+def test_shared_reader_refuses_malformed_modern_fields(parity, case):
+    _corrupt_report(parity, case)
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE, case
+    assert summary["status"] == "unavailable", case
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED, case
+    assert "compared_count" not in summary, case
+
+
+def test_raw_v12_diagnostic_reads_shared_but_api_refuses_missing_identity(parity):
+    """The captured exporter's raw v1.2 diagnostic (no run identity) stays
+    readable by the shared reader, while the API route refuses it."""
+    legacy, native = _source_rows()
+    report = compare_native_vs_legacy(legacy, native, ("forecasts", "simulation"))
+    assert report["schema_version"] == "native_parity_report.v1.2"
+    assert "as_of" not in report and "generated_at" not in report
+    write_parity_report(report, parity.report_path)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK
+    assert summary["status"] == "available"
+    assert summary["compared_count"] == 3
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=TOKEN)
+    assert code == 503
+    _assert_no_store(headers)
+    assert json.loads(body)["code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+def test_pre_v12_report_without_identity_stays_readable(parity):
+    legacy, native = _source_rows()
+    report = compare_native_vs_legacy(legacy, native, ("forecasts", "simulation"))
+    report["schema_version"] = "native_parity_report.v1.1"
+    write_parity_report(report, parity.report_path)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK
+    assert summary["status"] == "available"
+    assert summary["source_schema_version"] == "native_parity_report.v1.1"
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=TOKEN)
+    assert code == 200
+    _assert_no_store(headers)
+    assert json.loads(body)["status"] == "available"

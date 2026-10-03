@@ -20,9 +20,9 @@ import json
 import os
 import stat
 from http import HTTPStatus
-from pathlib import Path
 from typing import Any
 
+from engine.v2.foundation import parse_timestamp
 from engine.v2.parity.dimensions import (
     ANALOG_FIELDS,
     FINANCIAL_FIELDS,
@@ -42,6 +42,13 @@ __all__ = [
 
 NATIVE_PARITY_SUMMARY_V1 = "native_parity_summary.v1.0"
 NATIVE_PARITY_REPORT_MALFORMED = "NATIVE_PARITY_REPORT_MALFORMED"
+
+#: The producer's stamped schema. A v1.2 report (or any report carrying
+#: either run-identity key) must also carry a policy and each finding's
+#: ``{legacy, native}`` values; a raw v1.2 diagnostic without identity stays
+#: readable here -- the captured exporter's own output -- while the API route
+#: layers its own required-identity refusal on top.
+_V12_SCHEMA = "native_parity_report.v1.2"
 
 _REQUIRED_LIST_FIELDS = ("compared", "only_legacy", "only_native", "mismatches")
 _OPTIONAL_LIST_FIELDS = ("native_refused", "native_refused_unmatched")
@@ -111,7 +118,7 @@ def _reason_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
     return _counted(entry["refusal_code"] for entry in entries)
 
 
-def _open_regular_no_follow(path: Path):
+def _open_regular_no_follow(path: str | os.PathLike):
     """Open ``path`` for reading without ever following a symlink.
 
     Raises ``FileNotFoundError`` for a missing path, a symlink, or anything
@@ -183,6 +190,58 @@ def _validate_compared(compared: list[Any], mismatches: list[dict[str, Any]]) ->
             raise ValueError("native parity mismatch row_key is not in 'compared'")
 
 
+def _validate_report_values(mismatches: list[dict[str, Any]]) -> None:
+    """Every finding carries the supplied ``values`` dict's exact pair."""
+    for entry in mismatches:
+        values = entry.get("values")
+        if not isinstance(values, dict):
+            raise ValueError("native parity mismatch values is not an object")
+        for name in entry["finding_fields"]:
+            saved = values.get(name)
+            if (not isinstance(saved, dict)
+                    or "legacy" not in saved or "native" not in saved):
+                raise ValueError("native parity mismatch value pair is incomplete")
+
+
+def _validate_run_identity(report: dict[str, Any]) -> None:
+    """The supplied modern fields, shared by the reader and the API route.
+
+    A schema-v1.2 report OR either run-identity key present is modern:
+    ``tolerance_policy_id`` must be a nonempty string and every finding must
+    carry its ``values`` pair. Supplying one identity key requires both, with
+    ``generated_at`` a parsable timestamp and ``as_of`` null or an ISO date.
+    A raw v1.2 diagnostic with both keys absent stays accepted here -- the
+    API route's own required-identity guard is the only thing that refuses
+    it -- and a pre-v1.2 report without identity keeps its old behaviour.
+    """
+    has_as_of = "as_of" in report
+    has_generated_at = "generated_at" in report
+    if not (report["schema_version"] == _V12_SCHEMA or has_as_of or has_generated_at):
+        return
+    if has_as_of != has_generated_at:
+        raise ValueError("native parity report must carry both as_of and generated_at")
+    if has_as_of:
+        generated_at = report["generated_at"]
+        if not isinstance(generated_at, str):
+            raise ValueError("native parity generated_at is not a string")
+        try:
+            parse_timestamp(generated_at)
+        except (ValueError, TypeError):
+            raise ValueError("native parity generated_at is not a timestamp") from None
+        as_of = report["as_of"]
+        if as_of is not None:
+            if not isinstance(as_of, str) or len(as_of) != 10:
+                raise ValueError("native parity as_of is not an ISO date")
+            try:
+                parse_timestamp(as_of + "T00:00:00.000000Z")
+            except (ValueError, TypeError):
+                raise ValueError("native parity as_of is not an ISO date") from None
+    policy = report.get("tolerance_policy_id")
+    if not isinstance(policy, str) or not policy:
+        raise ValueError("native parity tolerance_policy_id is missing")
+    _validate_report_values(report["mismatches"])
+
+
 def _load_report(handle) -> dict[str, Any]:
     """Parse and shape-check the report; raises on anything malformed."""
     report = json.load(handle)
@@ -199,6 +258,7 @@ def _load_report(handle) -> dict[str, Any]:
         if not all(isinstance(key, str) for key in report[field]):
             raise ValueError(f"native parity report field {field!r} has a non-string entry")
     _validate_optional_lists(report)
+    _validate_run_identity(report)
     return report
 
 
@@ -401,12 +461,12 @@ def _unavailable() -> tuple[HTTPStatus, dict, None]:
     }, None
 
 
-def native_parity_snapshot(report_path: Path | str | None, *,
+def native_parity_snapshot(report_path: str | os.PathLike | None, *,
                            worst_limit: int = 10) -> tuple[HTTPStatus, dict, dict | None]:
     """``(status, summary, report_or_None)``; report is present only when available."""
     if report_path is None:
         return _no_report()
-    path = Path(report_path)
+    path = os.fspath(report_path)
     try:
         handle = _open_regular_no_follow(path)
     except FileNotFoundError:
@@ -458,7 +518,7 @@ def native_parity_snapshot(report_path: Path | str | None, *,
     return HTTPStatus.OK, summary, report
 
 
-def native_parity_summary(report_path: Path | str | None, *,
+def native_parity_summary(report_path: str | os.PathLike | None, *,
                           worst_limit: int = 10) -> tuple[HTTPStatus, dict]:
     """Summary-only wrapper over :func:`native_parity_snapshot`'s first two elements."""
     status, summary, _report = native_parity_snapshot(report_path, worst_limit=worst_limit)

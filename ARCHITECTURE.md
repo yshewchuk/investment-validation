@@ -443,7 +443,7 @@ Only a tracked path absent from the worktree reads as empty.
   Output document (`native_parity_summary.v1.0`), when a report is found and
   parses: `status: "available"`; `partial` (`true` when the artifact predates
   the `native_refused`/`native_refused_unmatched` fields); `source_schema_version`;
-  `as_of`/`generated_at`/`tolerance_policy_id` (null when absent from an older report);
+  `as_of`/`generated_at`/`tolerance_policy_id` (null when absent from an older report or unstamped diagnostic export);
   `compared_count`/`only_legacy_count`/`only_native_count`;
   `matched_row_count`/`mismatched_row_count` (distinct row keys with zero
   vs. at least one dimension mismatch — `matched_row_count +
@@ -460,6 +460,8 @@ Only a tracked path absent from the worktree reads as empty.
   | No file at `report_path` | `status: "no_report"` (200) |
   | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
+  | Supplied modern identity, policy or mismatch values malformed | Same `unavailable` (503) in the shared projection and both transports; null `as_of` remains valid |
+  | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
   Consumers are the authenticated FastAPI `/api/v1/native_parity` summary
