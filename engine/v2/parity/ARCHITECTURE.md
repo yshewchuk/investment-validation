@@ -36,10 +36,18 @@ from `engine/v2/diagnosis`) — this doc does not repeat it.
   dict` (`dimensions.py`) — the Phase 4 checker's own
   `_compare_dimension`, moved here unchanged, then widened by cutover
   PR-4 (below) with one new keyword. Returns
-  `{"agree": bool, "finding_fields": [...], "receipt": <content hash>}`.
-  `compare_records` stays injectable only so the Phase 4 checker's own
-  negative controls can keep rebinding it through `checks.phase4_real`'s
-  module global; no other caller has a reason to override it.
+  `{"agree": bool, "finding_fields": [...], "values": {...}, "receipt":
+  <content hash>}`. `values` (cutover PR-4 slice 1 of #327, this PR) is a
+  `{field_path: {"legacy": Finding.left_value, "native":
+  Finding.right_value}}` map covering only `finding_fields` — `{}` when
+  `agree` is `True`, since there is nothing to show — never every
+  compared field; `compare_dimension` invents no new value here, it only
+  stops discarding what `compare_records`'s own `Finding`s already carry.
+  This is additive: the Phase 4 checker's own caller reads only `"agree"`
+  and `"finding_fields"` and is unaffected. `compare_records` stays
+  injectable only so the Phase 4 checker's own negative controls can keep
+  rebinding it through `checks.phase4_real`'s module global; no other
+  caller has a reason to override it.
 - `FORECAST_FIELDS`, `SIMULATION_FIELDS`, `FINANCIAL_FIELDS`,
   `GATE_FIELDS`, `ANALOG_FIELDS` (`dimensions.py`) — the checker's five
   numeric field-name tuples, by name; `NEVER_RAN_DIMENSIONS` — the subset
@@ -83,8 +91,8 @@ changed by this PR.
 ## Outputs
 
 - One `ComparisonReceipt` per `compare_records` call; one
-  `{"agree", "finding_fields", "receipt"}` dict per `compare_dimension`
-  call. Neither call writes anything — no filesystem, no catalog, no
+  `{"agree", "finding_fields", "values", "receipt"}` dict per
+  `compare_dimension` call. Neither call writes anything — no filesystem, no catalog, no
   artifact store. The caller (`checks/phase4_real.py`,
   `engine/v2/ops/native_parity_report.py`) decides whether and where to
   persist what it got back.

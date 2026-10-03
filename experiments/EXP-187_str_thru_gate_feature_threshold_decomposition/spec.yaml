@@ -1,0 +1,82 @@
+id: EXP-187
+title: "STR-THRU gate promotion: decomposing EXP-184's feature-set and threshold-rule effects"
+hypothesis: "EXP-184 confounded two changes in one comparison: it changed the gate's feature set (the champion's registered features -> plus forecast/analog columns) AND its threshold rule (the registry's stored threshold -> each walk-forward fold's own top-20% quantile) at the same time, so its measured gain cannot be attributed to either alone. This experiment adds two pre-registered arms on the identical v2
+  snapshot, trades, repricer, walk-forward and MC settings as EXP-184, to isolate each effect by holding ONE axis fixed at a time. Arm A trains the champion's registered features (engine/models/training/gate.py FEATURES, no forecast or analog columns) with the SAME per-fold top-20% rule as EXP-184's candidate (experiments.common.make_trained_gate) -- same threshold rule as the candidate, different
+  feature set. Arm B re-evaluates the actually-served champion gate_midfill_str_thru_forecast_analog with its own registered threshold, refit per fold (experiments.common.make_registered_gate) -- the SAME full forecast+analog feature set as EXP-184's candidate, different threshold rule. Arm B also re-validates the already-promoted champion on the v2 snapshot it has not previously been scored on.
+  Features effect = EXP-184's candidate (experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/results/metrics_b8c322b24feb.json) vs this experiment's arm A -- both per-fold top-20%, so only the feature set differs. Threshold effect = EXP-184's candidate vs this experiment's arm B -- both the full forecast+analog feature set, so only the threshold rule differs. Arm A vs arm B is
+  NOT used to isolate either effect: it changes both the feature set and the threshold rule at once, the same confound this experiment exists to resolve. Whether the feature effect and the threshold effect are actually independent (additive) across the four-arm design this forms together with EXP-184's own two results is checked directly, not inferred from a single comparison -- see
+  interaction_check below."
+type: diagnostic_decomposition
+strategy: "STR-THRU"
+price_source: ORATS chains (bid/ask, validated +/-2-3%) + engine.replay pricing
+
+primary_spec:
+  structure: "STR-THRU e+0 x+1 (last pre-print close in, first post-print close out)"
+  universe: "all engine.replay STR-THRU events, unselected (~19,161 events, 2018-2026)"
+  fills: "full alpha grid {0.0, 0.25, 0.5, 0.75, 1.0}; mid headline"
+  equity: cashflow mode, max_deployed_fraction 1.0
+  mc: block bootstrap block=20, paths=1000, seed=0, draw_order=shared
+
+arm_a_base_features_trained:
+  features: "the champion's registered features (engine/models/training/gate.py FEATURES) -- no forecast or analog columns"
+  gate_kind: "no registered threshold; each walk-forward fold chooses its own top-20% quantile on that fold's training predictions (experiments.common.make_trained_gate, same discipline as EXP-184's candidate)"
+  top_fraction: 0.20
+  run_dir: "this experiment's own run_dir (REPORT.md at the experiment root)"
+  purpose: "isolates the feature-set effect against EXP-184's candidate: same per-fold top-20% threshold rule, base feature set instead of plus forecast/analog columns"
+
+arm_b_served_champion_registered:
+  gate_id: gate_midfill_str_thru_forecast_analog
+  source: "experiments.common.make_registered_gate pins this exact registry entry (role=gate, strategy=STR-THRU, promoted 2026-09-07, champion=true) -- the registry's own stored threshold, refit per fold"
+  run_dir: "this experiment's champion/ subdirectory (own REPORT.md and figures, never overwriting arm A's)"
+  purpose: "isolates the threshold-rule effect against EXP-184's candidate: same full forecast+analog feature set (50 features), registered threshold instead of per-fold top-20%. Also re-validates the served champion on this v2 snapshot (it was promoted on EXP-147's pre-v2 legacy trades universe, not on v2_snapshot_id below)"
+  threshold_lookahead_caveat: "make_registered_gate refits the MODEL per fold but applies gate_midfill_str_thru_forecast_analog's FIXED stored threshold, which engine/models/training/gate.py's choose_threshold picked from walk-forward predictions in result.frame spanning held-out years -- mild threshold look-ahead that a per-fold top-20% arm does not have. Arm A and EXP-184's candidate (both per-fold top-20%) are therefore the primary, look-ahead-free feature-effect comparison; EXP-184's candidate and arm B (both the full 50-feature set) are the threshold-effect comparison, and it inherits this caveat from arm B's side."
+
+comparison_baselines:
+  features_effect: "EXP-184's candidate (experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/results/metrics_b8c322b24feb.json, per-fold top-20% on the full forecast+analog feature set) vs this experiment's arm A (per-fold top-20% on the base feature set) -- threshold rule held fixed, feature set varies"
+  threshold_effect: "EXP-184's candidate (experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/results/metrics_b8c322b24feb.json, per-fold top-20% on the full forecast+analog feature set) vs this experiment's arm B (gate_midfill_str_thru_forecast_analog, registered threshold, refit per fold, same full forecast+analog feature set) -- feature set held fixed, threshold rule varies. Arm A vs arm B is deliberately NOT used here: it would vary both axes at once."
+  superseded_reference: "EXP-184's champion_baseline arm (experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/champion/results/metrics_3835b6283725.json) scored the former incumbent gate_midfill_str_thru, not the registry's current champion gate_midfill_str_thru_forecast_analog (champion since 2026-09-07) -- arm B above is the correct as-served comparator, so this experiment does not re-run EXP-184's champion arm. It is reused below as the fourth corner of interaction_check."
+
+interaction_check:
+  description: "Combined with EXP-184's own two results, this experiment's two arms form a four-arm design: EXP-184's candidate (full forecast+analog feature set, per-fold top-20%), this experiment's arm A (base feature set, per-fold top-20%), this experiment's arm B (full forecast+analog feature set, registered threshold), and EXP-184's champion_baseline arm (experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered/champion/results/metrics_3835b6283725.json; base feature set, registered threshold). A single comparison (arm A falling inside or outside the span of two diagonal corners) cannot establish additivity on its own -- opposing additive effects can place a vertex outside that span even when the two changes are perfectly independent. Additivity is checked instead by comparing the SAME effect estimated at both levels of the other axis, on CAGR and trade Sharpe. This is a manual, post-hoc comparison over the four metrics files once all exist -- no code in this experiment computes it."
+  feature_effect_at_trained_threshold: "EXP-184's candidate minus arm A"
+  feature_effect_at_registered_threshold: "arm B minus EXP-184's champion_baseline arm"
+  threshold_effect_at_full_features: "EXP-184's candidate minus arm B"
+  threshold_effect_at_base_features: "arm A minus EXP-184's champion_baseline arm"
+  negligible_definition: "fixed here, before any of this experiment's own results exist, so the boundary cannot be tuned to the outcome: a CAGR estimate is negligible if its absolute value is under 0.001 (0.1 percentage points of annualized return); a trade-Sharpe estimate is negligible if its absolute value is under 0.01. Both are round, order-of-magnitude judgement calls (the author's own, not a derived or house-standard number) meant to catch only noise-level estimates, not to carry any claim about what magnitude would matter for a promotion decision -- this experiment makes none."
+  criterion: "evaluate in this order, for each axis (feature effect, threshold effect), separately for CAGR and for trade Sharpe, using negligible_definition's fixed boundary for whichever metric is being checked: (1) if BOTH of the axis's two same-axis effect estimates are negligible, the axis is additive -- stop here, do not evaluate sign or magnitude at all, regardless of what they are; (2) otherwise, if the two estimates disagree in sign, the axis is an interaction; (3) otherwise (same sign, at least one non-negligible), if the larger estimate's magnitude is more than 5x the smaller's, the axis is an interaction; (4) otherwise, the axis is additive -- the two estimates read as the same effect measured twice, not two different phenomena that happen to share a sign. The intent throughout: a magnitude-based, not sign-only, test; two estimates that are both too small to matter are additive by definition, never flagged as an interaction merely because their signs differ in the noise."
+
+promotion_rule: "none -- this experiment does not decide a promotion. comparison_baselines and interaction_check above define both deltas (features effect, threshold effect) for a human to compute by hand once this experiment's own two metrics files exist alongside EXP-184's two -- no code in this experiment or EXP-147's shared runner computes or prints a cross-experiment delta -- so a future promotion decision can attribute EXP-184's result to a cause instead of citing a confounded headline."
+
+evaluation:
+  universe: "every engine.replay STR-THRU event; scoreable subset is smaller than the champion's wherever a forecast or a non-thin analog match is missing (same caveat as EXP-145/EXP-184)"
+  headline_window: "walk-forward OOS -- 2018-2019 cold-start ungated (min_train_years=2), gated selection from 2020"
+  required_metrics:
+    - "backtest at the fill-alpha grid (worst/mid/best) with breakeven alpha, for each arm"
+    - "walk-forward OOS mean/median/std/win_rate/profit_factor/Sharpe(trade)/Sharpe(equity)/Sortino/tail_ratio, for each arm"
+    - "CAGR, max drawdown, years positive vs years evaluated, by-year table, for each arm"
+    - "Monte Carlo (block=20, paths=1000, seed=0): P(loss), terminal equity percentiles at sizing {2%,5%,10%,20%}, for each arm"
+    - "stress battery: 2018Q4, 2020-02..04, 2022, 10 worst SPY earnings weeks, IV-regime split, for each arm"
+    - "calibration block (isotonic predict_proba, same discipline as EXP-184)"
+    - "n_selected by year, ungated share, deployment (peak/worst cash/constrained entries), for each arm"
+  multiplicity: "EXP-145 found the full forecast+analog feature set with a per-fold threshold the best of seven compared arms (exploratory). EXP-184 re-ran it as a single pre-registered confirmatory test, but that test still changed two things (features and threshold rule) at once. This experiment is the decomposition: two further pre-registered arms on the same hypothesis family, so a promotion decision can cite which change drove EXP-184's result. The ledger records this spec's own hash separately from EXP-145's and EXP-184's; no row here stands in for either."
+
+falsification: "Falsified as a clean, non-interacting decomposition if interaction_check.criterion's ordered test above calls either axis an interaction, on CAGR or on trade Sharpe -- step (1) of that test means two negligible estimates are never falsified by their sign, only a non-negligible sign disagreement (step 2), or an over-5x magnitude ratio between same-signed estimates where at least one is non-negligible (step 3), falsifies. This experiment makes no promotion decision and writes no registry entry regardless of outcome."
+
+data:
+  trades: "Tier-2 engine.replay STR-THRU trades (store.read_table('trades'))"
+  forecasts: "data/features/tier4_forecasts.parquet"
+  market_state: "Tier-2 daily_market"
+  events: "Tier-2 earnings_events"
+  source_experiments: [EXP-049, EXP-050, EXP-105, EXP-117, EXP-145, EXP-184]
+  quota_calls: 0
+
+data_snapshot: 36f048e19c21ffdf1fb99f000ec6b4578e41567417b5c7530c84fe05ebb51566
+v2_snapshot_id: snap_66fae174c4f34477fb1b9098993993fe
+walk_forward:
+  unit: year
+  min_train_years: 2
+equity_mode: cashflow
+max_deployed_fraction: 1.0
+mc_draw_order: shared
+has_short_leg: false
+preregistered_at: "2026-10-02T05:01:10+00:00"

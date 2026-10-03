@@ -13,7 +13,9 @@ caller yet -- see ``engine/v2/ops/ARCHITECTURE.md``'s
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -479,6 +481,105 @@ def _keyed_by_board_request(items: Any) -> dict[str, Any]:
     return keyed
 
 
+#: A producer refusal's detail is upstream, pipeline-generated text (the
+#: same trust level as events.json, not external/adversarial input), but
+#: refusals.json is a published artifact -- cap it defensively so one
+#: malformed producer detail can never dump an unbounded blob into it.
+_MAX_PRODUCER_DETAIL_LENGTH = 500
+
+#: The only ``event_date`` wire shape ``producer_refusals.json`` may carry --
+#: exactly what this module's own ``as_document()``/``_iso`` write. Relative
+#: strings like "now"/"today" parse fine under ``pd.Timestamp`` but resolve
+#: to wall-clock time, which would make a merged refusal's identity depend
+#: on when the gate runs instead of on the document's content.
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validated_producer_refusal_fields(index: int, item: Any) -> tuple[Mapping[str, Any], str, str]:
+    """Validate one ``producer_refusals.json`` item's shape and field types
+    -- presence, then type/value -- and return ``(raw_key, code, detail)``
+    ready for ``BoardRequest`` construction. Raises ``ValueError`` (a
+    fixed, index-naming message) for any problem; this is the stage split
+    out of :func:`_decode_producer_refusals` to keep that function's own
+    complexity within budget.
+    """
+    if not isinstance(item, Mapping):
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} must be an object")
+    raw_key = item.get("key")
+    if not isinstance(raw_key, Mapping):
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} has no \"key\" object")
+    for field_name in ("ticker", "strategy", "event_date", "session"):
+        if field_name not in raw_key:
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} key is "
+                f"missing {field_name!r}")
+    if "code" not in item:
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} is missing \"code\"")
+    if "detail" not in item:
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} is missing \"detail\"")
+    for field_name in ("ticker", "strategy", "event_date", "session"):
+        if not isinstance(raw_key[field_name], str) or not raw_key[field_name]:
+            raise ValueError(
+                f"producer_refusals.json refusal at index {index} key "
+                f"{field_name!r} must be a non-empty string")
+    if not isinstance(item["code"], str) or not item["code"]:
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} \"code\" "
+            f"must be a non-empty string")
+    if not isinstance(item["detail"], str):
+        raise ValueError(
+            f"producer_refusals.json refusal at index {index} \"detail\" "
+            f"must be a string")
+    event_date_error = (
+        f"producer_refusals.json refusal at index {index} key "
+        f"\"event_date\" must be a canonical YYYY-MM-DD date string")
+    if not _ISO_DATE_PATTERN.match(raw_key["event_date"]):
+        raise ValueError(event_date_error)
+    try:
+        date.fromisoformat(raw_key["event_date"])
+    except ValueError:
+        raise ValueError(event_date_error)
+    return raw_key, str(item["code"]), str(item["detail"])
+
+
+def _decode_producer_refusals(doc: Mapping[str, Any]) -> tuple[NativeScoreBatchRowRefusal, ...]:
+    """Decode ``producer_refusals.json``'s v1.0 document into the same typed
+    per-row refusal shape ``run_native_score_batch_worker``'s own per-row
+    loop already produces, so merging it reuses ``_native_score_batch_documents``'s
+    existing records/refusals collision check UNCHANGED -- see that
+    function's own docstring. A malformed document (wrong/missing
+    ``schema_version``, a non-list ``"refusals"``, or a malformed item) is a
+    whole-call ``ValueError``, matching this module's existing
+    "events.json must be a JSON array" discipline for malformed caller
+    input -- never a silently-dropped item.
+    """
+    if (not isinstance(doc, Mapping)
+            or doc.get("schema_version") != "native_score_batch_producer_refusals.v1.0"):
+        raise ValueError(
+            "producer_refusals.json must be a "
+            "native_score_batch_producer_refusals.v1.0 document")
+    items = doc.get("refusals")
+    if not isinstance(items, list):
+        raise ValueError("producer_refusals.json's \"refusals\" must be a list")
+    decoded = []
+    for index, item in enumerate(items):
+        raw_key, code, detail = _validated_producer_refusal_fields(index, item)
+        key = BoardRequest(
+            ticker=str(raw_key["ticker"]), strategy=str(raw_key["strategy"]),
+            event_date=pd.Timestamp(raw_key["event_date"]), session=str(raw_key["session"]))
+        if code == "INVALID_KEY_FIELD" and not any(
+                "|" in value for value in (key.ticker, key.strategy, key.session)):
+            raise ValueError(
+                "producer refusal claims INVALID_KEY_FIELD for an encodable key")
+        detail = detail[:_MAX_PRODUCER_DETAIL_LENGTH]
+        decoded.append(NativeScoreBatchRowRefusal(key, code, detail))
+    return tuple(decoded)
+
+
 def _native_score_batch_documents(
     keys_in_order: Sequence[BoardRequest],
     records: Sequence[Any],
@@ -573,6 +674,20 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
         events=events, feature_names=tuple(parameters["feature_names"]),
         gate_policy=parameters.get("gate_policy") or {},
     )
+    producer_refusals_path = root / "producer_refusals.json"
+    if producer_refusals_path.exists():
+        producer_doc = json.loads(producer_refusals_path.read_text(encoding="utf-8"))
+        refusals = refusals + _decode_producer_refusals(producer_doc)
+    seen_unkeyable_identities: set[tuple[str, str, str | None, str]] = set()
+    for refusal in refusals:
+        if refusal.code != "INVALID_KEY_FIELD":
+            continue
+        identity = (refusal.key.ticker, refusal.key.strategy,
+                    _iso(refusal.key.event_date), refusal.key.session)
+        if identity in seen_unkeyable_identities:
+            raise ValueError(
+                f"duplicate unkeyable refusal identity: {identity!r}")
+        seen_unkeyable_identities.add(identity)
     fields_by_request = {request_hash(request): inputs
                          for request, inputs in assembled.values()}
     batch_id = content_hash({

@@ -18,9 +18,12 @@ directly (the same symlink/one-segment safety ``operations.py``'s
 import ops), then reverifies the named release against the LIVE
 ``serving.sqlite`` index (``projections.verify_projection_binding``): a
 binding that does not (yet, or any longer) match is a typed, non-retryable
-``CURRENT_BINDING_INVALID``, never a silent "latest" fallback and never the
-plain "no current release configured" (503) a release with no bound
-projection at all (the P3-0 compatibility preview) still gets.
+ ``CURRENT_BINDING_INVALID``, never a silent "latest" fallback and never the
+ plain "no current release configured" (503) a release with no bound
+ projection at all (the P3-0 compatibility preview) still gets. A post-open
+ index read failing during that reverification is the retryable
+ ``SERVING_INDEX_UNREADABLE`` 503 (``_index_unreadable``, #342).
+
 
 ``create_app``'s ``resolver`` parameter remains the seam: any zero-argument
 ``Callable[[], str | None]`` (may also raise ``ApiError``) may replace it,
@@ -40,8 +43,19 @@ fan-out budget (§4.3, 8 distinct modules) is otherwise exactly spent on
 ``fastapi``, ``engine.v2.foundation``, this package's own ``projections``,
 plus ``hmac``/``os``/``json``/``argparse``/``uvicorn`` for auth, cursor
 signing, the CURRENT/health files and the launcher. The shape is pinned by
-``tests/test_v2_serving_api.py`` against the real dataclass's own field
-names, so the two cannot drift silently.
+ ``tests/test_v2_serving_api.py`` against the real dataclass's own field
+ names, so the two cannot drift silently.
+
+**A serving index that opens but cannot be read is one typed 503** (#342):
+every connection-owning read block -- the publication resolver's binding
+reverification, ``/releases/{id}`` + ``/releases/current``, ``/events``,
+``/events/{id}/scores``, ``/scores/{id}`` -- wraps only its projection calls in
+``except (projections.sqlite3.Error, json.JSONDecodeError)`` and raises
+``_index_unreadable()``, keeping the existing guaranteed-close ``finally``.
+Open-time behavior, artifact decoding (still the existing 500), binding-invalid
+(500), unknown release/event/score (404) and every validation refusal are
+unchanged; no global SQLite/JSON exception hook is registered.
+
 
 **Cursors** are opaque and integrity-protected (§6): ``release_id`` plus
 every normalized filter (``projections.event_query_hash``, over the wire
@@ -106,6 +120,31 @@ def _problem(code: str, category: str, message: str, *, retryable: bool = False,
     return {"code": code, "category": category, "retryable": retryable, "message": message,
             "stage": None, "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
             "diagnostic_ref": None, "details": details or {}, "schema_version": "problem.v1.0"}
+
+
+# --------------------------------------------------------------------------
+# post-open serving-index read failures (#342) -- the narrow boundary each
+# connection-owning read applies, same shape as the operations listener's #339
+# listener fix: a ``try`` around only the projection calls, the existing
+# ``conn.close()`` ``finally`` kept, and this one typed refusal. No global
+# SQLite/JSON hooks, no open-time behavior change (an index that fails to
+# OPEN stays exactly what ``projections.connect`` already did), and artifact
+# decoding failures stay their existing 500 -- only INDEX reads/rows translate.
+# --------------------------------------------------------------------------
+
+
+def _index_unreadable() -> ApiError:
+    """A connection ``projections.connect`` opened successfully, but a later
+    API-owned index read failed: ``sqlite3.Error`` (a dropped/corrupt table the
+    migrations still tolerate) or ``json.JSONDecodeError`` (malformed stored
+    ``document_json``/``findings_json``/``ref_json``/``flags``). Retryable 503
+    with the existing ``Problem`` shape and this FIXED message -- never raw
+    exception text, a path, the token, a traceback or the malformed bytes.
+    ``projections.sqlite3`` is reached through the sibling module's own import,
+    the way ``operations.py`` does it, because this module's fan-out budget
+    (§4.3, 8 distinct modules) is otherwise exactly spent."""
+    return ApiError(503, _problem("SERVING_INDEX_UNREADABLE", "resource",
+                                  "the serving index cannot be read", retryable=True))
 
 
 # --------------------------------------------------------------------------
@@ -184,9 +223,13 @@ def _publication_resolver(release_root, serving_db):
     publication yet (absent/malformed pointer or binding -- ordinary "no
     current release" 503). Raises :class:`ApiError` -- typed, non-
     retryable, distinct from "no current release" -- only when a binding
-    names a release id that fails to verify: not committed, or its
-    manifest/index hash no longer matches (a tampered doc or changed
-    index row)."""
+ names a release id that fails to verify: not committed, or its
+ manifest/index hash no longer matches (a tampered doc or changed index row).
+ Post-open failures of that reverification itself -- a dropped/corrupt table
+ (``sqlite3.Error``) or a malformed stored row (``json.JSONDecodeError``) --
+ are the retryable ``SERVING_INDEX_UNREADABLE`` 503 (#342); the connection
+ closes either way."""
+
 
     def resolve() -> str | None:
         ops_release_id = _read_ops_current(release_root)
@@ -203,6 +246,8 @@ def _publication_resolver(release_root, serving_db):
                     "the published pointer's projection binding does not match the "
                     "live serving index", details={"ops_release_id": ops_release_id}))
             release_id = binding.get("projection_release_id")
+        except (projections.sqlite3.Error, json.JSONDecodeError):
+            raise _index_unreadable() from None
         finally:
             conn.close()
         return release_id if isinstance(release_id, str) else None
@@ -392,6 +437,8 @@ def _release_response(serving_db, release_id: str | None, response: Response, re
     conn = _open(serving_db)
     try:
         release = projections.get_release(conn, release_id)
+    except (projections.sqlite3.Error, json.JSONDecodeError):
+        raise _index_unreadable() from None
     finally:
         conn.close()
     if release is None:
@@ -440,6 +487,8 @@ def _events_response(serving_db, resolve_current, cursor_key: bytes, response: R
             event_date_from=event_date_from, event_date_to=event_date_to,
             ticker=ticker, strategy=strategy, verdict=verdict, gate=gate,
             out_of_domain=out_of_domain_value, disabled=disabled_value)
+    except (projections.sqlite3.Error, json.JSONDecodeError):
+        raise _index_unreadable() from None
     finally:
         conn.close()
     document = _event_page_document(page, cursor_key)
@@ -478,6 +527,8 @@ def _event_scores_response(serving_db, response: Response, request: Request, *,
         if clock_id is not None and clock_id != item.clock_id:
             raise ApiError(422, _problem("INVALID_REQUEST", "validation",
                                          "clock_id does not match this event"))
+    except (projections.sqlite3.Error, json.JSONDecodeError):
+        raise _index_unreadable() from None
     finally:
         conn.close()
     document = [to_document(s) for s in item.scores]
@@ -494,11 +545,17 @@ def _score_detail_response(serving_db, store, response: Response, request: Reque
     conn = _open(serving_db)
     try:
         _require_release(conn, release_id)
-        detail = projections.get_score_detail(conn, store, release_id, score_id)
+        ref = projections._score_detail_ref(conn, release_id, score_id)
+    except (projections.sqlite3.Error, json.JSONDecodeError):
+        raise _index_unreadable() from None
     finally:
         conn.close()
-    if detail is None:
+    if ref is None:
         raise ApiError(404, _problem("UNKNOWN_SCORE", "validation", "unknown score id"))
+    # Deliberately outside the catch and after the guaranteed close: this reads
+    # the ARTIFACT store, not the index. A malformed artifact stays the existing
+    # unhandled 500 and is never translated into SERVING_INDEX_UNREADABLE.
+    detail = projections._score_detail_from_ref(store, ref)
     document = to_document(detail)
     return _immutable_response(request, response, detail.score_id, document)
 

@@ -269,32 +269,67 @@ build has to know which model wrote the prefix it is about to keep.
 
 An incremental (`--since`) build assumes the carried prefix — everything
 before the cut — is a total record of Tier 3. That assumption can go wrong:
-a night is missed, a pull fails, or a Tier-2 correction lands late, and Tier 3
-gains an event *before* the cut that the stored Tier-4 table never covered.
-`_carried_prefix` detects this the same way it detects a cadence or model-id
-mismatch — an anti-join of the Tier-3 keys against the existing table — but
-its response is different, because a gap in the prefix has a good repair: the
-event has a fold to recompute, so the run can widen `since` backward to cover
-it instead of refusing outright.
+a night is missed, a pull fails, a Tier-2 correction lands late, or a universe
+backfill adds a ticker's whole history at once (earnings before `FIRST_FOLD`
+included) — and Tier 3 gains an event *before* the cut that the stored
+Tier-4 table never covered. `_carried_prefix` detects this the same way it
+detects a cadence or model-id mismatch — an anti-join of the Tier-3 keys
+against the existing table — but its response is different, because a gap in
+the prefix has a repair, and which one applies depends on whether the gap
+predates `FIRST_FOLD`:
 
-Two cases, split at `FIRST_FOLD`:
+* **Unscored gap** (older than `FIRST_FOLD`): no fold exists to recompute
+  the key itself, and a full rebuild never scores it either, so the run
+  fills the same null row any unscorable event gets and continues. The key
+  can still matter beyond that row when it is also in the TRAINABLE pool
+  (`training_frames`'s target-filtered second return; `model.prepare` can
+  exclude a key from it) — a trainable pre-`FIRST_FOLD` key joins `n_train`
+  for EVERY scored fold a full rebuild fits, not only ones a widened `since`
+  reaches, so it folds into the SAME widen-and-bound computation the scored
+  gap below uses, capped at `FIRST_FOLD` (never past it, below). A
+  non-trainable unscored key gets only its null row — nothing about it can
+  change a fold's training pool.
+* **Scored gap** (`FIRST_FOLD` or later): the new row's own date bounds
+  which folds it can affect, so the run widens `since` backward to the
+  gap's own fold boundary and recomputes from there — bit-for-bit identical
+  to a full rebuild (`TestPrefixGapBackfill`), the same fold-recompute path
+  a normal `--since` build already uses, just starting earlier. If the key
+  is also TRAINABLE and its own fold boundary is outside the backfill
+  window, the build raises `Tier4Error` and requests a full rebuild. Such a
+  key joins the training pool of later folds; clipping to the window floor
+  could otherwise silently carry forecasts fitted against the old pool.
 
-* **Unscored gap** (older than `FIRST_FOLD`): no fold exists to recompute, so
-  widening can never fix it. This still refuses — `Tier4Error`, "permanent
-  holes" — exactly as it always has.
-* **Scored gap** (`FIRST_FOLD` or later): the run widens `since` backward to
-  the gap's own fold boundary and recomputes from there. The result is
-  bit-for-bit identical to what a full rebuild would have produced for those
-  rows (`TestPrefixGapBackfill`), because it is the same fold-recompute path a
-  normal `--since` build already uses — just starting earlier.
+A single build can hit both at once — a backfilled ticker's history carries
+pre- and post-`FIRST_FOLD` events together — and the repairs compose: the
+unscored fill runs first (so a scored gap's widened pass still finds the
+just-filled rows in the carried prefix instead of re-flagging them as an
+out-of-window gap), and, when the unscored half is also trainable, the
+recompute boundary is the EARLIER of the two gaps' own widening targets —
+`FIRST_FOLD` for the unscored side, the gap's fold boundary for the scored
+side — never the scored one alone. Each scored gap is checked against the
+trainable pool by its complete `(ticker, event_date)` key; an older
+nontrainable gap must not obscure a later trainable gap outside the window.
+
+**The widen target for a TRAINABLE unscored gap is `min(FIRST_FOLD, cut)`,
+never a bare `FIRST_FOLD`** — `cut` itself can already be earlier than
+`FIRST_FOLD` (a `since` requested before it), and such a key can never
+affect a fold earlier than `cut` already covers, so the target must never
+push `effective_cut` past the requested `cut`. A build with NEITHER kind of
+gap keeps the ordinary incremental cut unchanged — no widening at all.
 
 **The widening is bounded** (`BACKFILL_WINDOW_MONTHS`, measured back from the
 requested `since`). Recomputing an arbitrarily old gap would put unbounded,
 unpredictable runtime into the nightly's critical path — the exact failure
-mode the incremental path exists to avoid. A gap whose earliest date falls
-outside that window is **not** backfilled this run.
+mode the incremental path exists to avoid. A gap whose required recomputation
+target falls outside that window is **not** backfilled this run. A TRAINABLE
+gap whose widen target cannot be reached instead raises `Tier4Error`, whether scored
+or unscored, since carrying a fold against a changed training pool has no
+safe default. Refusal happens before forecast publication; the existing
+table stays unchanged, and retrying the same inputs refuses again until a
+full rebuild or an earlier `since` reaches the required target.
 
-**An out-of-window gap is a named skip, not a null row.** The affected key is
+**A nontrainable scored out-of-window gap is a named skip, not a null row.**
+It changes no training pool, so the run can continue. The affected key is
 left **absent** from the written table — it is in neither the carried prefix
 nor the recomputed scope — rather than given a placeholder NULL-forecast row.
 This is deliberate and is the one narrow exception to §3's "total over Tier 3"
@@ -311,9 +346,9 @@ so as the nightly cut keeps advancing an old gap only falls farther behind it
 — it never "ages into" the window on its own; a full rebuild (or deliberately
 choosing an earlier `--since`) is the only recovery.
 
-The run itself still proceeds on an out-of-window gap — it does not raise —
-and names the skipped keys in the build's report (`out_of_window_gap` per
-producer). The legacy nightly (`engine/dashboard/nightly.py`) turns a non-empty
+The run itself still proceeds on a nontrainable scored out-of-window gap
+and names the skipped keys in
+the build's report (`out_of_window_gap` per producer). The legacy nightly (`engine/dashboard/nightly.py`) turns a non-empty
 report into a `tier4_gap_partial` flag, counted by **distinct `(ticker,
 event_date)` key, not by summing each producer's list** — the same three
 events show up in every producer's list, and double-counting them would
@@ -399,11 +434,17 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   `tier4_gap_partial`), so an absent key means specifically "an unclosed gap",
   never a silent unbuilt table.
 * **The carry-over is guarded three ways** (`_carried_prefix`): a cadence
-  change and a different `model_id` still refuse `--since` outright. The
-  third — Tier-3 events appearing inside the retained prefix — refuses only
-  when the gap is UNSCORED (older than `FIRST_FOLD`, with no fold to
-  recompute); a SCORED gap now widens `since` backward to close it instead,
-  bounded, rather than refusing (§6a).
+  change and a different `model_id` refuse `--since` outright. The third —
+  Tier-3 events appearing inside the retained prefix — widens `since`
+  backward to recompute the earliest fold either kind of gap could have
+  changed the training pool of (a SCORED gap's own fold boundary, or
+  `min(FIRST_FOLD, cut)` for a TRAINABLE UNSCORED one, since a pre-
+  `FIRST_FOLD` row that is also in the trainable pool joins every scored
+  fold's pool — an unscored key `model.prepare` excludes from `trainable`
+  only gets its null row, no widening), bounded by `BACKFILL_WINDOW_MONTHS`;
+  past that bound a trainable gap, scored or unscored, refuses rather than
+  carry a fold it cannot safely recompute. A nontrainable scored gap keeps
+  the named, nonfatal skip (§6a).
 * **`--since` rounds DOWN to its fold boundary**, because a fold is the unit of
   recomputation: half a month cannot be rebuilt without fitting the model its
   other half already used. The rounding recomputes a superset, which is

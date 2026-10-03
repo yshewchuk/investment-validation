@@ -749,6 +749,7 @@ def _carried_prefix(
     keys: pd.DataFrame,
     cut: pd.Timestamp,
     model,
+    trainable: pd.DataFrame,
     *,
     log: Callable[[str], None] = _log,
 ):
@@ -776,13 +777,26 @@ def _carried_prefix(
       would leave the table labelled with two model ids and comparable to
       neither.
 
-    The third — Tier 3 gained events inside the retained prefix — used to
-    always raise too. It still does for a gap that predates ``FIRST_FOLD``:
-    an unscored row has no fold to recompute, so widening ``since`` could
-    never fix it, and a hole there means the existing table is corrupt in a
-    way this function cannot repair. For a SCORED gap (>= ``FIRST_FOLD``) it
-    now widens ``cut`` backward to close it instead, bounded by
-    ``BACKFILL_WINDOW_MONTHS`` — see guides/tier4_feature_models.md §6a.
+    The third — Tier 3 gained events inside the retained prefix — splits at
+    ``FIRST_FOLD``. A gap at or after ``FIRST_FOLD`` has a fold to recompute, so
+    it widens ``cut`` backward to close it, bounded by
+    ``BACKFILL_WINDOW_MONTHS`` (see guides/tier4_feature_models.md §6a). A gap
+    OLDER than ``FIRST_FOLD`` has no fold of its own, but a pre-``FIRST_FOLD``
+    event is ``< stamp`` for EVERY scored fold, so it joins the training pool
+    of every fold a full rebuild would fit, and any carried fold would keep
+    answering for a pool that just grew. A full build gives such a key the same
+    null row as any other unscorable event, so this fills it — and then widens
+    ``cut`` back to ``FIRST_FOLD`` exactly as the scored case does, bounded the
+    same way. If the bound cannot reach ``FIRST_FOLD``, carrying the folds in
+    between would be silently stale, so this refuses instead.
+
+    A SCORED gap that is also trainable is the same hazard with a nearer
+    reach: a row dated D is ``< stamp`` only for folds whose stamps are
+    strictly later than D, so such a gap's own fold can fall outside the
+    bounded window while folds from the next stamp up to the floor were still
+    fit against the old pool. This refuses too — conservatively, whether or
+    not the carried table still stores those folds. A nontrainable scored gap
+    changes no pool and keeps the named, nonfatal skip described in §6a.
     """
     _, _, _, _, _, model_id_col, fold_col = column_group(model.produces)
     have = existing[existing["event_date"] < cut]
@@ -817,25 +831,116 @@ def _carried_prefix(
 
     unscored = missing[missing["event_date"] < FIRST_FOLD]
     if len(unscored):
-        raise Tier4Error(
-            f"Tier 3 has {len(unscored):,} unscored event(s) before "
-            f"{FIRST_FOLD.date()} (of {len(missing):,} missing before {cut.date()}) "
-            "that the existing Tier-4 table does not cover — carrying the "
-            "prefix over would leave permanent holes. Rebuild in full, or "
-            "move --since earlier."
+        log(
+            f"{model.produces}: {len(unscored):,} event(s) before "
+            f"{FIRST_FOLD.date()} are new to Tier 3 and unscored by construction "
+            "(no fold exists before FIRST_FOLD) — filling the same null row a "
+            "full rebuild would give any unscorable event"
+        )
+        have = pd.concat(
+            [have, _normalize_group(unscored, model.produces)], ignore_index=True
+        )
+        merged = prefix_keys.merge(
+            have, on=["ticker", "event_date"], how="left", indicator=True
+        )
+        missing = merged[merged["_merge"] == "left_only"][["ticker", "event_date"]]
+
+    # Only a missing key that is ALSO in the trainable pool can change a
+    # fold's training-row count (n_train counts `trainable` rows): an unscored
+    # one joins every scored fold, a scored one joins every fold stamped
+    # strictly after its date. A key `model.prepare`/the target filter
+    # excluded from `trainable` cannot change a training pool or force a
+    # TRAINING-POOL refusal; a nontrainable unscored gap needs only the null
+    # fill, while a nontrainable scored gap still widens to repair its own
+    # missing forecast when reachable.
+    trainable_keys = pd.MultiIndex.from_arrays(
+        [trainable["ticker"], pd.to_datetime(trainable["date"])]
+    )
+    unscored_keys = pd.MultiIndex.from_arrays(
+        [unscored["ticker"], pd.to_datetime(unscored["event_date"])]
+    )
+    pool_changed = bool(unscored_keys.isin(trainable_keys).any())
+    if pool_changed:
+        log(
+            f"{model.produces}: {len(unscored):,} unscored event(s) are also "
+            "in the trainable pool — widening `since` to recompute every "
+            "scored fold they could affect, or refusing if the backfill "
+            "window cannot reach FIRST_FOLD"
         )
 
-    # Every missing key is scored (>= FIRST_FOLD, so it has a fold to
-    # recompute) — widen `cut` backward to close the gap, bounded.
-    earliest_gap = pd.Timestamp(missing["event_date"].min())
-    widened = pd.Timestamp(fold_start_of([earliest_gap]).iloc[0])
+    if missing.empty and not pool_changed:
+        stale = len(have) - len(prefix_keys)
+        if stale > 0:
+            log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
+        return merged.drop(columns=["_merge"]), cut, missing.copy()
+
+    # Any remaining missing key is scored (>= FIRST_FOLD, so it has a fold to
+    # recompute), and an unscored fill changes the training pool of every
+    # scored fold (its events are < every stamp) — widen `cut` backward to
+    # close both. The target is the EARLIER of the two candidates, each present
+    # only if its gap applies.
+    widened = min(
+        candidate
+        for candidate in (
+            pd.Timestamp(fold_start_of([missing["event_date"].min()]).iloc[0])
+            if not missing.empty
+            else None,
+            # `cut` can itself be earlier than FIRST_FOLD (a `--since` before
+            # FIRST_FOLD); the widen target must never exceed `cut`, since a
+            # trainable unscored key can never affect a fold earlier than
+            # `cut` already covers.
+            pd.Timestamp(min(FIRST_FOLD, cut)) if pool_changed else None,
+        )
+        if candidate is not None
+    )
     floor = pd.Timestamp(
         fold_start_of([cut - pd.DateOffset(months=BACKFILL_WINDOW_MONTHS)]).iloc[0]
     )
     effective_cut = max(widened, floor)
 
+    if pool_changed and effective_cut > FIRST_FOLD:
+        raise Tier4Error(
+            f"{model.produces}: Tier 3 has {len(unscored):,} event(s) before "
+            f"{FIRST_FOLD.date()} the existing table does not cover, and the "
+            f"{BACKFILL_WINDOW_MONTHS}-month backfill window from {cut.date()} "
+            f"reaches back only to {effective_cut.date()} — the scored folds "
+            f"between {FIRST_FOLD.date()} and {effective_cut.date()} would be "
+            "carried against a training pool that changed under them. Rebuild "
+            "in full (no --since)."
+        )
+
+    # A trainable SCORED gap reaches the same hazard, nearer: the row joins
+    # every fold stamped strictly after its date, so its own fold can sit
+    # outside the bounded window while folds after it up to the floor were
+    # still fit against the old pool. Match each remaining missing scored key
+    # by its complete (ticker, event_date) pair — an older nontrainable skip
+    # must not hide a later trainable one — and refuse on any matched key
+    # whose own fold precedes the floor (equality is inside the window).
+    scored_missing = missing[missing["event_date"] >= FIRST_FOLD]
+    matched = scored_missing[
+        pd.MultiIndex.from_arrays(
+            [scored_missing["ticker"], scored_missing["event_date"]]
+        ).isin(trainable_keys)
+    ]
+    if len(matched):
+        outside = fold_start_of(matched["event_date"]).to_numpy() < floor.to_datetime64()
+        if outside.any():
+            first = matched[outside].sort_values("event_date").iloc[0]
+            first_fold = fold_start_of([first["event_date"]]).iloc[0]
+            raise Tier4Error(
+                f"{model.produces}: Tier 3 has a trainable event dated "
+                f"{first['event_date'].date()} ({first['ticker']}, target "
+                f"{model.target!r}) the existing table does not cover, and its "
+                f"own fold {first_fold.date()} is outside the "
+                f"{BACKFILL_WINDOW_MONTHS}-month backfill window from the "
+                f"requested cut {cut.date()} (bounded floor {floor.date()}) — "
+                "folds stamped after that event would be carried against a "
+                "training pool that changed under them. Rebuild in full "
+                "(no --since)."
+            )
+
     prefix_keys2 = keys[keys["event_date"] < effective_cut]
-    have2 = existing[existing["event_date"] < effective_cut]
+    have2 = have[have["event_date"] < effective_cut]
     merged2 = prefix_keys2.merge(
         have2, on=["ticker", "event_date"], how="left", indicator=True
     )
@@ -940,7 +1045,9 @@ def build_producer(
             if existing is None
             else _normalize_group(existing, model.produces)
         )
-        carried, cut, unfilled_gap = _carried_prefix(prior, keys, requested_cut, model, log=log)
+        carried, cut, unfilled_gap = _carried_prefix(
+            prior, keys, requested_cut, model, trainable, log=log
+        )
         if gaps is not None:
             gaps[model.produces] = unfilled_gap
         log(

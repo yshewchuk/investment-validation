@@ -9,7 +9,7 @@ specific to this package.
 ## Purpose
 
 Durable job submission, leases, retry history and dependencies; resource
-admission and per-job CPU placement; the nightly job graph and its release
+admission (each constrained cgroup uses `max(0, memory.current - (file - shmem))`, reading `file` and `shmem` from that same directory’s `memory.stat`; active and inactive file cache is reclaimable, while shmem/tmpfs stays counted; missing, malformed or unreadable statistics fall back to `max(0, memory.current - inactive_file)`, then raw usage; headroom remains `min(host_available, container_remaining) - free_margin`) and per-job CPU placement; the nightly job graph and its release
 boundary. It does not decide research conclusions (`engine/v2/evaluation`)
 and does not compute a score (`engine/v2/scoring`) — it only sequences and
 persists the jobs that call into those packages.
@@ -39,7 +39,7 @@ derived directly from its `argparse` definitions:
 - `reconcile <job_id> --expected-attempt`
 - `provider-account --account --remaining --live-reserve`
 - `snapshot {plan-import,submit,promote,rollback}`
-- `ledger {import-history,status,calibrate,book}`
+- `ledger {import-history,status,calibrate,book}` — history summaries count new provenance writes as `imported` (excluding new divergences), and remaining lines as `already_present`; identical committed content under another purpose writes no provenance. Dry runs report the same projected counts and roll back writes.
 - `decisions supersede --row-id --reason --from-json`
 - `price-refresh --session [--dry-run]`
 - `price-history capture --source-root --scope [--dry-run]`
@@ -84,19 +84,16 @@ so nothing submits a `forward_calendar_refresh` job today.
 (`native_board_universe.BoardRequest`) and
 `engine.v2.scoring.application.score_batch`. `assemble_score_batch_inputs`
 turns one release binding (`ScoringReleaseBinding`) plus a sequence of
-already-staged `NightlyEventInputs` into
-`dict[BoardRequest, tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple
-of typed per-row refusals — a pure function; an empty `events` sequence is
-a legitimate no-op. `run_native_score_batch_worker(parameters, root)` is
-the job kind's worker entrypoint: resolves the release once, reads the
-staged `events.json`, calls `assemble_score_batch_inputs`, then
-`engine.v2.scoring.application.score_batch` under
-`engine.v2.models.no_fit.no_fit_guard()`, and writes
-`records.json`/`refusals.json` (refusal codes and the fixed-detail
-contract are in "Failure semantics" below). **Supports `STR-THRU` only** —
-any other strategy refuses per-row. `supervisor.Service`'s tick sidecar
-(below) is its one production caller, though under today's production
-default it never actually submits a job.
+already-staged `NightlyEventInputs` into `dict[BoardRequest,
+tuple[ScoreRequest, NativeScoreInputs]]` plus a tuple of typed per-row
+refusals — a pure function; an empty `events` sequence is a legitimate no-op.
+`run_native_score_batch_worker(parameters, root)` is the worker entrypoint:
+resolves the release once, reads staged `events.json` (plus an optional
+`producer_refusals.json`, merged into the per-row refusals before build — see
+"Failure semantics" below), assembles, scores under `no_fit_guard()`, and
+writes `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any
+other strategy refuses per-row. `supervisor.Service`'s tick sidecar (below) is
+its one production caller, though it never actually submits a job today.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
@@ -203,10 +200,10 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   `resource_classes=frozenset({"validation"})` (a pure comparison, no
   provider fetch — the same classification `decision_evidence` already
   has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
-  `checkpoint_contract="native_parity_report.v1.1"` (matching
-  `native_parity_report.SCHEMA_VERSION`, which Phase 1 (`#132`) already
-  bumped from `v1.0` — see "Outputs" below for the two additive fields
-  this contract already covers), `namespaces=frozenset({"shadow", "smoke"})`.
+  `checkpoint_contract="native_parity_report.v1.2"` (matching
+  `native_parity_report.SCHEMA_VERSION`, bumped from `v1.1` in cutover
+  PR-4 slice 1 of #327's redo — see "Outputs" below for what this
+  contract now covers), `namespaces=frozenset({"shadow", "smoke"})`.
   `worker.py::dispatch` gains a `"native_parity"` branch routing to
   `native_parity_report.run_native_parity_worker` (below), the same
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
@@ -419,9 +416,11 @@ submission path reads either edge (the rule Part 4 established for
   row's classification, but every report that test-only path writes now
   also carries the two new, always-present, empty fields
   `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
-  `SCHEMA_VERSION` `native_parity_report.v1.1`, not the pre-redo `v1.0` — a
-  real, already-shipped change to this existing artifact's shape, not a
-  no-op reserved for `run_native_parity_worker`.** Once Phase 2 builds it,
+  with this module's current `SCHEMA_VERSION` (`v1.1` when Phase 1 shipped
+  this; `v1.2` since cutover PR-4 slice 1 of #327 added run identity and
+  per-mismatch values on top) — a real, already-shipped change to this
+  existing artifact's shape, not a no-op reserved for
+  `run_native_parity_worker`.** Once Phase 2 builds it,
   `run_native_parity_worker` calls this the SAME way, this time with real
   `native_refusals`/`unkeyable_refusals`, AFTER
   `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
@@ -687,7 +686,7 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
 No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged/key/identity input → `INVALID_REQUEST`; repository failures propagate.
 `source_availability.verify_eod_availability(conn, store, repository, snapshot, *, table_name, session_date, decision_at)` validates canonical clocks, exact pinned identity and catalog-bound candidate receipt bytes, then always refuses; no source/finality validator is installed.
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
-Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone.
+Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
 **Cutover PR-6 (not yet implemented — design and code-slice split in the
 PR body, not restated here).** `_reconcile_native_score_batch_shadow`
@@ -1120,9 +1119,7 @@ starts working with no change of its own.
   `"native_refused_unmatched"` (a native refusal with no legacy row to
   move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/
   `tolerance_policy_id` fields; `only_legacy` now excludes rows
-  `native_refused` claims. `nightly.submit_native_parity_if_ready` and
-  its tick-loop caller, `Service._reconcile_native_parity`, submit such
-  a job automatically once its inputs are ready.
+  `native_refused` claims. `nightly.submit_native_parity_if_ready` and its tick-loop caller, `Service._reconcile_native_parity`, submit such a job automatically once its inputs are ready. `v1.2` (cutover PR-4 slice 1 of #327, this PR) adds top-level `as_of`/`generated_at` (run identity, stamped by `_stamp_report_identity` at the write step, AFTER `apply_native_refusals`, in both `run_native_parity_worker` and `native_parity_handler` -- never inside `compare_native_vs_legacy`/`_empty_native_report`, which stay wall-clock-free) and, inside each `mismatches` entry, `values` (that entry's own mismatched fields only, `{legacy, native}` -- `engine/v2/parity/ARCHITECTURE.md`).
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the existing `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild`
@@ -1297,7 +1294,7 @@ otherwise.
 
 | # | Convention |
 |---|---|
-| R1 | A missing/malformed input is a typed refusal (`Problem`/`OpsError`), never a default. A whole-call refusal is for a caller error that makes the request meaningless; anything scoped to one row of a batch is collected there instead, never sinking the batch. |
+| R1 | A missing/malformed input is a typed refusal (`Problem`/`OpsError`), never a default, except optional admission cache statistics: unavailable or invalid `file`/`shmem` falls back to valid `inactive_file`, then raw `memory.current`; `shmem > file` is invalid. A whole-call refusal is for a caller error that makes the request meaningless; anything scoped to one row of a batch is collected there instead, never sinking the batch. |
 | R2 | The catalog's `data_raw_receipts` table (`unit_receipts.py`) is the one durable fetch cache: only a `complete` receipt is reused; `legitimate_empty` is always re-verified live, and `not_final`/`transient`/`refused` are never cached. |
 | R3 | `lifecycle.py`/`recovery.py` govern lease and ownership recovery; a stale lease is reclaimed only after ownership is proven gone. A tick-loop sidecar (below) never resubmits a job that already exists under its own key in any state — that is a coarser, separate budget from a job's own `RetryPolicy`. |
 | R4 | Catalog writes go through `catalog.transaction`. A coordinator effect's own filesystem write must be replay-safe and idempotent, not atomic with the DB commit (root doc §6) — one exception, `experiment_effect`, appends a ledger CSV row inside the transaction and recovers by replay. Every sidecar below submits its job alone (`submission.submit`, never `submit_graph`), so it can never make a required job's admission all-or-nothing with it, and can never block, degrade, or slow the legacy board. |
@@ -1353,8 +1350,11 @@ stored receipt, rather than raising a permanent refusal.
 
 Batch-level (raises, no per-row attempt): a malformed `binding`/`events`
 argument, two events sharing one key, an unresolvable release, a
-`request_hash` collision across two different keys, or an invalid
-batch-level `as_of`/`snapshot_id`/`calendar_revision`.
+`request_hash` collision across two different keys, an invalid
+`as_of`/`snapshot_id`/`calendar_revision`, a malformed
+`producer_refusals.json` (bad `schema_version`, non-list `"refusals"`, or a
+missing `key`/`code`/`detail`), or a merged producer refusal keyed to an
+existing record (the same collision check below).
 
 Per row (collected as a refusal, never sinks the batch):
 

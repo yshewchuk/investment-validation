@@ -1166,7 +1166,7 @@ def submit_native_parity_if_ready(conn, registry, policy, store, *, catalog_path
         output_namespace="shadow",
         resource_class="validation",
         retry_policy_ref="bounded",
-        checkpoint_contract_ref="native_parity_report.v1.1")
+        checkpoint_contract_ref="native_parity_report.v1.2")
     return submit(conn, registry, policy, SubmitRequest(
         namespace="shadow", idempotency_key=key, principal="operator", job=job),
         clock=clock)

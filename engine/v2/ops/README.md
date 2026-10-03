@@ -38,6 +38,11 @@ Internal staging API: `nightly_raw_rows.scan_calendar_row` returns
 `CalendarRowInputs` from a pinned earnings event and explicit market context.
 It has no production caller; see the component architecture contract.
 
+`nightly_quote_rows.scan_quote_rows` is also an internal staging API. It
+returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
+`(ticker, decision_session)` request. It has no production caller; see the
+component architecture contract.
+
 <!-- public-interface: registered_artifact, verify_eod_availability -->
 
 ## Consumers

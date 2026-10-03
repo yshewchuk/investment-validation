@@ -57,26 +57,51 @@ interface section; this names only the load-bearing entry points.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which
   opens and streams object bytes through an `ArtifactStore`, and `objects.py`
   also holds `publish_legacy_file`/`inspect_fragment`, which do filesystem
-  I/O). `query.compile_row_matcher(contract, query)` is the one row-matching
-  entry point a scan should call when it will test more than one row against
-  the same `DataQuery`: it normalizes every `key_filter` predicate's `wanted`
-  values and the `time_interval`'s bounds eagerly, once, at compile time
-  (same `_normalize_bound` routing and the same `CONTRACT_MISMATCH` refusal
-  on an unparseable bound as calling `row_matches` would raise), and returns
-  a closure with no further normalization in its per-row path — the closure
-  is only valid for the `contract`/`query` it was compiled from and carries
-  no state across scans. `repository.Repository._fragment_rows` compiles one
-  per fragment (the scan's `DataQuery` does not change across fragments, so
-  this is O(fragments × predicate values), not O(rows × values)).
-  `row_matches(row, contract, query)` stays available as the one-row form
-  and is defined in terms of `compile_row_matcher` so the two can never
-  diverge; it re-normalizes on every call and must not be used inside a
-  per-row loop. Production reachability: `python3 -m engine.v2.ops serve` →
-  `Service.tick()` → `_reconcile_computed_moves_refresh()` →
+  I/O). `query.compile_batch_matcher(contract, query)` is the entry point
+  `repository.Repository._fragment_rows` calls once per fragment to
+  vectorize `key_filter` equality/set-membership (pyarrow `compute.is_in`)
+  on a `string`/`int64`/timestamp column (a timestamp column is floored
+  and widened to microsecond resolution first, exactly like the row
+  path's own wire form), returning a boolean mask `_fragment_rows` uses
+  to drop non-matching rows via `RecordBatch.filter` *before* they are
+  decoded to per-row Python dicts, so only surviving rows pay that cost.
+  Any `time_interval`, any predicate on a `bool`/`float64` column
+  (`is_in` compares a float's raw bit pattern, so `-0.0` never matches a
+  `0` value_set entry even though the row path's plain Python equality
+  treats them equal), or a predicate value not representable in its
+  column's declared Arrow type makes the function return `None` at
+  compile time, decided from `contract`/`query` alone, never from the
+  data, and the whole query falls back to `compile_row_matcher`.
+  `_fragment_rows` also falls back per fragment if the compiled mask
+  itself raises when evaluated against a real batch — a case
+  compile-time refusal cannot fully rule out. A null column value never
+  matches, on both paths.
+
+  `compile_row_matcher(contract, query)` is the one row-matching entry
+  point for every query this file does not vectorize, and for any caller
+  testing more than one row against the same `DataQuery`: it normalizes
+  every `key_filter` predicate's `wanted` values and the `time_interval`'s
+  bounds eagerly, once, at compile time, and returns a closure with no
+  further normalization in its per-row path — the closure is only valid
+  for the `contract`/`query` it was compiled from and carries no state
+  across scans. Both compiled forms must agree on every row the batch form
+  accepts (the equivalence fixture in `tests/test_v2_data_query.py` pins
+  this). `repository.Repository._fragment_rows` compiles the batch
+  matcher for every fragment, and additionally compiles the row-matcher
+  fallback when (and only when) batch compilation returns `None`, or the
+  first time batch evaluation raises on that fragment (the scan's
+  `DataQuery` does not change across fragments, so this is O(fragments ×
+  predicate values), not O(rows × values)). `row_matches(row, contract,
+  query)` stays available as the one-row form and is defined in terms of
+  `compile_row_matcher` so the two can never diverge; it re-normalizes on
+  every call and must not be used inside a per-row loop. Production
+  reachability: `python3 -m engine.v2.ops serve` → `Service.tick()` →
+  `_reconcile_computed_moves_refresh()` →
   `submit_computed_moves_refresh_if_ready()` →
   `_build_native_computed_moves_plan()` →
   `computed_moves_store.target_tickers_from_snapshot()` → `_scan_rows()` →
-  `Repository.scan()` → `_fragment_rows()` → `query.compile_row_matcher()`.
+  `Repository.scan()` → `_fragment_rows()` → `query.compile_batch_matcher()`
+  (row-path fallback: `query.compile_row_matcher()`).
 - **Legacy-touching seam** — `legacy_adapter.py`, the package's only module
   importing legacy `engine.*` code (17 declared, read-only entries). Built
   on it, read-only: `legacy_mapping.py` (table mapping);
@@ -173,6 +198,12 @@ committed by `engine.v2.ops.computed_moves_store.py`/
 `DATA_FAILURE_CODES`, intended to carry no local path or row value — not
 fully enforced today (Invariants).
 
+**`computed_moves.v2` — point-in-time availability.** `available_as_of_date`
+is the calendar day following the close that made `realized_move_pct`
+knowable. It is null exactly when `realized_move_pct` is null; null means
+unavailable to any decision. Readers must require
+`available_as_of_date <= decision_session`.
+
 ## Dependencies
 
 Layer 1.0 has no `only_imports` restriction (root doc §2), but in practice
@@ -227,7 +258,7 @@ and retryability come from that table, never guessed at a call site.
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
-| `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash |
+| `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
 | `UNSUPPORTED_CONTRACT` | validation | no | an operation on a table contract this code path does not implement |
@@ -266,11 +297,21 @@ the prior receipt even if the head moved since).
 
 **`repository.py` reads (summary).** Missing input maps to the codes above;
 a corrupt id is `MANIFEST_CORRUPT`; a re-hash mismatch is `OBJECT_CORRUPT`.
-No cache — `resolve` rebuilds from catalog rows every call, and
-`objects.verify_object_path` re-hashes on every open unconditionally (no
-stat-tuple cache yet: issue
-[#194](https://github.com/yshewchuk/investment-validation/issues/194)). No
-retry, no partial write (read-only). One read-only transaction covers a
+`resolve` rebuilds from catalog rows every call (no cache). `objects.verify_object_path`
+fully re-hashes an object on its first open in a process and skips the re-hash
+on a later open only while the file's stat tuple (device, inode, size, mtime
+and ctime, in nanoseconds) equals the one recorded when its hash last matched
+and the store root and the object's parent directories are still real
+directories (never symlinks);
+any drift, a failed verify or a non-regular file forces a full verify, and a
+file whose stat tuple is unavailable or changes while it is hashed is
+re-verified a bounded number of times, then refused as `OBJECT_CORRUPT`. The
+cache is in-memory and per process, bounded (emptied when full), and keyed by
+store root, content hash and byte size. Integrity guarantee: every change visible in the stat tuple is
+detected on the next open; a tamper that preserves all five fields within one
+process lifetime is not (objects are immutable, read-only files, so that needs
+out-of-band access to the store). No retry beyond that bounded re-verify, no
+partial write (read-only). One read-only transaction covers a
 whole `resolve` walk. Idempotent: every row is append-only.
 
 ## Invariants
@@ -311,6 +352,10 @@ Root doc §5 invariants this package is responsible for:
 - **Whole-partition rewrite, no legacy append order** — `price_history_table.py`/
   `computed_moves_table.py` each cover one ticker's whole history in one
   fragment, so a correction rewrites it rather than appending a byte.
+- **Registered contract definitions are immutable.** `catalog.commit_snapshot`
+  refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
+  `contract_id`; a table picks its next `contract_id`/`semantic_version` per
+  its own `schema_evolution_policy`.
 - **`daily_market` revision identity/ordering.** A revision's id folds in
   its own content hash, so differing content never shares an id. Ranking
   picks the surviving group's highest ordinal (derived from `received_at`,

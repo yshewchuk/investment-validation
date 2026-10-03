@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -668,9 +669,14 @@ def _row(ticker, obs_date) -> dict:
     return {"ticker": ticker, "obs_date": obs_date}
 
 
-def test_compile_row_matcher_agrees_with_row_matches_on_representative_cases():
+def _representative_cases(contract: TableContract) -> tuple[dict, dict, dict]:
+    """The shared ``compile_row_matcher``/``compile_batch_matcher`` fixture:
+    every interesting row shape (``None`` column values, a missing key, exact
+    boundary values, all three ``_normalize_bound`` forms) against every
+    interesting query shape (string ``in``, timestamp ``in`` with one value
+    per bound-normalization branch, and four interval bound combinations),
+    plus the independently-known expected boolean for each pair."""
     from datetime import datetime
-    contract = _synthetic_contract()
     ts_predicate = _synthetic_query(contract, key_filter=(KeyPredicate(
         column="obs_date", operator="in",
         # one value per _normalize_bound branch: bare date, naive wire form,
@@ -737,6 +743,12 @@ def test_compile_row_matcher_agrees_with_row_matches_on_representative_cases():
                              "AAA after boundary": True, "None ticker": True,
                              "missing ticker key": True, "None obs_date": False},
     }
+    return queries, rows, expected
+
+
+def test_compile_row_matcher_agrees_with_row_matches_on_representative_cases():
+    contract = _synthetic_contract()
+    queries, rows, expected = _representative_cases(contract)
     for name, query in queries.items():
         matches = query_mod.compile_row_matcher(contract, query)
         for row_name, row in rows.items():
@@ -785,6 +797,317 @@ def test_compile_row_matcher_normalizes_predicate_values_once_per_query(monkeypa
     rows = [_row("AAA", datetime(2024, 1, (i % m_values) + 1)) for i in range(n_rows)]
     assert all(matches(row) for row in rows)
     assert len(calls) <= m_values
+
+
+# --------------------------------------------------------------------------
+# compile_batch_matcher: ONLY key_filter equality/set-membership on a
+# non-timestamp column, vectorized onto a decoded Arrow batch (task brief
+# #286 follow-up narrowed the scope -- see query.py's docstring). Every
+# case below asserts either: the batch mask agrees, index by index, with
+# the row path for a predicate it DOES vectorize; or that it correctly
+# REFUSES (returns None, falling back to compile_row_matcher) for a
+# time_interval, a timestamp-typed predicate, or an unrepresentable value.
+# --------------------------------------------------------------------------
+
+
+def test_compile_batch_matcher_agrees_with_row_path_on_real_arrow_batch():
+    """The full representative fixture, once as one real Arrow batch:
+    ``compile_batch_matcher`` vectorizes ``in_string`` and
+    ``in_timestamp_three_bound_forms`` (string/timestamp equality need no
+    reinterpretation this package cannot prove identical) and each mask
+    must equal ``expected`` (and ``compile_row_matcher``) index by index;
+    every ``interval_*`` case here has a ``time_interval``, so task brief
+    #286 follow-up's narrowed scope refuses all of them -- ``None``,
+    falling back to ``compile_row_matcher`` entirely (already pinned
+    correct by
+    ``test_compile_row_matcher_agrees_with_row_matches_on_representative_cases``
+    above)."""
+    contract = _synthetic_contract()
+    queries, rows, expected = _representative_cases(contract)
+    row_order = list(rows)
+    columns = {
+        "ticker": pa.array([rows[name].get("ticker") for name in row_order], type=pa.string()),
+        "obs_date": pa.array([rows[name].get("obs_date") for name in row_order],
+                             type=pa.timestamp("us")),
+    }
+    vectorized_queries = {"in_string", "in_timestamp_three_bound_forms"}
+    for query_name, query in queries.items():
+        batch_matcher = query_mod.compile_batch_matcher(contract, query)
+        if query_name in vectorized_queries:
+            assert batch_matcher is not None, query_name
+            mask = batch_matcher(columns, len(row_order)).to_pylist()
+            row_matcher = query_mod.compile_row_matcher(contract, query)
+            for index, row_name in enumerate(row_order):
+                assert bool(mask[index]) is expected[query_name][row_name], (query_name, row_name)
+                assert row_matcher(rows[row_name]) is expected[query_name][row_name], (
+                    query_name, row_name)
+        else:
+            assert batch_matcher is None, query_name
+
+
+def _timestamp_ns_contract() -> TableContract:
+    """The synthetic contract again, but with ``obs_date`` declared
+    ``timestamp[ns]`` — the resolution the legacy ``datetime64[ns]`` columns
+    actually carry."""
+    return TableContract(
+        contract_id="tc_ns", definition_hash=_H, table_name="synthetic_ns",
+        semantic_version="1.0",
+        columns=(ColumnContract(name="ticker", physical_type="string", nullable=False),
+                 ColumnContract(name="obs_date", physical_type="timestamp[ns]", nullable=False)),
+        primary_key=("ticker", "obs_date"), duplicate_policy="reject", foreign_keys=(),
+        partition_columns=(), filterable_columns=("ticker", "obs_date"),
+        orderable_columns=("ticker", "obs_date"), observation_time_column="obs_date",
+        finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
+        coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
+        maximum_batch_rows=1000, maximum_result_rows=1000)
+
+
+def test_compile_batch_matcher_refuses_timestamp_interval_bounds_and_agrees_with_row_path():
+    """#286 follow-up: a ``TimeInterval`` always falls back to
+    ``compile_row_matcher`` now, regardless of how extreme its bound is --
+    including the exact bounds a vectorized timestamp path once needed
+    dedicated handling for (year 1, year 999, year 3000, and a pre-1970
+    negative-epoch instant). Each must: (1) make ``compile_batch_matcher``
+    refuse outright, and (2) still produce the correct, uncrashed result
+    through ``compile_row_matcher`` alone. A 2024 row is after year 1,
+    before year 3000, and inside 1000..3000; year 999 is the bound it is
+    AFTER, which this platform's zero-padded ``%Y`` wire form compares
+    chronologically, so that one row-path answer excludes the row."""
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp("2024-01-02T00:00:00.123456789").to_pydatetime()
+    decoded_row = _row("AAA", instant)
+    for bounds, matched in (
+            (dict(start_inclusive="0001-01-01"), True),
+            (dict(end_exclusive="0999-01-01"), False),
+            (dict(end_exclusive="3000-01-01"), True),
+            (dict(start_inclusive="1000-01-01", end_exclusive="3000-01-01"), True)):
+        query = _synthetic_query(contract, time_interval=TimeInterval(column="obs_date", **bounds))
+        assert query_mod.compile_batch_matcher(contract, query) is None, bounds
+        row_matcher = query_mod.compile_row_matcher(contract, query)
+        assert row_matcher(decoded_row) is matched, bounds
+
+    negative_epoch_row = _row("AAA", pd.Timestamp("1969-12-31T23:59:59.999999999").to_pydatetime())
+    interval_query = _synthetic_query(contract, time_interval=TimeInterval(
+        column="obs_date", end_exclusive="1970-01-01T00:00:00.000000"))
+    assert query_mod.compile_batch_matcher(contract, interval_query) is None
+    assert query_mod.compile_row_matcher(contract, interval_query)(negative_epoch_row) is True
+
+
+def test_compile_batch_matcher_truncates_nanoseconds_exactly_like_the_row_path():
+    """A ns timestamp with a non-zero sub-microsecond remainder must MATCH
+    the microsecond-truncated wire-form value on both paths: the row path
+    because ``strftime("%f")`` drops the remainder, the batch path because
+    ``_batch_comparable`` floors (never rounds) to microsecond resolution."""
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp("2024-01-02T00:00:00.123456789")
+    array = pa.array([instant], type=pa.timestamp("ns"))
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in", values=("2024-01-02T00:00:00.123456",)),))
+    batch_matcher = query_mod.compile_batch_matcher(contract, query)
+    assert batch_matcher is not None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    decoded_row = _row("AAA", instant.to_pydatetime())
+    assert row_matcher(decoded_row) is True
+    mask = batch_matcher({"obs_date": array}, 1).to_pylist()
+    assert bool(mask[0]) is True
+    assert bool(mask[0]) == row_matcher(decoded_row)
+
+
+def test_compile_batch_matcher_floors_negative_epoch_nanoseconds_like_the_row_path():
+    """A pre-1970 (negative-epoch) ns timestamp with a non-zero sub-
+    microsecond remainder must floor -- never truncate toward zero -- to
+    the microsecond wire form on both paths: a toward-zero truncation of
+    ``1969-12-31T23:59:59.999999999`` would wrongly round UP to
+    ``1970-01-01T00:00:00.000000``, while ``_batch_comparable``'s exact
+    ``int64`` arithmetic and the row path's ``strftime`` both give the
+    one-microsecond-earlier ``1969-12-31T23:59:59.999999``."""
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp("1969-12-31T23:59:59.999999999")
+    array = pa.array([instant], type=pa.timestamp("ns"))
+    decoded_row = _row("AAA", instant.to_pydatetime())
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in", values=("1969-12-31T23:59:59.999999",)),))
+    batch_matcher = query_mod.compile_batch_matcher(contract, query)
+    assert batch_matcher is not None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    assert row_matcher(decoded_row) is True
+    mask = batch_matcher({"obs_date": array}, 1).to_pylist()
+    assert bool(mask[0]) is True
+    assert bool(mask[0]) == row_matcher(decoded_row)
+
+
+def test_compile_batch_matcher_near_minimum_ns_instant_floors_like_the_row_path():
+    """A ns timestamp within a microsecond of the MINIMUM representable
+    ``timestamp[ns]`` instant must floor to its own microsecond wire form
+    on both paths. ``pc.floor_temporal`` silently wrapped exactly such a
+    value around to the MAXIMUM representable instant (a real pyarrow bug:
+    its internal arithmetic underflows near that boundary), which would
+    make this ``in`` check compare against the wrong value;
+    ``_floor_ns_to_us``'s exact ``int64`` arithmetic floors it correctly
+    to ``1677-09-21T00:12:43.145224``."""
+    import numpy as np
+    import pandas as pd
+    contract = _timestamp_ns_contract()
+    instant = pd.Timestamp(np.iinfo(np.int64).min + 500)
+    array = pa.array([instant], type=pa.timestamp("ns"))
+    decoded_row = _row("AAA", instant.to_pydatetime())
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in", values=("1677-09-21T00:12:43.145224",)),))
+    batch_matcher = query_mod.compile_batch_matcher(contract, query)
+    assert batch_matcher is not None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    assert row_matcher(decoded_row) is True
+    mask = batch_matcher({"obs_date": array}, 1).to_pylist()
+    assert bool(mask[0]) is True
+    assert bool(mask[0]) == row_matcher(decoded_row)
+
+
+def _string_time_contract() -> TableContract:
+    """A contract whose ``observation_time_column`` is declared ``string``
+    -- e.g. the real ``price_history.retrieved_at`` -- the exact case that
+    showed a vectorized interval comparing a STRING array against DATETIME
+    bounds raises at evaluation time, outside any compile-time guard;
+    task brief #286 follow-up's narrowed scope avoids this entirely by
+    never vectorizing a ``TimeInterval`` at all, regardless of column
+    type."""
+    return TableContract(
+        contract_id="tc_strtime", definition_hash=_H, table_name="synthetic_strtime",
+        semantic_version="1.0",
+        columns=(ColumnContract(name="ticker", physical_type="string", nullable=False),
+                 ColumnContract(name="retrieved_at", physical_type="string", nullable=False)),
+        primary_key=("ticker", "retrieved_at"), duplicate_policy="reject", foreign_keys=(),
+        partition_columns=(), filterable_columns=("ticker", "retrieved_at"),
+        orderable_columns=("ticker", "retrieved_at"), observation_time_column="retrieved_at",
+        finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
+        coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
+        maximum_batch_rows=1000, maximum_result_rows=1000)
+
+
+def test_compile_batch_matcher_refuses_interval_on_string_typed_time_column():
+    """The exact gate-caught case: a ``TimeInterval`` on a column declared
+    ``string`` (not a timestamp) must ALSO refuse at compile time -- it is
+    a ``time_interval`` at all, so ``compile_batch_matcher`` returns
+    ``None`` before ever looking at the column's physical type -- and the
+    row path alone must still run without raising (whatever its own
+    lexical-vs-chronological answer is for an extreme bound like this is
+    unchanged, pre-existing row-path behavior, not something this test
+    re-derives)."""
+    contract = _string_time_contract()
+    query = _synthetic_query(contract, columns=("ticker", "retrieved_at"), key_filter=(),
+                             order_by=("ticker", "retrieved_at"),
+                             time_interval=TimeInterval(column="retrieved_at",
+                                                        end_exclusive="0999-01-01"))
+    assert query_mod.compile_batch_matcher(contract, query) is None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    row = {"ticker": "AAA", "retrieved_at": "2024-01-02T00:00:00.000000"}
+    assert row_matcher(row) in (True, False)
+
+
+def test_compile_batch_matcher_all_null_column_array_never_matches():
+    """``null_array_for`` — what ``repository._filter_batch`` feeds the mask
+    for a filter column the physical fragment lacks — must never match, for
+    any predicate values and for both vectorized column kinds (string,
+    timestamp), exactly like the row path's ``row.get(column) is None``
+    -> never matches."""
+    contract = _synthetic_contract()
+    n = 4
+    for values in (("AAA",), ("AAA", "ZZZ"), ("ZZZ", "ZZZZ")):
+        query = _synthetic_query(contract, key_filter=(KeyPredicate(
+            column="ticker", operator="in", values=values),))
+        batch_matcher = query_mod.compile_batch_matcher(contract, query)
+        assert batch_matcher is not None
+        mask = batch_matcher({"ticker": query_mod.null_array_for("string", n)}, n).to_pylist()
+        assert [bool(entry) for entry in mask] == [False] * n
+    ts_query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="obs_date", operator="in", values=("2024-01-02",)),))
+    ts_batch_matcher = query_mod.compile_batch_matcher(contract, ts_query)
+    assert ts_batch_matcher is not None
+    ts_mask = ts_batch_matcher({"obs_date": query_mod.null_array_for("timestamp[us]", n)},
+                               n).to_pylist()
+    assert [bool(entry) for entry in ts_mask] == [False] * n
+
+
+def _mixed_types_contract() -> TableContract:
+    """The synthetic contract plus one ``int64``, one ``bool``, and one
+    ``float64`` column, so a predicate's ``values`` can be made
+    unrepresentable in more than one declared Arrow type, and so a
+    well-formed predicate on an excluded type (``bool``/``float64``) can be
+    tested directly."""
+    return TableContract(
+        contract_id="tc_types", definition_hash=_H, table_name="synthetic_types",
+        semantic_version="1.0",
+        columns=(ColumnContract(name="ticker", physical_type="string", nullable=False),
+                 ColumnContract(name="obs_date", physical_type="timestamp[us]", nullable=False),
+                 ColumnContract(name="shares", physical_type="int64", nullable=False),
+                 ColumnContract(name="flag", physical_type="bool", nullable=False),
+                 ColumnContract(name="price", physical_type="float64", nullable=False)),
+        primary_key=("ticker", "obs_date"), duplicate_policy="reject", foreign_keys=(),
+        partition_columns=(), filterable_columns=("ticker", "obs_date", "shares", "flag", "price"),
+        orderable_columns=("ticker", "obs_date"), observation_time_column="obs_date",
+        finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
+        coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
+        maximum_batch_rows=1000, maximum_result_rows=1000)
+
+
+def test_compile_batch_matcher_refuses_values_unrepresentable_in_column_type():
+    """The documented ``None``: a ``key_filter`` whose ``values`` cannot be
+    built into its column's declared Arrow type is not expressible
+    vectorized, and the caller must fall back to the per-row path — which
+    still compiles fine (it never performs the typed Arrow construction)
+    and simply matches nothing."""
+    contract = _mixed_types_contract()
+    mismatched = (
+        ("ticker", (1, 2)),
+        ("shares", ("x", "y")),
+        ("flag", ("yes",)),
+    )
+    for column, values in mismatched:
+        query = _synthetic_query(contract, key_filter=(KeyPredicate(
+            column=column, operator="in", values=values),))
+        assert query_mod.compile_batch_matcher(contract, query) is None, (column, values)
+        row_matcher = query_mod.compile_row_matcher(contract, query)
+        assert row_matcher(_row("AAA", None)) is False
+
+
+def test_compile_batch_matcher_refuses_int64_overflow_without_raising():
+    """#286 follow-up: a Python ``int`` outside the C ``long`` range against
+    an ``int64`` column makes ``pa.array(..., type=pa.int64())`` raise a
+    plain ``OverflowError`` -- not a ``pyarrow.lib.ArrowException``
+    subclass -- so the fallback guard must catch that too and return
+    ``None`` (degrading to the per-row path, whose plain ``in`` set check
+    never raises on this value) instead of crashing the scan."""
+    contract = _mixed_types_contract()
+    query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="shares", operator="in", values=(99999999999999999999999,)),))
+    assert query_mod.compile_batch_matcher(contract, query) is None
+    row_matcher = query_mod.compile_row_matcher(contract, query)
+    assert row_matcher(_row("AAA", None)) is False
+
+
+def test_compile_batch_matcher_refuses_float_and_bool_key_filter_and_agrees_with_row_path():
+    """#286 follow-up (gate-caught regression): a ``float64`` column is
+    excluded from vectorization even for a well-formed predicate --
+    ``pyarrow.compute.is_in`` compares a float's raw bit pattern, so a
+    ``-0.0`` row value never matches a ``0`` value_set entry, while the
+    row path's plain Python ``==``/set membership correctly treats them
+    equal (confirmed directly: a real divergence). ``bool`` is excluded
+    too -- task brief #286 follow-up narrowed the vectorized set to
+    ``string``/``int64``/timestamp only."""
+    contract = _mixed_types_contract()
+    float_query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="price", operator="in", values=(0,)),))
+    assert query_mod.compile_batch_matcher(contract, float_query) is None
+    row_matcher = query_mod.compile_row_matcher(contract, float_query)
+    assert row_matcher({"ticker": "AAA", "price": -0.0}) is True
+
+    bool_query = _synthetic_query(contract, key_filter=(KeyPredicate(
+        column="flag", operator="in", values=(True,)),))
+    assert query_mod.compile_batch_matcher(contract, bool_query) is None
+    bool_row_matcher = query_mod.compile_row_matcher(contract, bool_query)
+    assert bool_row_matcher({"ticker": "AAA", "flag": True}) is True
 
 
 # --------------------------------------------------------------------------

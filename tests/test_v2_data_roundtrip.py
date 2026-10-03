@@ -4,9 +4,8 @@ rows and byte/logical refs — phase-2 guide §7.2, §8.2, §12; task brief
 decision 6 (the round trip happens in this test, not in production code).
 
 Corrupting one object byte on disk and re-scanning proves the scan refuses
-it (OBJECT_CORRUPT) before yielding any row from that fragment — the
-stat-tuple verification cache §8.2 step 6 describes is deferred (TD-1), so
-every open re-hashes, unconditionally.
+it (OBJECT_CORRUPT) before yielding any row from that fragment — the changed
+bytes alter the object's stat tuple, so the verification cache cannot hide it.
 """
 from __future__ import annotations
 

@@ -16,6 +16,52 @@ def cgroup_directory(proc: Path = Path("/proc"), mount: Path = Path("/sys/fs/cgr
     return mount
 
 
+def _ascii_decimal(token: str) -> int | None:
+    """One strictly non-negative ASCII-decimal stat value, else ``None``.
+
+    Rejects signs, underscores, non-ASCII/Unicode digits and non-numeric
+    text; a digit string too long for ``int`` (CPython's conversion limit
+    raises ``ValueError``) is unusable too.
+    """
+    if not token.isascii() or not token.isdigit():
+        return None
+    try:
+        value = int(token)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _reclaimable_cache_bytes(directory: Path) -> int | None:
+    """Reclaimable page cache from this directory's ``memory.stat`` (#347).
+
+    ``file - shmem`` when the exact ``file`` and ``shmem`` fields are both
+    valid ASCII decimals and ``shmem <= file`` — active and inactive file
+    cache are reclaimable while shmem/tmpfs stays counted, and a valid
+    ``0``/``0`` pair takes precedence over the fallback. Otherwise the exact
+    ``inactive_file`` value when it is valid (the #343 fallback). ``None``
+    when the stat file is unreadable/undecodable or no usable field is
+    present, so callers keep raw ``memory.current``. One read per directory;
+    unrelated, similarly named keys are ignored.
+    """
+    try:
+        lines = (directory / "memory.stat").read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+    values = {}
+    for line in lines:
+        fields = line.split()
+        if len(fields) == 2 and fields[0] in ("file", "shmem", "inactive_file"):
+            values[fields[0]] = fields[1]
+    file_bytes = _ascii_decimal(values["file"]) if "file" in values else None
+    shmem_bytes = _ascii_decimal(values["shmem"]) if "shmem" in values else None
+    if file_bytes is not None and shmem_bytes is not None and shmem_bytes <= file_bytes:
+        return file_bytes - shmem_bytes
+    if "inactive_file" in values:
+        return _ascii_decimal(values["inactive_file"])
+    return None
+
+
 def memory_limits(directory: Path) -> tuple[int | None, int | None]:
     limits = []
     for parent in (directory, *directory.parents):
@@ -24,7 +70,12 @@ def memory_limits(directory: Path) -> tuple[int | None, int | None]:
             value = maximum.read_text().strip()
             if value != "max":
                 current = parent / "memory.current"
-                limits.append((int(value), int(current.read_text()) if current.exists() else None))
+                used = int(current.read_text()) if current.exists() else None
+                if used is not None:
+                    reclaimable = _reclaimable_cache_bytes(parent)
+                    if reclaimable is not None:
+                        used = max(0, used - reclaimable)
+                limits.append((int(value), used))
     if not limits:
         return None, None
     ceiling = min(limit for limit, _ in limits)

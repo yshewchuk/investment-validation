@@ -57,7 +57,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/domain/simulation/` | (pending) |
 | `engine/v2/scoring/` | [`engine/v2/scoring/ARCHITECTURE.md`](engine/v2/scoring/ARCHITECTURE.md) |
 | `engine/v2/evaluation/` | (pending) |
-| `engine/v2/ledger/` | (pending) |
+| `engine/v2/ledger/` | [`engine/v2/ledger/ARCHITECTURE.md`](engine/v2/ledger/ARCHITECTURE.md) |
 | `engine/v2/models/training/` | (pending) |
 | `engine/v2/research/` | [`engine/v2/research/ARCHITECTURE.md`](engine/v2/research/ARCHITECTURE.md) |
 | `engine/v2/parity/` | [`engine/v2/parity/ARCHITECTURE.md`](engine/v2/parity/ARCHITECTURE.md) |
@@ -422,12 +422,17 @@ Only a tracked path absent from the worktree reads as empty.
   `engine/v2/serving/native_parity_projection.py`'s `native_parity_summary(report_path)`
   is a pure, read-only aggregate over the `native_parity` stage's own
   report artifact (`engine/v2/ops/native_parity_report.py`'s
-  `native_parity_report.v1.1` JSON). It reports exactly what that stored
+  `native_parity_report.v1.2` JSON). It reports exactly what that stored
   artifact's own `mismatches`/`only_legacy`/`only_native`/`native_refused*`
   fields already say, never a second implementation of the one shared
   comparator (§5) — but the artifact itself can be stale, or was produced
   under a different tolerance policy than whichever is in effect when this
-  projection is read; this projection does not re-verify either.
+  projection is read; this projection does not re-verify either. The
+  artifact now carries its own run identity (`as_of`/`generated_at`,
+  stamped once at the write step, PR #327 slice 1) but this projection
+  does not yet read or expose either field — a reader still cannot tell
+  which night produced it through this projection without the catalog;
+  surfacing them is a later slice of PR #327's design.
   `Service.tick()`'s sidecar submits a `native_parity` job once its
   paired inputs are ready, so `"no_report"` stays the answer whenever
   nothing has completed yet, not a degraded one.
