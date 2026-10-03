@@ -827,8 +827,7 @@ def _carried_prefix(
             f"{model.produces}: {len(unscored):,} event(s) before "
             f"{FIRST_FOLD.date()} are new to Tier 3 and unscored by construction "
             "(no fold exists before FIRST_FOLD) — filling the same null row a "
-            "full rebuild would give any unscorable event, not widening since "
-            "there is no fold to recompute"
+            "full rebuild would give any unscorable event"
         )
         have = pd.concat(
             [have, _normalize_group(unscored, model.produces)], ignore_index=True
@@ -850,6 +849,13 @@ def _carried_prefix(
         [unscored["ticker"], pd.to_datetime(unscored["event_date"])]
     )
     pool_changed = bool(unscored_keys.isin(trainable_keys).any())
+    if pool_changed:
+        log(
+            f"{model.produces}: {len(unscored):,} unscored event(s) are also "
+            "in the trainable pool — widening `since` to recompute every "
+            "scored fold they could affect, or refusing if the backfill "
+            "window cannot reach FIRST_FOLD"
+        )
 
     if missing.empty and not pool_changed:
         stale = len(have) - len(prefix_keys)
