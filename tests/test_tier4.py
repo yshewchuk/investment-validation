@@ -36,7 +36,6 @@ from engine.data.features.tier4 import (
     write_forecasts,
 )
 
-
 # --------------------------------------------------------------------------
 # a cheap, exactly reproducible feature model
 # --------------------------------------------------------------------------
@@ -685,6 +684,192 @@ class TestPrefixGapBackfill:
             night1.sort_values(["event_date", "ticker"]).reset_index(drop=True),
             night2.sort_values(["event_date", "ticker"]).reset_index(drop=True),
         )
+
+
+class TestCarriedTrainingPoolBoundaries:
+    @pytest.fixture
+    def prefix(self, monkeypatch):
+        monkeypatch.setattr(tier4, "FIRST_FOLD", pd.Timestamp("2013-01-01"))
+        monkeypatch.setattr(tier4, "BACKFILL_WINDOW_MONTHS", 3)
+        existing = tier4._normalize_group(pd.DataFrame([
+            {"ticker": "OLD", "event_date": "2012-10-15"},
+            {
+                "ticker": "OLD", "event_date": "2013-02-15",
+                "pred_abs_move": 7.0, "pred_abs_move_model_id": MODEL.model_id,
+                "pred_abs_move_fold_start": "2013-02-01",
+            },
+        ]), MODEL.produces)
+        keys = pd.concat([
+            existing[list(tier4.KEY_COLUMNS)],
+            pd.DataFrame({"ticker": ["NEW"], "event_date": [pd.Timestamp("2012-12-15")]}),
+        ], ignore_index=True)
+        return existing, keys
+
+    @pytest.mark.parametrize("cut", ["2013-03-01", "2013-04-01"])
+    def test_window_reaching_first_fold_keeps_only_unscored_prefix(self, prefix, cut):
+        existing, keys = prefix
+        trainable = pd.DataFrame({"ticker": ["NEW"], "date": ["2012-12-15"]})
+        carried, effective_cut, unfilled = tier4._carried_prefix(
+            existing, keys, pd.Timestamp(cut), MODEL, trainable, log=lambda _m: None,
+        )
+
+        # Equality with the window floor is allowed; the old scored value
+        # must leave the prefix so the caller refits it with the new pool.
+        assert effective_cut == pd.Timestamp("2013-01-01")
+        assert unfilled.empty
+        assert set(zip(carried["ticker"], carried["event_date"])) == {
+            ("OLD", pd.Timestamp("2012-10-15")),
+            ("NEW", pd.Timestamp("2012-12-15")),
+        }
+        assert carried[list(tier4.column_group(MODEL.produces))].isna().all().all()
+
+    def test_one_fold_beyond_window_refuses_without_mutating_inputs(self, prefix):
+        existing, keys = prefix
+        trainable = pd.DataFrame({"ticker": ["NEW"], "date": ["2012-12-15"]})
+        originals = [frame.copy(deep=True) for frame in (existing, keys, trainable)]
+        with pytest.raises(Tier4Error) as exc:
+            tier4._carried_prefix(
+                existing, keys, pd.Timestamp("2013-05-01"), MODEL, trainable,
+                log=lambda _m: None,
+            )
+
+        message = str(exc.value)
+        for detail in (
+            "pred_abs_move", "2013-01-01", "2013-05-01", "2013-02-01",
+            "3-month backfill window", "Rebuild in full (no --since)",
+        ):
+            assert detail in message
+        for frame, original in zip((existing, keys, trainable), originals):
+            pd.testing.assert_frame_equal(frame, original)
+
+    @pytest.mark.parametrize("training_keys", [
+        [],
+        [("NEW", "2012-11-15")],
+        [("OTHER", "2012-12-15")],
+        [("NEW", "2012-11-15"), ("OTHER", "2012-12-15")],
+    ], ids=["empty-pool", "different-date", "different-ticker", "crossed-keys"])
+    def test_only_a_complete_training_key_match_can_force_widening(self, prefix, training_keys):
+        existing, keys = prefix
+        trainable = pd.DataFrame(training_keys, columns=["ticker", "date"])
+        cut = pd.Timestamp("2015-01-01")
+        carried, effective_cut, unfilled = tier4._carried_prefix(
+            existing, keys, cut, MODEL, trainable, log=lambda _m: None,
+        )
+
+        assert effective_cut == cut
+        assert unfilled.empty
+        assert len(carried) == len(keys)
+        pd.testing.assert_frame_equal(
+            carried[carried["ticker"] == "OLD"].reset_index(drop=True), existing,
+        )
+        filled = carried[carried["ticker"] == "NEW"]
+        assert len(filled) == 1
+        assert filled[list(tier4.column_group(MODEL.produces))].isna().all().all()
+
+    @pytest.mark.parametrize("trainable_unscored", [False, True])
+    def test_mixed_gaps_choose_the_earliest_affected_fold(self, prefix, trainable_unscored):
+        existing, keys = prefix
+        keys = pd.concat([
+            keys,
+            pd.DataFrame({"ticker": ["NEW"], "event_date": [pd.Timestamp("2013-02-15")]}),
+        ], ignore_index=True)
+        training_keys = [("NEW", "2013-02-15")]
+        if trainable_unscored:
+            training_keys.append(("NEW", "2012-12-15"))
+        trainable = pd.DataFrame(training_keys, columns=["ticker", "date"])
+        carried, effective_cut, unfilled = tier4._carried_prefix(
+            existing, keys, pd.Timestamp("2013-04-01"), MODEL, trainable,
+            log=lambda _m: None,
+        )
+
+        expected_cut = "2013-01-01" if trainable_unscored else "2013-02-01"
+        assert effective_cut == pd.Timestamp(expected_cut)
+        assert unfilled.empty
+        assert len(carried) == 2
+        assert (carried["event_date"] < effective_cut).all()
+        assert set(carried["ticker"]) == {"OLD", "NEW"}
+        assert carried[list(tier4.column_group(MODEL.produces))].isna().all().all()
+
+    @pytest.mark.parametrize(("column", "value"), [
+        ("n_prior", 0),
+        ("f1", np.nan),
+        ("abs_move", np.nan),
+        ("abs_move", np.inf),
+        ("abs_move", -np.inf),
+    ], ids=["prepare-filter", "missing-feature", "missing-target", "positive-inf", "negative-inf"])
+    def test_excluded_backfill_fills_null_without_refitting_carried_folds(
+        self, panel, built, monkeypatch, column, value,
+    ):
+        new_row = panel[panel["date"] == pd.Timestamp("2012-12-15")].iloc[[0]].copy()
+        new_row["ticker"] = "BACKFILL"
+        new_row[column] = value
+        augmented = pd.concat([panel, new_row], ignore_index=True)
+        expected = build_forecasts(
+            augmented, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+        calls = []
+        real_fit = tier4.fit_fold
+
+        def record_fit(trainable, model, fold_start):
+            calls.append(pd.Timestamp(fold_start))
+            return real_fit(trainable, model, fold_start)
+
+        monkeypatch.setattr(tier4, "fit_fold", record_fit)
+        report = {}
+        actual = build_forecasts(
+            augmented, produces=_ONLY, models=_MODELS, since="2015-01-01",
+            existing=built, tier3_snapshot="snap", report=report, log=lambda _m: None,
+        )
+
+        pd.testing.assert_frame_equal(actual, expected)
+        assert calls and min(calls) == pd.Timestamp("2015-01-01")
+        assert "gap_widened_since" not in report[MODEL.produces]
+        assert "out_of_window_gap" not in report[MODEL.produces]
+        filled = actual[actual["ticker"] == "BACKFILL"]
+        assert len(filled) == 1
+        assert filled[list(tier4.column_group(MODEL.produces))].isna().all().all()
+
+    def test_mixed_trainable_backfill_matches_full_rebuild_at_window_boundary(self, panel, monkeypatch):
+        # Make the first folds score in this small fixture, so carrying their
+        # old forecasts would be observable before the requested April cut.
+        monkeypatch.setattr(tier4, "MIN_TRAIN_ROWS", 200)
+        built = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+        new_rows = panel[
+            (panel["ticker"] == panel["ticker"].iloc[0])
+            & panel["date"].isin(pd.to_datetime(["2012-12-15", "2013-02-15"]))
+        ].copy()
+        assert len(new_rows) == 2
+        new_rows["ticker"] = "BACKFILL"
+        new_rows["abs_move"] += 10
+        augmented = pd.concat([panel, new_rows], ignore_index=True)
+        expected = build_forecasts(
+            augmented, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+        # Prove the fixture changes forecasts that would otherwise be carried.
+        first_fold = expected[
+            (expected["ticker"] != "BACKFILL")
+            & (expected["pred_abs_move_fold_start"] == FIRST_FOLD)
+        ]["pred_abs_move"].to_numpy()
+        old_first_fold = built[built["pred_abs_move_fold_start"] == FIRST_FOLD]["pred_abs_move"].to_numpy()
+        assert len(first_fold) > 0
+        assert not np.array_equal(first_fold, old_first_fold)
+
+        report = {}
+        actual = build_forecasts(
+            augmented, produces=_ONLY, models=_MODELS, since="2013-04-30",
+            existing=built, tier3_snapshot="snap", report=report, log=lambda _m: None,
+        )
+
+        # Includes the residual bands: they must grow from the refitted prefix.
+        pd.testing.assert_frame_equal(actual, expected)
+        assert report[MODEL.produces]["gap_widened_since"] == "2013-01-01"
+        assert report[MODEL.produces]["gap_widened_from"] == "2013-04-01"
+        assert "out_of_window_gap" not in report[MODEL.produces]
 
 
 class TestTotalityAndNulls:
