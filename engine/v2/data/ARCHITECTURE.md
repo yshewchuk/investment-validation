@@ -198,15 +198,11 @@ committed by `engine.v2.ops.computed_moves_store.py`/
 `DATA_FAILURE_CODES`, intended to carry no local path or row value — not
 fully enforced today (Invariants).
 
-**`computed_moves.v2` — point-in-time availability.** Every row now also
-carries `available_as_of_date`: the day *following* the close that let
-`session_move` compute `realized_move_pct` (that close date — `sd[j_post]`
-in `session_move`/`build_rows` — plus one calendar day, `YYYY-MM-DD`). It is
-null exactly when `realized_move_pct` is null (a skipped event, whatever the
-reason), and null means **not available to any decision** — never "always
-available." A reader enforces causality with
-`available_as_of_date <= decision_session`. `realized_move_pct`'s own
-computation is unchanged bit-for-bit; only the row shape grew a column.
+**`computed_moves.v2` — point-in-time availability.** `available_as_of_date`
+is the calendar day following the close that made `realized_move_pct`
+knowable. It is null exactly when `realized_move_pct` is null; null means
+unavailable to any decision. Readers must require
+`available_as_of_date <= decision_session`.
 
 ## Dependencies
 
@@ -356,23 +352,10 @@ Root doc §5 invariants this package is responsible for:
 - **Whole-partition rewrite, no legacy append order** — `price_history_table.py`/
   `computed_moves_table.py` each cover one ticker's whole history in one
   fragment, so a correction rewrites it rather than appending a byte.
-- **Schema evolution bumps the major version; it does not edit a registered
-  contract_id.** `catalog.commit_snapshot` keys `data_contracts` by
-  `contract_id` and refuses (`IDENTITY_CONFLICT`) a second, differently-shaped
-  definition under one already-registered `contract_id`. `computed_moves`'s
-  `available_as_of_date` column (new, nullable) therefore shipped as
-  `computed_moves.v2`/`2.0.0`, not a same-`contract_id` minor bump: `v1`'s
-  registration is left untouched, never mutated. Because `_commit_generation`
-  keys `table_manifests` by table *name*, the very next `computed_moves`
-  commit replaces the whole table's manifest with `v2`-only records; `v1`
-  fragments stay in `data_fragments`/`data_dataset_versions` as orphaned,
-  content-addressed rows (nothing deletes them) until the post-cutover
-  recapture rewrites every ticker under `v2`. `target_tickers_from_snapshot`'s
-  default (`all_scoreable=True`, `since=None` — also the nightly's own call)
-  already targets every scoreable ticker on each run, and each unit's
-  `capture_id` folds in `COMPUTED_MOVES_CONTRACT.definition_hash`, so the
-  version bump forces a cache miss and a full rebuild on the very next run —
-  no partial-scope recapture is needed or sufficient.
+- **Registered contract definitions are immutable.** `catalog.commit_snapshot`
+  refuses (`IDENTITY_CONFLICT`) a changed definition under an existing
+  `contract_id`; a table picks its next `contract_id`/`semantic_version` per
+  its own `schema_evolution_policy`.
 - **`daily_market` revision identity/ordering.** A revision's id folds in
   its own content hash, so differing content never shares an id. Ranking
   picks the surviving group's highest ordinal (derived from `received_at`,

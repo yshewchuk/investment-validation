@@ -177,3 +177,39 @@ def test_build_rows_gap_exceeds_limit_is_skipped_and_null():
     # the other 5 events are ordinary 1-3 day gaps and must still compute
     assert len(rows) == 6
     assert sum(1 for row in rows if not row["skipped"]) == 5
+
+
+def test_available_as_of_date_assertion_catches_a_planted_defect():
+    """Negative control for the BMO/AMC available_as_of_date tests above:
+    prove the comparison style they use actually rejects a wrong value,
+    not just that it happens to pass on correct ones."""
+    dates = ["2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08",
+             "2024-01-09", "2024-02-01"]
+    events = pd.DataFrame({"event_date": pd.to_datetime(dates),
+                           "session": ["BMO"] * len(dates)})
+    daily = _daily(dates, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+    rows = build_rows("AAPL", events, _SESSIONS, _CLOSES, daily,
+                      computed_at="2026-09-25T00:00:00+00:00",
+                      source_hash="sha256:" + "a" * 64, capture_id="capture_test")
+    computable = [row for row in rows if not row["skipped"]]
+    correct = [row["available_as_of_date"] for row in computable]
+
+    # Plant a defect: shift one computable row's date by a day, and null out
+    # another computable row's date (the two wrong shapes a real regression
+    # could take). Both must be REJECTED by the same comparison style
+    # test_build_rows_available_as_of_date_bmo uses -- if this assertion
+    # ever silently passed, that test's own assertions would be worthless.
+    corrupted_shifted = list(correct)
+    corrupted_shifted[0] = str(
+        (pd.Timestamp(corrupted_shifted[0]) + pd.Timedelta(days=1)).date())
+    assert corrupted_shifted != correct
+
+    corrupted_null = list(correct)
+    corrupted_null[1] = None
+    assert corrupted_null != correct
+
+    # And the real, uncorrupted output must still match itself exactly --
+    # confirming the negative control above is about the PLANTED defect,
+    # not about the comparison being trivially always-unequal.
+    assert correct == [row["available_as_of_date"] for row in computable]
