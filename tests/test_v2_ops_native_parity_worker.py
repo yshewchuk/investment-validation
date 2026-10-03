@@ -363,6 +363,26 @@ def test_run_native_parity_worker_opaque_id_leaves_as_of_none(tmp_path):
     assert report["as_of"] is None
 
 
+def test_run_native_parity_worker_non_date_prefix_leaves_as_of_none(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+
+    run_native_parity_worker({"expected_ids": ("opaque|scope",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["as_of"] is None
+
+
+def test_run_native_parity_worker_empty_prefix_leaves_as_of_none(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+
+    run_native_parity_worker({"expected_ids": ("|scope",)}, tmp_path)
+
+    report = _read_report(tmp_path)
+    assert report["as_of"] is None
+
+
 def test_comparators_stay_free_of_run_identity():
     report = compare_native_vs_legacy(
         {"a|b|c": {"gate_pass": True}}, {"a|b|c": {"gate_pass": True}},

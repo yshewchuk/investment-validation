@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -454,14 +455,21 @@ def write_parity_report(report: dict, path: Path | str) -> Path:
 def _as_of_from_expected_ids(expected_ids) -> str | None:
     """The run/session as-of date one opaque expected-id carries, or ``None``.
 
-    Only an id that actually contains the ``|`` separator yields a real date;
-    an opaque id with no separator stays ``None`` rather than masquerading as
-    one. Never raises.
+    Only an id of the form ``"<as_of>|<scope_hash>"`` where ``<as_of>`` is a
+    real ISO calendar date (``YYYY-MM-DD``) yields that date; anything else
+    -- no separator, an empty prefix, or a prefix that is not a valid date
+    -- stays ``None`` rather than masquerading as one. Never raises.
     """
     if not expected_ids:
         return None
     candidate, separator, _scope_hash = expected_ids[0].partition("|")
-    return candidate if separator else None
+    if not separator or not candidate:
+        return None
+    try:
+        date.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return candidate
 
 
 def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
