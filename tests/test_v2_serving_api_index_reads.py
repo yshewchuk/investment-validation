@@ -412,13 +412,19 @@ def test_damaged_score_detail_if_none_match_is_503_not_304(ctx):
 
 def test_malformed_artifact_detail_stays_500_not_index_unreadable(ctx, monkeypatch):
     score_id = _score_id(ctx, "e0")
-    monkeypatch.setattr(ArtifactStore, "read_verified",
-                        lambda self, ref: b"{malformed-artifact-not-index", raising=False)
+    calls: list = []
+
+    def fake_read_verified(self, ref):
+        calls.append(ref)
+        return b"{malformed-artifact-not-index"
+
+    monkeypatch.setattr(ArtifactStore, "read_verified", fake_read_verified)
     opened: list[sqlite3.Connection] = []
     with _track_connects() as opened:
         code, body, _ = _get(ctx.base, "/api/v1/scores/" + score_id, token=TOKEN,
                             params={"release_id": ctx.release_id})
     assert code == 500, (code, body[:200])
+    assert len(calls) == 1
     assert b"SERVING_INDEX_UNREADABLE" not in body
     _assert_closed(opened)
 
