@@ -121,7 +121,9 @@ history_start)` is implemented in `panel_row_inputs.py`. No production
 raw-row producer calls it yet (`engine/v2/ops/ARCHITECTURE.md` "Cutover
 PR-6"); it is the raw-row producer's one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
-pair; `panel_anchor` is the latest (freshest) of its contributing reads'
+pair. `panel_row.date` is the scored event's ISO calendar date, required by
+the scoring source-bundle consumer; it is never the decision or source-anchor
+date. `panel_anchor` is the latest (freshest) of its contributing reads'
 own source dates, never a caller-asserted value — its consumer
 (`../scoring/ARCHITECTURE.md`'s `nightly_source_bundle.py`) trusts it as
 an observation-freshness upper bound, which only the latest, not the
