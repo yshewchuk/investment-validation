@@ -309,11 +309,10 @@ key alongside it) widens exactly as before this fix.
 never a bare `FIRST_FOLD`** — `cut` itself can already be earlier than
 `FIRST_FOLD` (a `since` requested before it), and such a key can never
 affect a fold earlier than `cut` already covers, so the target must never
-push `effective_cut` past the requested `cut`. A build with no trainable
-unscored gap keeps the ordinary incremental cut unchanged — no widening at
-all, full or otherwise. A SCORED gap's own out-of-window case is unaffected
-by this fix (below); a defect in that path is tracked separately, issue
-#333.
+push `effective_cut` past the requested `cut`. A build with NEITHER kind of
+gap keeps the ordinary incremental cut unchanged — no widening at all. A
+SCORED gap's own out-of-window case is unaffected by this fix (below); a
+defect in that path is tracked separately, issue #333.
 
 **The widening is bounded** (`BACKFILL_WINDOW_MONTHS`, measured back from the
 requested `since`). Recomputing an arbitrarily old gap would put unbounded,
