@@ -606,15 +606,36 @@ def _load_ref(conn: sqlite3.Connection, artifact_id: str) -> ArtifactRef:
     return from_document(ArtifactRef, json.loads(row["ref_json"]))
 
 
-def get_score_detail(conn: sqlite3.Connection, store, release_id: str, score_id: str) -> LegacyScoreBridge | None:
+def _score_detail_ref(conn: sqlite3.Connection, release_id: str, score_id: str) -> ArtifactRef | None:
+    """The index half of :func:`get_score_detail`: the summary lookup plus the
+    detail object's registered ref. ``None`` for a score this release never
+    indexed. Every failure raised here is an INDEX read failure (a corrupt
+    table, a malformed stored ``ref_json``, an unregistered artifact id), which
+    is why the read API can wrap exactly this call in its own narrow
+    ``SERVING_INDEX_UNREADABLE`` boundary (#342) and nothing else.
+    ``sqlite3.Error`` propagates untouched -- this module never translates it."""
     row = conn.execute(
         "SELECT detail_artifact_id FROM serving_score_summary WHERE release_id = ? AND score_id = ?",
         (release_id, score_id)).fetchone()
     if row is None:
         return None
-    ref = _load_ref(conn, row["detail_artifact_id"])
+    return _load_ref(conn, row["detail_artifact_id"])
+
+
+def _score_detail_from_ref(store, ref: ArtifactRef) -> LegacyScoreBridge:
+    """The artifact half of :func:`get_score_detail`: read/verify the stored
+    object, decode it, rebuild the bridge. Deliberately separate from
+    :func:`_score_detail_ref` so an API caller can finish (and close) its index
+    connection before touching the artifact store: a malformed *artifact* stays
+    the existing ``ArtifactError``/``json.JSONDecodeError`` 500 and must never
+    be translated into an index-unreadable refusal."""
     document = json.loads(store.read_verified(ref).decode("utf-8"))
     return from_document(LegacyScoreBridge, document)
+
+
+def get_score_detail(conn: sqlite3.Connection, store, release_id: str, score_id: str) -> LegacyScoreBridge | None:
+    ref = _score_detail_ref(conn, release_id, score_id)
+    return None if ref is None else _score_detail_from_ref(store, ref)
 
 
 def _score_summary_from_row(row: sqlite3.Row) -> EventScoreSummary:
