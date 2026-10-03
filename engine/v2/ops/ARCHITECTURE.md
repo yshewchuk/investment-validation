@@ -688,21 +688,21 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6 (not yet implemented — design and code-slice split in the
-PR body, not restated here).** `_reconcile_native_score_batch_shadow`
-will build every admitted `board_requests()` key's `calendar_row`/
-`panel_row`/`panel_anchor` (panel-row staging: `engine/v2/features/
-ARCHITECTURE.md`) and `quote_rows`; `tier4_row` stays `{}` (every key is
-a forward event, `../scoring/ARCHITECTURE.md` "Inputs"). It, not the
-caller, sources every `calendar_row` field `nightly_raw_rows.
-scan_calendar_row` declares as caller-staged (entry/exit/expiry/spot/
-calendar-observed-through) — see the PR body for exactly which existing
-reader/resolver supplies each — so no field is ever left unsourced. Open
-prerequisites it must resolve or safely defer:
-`source_availability.verify_eod_availability`
-([#260](https://github.com/yshewchuk/investment-validation/issues/260))
-and intraday `event_date` admission
-([#243](https://github.com/yshewchuk/investment-validation/issues/243)).
+**Cutover PR-6 (design; implementation pending).** Calendar sourcing owns
+pinned spot, listed strategy-specific expiry and session-based planned exit;
+exit is independent of expiry. The producer owns enumeration, shared panel
+inputs, per-key calendar/quotes and refusal documents; the sidecar stages both
+documents before submission. Forward `tier4_row` is `{}`. Snapshot reads are
+SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
+
+| Calendar sourcing condition (R1–R6) | Outcome |
+|---|---|
+| R1: missing source table, missing exact spot or repository failure | Fail the whole build; preserve `CONTRACT_MISMATCH` and other repository codes |
+| R1: no strategy-eligible listed expiry; missing/ambiguous event; intraday key | Typed per-key refusal; intraday identity is never normalized ([#243](https://github.com/yshewchuk/investment-validation/issues/243)) |
+| R2: cache | No durable helper cache; any reuse is scoped to the pinned build |
+| R3: retry | No helper retry or provider fetch; unchanged inputs reproduce the result/refusal |
+| R4/R5: transaction or interruption | Read-only helper; no catalog writes, publication or partial document return |
+| R6: identity | Preserve exact event identity and earnings revision; producer successes and refusals are disjoint |
 
 ## Inputs
 
