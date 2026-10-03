@@ -72,6 +72,17 @@ NEVER_RAN_DIMENSIONS = {
 }
 
 
+def _json_safe(value):
+    """A float value as JSON can represent it without ``allow_nan``'s
+    non-standard tokens; everything else passes through unchanged.
+    """
+    if isinstance(value, float) and not (float("-inf") < value < float("inf")):
+        if value != value:
+            return "NaN"
+        return "Infinity" if value > 0 else "-Infinity"
+    return value
+
+
 def compare_dimension(expected: dict, actual: dict, dimension: str, *,
                       compare_records=compare_records,
                       tolerance_policy=SCORE_RECORD_V1) -> dict:
@@ -109,7 +120,7 @@ def compare_dimension(expected: dict, actual: dict, dimension: str, *,
             "verdict": comparison.verdict,
             "findings": [finding.field_path for finding in comparison.findings],
         }),
-        "values": {finding.field_path: {"legacy": finding.left_value,
-                                        "native": finding.right_value}
+        "values": {finding.field_path: {"legacy": _json_safe(finding.left_value),
+                                        "native": _json_safe(finding.right_value)}
                    for finding in comparison.findings},
     }

@@ -451,6 +451,19 @@ def write_parity_report(report: dict, path: Path | str) -> Path:
     return path
 
 
+def _as_of_from_expected_ids(expected_ids) -> str | None:
+    """The run/session as-of date one opaque expected-id carries, or ``None``.
+
+    Only an id that actually contains the ``|`` separator yields a real date;
+    an opaque id with no separator stays ``None`` rather than masquerading as
+    one. Never raises.
+    """
+    if not expected_ids:
+        return None
+    candidate, separator, _scope_hash = expected_ids[0].partition("|")
+    return candidate if separator else None
+
+
 def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
                              clock: Clock = SystemClock()) -> dict[str, Any]:
     """The ``native_parity`` job kind's worker entrypoint.
@@ -479,7 +492,7 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
     from engine.v2.ops.nightly import legacy_parity_rows
 
     expected_ids = parameters["expected_ids"]
-    as_of = expected_ids[0].partition("|")[0] if expected_ids else None
+    as_of = _as_of_from_expected_ids(expected_ids)
     score_document = json.loads((root / "score.json").read_text())
     records_document = json.loads((root / "records.json").read_text())
     refusals_document = json.loads((root / "refusals.json").read_text())

@@ -31,6 +31,24 @@ def test_differing_field_carries_both_raw_values():
     assert result["values"] == {"gate_score": {"legacy": 0.5, "native": 0.75}}
 
 
+def test_nan_mismatch_value_is_json_safe():
+    result = compare_dimension(
+        {"gate_score": float("nan")}, {"gate_score": 0.5}, "verdicts")
+
+    assert result["agree"] is False
+    assert result["values"]["gate_score"]["legacy"] == "NaN"
+
+
+def test_infinite_mismatch_values_are_json_safe():
+    positive = compare_dimension(
+        {"gate_score": float("inf")}, {"gate_score": 0.5}, "verdicts")
+    negative = compare_dimension(
+        {"gate_score": float("-inf")}, {"gate_score": 0.5}, "verdicts")
+
+    assert positive["values"]["gate_score"]["legacy"] == "Infinity"
+    assert negative["values"]["gate_score"]["legacy"] == "-Infinity"
+
+
 def test_phase4_wrapper_behavior_is_unchanged():
     agree = phase4_real._compare_dimension(
         {"exp_pnl_model": 1.0}, {"exp_pnl_model": 1.0}, "simulation")
