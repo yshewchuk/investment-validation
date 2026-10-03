@@ -9,7 +9,7 @@ specific to this package.
 ## Purpose
 
 Durable job submission, leases, retry history and dependencies; resource
-admission (cgroup-v2 usage is `max(0, memory.current - inactive_file)` from `memory.stat`, falling back to raw `memory.current` when the statistic is missing, malformed or unreadable) and per-job CPU placement; the nightly job graph and its release
+admission (each constrained cgroup uses `max(0, memory.current - inactive_file)` with both readings from that same directory and `inactive_file` from `memory.stat`, falling back to raw `memory.current` when the statistic is missing, malformed or unreadable) and per-job CPU placement; the nightly job graph and its release
 boundary. It does not decide research conclusions (`engine/v2/evaluation`)
 and does not compute a score (`engine/v2/scoring`) — it only sequences and
 persists the jobs that call into those packages.
