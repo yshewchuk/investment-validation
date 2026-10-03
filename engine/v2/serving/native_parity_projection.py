@@ -18,9 +18,9 @@ from __future__ import annotations
 import errno
 import json
 import os
+import sqlite3
 import stat
 from http import HTTPStatus
-from typing import Any
 
 from engine.v2.foundation import parse_timestamp
 from engine.v2.parity.dimensions import (
@@ -38,6 +38,7 @@ __all__ = [
     "native_parity_snapshot",
     "native_parity_summary",
     "native_parity_items",
+    "native_parity_freshness",
 ]
 
 NATIVE_PARITY_SUMMARY_V1 = "native_parity_summary.v1.0"
@@ -84,24 +85,24 @@ def _counted(values) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _field_mismatch_counts(mismatches: list[dict[str, Any]]) -> dict[str, int]:
+def _field_mismatch_counts(mismatches: list[dict[str, object]]) -> dict[str, int]:
     """How many mismatch entries name each field, across every dimension."""
     return _counted(field for entry in mismatches for field in entry["finding_fields"])
 
 
-def _dimension_mismatch_counts(mismatches: list[dict[str, Any]]) -> dict[str, int]:
+def _dimension_mismatch_counts(mismatches: list[dict[str, object]]) -> dict[str, int]:
     """How many mismatch entries (one per row+dimension) name each dimension."""
     return _counted(entry["dimension"] for entry in mismatches)
 
 
-def _worst_rows(mismatches: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+def _worst_rows(mismatches: list[dict[str, object]], limit: int) -> list[dict[str, object]]:
     """The rows with the most mismatched fields, most first.
 
     One row can carry several dimension mismatches; a row's total is the
     sum of ``len(finding_fields)`` across all of them. Ties break on
     ``row_key`` so the result is deterministic.
     """
-    totals: dict[str, dict[str, Any]] = {}
+    totals: dict[str, dict[str, object]] = {}
     for entry in mismatches:
         key = entry["row_key"]
         row = totals.setdefault(
@@ -114,7 +115,7 @@ def _worst_rows(mismatches: list[dict[str, Any]], limit: int) -> list[dict[str, 
     return ordered[:limit]
 
 
-def _reason_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
+def _reason_counts(entries: list[dict[str, object]]) -> dict[str, int]:
     return _counted(entry["refusal_code"] for entry in entries)
 
 
@@ -147,7 +148,7 @@ def _open_regular_no_follow(path: str | os.PathLike):
     return os.fdopen(fd, "r")
 
 
-def _validate_mismatches(mismatches: list[Any]) -> None:
+def _validate_mismatches(mismatches: list[object]) -> None:
     for entry in mismatches:
         if (
             not isinstance(entry, dict)
@@ -159,7 +160,7 @@ def _validate_mismatches(mismatches: list[Any]) -> None:
             raise ValueError("native parity mismatch entry is malformed")
 
 
-def _validate_optional_lists(report: dict[str, Any]) -> None:
+def _validate_optional_lists(report: dict[str, object]) -> None:
     for field in _OPTIONAL_LIST_FIELDS:
         if field in report:
             value = report[field]
@@ -170,7 +171,7 @@ def _validate_optional_lists(report: dict[str, Any]) -> None:
                     raise ValueError(f"native parity report field {field!r} entry is malformed")
 
 
-def _validate_compared(compared: list[Any], mismatches: list[dict[str, Any]]) -> None:
+def _validate_compared(compared: list[object], mismatches: list[dict[str, object]]) -> None:
     """``compared`` must be unique strings, and every mismatch's ``row_key``
     must be one of them.
 
@@ -190,7 +191,7 @@ def _validate_compared(compared: list[Any], mismatches: list[dict[str, Any]]) ->
             raise ValueError("native parity mismatch row_key is not in 'compared'")
 
 
-def _validate_report_values(mismatches: list[dict[str, Any]]) -> None:
+def _validate_report_values(mismatches: list[dict[str, object]]) -> None:
     """Every finding carries the supplied ``values`` dict's exact pair."""
     for entry in mismatches:
         values = entry.get("values")
@@ -203,7 +204,7 @@ def _validate_report_values(mismatches: list[dict[str, Any]]) -> None:
                 raise ValueError("native parity mismatch value pair is incomplete")
 
 
-def _validate_run_identity(report: dict[str, Any]) -> None:
+def _validate_run_identity(report: dict[str, object]) -> None:
     """The supplied modern fields, shared by the reader and the API route.
 
     A schema-v1.2 report OR either run-identity key present is modern:
@@ -242,7 +243,7 @@ def _validate_run_identity(report: dict[str, Any]) -> None:
     _validate_report_values(report["mismatches"])
 
 
-def _load_report(handle) -> dict[str, Any]:
+def _load_report(handle) -> dict[str, object]:
     """Parse and shape-check the report; raises on anything malformed."""
     report = json.load(handle)
     if not isinstance(report, dict):
@@ -262,13 +263,13 @@ def _load_report(handle) -> dict[str, Any]:
     return report
 
 
-def _captured_string(value: Any, limit: int, label: str) -> str:
+def _captured_string(value: object, limit: int, label: str) -> str:
     if not isinstance(value, str) or not (1 <= len(value) <= limit):
         raise ValueError(f"captured comparison {label} is not a bounded non-empty string")
     return value
 
 
-def _captured_number(value: Any) -> Any:
+def _captured_number(value: object) -> object:
     """Accept null and finite JSON numbers; reject bools, strings and non-finite floats.
 
     Finiteness is a strict open interval against the float infinities, so
@@ -288,7 +289,7 @@ def _captured_number(value: Any) -> Any:
 _MAX_SAFE_INTEGER = 2 ** 53 - 1
 
 
-def _captured_display(value: Any) -> Any:
+def _captured_display(value: object) -> object:
     """JSON-safe rendering form of an already-validated captured number.
 
     The browser's ``Response.json`` converts the payload to IEEE-754, so a
@@ -305,7 +306,7 @@ def _captured_display(value: Any) -> Any:
     return value
 
 
-def _captured_value(group: str, field: str, value: Any) -> Any:
+def _captured_value(group: str, field: str, value: object) -> object:
     """One captured row value under the schema's exact per-field typing.
 
     Every group/field is numeric except the single canonical boolean gate
@@ -321,8 +322,8 @@ def _captured_value(group: str, field: str, value: Any) -> Any:
     return _captured_number(value)
 
 
-def _captured_row(group: str, field: str, legacy_value: Any,
-                  native_value: Any) -> dict[str, Any]:
+def _captured_row(group: str, field: str, legacy_value: object,
+                  native_value: object) -> dict[str, object]:
     """Validate each side once; emit the original and additive display fields."""
     legacy = _captured_value(group, field, legacy_value)
     native = _captured_value(group, field, native_value)
@@ -332,7 +333,7 @@ def _captured_row(group: str, field: str, legacy_value: Any,
             "native_display": _captured_display(native)}
 
 
-def _captured_aligned_group(group: str, left: Any, right: Any) -> None:
+def _captured_aligned_group(group: str, left: object, right: object) -> None:
     """One legacy/native group: a non-empty aligned object of bounded names."""
     if (not isinstance(left, dict) or not isinstance(right, dict)
             or not left or set(left) != set(right)):
@@ -342,8 +343,8 @@ def _captured_aligned_group(group: str, left: Any, right: Any) -> None:
         raise ValueError(f"captured comparison group {group!r} has a bad field name")
 
 
-def _captured_metadata_section(block: dict[str, Any], key: str,
-                               fields: tuple[str, ...]) -> dict[str, Any]:
+def _captured_metadata_section(block: dict[str, object], key: str,
+                               fields: tuple[str, ...]) -> dict[str, object]:
     """An exact-key metadata object of bounded non-empty strings; return it."""
     section = block.get(key)
     if not isinstance(section, dict) or set(section) != set(fields):
@@ -353,7 +354,7 @@ def _captured_metadata_section(block: dict[str, Any], key: str,
     return section
 
 
-def _captured_rows(legacy: Any, native: Any) -> list[dict[str, Any]]:
+def _captured_rows(legacy: object, native: object) -> list[dict[str, object]]:
     if (not isinstance(legacy, dict) or not isinstance(native, dict)
             or set(legacy) != set(_CAPTURED_GROUPS)
             or set(native) != set(_CAPTURED_GROUPS)):
@@ -366,7 +367,7 @@ def _captured_rows(legacy: Any, native: Any) -> list[dict[str, Any]]:
             for group in _CAPTURED_GROUPS for field in sorted(legacy[group])]
 
 
-def _project_captured_comparison(block: Any) -> dict[str, Any]:
+def _project_captured_comparison(block: object) -> dict[str, object]:
     """Validate the exporter's optional captured block and project paired rows.
 
     Raises ``ValueError`` (the existing malformed-report refusal) on any
@@ -412,7 +413,7 @@ def _project_captured_comparison(block: Any) -> dict[str, Any]:
     }
 
 
-def _mismatch_item(entry: dict[str, Any]) -> dict[str, Any]:
+def _mismatch_item(entry: dict[str, object]) -> dict[str, object]:
     fields = {name: {"status": "agree"}
               for name in _ITEM_GROUP_FIELDS.get(entry["dimension"], ())}
     values = entry.get("values")
@@ -428,9 +429,9 @@ def _mismatch_item(entry: dict[str, Any]) -> dict[str, Any]:
             "fields": fields}
 
 
-def native_parity_items(report: dict[str, Any], section: str, *,
+def native_parity_items(report: dict, section: str, *,
                         side: str | None = None,
-                        row_key: str | None = None) -> list[Any]:
+                        row_key: str | None = None) -> list:
     """One detail collection; a row_key outside the report population raises LookupError."""
     population = set(report["compared"]) | set(report["only_legacy"]) | set(report["only_native"])
     if row_key is not None and row_key not in population:
@@ -444,6 +445,37 @@ def native_parity_items(report: dict[str, Any], section: str, *,
                 if row_key is None or entry["row_key"] == row_key]
     selected.sort(key=lambda entry: (entry["row_key"], entry["dimension"]))
     return [_mismatch_item(entry) for entry in selected]
+
+
+def native_parity_freshness(serving_db, resolve_current, as_of: str | None, open_index,
+                            read_release) -> str:
+    """Compare the report's run date with the same resolution /releases/current
+    uses. A null ``as_of`` is available without invoking either callback. No
+    current release, an unknown release row, or a ``sqlite3.OperationalError``
+    from the resolver, the index opener, or the release reader leaves the report
+    available; a genuinely earlier ISO date is stale. Every other exception --
+    including the serving index's own typed refusals -- propagates."""
+    if as_of is None:
+        return "available"
+    try:
+        release_id = resolve_current()
+    except sqlite3.OperationalError:
+        return "available"
+    if release_id is None:
+        return "available"
+    try:
+        conn = open_index(serving_db)
+    except sqlite3.OperationalError:
+        return "available"
+    try:
+        release = read_release(conn, release_id)
+    except sqlite3.OperationalError:
+        return "available"
+    finally:
+        conn.close()
+    if release is not None and as_of < release.resolved_as_of:
+        return "stale"
+    return "available"
 
 
 def _no_report() -> tuple[HTTPStatus, dict, None]:

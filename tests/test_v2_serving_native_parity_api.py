@@ -13,6 +13,7 @@ from __future__ import annotations
 import builtins
 import json
 import os
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.contracts import Problem  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactStore  # noqa: E402
 from engine.v2.ops.native_parity_report import (  # noqa: E402
@@ -32,6 +34,7 @@ from engine.v2.ops.native_parity_report import (  # noqa: E402
     write_parity_report,
 )
 from engine.v2.parity.dimensions import FORECAST_FIELDS, SIMULATION_FIELDS  # noqa: E402
+from engine.v2.serving import api as api_module  # noqa: E402
 from engine.v2.serving import projections  # noqa: E402
 from engine.v2.serving.api import ApiError, create_app  # noqa: E402
 from engine.v2.serving.native_parity_projection import (  # noqa: E402
@@ -520,6 +523,130 @@ def test_current_pointer_io_failure_leaves_report_available(parity, tmp_path, mo
     finally:
         monkeypatch.undo()
         _stop(server, thread)
+
+
+_SAFE_RELEASE_ID = "operational-fallback-release"
+
+
+def _operational_resolver(phase):
+    def resolver():
+        if phase == "resolver":
+            raise sqlite3.OperationalError("database is locked")
+        return _SAFE_RELEASE_ID
+    return resolver
+
+
+def _assert_available_report(base):
+    code, body, headers = _get(base, "/api/v1/native_parity", token=TOKEN)
+    assert code == 200
+    _assert_no_store(headers)
+    summary = json.loads(body)
+    assert summary["status"] == "available"
+    assert summary["as_of"] == AS_OF
+    assert summary["generated_at"] == GENERATED_AT
+    assert summary["compared_count"] == 3
+    assert summary["matched_row_count"] == 1
+    assert summary["mismatched_row_count"] == 2
+    assert summary["only_legacy_count"] == 2
+    assert summary["only_native_count"] == 2
+
+    code, body, headers = _get(base, "/api/v1/native_parity/mismatches", token=TOKEN,
+                               params={"limit": "10"})
+    assert code == 200
+    _assert_no_store(headers)
+    document = json.loads(body)
+    assert document["status"] == "available"
+    assert [(item["row_key"], item["dimension"]) for item in document["items"]] == [
+        ("BBB|S|2026-01-02", "forecasts"), ("CCC|S|2026-01-03", "simulation")]
+    assert document["next_cursor"] is None
+
+    for side, expected in (("legacy", ["DDD|S|2026-01-04", "EEE|S|2026-01-05"]),
+                           ("native", ["FFF|S|2026-01-06", "GGG|S|2026-01-07"])):
+        code, body, headers = _get(base, "/api/v1/native_parity/unpaired", token=TOKEN,
+                                   params={"side": side, "limit": "10"})
+        assert code == 200
+        _assert_no_store(headers)
+        document = json.loads(body)
+        assert document["status"] == "available", side
+        assert document["items"] == expected, side
+
+
+@pytest.mark.parametrize("phase", ("resolver", "open", "get_release"))
+def test_operational_index_failure_leaves_report_available(parity, tmp_path, monkeypatch, phase):
+    """A sqlite3.OperationalError -- from the resolver, the serving-db open, or
+    the release lookup -- is the same availability contract as the ApiError and
+    real OSError cases above. Injected at the dependency boundary (resolver,
+    api._open, projections.get_release), never by mocking freshness itself."""
+    connections = []
+    if phase == "open":
+        def fail_open(serving_db):
+            raise sqlite3.OperationalError("unable to open database file")
+
+        monkeypatch.setattr(api_module, "_open", fail_open)
+    elif phase == "get_release":
+        def memory_open(serving_db):
+            conn = sqlite3.connect(":memory:", check_same_thread=False)
+            connections.append(conn)
+            return conn
+
+        def fail_get_release(conn, release_id):
+            raise sqlite3.OperationalError("database disk image is malformed")
+
+        monkeypatch.setattr(api_module, "_open", memory_open)
+        monkeypatch.setattr(projections, "get_release", fail_get_release)
+
+    app = create_app(serving_db=str(tmp_path / "serving.sqlite"),
+                     store_root=str(tmp_path / "objects"),
+                     serving_root=str(tmp_path / "serving"),
+                     token=TOKEN, resolver=_operational_resolver(phase),
+                     native_parity_report_path=str(parity.report_path))
+    server, thread, base = _start(app)
+    try:
+        _assert_available_report(base)
+    finally:
+        monkeypatch.undo()
+        _stop(server, thread)
+
+    if phase == "get_release":
+        assert len(connections) == 4
+        for conn in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+                conn.execute("SELECT 1")
+
+
+def _integrity_error():
+    return projections.ServingIndexError(Problem(
+        code="SERVING_INDEX_UNREADABLE", category="integrity", retryable=False,
+        message="the serving index cannot be read"))
+
+
+def test_index_integrity_errors_propagate_from_freshness(monkeypatch):
+    """The negative control: ServingIndexError is an integrity failure, not an
+    availability signal -- resolver and lookup failures both propagate, and the
+    lookup connection is still closed on the way out."""
+    def fail_resolver():
+        raise _integrity_error()
+
+    with pytest.raises(projections.ServingIndexError):
+        api_module._native_parity_freshness("unused", fail_resolver, AS_OF)
+
+    connections = []
+
+    def memory_open(serving_db):
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        connections.append(conn)
+        return conn
+
+    def fail_get_release(conn, release_id):
+        raise _integrity_error()
+
+    monkeypatch.setattr(api_module, "_open", memory_open)
+    monkeypatch.setattr(projections, "get_release", fail_get_release)
+    with pytest.raises(projections.ServingIndexError):
+        api_module._native_parity_freshness("unused", lambda: _SAFE_RELEASE_ID, AS_OF)
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connections[0].execute("SELECT 1")
 
 
 def test_null_as_of(parity):

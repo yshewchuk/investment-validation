@@ -19,7 +19,7 @@ The [README](README.md) lists the checked exports (the only names other packages
 Not in the README's checked list, so not part of the public interface: the route
 enumeration `operations.route_table` (with `STATIC_ROUTES`, `PARAMETERIZED_ROUTES`), the
 read-only documents `analog_projection.analog_document`, `derivation_projection.derivation_document`
-and `native_parity_projection` summary/detail helpers, and the row builders
+and `native_parity_projection` summary/detail/freshness helpers, and the row builders
 `native_render.native_display_row` and `native_shadow_render.shadow_serving_row_source`.
 
 ## Inputs
@@ -67,13 +67,16 @@ The API and compatibility preview share validation of modern report fields.
 Pre-v1.2 reports and unstamped diagnostic comparisons retain their legacy
 summary behavior; the API requires complete run identity for v1.2 reports.
 The API takes an optional configured report path; no path means `no_report`.
+Freshness projection uses the API's current resolver, index opener and release reader; the API
+normalizes its resolver's typed HTTP and pointer-read failures. Standalone report
+summary reads do not query the serving index.
 
 | Native parity condition | Outcome |
 |---|---|
 | Report absent | `no_report` (200) |
 | Report malformed or cannot be read safely | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no data |
 | Report `as_of` predates current release `resolved_as_of` | `stale` (200); all retained data still returned |
-| Current release cannot be resolved, including a pointer read failure | Report `available`; freshness indeterminate |
+| Current release cannot be resolved, including pointer read or SQLite operational failures | Report `available`; freshness indeterminate; serving-index integrity errors retain their normal propagation |
 | Detail `row_key` absent from the report | 404 Problem |
 | Cursor belongs to another report or detail filter | `CURSOR_MISMATCH` Problem (409) |
 | Cache/retry/transaction/partial write/idempotency | `no-store`, no ETag; no retries, jobs or writes; report-derived summary fields and detail items stay stable for the same report and query; freshness `status` may change with current-release resolution |

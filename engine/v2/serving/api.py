@@ -556,25 +556,20 @@ def _parity_mismatch(message: str) -> ApiError:
 
 
 def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
-    """Compare the report's run date with the same resolution /releases/current
-    uses. No current release, no release row, or an ApiError binding failure
-    leaves the report available; a genuinely earlier date is stale."""
-    if as_of is None:
-        return "available"
-    try:
-        release_id = resolve_current()
-    except (ApiError, OSError):
-        return "available"
-    if release_id is None:
-        return "available"
-    conn = _open(serving_db)
-    try:
-        release = projections.get_release(conn, release_id)
-    finally:
-        conn.close()
-    if release is not None and as_of < release.resolved_as_of:
-        return "stale"
-    return "available"
+    """Compare the report's run date with current-release resolution.
+
+    The API resolver supplies the current release; its ApiError/OSError become
+    an unknown current. The projection classifies SQLite operational failures;
+    only a genuinely older run date is stale."""
+
+    def normalized_resolver() -> str | None:
+        try:
+            return resolve_current()
+        except (ApiError, OSError):
+            return None
+
+    return native_parity_projection.native_parity_freshness(
+        serving_db, normalized_resolver, as_of, _open, projections.get_release)
 
 
 def _parity_offset(raw: str | None, population: int) -> int:
