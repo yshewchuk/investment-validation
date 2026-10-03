@@ -655,17 +655,17 @@ notes = "Legacy had only a lock and a run report; browser job buttons are post-c
 
 [[row]]
 id = "operations-native-parity"
-evidence = "route:GET /native_parity.json"
+evidence = "py:engine/v2/serving/native_parity_projection.py::native_parity_summary"
 area = "operations"
 capability = "Native-vs-legacy parity summary: nightly match/mismatch/incomparable/refused counts, per-field breakdown, worst differing rows"
 old = []
-new = ["route:v2-ops GET /native_parity", "route:v2-ops GET /native_parity.json", "py:engine/v2/serving/native_parity_projection.py::native_parity_summary", "route:v2-api GET /api/v1/native_parity", "route:v2-api GET /api/v1/native_parity/mismatches", "route:v2-api GET /api/v1/native_parity/unpaired", "view:ui #nativeParity"]
-producer = "projection reads the configured saved native_parity_report.v1.2 file; no automatic selection of outputs; run_shadow_nightly's supplied output path is separate from the native_parity worker's native_parity_report.json job output"
-identity = "v2-api and v2-ops each take an optional, independent --native-parity-report-path; the API path is independent of --publication-root, and the ops preview path is independent of --release-root"
-tests = ["tests/test_v2_serving_native_parity.py", "tests/test_v2_dashboard_preview_native_parity.py", "tests/test_v2_route_probe.py", "tests/test_v2_serving_native_parity_api.py", "tests/test_v2_native_parity_browser.py"]
+new = ["py:engine/v2/serving/native_parity_projection.py::native_parity_summary", "route:v2-api GET /api/v1/native_parity", "route:v2-api GET /api/v1/native_parity/mismatches", "route:v2-api GET /api/v1/native_parity/unpaired", "view:ui #nativeParity"]
+producer = "projection reads the configured saved native_parity_report.v1.2 file; no automatic selection of outputs"
+identity = "the API takes an optional --native-parity-report-path independent of --publication-root"
+tests = ["tests/test_v2_serving_native_parity.py", "tests/test_v2_route_probe.py", "tests/test_v2_serving_native_parity_api.py", "tests/test_v2_native_parity_browser.py"]
 disposition = "native"
 owner = "P6-4"
-notes = "No legacy equivalent (old = []): this is a brand-new operations page, not a migrated one. GET /native_parity is the small page that fetches GET /native_parity.json and renders it; omitting --native-parity-report-path keeps the route's explicit 503 'native parity not configured' refusal, distinct from that same route's 200 'no_report' when the flag is set but nothing has been written there yet. The React board-shell consumer is view:ui #nativeParity (ui/src/routes.ts hash '#/native-parity' -> ui/src/components/NativeParity.tsx): it reads ONLY GET /api/v1/native_parity through the typed client with the same-origin cookie (#327), displaying the saved identity, counts and refusal reasons, and defers mismatch/unpaired rendering."
+notes = "No legacy equivalent (old = []): the React screen at ui/src/routes.ts hash '#/native-parity' renders mismatches only through the typed serving API client; the operations HTML/JSON preview is retired."
 
 # ----------------------------------------------------------------- export
 
