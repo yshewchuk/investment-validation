@@ -167,7 +167,7 @@ contract — see the PR body.
 | snapshot has no `price_history` table | `CONTRACT_MISMATCH`, propagated unchanged |
 | `computed_moves` has no row for `key.ticker` | `panel_math.history_features`'s own empty-input behavior: every key is still present (`n_prior=0`, the mean/EMA keys `None`), never absent; `regime`'s fields are unaffected (independent read) |
 | a non-null `computed_moves.available_as_of_date` is not a naive calendar day | `CONTRACT_MISMATCH`, refused before history arithmetic |
-| a non-skipped `computed_moves` row has a null `realized_move_pct` (a repository-integrity violation — the contract allows that only when `skipped=true`) | `CONTRACT_MISMATCH`, refused before `panel_math.history_features` runs, never silently coerced |
+| an eligible non-skipped `computed_moves` row has a null `realized_move_pct` (a repository-integrity violation — the contract allows that only when `skipped=true`) | `CONTRACT_MISMATCH`, refused before `panel_math.history_features` runs, never silently coerced |
 | `daily_market` has no row for `"SPY"` | `regime`'s own no-history behavior: its fields stay `NaN` (its own Inputs table); `panel_math`'s keys are unaffected (independent read) |
 | `price_history` has no row for this ticker | `CONTRACT_MISMATCH`, propagated from `get_price_series` unchanged — this read has no empty-source fallback |
 | `get_price_series`'s `session_date > observation_ceiling` | `QUERY_NOT_BOUNDED`, propagated unchanged — never a silent future read |
