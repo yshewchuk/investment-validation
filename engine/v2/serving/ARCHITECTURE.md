@@ -34,7 +34,8 @@ remain a compatibility exception; their presentation still requires React migrat
 
 ## Dependencies
 Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.deployment`
-(`operations`) and `registry.strategies` (`derivation_projection`). `native_render` and
+(`operations`), `registry.strategies` (`derivation_projection`) and `parity`
+(shared field groups for retained mismatch details). `native_render` and
 `native_shadow_render` also import `scoring` for offline row building; no HTTP path does.
 Never imports `engine.v2.ops` (equal-layer peer) or legacy `engine.*`: ops-side pointers,
 reports and transaction/migration patterns are read as inert JSON or reimplemented.

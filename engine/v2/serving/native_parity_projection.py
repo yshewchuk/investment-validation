@@ -6,7 +6,9 @@ already computed (``mismatches``/``only_legacy``/``only_native``/
 ``native_refused*``). ``engine/v2/serving`` (layer 7.0) and
 ``engine/v2/ops`` (layer 7.0) are equal-layer peers -- neither may import
 the other -- so this module reads the report file directly as JSON rather
-than importing anything from ``engine.v2.ops`` or ``engine.v2.parity``.
+than importing anything from ``engine.v2.ops``; it takes only the checker's
+public field groups from ``engine.v2.parity.dimensions`` for the per-mismatch
+detail screen.
 
 See root ``ARCHITECTURE.md`` section 4, "Native parity summary projection",
 for the condition-to-outcome failure-semantics table this implements.
@@ -17,16 +19,25 @@ import errno
 import json
 import os
 import stat
-from collections import Counter
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+
+from engine.v2.parity.dimensions import (
+    ANALOG_FIELDS,
+    FINANCIAL_FIELDS,
+    FORECAST_FIELDS,
+    GATE_FIELDS,
+    SIMULATION_FIELDS,
+)
 
 __all__ = [
     "NATIVE_PARITY_SUMMARY_V1",
     "NATIVE_PARITY_REPORT_MALFORMED",
     "CAPTURED_COMPARISON_V1",
+    "native_parity_snapshot",
     "native_parity_summary",
+    "native_parity_items",
 ]
 
 NATIVE_PARITY_SUMMARY_V1 = "native_parity_summary.v1.0"
@@ -48,24 +59,32 @@ _CAPTURED_PROVENANCE_FIELDS = ("corpus_hash", "fixture_id", "payload_hash",
                                "same_input_receipt", "frozen_release_id",
                                "native_snapshot_ref")
 _CAPTURED_GROUPS = ("forecasts", "simulation", "financial_diagnostics", "verdicts", "analogs")
+#: Detail dimension -> the checker's public field group (slice 2 mismatch screen).
+_ITEM_GROUP_FIELDS: dict[str, tuple[str, ...]] = dict(zip(
+    _CAPTURED_GROUPS,
+    (FORECAST_FIELDS, SIMULATION_FIELDS, FINANCIAL_FIELDS, GATE_FIELDS, ANALOG_FIELDS),
+))
 _CAPTURED_BOOL_FIELDS = frozenset({("verdicts", "gate_pass")})
 _STRING_LIMIT = 512
 _NAME_LIMIT = 128
 _ROW_LIMIT = 100
 
 
+def _counted(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _field_mismatch_counts(mismatches: list[dict[str, Any]]) -> dict[str, int]:
     """How many mismatch entries name each field, across every dimension."""
-    counts: Counter[str] = Counter()
-    for entry in mismatches:
-        counts.update(entry["finding_fields"])
-    return dict(sorted(counts.items()))
+    return _counted(field for entry in mismatches for field in entry["finding_fields"])
 
 
 def _dimension_mismatch_counts(mismatches: list[dict[str, Any]]) -> dict[str, int]:
     """How many mismatch entries (one per row+dimension) name each dimension."""
-    counts = Counter(entry["dimension"] for entry in mismatches)
-    return dict(sorted(counts.items()))
+    return _counted(entry["dimension"] for entry in mismatches)
 
 
 def _worst_rows(mismatches: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -89,8 +108,7 @@ def _worst_rows(mismatches: list[dict[str, Any]], limit: int) -> list[dict[str, 
 
 
 def _reason_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
-    counts = Counter(entry["refusal_code"] for entry in entries)
-    return dict(sorted(counts.items()))
+    return _counted(entry["refusal_code"] for entry in entries)
 
 
 def _open_regular_no_follow(path: Path):
@@ -177,6 +195,9 @@ def _load_report(handle) -> dict[str, Any]:
             raise ValueError(f"native parity report field {field!r} is missing or not a list")
     _validate_mismatches(report["mismatches"])
     _validate_compared(report["compared"], report["mismatches"])
+    for field in ("only_legacy", "only_native"):
+        if not all(isinstance(key, str) for key in report[field]):
+            raise ValueError(f"native parity report field {field!r} has a non-string entry")
     _validate_optional_lists(report)
     return report
 
@@ -331,33 +352,67 @@ def _project_captured_comparison(block: Any) -> dict[str, Any]:
     }
 
 
-def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> tuple[HTTPStatus, dict]:
-    """Load ``report_path`` and return a compact, dashboard-ready summary.
+def _mismatch_item(entry: dict[str, Any]) -> dict[str, Any]:
+    fields = {name: {"status": "agree"}
+              for name in _ITEM_GROUP_FIELDS.get(entry["dimension"], ())}
+    values = entry.get("values")
+    for name in entry["finding_fields"]:
+        saved = values.get(name) if isinstance(values, dict) else None
+        if (isinstance(saved, dict)
+                and "legacy" in saved and "native" in saved):
+            fields[name] = {"status": "differ",
+                            "legacy": saved["legacy"], "native": saved["native"]}
+        else:
+            fields[name] = {"status": "differ"}
+    return {"row_key": entry["row_key"], "dimension": entry["dimension"],
+            "fields": fields}
 
-    See the module docstring and root ``ARCHITECTURE.md`` section 4 for the
-    failure semantics: missing file, a symlink, or a non-regular path ->
-    ``"no_report"`` (200, the everyday state today, no production job
-    writes this artifact yet); malformed content, including a present but
-    non-list/wrongly-typed required or optional field -> ``"unavailable"``
-    (503); a valid report simply missing the optional
-    ``native_refused``/``native_refused_unmatched`` KEYS (pre-refusal
-    schema) -> ``"available"`` with ``partial: true``. A key present with a
-    null or otherwise non-list value is malformed, never treated as absent.
-    """
+
+def native_parity_items(report: dict[str, Any], section: str, *,
+                        side: str | None = None,
+                        row_key: str | None = None) -> list[Any]:
+    """One detail collection; a row_key outside the report population raises LookupError."""
+    population = set(report["compared"]) | set(report["only_legacy"]) | set(report["only_native"])
+    if row_key is not None and row_key not in population:
+        raise LookupError(row_key)
+    if section == "unpaired":
+        keys = report["only_" + side]
+        return sorted(key for key in keys if row_key is None or key == row_key)
+    if section != "mismatches":
+        raise ValueError(f"unknown native parity detail section {section!r}")
+    selected = [entry for entry in report["mismatches"]
+                if row_key is None or entry["row_key"] == row_key]
+    selected.sort(key=lambda entry: (entry["row_key"], entry["dimension"]))
+    return [_mismatch_item(entry) for entry in selected]
+
+
+def _no_report() -> tuple[HTTPStatus, dict, None]:
+    return HTTPStatus.OK, {
+        "schema_version": NATIVE_PARITY_SUMMARY_V1,
+        "status": "no_report",
+    }, None
+
+
+def _unavailable() -> tuple[HTTPStatus, dict, None]:
+    return HTTPStatus.SERVICE_UNAVAILABLE, {
+        "schema_version": NATIVE_PARITY_SUMMARY_V1,
+        "status": "unavailable",
+        "reason_code": NATIVE_PARITY_REPORT_MALFORMED,
+    }, None
+
+
+def native_parity_snapshot(report_path: Path | str | None, *,
+                           worst_limit: int = 10) -> tuple[HTTPStatus, dict, dict | None]:
+    """``(status, summary, report_or_None)``; report is present only when available."""
+    if report_path is None:
+        return _no_report()
     path = Path(report_path)
     try:
         handle = _open_regular_no_follow(path)
     except FileNotFoundError:
-        return HTTPStatus.OK, {
-            "schema_version": NATIVE_PARITY_SUMMARY_V1,
-            "status": "no_report",
-        }
+        return _no_report()
     except OSError:
-        return HTTPStatus.SERVICE_UNAVAILABLE, {
-            "schema_version": NATIVE_PARITY_SUMMARY_V1,
-            "status": "unavailable",
-            "reason_code": NATIVE_PARITY_REPORT_MALFORMED,
-        }
+        return _unavailable()
     try:
         with handle:
             report = _load_report(handle)
@@ -377,16 +432,15 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
             _project_captured_comparison(report["captured_comparison"])
             if "captured_comparison" in report else None)
     except (OSError, json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError):
-        return HTTPStatus.SERVICE_UNAVAILABLE, {
-            "schema_version": NATIVE_PARITY_SUMMARY_V1,
-            "status": "unavailable",
-            "reason_code": NATIVE_PARITY_REPORT_MALFORMED,
-        }
+        return _unavailable()
     summary = {
         "schema_version": NATIVE_PARITY_SUMMARY_V1,
         "status": "available",
         "partial": partial,
         "source_schema_version": report["schema_version"],
+        "as_of": report.get("as_of"),
+        "generated_at": report.get("generated_at"),
+        "tolerance_policy_id": report.get("tolerance_policy_id"),
         "compared_count": len(report["compared"]),
         "only_legacy_count": len(report["only_legacy"]),
         "only_native_count": len(report["only_native"]),
@@ -401,4 +455,11 @@ def native_parity_summary(report_path: Path | str, *, worst_limit: int = 10) -> 
     }
     if captured is not None:
         summary["captured_comparison"] = captured
-    return HTTPStatus.OK, summary
+    return HTTPStatus.OK, summary, report
+
+
+def native_parity_summary(report_path: Path | str | None, *,
+                          worst_limit: int = 10) -> tuple[HTTPStatus, dict]:
+    """Summary-only wrapper over :func:`native_parity_snapshot`'s first two elements."""
+    status, summary, _report = native_parity_snapshot(report_path, worst_limit=worst_limit)
+    return status, summary
