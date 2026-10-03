@@ -467,14 +467,8 @@ Only a tracked path absent from the worktree reads as empty.
   | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  Consumers are the authenticated FastAPI `/api/v1/native_parity` summary
-  and paginated `/native_parity/mismatches` and `/native_parity/unpaired`
-  routes, plus the read-only operations preview server's
-  `GET /native_parity`/`GET /native_parity.json` routes
-  (`engine/v2/serving/operations.py`), which read this document unchanged,
-  wired through `engine/v2/dashboard/preview.py`'s optional
-  `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
-  for that route/CLI contract.
+  Native parity presentation belongs to the React screen through the serving API.
+  The operations listener has no native-parity HTML or JSON preview routes.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;
   this report projection remains a read over retained evidence.

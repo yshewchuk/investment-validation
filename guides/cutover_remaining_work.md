@@ -21,8 +21,8 @@ pair. The dashboard reads the parity report, so it shows `no_report`.
   #212 this closes the CAS/`calendar_version` guard, #200).
 - `native_parity` job, pairing core, supervisor sidecar (runs every tick):
   #132, #185, #191, #227, #211, #242.
-- Parity serving: projection and `/native_parity.json` route (#189, #198);
-  retained captured comparison added to that JSON (#255), exported by
+- Parity serving: saved-report projection (#189, #198);
+  retained captured comparison added to that projection (#255), exported by
   `tools/captured_native_comparison.py` (#254).
 - Raw-row producer pieces: board enumeration (#212), calendar rows (#239),
   history advance (#245), regime math (#248), run-up math (#250), daily-state
@@ -48,12 +48,10 @@ pair. The dashboard reads the parity report, so it shows `no_report`.
   currently has no owner (no assignee or PR aimed at it).
 - [ ] **First real `native_score_batch` and `native_parity` run** on a pinned
   night; nothing exists to classify tolerances against until then.
-- [ ] **React side-by-side screen.** `ui/` has no parity view; the only parity
-  page is the HTML preview in `engine/v2/serving/operations.py`, a documented
-  compatibility exception.
-- [ ] **React transport design.** The React client uses `/api/v1`; parity is
-  served as `/native_parity.json` from the operations server. Decide whether
-  parity moves under `/api/v1` or the client reads that JSON directly.
+- [ ] **React side-by-side screen.** Owned by the React screen slice of #327;
+  the operations parity HTML/JSON preview is retired.
+- [x] **React transport design.** #327 selects authenticated
+  `/api/v1/native_parity*` reads through the serving API.
 - [ ] **Production release root.** The binding is the `MODEL_RELEASE_ROOT`
   environment variable and fails closed when unset. Production's value is
   unverified from the repository.
