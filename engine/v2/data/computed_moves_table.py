@@ -13,8 +13,9 @@ The pull this table replaces is ``engine.data.pulls.computed_moves``; the pure
 row-building math lives in :mod:`engine.v2.data.computed_moves` and the
 capture/store path in :mod:`engine.v2.ops.computed_moves_store`.
 
-Layout: ``ticker, event_date, realized_move_pct, implied_move_pct,
-quarter_ordinal, skipped, computed_at, source_hash, capture_id``, primary key
+Layout: ``ticker, event_date, realized_move_pct, available_as_of_date,
+implied_move_pct, quarter_ordinal, skipped, computed_at, source_hash,
+capture_id``, primary key
 ``(ticker, event_date)``, one fragment per ticker (``partition_columns =
 ("ticker",)``) holding that ticker's whole event history -- the same
 whole-partition-rewrite reasoning ``price_history_table.py``'s docstring
@@ -50,6 +51,16 @@ _COLUMNS = (
                    unit="percent",
                    null_policy="null on a skipped event (skipped=true); a skip is recorded "
                                "as a row, never silently dropped"),
+    ColumnContract(name="available_as_of_date", physical_type="string", nullable=True,
+                   observation_time_semantics="the day FOLLOWING the close that allowed "
+                                              "computing realized_move_pct -- the measured "
+                                              "close date (session_move's sd[j_post]) plus "
+                                              "one calendar day, YYYY-MM-DD, never a "
+                                              "timestamp; the earliest decision_session at "
+                                              "which this event's move was knowable",
+                   null_policy="null exactly when realized_move_pct is null (a skipped event, "
+                               "whatever the reason): null means not available to any decision "
+                               "-- never treat a null available_as_of_date as always available"),
     ColumnContract(name="implied_move_pct", physical_type="float64", nullable=True,
                    unit="percent",
                    null_policy="null when daily_market has no implied_move row strictly "
@@ -76,9 +87,9 @@ _COLUMNS = (
 
 def _build() -> TableContract:
     fields = dict(
-        contract_id="computed_moves.v1",
+        contract_id="computed_moves.v2",
         table_name=COMPUTED_MOVES_TABLE_NAME,
-        semantic_version="1.0.0",
+        semantic_version="2.0.0",
         columns=_COLUMNS,
         primary_key=("ticker", "event_date"),
         duplicate_policy="none_by_construction -- one row per (ticker, event_date)",

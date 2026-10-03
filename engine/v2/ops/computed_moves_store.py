@@ -67,13 +67,15 @@ __all__ = [
 
 INPUT_PATH = "computed_moves_refresh_input.json"
 MAX_SCAN_ROWS = 2_000_000
-FRAGMENT_COLUMNS = ("ticker", "event_date", "realized_move_pct", "implied_move_pct",
-                    "quarter_ordinal", "skipped", "computed_at", "source_hash", "capture_id")
+FRAGMENT_COLUMNS = ("ticker", "event_date", "realized_move_pct", "available_as_of_date",
+                    "implied_move_pct", "quarter_ordinal", "skipped", "computed_at",
+                    "source_hash", "capture_id")
 
 _EMPTY_DAILY = pd.DataFrame(columns=["date", "implied_move"])
 
 _ARROW_SCHEMA = pa.schema([
     ("ticker", pa.string()), ("event_date", pa.string()), ("realized_move_pct", pa.float64()),
+    ("available_as_of_date", pa.string()),
     ("implied_move_pct", pa.float64()), ("quarter_ordinal", pa.int64()), ("skipped", pa.bool_()),
     ("computed_at", pa.string()), ("source_hash", pa.string()), ("capture_id", pa.string()),
 ])
