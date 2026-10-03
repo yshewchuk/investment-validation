@@ -749,6 +749,7 @@ def _carried_prefix(
     keys: pd.DataFrame,
     cut: pd.Timestamp,
     model,
+    trainable: pd.DataFrame,
     *,
     log: Callable[[str], None] = _log,
 ):
@@ -780,12 +781,14 @@ def _carried_prefix(
     ``FIRST_FOLD``. A gap at or after ``FIRST_FOLD`` has a fold to recompute, so
     it widens ``cut`` backward to close it, bounded by
     ``BACKFILL_WINDOW_MONTHS`` (see guides/tier4_feature_models.md §6a). A gap
-    OLDER than ``FIRST_FOLD`` has no fold to recompute — but it has no forecast
-    in a full rebuild either: ``folds`` is bounded below by ``FIRST_FOLD``, so a
-    full build gives any pre-``FIRST_FOLD`` key the same null row as any other
-    unscorable event, regardless of why that key is new to the table. Carrying
-    such a key over as that same null row is exactly what a full rebuild would
-    do, so this fills it and continues instead of refusing.
+    OLDER than ``FIRST_FOLD`` has no fold of its own, but a pre-``FIRST_FOLD``
+    event is ``< stamp`` for EVERY scored fold, so it joins the training pool
+    of every fold a full rebuild would fit, and any carried fold would keep
+    answering for a pool that just grew. A full build gives such a key the same
+    null row as any other unscorable event, so this fills it — and then widens
+    ``cut`` back to ``FIRST_FOLD`` exactly as the scored case does, bounded the
+    same way. If the bound cannot reach ``FIRST_FOLD``, carrying the folds in
+    between would be silently stale, so this refuses instead.
     """
     _, _, _, _, _, model_id_col, fold_col = column_group(model.produces)
     have = existing[existing["event_date"] < cut]
@@ -824,8 +827,7 @@ def _carried_prefix(
             f"{model.produces}: {len(unscored):,} event(s) before "
             f"{FIRST_FOLD.date()} are new to Tier 3 and unscored by construction "
             "(no fold exists before FIRST_FOLD) — filling the same null row a "
-            "full rebuild would give any unscorable event, not widening since "
-            "there is no fold to recompute"
+            "full rebuild would give any unscorable event"
         )
         have = pd.concat(
             [have, _normalize_group(unscored, model.produces)], ignore_index=True
@@ -834,20 +836,67 @@ def _carried_prefix(
             have, on=["ticker", "event_date"], how="left", indicator=True
         )
         missing = merged[merged["_merge"] == "left_only"][["ticker", "event_date"]]
-        if missing.empty:
-            stale = len(have) - len(prefix_keys)
-            if stale > 0:
-                log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
-            return merged.drop(columns=["_merge"]), cut, missing.copy()
 
-    # Every remaining missing key is scored (>= FIRST_FOLD, so it has a fold to
-    # recompute) — widen `cut` backward to close the gap, bounded.
-    earliest_gap = pd.Timestamp(missing["event_date"].min())
-    widened = pd.Timestamp(fold_start_of([earliest_gap]).iloc[0])
+    # Only an unscored key that is ALSO in the trainable pool can change a
+    # fold's training-row count (n_train counts `trainable` rows). A key
+    # `model.prepare`/the target filter excluded from `trainable` never joins
+    # any fold's pool, in a full rebuild or otherwise, so it must not force a
+    # widen or a refusal.
+    trainable_keys = pd.MultiIndex.from_arrays(
+        [trainable["ticker"], pd.to_datetime(trainable["date"])]
+    )
+    unscored_keys = pd.MultiIndex.from_arrays(
+        [unscored["ticker"], pd.to_datetime(unscored["event_date"])]
+    )
+    pool_changed = bool(unscored_keys.isin(trainable_keys).any())
+    if pool_changed:
+        log(
+            f"{model.produces}: {len(unscored):,} unscored event(s) are also "
+            "in the trainable pool — widening `since` to recompute every "
+            "scored fold they could affect, or refusing if the backfill "
+            "window cannot reach FIRST_FOLD"
+        )
+
+    if missing.empty and not pool_changed:
+        stale = len(have) - len(prefix_keys)
+        if stale > 0:
+            log(f"dropping {stale:,} carried row(s) whose Tier-3 event no longer exists")
+        return merged.drop(columns=["_merge"]), cut, missing.copy()
+
+    # Any remaining missing key is scored (>= FIRST_FOLD, so it has a fold to
+    # recompute), and an unscored fill changes the training pool of every
+    # scored fold (its events are < every stamp) — widen `cut` backward to
+    # close both. The target is the EARLIER of the two candidates, each present
+    # only if its gap applies.
+    widened = min(
+        candidate
+        for candidate in (
+            pd.Timestamp(fold_start_of([missing["event_date"].min()]).iloc[0])
+            if not missing.empty
+            else None,
+            # `cut` can itself be earlier than FIRST_FOLD (a `--since` before
+            # FIRST_FOLD); the widen target must never exceed `cut`, since a
+            # trainable unscored key can never affect a fold earlier than
+            # `cut` already covers.
+            pd.Timestamp(min(FIRST_FOLD, cut)) if pool_changed else None,
+        )
+        if candidate is not None
+    )
     floor = pd.Timestamp(
         fold_start_of([cut - pd.DateOffset(months=BACKFILL_WINDOW_MONTHS)]).iloc[0]
     )
     effective_cut = max(widened, floor)
+
+    if pool_changed and effective_cut > FIRST_FOLD:
+        raise Tier4Error(
+            f"{model.produces}: Tier 3 has {len(unscored):,} event(s) before "
+            f"{FIRST_FOLD.date()} the existing table does not cover, and the "
+            f"{BACKFILL_WINDOW_MONTHS}-month backfill window from {cut.date()} "
+            f"reaches back only to {effective_cut.date()} — the scored folds "
+            f"between {FIRST_FOLD.date()} and {effective_cut.date()} would be "
+            "carried against a training pool that changed under them. Rebuild "
+            "in full (no --since)."
+        )
 
     prefix_keys2 = keys[keys["event_date"] < effective_cut]
     have2 = have[have["event_date"] < effective_cut]
@@ -955,7 +1004,9 @@ def build_producer(
             if existing is None
             else _normalize_group(existing, model.produces)
         )
-        carried, cut, unfilled_gap = _carried_prefix(prior, keys, requested_cut, model, log=log)
+        carried, cut, unfilled_gap = _carried_prefix(
+            prior, keys, requested_cut, model, trainable, log=log
+        )
         if gaps is not None:
             gaps[model.produces] = unfilled_gap
         log(
