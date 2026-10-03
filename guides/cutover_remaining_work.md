@@ -11,7 +11,7 @@ The native scoring chain is built and wired up to the raw-row input, which is
 not: with the scheduled plan pinning a snapshot, `nightly.submit_native_score_batch_shadow_if_ready`
 still raises `VALIDATION_FAILED` ("raw-row producer ... not built yet"), so no
 `native_score_batch` has run on a real night and `native_parity` has nothing to
-pair. The dashboard reads the parity report, so it shows `no_report`.
+pair. The retained serving projection returns `no_report` when the parity report is absent.
 
 ## Done
 
