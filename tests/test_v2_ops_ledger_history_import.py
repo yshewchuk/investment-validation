@@ -14,7 +14,9 @@ import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import ArtifactStore
-from engine.v2.ledger.decisions import _import_decision_id, rows
+from engine.v2.ledger.decisions import (
+    DecisionConflict, _import_decision_id, insert, rows, set_authority,
+)
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.checkpoints import register_artifact
 from engine.v2.ops.decision_commit import (
@@ -372,6 +374,78 @@ def _context(row_id):
     return {"purpose": "shadow", "deployment": "shadow:impl-1",
             "clock": "2026-09-10T21:00:00.000000Z", "session": "2026-08-01",
             "scope": "shadow", "validations": []}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_identical_history_after_shadow_commit_is_already_present(tmp_path, dry_run):
+    root = _root(tmp_path)
+    conn, clock, _ = catalog(root)
+    source = tmp_path / "legacy"
+    payload = _prediction("shadow-first", "2026-08-01")
+    with transaction(conn):
+        set_authority(conn, None, "catalog", _context(payload["row_id"])["clock"])
+        committed = _commit_row_or_diverge(
+            conn, _context(payload["row_id"]), payload, "genref-1", clock=clock)
+    assert committed["purpose"] == "shadow"
+    _write(source / "ledger/predictions/2026-08-01.jsonl", [payload])
+
+    summary = import_history(conn, root, source, dry_run=dry_run, clock=clock)
+
+    assert summary["families"]["predictions"] == {
+        "files": 1, "lines": 1, "imported": 0, "already_present": 1, "conflicts": [],
+        "divergences": 0, "divergent_row_ids": 0}
+    assert rows(conn) == [committed]
+    assert conn.execute("SELECT COUNT(*) FROM decision_imports").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0
+
+    again = import_history(conn, root, source, dry_run=dry_run, clock=clock)
+    assert again["families"] == summary["families"]
+    assert rows(conn) == [committed]
+
+
+def test_differing_history_after_shadow_commit_still_diverges(tmp_path):
+    root = _root(tmp_path)
+    conn, clock, _ = catalog(root)
+    source = tmp_path / "legacy"
+    payload = _prediction("shadow-first", "2026-08-01")
+    with transaction(conn):
+        set_authority(conn, None, "catalog", _context(payload["row_id"])["clock"])
+        committed = _commit_row_or_diverge(
+            conn, _context(payload["row_id"]), payload, "genref-1", clock=clock)
+    changed = dict(payload, event_id="changed")
+    _write(source / "ledger/predictions/2026-08-01.jsonl", [changed])
+
+    summary = import_history(conn, root, source, clock=clock)
+
+    assert summary["families"]["predictions"] == {
+        "files": 1, "lines": 1, "imported": 0, "already_present": 0, "conflicts": [],
+        "divergences": 1, "divergent_row_ids": 1}
+    assert rows(conn) == [committed]
+    [divergence] = conn.execute("SELECT * FROM decision_divergences").fetchall()
+    assert divergence["scope"] == "legacy_import"
+    assert divergence["existing_payload_hash"] != divergence["attempted_payload_hash"]
+    [provenance] = conn.execute("SELECT * FROM decision_imports").fetchall()
+    assert json.loads(bytes(provenance["original_bytes"])) == changed
+
+
+@pytest.mark.parametrize("conflict", ["purpose", "content"])
+def test_conflicting_direct_insert_after_shadow_commit_still_refuses(tmp_path, conflict):
+    conn, clock, _ = catalog(_root(tmp_path))
+    payload = _prediction("shadow-first", "2026-08-01")
+    with transaction(conn):
+        set_authority(conn, None, "catalog", _context(payload["row_id"])["clock"])
+        committed = _commit_row_or_diverge(
+            conn, _context(payload["row_id"]), payload, "genref-1", clock=clock)
+
+    with pytest.raises(DecisionConflict, match="IDEMPOTENCY_CONFLICT"):
+        with transaction(conn):
+            insert(conn, logical_key=committed["logical_key"],
+                   decision_id=committed["decision_id"],
+                   payload=dict(payload, event_id="changed") if conflict == "content" else payload,
+                   purpose="legacy_import" if conflict == "purpose" else "shadow",
+                   kind="prediction", validations=[], created_at=committed["created_at"])
+    assert rows(conn) == [committed]
+    assert conn.execute("SELECT COUNT(*) FROM decision_divergences").fetchone()[0] == 0
 
 
 def test_bootstrap_prediction_then_identical_nightly_recommit_is_safe(tmp_path):

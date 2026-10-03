@@ -553,6 +553,12 @@ change their arithmetic or imply that source receipt production is available.
   a transaction, a partial write, and idempotency (the 4c R1–R6 template —
   see `docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`). "It raises" is not a
   failure semantic.
+- **Historical decision imports preserve first-commit authority.** An
+  existing decision with identical content under another purpose counts as
+  already present, with no new row. Under `on_conflict="diverge"`, differing
+  content becomes durable divergence evidence; the committed decision stays
+  authoritative. Provenance conflicts and conflicting direct inserts still
+  refuse.
 - **Nothing published carries a local path or raw exception text.**
   `engine/v2/ops/worker.py`'s convention is the model: a caught traceback is
   written to a private per-attempt file and never put on the result pipe or
