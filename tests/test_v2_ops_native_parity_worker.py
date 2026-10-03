@@ -14,13 +14,17 @@ import json
 import pytest
 
 from engine.v2.contracts import ScoreRecord
-from engine.v2.foundation import to_document
+from engine.v2.foundation import format_timestamp, to_document
 from engine.v2.ops import worker
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_parity_report import (
     SCHEMA_VERSION,
+    _empty_native_report,
+    compare_native_vs_legacy,
     run_native_parity_worker,
 )
+from engine.v2.parity.tolerance import SCORE_RECORD_V1
+from tests.ops_support import FakeClock
 
 _OUTPUTS = [{"name": "report", "path": "native_parity_report.json",
              "schema": SCHEMA_VERSION}]
@@ -153,6 +157,7 @@ def test_run_native_parity_worker_reports_a_planted_mismatch(tmp_path):
     assert mismatch["row_key"] == _row_key(legacy_row)
     assert mismatch["dimension"] == "verdicts"
     assert "gate_pass" in mismatch["finding_fields"]
+    assert mismatch["values"] == {"gate_pass": {"legacy": True, "native": False}}
 
 
 def test_run_native_parity_worker_flattens_nested_agreeing_record(tmp_path):
@@ -329,6 +334,32 @@ def test_run_native_parity_worker_empty_expected_ids_is_no_work(tmp_path):
     assert result["no_work"] is True
     assert result["completed_ids"] == []
     assert (tmp_path / "native_parity_report.json").is_file()
+    report = _read_report(tmp_path)
+    assert report["as_of"] is None
+    assert isinstance(report["generated_at"], str) and report["generated_at"]
+
+
+def test_run_native_parity_worker_stamps_the_run_identity(tmp_path):
+    rows, records = _happy_rows_and_records()
+    _write_inputs(tmp_path, rows=rows, records=records)
+    clock = FakeClock()
+
+    run_native_parity_worker(
+        {"expected_ids": ("2026-01-15|abc123",)}, tmp_path, clock=clock)
+
+    report = _read_report(tmp_path)
+    assert report["as_of"] == "2026-01-15"
+    assert report["generated_at"] == format_timestamp(clock.now())
+    assert report["mismatches"] == []
+
+
+def test_comparators_stay_free_of_run_identity():
+    report = compare_native_vs_legacy(
+        {"a|b|c": {"gate_pass": True}}, {"a|b|c": {"gate_pass": True}},
+        ("verdicts",))
+    assert "as_of" not in report and "generated_at" not in report
+    empty = _empty_native_report({"a|b|c": {}}, {}, ("verdicts",), SCORE_RECORD_V1)
+    assert "as_of" not in empty and "generated_at" not in empty
 
 
 def test_dispatch_routes_native_parity_to_the_worker(tmp_path):

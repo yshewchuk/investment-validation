@@ -200,10 +200,10 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   `resource_classes=frozenset({"validation"})` (a pure comparison, no
   provider fetch — the same classification `decision_evidence` already
   has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
-  `checkpoint_contract="native_parity_report.v1.1"` (matching
-  `native_parity_report.SCHEMA_VERSION`, which Phase 1 (`#132`) already
-  bumped from `v1.0` — see "Outputs" below for the two additive fields
-  this contract already covers), `namespaces=frozenset({"shadow", "smoke"})`.
+  `checkpoint_contract="native_parity_report.v1.2"` (matching
+  `native_parity_report.SCHEMA_VERSION`, bumped from `v1.1` in cutover
+  PR-4 slice 1 of #327's redo — see "Outputs" below for what this
+  contract now covers), `namespaces=frozenset({"shadow", "smoke"})`.
   `worker.py::dispatch` gains a `"native_parity"` branch routing to
   `native_parity_report.run_native_parity_worker` (below), the same
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
@@ -1120,6 +1120,23 @@ starts working with no change of its own.
   `native_refused` claims. `nightly.submit_native_parity_if_ready` and
   its tick-loop caller, `Service._reconcile_native_parity`, submit such
   a job automatically once its inputs are ready.
+
+  Schema `native_parity_report.v1.2` (cutover PR-4 slice 1 of #327, this
+  PR) adds two more things, both additive: top-level `as_of`/`generated_at`
+  — this report's own run identity, stamped by `_stamp_report_identity`
+  once, AFTER `apply_native_refusals`, at the write step in both
+  `run_native_parity_worker` (`as_of` parsed from the job's own
+  `"<as_of>|<scope_hash>"` `expected_ids[0]`, `None` when `expected_ids`
+  is empty) and `native_parity_handler` (`as_of` read from the stage
+  graph's own running `value["session"]`) — and, inside each
+  `mismatches` entry, `values`: a `{field_path: {"legacy": ...,
+  "native": ...}}` map covering only that entry's own `finding_fields`
+  (bounded by how many mismatches already exist, never every field —
+  USER DECISION, 2026-10-02), threaded straight through from
+  `compare_dimension`'s own widened return
+  (`engine/v2/parity/ARCHITECTURE.md`). `as_of`/`generated_at` are never
+  set inside `compare_native_vs_legacy`/`_empty_native_report`, which
+  stay pure and wall-clock-free (R6, parity package).
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the existing `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild`
