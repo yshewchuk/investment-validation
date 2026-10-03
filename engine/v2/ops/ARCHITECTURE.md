@@ -416,9 +416,11 @@ submission path reads either edge (the rule Part 4 established for
   row's classification, but every report that test-only path writes now
   also carries the two new, always-present, empty fields
   `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
-  `SCHEMA_VERSION` `native_parity_report.v1.1`, not the pre-redo `v1.0` — a
-  real, already-shipped change to this existing artifact's shape, not a
-  no-op reserved for `run_native_parity_worker`.** Once Phase 2 builds it,
+  with this module's current `SCHEMA_VERSION` (`v1.1` when Phase 1 shipped
+  this; `v1.2` since cutover PR-4 slice 1 of #327 added run identity and
+  per-mismatch values on top) — a real, already-shipped change to this
+  existing artifact's shape, not a no-op reserved for
+  `run_native_parity_worker`.** Once Phase 2 builds it,
   `run_native_parity_worker` calls this the SAME way, this time with real
   `native_refusals`/`unkeyable_refusals`, AFTER
   `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
