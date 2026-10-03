@@ -427,7 +427,10 @@ Only a tracked path absent from the worktree reads as empty.
   fields already say, never a second implementation of the one shared
   comparator (§5) — but the artifact itself can be stale, or was produced
   under a different tolerance policy than whichever is in effect when this
-  projection is read; this projection does not re-verify either.
+  projection is read; this projection does not re-verify either. The report
+  also carries no run identity of its own today — no `as_of`/`generated_at`
+  field — so a reader cannot tell which night produced it without the
+  catalog (design discussion: PR #327).
   `Service.tick()`'s sidecar submits a `native_parity` job once its
   paired inputs are ready, so `"no_report"` stays the answer whenever
   nothing has completed yet, not a degraded one.
