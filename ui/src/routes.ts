@@ -15,7 +15,10 @@
 export type Route =
   | { name: "board"; releaseId: string | null }
   | { name: "event"; releaseId: string; eventId: string }
-  | { name: "score"; releaseId: string; scoreId: string; eventId: string | null };
+  | { name: "score"; releaseId: string; scoreId: string; eventId: string | null }
+  /** Standalone parity screen: no release pin, resolves before any release
+   * gate (`App.tsx`), so it works while `/releases/current` is unavailable. */
+  | { name: "nativeParity"; releaseId: null };
 
 function decodePart(part: string): string {
   try {
@@ -31,6 +34,9 @@ function decodePart(part: string): string {
 export function parseHash(hash: string): Route {
   const raw = hash.startsWith("#") ? hash.slice(1) : hash;
   const parts = raw.split("/").filter((p) => p.length > 0);
+  if (parts[0] === "native-parity") {
+    return { name: "nativeParity", releaseId: null };
+  }
   if (parts[0] !== "release" || parts.length < 2 || parts[1] === undefined) {
     return { name: "board", releaseId: null };
   }

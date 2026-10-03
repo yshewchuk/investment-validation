@@ -171,3 +171,46 @@ export interface EventQuery {
   cursor?: string;
   limit?: number;
 }
+
+/**
+ * Native-parity reads for the standalone `#/native-parity` screen: only the
+ * summary wire shape is mocked in the browser tests and ui/README.md in
+ * this PR; summary follows #327. Detail item spellings must be checked
+ * against the merged API slice 2 before ready/auto-merge — merged API
+ * contract validation is the dependency gate — and the client never
+ * normalizes guessed responses. A malformed report arrives as a 503
+ * `NATIVE_PARITY_REPORT_MALFORMED` Problem (`ApiError`), not a body.
+ */
+export interface NativeParitySummary {
+  status: "available" | "stale" | "no_report";
+  as_of: string | null;
+  generated_at: string | null;
+  tolerance_policy_id: string | null;
+  compared_count: number | null;
+  matched_row_count: number | null;
+  mismatched_row_count: number | null;
+  only_legacy_count: number | null;
+  only_native_count: number | null;
+  native_refused_count: number | null;
+  native_refused_unmatched_count: number | null;
+  native_refused_reasons: Record<string, number>;
+}
+
+export interface NativeParityMismatchField {
+  field: string;
+  status: "agree" | "differ";
+  legacy_value?: unknown;
+  native_value?: unknown;
+}
+
+export interface NativeParityMismatchItem {
+  row_key: string;
+  dimension: string;
+  fields: NativeParityMismatchField[];
+}
+
+export interface NativeParityPage<T> {
+  items: T[];
+  next_cursor: string | null;
+  total_matching: number;
+}

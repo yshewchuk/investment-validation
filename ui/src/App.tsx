@@ -4,6 +4,7 @@ import type { EventQuery, EventPageItem } from "./api/types";
 import { EMPTY_FILTERS, EventFilters, type FilterValues } from "./components/EventFilters";
 import { EventDetail, type EventMeta } from "./components/EventDetail";
 import { EventTable } from "./components/EventTable";
+import { NativeParity } from "./components/NativeParity";
 import { Pagination } from "./components/Pagination";
 import { ReleaseBanner, reloadToCurrent } from "./components/ReleaseBanner";
 import { ScoreDetail } from "./components/ScoreDetail";
@@ -25,6 +26,14 @@ function toQuery(releaseId: string, filters: FilterValues, cursor: string | null
   if (filters.date_to) query.date_to = filters.date_to;
   if (cursor) query.cursor = cursor;
   return query;
+}
+
+function NativeParityLink() {
+  return (
+    <p>
+      <a href="#/native-parity" data-testid="native-parity-link">Native parity</a>
+    </p>
+  );
 }
 
 interface Props {
@@ -108,10 +117,18 @@ export function App({ client }: Props) {
     setCursorStack((stack) => (stack.length > 1 ? stack.slice(0, -1) : stack));
   }
 
+  // The parity screen renders first and works even when the release read
+  // failed; returning here (after every hook) keeps the board's pin, filter
+  // and cursor state alive across board -> parity -> board.
+  if (route.name === "nativeParity") {
+    return <NativeParity client={client} />;
+  }
+
   if (releaseState.status === "loading") {
     return (
       <main className="app">
         <p data-testid="loading-release">Resolving current release…</p>
+        <NativeParityLink />
       </main>
     );
   }
@@ -123,6 +140,7 @@ export function App({ client }: Props) {
           Not authenticated. This is a private shadow dashboard; sign in with the
           operations session to continue.
         </p>
+        <NativeParityLink />
       </main>
     );
   }
@@ -135,6 +153,7 @@ export function App({ client }: Props) {
             ? "No current release is published yet."
             : `Could not resolve the current release: ${releaseState.error.message}.`}
         </p>
+        <NativeParityLink />
       </main>
     );
   }
@@ -153,6 +172,7 @@ export function App({ client }: Props) {
             </>
           )}
         </p>
+        <NativeParityLink />
       </main>
     );
   }
@@ -162,6 +182,7 @@ export function App({ client }: Props) {
   return (
     <main className="app">
       <h1>v2 board (shadow)</h1>
+      <NativeParityLink />
       <ReleaseBanner
         releaseId={releaseId}
         release={release}

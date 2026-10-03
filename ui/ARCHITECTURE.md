@@ -5,13 +5,16 @@ Layer 8 presentation in the [root architecture](../ARCHITECTURE.md): the existin
 React/TypeScript app owns application components, layout, navigation and rendering.
 Its presentation scope includes the legacy dashboard views still awaiting migration.
 ## Primary contracts and public interfaces
-`src/App.tsx` composes board/event/score views; `src/routes.ts` handles routes.
+`src/App.tsx` composes board/event/score and native-parity views; `src/routes.ts` handles routes.
 `src/api/client.ts` is the sole fetch boundary to the authenticated serving API.
 Wire shapes and shipped views are detailed in the [README](README.md).
 
 ## Inputs
 Saved JSON release metadata, paginated events, score details and operations data
 from [serving](../engine/v2/serving/ARCHITECTURE.md), plus route/filter state.
+Native parity renders the summary from `/api/v1/native_parity`. The typed
+client also exposes `/mismatches` and `/unpaired` under that prefix; the
+summary component does not request those pages.
 
 ## Outputs
 React DOM and chart pixels, navigation/deep links, loading/error/refusal states
@@ -31,6 +34,10 @@ cookie. Build output is static assets; serving those bytes is transport.
 |---|---|
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
+| Parity loading, 401 or `no_report` | Explicit loading/auth/no-report state, independent of release resolution. |
+| Parity `stale` | Banner with saved identity, counts and refusal reasons still shown. |
+| Parity `unavailable` | Explicit error; failed data is withheld, never presented as an empty comparison. |
+| Parity zero counts or no refusal reasons | Saved zero counts remain visible; an explicit message identifies absent refusal reasons. |
 | Retry or navigation | Reads keep pinned identity; no durable transaction or partial publication. |
 
 ## Invariants
@@ -40,6 +47,9 @@ Format saved financial values; do not fit, rescore, derive financial evidence or
 fetch vendors. Preserve saved replay clocks and provenance without relabelling.
 Existing operations HTML/legacy previews are compatibility exceptions with
 migration outstanding, not evidence that a React application view is shipped.
+Native parity summary presentation belongs here; mismatch/unpaired detail is
+outside this component. The existing operations parity preview remains owned
+by serving/dashboard.
 ## Diagrams
 ```mermaid
 flowchart LR
