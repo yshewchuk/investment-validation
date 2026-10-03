@@ -72,6 +72,17 @@ NEVER_RAN_DIMENSIONS = {
 }
 
 
+def _json_safe(value):
+    """A float value as JSON can represent it without ``allow_nan``'s
+    non-standard tokens; everything else passes through unchanged.
+    """
+    if isinstance(value, float) and not (float("-inf") < value < float("inf")):
+        if value != value:
+            return "NaN"
+        return "Infinity" if value > 0 else "-Infinity"
+    return value
+
+
 def compare_dimension(expected: dict, actual: dict, dimension: str, *,
                       compare_records=compare_records,
                       tolerance_policy=SCORE_RECORD_V1) -> dict:
@@ -87,6 +98,12 @@ def compare_dimension(expected: dict, actual: dict, dimension: str, *,
     *parity* comparison (never for the Phase 4 checker's own tier-0-style
     exact check) passes a different ``TolerancePolicy`` explicitly; this
     module invents no field's tolerance value itself.
+
+    Returns ``{"agree": bool, "finding_fields": [...], "receipt": <content
+    hash>, "values": {field_path: {"legacy": ..., "native": ...}}}``.
+    ``values`` is built from the same findings as ``finding_fields`` (so it is
+    empty whenever ``agree`` is True) and carries each disagreeing field's
+    raw ``left_value``/``right_value``, unformatted.
     """
     comparison = compare_records(
         expected, actual,
@@ -103,4 +120,7 @@ def compare_dimension(expected: dict, actual: dict, dimension: str, *,
             "verdict": comparison.verdict,
             "findings": [finding.field_path for finding in comparison.findings],
         }),
+        "values": {finding.field_path: {"legacy": _json_safe(finding.left_value),
+                                        "native": _json_safe(finding.right_value)}
+                   for finding in comparison.findings},
     }

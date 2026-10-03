@@ -520,5 +520,5 @@ def test_submit_native_parity_if_ready_submits_real_paired_score_job(tmp_path):
     }
     assert spec["dependency_job_ids"] == [score_job_id, batch_job_id]
     assert row["kind"] == "native_parity"
-    assert row["checkpoint_contract_ref"] == "native_parity_report.v1.1"
+    assert row["checkpoint_contract_ref"] == "native_parity_report.v1.2"
     assert row["resource_class"] == "validation"

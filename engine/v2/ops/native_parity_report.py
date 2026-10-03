@@ -34,9 +34,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from datetime import date
 from pathlib import Path
 from typing import Any
 
+from engine.v2.foundation import Clock, SystemClock, format_timestamp
 from engine.v2.ops.decision_validation import population_key
 from engine.v2.ops.errors import fail
 from engine.v2.ops.native_shadow_render import native_shadow_serving_mode
@@ -61,7 +63,10 @@ __all__ = [
     "write_parity_report",
 ]
 
-SCHEMA_VERSION = "native_parity_report.v1.1"
+#: v1.1 -> v1.2: adds the top-level run identity ``as_of``/``generated_at``
+#: and, inside each ``mismatches`` entry, ``values`` -- that entry's own
+#: mismatched fields only, keyed ``{legacy, native}``.
+SCHEMA_VERSION = "native_parity_report.v1.2"
 
 #: The exact ``schema_version`` tags
 #: ``native_score_batch._native_score_batch_documents`` writes for its v2.0
@@ -123,6 +128,7 @@ def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, An
                 "dimension": dimension,
                 "finding_fields": list(result["finding_fields"]),
                 "receipt": result["receipt"],
+                "values": result["values"],
             })
     return mismatches
 
@@ -418,6 +424,22 @@ def apply_native_refusals(
     return updated
 
 
+def _stamp_report_identity(report: dict, *, as_of: str | None, clock: Clock) -> dict:
+    """Add this report's run identity -- never set inside
+    compare_native_vs_legacy/_empty_native_report, which stay pure and
+    wall-clock-free (R6, engine/v2/parity/ARCHITECTURE.md). ``as_of`` is the
+    nightly session/as-of date this comparison was produced for (``None``
+    when the caller has none to give -- never invented). ``generated_at`` is
+    always this call's own wall-clock write time. Returns a new dict; never
+    mutates ``report`` in place, matching every other function in this
+    module.
+    """
+    updated = dict(report)
+    updated["as_of"] = as_of
+    updated["generated_at"] = format_timestamp(clock.now())
+    return updated
+
+
 def write_parity_report(report: dict, path: Path | str) -> Path:
     """Write ``report`` as deterministic JSON; any filesystem error propagates.
 
@@ -430,7 +452,28 @@ def write_parity_report(report: dict, path: Path | str) -> Path:
     return path
 
 
-def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[str, Any]:
+def _as_of_from_expected_ids(expected_ids) -> str | None:
+    """The run/session as-of date one opaque expected-id carries, or ``None``.
+
+    Only an id of the form ``"<as_of>|<scope_hash>"`` where ``<as_of>`` is a
+    real ISO calendar date (``YYYY-MM-DD``) yields that date; anything else
+    -- no separator, an empty prefix, or a prefix that is not a valid date
+    -- stays ``None`` rather than masquerading as one. Never raises.
+    """
+    if not expected_ids:
+        return None
+    candidate, separator, _scope_hash = expected_ids[0].partition("|")
+    if not separator or not candidate:
+        return None
+    try:
+        date.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return candidate
+
+
+def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
+                             clock: Clock = SystemClock()) -> dict[str, Any]:
     """The ``native_parity`` job kind's worker entrypoint.
 
     Reads three job-bound inputs already staged into ``root`` by the
@@ -450,11 +493,14 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[
     :func:`compare_native_vs_legacy` -- or, when nothing shared but a
     refusal explains why, :func:`_empty_native_report` -- and layers
     :func:`apply_native_refusals` on top before writing
-    ``native_parity_report.json``. See ARCHITECTURE.md's "Cutover PR-4
-    (redo)" section for the full branching rationale.
+    ``native_parity_report.json``, additively stamped with this run's
+    ``as_of``/``generated_at`` by :func:`_stamp_report_identity`. See
+    ARCHITECTURE.md's "Cutover PR-4 (redo)" section for the rationale.
     """
     from engine.v2.ops.nightly import legacy_parity_rows
 
+    expected_ids = parameters["expected_ids"]
+    as_of = _as_of_from_expected_ids(expected_ids)
     score_document = json.loads((root / "score.json").read_text())
     records_document = json.loads((root / "records.json").read_text())
     refusals_document = json.loads((root / "refusals.json").read_text())
@@ -495,6 +541,7 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path) -> dict[
             legacy_rows, native_rows, PARITY_DIMENSIONS,
             tolerance_policy=SCORE_RECORD_V1)
     report = apply_native_refusals(report, native_refusals, unkeyable_refusals)
+    report = _stamp_report_identity(report, as_of=as_of, clock=clock)
     (root / "native_parity_report.json").write_text(
         json.dumps(report, sort_keys=True, separators=(",", ":")))
     return {
@@ -515,6 +562,7 @@ def native_parity_handler(
     report_path: Path | str,
     dimensions: tuple[str, ...] = PARITY_DIMENSIONS,
     tolerance_policy: TolerancePolicy = SCORE_RECORD_V1,
+    clock: Clock = SystemClock(),
 ) -> Callable[[dict], dict]:
     """Build the ``nightly.GRAPH`` handler for the ``native_parity`` stage.
 
@@ -529,6 +577,11 @@ def native_parity_handler(
     field, unchanged from before this parameter existed) and is passed
     straight through to :func:`compare_native_vs_legacy` -- see that
     function's docstring for what a caller may plug in here.
+
+    The written report is stamped additively with this run's identity --
+    ``as_of`` from the running stage accumulator's ``"session"`` (``None``
+    when absent) and ``clock``'s write time as ``generated_at`` -- by
+    :func:`_stamp_report_identity`.
     """
     path = Path(report_path)
 
@@ -538,6 +591,7 @@ def native_parity_handler(
         report = compare_native_vs_legacy(
             legacy_rows, native_rows, dimensions, tolerance_policy=tolerance_policy)
         report = apply_native_refusals(report, {}, ())
+        report = _stamp_report_identity(report, as_of=value.get("session"), clock=clock)
         write_parity_report(report, path)
         return {**value, "native_parity": {
             "status": "compared",

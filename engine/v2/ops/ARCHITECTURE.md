@@ -200,10 +200,10 @@ Four new symbols, mirroring `native_score_batch`'s own PR-7a shape:
   `resource_classes=frozenset({"validation"})` (a pure comparison, no
   provider fetch — the same classification `decision_evidence` already
   has), `effects=("staged",)`, `retry=RetryPolicy("bounded", 2, (5, 30))`,
-  `checkpoint_contract="native_parity_report.v1.1"` (matching
-  `native_parity_report.SCHEMA_VERSION`, which Phase 1 (`#132`) already
-  bumped from `v1.0` — see "Outputs" below for the two additive fields
-  this contract already covers), `namespaces=frozenset({"shadow", "smoke"})`.
+  `checkpoint_contract="native_parity_report.v1.2"` (matching
+  `native_parity_report.SCHEMA_VERSION`, bumped from `v1.1` in cutover
+  PR-4 slice 1 of #327's redo — see "Outputs" below for what this
+  contract now covers), `namespaces=frozenset({"shadow", "smoke"})`.
   `worker.py::dispatch` gains a `"native_parity"` branch routing to
   `native_parity_report.run_native_parity_worker` (below), the same
   lazy-import-inside-`_dispatch_*` pattern `_dispatch_native_score_batch`
@@ -416,9 +416,11 @@ submission path reads either edge (the rule Part 4 established for
   row's classification, but every report that test-only path writes now
   also carries the two new, always-present, empty fields
   `"native_refused": []`/`"native_refused_unmatched": []` and is stamped
-  `SCHEMA_VERSION` `native_parity_report.v1.1`, not the pre-redo `v1.0` — a
-  real, already-shipped change to this existing artifact's shape, not a
-  no-op reserved for `run_native_parity_worker`.** Once Phase 2 builds it,
+  with this module's current `SCHEMA_VERSION` (`v1.1` when Phase 1 shipped
+  this; `v1.2` since cutover PR-4 slice 1 of #327 added run identity and
+  per-mismatch values on top) — a real, already-shipped change to this
+  existing artifact's shape, not a no-op reserved for
+  `run_native_parity_worker`.** Once Phase 2 builds it,
   `run_native_parity_worker` calls this the SAME way, this time with real
   `native_refusals`/`unkeyable_refusals`, AFTER
   `compare_native_vs_legacy` or `_empty_native_report` (above) returns: any
@@ -1117,9 +1119,7 @@ starts working with no change of its own.
   `"native_refused_unmatched"` (a native refusal with no legacy row to
   move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/
   `tolerance_policy_id` fields; `only_legacy` now excludes rows
-  `native_refused` claims. `nightly.submit_native_parity_if_ready` and
-  its tick-loop caller, `Service._reconcile_native_parity`, submit such
-  a job automatically once its inputs are ready.
+  `native_refused` claims. `nightly.submit_native_parity_if_ready` and its tick-loop caller, `Service._reconcile_native_parity`, submit such a job automatically once its inputs are ready. `v1.2` (cutover PR-4 slice 1 of #327, this PR) adds top-level `as_of`/`generated_at` (run identity, stamped by `_stamp_report_identity` at the write step, AFTER `apply_native_refusals`, in both `run_native_parity_worker` and `native_parity_handler` -- never inside `compare_native_vs_legacy`/`_empty_native_report`, which stay wall-clock-free) and, inside each `mismatches` entry, `values` (that entry's own mismatched fields only, `{legacy, native}` -- `engine/v2/parity/ARCHITECTURE.md`).
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions
   into the existing `earnings_events` contract through
   `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild`
