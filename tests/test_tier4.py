@@ -440,6 +440,42 @@ class TestPrefixGapBackfill:
             built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
         )
 
+    def test_a_since_before_first_fold_never_widens_past_the_requested_cut(
+        self, panel, built
+    ):
+        """Regression: when `since` itself falls BEFORE `FIRST_FOLD`, the
+        widen target for a trainable unscored gap must never exceed the
+        requested `cut` -- `FIRST_FOLD` is LATER than `cut` here, so using it
+        unconditionally would move `effective_cut` forward past `cut` and
+        turn every already-covered Tier-3 key between the two into a
+        spurious, omitted gap. The fix clamps the widen target to
+        `min(FIRST_FOLD, cut)`.
+        """
+        victim = panel["ticker"].iloc[0]
+        old_panel = panel[
+            ~((panel["ticker"] == victim) & (panel["date"] < FIRST_FOLD))
+        ].reset_index(drop=True)
+        existing_old = build_forecasts(
+            old_panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+
+        since = "2012-06-01"  # strictly before FIRST_FOLD (2013-01-01)
+        assert pd.Timestamp(since) < FIRST_FOLD
+
+        incremental = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since,
+            existing=existing_old, tier3_snapshot="snap", log=lambda _m: None,
+        )
+
+        # Total over Tier 3 -- nothing between `since` and FIRST_FOLD may be
+        # dropped as a spurious out-of-window gap.
+        assert len(incremental) == len(panel)
+        pd.testing.assert_frame_equal(
+            incremental.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
+
     def test_a_backfill_outside_the_window_from_first_fold_raises_not_carries(
         self, panel, built
     ):

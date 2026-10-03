@@ -285,17 +285,23 @@ predates `FIRST_FOLD`:
   new to the table. The run fills it with that same null row, at the current
   `since`, and continues.
 
-  The key having no fold of its own does not mean nothing else needs
-  recomputing: it is still a new row in the TRAINABLE pool, dated before
-  `FIRST_FOLD` — and every fold's own cutoff is `FIRST_FOLD` or later, so
-  `n_train = (trainable["date"] < stamp).sum()` would include it for EVERY
-  fold a full rebuild fits, not only the folds a widened `since` would reach.
-  Filling the key's own null row and leaving `since` unchanged — the
+  Whether anything ELSE needs recomputing depends on whether the key is also
+  in the TRAINABLE pool (`training_frames`'s second return value — complete
+  features AND a realized target; `model.prepare`'s own filters can exclude a
+  key that is otherwise a normal Tier-3 event). Only a TRAINABLE pre-
+  `FIRST_FOLD` key changes anything beyond its own null row: every fold's own
+  cutoff is `FIRST_FOLD` or later, so `n_train = (trainable["date"] <
+  stamp).sum()` would include a trainable pre-`FIRST_FOLD` row for EVERY fold
+  a full rebuild fits, not only the folds a widened `since` would reach.
+  Filling such a key's null row and leaving `since` unchanged — the
   behaviour before this fix — carried every earlier fold's forecast and
   residual band forward as if the training pool had not changed, silently.
-  The earliest fold a pre-`FIRST_FOLD` row can affect is `FIRST_FOLD` itself,
-  so this is folded into the SAME widen-and-bound computation the scored gap
-  below uses, not a separate rule.
+  The earliest fold a TRAINABLE pre-`FIRST_FOLD` row can affect is
+  `FIRST_FOLD` itself, so this is folded into the SAME widen-and-bound
+  computation the scored gap below uses, not a separate rule. An unscored key
+  that is NOT trainable (e.g. `model.prepare` excludes it) still gets its
+  null row, exactly as before this fix, with no widening at all — nothing
+  about it could possibly change a fold's training pool.
 * **Scored gap** (`FIRST_FOLD` or later): the new row's own date is itself a
   lower bound on which folds it can affect, because a fold's training only
   looks at rows dated before its OWN cutoff — a fold starting before the new
@@ -311,24 +317,38 @@ A single build can hit both at once — a backfilled ticker's history carries
 pre- and post-`FIRST_FOLD` events together — and the repairs compose: the
 unscored fill runs first (so a scored gap's widened pass still finds the
 just-filled rows in the carried prefix instead of re-flagging them as an
-out-of-window gap), and the recompute boundary is the EARLIER of the two
-gaps' own widening targets — `FIRST_FOLD` for the unscored side, the gap's
-fold boundary for the scored side — never the scored one alone.
+out-of-window gap), and, when the unscored half is also trainable, the
+recompute boundary is the EARLIER of the two gaps' own widening targets —
+`FIRST_FOLD` for the unscored side, the gap's fold boundary for the scored
+side — never the scored one alone. A scored gap ALONE (no trainable unscored
+key alongside it) widens exactly as before this fix.
 
 **Widening to `FIRST_FOLD` is still bounded by `BACKFILL_WINDOW_MONTHS`,
 measured from the requested `since`, like any other widening** — and in a
 mature table that bound is almost always narrower than the distance back to
 `FIRST_FOLD`. When it is, the run cannot both stay inside the bound and
-recompute every fold whose training pool the new row actually joined, so it
-refuses instead of picking one silently: `_carried_prefix` raises
-`Tier4Error`, naming the producer, and tells the operator to run
-`tier4_full.sh` with no `--since`. This is the same refuse-over-silent-carry
-answer the cadence and `model_id` guards already give for an unsafe
-carry-over (below) — restored for this case, rather than the null-row fill
-quietly standing in for it. A build with no unscored gap, or whose `since` is
-itself close enough to `FIRST_FOLD` for the bounded widening to reach it (a
-table still young, or a test fixture with a short history), recomputes in
-full instead of raising.
+recompute every fold whose training pool the new row actually joined, so a
+build with a TRAINABLE unscored gap refuses instead of picking one silently:
+`_carried_prefix` raises `Tier4Error`, naming the producer, and tells the
+operator to run `tier4_full.sh` with no `--since`. This is the same
+refuse-over-silent-carry answer the cadence and `model_id` guards already
+give for an unsafe carry-over (below) — restored for this one case, rather
+than the null-row fill quietly standing in for it. A build with no trainable
+unscored gap (none at all, or none that are also trainable), or whose
+`since` is itself close enough to `FIRST_FOLD` for the bounded widening to
+reach it (a table still young, or a test fixture with a short history),
+recomputes in full instead of raising. A SCORED gap's own out-of-window case
+is unchanged by this fix — it stays the named, nonfatal skip described below,
+not a refusal; a defect in that path's own failure mode is tracked
+separately (issue #333), not fixed by this refusal.
+
+A requested `since` that already falls before `FIRST_FOLD` needs no widening
+past it at all — `cut` itself is already earlier than every scored fold, so
+a trainable unscored key cannot possibly reach a fold `cut` does not already
+cover. The widen target used here is `min(FIRST_FOLD, cut)`, never
+`FIRST_FOLD` unconditionally, so `effective_cut` never moves LATER than the
+originally requested `cut` and turns already-covered Tier-3 keys into a
+spurious gap.
 
 **The widening is bounded** (`BACKFILL_WINDOW_MONTHS`, measured back from the
 requested `since`). Recomputing an arbitrarily old gap would put unbounded,
@@ -445,9 +465,14 @@ Steps 1–3 are worth doing whether or not TWIN-P ever earns its place.
   Tier-3 events appearing inside the retained prefix — widens `since`
   backward to recompute the earliest fold either kind of gap could have
   changed the training pool of (a SCORED gap's own fold boundary, or
-  `FIRST_FOLD` for an UNSCORED one, since a pre-`FIRST_FOLD` row joins every
-  scored fold's pool), bounded by `BACKFILL_WINDOW_MONTHS`; past that bound
-  it refuses rather than carry a fold it cannot safely recompute (§6a).
+  `min(FIRST_FOLD, cut)` for a TRAINABLE UNSCORED one, since a pre-
+  `FIRST_FOLD` row that is also in the trainable pool joins every scored
+  fold's pool — an unscored key `model.prepare` excludes from `trainable`
+  only gets its null row, no widening), bounded by `BACKFILL_WINDOW_MONTHS`;
+  past that bound a trainable unscored gap refuses rather than carry a fold
+  it cannot safely recompute, while a scored gap's own out-of-window case
+  stays the pre-existing named, nonfatal skip (§6a; the scored path's own
+  gap in this regard is tracked separately, issue #333).
 * **`--since` rounds DOWN to its fold boundary**, because a fold is the unit of
   recomputation: half a month cannot be rebuilt without fitting the model its
   other half already used. The rounding recomputes a superset, which is

@@ -868,7 +868,11 @@ def _carried_prefix(
             pd.Timestamp(fold_start_of([missing["event_date"].min()]).iloc[0])
             if not missing.empty
             else None,
-            pd.Timestamp(FIRST_FOLD) if pool_changed else None,
+            # `cut` can itself be earlier than FIRST_FOLD (a `--since` before
+            # FIRST_FOLD); the widen target must never exceed `cut`, since a
+            # trainable unscored key can never affect a fold earlier than
+            # `cut` already covers.
+            pd.Timestamp(min(FIRST_FOLD, cut)) if pool_changed else None,
         )
         if candidate is not None
     )
