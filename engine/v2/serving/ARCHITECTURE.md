@@ -19,7 +19,7 @@ The [README](README.md) lists the checked exports (the only names other packages
 Not in the README's checked list, so not part of the public interface: the route
 enumeration `operations.route_table` (with `STATIC_ROUTES`, `PARAMETERIZED_ROUTES`), the
 read-only documents `analog_projection.analog_document`, `derivation_projection.derivation_document`
-and `native_parity_projection.native_parity_summary`, and the row builders
+and `native_parity_projection` summary/detail helpers, and the row builders
 `native_render.native_display_row` and `native_shadow_render.shadow_serving_row_source`.
 
 ## Inputs
@@ -56,6 +56,24 @@ FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
+`GET /api/v1/native_parity` exposes report identity and the existing aggregate.
+`/native_parity/mismatches` pages row-key/dimension entries with known fields
+marked agree/differ and stored values only for differing fields;
+`/native_parity/unpaired?side=legacy|native` pages unpaired row keys.
+Both detail routes accept an optional `row_key` filter. These authenticated
+reads consume one safely opened report per request and never rerun comparisons.
+The API takes an optional configured report path; no path means `no_report`.
+
+| Native parity condition | Outcome |
+|---|---|
+| Report absent | `no_report` (200) |
+| Report malformed or cannot be read safely | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no data |
+| Report `as_of` predates current release `resolved_as_of` | `stale` (200); all retained data still returned |
+| Current release cannot be resolved | Report `available`; freshness indeterminate |
+| Detail `row_key` absent from the report | 404 Problem |
+| Cursor belongs to another report or detail filter | `CURSOR_MISMATCH` Problem (409) |
+| Cache/retry/transaction/partial write/idempotency | `no-store`, no ETag; no retries, jobs or writes; identical report and query yield identical data |
+
 API errors raised as `ApiError` share one `Problem` envelope (`code`, `category`, `retryable`);
 HTTP statuses are in parentheses. Index integrity failures (`ServingIndexError`, e.g. a schema
 newer than the code supports) are not caught by the API handler, so they are not returned as a

@@ -427,12 +427,13 @@ Only a tracked path absent from the worktree reads as empty.
   fields already say, never a second implementation of the one shared
   comparator (§5) — but the artifact itself can be stale, or was produced
   under a different tolerance policy than whichever is in effect when this
-  projection is read; this projection does not re-verify either. The
-  artifact now carries its own run identity (`as_of`/`generated_at`,
-  stamped once at the write step, PR #327 slice 1) but this projection
-  does not yet read or expose either field — a reader still cannot tell
-  which night produced it through this projection without the catalog;
-  surfacing them is a later slice of PR #327's design.
+  projection is read; this projection does not re-verify tolerance policy.
+  The projection exposes the artifact's `as_of`/`generated_at` identity.
+  The authenticated `/api/v1/native_parity*` routes also flag a report as
+  `stale` when its `as_of` predates the current release's `resolved_as_of`,
+  resolved through the same publication resolver as `/releases/current`.
+  An unavailable current release leaves freshness indeterminate and the
+  report `available`; retained counts and details are never withheld for age.
   `Service.tick()`'s sidecar submits a `native_parity` job once its
   paired inputs are ready, so `"no_report"` stays the answer whenever
   nothing has completed yet, not a degraded one.
@@ -460,7 +461,9 @@ Only a tracked path absent from the worktree reads as empty.
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  The one consumer today is the read-only operations preview server's
+  Consumers are the authenticated FastAPI `/api/v1/native_parity` summary
+  and paginated `/native_parity/mismatches` and `/native_parity/unpaired`
+  routes, plus the read-only operations preview server's
   `GET /native_parity`/`GET /native_parity.json` routes
   (`engine/v2/serving/operations.py`), which read this document unchanged,
   wired through `engine/v2/dashboard/preview.py`'s optional
