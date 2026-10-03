@@ -16,6 +16,31 @@ def cgroup_directory(proc: Path = Path("/proc"), mount: Path = Path("/sys/fs/cgr
     return mount
 
 
+def _inactive_file_bytes(directory: Path) -> int | None:
+    """The exact ``inactive_file`` value from this directory's ``memory.stat``.
+
+    ``None`` when the file is unreadable (including undecodable content), the
+    key is absent, or the value is malformed/non-ASCII-decimal/negative —
+    callers then keep raw ``memory.current``.
+    """
+    try:
+        lines = (directory / "memory.stat").read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in lines:
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == "inactive_file":
+            token = fields[1]
+            if not token.isascii() or not token.isdigit():
+                return None
+            try:
+                value = int(token)
+            except ValueError:
+                return None
+            return value if value >= 0 else None
+    return None
+
+
 def memory_limits(directory: Path) -> tuple[int | None, int | None]:
     limits = []
     for parent in (directory, *directory.parents):
@@ -24,7 +49,12 @@ def memory_limits(directory: Path) -> tuple[int | None, int | None]:
             value = maximum.read_text().strip()
             if value != "max":
                 current = parent / "memory.current"
-                limits.append((int(value), int(current.read_text()) if current.exists() else None))
+                used = int(current.read_text()) if current.exists() else None
+                if used is not None:
+                    inactive = _inactive_file_bytes(parent)
+                    if inactive is not None:
+                        used = max(0, used - inactive)
+                limits.append((int(value), used))
     if not limits:
         return None, None
     ceiling = min(limit for limit, _ in limits)

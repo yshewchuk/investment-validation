@@ -556,12 +556,31 @@ class TestPrefixGapBackfill:
         and hide the hole permanently. It stays ABSENT from the table (Tier 4
         total over Tier 3 MINUS exactly this key) and is named in the
         build's report.
+
+        This test speaks for the NONtrainable half of that contract. The
+        selected gap is kept scorable but removed from the training pool by
+        setting ONLY its ``abs_move`` to NaN in a copy of the panel; the
+        initial forecasts are built from that same panel, and then the key is
+        thinned. A scored key that is ALSO trainable changes folds the bounded
+        window cannot recompute, so its contract is refusal (see
+        ``TestScoredTrainingPoolBoundaries``); a nontrainable scored gap
+        retains the named-skip contract asserted here.
         """
         scored = built[built["pred_abs_move"].notna()]
         old_date = scored["event_date"].min()
         old_ticker = scored.loc[scored["event_date"] == old_date, "ticker"].iloc[0]
-        thinned = built[
-            ~((built["ticker"] == old_ticker) & (built["event_date"] == old_date))
+
+        nontrainable = panel.copy(deep=True)
+        nontrainable.loc[
+            (nontrainable["ticker"] == old_ticker) & (nontrainable["date"] == old_date),
+            "abs_move",
+        ] = np.nan
+        existing = build_forecasts(
+            nontrainable, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+        thinned = existing[
+            ~((existing["ticker"] == old_ticker) & (existing["event_date"] == old_date))
         ]
 
         # Far enough past `old_date` that the bounded window cannot reach it.
@@ -570,11 +589,11 @@ class TestPrefixGapBackfill:
         ).strftime("%Y-%m-%d")
         report: dict = {}
         out = build_forecasts(
-            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
+            nontrainable, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
             tier3_snapshot="snap", log=lambda _m: None, report=report,
         )
 
-        assert len(out) == len(panel) - 1, "the out-of-window key must be ABSENT, not a null row"
+        assert len(out) == len(nontrainable) - 1, "the out-of-window key must be ABSENT, not a null row"
         row = out[(out["ticker"] == old_ticker) & (out["event_date"] == old_date)]
         assert len(row) == 0, "a placeholder row hides the gap from the next run's own anti-join"
 
@@ -638,12 +657,29 @@ class TestPrefixGapBackfill:
         null-forecast placeholder: the SECOND night must see the SAME gap,
         raise the SAME named skip, and produce a table IDENTICAL to the
         first night's — not silently swallow it once a row exists.
+
+        As in the sibling named-skip test, the selected gap is made
+        nontrainable (``abs_move`` set to NaN on that key alone in a copied
+        panel) and the initial forecasts are built from that same panel, so
+        the absent-key contract is asserted for a nontrainable scored gap. A
+        trainable one is refused, not skipped — see
+        ``TestScoredTrainingPoolBoundaries``.
         """
         scored = built[built["pred_abs_move"].notna()]
         old_date = scored["event_date"].min()
         old_ticker = scored.loc[scored["event_date"] == old_date, "ticker"].iloc[0]
-        thinned = built[
-            ~((built["ticker"] == old_ticker) & (built["event_date"] == old_date))
+
+        nontrainable = panel.copy(deep=True)
+        nontrainable.loc[
+            (nontrainable["ticker"] == old_ticker) & (nontrainable["date"] == old_date),
+            "abs_move",
+        ] = np.nan
+        existing = build_forecasts(
+            nontrainable, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+        thinned = existing[
+            ~((existing["ticker"] == old_ticker) & (existing["event_date"] == old_date))
         ]
         since = (
             old_date + pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS + 6)
@@ -654,7 +690,7 @@ class TestPrefixGapBackfill:
 
         report1: dict = {}
         night1 = build_forecasts(
-            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
+            nontrainable, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
             tier3_snapshot="snap", log=lambda _m: None, report=report1,
         )
         assert expected_gap_entry in report1["pred_abs_move"]["out_of_window_gap"]
@@ -667,7 +703,7 @@ class TestPrefixGapBackfill:
         # defect this fix closes.
         report2: dict = {}
         night2 = build_forecasts(
-            panel, produces=_ONLY, models=_MODELS, since=since, existing=night1,
+            nontrainable, produces=_ONLY, models=_MODELS, since=since, existing=night1,
             tier3_snapshot="snap", log=lambda _m: None, report=report2,
         )
         assert expected_gap_entry in report2["pred_abs_move"]["out_of_window_gap"], (
@@ -870,6 +906,298 @@ class TestCarriedTrainingPoolBoundaries:
         assert report[MODEL.produces]["gap_widened_since"] == "2013-01-01"
         assert report[MODEL.produces]["gap_widened_from"] == "2013-04-01"
         assert "out_of_window_gap" not in report[MODEL.produces]
+
+
+class TestScoredTrainingPoolBoundaries:
+    """Issue #333: a SCORED gap is a training-pool boundary too.
+
+    ``_carried_prefix`` already refuses to carry folds past the bounded window
+    when an UNSCORED (``< FIRST_FOLD``) gap is also trainable, because such a
+    key joins every scored fold's pool. A SCORED gap reaches less far — a row
+    dated D is ``< stamp`` only for folds whose stamps are strictly AFTER D,
+    never its own ``fold_start(D)`` — but within that reach it is the same
+    hazard: every fold whose stamp is strictly after D was fit against a pool
+    the new panel has changed, so carrying one is silently stale. Widening to
+    its own fold still rebuilds the key's missing forecast; the training-pool
+    changes start at later stamps. The pre-fix check tested trainable
+    membership only on the unscored half, so a trainable scored gap outside
+    the window was treated exactly like a nontrainable one — a named skip
+    over folds whose answers were fit for the old pool.
+
+    The primary regression at the top of this class shows the staleness is
+    observable (a full augmented rebuild moves an existing intermediate fold's
+    point forecast and band) and then demands the refusal. The controls below
+    pin the boundary rules directly on ``_carried_prefix``: equality with the
+    window floor is inside the window, membership is per complete
+    ``(ticker, event_date)`` key, an older nontrainable gap must not hide a
+    later trainable one (nor force a trainable at-floor one out), and the
+    unscored trainable guard is unchanged.
+    """
+
+    @staticmethod
+    def _keys(keys: pd.DataFrame, *pairs) -> pd.DataFrame:
+        extra = pd.DataFrame(list(pairs), columns=["ticker", "event_date"])
+        extra["event_date"] = pd.to_datetime(extra["event_date"]).astype("datetime64[us]")
+        return pd.concat([keys, extra], ignore_index=True)
+
+    @staticmethod
+    def _trainable(*pairs) -> pd.DataFrame:
+        return pd.DataFrame(list(pairs), columns=["ticker", "date"])
+
+    @pytest.fixture
+    def prefix(self, monkeypatch):
+        monkeypatch.setattr(tier4, "FIRST_FOLD", pd.Timestamp("2013-01-01"))
+        monkeypatch.setattr(tier4, "BACKFILL_WINDOW_MONTHS", 3)
+        existing = tier4._normalize_group(
+            pd.DataFrame([
+                {
+                    "ticker": "OLD",
+                    "event_date": "2013-02-15",
+                    "pred_abs_move": 7.0,
+                    "pred_abs_move_model_id": MODEL.model_id,
+                    "pred_abs_move_fold_start": "2013-02-01",
+                },
+            ]),
+            MODEL.produces,
+        )
+        return existing, existing[list(tier4.KEY_COLUMNS)].copy()
+
+    def test_trainable_scored_backfill_outside_window_refuses(
+        self, panel, built, monkeypatch, tmp_path
+    ):
+        """A trainable scored backfill outside the bounded window must refuse.
+
+        The ordinary panel built the old table (``built``); the augmented panel
+        adds one BACKFILL key dated 2014-04-15, copied from a trainable row but
+        with a deliberately different finite target, so the key is BOTH
+        scorable and trainable. The requested ``since`` is 2014-10-01 and the
+        bounded window floor is 2014-07-01, both computed from the module's own
+        constants: the key's own fold (2014-04-01) is outside that window, and
+        every fold stamped strictly after the key's date (2014-04-15) — from
+        2014-05-01 up to the floor — was fitted against a pool the augmented
+        panel changes. (The key never enters its own fold; widening to that
+        fold rebuilds only its missing forecast, while the training-pool
+        changes start at later stamps.) Carrying those later folds would be
+        silently stale, so the build must raise naming a full rebuild instead
+        of skipping the key the way a nontrainable one is skipped.
+
+        The fold at 2014-06-01 is the tangible proof the pool moved: a full
+        augmented rebuild scores it differently (point and band) from the old
+        table, so carrying it is observable rather than theoretical. Both
+        sides use the same ``snap`` Tier-3 snapshot; the inputs are
+        deep-copied before the refusal to prove the failed build left them
+        untouched. Publication is now tested through the real ``build_table``
+        entry point, not a direct ``build_forecasts`` call: the panel and
+        existing table are patched at the module boundary and the writer is
+        spied, so a silent carry reaches the spy and fails loudly instead of
+        raising ``Tier4Error``, while a sentinel at the target proves nothing
+        was published.
+        """
+        since = "2014-10-01"
+        gap_date = pd.Timestamp("2014-04-15")
+        requested_cut = pd.Timestamp(fold_start_of([pd.Timestamp(since)]).iloc[0])
+        floor = pd.Timestamp(
+            fold_start_of(
+                [pd.Timestamp(since) - pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS)]
+            ).iloc[0]
+        )
+        gap_fold = pd.Timestamp(fold_start_of([gap_date]).iloc[0])
+        assert requested_cut == pd.Timestamp("2014-10-01")
+        assert floor == pd.Timestamp("2014-07-01")
+        assert gap_fold == pd.Timestamp("2014-04-01")
+        assert gap_fold < floor, "the gap's own fold must sit outside the backfill window"
+
+        assert built["tier3_snapshot"].eq("snap").all(), (
+            "the old table must share the snapshot this incremental build is given"
+        )
+
+        source = panel[(panel["date"] == gap_date) & (panel["n_prior"] >= 4)].iloc[[0]]
+        assert len(source) == 1, "fixture must hold a trainable event on the backfill date"
+        backfill = source.copy(deep=True)
+        backfill["ticker"] = "BACKFILL"
+        backfill["abs_move"] = float(source["abs_move"].iloc[0]) + 25.0
+        augmented = pd.concat([panel, backfill], ignore_index=True)
+
+        expected = build_forecasts(
+            augmented, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+
+        fold = pd.Timestamp("2014-06-01")
+        assert gap_fold <= fold < floor, "the proof fold must be one a carry would freeze"
+        old_fold = built[built["pred_abs_move_fold_start"] == fold]
+        new_fold = expected[expected["pred_abs_move_fold_start"] == fold]
+        merged = old_fold.merge(
+            new_fold, on=["ticker", "event_date"], suffixes=("_old", "_new")
+        )
+        assert len(old_fold) > 0
+        assert len(merged) == len(old_fold) == len(new_fold)
+        old_point = merged["pred_abs_move_old"].to_numpy(dtype=float)
+        new_point = merged["pred_abs_move_new"].to_numpy(dtype=float)
+        assert np.isfinite(old_point).all(), "the intermediate fold must already be scored"
+        assert not np.array_equal(old_point, new_point), (
+            "the copied trainable row must move the intermediate fold's forecast, "
+            "or the refusal this test demands would be protecting nothing"
+        )
+        old_sd = merged["pred_abs_move_sd_old"].to_numpy(dtype=float)
+        new_sd = merged["pred_abs_move_sd_new"].to_numpy(dtype=float)
+        assert np.isfinite(old_sd).all() and np.isfinite(new_sd).all(), (
+            "the proof fold must carry a band on both sides"
+        )
+        assert not np.array_equal(old_sd, new_sd), (
+            "the residual band must move with the refit pool"
+        )
+
+        augmented_before = augmented.copy(deep=True)
+        existing_before = built.copy(deep=True)
+
+        # Drive the real production path: build_table loads the panel, reads
+        # the existing output, and only then builds and publishes. Every
+        # dependency it cannot parameterise is injected at the module
+        # boundary; the refusal itself must still come from the real
+        # build_forecasts/_carried_prefix logic, never from a stub.
+        target = tmp_path / "tier4_forecasts.parquet"
+        sentinel = b"synthetic pre-existing output; a refused build must not publish over it"
+        target.write_bytes(sentinel)
+
+        from engine import features as engine_features
+
+        monkeypatch.setattr(engine_features, "load_panel", lambda *a, **k: augmented)
+        monkeypatch.setattr(tier4, "load_forecasts", lambda path=None: built)
+        real_build_forecasts = tier4.build_forecasts
+
+        def with_test_models(panel, *, since=None, existing=None, report=None):
+            return real_build_forecasts(
+                panel, produces=_ONLY, models=_MODELS, since=since,
+                existing=existing, tier3_snapshot="snap", log=lambda _m: None,
+                report=report,
+            )
+
+        monkeypatch.setattr(tier4, "build_forecasts", with_test_models)
+
+        writer_calls: list = []
+
+        def refuse_publication(frame, path=None):
+            writer_calls.append((frame, path))
+            raise AssertionError("a refused build must never reach the writer")
+
+        monkeypatch.setattr(tier4, "write_forecasts", refuse_publication)
+
+        with pytest.raises(Tier4Error, match="(?i)rebuild in full"):
+            tier4.build_table(since=since, out=target)
+        assert writer_calls == [], "the refusal must happen before any publication"
+        assert target.read_bytes() == sentinel, "the existing output must be untouched"
+        pd.testing.assert_frame_equal(augmented, augmented_before)
+        pd.testing.assert_frame_equal(built, existing_before)
+
+    def test_a_trainable_scored_gap_at_the_window_floor_widens_and_continues(self, prefix):
+        existing, keys = prefix
+        gap = ("GAP", "2013-03-15")
+        keys = self._keys(keys, gap)
+        trainable = self._trainable(gap)
+        cut = pd.Timestamp("2013-06-01")
+        floor = pd.Timestamp(
+            fold_start_of(
+                [cut - pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS)]
+            ).iloc[0]
+        )
+
+        carried, effective_cut, unfilled = tier4._carried_prefix(
+            existing, keys, cut, MODEL, trainable, log=lambda _m: None,
+        )
+
+        assert effective_cut == floor == pd.Timestamp("2013-03-01"), (
+            "a trainable scored gap AT the window floor must widen the cut to "
+            "its own fold, not refuse"
+        )
+        assert unfilled.empty, "the at-floor key is recomputed, not left absent"
+        assert set(zip(carried["ticker"], carried["event_date"])) == {
+            ("OLD", pd.Timestamp("2013-02-15")),
+        }, "only the pre-window prefix is carried"
+
+    def test_a_nontrainable_scored_gap_outside_the_window_stays_unfilled(self, prefix):
+        existing, keys = prefix
+        keys = self._keys(keys, ("GAP", "2013-02-15"))
+        trainable = self._trainable(("OTHER", "2013-02-15"))
+
+        carried, effective_cut, unfilled = tier4._carried_prefix(
+            existing, keys, pd.Timestamp("2013-06-01"), MODEL, trainable,
+            log=lambda _m: None,
+        )
+
+        assert effective_cut == pd.Timestamp("2013-03-01")
+        assert set(zip(unfilled["ticker"], unfilled["event_date"])) == {
+            ("GAP", pd.Timestamp("2013-02-15")),
+        }, "an out-of-window nontrainable key is reported through `unfilled`"
+        assert set(zip(carried["ticker"], carried["event_date"])) == {
+            ("OLD", pd.Timestamp("2013-02-15")),
+        }
+
+    def test_an_earlier_nontrainable_gap_cannot_hide_a_later_trainable_one(self, prefix):
+        existing, keys = prefix
+        keys = self._keys(keys, ("EARLY", "2013-01-10"), ("LATE", "2013-02-10"))
+        trainable = self._trainable(("LATE", "2013-02-10"))
+
+        with pytest.raises(Tier4Error, match="(?i)rebuild in full"):
+            tier4._carried_prefix(
+                existing, keys, pd.Timestamp("2013-06-01"), MODEL, trainable,
+                log=lambda _m: None,
+            )
+
+    def test_a_trainable_gap_at_the_floor_survives_an_earlier_out_of_window_skip(
+        self, prefix
+    ):
+        existing, keys = prefix
+        skip = ("SKIP", "2013-01-10")
+        hit = ("HIT", "2013-03-10")
+        keys = self._keys(keys, skip, hit)
+        trainable = self._trainable(hit)
+
+        carried, effective_cut, unfilled = tier4._carried_prefix(
+            existing, keys, pd.Timestamp("2013-06-01"), MODEL, trainable,
+            log=lambda _m: None,
+        )
+
+        assert effective_cut == pd.Timestamp("2013-03-01")
+        assert set(zip(unfilled["ticker"], unfilled["event_date"])) == {
+            ("SKIP", pd.Timestamp("2013-01-10")),
+        }, "only the older, nontrainable gap is skipped"
+        assert set(zip(carried["ticker"], carried["event_date"])) == {
+            ("OLD", pd.Timestamp("2013-02-15")),
+        }, "the at-floor trainable key is recomputed, never carried"
+
+    @pytest.mark.parametrize("trainable_pairs", [
+        [("GAP", "2013-02-20")],
+        [("OTHER", "2013-02-15")],
+        [("GAP", "2013-02-20"), ("OTHER", "2013-02-15")],
+    ], ids=["different-date", "different-ticker", "crossed-pairs"])
+    def test_scored_trainable_membership_matches_both_key_columns(
+        self, prefix, trainable_pairs
+    ):
+        existing, keys = prefix
+        keys = self._keys(keys, ("GAP", "2013-02-15"))
+        trainable = self._trainable(*trainable_pairs)
+
+        carried, effective_cut, unfilled = tier4._carried_prefix(
+            existing, keys, pd.Timestamp("2013-06-01"), MODEL, trainable,
+            log=lambda _m: None,
+        )
+
+        assert effective_cut == pd.Timestamp("2013-03-01")
+        assert set(zip(unfilled["ticker"], unfilled["event_date"])) == {
+            ("GAP", pd.Timestamp("2013-02-15")),
+        }, "a crossed key is not the missing key; the gap stays a named skip"
+
+    def test_a_trainable_unscored_gap_still_refuses_with_a_scored_gap_present(self, prefix):
+        existing, keys = prefix
+        keys = self._keys(keys, ("NEW", "2012-12-15"), ("NEW", "2013-02-15"))
+        trainable = self._trainable(("NEW", "2012-12-15"))
+
+        with pytest.raises(Tier4Error, match="(?i)rebuild in full"):
+            tier4._carried_prefix(
+                existing, keys, pd.Timestamp("2013-06-01"), MODEL, trainable,
+                log=lambda _m: None,
+            )
 
 
 class TestTotalityAndNulls:
