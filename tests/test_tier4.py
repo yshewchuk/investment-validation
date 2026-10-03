@@ -246,9 +246,12 @@ class TestCarryOverGuards:
 
     def test_an_unscored_gap_is_backfilled_as_a_null_row_not_refused(self, panel, built):
         # A backfill that adds a ticker's full history, including events
-        # before FIRST_FOLD: those have no fold to recompute, but a full
-        # rebuild never gives them a forecast either, so the only correct
-        # repair is the same null row a full rebuild would write.
+        # before FIRST_FOLD: those get the same null row a full rebuild would
+        # write, and because a pre-FIRST_FOLD event is < every scored fold's
+        # stamp it joins every fold's training pool, so `cut` also widens back
+        # to FIRST_FOLD and refits every fold. `since` must be close enough
+        # for the bounded window to reach FIRST_FOLD; farther out the build
+        # correctly refuses rather than carrying a stale fold.
         gap_date = built["event_date"].min()
         gap_ticker = built.loc[built["event_date"] == gap_date, "ticker"].iloc[0]
         thinned = built[
@@ -256,7 +259,7 @@ class TestCarryOverGuards:
         ]
 
         backfilled = build_forecasts(
-            panel, produces=_ONLY, models=_MODELS, since="2015-01-01", existing=thinned,
+            panel, produces=_ONLY, models=_MODELS, since="2013-03-01", existing=thinned,
             tier3_snapshot="snap", log=lambda _m: None,
         )
 
@@ -279,8 +282,11 @@ class TestPrefixGapBackfill:
     ``TestCarryOverGuards.test_an_unscored_gap_is_backfilled_as_a_null_row_not_refused``
     locks in the OTHER half of this behaviour: a gap in an UNSCORED prefix row
     (older than ``FIRST_FOLD``) is filled with the same null row a full rebuild
-    would give it, since no fold ever existed to recompute it. This class covers
-    the SCORED case, which widens ``since`` backward instead.
+    would give it — and, because a pre-``FIRST_FOLD`` event joins every scored
+    fold's training pool, it also widens ``since`` back to ``FIRST_FOLD``
+    exactly the way a scored gap does, refusing when the bound cannot reach
+    that far. This class covers the scored case and the panel-varying cases
+    (the ones that actually move the training pool).
     """
 
     def test_a_gap_in_the_carried_prefix_is_backfilled_not_refused(self, panel, built):
@@ -340,41 +346,152 @@ class TestPrefixGapBackfill:
             built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
         )
 
-    def test_a_mixed_unscored_and_scored_gap_matches_a_full_rebuild(self, panel, built):
-        """A universe backfill adds a ticker's whole history at once, so the
-        SAME incremental build can be missing an unscored (pre-FIRST_FOLD)
-        key and a scored key that needs widening, together. Each half is
-        covered by its own test above; this is the case that actually broke
-        the nightly (2026-09-26 onward) and the one the fix must get right
-        when both happen in the same call: the widened pass must still see
-        the just-healed unscored row, or it is silently dropped as an
-        out-of-window gap instead of kept as a null row.
+    def test_a_mixed_gap_that_cannot_reach_first_fold_raises(self, panel):
+        """A universe backfill can add a ticker's whole history at once, so the
+        SAME incremental build may be missing an unscored (pre-``FIRST_FOLD``)
+        key and a scored key together. The unscored fill still forces the widen
+        target back to ``FIRST_FOLD`` — a pre-``FIRST_FOLD`` event joins every
+        scored fold's pool — so a ``since`` whose bounded window cannot reach
+        ``FIRST_FOLD`` must refuse: recomputing only down to the window floor
+        would carry the folds in between with a changed pool. This is the
+        mixed-gap form of the failure semantics; before the fix the unscored
+        fill returned early and those stale folds were silently reused. The
+        thinned scored key is present only to mirror a realistic mixed
+        backfill — it is NOT what triggers the refusal. The unscored half
+        alone forces it (``pool_changed`` decides before any scored widening),
+        which is why a pure unscored gap under the same ``since`` raises the
+        same ``rebuild in full`` message this test reads via ``match=``. Like
+        the two tests below, the unscored gap is produced by varying the PANEL
+        (the genuine backfill), not by thinning the stored table.
         """
-        since = "2015-01-01"
-        unscored_date = built["event_date"].min()
-        unscored_ticker = built.loc[built["event_date"] == unscored_date, "ticker"].iloc[0]
-
-        scored = built[built["pred_abs_move"].notna()]
-        scored_date = scored.loc[scored["event_date"] < pd.Timestamp(since), "event_date"].max()
-        scored_ticker = scored.loc[scored["event_date"] == scored_date, "ticker"].iloc[0]
-
-        thinned = built[
-            ~(
-                ((built["ticker"] == unscored_ticker) & (built["event_date"] == unscored_date))
-                | ((built["ticker"] == scored_ticker) & (built["event_date"] == scored_date))
-            )
-        ]
-
-        backfilled = build_forecasts(
-            panel, produces=_ONLY, models=_MODELS, since=since, existing=thinned,
-            tier3_snapshot="snap", log=lambda _m: None,
+        victim = panel["ticker"].iloc[0]
+        old_panel = panel[
+            ~((panel["ticker"] == victim) & (panel["date"] < FIRST_FOLD))
+        ].reset_index(drop=True)
+        existing_old = build_forecasts(
+            old_panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
         )
 
-        assert len(backfilled) == len(panel)
+        since = "2015-01-01"
+        scored = existing_old[existing_old["pred_abs_move"].notna()]
+        scored_date = scored.loc[
+            scored["event_date"] < pd.Timestamp(since), "event_date"
+        ].max()
+        scored_ticker = scored.loc[scored["event_date"] == scored_date, "ticker"].iloc[0]
+        # Thin a scored key too, so both halves of the mixed gap are present.
+        thinned = existing_old[
+            ~(
+                (existing_old["ticker"] == scored_ticker)
+                & (existing_old["event_date"] == scored_date)
+            )
+        ].reset_index(drop=True)
+
+        with pytest.raises(tier4.Tier4Error, match="(?i)rebuild in full"):
+            build_forecasts(
+                panel, produces=_ONLY, models=_MODELS, since=since,
+                existing=thinned, tier3_snapshot="snap", log=lambda _m: None,
+            )
+
+    def test_a_backfilled_pre_first_fold_row_widens_to_match_a_full_rebuild(
+        self, panel, built
+    ):
+        """The regression the issue brief names: a pre-``FIRST_FOLD`` row is
+        ``< stamp`` for EVERY scored fold, so backfilling one grows the
+        training pool a carried fold was fitted against. The old code filled
+        the key's null row and returned with ``cut`` unchanged, leaving every
+        carried fold silently stale. The other tests in this class thin the
+        stored table while passing the SAME panel — the trained pool never
+        moves — so this test varies the PANEL instead: build on a panel
+        missing one ticker's pre-``FIRST_FOLD`` history, then run the
+        incremental against the full one. Before the fix, ``incremental``
+        matched ``existing_old``'s stale carried folds, not ``built``. A
+        compound case — an unscored AND a scored gap together, both in-window
+        — reduces to this same widen target, because ``FIRST_FOLD`` always
+        wins the ``min()`` once an unscored gap is present (a scored gap's own
+        candidate can never be earlier than ``FIRST_FOLD``), so this single
+        case already covers it and a separate compound test would not
+        exercise a different code path.
+        """
+        victim = panel["ticker"].iloc[0]
+        old_panel = panel[
+            ~((panel["ticker"] == victim) & (panel["date"] < FIRST_FOLD))
+        ].reset_index(drop=True)
+        existing_old = build_forecasts(
+            old_panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+
+        since = "2013-03-01"
+        floor = fold_start_of(
+            [pd.Timestamp(since) - pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS)]
+        ).iloc[0]
+        assert floor <= FIRST_FOLD, "pick a since whose bounded window reaches FIRST_FOLD"
+
+        incremental = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since=since,
+            existing=existing_old, tier3_snapshot="snap", log=lambda _m: None,
+        )
+
+        # The actual regression: the unscored fill must widen to FIRST_FOLD so
+        # every scored fold is refit with the backfilled ticker in its pool.
         pd.testing.assert_frame_equal(
-            backfilled.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            incremental.sort_values(["event_date", "ticker"]).reset_index(drop=True),
             built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
         )
+
+    def test_a_backfill_outside_the_window_from_first_fold_raises_not_carries(
+        self, panel, built
+    ):
+        """When the bounded window from the requested ``since`` cannot reach
+        ``FIRST_FOLD``, recomputing from the window floor cannot heal the
+        scored folds between ``FIRST_FOLD`` and that floor — their training
+        pool changed, so carrying them is silently stale. The build must
+        refuse and name the full rebuild rather than write a table it knows is
+        wrong. Same panel-vs-existing split as the sibling test: the bug only
+        exists when the PANEL itself gains the pre-``FIRST_FOLD`` rows.
+        """
+        victim = panel["ticker"].iloc[0]
+        old_panel = panel[
+            ~((panel["ticker"] == victim) & (panel["date"] < FIRST_FOLD))
+        ].reset_index(drop=True)
+        existing_old = build_forecasts(
+            old_panel, produces=_ONLY, models=_MODELS, tier3_snapshot="snap",
+            log=lambda _m: None,
+        )
+
+        since = "2015-06-01"
+        floor = fold_start_of(
+            [pd.Timestamp(since) - pd.DateOffset(months=tier4.BACKFILL_WINDOW_MONTHS)]
+        ).iloc[0]
+        assert floor > FIRST_FOLD, "pick a since whose bounded window cannot reach FIRST_FOLD"
+
+        with pytest.raises(tier4.Tier4Error, match="(?i)rebuild in full"):
+            build_forecasts(
+                panel, produces=_ONLY, models=_MODELS, since=since,
+                existing=existing_old, tier3_snapshot="snap", log=lambda _m: None,
+            )
+
+    def test_an_unchanged_pool_still_carries_without_recomputing(self, panel, built):
+        """Negative control: the new ``pool_changed`` bookkeeping must not fire
+        when nothing was added to the retained prefix. No thinning is needed
+        here — passing the SAME panel ``built`` was built from leaves no gap
+        for the anti-join to find, so the early return must still carry every
+        fold untouched: no ``gap_widened_since`` in the report and no fold
+        recomputed just because the module now tracks the pool.
+        """
+        report: dict = {}
+        out = build_forecasts(
+            panel, produces=_ONLY, models=_MODELS, since="2015-01-01",
+            existing=built, tier3_snapshot="snap", log=lambda _m: None,
+            report=report,
+        )
+
+        pd.testing.assert_frame_equal(
+            out.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+            built.sort_values(["event_date", "ticker"]).reset_index(drop=True),
+        )
+        assert "gap_widened_since" not in report.get("pred_abs_move", {})
 
     def test_a_gap_outside_the_backfill_window_is_a_named_skip_not_a_crash(self, panel, built):
         """Decision 3 (revised): a gap older than BACKFILL_WINDOW_MONTHS from
