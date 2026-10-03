@@ -685,6 +685,13 @@ class OperationsHandler(http.server.BaseHTTPRequestHandler):
                     analog_projection.SERVING_INDEX_OUTDATED))
             status, document = analog_projection.analog_document(
                 conn, None, release_id, event_id, strategy)
+        except (analog_projection.sqlite3.Error, json.JSONDecodeError):
+            # #306: an index that opens but cannot be read (damaged bytes,
+            # corrupt stored analog JSON) is the typed refusal, never a
+            # traceback mid-response. Reached through ``analog_projection``'s
+            # own ``sqlite3`` import: this module's fan-out budget is spent.
+            status, document = analog_projection.index_refusal(
+                analog_projection.SERVING_INDEX_UNREADABLE)
         finally:
             conn.close()
         return self._send_document(status, document)
