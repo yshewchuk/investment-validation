@@ -65,6 +65,9 @@ Both detail routes accept an optional `row_key` filter. These authenticated
 reads consume one safely opened report per request and never rerun comparisons.
 The API and compatibility preview share validation of modern report fields,
 including dimension and finding-field membership in the shared field groups.
+Modern saved value pairs must encode as finite JSON; non-finite numbers and
+overflowing numeric literals produce the same malformed-report refusal.
+Finite numbers, large integers, nulls and string markers remain valid values.
 Pre-v1.2 reports and unstamped diagnostic comparisons retain their legacy
 summary behavior; the API requires complete run identity for v1.2 reports.
 The API takes an optional configured report path; no path means `no_report`.

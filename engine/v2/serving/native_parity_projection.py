@@ -203,6 +203,7 @@ def _validate_report_values(mismatches: list[dict[str, object]]) -> None:
             if (not isinstance(saved, dict)
                     or "legacy" not in saved or "native" not in saved):
                 raise ValueError("native parity mismatch value pair is incomplete")
+            json.dumps(saved, allow_nan=False)
 
 
 def _validate_run_identity(report: dict[str, object]) -> None:

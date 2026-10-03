@@ -769,3 +769,109 @@ def test_pre_v11_raw_comparison_unknown_dimension_and_field_stays_readable(parit
     code, summary = native_parity_summary(str(parity.report_path))
     assert code == HTTPStatus.OK
     assert summary["status"] == "available"
+
+
+# --------------------------------------------------------------------------
+# non-finite saved value pairs: the shared reader refuses them before any
+# route can serialize a response, and every valid saved value still serves
+# --------------------------------------------------------------------------
+
+
+_NON_FINITE_LITERALS = ("NaN", "Infinity", "-Infinity", "1e999", "-1e999")
+_SAVED_VALUE_SENTINEL = "saved-value-sentinel-4f19c2"
+_POSITIVE_SAVED_VALUES = (
+    pytest.param(1.25, id="finite"),
+    pytest.param(None, id="null"),
+    pytest.param("NaN", id="string_nan"),
+    pytest.param("Infinity", id="string_infinity"),
+    pytest.param(2 ** 53 + 1, id="large_int"),
+    pytest.param(True, id="bool"),
+)
+
+
+def _first_mismatch(document):
+    mismatch = next(entry for entry in document["mismatches"] if entry["finding_fields"])
+    assert mismatch["row_key"] == "BBB|S|2026-01-02"
+    assert mismatch["dimension"] == "forecasts"
+    assert mismatch["finding_fields"] == ["forecast_p10"]
+    return mismatch
+
+
+def _assert_malformed_routes(parity):
+    for path in _PARITY_ROUTES:
+        params = {"side": "legacy"} if path.endswith("unpaired") else None
+        code, body, headers = _get(parity.base, path, token=parity.token, params=params)
+        assert code == 503, path
+        _assert_no_store(headers)
+        problem = json.loads(body)
+        assert problem["code"] == NATIVE_PARITY_REPORT_MALFORMED, path
+        assert "items" not in problem, path
+        assert "compared_count" not in problem, path
+
+
+@pytest.mark.parametrize("side", ("legacy", "native"))
+@pytest.mark.parametrize("literal", _NON_FINITE_LITERALS)
+def test_non_finite_saved_value_is_refused_everywhere(parity, side, literal):
+    document = json.loads(json.dumps(parity.report))
+    _first_mismatch(document)["values"]["forecast_p10"][side] = _SAVED_VALUE_SENTINEL
+    write_parity_report(document, parity.report_path)
+    text = parity.report_path.read_text()
+    assert json.dumps(_SAVED_VALUE_SENTINEL) in text
+    parity.report_path.write_text(
+        text.replace(json.dumps(_SAVED_VALUE_SENTINEL), literal, 1))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE, (side, literal)
+    assert summary["status"] == "unavailable", (side, literal)
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED, (side, literal)
+    assert "compared_count" not in summary, (side, literal)
+
+    _assert_malformed_routes(parity)
+
+
+def test_nested_non_finite_saved_value_is_refused(parity):
+    document = json.loads(json.dumps(parity.report))
+    _first_mismatch(document)["values"]["forecast_p10"]["legacy"] = {
+        "nested": [1.0, {"deeper": float("nan")}]}
+    write_parity_report(document, parity.report_path)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert summary["status"] == "unavailable"
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+    _assert_malformed_routes(parity)
+
+
+@pytest.mark.parametrize("side", ("legacy", "native"))
+@pytest.mark.parametrize("value", _POSITIVE_SAVED_VALUES)
+def test_valid_saved_values_serve_exactly(parity, side, value):
+    document = json.loads(json.dumps(parity.report))
+    pair = _first_mismatch(document)["values"]["forecast_p10"]
+    pair[side] = value
+    write_parity_report(document, parity.report_path)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK, (side, value)
+    assert summary["status"] == "available", (side, value)
+    assert summary["mismatched_row_count"] == 2, (side, value)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200, (side, value)
+    _assert_no_store(headers)
+    assert json.loads(body)["status"] == "available", (side, value)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches",
+                               token=parity.token, params={"limit": "10"})
+    assert code == 200, (side, value)
+    _assert_no_store(headers)
+    first = json.loads(body)["items"][0]
+    assert (first["row_key"], first["dimension"]) == ("BBB|S|2026-01-02", "forecasts")
+    served = first["fields"]["forecast_p10"]
+    assert served["status"] == "differ", (side, value)
+    assert served[side] == value, (side, value)
+    assert type(served[side]) is type(value), (side, value)
+    other = "native" if side == "legacy" else "legacy"
+    assert served[other] == (1.25 if other == "native" else 1.0), (side, value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        assert served[side] == 2 ** 53 + 1, (side, value)
