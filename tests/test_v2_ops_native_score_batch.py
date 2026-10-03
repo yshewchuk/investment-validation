@@ -610,6 +610,13 @@ def test_decode_producer_refusals_rejects_malformed_item():
         {**code_detail, "key": {**key}, "code": None},
         {**code_detail, "key": {**key, "event_date": 1700000000}},
         {**code_detail, "key": {**key, "event_date": "not-a-real-date"}},
+        {**code_detail, "key": {**key, "event_date": "now"}},
+        {**code_detail, "key": {**key, "event_date": "today"}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01T00:00:00"}},
+        {**code_detail, "key": {**key, "event_date": "2026/01/01"}},
+        {**code_detail, "key": {**key, "event_date": "20260101"}},
+        {**code_detail, "key": {**key, "event_date": "2026-13-01"}},
+        {**code_detail, "key": {**key, "event_date": "2026-02-30"}},
     ):
         with pytest.raises(ValueError):
             _decode_producer_refusals(

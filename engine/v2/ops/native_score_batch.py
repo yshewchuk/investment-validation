@@ -13,7 +13,9 @@ caller yet -- see ``engine/v2/ops/ARCHITECTURE.md``'s
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -485,6 +487,13 @@ def _keyed_by_board_request(items: Any) -> dict[str, Any]:
 #: malformed producer detail can never dump an unbounded blob into it.
 _MAX_PRODUCER_DETAIL_LENGTH = 500
 
+#: The only ``event_date`` wire shape ``producer_refusals.json`` may carry --
+#: exactly what this module's own ``as_document()``/``_iso`` write. Relative
+#: strings like "now"/"today" parse fine under ``pd.Timestamp`` but resolve
+#: to wall-clock time, which would make a merged refusal's identity depend
+#: on when the gate runs instead of on the document's content.
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 def _validated_producer_refusal_fields(index: int, item: Any) -> tuple[Mapping[str, Any], str, str]:
     """Validate one ``producer_refusals.json`` item's shape and field types
@@ -525,10 +534,15 @@ def _validated_producer_refusal_fields(index: int, item: Any) -> tuple[Mapping[s
         raise ValueError(
             f"producer_refusals.json refusal at index {index} \"detail\" "
             f"must be a string")
-    if pd.isna(pd.Timestamp(raw_key["event_date"])):
-        raise ValueError(
-            f"producer_refusals.json refusal at index {index} key "
-            f"\"event_date\" must be a parseable date string")
+    event_date_error = (
+        f"producer_refusals.json refusal at index {index} key "
+        f"\"event_date\" must be a canonical YYYY-MM-DD date string")
+    if not _ISO_DATE_PATTERN.match(raw_key["event_date"]):
+        raise ValueError(event_date_error)
+    try:
+        date.fromisoformat(raw_key["event_date"])
+    except ValueError:
+        raise ValueError(event_date_error)
     return raw_key, str(item["code"]), str(item["detail"])
 
 
