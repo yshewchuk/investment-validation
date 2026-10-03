@@ -22,6 +22,7 @@ from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch import (
     NativeScoreBatchRowRefusal,
     NightlyEventInputs,
+    _decode_producer_refusals,
     _native_score_batch_documents,
     assemble_score_batch_inputs,
     run_native_score_batch_worker,
@@ -490,6 +491,177 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     # just its code.
     _refusal_matches_key(refusals_document, "TEST|TWIN-P|2026-01-15|am",
                          "UNSUPPORTED_STRATEGY")
+
+
+def test_run_native_score_batch_worker_merges_producer_refusals_when_present(tmp_path):
+    _stage_release(tmp_path)
+    root = tmp_path / "staging"
+    root.mkdir()
+    (root / "events.json").write_text(json.dumps([_event_doc()]))
+    (root / "producer_refusals.json").write_text(json.dumps({
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "OTHER", "strategy": "STR-THRU",
+                    "event_date": "2026-01-20", "session": "am"},
+            "code": "EVENT_NOT_FOUND",
+            "detail": "no matching calendar event",
+        }],
+    }))
+    run_native_score_batch_worker(
+        _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+    records_document = json.loads((root / "records.json").read_text())
+    assert len(records_document["records"]) == 1
+    assert _record_matches_identity(
+        records_document["records"]["TEST|STR-THRU|2026-01-15|am"],
+        event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    _refusal_matches_key(refusals_document, "OTHER|STR-THRU|2026-01-20|am",
+                         "EVENT_NOT_FOUND")
+
+
+def test_run_native_score_batch_worker_without_producer_refusals_file_matches_absent_and_empty(
+        tmp_path):
+    _stage_release(tmp_path)
+    for root_name, producer_body in (
+        ("staging_absent", None),
+        ("staging_empty", {"schema_version": "native_score_batch_producer_refusals.v1.0",
+                           "refusals": []}),
+    ):
+        root = tmp_path / root_name
+        root.mkdir()
+        (root / "events.json").write_text(json.dumps([_event_doc()]))
+        if producer_body is not None:
+            (root / "producer_refusals.json").write_text(json.dumps(producer_body))
+        run_native_score_batch_worker(
+            _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+    absent_root = tmp_path / "staging_absent"
+    empty_root = tmp_path / "staging_empty"
+    assert (absent_root / "refusals.json").read_bytes() == (
+        empty_root / "refusals.json").read_bytes()
+    assert (absent_root / "records.json").read_bytes() == (
+        empty_root / "records.json").read_bytes()
+
+
+def test_run_native_score_batch_worker_producer_refusal_colliding_with_record_raises(tmp_path):
+    _stage_release(tmp_path)
+    root = tmp_path / "staging"
+    root.mkdir()
+    (root / "events.json").write_text(json.dumps([_event_doc()]))
+    (root / "producer_refusals.json").write_text(json.dumps({
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "TEST", "strategy": "STR-THRU",
+                    "event_date": "2026-01-15", "session": "am"},
+            "code": "EVENT_NOT_FOUND",
+            "detail": "no matching calendar event",
+        }],
+    }))
+    with pytest.raises(ValueError):
+        run_native_score_batch_worker(
+            _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+
+
+def test_run_native_score_batch_worker_duplicate_unkeyable_producer_refusal_raises(tmp_path):
+    _stage_release(tmp_path)
+    root = tmp_path / "staging"
+    root.mkdir()
+    (root / "events.json").write_text(json.dumps([_event_doc()]))
+    bad_key = {"ticker": "TE|ST", "strategy": "STR-THRU",
+               "event_date": "2026-02-01", "session": "am"}
+    (root / "producer_refusals.json").write_text(json.dumps({
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [
+            {"key": bad_key, "code": "INVALID_KEY_FIELD", "detail": "first"},
+            {"key": bad_key, "code": "INVALID_KEY_FIELD", "detail": "second"},
+        ],
+    }))
+    with pytest.raises(ValueError):
+        run_native_score_batch_worker(
+            _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+
+
+def test_decode_producer_refusals_rejects_wrong_schema_version():
+    with pytest.raises(ValueError):
+        _decode_producer_refusals({"schema_version": "wrong", "refusals": []})
+    with pytest.raises(ValueError):
+        _decode_producer_refusals({
+            "schema_version": "native_score_batch_producer_refusals.v1.0",
+            "refusals": "not-a-list",
+        })
+
+
+def test_decode_producer_refusals_rejects_malformed_item():
+    schema_version = "native_score_batch_producer_refusals.v1.0"
+    key = {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+           "session": "am"}
+    code_detail = {"code": "EVENT_NOT_FOUND", "detail": "x"}
+    for item in (
+        None,
+        {"code": "EVENT_NOT_FOUND", "detail": "x"},
+        {"key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01"},
+         "code": "EVENT_NOT_FOUND", "detail": "x"},
+        {"key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+                 "session": "am"}, "detail": "x"},
+        {"key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+                 "session": "am"}, "code": "EVENT_NOT_FOUND"},
+        {**code_detail, "key": {**key, "ticker": None}},
+        {**code_detail, "key": {**key, "ticker": 123}},
+        {**code_detail, "key": {**key, "ticker": ""}},
+        {**code_detail, "key": {**key}, "code": None},
+        {**code_detail, "key": {**key, "event_date": 1700000000}},
+        {**code_detail, "key": {**key, "event_date": "not-a-real-date"}},
+        {**code_detail, "key": {**key, "event_date": "now"}},
+        {**code_detail, "key": {**key, "event_date": "today"}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01T00:00:00"}},
+        {**code_detail, "key": {**key, "event_date": "2026/01/01"}},
+        {**code_detail, "key": {**key, "event_date": "20260101"}},
+        {**code_detail, "key": {**key, "event_date": "2026-13-01"}},
+        {**code_detail, "key": {**key, "event_date": "2026-02-30"}},
+    ):
+        with pytest.raises(ValueError):
+            _decode_producer_refusals(
+                {"schema_version": schema_version, "refusals": [item]})
+
+
+def test_decode_producer_refusals_rejects_non_string_detail():
+    doc = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "A", "strategy": "B", "event_date": "2026-01-01",
+                    "session": "am"},
+            "code": "EVENT_NOT_FOUND", "detail": None,
+        }],
+    }
+    with pytest.raises(ValueError):
+        _decode_producer_refusals(doc)
+
+
+def test_decode_producer_refusals_rejects_mislabeled_invalid_key_field():
+    doc = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "TEST", "strategy": "STR-THRU",
+                    "event_date": "2026-01-15", "session": "am"},
+            "code": "INVALID_KEY_FIELD", "detail": "x",
+        }],
+    }
+    with pytest.raises(ValueError):
+        _decode_producer_refusals(doc)
+
+
+def test_decode_producer_refusals_truncates_long_detail():
+    doc = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "TEST", "strategy": "STR-THRU",
+                    "event_date": "2026-01-15", "session": "am"},
+            "code": "EVENT_NOT_FOUND", "detail": "x" * 1000,
+        }],
+    }
+    decoded = _decode_producer_refusals(doc)
+    assert len(decoded) == 1
+    assert len(decoded[0].detail) == 500
+    assert decoded[0].detail == ("x" * 1000)[:500]
 
 
 def test_run_native_score_batch_worker_scores_under_no_fit_guard(tmp_path, monkeypatch):
