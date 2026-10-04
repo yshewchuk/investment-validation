@@ -132,12 +132,20 @@ an event-day decision. Numeric, invalid, missing, and timezone-aware event
 dates refuse with `CONTRACT_MISMATCH`; decision and history-start inputs
 continue to require explicit naive midnight days.
 `panel_anchor` is the latest (freshest) of its contributing reads'
-own source dates, never a caller-asserted value — its consumer
+own source or outcome-availability dates, never a caller-asserted value — its consumer
 (`../scoring/ARCHITECTURE.md`'s `nightly_source_bundle.py`) trusts it as
 an observation-freshness upper bound, which only the latest, not the
 earliest, contributing date can be: the earliest would let an
 intervening freshness cutoff pass even though a later-dated input is
-actually fresher than that cutoff. It never assigns `tier4_row` or
+actually fresher than that cutoff. The bound includes the daily-state
+`source_session`, `regime_asof`, `runup_asof`, and the latest
+`computed_moves.available_as_of_date` among the eligible, non-skipped moves
+actually used by history aggregates and history-derived runup fields.
+Computed history contributes this bound even when price-history features
+cannot resolve a `runup_asof`. Empty history contributes no date; skipped,
+unavailable, and null-availability rows do not advance the anchor. Historical
+event dates and provenance timestamps do not substitute for outcome availability.
+It never assigns `tier4_row` or
 `quote_rows` — those stay the raw-row producer's own job
 (`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"). `key.strategy` never
 changes which reads it makes or which keys the result carries — every
