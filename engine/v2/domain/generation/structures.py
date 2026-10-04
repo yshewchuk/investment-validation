@@ -227,6 +227,28 @@ def _resolve_first_dte_at_least(inputs: Mapping[str, Any], expiries: list[str]) 
     return survivors[0]
 
 
+def resolve_expiry(strategy: str, inputs: Mapping[str, Any],
+                   expiries: list[str]) -> str:
+    """Public seam over the native expiry resolver (:func:`_resolve_straddle_expiry`).
+
+    Resolves ONLY an expiry: no strike/leg selection, no pricing, no reads.
+    ``expiries`` is the caller's sorted, distinct list of ISO candidate days
+    (the same shape ``_resolve_straddle_expiry``'s private callers already
+    build from the listed chain); its values are passed through unvalidated
+    and unnormalized, and neither ``inputs`` nor ``expiries`` is mutated.
+    Every resolution and refusal code is the private resolver's own
+    (``EXPIRY_NOT_LISTED``, ``NO_EXPIRY_ON_OR_AFTER``, and for STR-RUNUP the
+    ``first_dte_at_least`` family). The single addition is the empty
+    candidate list: with nothing to choose from, the resolver's no-date-
+    signal default would raise a bare ``IndexError``, so this refuses
+    ``MISSING_EXPIRY`` -- the same typed code ``_expiry`` already uses when
+    no expiry is captured and there is nothing listed to select from.
+    """
+    if not expiries:
+        raise GeometryRefusal("MISSING_EXPIRY")
+    return _resolve_straddle_expiry(strategy, inputs, expiries)
+
+
 def _select_listed_straddle(strategy: str, inputs: Mapping[str, Any], spot: float) -> tuple[float, str] | None:
     """Select a common listed strike and expiry from raw quote keys.
 
@@ -700,4 +722,5 @@ def price(geometry: Geometry, quotes: Mapping[Any, Mapping[str, Any]],
 
 
 __all__ = ["DISABLED", "Geometry", "GeometryRefusal", "NativeLeg", "PricedLeg",
-           "Pricing", "PricingRefusal", "STRATEGIES", "generate", "price"]
+           "Pricing", "PricingRefusal", "STRATEGIES", "generate", "price",
+           "resolve_expiry"]

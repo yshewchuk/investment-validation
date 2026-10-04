@@ -31,14 +31,18 @@ Exported from `engine/v2/domain/generation/__init__.py`
   `generate` can still resolve on its own. Deliberately not a full
   resolution: whether a date filter then leaves a survivor is `generate`'s
   job, and its refusal is more specific (see "Failure semantics").
+- `resolve_expiry(strategy: str, inputs: Mapping[str, Any], expiries: list[str]) -> str`
+  — resolves only an expiry from sorted, distinct ISO candidate days by
+  delegating to the existing native resolver. It does not select strikes or
+  legs, price quotes, or mutate `inputs` or `expiries`.
 - Dataclasses: `Geometry` (`strategy`, `spot`, `width`, `legs`, `refusal`,
   `detail`), `NativeLeg` (`name`, `right`, `side`, `quantity`, `strike`,
   `expiry`), `Pricing` (`strategy`, `spot`, `entry_cost`, `legs`, `refusal`),
   `PricedLeg` (`NativeLeg`'s fields plus `bid`, `ask`, `fill`, `cash_flow`).
-- Exceptions: `GeometryRefusal` (raised by `generate`/`has_resolvable_expiry`
-  helpers; carries the refusal code as both its message and `.code`, plus an
-  optional `.detail`) and `PricingRefusal` (raised by `price`; the code is
-  its message).
+- Exceptions: `GeometryRefusal` (raised by `generate`,
+  `has_resolvable_expiry` helpers, and `resolve_expiry`; carries the refusal
+  code as both its message and `.code`, plus an optional `.detail`) and
+  `PricingRefusal` (raised by `price`; the code is its message).
 - `STRATEGIES` — every strategy name this package knows. `DISABLED` — the
   subset `generate` always refuses outright (`CAL-P`, `CND-P`, each mapped
   to `UNVALIDATED_STRUCTURE`).
@@ -132,6 +136,10 @@ are instead returned as data, never raised:
   re-raises or re-derives a different code.
 - `has_resolvable_expiry` always returns a plain `bool`; it never raises,
   even where the resolution it is checking for would itself refuse.
+- `resolve_expiry` raises `GeometryRefusal("MISSING_EXPIRY")` for an empty
+  candidate list. For non-empty candidates, it preserves the native
+  resolver's existing `GeometryRefusal` codes, including fixed-expiry and
+  strategy-specific date-filter refusals.
 
 Raised exceptions:
 
