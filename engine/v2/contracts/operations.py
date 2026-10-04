@@ -103,6 +103,12 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "PUBLICATION_REFUSED": ("validation", False),
     "IDEMPOTENCY_CONFLICT": ("validation", False),
     "INVALID_REQUEST": ("validation", False),
+    # P6 experiment platform (ops/experiments.py, ARCHITECTURE.md section R1):
+    # the spec resolver's typed refusal for an unknown spec field or an
+    # economically unused declaration. Registered here -- the established
+    # code registry -- never as an import-time side effect in the raising
+    # module, so ``make_problem`` is an OpsError in every import order.
+    "INVALID_EXPERIMENT_SPEC": ("validation", False),
     "UNAUTHORIZED_NAMESPACE": ("validation", False),
     "STALE_EXPECTATION": ("validation", False),
     "INTEGRITY_FAILED": ("integrity", False),

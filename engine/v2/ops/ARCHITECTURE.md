@@ -1271,6 +1271,15 @@ either, except that one documented dashboard caller. `board_requests`'s
 real caller is the raw-row producer ("Cutover PR-6" above), once
 implemented.
 
+### Experiment specification resolution
+
+`experiments.py` resolves one `ExperimentSpec` into a typed immutable
+execution plan before experiment work begins. The plan records the declared
+economic inputs in the form consumed by the selected stage and is persisted
+as a deterministic artifact. Resolution rejects unknown fields and any
+declared economic input that has no consuming stage; recording a value in
+the specification alone does not make it an execution input.
+
 ## External systems and libraries
 
 | System / library | Used for | Notes |
@@ -1294,7 +1303,7 @@ otherwise.
 
 | # | Convention |
 |---|---|
-| R1 | A missing/malformed input is a typed refusal (`Problem`/`OpsError`), never a default, except optional admission cache statistics: unavailable or invalid `file`/`shmem` falls back to valid `inactive_file`, then raw `memory.current`; `shmem > file` is invalid. A whole-call refusal is for a caller error that makes the request meaningless; anything scoped to one row of a batch is collected there instead, never sinking the batch. Proposed experiment spec resolution refuses unknown or economically unused declarations as `INVALID_EXPERIMENT_SPEC` before execution. |
+| R1 | A missing/malformed input is a typed refusal (`Problem`/`OpsError`), never a default, except optional admission cache statistics: unavailable or invalid `file`/`shmem` falls back to valid `inactive_file`, then raw `memory.current`; `shmem > file` is invalid. A whole-call refusal is for a caller error that makes the request meaningless; anything scoped to one row of a batch is collected there instead, never sinking the batch. Experiment spec resolution refuses unknown fields or economically unused declarations as `INVALID_EXPERIMENT_SPEC` before an execution plan is persisted or work begins. |
 | R2 | The catalog's `data_raw_receipts` table (`unit_receipts.py`) is the one durable fetch cache: only a `complete` receipt is reused; `legitimate_empty` is always re-verified live, and `not_final`/`transient`/`refused` are never cached. |
 | R3 | `lifecycle.py`/`recovery.py` govern lease and ownership recovery; a stale lease is reclaimed only after ownership is proven gone. A tick-loop sidecar (below) never resubmits a job that already exists under its own key in any state — that is a coarser, separate budget from a job's own `RetryPolicy`. |
 | R4 | Catalog writes go through `catalog.transaction`. A coordinator effect's own filesystem write must be replay-safe and idempotent, not atomic with the DB commit (root doc §6) — one exception, legacy `experiment_effect`, appends a ledger CSV row inside the transaction and recovers by replay. Proposed v2 experiment arms resolve declared economics into execution inputs before effects, bind per-variant reports and ledger rows to that identity, report variant count, keep the final holdback outside all sweeps, and use `--no-ledger` for smoke/subset runs. The `computed_moves_refresh` and `native_parity` tick-loop paths submit individually (`submission.submit`, not `submit_graph`); this does not describe `native_score_batch`, whose snapshot-pinned identity may be refused before a matching job exists. Separate submission also does not guarantee legacy progress: a pre-plan resume can wait for snapshot import while `run_trigger` holds the legacy nightly lock. |

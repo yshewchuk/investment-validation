@@ -46,7 +46,7 @@ def test_experiment_kind_is_registered_with_experiment_heavy_profile():
 
 
 def test_experiment_worker_runs_synthetic_runner_and_writes_receipt(tmp_path):
-    (tmp_path / "spec.json").write_text(json.dumps(_spec_document()))
+    (tmp_path / "spec.json").write_text(json.dumps(_spec_document(economic_params={})))
     result = worker.dispatch("experiment", {"expected_ids": ["experiment:x"],
                                             "runner": "synthetic", "no_ledger": True}, tmp_path)
     assert result["completed_ids"] == ["experiment:x"]
@@ -207,7 +207,8 @@ def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path
     runner_path.parent.mkdir(parents=True)
     runner_path.write_text("if __name__ == '__main__':\n    pass\n")
     (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
-    (tmp_path / "spec.json").write_text(json.dumps(_spec_document(runner=runner_id)))
+    (tmp_path / "spec.json").write_text(
+        json.dumps(_spec_document(runner=runner_id, economic_params={})))
 
     commands = []
 
@@ -241,7 +242,8 @@ def test_worker_refuses_a_legacy_runner_that_exits_nonzero_after_the_report(tmp_
         "print('runner exploded', file=sys.stderr)\n"
         "sys.exit(1)\n")
     (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
-    (tmp_path / "spec.json").write_text(json.dumps(_spec_document(runner=runner_id)))
+    (tmp_path / "spec.json").write_text(
+        json.dumps(_spec_document(runner=runner_id, economic_params={})))
 
     with pytest.raises(OpsError) as excinfo:
         worker.dispatch("experiment",
@@ -407,7 +409,7 @@ def test_experiment_plan_names_a_runner_and_experiment_heavy_profile(tmp_path):
 
 def _submit_experiment(conn, root, clock, key, *, document=None, no_ledger=True,
                        preregistration_root=None):
-    document = document or _spec_document()
+    document = document or _spec_document(economic_params={})
     store = ArtifactStore(root)
     spec_ref = store.publish_bytes(json.dumps(document, sort_keys=True).encode(),
                                    schema_ref="experiment_spec.v1.0")
@@ -481,7 +483,7 @@ def test_cli_experiment_plan_and_submit_run_under_the_planned_profile(tmp_path, 
     hard-coded 1-thread identity and every CLI submission was refused)."""
     root = tmp_path / "ops"
     spec_path = tmp_path / "spec.json"
-    spec_path.write_text(json.dumps(_spec_document()))
+    spec_path.write_text(json.dumps(_spec_document(economic_params={})))
     job_id = _cli_plan_and_submit(root, spec_path, capsys)
 
     clock = SystemClock()
@@ -531,9 +533,142 @@ def test_cli_experiment_with_stale_thread_count_is_refused_input_changed(
         finally:
             service.close()
         failure = json.loads(conn.execute("SELECT failure_json FROM attempts WHERE job_id=?",
-                                          (job_id,)).fetchone()[0])
+                                           (job_id,)).fetchone()[0])
         assert failure["code"] == "INPUT_CHANGED"
         assert conn.execute("SELECT state FROM jobs WHERE job_id=?",
-                            (job_id,)).fetchone()[0] != "succeeded"
+                             (job_id,)).fetchone()[0] != "succeeded"
     finally:
         conn.close()
+
+
+def test_spec_refuses_an_unknown_top_level_key_as_invalid_experiment_spec():
+    with pytest.raises(OpsError) as excinfo:
+        experiments.experiment_spec_from_document(_spec_document(author="operator"))
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_unused_economic_key_refuses_before_the_runner_is_invoked(tmp_path):
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid", "slippage_bps": 5}))
+    invoked = []
+
+    def runner(*, run_dir, no_ledger):
+        invoked.append(run_dir)
+
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, tmp_path / "run", runner=runner,
+                                   mode="smoke", synthetic=True)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not invoked and not (tmp_path / "run").exists()
+
+
+def test_resolved_plan_is_immutable_and_its_json_bytes_are_canonical():
+    document = _spec_document(economic_params={"fill": "mid"})
+    plan = experiments.resolve_experiment_plan(
+        experiments.experiment_spec_from_document(document))
+    first = plan.json_bytes()
+    assert first == plan.json_bytes()
+    assert b'"fill":"mid"' in first and b": " not in first
+    payload = json.loads(first.decode("utf-8"))
+    assert list(payload) == sorted(payload)
+    with pytest.raises(TypeError):
+        plan.economic_params["fill"] = "off"
+    document["economic_params"]["fill"] = "off"  # no mutable mapping leaks in
+    assert plan.json_bytes() == first
+
+
+def test_changed_fill_changes_the_plan_the_runner_receives(tmp_path):
+    received = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        received.append(execution_plan)
+        (run_dir / "REPORT.md").write_text(
+            "# plan probe\n\n*Generated by engine.report v1.0.*\n")
+
+    for fill in ("mid", "off"):
+        spec = experiments.experiment_spec_from_document(
+            _spec_document(economic_params={"fill": fill}))
+        receipt = experiments.run_experiment(spec, tmp_path, tmp_path / fill, runner=runner,
+                                             mode="smoke", synthetic=True)
+        assert receipt["status"] == "succeeded"
+    assert [type(plan) for plan in received] == [experiments.ResolvedExperimentPlan] * 2
+    assert [plan.economic_params["fill"] for plan in received] == ["mid", "off"]
+    assert received[0].json_bytes() != received[1].json_bytes()
+
+
+def test_legacy_callable_without_execution_plan_still_runs_empty_economics(tmp_path):
+    spec = experiments.experiment_spec_from_document(_spec_document(economic_params={}))
+    seen = []
+
+    def runner(*, run_dir, no_ledger):
+        seen.append(no_ledger)
+        (run_dir / "REPORT.md").write_text(
+            "# legacy\n\n*Generated by engine.report v1.0.*\n")
+
+    receipt = experiments.run_experiment(spec, tmp_path, tmp_path / "legacy", runner=runner,
+                                         mode="smoke", synthetic=True)
+    assert receipt["status"] == "succeeded"
+    assert seen == [True]
+
+
+def test_legacy_callable_without_execution_plan_refuses_declared_economics(tmp_path):
+    """A legacy callable has no channel for ``execution_plan``, so a resolved
+    plan carrying economic parameters is a typed refusal before the call --
+    never an invocation that silently drops the declared stance -- and the
+    refusal is a preflight in ``run_experiment`` itself: no run directory,
+    no ``CAPABILITIES.json``, no receipt exists when it fires."""
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid"}))
+    invoked = []
+
+    def runner(*, run_dir, no_ledger):
+        invoked.append(run_dir)
+
+    run_dir = tmp_path / "legacy-refusal"
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                   mode="smoke", synthetic=True)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert excinfo.value.problem.details["economic_keys"] == ["fill"]
+    assert not invoked
+    assert not run_dir.exists()
+    assert not (run_dir / "CAPABILITIES.json").exists()
+    assert not (tmp_path / "experiment_receipt.json").exists()
+
+
+def test_run_experiment_hands_in_the_same_supplied_resolved_plan(tmp_path):
+    """A supplied plan whose canonical bytes match the spec's resolution is
+    adopted as-is -- the callable receives that exact object -- and a plan
+    that resolves differently is a typed refusal before the run directory
+    or any evidence can exist."""
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid"}))
+    plan = experiments.resolve_experiment_plan(spec)
+    received = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        received.append(execution_plan)
+        (run_dir / "REPORT.md").write_text(
+            "# supplied plan\n\n*Generated by engine.report v1.0.*\n")
+
+    run_dir = tmp_path / "supplied"
+    receipt = experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                         mode="smoke", synthetic=True, resolved_plan=plan)
+    assert receipt["status"] == "succeeded"
+    assert len(received) == 1
+    assert received[0] is plan
+
+    mismatched = experiments.resolve_experiment_plan(
+        replace(spec, economic_params={"fill": "off"}))
+    refused_dir = tmp_path / "mismatched"
+    invoked = []
+
+    def spy_runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(execution_plan)
+
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, refused_dir, runner=spy_runner,
+                                   mode="smoke", synthetic=True, resolved_plan=mismatched)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not invoked
+    assert not refused_dir.exists()

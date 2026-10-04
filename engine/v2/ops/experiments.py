@@ -4,8 +4,10 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Callable
 
 from engine.v2.foundation import content_hash
@@ -18,6 +20,16 @@ from engine.v2.ops.fingerprints import (
     worker_source_manifest,
 )
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
+
+#: The closed top-level field set of a spec document: a key this resolver
+#: cannot interpret is refused, never quietly ignored into a runner call.
+SPEC_FIELDS = frozenset({"experiment_id", "hypothesis", "primary_arm_id", "arms",
+                         "seed", "folds", "economic_params", "price_source",
+                         "input_files", "runner"})
+
+#: The only economic declaration with a defined execution meaning today;
+#: any other key is an unused declaration, refused before the runner.
+SUPPORTED_ECONOMIC_KEYS = frozenset({"fill"})
 
 
 def default_checkout_root() -> Path:
@@ -81,6 +93,11 @@ def experiment_spec_from_document(document: dict) -> ExperimentSpec:
     durable attempt record -- is built, so a missing required field is refused
     once, as an ``OpsError``, never a bare ``KeyError``.
     """
+    unknown = sorted(set(document) - SPEC_FIELDS)
+    if unknown:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment specification declares fields this resolver does not know",
+                   details={"fields": unknown})
     for name in ("hypothesis", "primary_arm_id", "economic_params", "price_source"):
         if name not in document or document[name] is None:
             raise fail("INVALID_REQUEST", "experiment specification is missing a required field",
@@ -118,8 +135,70 @@ class ExperimentSpec:
                              "hypothesis": self.hypothesis,
                              "primary_arm_id": self.primary_arm_id,
                              "arms": self.arms, "seed": self.seed,
-                             "folds": self.folds, "economic_params": self.economic_params,
-                             "price_source": self.price_source, "runner": self.runner})
+                              "folds": self.folds, "economic_params": self.economic_params,
+                              "price_source": self.price_source, "runner": self.runner})
+
+
+def _freeze(value):
+    """Immutable snapshot over FRESH dicts: a proxy over the parsed document's
+    own mapping would still let that document mutate the "immutable" plan."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value):
+    """Plain JSON structures rebuilt at serialization time, never stored."""
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class ResolvedExperimentPlan:
+    """The one execution plan an ``ExperimentSpec`` resolves to.
+
+    Deeply immutable (a frozen dataclass over frozen mappings), and its
+    ``json_bytes`` are canonical: sorted keys, compact separators, one stable
+    UTF-8 encoding. A runner that declares ``execution_plan`` receives this
+    plan -- never the raw document it was parsed from.
+    """
+    schema_version: str
+    experiment_id: str
+    arms: tuple[str, ...]
+    seed: int
+    folds: tuple[str, ...]
+    economic_params: Mapping
+    price_source: str
+    runner: str
+
+    def as_document(self) -> dict:
+        return {"schema_version": self.schema_version, "experiment_id": self.experiment_id,
+                "arms": list(self.arms), "seed": self.seed, "folds": list(self.folds),
+                "economic_params": _thaw(self.economic_params),
+                "price_source": self.price_source, "runner": self.runner}
+
+    def json_bytes(self) -> bytes:
+        return json.dumps(self.as_document(), sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8")
+
+
+def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
+    """Refuse economically unused declarations, then freeze the one plan."""
+    unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
+    if unused:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment declares economically unused parameters",
+                   details={"keys": unused})
+    return ResolvedExperimentPlan(
+        schema_version="experiment_execution_plan.v1.0", experiment_id=spec.experiment_id,
+        arms=spec.arms, seed=spec.seed, folds=spec.folds,
+        economic_params=_freeze(spec.economic_params), price_source=spec.price_source,
+        runner=spec.runner)
 
 
 def experiments_ledger_path(repo_root: Path | str) -> Path:
@@ -425,12 +504,45 @@ def runner_manifest(root: Path | str, script: str) -> dict:
             "removal_phase": entry["removal_phase"]}
 
 
-def _call_runner(runner: Callable, run_dir: Path, *, no_ledger: bool):
+def _execution_plan_compatibility(runner: Callable,
+                                  execution_plan: ResolvedExperimentPlan) -> None:
+    """Refuse a legacy callable that cannot carry the plan's economic stance.
+
+    A callable without an ``execution_plan`` parameter has no channel for
+    ``economic_params``, so silently dropping a declared economic stance is
+    refused as the resolver's typed ``INVALID_EXPERIMENT_SPEC``. Called by
+    :func:`run_experiment` as a preflight -- before the run directory or any
+    evidence exists -- and again by :func:`_call_runner` as defense in depth.
+    """
+    if not execution_plan.economic_params:
+        return
+    if "execution_plan" in {name for name in inspect.signature(runner).parameters}:
+        return
+    raise fail("INVALID_EXPERIMENT_SPEC",
+               "experiment runner does not declare execution_plan but the "
+               "resolved plan carries economic parameters",
+               details={"economic_keys": sorted(execution_plan.economic_params)})
+
+
+def _call_runner(runner: Callable, run_dir: Path, *, no_ledger: bool,
+                 execution_plan: ResolvedExperimentPlan):
+    """Invoke one runner with the resolved plan as its ``execution_plan``.
+
+    A callable that declares ``execution_plan`` receives exactly that plan --
+    never the raw document. A callable that does not is the legacy shape and
+    stays compatible only while the resolved plan carries no
+    ``economic_params``: the refusal is the shared preflight above, which
+    ``run_experiment`` already ran before any artifact existed and which is
+    re-checked here as defense in depth.
+    """
     signature = inspect.signature(runner)
     if "no_ledger" not in signature.parameters:
         raise fail("INVALID_REQUEST", "experiment runner lacks required no-ledger control")
+    _execution_plan_compatibility(runner, execution_plan)
     kwargs = {"run_dir": run_dir, "no_ledger": no_ledger}
     accepted = {name for name in signature.parameters}
+    if "execution_plan" in accepted:
+        kwargs["execution_plan"] = execution_plan
     return runner(**{key: value for key, value in kwargs.items() if key in accepted})
 
 
@@ -447,12 +559,31 @@ def _report_evidence(run_dir: Path) -> dict:
 
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    *, runner: Callable, mode="smoke", backup: Callable | None = None,
-                   synthetic=False) -> dict:
+                   synthetic=False,
+                   resolved_plan: ResolvedExperimentPlan | None = None) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity."""
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
     if mode == "smoke" and backup is not None:
         raise fail("INVALID_REQUEST", "smoke runs cannot request backup")
+    # Resolved once, here: an unused economic declaration is a typed refusal
+    # before any directory is created, any evidence persisted, or the runner
+    # is invoked, and the very plan is the one handed to the callable below.
+    # A supplied plan is adopted only after its canonical bytes prove it is
+    # the plan this spec resolves to; the object itself then travels to the
+    # runner, so a caller's plan identity survives the call unchanged.
+    if resolved_plan is None:
+        plan = resolve_experiment_plan(spec)
+    else:
+        if resolved_plan.json_bytes() != resolve_experiment_plan(spec).json_bytes():
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "supplied resolved plan is not the plan this spec resolves to",
+                       details={"experiment_id": spec.experiment_id})
+        plan = resolved_plan
+    # The legacy-callable compatibility check is the same kind of preflight:
+    # a runner with no ``execution_plan`` channel is refused, typed, before
+    # the run directory, ``CAPABILITIES.json``, or any receipt can exist.
+    _execution_plan_compatibility(runner, plan)
     base = Path(root).resolve()
     destination = Path(run_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -464,8 +595,8 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
     (destination / "CAPABILITIES.json").write_text(json.dumps(capabilities, indent=2,
                                                                 sort_keys=True))
     try:
-        result = _call_runner(runner, destination,
-                              no_ledger=(mode == "smoke" or synthetic))
+        result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
+                              execution_plan=plan)
         report = _report_evidence(destination)
         receipt.evidence.update(report)
         receipt.evidence["runner_result"] = result if isinstance(result, dict) else str(result)
