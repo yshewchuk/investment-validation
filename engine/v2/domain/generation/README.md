@@ -16,6 +16,8 @@ Replaces (§4.4): `structures.py`, `forecast_sizing.py`, `fills.py`.
 - Resolve a structure template against a listed strike ladder and expiry set,
   selecting the expiry itself off listed quotes when the caller supplies
   none (`has_resolvable_expiry`).
+- Resolve only a strategy expiry from caller-supplied candidate days
+  (`resolve_expiry`), without selecting geometry or pricing.
 - Finite placement search with a validity and completeness receipt.
 - Forecast-sized geometry, recording the forecast even when the shape is pinned.
 
@@ -32,7 +34,7 @@ underscore convention, and an import of a name absent from this list fails
 
 The package exposes deterministic native geometry and quote pricing.
 
-<!-- public-interface: DISABLED, STRATEGIES, Geometry, GeometryRefusal, NativeLeg, PricedLeg, Pricing, PricingRefusal, generate, has_resolvable_expiry, price -->
+<!-- public-interface: DISABLED, STRATEGIES, Geometry, GeometryRefusal, NativeLeg, PricedLeg, Pricing, PricingRefusal, generate, has_resolvable_expiry, price, resolve_expiry -->
 
 ## Consumers
 

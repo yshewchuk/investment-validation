@@ -1288,3 +1288,105 @@ class TestLadderTooCoarseIsItsOwnFailure:
         with pytest.raises(StructureError) as excinfo:
             price_structure(twin_peak(width_moneyness=0.9), snapshot, MID)
         assert not isinstance(excinfo.value, LadderTooCoarse)
+
+
+# --------------------------------------------------------------------------
+# 4a.0 — the public `resolve_expiry` seam (engine.v2.domain.generation).
+#
+# The acceptance bar is that the wrapper IS the existing private resolver:
+# same answers, same refusal codes, on caller-supplied sorted distinct ISO
+# candidate days — plus the one new refusal (an empty candidate list is
+# MISSING_EXPIRY), no mutation of caller state, and no reach into geometry
+# generation or pricing. Every case below is one the private resolver
+# already resolves today; nothing here introduces new strategy semantics.
+# --------------------------------------------------------------------------
+
+from engine.v2.domain.generation import resolve_expiry
+from engine.v2.domain.generation import structures as v2_structures
+from engine.v2.domain.generation import GeometryRefusal
+
+#: Two real Friday expirations one week apart — the same shape as
+#: ``_runup_chain`` above: 2025-05-09 is 24 DTE from a 2025-04-15 session
+#: (too short for STR-RUNUP), 2025-05-16 is 31 (the survivor).
+_RESOLVER_CANDIDATES = ["2025-05-09", "2025-05-16"]
+
+
+class TestResolveExpirySeam:
+    def test_exported_from_the_public_package(self):
+        import engine.v2.domain.generation as generation
+        assert "resolve_expiry" in generation.__all__
+        assert "resolve_expiry" in v2_structures.__all__
+        assert generation.resolve_expiry is resolve_expiry
+
+    def test_backed_directly_by_the_existing_private_resolver(self, monkeypatch):
+        seen = []
+
+        def spy(strategy, inputs, expiries):
+            seen.append((strategy, dict(inputs), list(expiries)))
+            return "resolved-by-spy"
+
+        monkeypatch.setattr(v2_structures, "_resolve_straddle_expiry", spy)
+        got = resolve_expiry("STR-THRU", {"expiry": "2025-05-16"},
+                             list(_RESOLVER_CANDIDATES))
+        assert got == "resolved-by-spy"
+        assert seen == [("STR-THRU", {"expiry": "2025-05-16"},
+                         _RESOLVER_CANDIDATES)]
+
+    @pytest.mark.parametrize("strategy, inputs, expected", [
+        # fixed: the caller-supplied expiry wins over the earlier candidate.
+        ("STR-THRU", {"expiry": "2025-05-16"}, "2025-05-16"),
+        # first_post_event AMC: an expiry landing ON the event date dies at
+        # the close before the print and must be skipped.
+        ("STR-THRU", {"event_date": "2025-05-09", "session": "AMC"}, "2025-05-16"),
+        # first_post_event BMO: the same expiry survives and is selected.
+        ("STR-THRU", {"event_date": "2025-05-09", "session": "BMO"}, "2025-05-09"),
+        # STR-RUNUP: first_dte_at_least 30 from entry, not first_post_event.
+        ("STR-RUNUP", {"entry_date": "2025-04-15"}, "2025-05-16"),
+    ])
+    def test_returns_the_same_expiry_as_the_private_resolver(self, strategy,
+                                                             inputs, expected):
+        got = resolve_expiry(strategy, inputs, list(_RESOLVER_CANDIDATES))
+        assert got == expected
+        assert got == v2_structures._resolve_straddle_expiry(
+            strategy, inputs, list(_RESOLVER_CANDIDATES))
+
+    @pytest.mark.parametrize("strategy, inputs, code", [
+        ("STR-THRU", {"expiry": "2030-01-18"}, "EXPIRY_NOT_LISTED:2030-01-18"),
+        ("STR-THRU", {"event_date": "2026-01-01", "session": "BMO"},
+         "NO_EXPIRY_ON_OR_AFTER:2026-01-01"),
+        ("STR-RUNUP", {"entry_date": "2025-05-01"}, "NO_EXPIRY_DTE_AT_LEAST:30"),
+        ("STR-RUNUP", {}, "MISSING_ENTRY_DATE"),
+    ])
+    def test_preserves_the_private_resolvers_refusal_codes(self, strategy,
+                                                           inputs, code):
+        with pytest.raises(GeometryRefusal) as public:
+            resolve_expiry(strategy, inputs, list(_RESOLVER_CANDIDATES))
+        with pytest.raises(GeometryRefusal) as private:
+            v2_structures._resolve_straddle_expiry(
+                strategy, inputs, list(_RESOLVER_CANDIDATES))
+        assert public.value.code == code
+        assert private.value.code == code
+
+    def test_empty_candidate_list_refuses_missing_expiry(self):
+        with pytest.raises(GeometryRefusal) as caught:
+            resolve_expiry("STR-THRU", {"event_date": "2025-05-09"}, [])
+        assert caught.value.code == "MISSING_EXPIRY"
+
+    def test_caller_inputs_and_candidates_are_unchanged(self):
+        inputs = {"event_date": "2025-05-09", "session": "AMC"}
+        expiries = list(_RESOLVER_CANDIDATES)
+        inputs_before = dict(inputs)
+        expiries_before = list(expiries)
+        assert resolve_expiry("STR-THRU", inputs, expiries) == "2025-05-16"
+        assert inputs == inputs_before
+        assert expiries == expiries_before
+
+    def test_the_wrapper_reaches_neither_geometry_nor_pricing(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise AssertionError("resolve_expiry must not generate or price")
+
+        monkeypatch.setattr(v2_structures, "generate", boom)
+        monkeypatch.setattr(v2_structures, "price", boom)
+        got = resolve_expiry("STR-RUNUP", {"entry_date": "2025-04-15"},
+                             list(_RESOLVER_CANDIDATES))
+        assert got == "2025-05-16"
