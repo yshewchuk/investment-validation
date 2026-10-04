@@ -143,10 +143,13 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
     slice, projected to raw ``(right, strike, expiry)``: no other session, no
     quote-usability filter, no expiry before the decision session. Every
     projected row's ``expiry``/``strike``/``right`` is validated before any
-    expiry filtering -- a malformed one is ``CONTRACT_MISMATCH``. The eligible
-    domain follows the native strategy policy; the result is the sorted distinct
-    ISO tuple, empty only when the domain is empty."""
+    expiry filtering -- a malformed one is ``CONTRACT_MISMATCH``. The key's
+    strategy and session domains are checked before any scan, so an unsupported
+    nonempty value is ``INVALID_REQUEST`` rather than a masked empty expiry
+    domain. The eligible domain follows the native strategy policy; the result
+    is the sorted distinct ISO tuple, empty only when the domain is empty."""
     _require_key(key)
+    _require_supported_domains(key)
     session_day = _calendar_day(decision_session, "decision_session")
     contract = repository.table_contract(snapshot, _CHAIN_TABLE)
     version = snapshot.table_versions[_CHAIN_TABLE]

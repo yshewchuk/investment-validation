@@ -711,6 +711,30 @@ def test_candidate_expiries_rejects_bad_key_before_scan(key):
     assert exc.value.code == "INVALID_REQUEST"
 
 
+@pytest.mark.parametrize("key", [
+    replace(_STRADDLE_KEY, strategy="NOT-A-STRATEGY"),
+    replace(_STRADDLE_KEY, session="OVD"),
+])
+def test_candidate_expiries_rejects_unsupported_domains_before_expiry_scan(
+        tmp_path, monkeypatch, key):
+    """Direct-entrypoint guard matching ``scan_calendar_row_inputs``: an
+    unsupported nonempty strategy/session is malformed input and must refuse
+    ``INVALID_REQUEST`` before the ``option_chains`` scan, never staged as a
+    legitimately empty eligible expiry domain. The repository scan is made to
+    raise on call, so reaching it would fail the test rather than return ()."""
+    repository, snapshot = _snapshot(
+        tmp_path,
+        chains=_common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0))
+
+    def forbidden(query, *, table_name):
+        raise AssertionError("expiry scan before strategy/session validation")
+
+    monkeypatch.setattr(repository, "scan", forbidden)
+    with pytest.raises(OpsError) as exc:
+        scan_candidate_expiries(repository, snapshot, key, decision_session=_SESSION)
+    assert exc.value.code == "INVALID_REQUEST"
+
+
 def test_calendar_row_inputs_validates_before_source_scans(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("source read before validation")
