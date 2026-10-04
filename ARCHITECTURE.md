@@ -463,7 +463,7 @@ Only a tracked path absent from the worktree reads as empty.
   | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
   | Supplied modern identity, policy or mismatch values malformed (including non-finite JSON numbers), or mismatch dimension/field outside the shared field groups | Same `unavailable` (503) in the shared projection and authenticated API; null `as_of` remains valid |
-  | Forwarded summary or detail values cannot encode as finite UTF-8 JSON, or stored input exceeds parser/encoder recursion capacity | Malformed-report refusal (503); summary responses ignore saved mismatch values, while detail responses validate the values they return. |
+  | Forwarded summary or detail values cannot encode as finite UTF-8 JSON, or stored input exceeds parser/encoder recursion capacity | Malformed-report refusal (503); summary responses omit saved mismatch values, but v1.2 report loading still validates them; detail responses validate the values they return. |
   | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
