@@ -23,22 +23,18 @@
   "provider": {
     "openrouter": {
       "models": {
-        "deepseek/deepseek-v4.1-flash": {
-          "options": {
-            "skip-title": true
-          }
-        },
-        "qwen/qwen3.8-flash": {
-          "options": {
-            "skip-title": true
-          }
-        },
-        "z-ai/glm-5.3": {
-          "options": {
-            "skip-title": true
-          }
-        }
+        "deepseek/deepseek-v4.1-flash": {},
+        "qwen/qwen3.8-flash": {},
+        "z-ai/glm-5.3": {}
       }
+    }
+  },
+  "agent": {
+    "title": {
+      "disable": true
+    },
+    "summary": {
+      "disable": true
     }
   }
 }

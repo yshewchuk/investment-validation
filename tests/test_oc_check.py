@@ -133,16 +133,23 @@ def test_opencode_config_has_no_root_level_models_key(config_name):
 @pytest.mark.parametrize(
     "config_name", ["opencode_config.json", "opencode_review_config.json"]
 )
-def test_opencode_config_openrouter_model_overrides_set_skip_title(config_name):
-    """Every per-model override under provider.openrouter.models must set
-    options.skip-title, matching the layout on main."""
+def test_opencode_config_disables_title_and_summary_agents(config_name):
+    """The built-in title and summary agents are disabled through their
+    supported agent settings, not per-model options."""
     config = json.loads((ROOT / "tools" / config_name).read_text())
+    assert config["agent"]["title"]["disable"] is True, (
+        f"{config_name}: agent.title.disable must be true"
+    )
+    assert config["agent"]["summary"]["disable"] is True, (
+        f"{config_name}: agent.summary.disable must be true"
+    )
     models = config["provider"]["openrouter"]["models"]
     assert models, f"{config_name}: expected at least one openrouter model override"
     for model_id, override in models.items():
-        assert override.get("options", {}).get("skip-title") is True, (
-            f"{config_name}: provider.openrouter.models[{model_id!r}] is "
-            "missing options.skip-title"
+        assert "skip-title" not in override.get("options", {}), (
+            f"{config_name}: provider.openrouter.models[{model_id!r}] still sets "
+            "options.skip-title, which is unsupported; disable the title agent "
+            "via agent.title.disable instead"
         )
 
 def test_bounded_run_exit_75_is_a_resource_wait_not_a_test_failure(monkeypatch, capsys):
