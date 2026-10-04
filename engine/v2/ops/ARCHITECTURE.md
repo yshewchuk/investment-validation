@@ -1348,14 +1348,12 @@ stored receipt, rather than raising a permanent refusal.
 
 Batch-level (raises, no per-row attempt): malformed binding/events, duplicate
 event identities, unresolvable release, request-hash collision, invalid
-worker identity fields, or malformed `producer_refusals.json` (including an
-invalid timestamp wire value). Decode and record/refusal disjointness checks
-finish before output publication. These input failures are deterministic and
-not retryable; they leave no `records.json` or `refusals.json` from this
-attempt. R1: invalid wire is `ValueError`, not a row refusal. R2: no cache.
-R3: no internal retry. R4: no catalog transaction. R5: outputs are written
-only after successful assembly, scoring and collision checks. R6: strict
-timestamp identity is used consistently for duplicate and overlap checks.
+worker identity fields, or malformed `events.json`/`producer_refusals.json`
+(including invalid timestamp wire values, checked before date parsing).
+These input failures are deterministic and not retryable; they leave no
+`records.json` or `refusals.json` from this attempt. R1: invalid
+date wire is `ValueError`, not a row refusal. R2: no cache.
+R3: no internal retry. R4: no catalog transaction. R5: publish after assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
 
 Per row (collected as a refusal, never sinks the batch):
 

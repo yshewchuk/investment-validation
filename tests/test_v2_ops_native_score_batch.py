@@ -25,6 +25,7 @@ from engine.v2.ops.native_score_batch import (
     NightlyEventInputs,
     _board_request_key,
     _decode_producer_refusals,
+    _event_inputs_from_document,
     _native_score_batch_documents,
     assemble_score_batch_inputs,
     run_native_score_batch_worker,
@@ -761,6 +762,41 @@ def test_board_request_identity_rejects_timezone_aware_event_date(aware_event_da
     with pytest.raises(ValueError):
         NativeScoreBatchRowRefusal(
             key, "UNSUPPORTED_STRATEGY", "detail").as_document()
+
+
+@pytest.mark.parametrize("event_date", [
+    "today", "now", "2026-01-15T09:00:00Z", "2026-01-15T09:00:00+05:00",
+])
+def test_event_inputs_from_document_rejects_relative_and_aware_event_date(event_date):
+    """PR #384 (CodeRabbit): the events.json decoder must refuse raw key
+    ``event_date`` strings -- relative (``today``/``now``) or timezone-aware
+    (``Z``/numeric offset) -- with a ``ValueError`` BEFORE ``pd.Timestamp``
+    gets a chance to resolve them onto wall-clock time or shift them onto
+    some other naive day. Fails against current production code, which
+    calls ``pd.Timestamp(...)`` directly and parses every one of these."""
+    doc = _event_doc()
+    doc["key"]["event_date"] = event_date
+    with pytest.raises(ValueError):
+        _event_inputs_from_document(doc)
+
+
+def test_event_inputs_from_document_keeps_midnight_and_intraday_success_events():
+    """PR #384 companion anchor: the two canonical wire forms the producer
+    itself writes must keep decoding successfully -- the legacy midnight
+    day form and the naive intraday datetime -- with their exact
+    wall-clock identity preserved."""
+    midnight_inputs = _event_inputs_from_document(_event_doc())
+    assert midnight_inputs.key == BoardRequest(
+        ticker="TEST", strategy="STR-THRU",
+        event_date=pd.Timestamp("2026-01-15"), session="am")
+    intraday_doc = _event_doc()
+    intraday_doc["key"]["event_date"] = "2026-01-15T09:00:00"
+    intraday_inputs = _event_inputs_from_document(intraday_doc)
+    assert intraday_inputs.key == BoardRequest(
+        ticker="TEST", strategy="STR-THRU",
+        event_date=pd.Timestamp("2026-01-15T09:00:00"), session="am")
+    assert _board_request_key(intraday_inputs.key) == \
+        "TEST|STR-THRU|2026-01-15T09:00:00|am"
 
 
 def test_event_date_identity_keeps_legacy_day_form_and_preserves_intraday_time():

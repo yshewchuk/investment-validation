@@ -492,9 +492,11 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
     ``assemble_nightly_source_bundle`` already accepts them (exactly as
     ``tests/test_v2_scoring_nightly_source_bundle.py``'s own fixtures do).
     """
+    raw_event_date = doc["key"]["event_date"]
+    _event_date_identity(raw_event_date)
     key = BoardRequest(
         ticker=str(doc["key"]["ticker"]), strategy=str(doc["key"]["strategy"]),
-        event_date=pd.Timestamp(doc["key"]["event_date"]),
+        event_date=pd.Timestamp(raw_event_date),
         session=str(doc["key"]["session"]))
     return NightlyEventInputs(
         key=key, calendar_row=doc["calendar_row"], panel_row=doc["panel_row"],
