@@ -52,6 +52,9 @@ interface section; this names only the load-bearing entry points.
   exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
   Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
   `get_close`, and `explain_dependencies`.
+  Metadata-only `scan_population_bound` sums recorded counts of surviving
+  fragments of the supplied snapshot, with no head fallback or object reads;
+  request limits are validated separately from this planning interface.
 - **Pure primitives, no I/O** — `query.py` and `documents.py` (`manifests.py`
   and `objects.py` are identity builders, not pure: `manifests.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which
@@ -252,8 +255,8 @@ and retryability come from that table, never guessed at a call site.
 | `SNAPSHOT_NOT_FOUND` | dependency | no | unknown `snapshot_id` |
 | `SNAPSHOT_NOT_READY` | dependency | yes | scope has no committed head yet |
 | `SNAPSHOT_CONFLICT` | dependency | yes | head-fence or compare-and-swap mismatch |
-| `CONTRACT_MISMATCH` | validation | no | table/column absent from a snapshot or contract |
-| `QUERY_NOT_BOUNDED` | validation | no | an unbounded `DataQuery`/`ChainQuery` |
+| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract |
+| `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
@@ -279,7 +282,7 @@ and retryability come from that table, never guessed at a call site.
 | R2 — cache | Bounds come from the pinned fragment membership; no current-head fallback or cached bound from another snapshot. |
 | R3 — retry | No internal scan retry; integrity and result-limit refusals require corrected inputs. Registration retries retain the head fence. |
 | R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
-| R5 — partial result/write | A fragment footer count differing from its recorded count refuses `MANIFEST_CORRUPT` before that fragment yields rows. Earlier streamed batches may already have been consumed; they are not a successful complete result. Failed registration leaves the head unchanged and staged objects unreferenced. |
+| R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open. A fragment footer count differing from its recorded count refuses `MANIFEST_CORRUPT` before that fragment yields rows. Earlier streamed batches may already have been consumed; they are not a successful complete result. Failed registration leaves the head unchanged and staged objects unreferenced. |
 | R6 — idempotency | An identical registration request reuses its committed receipt through the same head fence; a conflicting identity refuses. Scan completion requires exhaustion without an error. |
 
 **Snapshot commit (4c R1–R6).** Missing input: `INPUT_CHANGED`/
