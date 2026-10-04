@@ -117,6 +117,19 @@ interface section; this names only the load-bearing entry points.
   `Repository.get_price_series`/`.get_close`.
 - **Errors** — `errors.DataError`, built only from a registered
   `DATA_FAILURE_CODES` entry.
+- **Neutral snapshot inventory** — `tools.reregister_snapshot.neutral_inventory`
+  accepts explicit source snapshot, receipt, scope and generation pins and returns
+  deterministic table/object membership, partition/count/bound metadata,
+  reference bindings and native capture history. It never parses contract
+  documents or recomputes native values. Price-history captures follow the pinned
+  receipt lineage; computed-moves captures retain their existing contract-wide
+  scope. One read transaction pins the inventory; callers own supported source
+  identity validation, object-byte verification, publication, and computing
+  the canonical inventory hash (`engine.v2.foundation.content_hash` over the
+  returned payload) and comparing that hash with the exported expectation to
+  detect drift. Internally the tool builds every typed refusal through
+  `engine.v2.data.errors` and `engine.v2.contracts.data.DATA_FAILURE_CODES`:
+  its dependency on the data error catalog is part of this contract.
 
 ## Inputs
 
@@ -284,6 +297,15 @@ and retryability come from that table, never guessed at a call site.
 | R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
 | R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open. A fragment footer count differing from its recorded count refuses `MANIFEST_CORRUPT` before that fragment yields rows. Earlier streamed batches may already have been consumed; they are not a successful complete result. Failed registration leaves the head unchanged and staged objects unreferenced. |
 | R6 — idempotency | An identical registration request reuses its committed receipt through the same head fence; a conflicting identity refuses. Scan completion requires exhaustion without an error. |
+
+For neutral inventory reads, missing relational members or invalid receipt
+lineage refuse `INPUT_CHANGED`; inconsistent fragment metadata or row counts
+refuse `MANIFEST_CORRUPT`. Retryability follows the table above. There is no
+automatic retry or cached inventory and no catalog writes or artifact output.
+An active caller transaction refuses `INPUT_CHANGED` without altering it.
+The same pins and metadata yield the same inventory; the caller-owned
+canonical `content_hash` of the payload, compared with the exported
+expectation, detects drift, including changed table membership.
 
 **Snapshot commit (4c R1–R6).** Missing input: `INPUT_CHANGED`/
 `CONTRACT_MISMATCH` before any write; every contract/fragment/manifest is
