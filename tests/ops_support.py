@@ -290,5 +290,10 @@ def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.
             return state
         watch.check()
         time.sleep(poll)
+    # A job completing during the final sleep (after the deadline elapsed) is a
+    # success, not a timeout: refresh once more before the final watch check.
+    state = job_state(conn, job_id)
+    if state in states:
+        return state
     watch.check(final=True)
     raise AssertionError(_run_until_deadline_message(conn, job_id, state, states, effective))

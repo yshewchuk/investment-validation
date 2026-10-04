@@ -221,6 +221,29 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     assert "log tail: tick at" in message
     assert "last worker heartbeat: attempt 1 (queued)" in message
 
+    # The final-poll race CodeRabbit flagged on #377: a job that completes
+    # DURING the last sleep -- i.e. after the deadline already elapsed -- is a
+    # success, not a timeout. Isolated fake clock and job-state reader, so there
+    # is no real wait: the reader reports ``queued`` at the start and in the loop
+    # body, then flips to ``succeeded`` only once the fake sleep has advanced the
+    # clock past the tiny deadline, and ``run_until`` returns it.
+    clock = {"t": 0.0}
+    fake_deadline = 0.2
+
+    class _FakeTime:
+        def monotonic(self):
+            return clock["t"]
+
+        def sleep(self, seconds):
+            clock["t"] += fake_deadline * 2  # one step clears the deadline
+
+    def _final_poll_state(conn_, job_id_):
+        return "succeeded" if clock["t"] >= fake_deadline else "queued"
+
+    monkeypatch.setattr("tests.ops_support.time", _FakeTime())
+    monkeypatch.setattr("tests.ops_support.job_state", _final_poll_state)
+    assert run_until(_NeverAdmits(), conn, job_id, timeout=fake_deadline) == "succeeded"
+
 
 @pytest.mark.parametrize("workers", [["-p", "no:xdist"], ["-n", "2"]], ids=["serial", "xdist"])
 def test_per_test_timeout_fails_the_test_by_name_and_the_run_continues(tmp_path, workers):
