@@ -463,6 +463,22 @@ def test_planted_refusal_key_corruption_is_caught():
                              "UNSUPPORTED_STRATEGY")
 
 
+def test_planted_refusal_timestamp_key_corruption_is_caught():
+    """Proves _refusal_matches_key is not a tautology on key identity: a
+    refusal serialized under the intraday timestamp key must not resolve
+    under a distinct expected key, with the refusal code identical between
+    stored and expected lookups -- independent of the code-corruption test
+    above."""
+    refusals = {"refusals": {"TEST|TWIN-P|2026-01-15T09:00:01|am": {
+        "code": "INTRADAY_EVENT_NOT_ADMITTED",
+        "detail": "intraday event not admitted to the midnight batch"}}}
+    _refusal_matches_key(refusals, "TEST|TWIN-P|2026-01-15T09:00:01|am",
+                         "INTRADAY_EVENT_NOT_ADMITTED")
+    with pytest.raises(KeyError):
+        _refusal_matches_key(refusals, "TEST|TWIN-P|2026-01-15T09:00:00|am",
+                             "INTRADAY_EVENT_NOT_ADMITTED")
+
+
 def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
     _stage_release(tmp_path)
     root = tmp_path / "staging"

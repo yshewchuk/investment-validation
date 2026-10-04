@@ -690,8 +690,7 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 
 **Cutover PR-6: 4a.2 helpers implemented; 4b producer pending.** `nightly_calendar_inputs.scan_calendar_row_inputs`
 owns pinned spot, listed strategy-specific expiry and session-based planned exit; exit is independent of expiry.
-`nightly_raw_row_producer.build_native_score_batch_events` owns enumeration, shared panel inputs,
-per-key calendar/quotes and refusal documents; the sidecar stages both before submission. Forward `tier4_row` is `{}`.
+`nightly_raw_row_producer.build_native_score_batch_events` owns enumeration, shared panel inputs, per-key calendar/quotes and refusal documents; the sidecar stages both before submission. Forward `tier4_row` is `{}`.
 Snapshot reads are SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
@@ -699,10 +698,10 @@ Snapshot reads are SHADOW-only, un-admitted pending [#260](https://github.com/ys
 | Calendar sourcing condition (R1–R6) | Outcome |
 |---|---|
 | R1: missing source table, exact spot or row; source/repository failure | Typed source/event/repository errors propagate; fail the whole build and preserve `CONTRACT_MISMATCH` and other repository codes; only empty domain or native no-expiry maps to `NO_RESOLVABLE_EXPIRY`; unrelated geometry failures propagate |
-| R1: no strategy-eligible listed expiry; missing/ambiguous event; intraday key | Per-key `NO_RESOLVABLE_EXPIRY`, event refusal or `INTRADAY_EVENT_NOT_ADMITTED`; refusal wire and key preserve naive intraday timestamps while midnight identities keep their existing day form ([#356](https://github.com/yshewchuk/investment-validation/issues/356), [#243](https://github.com/yshewchuk/investment-validation/issues/243)) |
+| R1: no strategy-eligible listed expiry; missing/ambiguous event; intraday key passed to `nightly_calendar_inputs.scan_calendar_row_inputs` | `NO_RESOLVABLE_EXPIRY` or event refusal; the calendar helper returns `INVALID_REQUEST` for an intraday key and does not issue a row admission refusal |
 | R2/R3: cache or retry | No durable/negative helper cache, retry or provider fetch; reuse is build- and snapshot-scoped; unchanged inputs reproduce the result/refusal |
 | R4/R5: transaction or interruption | Read-only helper; no catalog writes, publication, partial result or document return |
-| R6: identity | Preserve exact event identity and earnings revision; producer successes and refusals are disjoint; content and candidate order are deterministic |
+| R6: identity | Preserve exact event identity and earnings revision; producer successes and refusals are disjoint; content and candidate order are deterministic. The separate `native_score_batch` worker refusal wire/key retains `YYYY-MM-DD` for midnight and canonical naive ISO timestamps for intraday events, including `INTRADAY_EVENT_NOT_ADMITTED` ([#356](https://github.com/yshewchuk/investment-validation/issues/356)) |
 
 ## Inputs
 
