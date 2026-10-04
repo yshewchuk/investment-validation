@@ -136,13 +136,22 @@ def _scan_rows(repository: Repository, snapshot, table_name: str, columns) -> li
                           for record in repository.fragment_records(snapshot, table_name)}))
     if not years:
         return []
+    key_filter = (KeyPredicate(column="year", operator="in", values=years),)
+    max_batch_rows = min(contract.maximum_batch_rows, 50_000)
+    max_result_rows = min(contract.maximum_result_rows, MAX_SCAN_ROWS)
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
+        key_filter=key_filter, time_interval=None)
+    if population_bound > 0:
+        max_result_rows = min(max_result_rows, population_bound)
+        max_batch_rows = min(max_batch_rows, max_result_rows)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
         columns=tuple(columns),
-        key_filter=(KeyPredicate(column="year", operator="in", values=years),),
+        key_filter=key_filter,
         order_by=tuple(contract.primary_key),
-        max_batch_rows=min(contract.maximum_batch_rows, 50_000),
-        max_result_rows=min(contract.maximum_result_rows, MAX_SCAN_ROWS))
+        max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
     rows: list[dict] = []
     for batch in repository.scan(query, table_name=table_name):
         rows.extend(batch.to_pylist())

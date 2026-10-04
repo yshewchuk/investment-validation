@@ -128,14 +128,24 @@ def scan_quote_rows(
         raise data_fail("QUERY_NOT_BOUNDED", "decision_session is after the contract expiry")
     contract = repository.table_contract(snapshot, _QUOTE_TABLE)
     version = snapshot.table_versions[_QUOTE_TABLE]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
+                  KeyPredicate(column="obs_date", operator="eq", values=(session_day,)))
+    max_batch_rows = min(contract.maximum_batch_rows, _BATCH_CAP)
+    max_result_rows = min(contract.maximum_result_rows, _RESULT_CAP)
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=_QUOTE_TABLE,
+        table_contract_ref=version.table_contract_ref,
+        key_filter=key_filter, time_interval=None)
+    if 0 < population_bound < max_result_rows:
+        max_result_rows = population_bound
+        max_batch_rows = min(max_batch_rows, max_result_rows)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=version.table_contract_ref,
         columns=_QUOTE_COLUMNS,
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(key.ticker,)),
-                    KeyPredicate(column="obs_date", operator="eq", values=(session_day,))),
+        key_filter=key_filter,
         order_by=tuple(contract.primary_key),
-        max_batch_rows=min(contract.maximum_batch_rows, _BATCH_CAP),
-        max_result_rows=min(contract.maximum_result_rows, _RESULT_CAP))
+        max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
     rows: list[dict] = []
     for batch in repository.scan(query, table_name=_QUOTE_TABLE):
         rows.extend(batch.to_pylist())

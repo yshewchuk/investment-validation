@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from engine.calendar import SESSION_PRIORITY
-from engine.v2.contracts import SnapshotRef, TableContract, TableContractRef
+from engine.v2.contracts import KeyPredicate, SnapshotRef, TableContract, TableContractRef
 from engine.v2.data import generic_incremental
 from engine.v2.data.catalog import commit_snapshot as data_commit_snapshot
 from engine.v2.data.legacy_mapping import build_legacy_mapping
@@ -459,3 +459,83 @@ def test_attempt_fence_pair_both_set_is_valid():
     """Both set (a live job attempt fencing the commit) is the other valid
     shape."""
     forward_calendar_store._validated_attempt_fence_pair("attempt-1", 3)
+
+
+def _capture_scan_queries(monkeypatch, repository):
+    captured = []
+    original_scan = repository.scan
+
+    def _scan(query, **kwargs):
+        captured.append(query)
+        return original_scan(query, **kwargs)
+
+    monkeypatch.setattr(repository, "scan", _scan)
+    return captured
+
+
+def _capture_population_scan(monkeypatch, repository, population_bound):
+    monkeypatch.setattr(
+        repository, "scan_population_bound", lambda *_a, **_k: population_bound)
+    return _capture_scan_queries(monkeypatch, repository)
+
+
+def _scan_fixture(tmp_path):
+    conn, clock, supervisor = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    parent = _seeded_parent(conn, store, clock, scope="fwd-cal-scan-bound")
+    repository = Repository(conn, store)
+    return repository, parent.snapshot
+
+
+def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp_path,
+                                                                             monkeypatch):
+    repository, snapshot = _scan_fixture(tmp_path)
+    columns = ("ticker", "event_date", "year", "src_orats")
+    baseline = forward_calendar_store._scan_rows(
+        repository, snapshot, "earnings_events", columns)
+    contract = repository.table_contract(snapshot, "earnings_events")
+    expected = min(contract.maximum_result_rows, forward_calendar_store.MAX_SCAN_ROWS)
+    captured = _capture_population_scan(monkeypatch, repository, expected)
+
+    result = forward_calendar_store._scan_rows(
+        repository, snapshot, "earnings_events", columns)
+
+    assert result == baseline
+    assert result == [{"ticker": "AAA", "event_date": datetime(2025, 1, 15),
+                       "year": 2025, "src_orats": True}]
+    assert captured[0].max_result_rows == expected
+    assert captured[0].max_batch_rows == min(contract.maximum_batch_rows, 50_000, expected)
+
+
+def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch):
+    """PR 360 positive case: the REAL selected-fragment bound (no mock) --
+    the sum of the recorded row counts of the fragments the scan's year
+    predicate selects -- is below the existing limit, and the prepared query
+    carries exactly ``min(existing_limit, bound)`` with its batch limit kept
+    at or below the result limit."""
+    repository, snapshot = _scan_fixture(tmp_path)
+    table_name = "earnings_events"
+    columns = ("ticker", "event_date", "year", "src_orats")
+    contract = repository.table_contract(snapshot, table_name)
+    existing = min(contract.maximum_result_rows, forward_calendar_store.MAX_SCAN_ROWS)
+    years = tuple(sorted({int(record.partition_key)
+                          for record in repository.fragment_records(snapshot, table_name)}))
+    bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=table_name,
+        table_contract_ref=snapshot.table_versions[table_name].table_contract_ref,
+        key_filter=(KeyPredicate(column="year", operator="in", values=years),),
+        time_interval=None)
+    assert 0 < bound < existing
+    baseline = forward_calendar_store._scan_rows(
+        repository, snapshot, table_name, columns)
+    captured = _capture_scan_queries(monkeypatch, repository)
+
+    result = forward_calendar_store._scan_rows(repository, snapshot, table_name, columns)
+
+    assert result == baseline
+    assert result == [{"ticker": "AAA", "event_date": datetime(2025, 1, 15),
+                       "year": 2025, "src_orats": True}]
+    assert captured[0].max_result_rows == min(existing, bound)
+    assert captured[0].max_batch_rows <= captured[0].max_result_rows
+    assert captured[0].max_batch_rows == min(contract.maximum_batch_rows, 50_000,
+                                             min(existing, bound))

@@ -54,7 +54,9 @@ interface section; this names only the load-bearing entry points.
   `get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
   fragments of the supplied snapshot, with no head fallback or object reads;
-  request limits are validated separately from this planning interface.
+  caller preparation may lower an existing request limit to this bound while
+  preserving the active contract check; slice E enables zero limits and makes
+  manifest-bound validation apply to all requests.
 - **Pure primitives, no I/O** — `query.py` and `documents.py` (`manifests.py`
   and `objects.py` are identity builders, not pure: `manifests.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which

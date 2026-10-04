@@ -9,6 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from engine.v2.contracts import KeyPredicate
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json
 from engine.v2.ops import computed_moves_store
@@ -966,3 +967,103 @@ def test_run_computed_moves_refresh_refuses_a_bad_refresh_plan_hash(
             parameters, root, as_of=_AS_OF, fetcher=fetcher)
     _assert_refused_before_any_io(conn, fetcher, err=err)
     assert connect_calls == []
+
+
+def _capture_population_scan(monkeypatch, repository, population_bound):
+    captured = []
+    original_scan = repository.scan
+    monkeypatch.setattr(
+        repository, "scan_population_bound", lambda *_a, **_k: population_bound)
+
+    def _scan(query, **kwargs):
+        captured.append(query)
+        return original_scan(query, **kwargs)
+
+    monkeypatch.setattr(repository, "scan", _scan)
+    return captured
+
+
+def _capture_scans(monkeypatch, repository):
+    """Spy on ``repository.scan`` only -- the bound comes from the REAL
+    ``scan_population_bound`` (spec PR 360: the positive lowered-limit case
+    must not mock the bound)."""
+    captured = []
+    original_scan = repository.scan
+
+    def _scan(query, **kwargs):
+        captured.append(query)
+        return original_scan(query, **kwargs)
+
+    monkeypatch.setattr(repository, "scan", _scan)
+    return captured
+
+
+def _actual_population_bound(repository, snapshot, table_name: str) -> int:
+    """The real ``scan_population_bound`` for the exact snapshot, table, and
+    year predicate ``_scan_rows`` builds -- same contract ref, same key
+    filter, no mocking."""
+    contract_ref = snapshot.table_versions[table_name].table_contract_ref
+    years = tuple(sorted({int(record.partition_key)
+                          for record in repository.fragment_records(snapshot, table_name)}))
+    key_filter = (KeyPredicate(column="year", operator="in", values=years),)
+    return repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
+        key_filter=key_filter, time_interval=None)
+
+
+def _scan_fixture(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    head = _build_parent(
+        conn, clock, store,
+        events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    repository = Repository(conn, store)
+    return repository, repository.resolve(head["snapshot_id"])
+
+
+def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp_path,
+                                                                             monkeypatch):
+    repository, snapshot = _scan_fixture(tmp_path)
+    columns = ("event_id", "ticker", "event_date", "year", "src_orats")
+    baseline = computed_moves_store._scan_rows(repository, snapshot,
+                                               "earnings_events", columns)
+    expected = min(_EVENTS.maximum_result_rows, computed_moves_store.MAX_SCAN_ROWS)
+    assert expected >= min(_EVENTS.maximum_batch_rows, 50_000)
+    captured = _capture_population_scan(monkeypatch, repository, expected)
+
+    result = computed_moves_store._scan_rows(repository, snapshot,
+                                             "earnings_events", columns)
+
+    assert result == baseline
+    assert len(result) == len(_EVENT_DAYS)
+    assert all(r["ticker"] == "AAAA" for r in result)
+    assert {r["event_id"] for r in result} == {f"AAAA_{day.date()}" for day in _EVENT_DAYS}
+    assert captured[0].max_result_rows == expected
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000)
+
+
+def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch):
+    """PR 360's cap removal, proven against the REAL bound: the prepared
+    query's ``max_result_rows`` is exactly ``min(existing_limit, bound)`` for
+    the same snapshot, table, and year predicate, the batch limit is lowered
+    only as needed to keep ``max_batch_rows <= max_result_rows``, and the
+    returned rows are unchanged."""
+    repository, snapshot = _scan_fixture(tmp_path)
+    columns = ("event_id", "ticker", "event_date", "year", "src_orats")
+    baseline = computed_moves_store._scan_rows(repository, snapshot,
+                                               "earnings_events", columns)
+    bound = _actual_population_bound(repository, snapshot, "earnings_events")
+    existing_limit = min(_EVENTS.maximum_result_rows, computed_moves_store.MAX_SCAN_ROWS)
+    assert 0 < bound < existing_limit
+    captured = _capture_scans(monkeypatch, repository)
+
+    result = computed_moves_store._scan_rows(repository, snapshot,
+                                             "earnings_events", columns)
+
+    assert result == baseline
+    assert len(result) == len(_EVENT_DAYS)
+    assert all(r["ticker"] == "AAAA" for r in result)
+    assert {r["event_id"] for r in result} == {f"AAAA_{day.date()}" for day in _EVENT_DAYS}
+    assert captured[0].max_result_rows == min(existing_limit, bound)
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, bound)
+    assert captured[0].max_batch_rows <= captured[0].max_result_rows

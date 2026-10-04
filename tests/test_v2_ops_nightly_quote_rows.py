@@ -12,11 +12,17 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from engine.v2.contracts import KeyPredicate
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.nightly_quote_rows import QuoteRowInputs, scan_quote_rows
+from engine.v2.ops.nightly_quote_rows import (
+    QuoteRowInputs,
+    _BATCH_CAP,
+    _RESULT_CAP,
+    scan_quote_rows,
+)
 from tests.data_scan_support import (
     catalog_and_store,
     commit_tables,
@@ -202,3 +208,84 @@ def test_scan_quote_rows_without_an_option_chains_table_is_contract_mismatch(tmp
                         decision_session=_SESSION)
 
     assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def _capture_scan(monkeypatch, repository):
+    captured = []
+    original_scan = repository.scan
+
+    def _scan(query, **kwargs):
+        captured.append(query)
+        return original_scan(query, **kwargs)
+
+    monkeypatch.setattr(repository, "scan", _scan)
+    return captured
+
+
+def _capture_population_scan(monkeypatch, repository, population_bound):
+    monkeypatch.setattr(
+        repository, "scan_population_bound", lambda *_a, **_k: population_bound)
+    return _capture_scan(monkeypatch, repository)
+
+
+def _quote_rows():
+    return [
+        _chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 2, 16), 100.0,
+                   right="C", bid=1.0, ask=1.2),
+        _chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 2, 16), 105.0,
+                   right="P", bid=2.0, ask=2.4),
+    ]
+
+
+def test_scan_quote_rows_keeps_limit_when_population_bound_is_at_or_above_current(
+        tmp_path, monkeypatch):
+    repository, snapshot = _chain_snapshot(tmp_path, _quote_rows())
+    baseline = scan_quote_rows(repository, snapshot, _KEY, expiry=_EXPIRY,
+                               decision_session=_SESSION)
+    expected = min(_CHAINS.maximum_result_rows, _RESULT_CAP)
+    captured = _capture_population_scan(monkeypatch, repository, expected)
+
+    result = scan_quote_rows(repository, snapshot, _KEY, expiry=_EXPIRY,
+                             decision_session=_SESSION)
+
+    assert result == baseline
+    assert result.quote_status == "recorded"
+    assert result.quote_rows == (
+        {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
+         "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+        {"ticker": "AAA", "right": "P", "strike": 105.0, "expiry": _EXPIRY,
+         "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
+    )
+    assert captured[0].max_result_rows == expected
+    assert captured[0].max_batch_rows == min(_CHAINS.maximum_batch_rows, 50_000)
+
+
+def test_scan_quote_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch):
+    repository, snapshot = _chain_snapshot(tmp_path, _quote_rows())
+    baseline = scan_quote_rows(repository, snapshot, _KEY, expiry=_EXPIRY,
+                               decision_session=_SESSION)
+    version = snapshot.table_versions["option_chains"]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(_KEY.ticker,)),
+                  KeyPredicate(column="obs_date", operator="eq", values=(_SESSION,)))
+    bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name="option_chains",
+        table_contract_ref=version.table_contract_ref,
+        key_filter=key_filter, time_interval=None)
+    captured = _capture_scan(monkeypatch, repository)
+
+    result = scan_quote_rows(repository, snapshot, _KEY, expiry=_EXPIRY,
+                             decision_session=_SESSION)
+
+    existing_limit = min(_CHAINS.maximum_result_rows, _RESULT_CAP)
+    assert result == baseline
+    assert result.quote_status == "recorded"
+    assert result.quote_rows == (
+        {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
+         "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+        {"ticker": "AAA", "right": "P", "strike": 105.0, "expiry": _EXPIRY,
+         "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
+    )
+    assert 0 < bound < existing_limit
+    assert captured[0].max_result_rows == min(existing_limit, bound)
+    assert captured[0].max_batch_rows == min(
+        _CHAINS.maximum_batch_rows, _BATCH_CAP, captured[0].max_result_rows)
