@@ -68,6 +68,11 @@ _NAME_LIMIT = 128
 _ROW_LIMIT = 100
 
 
+def _validate_encodable(document: object) -> None:
+    """Validate strict JSON and UTF-8 without changing retained values."""
+    json.dumps(document, ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
 def _counted(values) -> dict[str, int]:
     counts: dict[str, int] = {}
     for value in values:
@@ -195,7 +200,7 @@ def _validate_report_values(mismatches: list[dict[str, object]]) -> None:
             if (not isinstance(saved, dict)
                     or "legacy" not in saved or "native" not in saved):
                 raise ValueError("native parity mismatch value pair is incomplete")
-            json.dumps(saved, allow_nan=False)
+            _validate_encodable(saved)
 
 
 def _validate_run_identity(report: dict[str, object]) -> None:
@@ -413,13 +418,16 @@ def native_parity_items(report: dict, section: str, *,
         raise LookupError(row_key)
     if section == "unpaired":
         keys = report["only_" + side]
-        return sorted(key for key in keys if row_key is None or key == row_key)
-    if section != "mismatches":
+        items = sorted(key for key in keys if row_key is None or key == row_key)
+    elif section == "mismatches":
+        selected = [entry for entry in report["mismatches"]
+                    if row_key is None or entry["row_key"] == row_key]
+        selected.sort(key=lambda entry: (entry["row_key"], entry["dimension"]))
+        items = [_mismatch_item(entry) for entry in selected]
+    else:
         raise ValueError(f"unknown native parity detail section {section!r}")
-    selected = [entry for entry in report["mismatches"]
-                if row_key is None or entry["row_key"] == row_key]
-    selected.sort(key=lambda entry: (entry["row_key"], entry["dimension"]))
-    return [_mismatch_item(entry) for entry in selected]
+    _validate_encodable(items)
+    return items
 
 
 def native_parity_freshness(serving_db, resolve_current, as_of: str | None, open_index,
@@ -484,7 +492,8 @@ def native_parity_snapshot(report_path: str | os.PathLike | None, *,
         captured = (
             _project_captured_comparison(report["captured_comparison"])
             if "captured_comparison" in report else None)
-    except (OSError, json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, json.JSONDecodeError, ValueError, KeyError, TypeError,
+            AttributeError, RecursionError):
         return _empty_snapshot(unavailable=True)
     summary = {
         "schema_version": NATIVE_PARITY_SUMMARY_V1,
@@ -508,6 +517,10 @@ def native_parity_snapshot(report_path: str | os.PathLike | None, *,
     }
     if captured is not None:
         summary["captured_comparison"] = captured
+    try:
+        _validate_encodable(summary)
+    except (ValueError, TypeError, RecursionError):
+        return _empty_snapshot(unavailable=True)
     return HTTPStatus.OK, summary, report
 
 

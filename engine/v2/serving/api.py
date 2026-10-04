@@ -551,6 +551,28 @@ def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> 
         (ApiError, OSError))
 
 
+def _native_parity_encoded_response(document) -> Response:
+    """Serialize validated JSON directly, avoiding FastAPI's recursive re-encoding."""
+    try:
+        body = json.dumps(document, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError):
+        raise _parity_malformed() from None
+    return Response(content=body, media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
+
+
+def _native_parity_screen_items(report, section: str, side: str | None, row_key: str | None):
+    """Return one screen's native parity items, mapping lookup/malformed failures to ApiError."""
+    try:
+        return native_parity_projection.native_parity_items(
+            report, section, side=side, row_key=row_key)
+    except LookupError:
+        raise ApiError(404, _problem("NATIVE_PARITY_ROW_NOT_FOUND", "validation",
+                                     "unknown native parity row key")) from None
+    except (ValueError, TypeError, RecursionError):
+        raise _parity_malformed() from None
+
+
 def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, report_path,
                             response: Response, *, section: str | None = None,
                             side: str | None = None, row_key: str | None = None,
@@ -574,15 +596,11 @@ def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, repo
     limit_value = min(_parse_limit(limit), projections.MAX_PAGE_SIZE)
     try:
         release_id = content_hash(report)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         raise _parity_malformed() from None
     query_hash = content_hash({"section": section, "side": side, "row_key": row_key})
     raw_cursor = _validated_raw_cursor(cursor, cursor_key, release_id, query_hash)
-    try:
-        items = native_parity_projection.native_parity_items(report, section, side=side, row_key=row_key)
-    except LookupError:
-        raise ApiError(404, _problem("NATIVE_PARITY_ROW_NOT_FOUND", "validation",
-                                     "unknown native parity row key")) from None
+    items = _native_parity_screen_items(report, section, side, row_key)
     try:
         offset = 0 if raw_cursor is None else int(raw_cursor)
         if not 0 <= offset <= len(items):
@@ -603,21 +621,24 @@ def _register_native_parity_routes(app, auth, serving_db, resolve_current, curso
                                    report_path) -> None:
     @app.get("/api/v1/native_parity", dependencies=auth)
     def native_parity_summary_route(response: Response):
-        return _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response)
+        return _native_parity_encoded_response(
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response))
 
     @app.get("/api/v1/native_parity/mismatches", dependencies=auth)
     def native_parity_mismatches_route(response: Response, row_key: str | None = None,
                                        limit: str | None = None, cursor: str | None = None):
-        return _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
-                                       section="mismatches", row_key=row_key, limit=limit, cursor=cursor)
+        return _native_parity_encoded_response(
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
+                                    section="mismatches", row_key=row_key, limit=limit, cursor=cursor))
 
     @app.get("/api/v1/native_parity/unpaired", dependencies=auth)
     def native_parity_unpaired_route(response: Response, side: str | None = None,
                                      row_key: str | None = None, limit: str | None = None,
                                      cursor: str | None = None):
-        return _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
-                                       section="unpaired", side=side, row_key=row_key,
-                                       limit=limit, cursor=cursor)
+        return _native_parity_encoded_response(
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
+                                    section="unpaired", side=side, row_key=row_key,
+                                    limit=limit, cursor=cursor))
 
 
 # --------------------------------------------------------------------------

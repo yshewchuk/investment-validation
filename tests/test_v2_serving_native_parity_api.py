@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -35,7 +36,7 @@ from engine.v2.ops.native_parity_report import (  # noqa: E402
 )
 from engine.v2.parity.dimensions import FORECAST_FIELDS, SIMULATION_FIELDS  # noqa: E402
 from engine.v2.serving import api as api_module  # noqa: E402
-from engine.v2.serving import projections  # noqa: E402
+from engine.v2.serving import native_parity_projection, projections  # noqa: E402
 from engine.v2.serving.api import ApiError, create_app  # noqa: E402
 from engine.v2.serving.native_parity_projection import (  # noqa: E402
     NATIVE_PARITY_REPORT_MALFORMED,
@@ -925,3 +926,473 @@ def test_valid_saved_values_serve_exactly(parity, side, value):
     assert served[other] == (1.25 if other == "native" else 1.0), (side, value)
     if isinstance(value, int) and not isinstance(value, bool):
         assert served[side] == 2 ** 53 + 1, (side, value)
+
+
+# --------------------------------------------------------------------------
+# forwarding-safety round: unstamped v1.1 compatibility, non-finite forwarded
+# metadata, lone surrogates, recursion and strict-encoder round-trips
+# --------------------------------------------------------------------------
+
+
+def _unstamped_document(parity):
+    """The real stamped fixture in the pre-identity v1.1 shape."""
+    document = json.loads(json.dumps(parity.report))
+    document["schema_version"] = "native_parity_report.v1.1"
+    del document["as_of"]
+    del document["generated_at"]
+    return document
+
+
+def _write_unstamped(parity, mutate):
+    document = _unstamped_document(parity)
+    mutate(document)
+    parity.report_path.write_text(json.dumps(document))
+    return document
+
+
+@pytest.mark.parametrize("side", ("legacy", "native"))
+@pytest.mark.parametrize("literal", _NON_FINITE_LITERALS)
+def test_unstamped_v11_non_finite_saved_value_serves_summary_and_unpaired(parity, side, literal):
+    """An ignored legacy saved value stays out of the summary and both unpaired
+    collections (which never project it); only the mismatch screen, which would
+    forward the raw value, is the refused one."""
+    document = _unstamped_document(parity)
+    _first_mismatch(document)["values"]["forecast_p10"][side] = _SAVED_VALUE_SENTINEL
+    parity.report_path.write_text(json.dumps(document))
+    text = parity.report_path.read_text()
+    assert json.dumps(_SAVED_VALUE_SENTINEL) in text
+    parity.report_path.write_text(text.replace(json.dumps(_SAVED_VALUE_SENTINEL), literal, 1))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK, (side, literal)
+    assert summary["status"] == "available", (side, literal)
+    assert summary["compared_count"] == 3, (side, literal)
+    assert summary["mismatched_row_count"] == 2, (side, literal)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200, (side, literal)
+    _assert_no_store(headers)
+    authenticated = json.loads(body)
+    assert authenticated["status"] == "available", (side, literal)
+    assert authenticated["compared_count"] == 3, (side, literal)
+    assert authenticated["only_legacy_count"] == 2, (side, literal)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches",
+                               token=parity.token, params={"limit": "10"})
+    assert code == 503, (side, literal)
+    _assert_no_store(headers)
+    problem = json.loads(body)
+    assert problem["code"] == NATIVE_PARITY_REPORT_MALFORMED, (side, literal)
+    assert "items" not in problem, (side, literal)
+    assert "compared_count" not in problem, (side, literal)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/unpaired",
+                               token=parity.token, params={"side": "legacy", "limit": "10"})
+    assert code == 200, (side, literal)
+    _assert_no_store(headers)
+    assert json.loads(body)["items"] == ["DDD|S|2026-01-04", "EEE|S|2026-01-05"], (side, literal)
+
+
+def test_unstamped_v11_nested_non_finite_saved_value_refuses_only_mismatches(parity):
+    def mutate(document):
+        _first_mismatch(document)["values"]["forecast_p10"]["legacy"] = {
+            "nested": [1.0, {"deeper": float("nan")}]}
+
+    _write_unstamped(parity, mutate)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK
+    assert summary["status"] == "available"
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches",
+                               token=parity.token, params={"limit": "10"})
+    assert code == 503
+    _assert_no_store(headers)
+    assert json.loads(body)["code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/unpaired",
+                               token=parity.token, params={"side": "native", "limit": "10"})
+    assert code == 200
+    _assert_no_store(headers)
+    assert json.loads(body)["items"] == ["FFF|S|2026-01-06", "GGG|S|2026-01-07"]
+
+
+_NON_FINITE_FORWARDED_METADATA = (
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="infinity"),
+    pytest.param([1.0, [{"deep": float("-inf")}]], id="nested_non_finite"),
+)
+
+
+@pytest.mark.parametrize("policy", _NON_FINITE_FORWARDED_METADATA)
+def test_unstamped_v11_non_finite_forwarded_policy_refuses_every_route(parity, policy):
+    """The summary passes legacy tolerance_policy_id through verbatim: a
+    non-finite value there is the strict encoder's refusal at every route, with
+    no new policy type rule introduced for old reports."""
+    def mutate(document):
+        document["tolerance_policy_id"] = policy
+
+    _write_unstamped(parity, mutate)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE, policy
+    assert summary["status"] == "unavailable", policy
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED, policy
+    assert "compared_count" not in summary, policy
+
+    _assert_malformed_routes(parity)
+
+
+_SURROGATE = "\ud800"
+_SURROGATE_SUMMARY_CASES = ("schema_version", "tolerance_policy_id", "mismatch_key",
+                            "dimension", "finding_field", "refusal_code")
+
+
+def _apply_surrogate_summary_case(document, case):
+    if case == "schema_version":
+        document["schema_version"] = _SURROGATE
+    elif case == "tolerance_policy_id":
+        document["tolerance_policy_id"] = _SURROGATE
+    elif case == "mismatch_key":
+        mismatch = _first_mismatch(document)
+        document["compared"][document["compared"].index(mismatch["row_key"])] = _SURROGATE
+        mismatch["row_key"] = _SURROGATE
+    elif case == "dimension":
+        _first_mismatch(document)["dimension"] = _SURROGATE
+    elif case == "finding_field":
+        mismatch = _first_mismatch(document)
+        name = mismatch["finding_fields"][0]
+        mismatch["finding_fields"][0] = _SURROGATE
+        mismatch["values"][_SURROGATE] = mismatch["values"].pop(name)
+    elif case == "refusal_code":
+        document["native_refused"] = [{"row_key": "AAA|S|2026-01-01",
+                                       "refusal_code": _SURROGATE}]
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize("case", _SURROGATE_SUMMARY_CASES)
+def test_unstamped_v11_lone_surrogate_in_summary_field_is_refused(parity, case):
+    """The summary forwards these strings/keys, so a lone surrogate is the
+    malformed-report refusal everywhere. The stored JSON is written escaped,
+    never as raw surrogate UTF-8 bytes."""
+    document = _unstamped_document(parity)
+    _apply_surrogate_summary_case(document, case)
+    parity.report_path.write_text(json.dumps(document))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE, case
+    assert summary["status"] == "unavailable", case
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED, case
+
+    _assert_malformed_routes(parity)
+
+
+_SURROGATE_DETAIL_CASES = ("unpaired_key", "saved_value", "nested_saved_key")
+
+
+def _apply_surrogate_detail_case(document, case):
+    if case == "unpaired_key":
+        document["only_legacy"].append(_SURROGATE)
+    elif case == "saved_value":
+        _first_mismatch(document)["values"]["forecast_p10"]["legacy"] = _SURROGATE
+    elif case == "nested_saved_key":
+        _first_mismatch(document)["values"]["forecast_p10"]["native"] = {_SURROGATE: 1.0}
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize("case", _SURROGATE_DETAIL_CASES)
+def test_unstamped_v11_lone_surrogate_in_ignored_details_keeps_summary(parity, case):
+    """The summary ignores these contents (unpaired keys are counts, saved
+    values are not projected), so it stays readable; every detail route that
+    would forward them refuses as malformed."""
+    document = _unstamped_document(parity)
+    _apply_surrogate_detail_case(document, case)
+    parity.report_path.write_text(json.dumps(document))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK, case
+    assert summary["status"] == "available", case
+    assert summary["source_schema_version"] == "native_parity_report.v1.1", case
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200, case
+    _assert_no_store(headers)
+    assert json.loads(body)["status"] == "available", case
+
+    for path, params in (("/api/v1/native_parity/mismatches", {"limit": "10"}),
+                         ("/api/v1/native_parity/unpaired", {"side": "legacy", "limit": "10"})):
+        code, body, headers = _get(parity.base, path, token=parity.token, params=params)
+        assert code == 503, (case, path)
+        _assert_no_store(headers)
+        assert json.loads(body)["code"] == NATIVE_PARITY_REPORT_MALFORMED, (case, path)
+
+
+@pytest.mark.parametrize("case", ("tolerance_policy_id", "saved_value", "nested_saved_key",
+                                  "refusal_code"))
+def test_stamped_v12_lone_surrogate_in_modern_fields_is_refused(parity, case):
+    document = json.loads(json.dumps(parity.report))
+    if case == "tolerance_policy_id":
+        document["tolerance_policy_id"] = _SURROGATE
+    elif case == "saved_value":
+        _first_mismatch(document)["values"]["forecast_p10"]["legacy"] = _SURROGATE
+    elif case == "nested_saved_key":
+        _first_mismatch(document)["values"]["forecast_p10"]["native"] = {_SURROGATE: 1.0}
+    else:
+        document["native_refused"] = [{"row_key": "AAA|S|2026-01-01",
+                                       "refusal_code": _SURROGATE}]
+    parity.report_path.write_text(json.dumps(document))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE, case
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED, case
+
+    _assert_malformed_routes(parity)
+
+
+def test_stamped_v12_lone_surrogate_unpaired_key_keeps_summary_but_refuses_details(parity):
+    document = json.loads(json.dumps(parity.report))
+    document["only_legacy"].append(_SURROGATE)
+    parity.report_path.write_text(json.dumps(document))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK
+    assert summary["status"] == "available"
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    _assert_no_store(headers)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/unpaired",
+                               token=parity.token, params={"side": "legacy", "limit": "10"})
+    assert code == 503
+    _assert_no_store(headers)
+    assert json.loads(body)["code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+_DEEP_FORWARDED_LEAF = "deep-forwarded-leaf-8f42"
+
+
+def _deep_forwarded_text(depth):
+    body = json.dumps(_DEEP_FORWARDED_LEAF)
+    for _ in range(depth):
+        body = "[" + body + "]"
+    return body
+
+
+def test_unstamped_v11_deep_forwarded_metadata_serves_without_transport_500(parity):
+    """A nested-but-valid forwarded legacy value passes the projection boundary
+    and must not be re-rejected by FastAPI's own recursive encoder at the
+    transport seam: the shared reader and the authenticated summary both serve
+    it, and the test unwraps iteratively to the exact leaf."""
+    depth = sys.getrecursionlimit() + 100
+    deep_text = _deep_forwarded_text(depth)
+    try:
+        json.dumps(json.loads(deep_text))
+    except RecursionError:
+        depth = sys.getrecursionlimit() // 2 + 50
+        deep_text = _deep_forwarded_text(depth)
+    document = _unstamped_document(parity)
+    document["tolerance_policy_id"] = "__deep_forwarded_policy__"
+    text = json.dumps(document)
+    parity.report_path.write_text(
+        text.replace(json.dumps("__deep_forwarded_policy__"), deep_text, 1))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK
+    assert summary["status"] == "available"
+    assert summary["compared_count"] == 3
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    _assert_no_store(headers)
+    authenticated = json.loads(body)
+    assert authenticated["status"] == "available"
+    assert authenticated["compared_count"] == 3
+
+    leaves = []
+    for forwarded in (summary["tolerance_policy_id"],
+                      authenticated["tolerance_policy_id"]):
+        assert type(forwarded) is list
+        assert len(forwarded) == 1
+        value = forwarded
+        for _ in range(depth):
+            assert type(value) is list and len(value) == 1
+            value = value[0]
+        leaves.append(value)
+    assert leaves == [_DEEP_FORWARDED_LEAF, _DEEP_FORWARDED_LEAF]
+
+
+@pytest.mark.parametrize("schema_version, unstamped", (
+    ("native_parity_report.v1.1", True),
+    ("native_parity_report.v1.2", False),
+))
+def test_parser_recursion_is_503_not_500(parity, monkeypatch, schema_version, unstamped):
+    """A RecursionError from the projection's own json.load parser is the
+    malformed-report refusal for both schemas, never an untyped transport
+    failure, and every opened report handle is closed again."""
+    document = json.loads(json.dumps(parity.report))
+    document["schema_version"] = schema_version
+    if unstamped:
+        del document["as_of"]
+        del document["generated_at"]
+    write_parity_report(document, parity.report_path)
+
+    handles = []
+
+    def exploding_load(handle, *args, **kwargs):
+        handles.append(handle)
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(native_parity_projection.json, "load", exploding_load)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE, schema_version
+    assert summary["status"] == "unavailable", schema_version
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED, schema_version
+    assert handles and all(handle.closed for handle in handles), schema_version
+
+    for path in _PARITY_ROUTES:
+        params = {"side": "legacy"} if path.endswith("unpaired") else None
+        code, body, headers = _get(parity.base, path, token=parity.token, params=params)
+        assert code == 503, (schema_version, path)
+        _assert_no_store(headers)
+        assert json.loads(body)["code"] == NATIVE_PARITY_REPORT_MALFORMED, (schema_version, path)
+        assert b"maximum recursion depth exceeded" not in body, (schema_version, path)
+
+    assert len(handles) == 1 + len(_PARITY_ROUTES), schema_version
+    assert all(handle.closed for handle in handles), schema_version
+
+
+def test_cursor_hashing_recursion_on_ignored_extras_is_typed_503(parity, monkeypatch):
+    """The summary ignores unknown report extras, but a detail route's cursor
+    hash recursion over them must classify as the malformed-report 503, never a
+    500. Injecting RecursionError at the native parity content_hash boundary is
+    the stable way to exercise that classification."""
+    document = json.loads(json.dumps(parity.report))
+    document["unknown_extra"] = {"ignored": [1, 2, 3]}
+    parity.report_path.write_text(json.dumps(document))
+    real_hash = api_module.content_hash
+
+    def exploding_hash(value, **kwargs):
+        if isinstance(value, dict) and "mismatches" in value:
+            raise RecursionError("maximum recursion depth exceeded")
+        return real_hash(value, **kwargs)
+
+    monkeypatch.setattr(api_module, "content_hash", exploding_hash)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity", token=parity.token)
+    assert code == 200
+    _assert_no_store(headers)
+    assert json.loads(body)["status"] == "available"
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches",
+                               token=parity.token, params={"limit": "10"})
+    assert code == 503
+    _assert_no_store(headers)
+    assert json.loads(body)["code"] == NATIVE_PARITY_REPORT_MALFORMED
+
+
+_LEGACY_DETAIL_VALUES = (
+    pytest.param(1.25, id="finite"),
+    pytest.param(-0.0, id="negative_zero"),
+    pytest.param(None, id="null"),
+    pytest.param(True, id="bool"),
+    pytest.param(2 ** 53 + 1, id="large_int"),
+    pytest.param(10 ** 400, id="arbitrary_precision_int"),
+    pytest.param(sys.float_info.max, id="max_finite_float"),
+    pytest.param("NaN", id="string_nan_marker"),
+    pytest.param("Infinity", id="string_infinity_marker"),
+    pytest.param({"nested": [1, 2, {"deep": False}]}, id="nested_finite"),
+    pytest.param("\U0001F600 safe \u2713 \u00e9", id="non_bmp_unicode"),
+)
+
+
+@pytest.mark.parametrize("side", ("legacy", "native"))
+@pytest.mark.parametrize("value", _LEGACY_DETAIL_VALUES)
+def test_unstamped_v11_finite_saved_value_round_trips_through_pages(parity, side, value):
+    document = _unstamped_document(parity)
+    _first_mismatch(document)["values"]["forecast_p10"][side] = value
+    parity.report_path.write_text(json.dumps(document))
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches",
+                               token=parity.token, params={"limit": "1"})
+    assert code == 200, (side, value)
+    _assert_no_store(headers)
+    first_page = json.loads(body)
+    assert first_page["next_cursor"] is not None, (side, value)
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches",
+                               token=parity.token,
+                               params={"limit": "1", "cursor": first_page["next_cursor"]})
+    assert code == 200, (side, value)
+    _assert_no_store(headers)
+    second_page = json.loads(body)
+    assert second_page["next_cursor"] is None, (side, value)
+
+    first = first_page["items"][0]
+    assert (first["row_key"], first["dimension"]) == ("BBB|S|2026-01-02", "forecasts")
+    served = first["fields"]["forecast_p10"]
+    assert served["status"] == "differ", (side, value)
+    assert served[side] == value, (side, value)
+    assert type(served[side]) is type(value), (side, value)
+    if isinstance(value, float) and value == 0.0:
+        assert math.copysign(1.0, served[side]) == -1.0, (side, value)
+
+
+_LEGACY_READABILITY_CASES = ("missing_saved_pair", "unknown_dimension_field",
+                             "absent_policy", "null_policy")
+
+
+def _apply_readability_case(document, case):
+    if case == "missing_saved_pair":
+        _first_mismatch(document)["values"]["forecast_p10"].pop("native")
+    elif case == "unknown_dimension_field":
+        mismatch = _first_mismatch(document)
+        name = mismatch["finding_fields"][0]
+        mismatch["finding_fields"][0] = "unknown_field"
+        mismatch["values"]["unknown_field"] = mismatch["values"].pop(name)
+        mismatch["dimension"] = "unknown_dimension"
+    elif case == "absent_policy":
+        del document["tolerance_policy_id"]
+    elif case == "null_policy":
+        document["tolerance_policy_id"] = None
+    else:
+        raise AssertionError(case)
+
+
+@pytest.mark.parametrize("case", _LEGACY_READABILITY_CASES)
+def test_unstamped_v11_ignored_or_missing_modern_fields_stay_readable(parity, case):
+    document = _unstamped_document(parity)
+    _apply_readability_case(document, case)
+    parity.report_path.write_text(json.dumps(document))
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.OK, case
+    assert summary["status"] == "available", case
+    assert summary["source_schema_version"] == "native_parity_report.v1.1", case
+
+    code, body, headers = _get(parity.base, "/api/v1/native_parity/mismatches",
+                               token=parity.token, params={"limit": "10"})
+    assert code == 200, case
+    _assert_no_store(headers)
+    items = json.loads(body)["items"]
+    expected_dimension = ("unknown_dimension" if case == "unknown_dimension_field"
+                          else "forecasts")
+    assert [(item["row_key"], item["dimension"]) for item in items] == [
+        ("BBB|S|2026-01-02", expected_dimension),
+        ("CCC|S|2026-01-03", "simulation")], case
+
+    first = items[0]
+    if case == "missing_saved_pair":
+        assert first["fields"]["forecast_p10"] == {"status": "differ"}, case
+    elif case == "unknown_dimension_field":
+        assert first["fields"] == {"unknown_field": {
+            "status": "differ", "legacy": 1.0, "native": 1.25}}, case
+    else:
+        assert first["fields"]["forecast_p10"] == {
+            "status": "differ", "legacy": 1.0, "native": 1.25}, case
+
+    if case in ("absent_policy", "null_policy"):
+        assert summary["tolerance_policy_id"] is None, case
