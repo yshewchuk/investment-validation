@@ -710,6 +710,20 @@ def test_shared_reader_refuses_malformed_modern_fields(parity, case):
     assert "compared_count" not in summary, case
 
 
+def test_space_padded_as_of_day_is_refused_as_malformed(parity):
+    document = json.loads(json.dumps(parity.report))
+    document["as_of"] = "2026-01- 2"
+    write_parity_report(document, parity.report_path)
+
+    code, summary = native_parity_summary(str(parity.report_path))
+    assert code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert summary["status"] == "unavailable"
+    assert summary["reason_code"] == NATIVE_PARITY_REPORT_MALFORMED
+    assert "compared_count" not in summary
+
+    _assert_malformed_routes(parity)
+
+
 def test_raw_v12_diagnostic_reads_shared_but_api_refuses_missing_identity(parity):
     """The captured exporter's raw v1.2 diagnostic (no run identity) stays
     readable by the shared reader, while the API route refuses it."""

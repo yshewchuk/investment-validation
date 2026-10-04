@@ -212,7 +212,9 @@ def _validate_run_identity(report: dict[str, object]) -> None:
         if as_of is not None:
             if not isinstance(as_of, str) or len(as_of) != 10:
                 raise ValueError("native parity as_of is not an ISO date")
-            parse_timestamp(as_of + "T00:00:00.000000Z")
+            parsed_as_of = parse_timestamp(as_of + "T00:00:00.000000Z")
+            if parsed_as_of.date().isoformat() != as_of:
+                raise ValueError("native parity as_of is not a canonical ISO date")
     policy = report.get("tolerance_policy_id")
     if not isinstance(policy, str) or not policy:
         raise ValueError("native parity tolerance_policy_id is missing")
