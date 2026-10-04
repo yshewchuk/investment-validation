@@ -89,8 +89,10 @@ content-derived `release_id`. A findings failure still publishes the receipt
 created here, that is a later task's single published pointer. `get_release`,
 `list_events` (cursor-paginated, ordered `event_date, ticker, event_id`),
 `event_scores` (all matching summaries for one event, with optional filters),
-and `get_score_detail` (one document) are the read helpers a future read API
-(P3-2) wraps. `connect`/`ensure_schema` open and migrate the file.
+and `get_score_detail` (one document) are projection read helpers used by the
+existing P3-2 read API. `GET /api/v1/events/{id}/scores` calls
+`projections.get_event`, which returns the event's full score summaries via
+`event_scores`. `connect`/`ensure_schema` open and migrate the file.
 
 **Summary-field gap (review fix, `EVENT_SCORE_SUMMARY_V1` v1.1).** The
 rendered row carries no single headline "expected return" or closed
