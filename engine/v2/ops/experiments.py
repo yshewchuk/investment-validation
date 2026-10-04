@@ -4,8 +4,11 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Callable
 
 from engine.v2.foundation import content_hash
@@ -19,6 +22,16 @@ from engine.v2.ops.fingerprints import (
 )
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
+#: The closed top-level field set of a spec document: a key this resolver
+#: cannot interpret is refused, never quietly ignored into a runner call.
+SPEC_FIELDS = frozenset({"experiment_id", "hypothesis", "primary_arm_id", "arms",
+                         "seed", "folds", "economic_params", "price_source",
+                         "input_files", "runner"})
+
+#: The only economic declaration with a defined execution meaning today;
+#: any other key is an unused declaration, refused before the runner.
+SUPPORTED_ECONOMIC_KEYS = frozenset({"fill"})
+
 
 def default_checkout_root() -> Path:
     """The code checkout whose ``experiments/`` tree owns pre-registration.
@@ -31,6 +44,16 @@ def default_checkout_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _require_mapping(document) -> None:
+    """Refuse a non-mapping spec document as the resolver's typed code, before
+    any ``.get`` or key enumeration touches it. The plan entry point and direct
+    ``experiment_spec_from_document`` callers both pass through here."""
+    if not isinstance(document, Mapping):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment specification document is not a mapping",
+                   details={"type": type(document).__name__})
+
+
 def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | None = None):
     """Create an immutable plan for a supervised smoke or primary experiment run."""
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
@@ -39,6 +62,7 @@ def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | Non
     if not path.is_file() or path.is_symlink():
         raise fail("INPUT_CHANGED", "experiment specification is missing")
     document = json.loads(path.read_text())
+    _require_mapping(document)
     experiment_id = document.get("experiment_id")
     if not isinstance(experiment_id, str) or not experiment_id:
         raise fail("INVALID_REQUEST", "experiment specification has no experiment_id")
@@ -81,10 +105,20 @@ def experiment_spec_from_document(document: dict) -> ExperimentSpec:
     durable attempt record -- is built, so a missing required field is refused
     once, as an ``OpsError``, never a bare ``KeyError``.
     """
+    _require_mapping(document)
+    unknown = sorted(set(document) - SPEC_FIELDS)
+    if unknown:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment specification declares fields this resolver does not know",
+                   details={"fields": unknown})
     for name in ("hypothesis", "primary_arm_id", "economic_params", "price_source"):
         if name not in document or document[name] is None:
             raise fail("INVALID_REQUEST", "experiment specification is missing a required field",
                        details={"field": name})
+    for name in ("arms", "folds"):
+        if name in document and not isinstance(document[name], list):
+            raise fail("INVALID_EXPERIMENT_SPEC", "arms and folds must be JSON arrays",
+                       details={"field": name, "type": type(document[name]).__name__})
     return ExperimentSpec(
         experiment_id=document.get("experiment_id", ""),
         hypothesis=document["hypothesis"],
@@ -119,7 +153,184 @@ class ExperimentSpec:
                              "primary_arm_id": self.primary_arm_id,
                              "arms": self.arms, "seed": self.seed,
                              "folds": self.folds, "economic_params": self.economic_params,
-                             "price_source": self.price_source, "runner": self.runner})
+                              "price_source": self.price_source, "runner": self.runner})
+
+
+def _freeze(value):
+    """Immutable snapshot over FRESH dicts: a proxy over the parsed document's
+    own mapping would still let that document mutate the "immutable" plan."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _require_immutable_economics(spec: ExperimentSpec,
+                                 plan: ResolvedExperimentPlan) -> None:
+    """Accept a supplied plan's economics only in the shapes ``_freeze``
+    itself produces: immutable JSON scalars, tuples of immutable values, and
+    read-only mapping proxies with immutable keys and values. Built-in dicts,
+    lists, and any other mutable container are refused as the same typed
+    refusal -- canonical bytes can match while the nested values are still
+    editable behind the adopted plan's back."""
+    def immutable(value) -> bool:
+        if isinstance(value, MappingProxyType):
+            return all(immutable(key) and immutable(item)
+                       for key, item in value.items())
+        if isinstance(value, tuple):
+            return all(immutable(item) for item in value)
+        return isinstance(value, (str, int, float, bool, type(None)))
+    if not immutable(plan.economic_params):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "supplied resolved plan carries mutable nested economics",
+                   details={"experiment_id": spec.experiment_id})
+
+
+def _thaw(value):
+    """Plain JSON structures rebuilt at serialization time, never stored."""
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class ResolvedExperimentPlan:
+    """The one execution plan an ``ExperimentSpec`` resolves to.
+
+    Deeply immutable (a frozen dataclass over frozen mappings), and its
+    ``json_bytes`` are canonical: sorted keys, compact separators, one stable
+    UTF-8 encoding. A runner that declares ``execution_plan`` receives this
+    plan -- never the raw document it was parsed from.
+    """
+    schema_version: str
+    experiment_id: str
+    arms: tuple[str, ...]
+    seed: int
+    folds: tuple[str, ...]
+    economic_params: Mapping
+    price_source: str
+    runner: str
+    #: Set by :func:`resolve_experiment_plan` on the exact object it returns.
+    #: A non-init field whose ``dataclasses.replace`` default is ``False``, so a
+    #: rebuilt or hand-built plan never carries the resolver's provenance and
+    #: :func:`_adopt_resolved_plan` refuses adoption before any filesystem
+    #: effect. Excluded from ``repr``/``compare`` to keep canonical identity.
+    _provenance: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def as_document(self) -> dict:
+        return {"schema_version": self.schema_version, "experiment_id": self.experiment_id,
+                "arms": list(self.arms), "seed": self.seed, "folds": list(self.folds),
+                "economic_params": _thaw(self.economic_params),
+                "price_source": self.price_source, "runner": self.runner}
+
+    def json_bytes(self) -> bytes:
+        return json.dumps(self.as_document(), sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8")
+
+
+def _validate_plan_fields(spec: ExperimentSpec) -> None:
+    """Refuse values that cannot become the plan's immutable, correctly
+    typed fields, before any plan is built or any field is frozen. A
+    dataclass annotation checks nothing at runtime, so a JSON object
+    supplied as ``seed`` used to travel into ``ResolvedExperimentPlan`` by
+    reference and mutating its source rewrote the plan's canonical bytes
+    after the fact. ``experiment_id``/``price_source``/``runner`` must be
+    non-empty strings; ``arms``/``folds`` must be tuples of strings -- the
+    fields' declared type, so a mutable list or a bare string is refused no
+    matter what it contains (the parser converts valid document arrays to
+    tuples); ``seed`` must be an ``int``, never a ``bool``; and
+    every nested economic value must be JSON-representable -- finite
+    numbers, strings, booleans, null, lists and string-keyed mappings --
+    anything else refused rather than frozen into a plan and handed to a
+    runner. Assumes the caller's mapping check already established
+    ``economic_params`` is a mapping."""
+    def json_value(value) -> bool:
+        if value is None or isinstance(value, (bool, int, str)):
+            return True
+        if isinstance(value, float):
+            return math.isfinite(value)
+        if isinstance(value, list):
+            return all(json_value(item) for item in value)
+        if isinstance(value, Mapping):
+            return all(isinstance(key, str) and json_value(item)
+                       for key, item in value.items())
+        return False
+
+    for name in ("experiment_id", "price_source", "runner"):
+        value = getattr(spec, name)
+        if not isinstance(value, str) or not value:
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment plan field must be a non-empty string",
+                       details={"field": name, "type": type(value).__name__})
+    for name in ("arms", "folds"):
+        value = getattr(spec, name)
+        if not isinstance(value, tuple) or not all(
+                isinstance(item, str) for item in value):
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment plan field must be a tuple of strings",
+                       details={"field": name, "type": type(value).__name__})
+    if isinstance(spec.seed, bool) or not isinstance(spec.seed, int):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment seed must be an integer",
+                   details={"type": type(spec.seed).__name__})
+    if not all(isinstance(key, str) and json_value(item)
+               for key, item in spec.economic_params.items()):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment economic parameters must be string-keyed "
+                   "JSON-representable values",
+                   details={"type": type(spec.economic_params).__name__})
+
+
+def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
+    """Refuse malformed plan fields and economically unused declarations,
+    then freeze the one plan."""
+    if not isinstance(spec.economic_params, Mapping):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "economic_params must be a mapping",
+                   details={"type": type(spec.economic_params).__name__})
+    # Order matters: the field check types the economic keys before the sort.
+    _validate_plan_fields(spec)
+    unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
+    if unused:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment declares economically unused parameters",
+                   details={"keys": unused})
+    plan = ResolvedExperimentPlan(
+        schema_version="experiment_execution_plan.v1.0", experiment_id=spec.experiment_id,
+        arms=_freeze(list(spec.arms)), seed=spec.seed, folds=_freeze(list(spec.folds)),
+        economic_params=_freeze(spec.economic_params), price_source=spec.price_source,
+        runner=spec.runner)
+    object.__setattr__(plan, "_provenance", True)
+    return plan
+
+
+def _adopt_resolved_plan(spec: ExperimentSpec,
+                         resolved_plan: ResolvedExperimentPlan) -> ResolvedExperimentPlan:
+    """Seal plan adoption to the exact object ``resolve_experiment_plan`` stamped.
+
+    Only a resolver-produced plan carries the private provenance marker; a
+    ``dataclasses.replace`` rebuild or a hand-built plan loses it, so a
+    byte-equal impostor hiding a mutable ``economic_params`` dict, a
+    ``MappingProxyType`` over a caller-held mapping, or mutable ``arms``/other
+    fields is refused here -- the resolver's typed ``INVALID_EXPERIMENT_SPEC``
+    -- before ``run_experiment`` touches the filesystem. The immutable-economics
+    shape check and canonical-byte equality are kept as defense in depth, and
+    the accepted object is returned unchanged so its identity reaches the
+    runner.
+    """
+    if not resolved_plan._provenance:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "supplied resolved plan was not produced by this resolver",
+                   details={"experiment_id": spec.experiment_id})
+    _require_immutable_economics(spec, resolved_plan)
+    if resolved_plan.json_bytes() != resolve_experiment_plan(spec).json_bytes():
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "supplied resolved plan is not the plan this spec resolves to",
+                   details={"experiment_id": spec.experiment_id})
+    return resolved_plan
 
 
 def experiments_ledger_path(repo_root: Path | str) -> Path:
@@ -425,12 +636,45 @@ def runner_manifest(root: Path | str, script: str) -> dict:
             "removal_phase": entry["removal_phase"]}
 
 
-def _call_runner(runner: Callable, run_dir: Path, *, no_ledger: bool):
+def _execution_plan_compatibility(runner: Callable,
+                                  execution_plan: ResolvedExperimentPlan) -> None:
+    """Refuse a legacy callable that cannot carry the plan's economic stance.
+
+    A callable without an ``execution_plan`` parameter has no channel for
+    ``economic_params``, so silently dropping a declared economic stance is
+    refused as the resolver's typed ``INVALID_EXPERIMENT_SPEC``. Called by
+    :func:`run_experiment` as a preflight -- before the run directory or any
+    evidence exists -- and again by :func:`_call_runner` as defense in depth.
+    """
+    if not execution_plan.economic_params:
+        return
+    if "execution_plan" in {name for name in inspect.signature(runner).parameters}:
+        return
+    raise fail("INVALID_EXPERIMENT_SPEC",
+               "experiment runner does not declare execution_plan but the "
+               "resolved plan carries economic parameters",
+               details={"economic_keys": sorted(execution_plan.economic_params)})
+
+
+def _call_runner(runner: Callable, run_dir: Path, *, no_ledger: bool,
+                 execution_plan: ResolvedExperimentPlan):
+    """Invoke one runner with the resolved plan as its ``execution_plan``.
+
+    A callable that declares ``execution_plan`` receives exactly that plan --
+    never the raw document. A callable that does not is the legacy shape and
+    stays compatible only while the resolved plan carries no
+    ``economic_params``: the refusal is the shared preflight above, which
+    ``run_experiment`` already ran before any artifact existed and which is
+    re-checked here as defense in depth.
+    """
     signature = inspect.signature(runner)
     if "no_ledger" not in signature.parameters:
         raise fail("INVALID_REQUEST", "experiment runner lacks required no-ledger control")
+    _execution_plan_compatibility(runner, execution_plan)
     kwargs = {"run_dir": run_dir, "no_ledger": no_ledger}
     accepted = {name for name in signature.parameters}
+    if "execution_plan" in accepted:
+        kwargs["execution_plan"] = execution_plan
     return runner(**{key: value for key, value in kwargs.items() if key in accepted})
 
 
@@ -447,12 +691,31 @@ def _report_evidence(run_dir: Path) -> dict:
 
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    *, runner: Callable, mode="smoke", backup: Callable | None = None,
-                   synthetic=False) -> dict:
+                   synthetic=False,
+                   resolved_plan: ResolvedExperimentPlan | None = None) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity."""
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
     if mode == "smoke" and backup is not None:
         raise fail("INVALID_REQUEST", "smoke runs cannot request backup")
+    # Resolved once, here: an unused economic declaration is a typed refusal
+    # before any directory is created, any evidence persisted, or the runner
+    # is invoked, and the very plan is the one handed to the callable below.
+    # A supplied plan is adopted only when it is the exact object this resolver
+    # produced -- its private provenance marker, which a ``dataclasses.replace``
+    # rebuild loses -- so a byte-equal plan hiding a mutable dict, a proxy over
+    # a caller-held mapping, or mutable ``arms``/other fields is refused before
+    # any filesystem effect; its canonical bytes must still match, and the
+    # accepted object then travels to the runner unchanged, so a caller's plan
+    # identity survives the call unchanged.
+    if resolved_plan is None:
+        plan = resolve_experiment_plan(spec)
+    else:
+        plan = _adopt_resolved_plan(spec, resolved_plan)
+    # The legacy-callable compatibility check is the same kind of preflight:
+    # a runner with no ``execution_plan`` channel is refused, typed, before
+    # the run directory, ``CAPABILITIES.json``, or any receipt can exist.
+    _execution_plan_compatibility(runner, plan)
     base = Path(root).resolve()
     destination = Path(run_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -464,8 +727,8 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
     (destination / "CAPABILITIES.json").write_text(json.dumps(capabilities, indent=2,
                                                                 sort_keys=True))
     try:
-        result = _call_runner(runner, destination,
-                              no_ledger=(mode == "smoke" or synthetic))
+        result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
+                              execution_plan=plan)
         report = _report_evidence(destination)
         receipt.evidence.update(report)
         receipt.evidence["runner_result"] = result if isinstance(result, dict) else str(result)
