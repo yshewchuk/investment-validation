@@ -178,6 +178,9 @@ def main():
     except SystemExit as e:
         code = e.code
         raise
+    except BaseException:
+        code = 1
+        raise
     finally:
         if RUN:
             record_metrics(started, t0, code)
