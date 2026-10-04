@@ -1427,13 +1427,14 @@ def test_zero_population_bound_does_not_admit_zero_result_limit(tmp_path, case):
     {"ticker": "AAA"},
     b"",
     set(),
+    [None],
+    ["ticker"],
+    [1],
 ])
-def test_non_sequence_key_filter_container_refuses_query_not_bounded(tmp_path, key_filter):
-    """PR 365 gate finding: metadata planning refuses any ``key_filter``
-    that is not a list/tuple — None/integers used to raise a raw
-    ``TypeError``, while empty strings/mappings/bytes/sets iterated nothing
-    and silently selected ALL fragments. Both planning APIs refuse with a
-    nonretryable ``QUERY_NOT_BOUNDED`` before touching a record; no raw
+def test_malformed_key_filter_refuses_query_not_bounded(tmp_path, key_filter):
+    """PR 365 gate finding: both planning APIs refuse malformed ``key_filter``
+    containers (not a list/tuple) and malformed elements (not KeyPredicates)
+    inside valid containers with a nonretryable ``QUERY_NOT_BOUNDED``; no raw
     ``TypeError`` escapes and no full-membership bound is ever returned."""
     conn, _store, snap = _securities_snapshot(tmp_path)
     records = Repository(conn).fragment_records(snap, "securities")
