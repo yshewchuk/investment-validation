@@ -174,3 +174,77 @@ def test_exit_75_from_a_gate_is_still_a_plain_failure(monkeypatch, capsys):
 def test_pytest_step_bounds_its_resource_wait_below_its_own_timeout():
     source = (ROOT / "tools" / "oc_check.py").read_text()
     assert '"--max-wait-s", "600"' in source
+
+
+class TestSelfMetrics:
+    """One best-effort JSON line per run in $OC_METRICS_DIR/oc_check.jsonl."""
+
+    BOUNDED_WAIT = "[bounded] RESOURCE WAIT: all test slots held; retrying in 5s\n"
+
+    @pytest.fixture
+    def wt(self, tmp_path, monkeypatch):
+        root = tmp_path / "worktrees" / "wt1"
+        (root / "checks").mkdir(parents=True)
+        (root / "checks" / "repo_hygiene.py").write_text("")
+        (root / "tests").mkdir()
+        (root / "tests" / "test_x.py").write_text("")
+        monkeypatch.chdir(root)
+        monkeypatch.setattr(oc_check, "WORKTREES", tmp_path / "worktrees")
+        monkeypatch.setattr(oc_check, "tree_id", lambda r: "t1")
+        for name in ("STEPS", "STEP_SECONDS", "RUN"):
+            monkeypatch.setattr(oc_check, name, type(getattr(oc_check, name))())
+        monkeypatch.setattr(oc_check, "WAIT", [0.0])
+        monkeypatch.setenv("OC_METRICS_DIR", str(tmp_path / "metrics"))
+        self.metrics = tmp_path / "metrics" / "oc_check.jsonl"
+        self.stderr = ""
+        monkeypatch.setattr(oc_check.subprocess, "run", self._fake_run)
+        return root
+
+    def _fake_run(self, cmd, **kw):
+        err = self.stderr if "pytest" in cmd else ""
+        return subprocess.CompletedProcess(cmd, 0, "", err)
+
+    def _main(self, monkeypatch, *argv):
+        monkeypatch.setattr(oc_check.sys, "argv", ["oc_check.py", *argv])
+        with pytest.raises(SystemExit) as excinfo:
+            oc_check.main()
+        return excinfo.value.code
+
+    def _lines(self):
+        return [json.loads(x) for x in self.metrics.read_text().splitlines()]
+
+    def test_normal_run_writes_exactly_one_line_with_the_documented_fields(self, wt, monkeypatch, capsys):
+        assert self._main(monkeypatch, "tests/test_x.py") == 0
+        (line,) = self._lines()
+        assert set(line) == {"ts", "duration_s", "wait_s", "steps", "targets", "verdict", "exit", "mode", "worktree"}
+        assert (line["verdict"], line["exit"], line["mode"]) == ("ALL GREEN", 0, "normal")
+        assert (line["targets"], line["wait_s"], line["worktree"]) == (1, 0, "wt1")
+        assert set(line["steps"]) == {"hygiene", "import_layers", "code_budgets", "package_readmes", "v2_lint", "pytest"}
+        assert str(wt) not in json.dumps(line) and "tests/test_x.py" not in json.dumps(line)
+        assert capsys.readouterr().out.rstrip().endswith("oc-check: ALL GREEN  (report: .oc_logs/oc_check_report.json)")
+
+    def test_unwritable_metrics_dir_changes_neither_exit_code_nor_output(self, wt, monkeypatch, capsys, tmp_path):
+        assert self._main(monkeypatch, "tests/test_x.py") == 0
+        good = capsys.readouterr().out
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file, so mkdir under it fails")
+        monkeypatch.setenv("OC_METRICS_DIR", str(blocker / "sub"))
+        assert self._main(monkeypatch, "tests/test_x.py") == 0
+        assert capsys.readouterr().out == good
+
+    def test_verify_run_records_mode_verify(self, wt, monkeypatch):
+        (wt / ".oc_logs").mkdir()
+        (wt / ".oc_logs" / "oc_check_report.json").write_text(json.dumps({"tree": "t1", "verdict": "ALL GREEN"}))
+        assert self._main(monkeypatch, "--verify") == 0
+        (line,) = self._lines()
+        assert (line["mode"], line["verdict"], line["exit"], line["steps"]) == ("verify", "VERIFIED", 0, {})
+
+    def test_two_runs_append_two_lines(self, wt, monkeypatch):
+        self._main(monkeypatch, "tests/test_x.py")
+        self._main(monkeypatch, "tests/test_x.py")
+        assert len(self._lines()) == 2
+
+    def test_a_run_that_waited_for_a_slot_records_wait_s(self, wt, monkeypatch):
+        self.stderr = self.BOUNDED_WAIT * 3
+        assert self._main(monkeypatch, "tests/test_x.py") == 0
+        assert self._lines()[0]["wait_s"] == 15

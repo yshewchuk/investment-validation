@@ -24,6 +24,13 @@ pytest tail and the git tree id of the working tree at the end of the run.
   python3 tools/oc_check.py --verify    VERIFIED only if the report exists, is ALL GREEN and
                                         matches the CURRENT tree (so a claim "I ran oc-check"
                                         is checkable, and any edit after the run shows as STALE).
+
+Every run (including --verify) also appends ONE JSON line to
+$OC_METRICS_DIR/oc_check.jsonl (default .oc_logs/, per worktree, append-only, no rotation):
+ts (UTC run start), duration_s, wait_s (slept waiting for a bounded_run slot, parsed from
+its "RESOURCE WAIT ... retrying in Ns" lines; 0 if none), steps (step -> seconds), targets
+(a count, never paths), verdict, exit, mode (normal|verify), worktree (directory name only).
+Best-effort: it never raises, prints, locks, or changes the run's output or exit code.
 """
 import json
 import tempfile
@@ -55,6 +62,11 @@ def tail(text):
 
 
 STEPS = []
+STEP_SECONDS = {}
+WAIT = [0.0]  # seconds bounded_run reported sleeping for a slot, summed over the run
+RUN = {}  # set by main() once the worktree checks pass; empty means nothing is recorded
+WAIT_RE = re.compile(r"RESOURCE WAIT: .*retrying in ([0-9.]+)s")
+VERDICT_BY_EXIT = {0: "VERIFIED", 1: "NOT GREEN", 2: "REFUSED", 3: "MISSING", 4: "STALE"}
 REPORT = Path(".oc_logs") / "oc_check_report.json"
 
 
@@ -69,13 +81,34 @@ def tree_id(root):
                               capture_output=True, text=True).stdout.strip()
 
 
+def record_metrics(started, t0, code):
+    """Append one best-effort line to $OC_METRICS_DIR/oc_check.jsonl (see module docstring)."""
+    try:
+        d = Path(os.environ.get("OC_METRICS_DIR") or ".oc_logs")
+        d.mkdir(parents=True, exist_ok=True)
+        code = code if isinstance(code, int) else (0 if code is None else 1)
+        line = {"ts": started, "duration_s": round(time.monotonic() - t0, 1), "wait_s": round(WAIT[0], 1),
+                "steps": dict(STEP_SECONDS), "targets": RUN.get("targets", 0),
+                "verdict": RUN.get("verdict") or VERDICT_BY_EXIT.get(code, "EXIT"), "exit": code,
+                "mode": RUN["mode"], "worktree": Path.cwd().name}
+        with open(d / "oc_check.jsonl", "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except Exception:
+        pass
+
+
 def run(label, cmd, env, timeout):
+    t0 = time.monotonic()
     try:
         p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         print(f"== {label}: TIMEOUT after {timeout}s")
         STEPS.append({"step": label, "result": "TIMEOUT"})
         return False
+    finally:
+        STEP_SECONDS[label] = round(time.monotonic() - t0, 1)
+    if label == "pytest":
+        WAIT[0] += sum(float(m) for m in WAIT_RE.findall((p.stdout or "") + (p.stderr or "")))
     if label == "pytest" and p.returncode == EX_TEMPFAIL:
         print(f"== {label}: {RESOURCE_WAIT_MSG}")
         STEPS.append({"step": label, "result": "RESOURCE WAIT TIMEOUT",
@@ -139,12 +172,25 @@ def changed_tests(root):
 
 
 def main():
+    started, t0, code = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic(), 0
+    try:
+        _main()
+    except SystemExit as e:
+        code = e.code
+        raise
+    finally:
+        if RUN:
+            record_metrics(started, t0, code)
+
+
+def _main():
     root = Path.cwd().resolve()
     if WORKTREES not in root.parents:
         refuse(f"must run from an agent worktree under {WORKTREES}, not {root}")
     if not (root / "checks" / "repo_hygiene.py").is_file():
         refuse("run from the worktree root")
     args = sys.argv[1:]
+    RUN["mode"] = "verify" if args == ["--verify"] else "normal"
     if args == ["--verify"]:
         verify(root)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -179,6 +225,7 @@ def main():
         ok = run("pytest", cmd, env, 900) and ok
     waited_out = any(s.get("result") == "RESOURCE WAIT TIMEOUT" for s in STEPS)
     verdict = "ALL GREEN" if ok else ("RESOURCE WAIT TIMEOUT" if waited_out else "NOT GREEN")
+    RUN.update(verdict=verdict, targets=len(args))
     REPORT.parent.mkdir(exist_ok=True)
     REPORT.write_text(json.dumps({
         "verdict": verdict, "tree": tree_id(root), "targets": args, "steps": STEPS,
