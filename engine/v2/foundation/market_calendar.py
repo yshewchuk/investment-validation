@@ -1,5 +1,5 @@
 """Rule-based trading sessions and BMO/AMC exit anchoring (layer 0.5): projected
-weekdays minus NYSE holidays, plus the first session after ``event_through``."""
+weekdays minus NYSE holidays, synthesized only strictly past the observed max."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -120,9 +120,9 @@ def _first_rule_session_after(day: date) -> date:
 
 
 def build_calendar_sessions(observed_sessions: tuple[str, ...], *, event_through: Any) -> CalendarSessions:
-    """R6: sorted unique observed sessions projected through ``event_through``;
-    ``observed_through`` is the max source session, never a projection, and
-    ``days`` appends the first projected session after it for a next close.
+    """R6: observed sessions kept verbatim; synthesis happens only strictly
+    after the max observed date, never inside coverage: ``event_through`` at
+    or past it projects up to it plus one next close, below it adds nothing.
     """
     if not isinstance(observed_sessions, tuple) or not observed_sessions:
         raise CalendarInputError("observed_sessions must be a non-empty tuple of YYYY-MM-DD strings")
@@ -138,9 +138,10 @@ def build_calendar_sessions(observed_sessions: tuple[str, ...], *, event_through
         days.add(day)
     through = _as_day(event_through, "event_through")
     observed_through = max(days)
-    projected = _rule_sessions(observed_through, through)
-    tail = _first_rule_session_after(through)
-    all_days = sorted(days.union(projected).union((tail,)))
+    beyond = through >= observed_through
+    projected = _rule_sessions(observed_through, through) if beyond else []
+    tail = [_first_rule_session_after(through)] if beyond else []
+    all_days = sorted(days.union(projected).union(tail))
     return CalendarSessions(tuple(d.isoformat() for d in all_days), observed_through.isoformat())
 
 

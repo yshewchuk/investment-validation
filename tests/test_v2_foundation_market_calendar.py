@@ -65,10 +65,59 @@ def test_event_through_below_observed_max_appends_no_extra_session() -> None:
     assert built.observed_through == "2024-03-15"
 
 
-def test_sparse_source_includes_first_post_through_session() -> None:
+def test_sparse_source_preserves_gap_below_event_through() -> None:
     built = build_calendar_sessions(("2024-03-08", "2024-03-15"), event_through="2024-03-10")
-    assert built.days == ("2024-03-08", "2024-03-11", "2024-03-15")
+    assert built.days == ("2024-03-08", "2024-03-15")  # never synthesize inside coverage
     assert built.observed_through == "2024-03-15"
+
+
+# --------------------------------------------------------------------------
+# Regression (gate round 2): projection must never synthesize a session
+# inside supplied observed coverage. The rule set treats 2025-01-09 as a
+# weekday session while the observed history carries a real gap there.
+# --------------------------------------------------------------------------
+
+JAN_GAP = ("2025-01-08", "2025-01-10")
+
+
+def test_projection_never_synthesizes_observed_gap() -> None:
+    built = build_calendar_sessions(JAN_GAP, event_through="2025-01-08")
+    assert built.days == JAN_GAP  # the historical sequence survives verbatim
+    assert "2025-01-09" not in built.days
+    assert built.observed_through == "2025-01-10"
+
+
+def test_historical_gap_exit_uses_the_observed_session() -> None:
+    built = build_calendar_sessions(JAN_GAP, event_through="2025-01-08")
+    assert planned_exit_date(_key("STR-THRU", "2025-01-08", "AMC"), built) == "2025-01-10"
+    assert planned_exit_date(_key("CTR5", date(2025, 1, 8), "AMC"), built) == "2025-01-10"
+    assert planned_exit_date(_key("STR-RUNUP", "2025-01-08", "AMC"), built) == "2025-01-08"
+
+
+def test_projection_at_observed_max_adds_only_a_legitimate_suffix() -> None:
+    built = build_calendar_sessions(JAN_GAP, event_through="2025-01-10")
+    assert built.days == JAN_GAP + ("2025-01-13",)  # suffix strictly past the max
+    assert built.observed_through == "2025-01-10"
+    assert planned_exit_date(_key("STR-THRU", "2025-01-09", "AMC"), built) == "2025-01-10"
+
+
+def test_projection_past_coverage_still_skips_the_internal_gap() -> None:
+    built = build_calendar_sessions(JAN_GAP, event_through="2025-02-03")
+    assert "2025-01-09" not in built.days
+    assert built.days[:2] == JAN_GAP
+    assert built.days[-1] == "2025-02-04"  # first close strictly after event_through
+    assert all(d > "2025-01-10" for d in built.days[2:])  # suffix is all past coverage
+    assert built.observed_through == "2025-01-10"
+
+
+@pytest.mark.parametrize("through", ["2025-01-02", "2025-01-08", "2025-01-09",
+                                     "2025-01-10", "2025-01-15"])
+def test_synthesis_is_always_strictly_past_the_observed_max(through: str) -> None:
+    built = build_calendar_sessions(JAN_GAP, event_through=through)
+    assert set(JAN_GAP) <= set(built.days)  # supplied dates never displaced or dropped
+    assert built.observed_through == "2025-01-10"
+    extra = [d for d in built.days if d not in JAN_GAP]
+    assert all(d > "2025-01-10" for d in extra)
 
 
 def test_observed_through_never_moves_under_projection() -> None:
