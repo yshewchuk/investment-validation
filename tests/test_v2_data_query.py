@@ -1156,3 +1156,262 @@ def test_explain_dependencies_for_an_unrecognized_object_is_unsupported_contract
     with pytest.raises(DataError) as err:
         repo.explain_dependencies(object(), table_name="securities")
     assert err.value.code == "UNSUPPORTED_CONTRACT"
+
+
+# --------------------------------------------------------------------------
+# Slice A: manifest membership bounds (``query.plan_scan_population`` and
+# ``Repository.scan_population_bound``) and the footer-vs-manifest row-count
+# integrity check in ``Repository._fragment_rows``.
+# --------------------------------------------------------------------------
+
+
+def _aaa_filter() -> tuple:
+    return (KeyPredicate(column="ticker", operator="eq", values=("AAA",)),)
+
+
+def test_scan_population_bound_of_empty_table_membership_is_zero(tmp_path):
+    conn, clock, _store = catalog_and_store(tmp_path)
+    snap = commit_tables(conn, clock, {"securities": []}, {"securities": _SEC})
+    repo = Repository(conn)  # no ArtifactStore: metadata planning opens no bytes
+    assert repo.scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=_aaa_filter()) == 0
+
+
+def test_scan_population_bound_of_fully_pruned_selection_is_zero(tmp_path):
+    conn, store, snap = _securities_snapshot(tmp_path)
+    query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query(
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("ZZZ",)),)))
+    assert Repository(conn).scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=query.key_filter) == 0
+    repo = Repository(conn, store)
+    assert list(repo.scan(query, table_name="securities")) == []
+    assert repo.explain_dependencies(query, table_name="securities").dependencies == ()
+
+    unbounded = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query(
+        key_filter=(), time_interval=None))
+    with pytest.raises(DataError) as err:
+        list(repo.scan(unbounded, table_name="securities"))
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    with pytest.raises(DataError) as err:
+        repo.explain_dependencies(unbounded, table_name="securities")
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+
+
+def test_zero_row_fragment_metadata_has_zero_bound_and_scans_empty(tmp_path):
+    conn, clock, store = catalog_and_store(tmp_path)
+    record = hand_built_record(
+        store, _SEC, _SEC_REF, table_from_rows(_SEC, []), partition_key="2024", row_count=0,
+        primary_key_min=("AAA", 2024), primary_key_max=("ZZZ", 2024))
+    snap = commit_tables(conn, clock, {"securities": [record]}, {"securities": _SEC})
+    query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query())
+    assert Repository(conn).scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=query.key_filter) == 0
+    assert list(Repository(conn, store).scan(query, table_name="securities")) == []
+
+
+def _pruning_case(case, tmp_path):
+    from datetime import datetime
+
+    conn, clock, store = catalog_and_store(tmp_path)
+    if case == "partition":
+        records = [
+            publish_and_inspect(store, _SEC, _SEC_REF,
+                                [_securities_row(t, 2024) for t in ("AAA", "BBB")], "2024"),
+            publish_and_inspect(store, _SEC, _SEC_REF,
+                                [_securities_row(t, 2025) for t in ("AAA", "BBB")], "2025"),
+        ]
+        snap = commit_tables(conn, clock, {"securities": records}, {"securities": _SEC})
+        query = DataQuery(
+            snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF,
+            columns=("ticker", "year"),
+            key_filter=(KeyPredicate(column="year", operator="eq", values=(2024,)),
+                        KeyPredicate(column="ticker", operator="eq", values=("BBB",))),
+            order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+        expected = (2, [{"ticker": "BBB", "year": 2024}], [records[0].fragment_id])
+        return conn, store, snap, "securities", _SEC_REF, query, expected
+    if case == "leading_key":
+        records = [
+            publish_and_inspect(store, _SEC, _SEC_REF,
+                                [_securities_row(t, 2024) for t in ("AAA", "BBB")], "2024"),
+            publish_and_inspect(store, _SEC, _SEC_REF,
+                                [_securities_row(t, 2025) for t in ("CCC", "DDD")], "2025"),
+        ]
+        snap = commit_tables(conn, clock, {"securities": records}, {"securities": _SEC})
+        query = DataQuery(
+            snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF,
+            columns=("ticker", "year"),
+            key_filter=(KeyPredicate(column="ticker", operator="eq", values=("CCC",)),),
+            order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+        expected = (2, [{"ticker": "CCC", "year": 2025}], [records[1].fragment_id])
+        return conn, store, snap, "securities", _SEC_REF, query, expected
+    records = [
+        publish_and_inspect(store, _DM, _DM_REF, [_daily_market_row("AAA", 2024, 2)], "2024"),
+        publish_and_inspect(store, _DM, _DM_REF,
+                            [_daily_market_row("AAA", 2025, 2), _daily_market_row("AAA", 2025, 3)],
+                            "2025"),
+    ]
+    snap = commit_tables(conn, clock, {"daily_market": records}, {"daily_market": _DM})
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
+        time_interval=TimeInterval(column="date", start_inclusive="2025-01-03",
+                                   end_exclusive="2026-01-01"),
+        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+    expected = (2, [{"ticker": "AAA", "date": datetime(2025, 1, 3)}], [records[1].fragment_id])
+    return conn, store, snap, "daily_market", _DM_REF, query, expected
+
+
+@pytest.mark.parametrize("case", ["partition", "leading_key", "time"])
+def test_pruning_bound_explain_and_opened_fragments_agree(tmp_path, monkeypatch, case):
+    """The metadata bound equals the explain estimate sum equals the opened
+    scan fragments, while a predicate inside the surviving fragment makes the
+    candidate bound strictly larger than the matched rows."""
+    conn, store, snap, table_name, ref, query, (bound, rows, ids) = _pruning_case(case, tmp_path)
+    repo = Repository(conn, store)
+    assert repo.scan_population_bound(
+        snap.snapshot_id, table_name=table_name, table_contract_ref=ref,
+        key_filter=query.key_filter, time_interval=query.time_interval) == bound
+    plan = repo.explain_dependencies(query, table_name=table_name)
+    assert [e.fragment_ref.fragment_id for e in plan.dependencies] == ids
+    assert sum(e.estimated_rows for e in plan.dependencies) == bound
+    opened = []
+    real = Repository._fragment_rows
+
+    def counting(self, record, *args, **kwargs):
+        opened.append(record.fragment_id)
+        return real(self, record, *args, **kwargs)
+
+    monkeypatch.setattr(Repository, "_fragment_rows", counting)
+    scanned = [row for batch in repo.scan(query, table_name=table_name)
+               for row in batch.to_pylist()]
+    assert opened == ids
+    assert scanned == rows
+
+
+@pytest.mark.parametrize("bad_count", [-1, True, "2"])
+def test_plan_scan_population_refuses_invalid_surviving_row_count(tmp_path, bad_count):
+    import dataclasses
+
+    conn, _store, snap = _securities_snapshot(tmp_path)
+    record = Repository(conn).fragment_records(snap, "securities")[0]
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(_SEC, [dataclasses.replace(record, row_count=bad_count)])
+    assert err.value.code == "MANIFEST_CORRUPT"
+    assert err.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("bad_count", [-1, True, "2"])
+def test_scan_and_explain_refuse_planted_invalid_row_count_before_streams(
+        tmp_path, monkeypatch, bad_count):
+    import dataclasses
+
+    conn, store, snap = _securities_snapshot(tmp_path)
+    repo = Repository(conn, store)
+    _contract, records = repo._table_records(snap, "securities", _SEC_REF)
+    bad_record = dataclasses.replace(records[0], row_count=bad_count)
+    original = repo._table_records
+
+    def planted(snap_, table_name, table_contract_ref):
+        contract, _records = original(snap_, table_name, table_contract_ref)
+        return contract, [bad_record]
+
+    monkeypatch.setattr(repo, "_table_records", planted)
+    monkeypatch.setattr(Repository, "_fragment_rows",
+                        lambda *args, **kwargs: pytest.fail("fragment stream opened"))
+    query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query())
+    with pytest.raises(DataError) as err:
+        list(repo.scan(query, table_name="securities"))
+    assert err.value.code == "MANIFEST_CORRUPT" and err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:
+        repo.explain_dependencies(query, table_name="securities")
+    assert err.value.code == "MANIFEST_CORRUPT" and err.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("physical_rows,recorded_count", [(2, 1), (1, 2)])
+def test_footer_row_count_mismatch_refuses_before_iter_batches(
+        tmp_path, monkeypatch, physical_rows, recorded_count):
+    """Recorded below (a predicate hides one real row) and recorded above both
+    refuse on the raw footer count, before ``_iter_batches`` -- so the below
+    case cannot pass merely because filtering leaves fewer matches."""
+    conn, clock, store = catalog_and_store(tmp_path)
+    rows = [_daily_market_row("AAA", 2024, day) for day in range(2, 2 + physical_rows)]
+    record = hand_built_record(
+        store, _DM, _DM_REF, table_from_rows(_DM, rows), partition_key="2024",
+        row_count=recorded_count,
+        primary_key_min=("AAA", "2024-01-02T00:00:00.000000"),
+        primary_key_max=("AAA", f"2024-01-{1 + physical_rows:02d}T00:00:00.000000"))
+    snap = commit_tables(conn, clock, {"daily_market": [record]}, {"daily_market": _DM})
+    repo = Repository(conn, store)
+
+    def _no_batches(self, *args, **kwargs):
+        raise AssertionError("_iter_batches reached despite footer row-count mismatch")
+
+    monkeypatch.setattr(Repository, "_iter_batches", _no_batches)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
+        key_filter=(KeyPredicate(column="date", operator="eq",
+                                 values=("2024-01-02T00:00:00.000000",)),),
+        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+    with pytest.raises(DataError) as err:
+        next(repo.scan(query, table_name="daily_market"))
+    assert err.value.code == "MANIFEST_CORRUPT"
+    assert err.value.problem.retryable is False
+
+
+def test_result_limit_above_candidate_bound_succeeds_smaller_limit_fails(tmp_path):
+    from engine.v2.foundation import content_hash, to_document
+
+    conn, store, snap = _securities_snapshot(tmp_path)
+    repo = Repository(conn, store)
+    query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query())
+    bound = repo.scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=query.key_filter)
+    assert bound == 4 and query.max_result_rows == 10 > bound
+    plan = repo.explain_dependencies(query, table_name="securities")
+    assert plan.request_hash == content_hash(to_document(query))
+    assert {e.maximum_rows for e in plan.dependencies} == {query.max_result_rows}
+    rows = [row for batch in repo.scan(query, table_name="securities") for row in batch.to_pylist()]
+    assert rows == [{"ticker": "AAA", "year": 2024}, {"ticker": "AAA", "year": 2025}]
+
+    smaller = DataQuery(snapshot_id=snap.snapshot_id,
+                        **_basic_query(max_batch_rows=1, max_result_rows=1))
+    with pytest.raises(DataError) as err:
+        list(repo.scan(smaller, table_name="securities"))
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    above_cap = DataQuery(snapshot_id=snap.snapshot_id,
+                          **_basic_query(max_result_rows=3_000_000))
+    with pytest.raises(DataError) as err:
+        list(repo.scan(above_cap, table_name="securities"))
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    with pytest.raises(DataError) as err:
+        repo.explain_dependencies(above_cap, table_name="securities")
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+
+
+@pytest.mark.parametrize("case", ["empty_membership", "fully_pruned"])
+def test_zero_population_bound_does_not_admit_zero_result_limit(tmp_path, case):
+    if case == "empty_membership":
+        conn, clock, store = catalog_and_store(tmp_path)
+        snap = commit_tables(conn, clock, {"securities": []}, {"securities": _SEC})
+        key_filter = _aaa_filter()
+    else:
+        conn, store, snap = _securities_snapshot(tmp_path)
+        key_filter = (KeyPredicate(column="ticker", operator="eq", values=("ZZZ",)),)
+    repo = Repository(conn, store)
+    assert repo.scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=key_filter) == 0
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF,
+        columns=("ticker", "year"), key_filter=key_filter,
+        order_by=("ticker", "year"), max_batch_rows=1, max_result_rows=0)
+    with pytest.raises(DataError) as err:
+        list(repo.scan(query, table_name="securities"))
+    assert err.value.code == "QUERY_NOT_BOUNDED" and err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:
+        repo.explain_dependencies(query, table_name="securities")
+    assert err.value.code == "QUERY_NOT_BOUNDED" and err.value.problem.retryable is False

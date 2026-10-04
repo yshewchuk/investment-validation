@@ -322,10 +322,12 @@ class Repository:
 
     def _execute_scan(self, contract: TableContract, records: list[FragmentRecord],
                       query: DataQuery):
-        surviving = [r for r in records if query_mod.fragment_may_match(r, contract, query)]
+        population = query_mod.plan_scan_population(
+            contract, records, key_filter=query.key_filter, time_interval=query.time_interval)
         needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key, *self._hidden_columns(query))))
         batch_cap = min(query.max_batch_rows, contract.maximum_batch_rows)
-        streams = [self._fragment_rows(r, contract, needed, query, batch_cap) for r in surviving]
+        streams = [self._fragment_rows(r, contract, needed, query, batch_cap)
+                   for r in population.records]
         merged = heapq.merge(*streams, key=lambda item: item[0])
         yield from self._yield_batches(merged, contract, query, batch_cap)
         if query.deadline is not None:
@@ -364,6 +366,14 @@ class Repository:
         matcher only then, if it was not already compiled)."""
         path = objects.verify_object_path(self._store, record.object_ref)
         parquet_file = self._open_parquet(path)
+        # Slice A (PR 360): footer-vs-manifest row-count integrity, decided
+        # before schema matching, batch iteration or filtering -- extra rows
+        # a predicate would have hidden still refuse here, and no corrupt
+        # fragment ever streams.
+        if parquet_file.metadata.num_rows != record.row_count:
+            raise errors.fail("MANIFEST_CORRUPT",
+                              "parquet footer row count does not match the manifest",
+                              details={"fragment_id": record.fragment_id})
         present, missing = self._match_columns(contract, needed, parquet_file.schema_arrow)
         batch_matcher = query_mod.compile_batch_matcher(contract, query)
         row_matcher = None if batch_matcher is not None else query_mod.compile_row_matcher(contract, query)
@@ -641,6 +651,22 @@ class Repository:
         with _read_only(self._conn) as conn:
             return tuple(self._records(conn, dvr.dataset_version_id, dvr.table_contract_ref))
 
+    def scan_population_bound(self, snapshot_id: str, *, table_name: str,
+                              table_contract_ref: TableContractRef,
+                              key_filter=(), time_interval=None) -> int:
+        """The membership-bound row count for one selection over an exact
+        named snapshot — the surviving candidate fragments' recorded
+        ``row_count``, summed. Pure metadata planning: shares
+        ``query_mod.plan_scan_population`` with ``scan``/``explain`` so the
+        bound is by construction exactly the population those paths open,
+        and needs no ``ArtifactStore`` (no bytes, no cap, no head fallback).
+        Not yet enforced against ``max_result_rows`` — that is slice E."""
+        snap = self.resolve(snapshot_id)
+        contract, records = self._table_records(snap, table_name, table_contract_ref)
+        population = query_mod.plan_scan_population(
+            contract, records, key_filter=key_filter, time_interval=time_interval)
+        return population.row_count
+
     # ----------------------------------------------------------------------
     # P2-4: explain_dependencies — §5.5
     # ----------------------------------------------------------------------
@@ -761,12 +787,14 @@ class Repository:
         snap = self.resolve(validated.snapshot_id)
         contract, records = self._table_records(snap, table_name, validated.table_contract_ref)
         query_validator(contract, validated)
-        surviving = [r for r in records if query_mod.fragment_may_match(r, contract, validated)]
+        population = query_mod.plan_scan_population(
+            contract, records, key_filter=validated.key_filter,
+            time_interval=validated.time_interval)
         dependencies = tuple(
             DependencyEntry(table_name=table_name, dataset_version_ref=snap.table_versions[table_name],
                             fragment_ref=manifests.fragment_ref(record), columns=validated.columns,
                             predicates=validated.key_filter, estimated_rows=record.row_count,
                             maximum_rows=validated.max_result_rows)
-            for record in surviving)
+            for record in population.records)
         return DependencyPlan(request_hash=content_hash(to_document(validated)), snapshot_ref=snap,
                               dependencies=dependencies)

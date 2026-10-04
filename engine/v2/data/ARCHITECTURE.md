@@ -259,7 +259,7 @@ and retryability come from that table, never guessed at a call site.
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
-| `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row |
+| `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
 | `UNSUPPORTED_CONTRACT` | validation | no | an operation on a table contract this code path does not implement |
 | `EVENT_NOT_FOUND` | dependency | no | `events.get_event` for an unknown key |
@@ -338,6 +338,8 @@ Root doc §5 invariants this package is responsible for:
   its own retained-memory or cardinality requirement; exceeding the manifest
   bound is `QUERY_NOT_BOUNDED`. Fragment counts bound candidate rows, not the
   exact predicate-matching population or total process memory.
+  Slice A supplies shared membership-bound planning and footer-count integrity;
+  slice E enables zero queries and enforces the manifest bound on request limits.
 - **Missing input → typed refusal, never a silent default** — every failure
   path raises a `DataError`/`Problem` from the table above.
 - **Snapshot/root isolation** — every store path resolves through
