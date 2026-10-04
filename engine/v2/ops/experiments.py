@@ -93,6 +93,10 @@ def experiment_spec_from_document(document: dict) -> ExperimentSpec:
     durable attempt record -- is built, so a missing required field is refused
     once, as an ``OpsError``, never a bare ``KeyError``.
     """
+    if not isinstance(document, Mapping):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment specification document is not a mapping",
+                   details={"type": type(document).__name__})
     unknown = sorted(set(document) - SPEC_FIELDS)
     if unknown:
         raise fail("INVALID_EXPERIMENT_SPEC",
@@ -147,6 +151,27 @@ def _freeze(value):
     if isinstance(value, list):
         return tuple(_freeze(item) for item in value)
     return value
+
+
+def _require_immutable_economics(spec: ExperimentSpec,
+                                 plan: ResolvedExperimentPlan) -> None:
+    """Accept a supplied plan's economics only in the shapes ``_freeze``
+    itself produces: immutable JSON scalars, tuples of immutable values, and
+    read-only mapping proxies with immutable keys and values. Built-in dicts,
+    lists, and any other mutable container are refused as the same typed
+    refusal -- canonical bytes can match while the nested values are still
+    editable behind the adopted plan's back."""
+    def immutable(value) -> bool:
+        if isinstance(value, MappingProxyType):
+            return all(immutable(key) and immutable(item)
+                       for key, item in value.items())
+        if isinstance(value, tuple):
+            return all(immutable(item) for item in value)
+        return isinstance(value, (str, int, float, bool, type(None)))
+    if not immutable(plan.economic_params):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "supplied resolved plan carries mutable nested economics",
+                   details={"experiment_id": spec.experiment_id})
 
 
 def _thaw(value):
@@ -573,12 +598,16 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
     # Resolved once, here: an unused economic declaration is a typed refusal
     # before any directory is created, any evidence persisted, or the runner
     # is invoked, and the very plan is the one handed to the callable below.
-    # A supplied plan is adopted only after its canonical bytes prove it is
-    # the plan this spec resolves to; the object itself then travels to the
-    # runner, so a caller's plan identity survives the call unchanged.
+    # A supplied plan is adopted only after its nested economics prove deeply
+    # immutable -- exactly the shapes ``_freeze`` produces, never a mutable
+    # dict or list hidden behind byte-equal canonical JSON -- and after its
+    # canonical bytes prove it is the plan this spec resolves to; the object
+    # itself then travels to the runner, so a caller's plan identity survives
+    # the call unchanged.
     if resolved_plan is None:
         plan = resolve_experiment_plan(spec)
     else:
+        _require_immutable_economics(spec, resolved_plan)
         if resolved_plan.json_bytes() != resolve_experiment_plan(spec).json_bytes():
             raise fail("INVALID_EXPERIMENT_SPEC",
                        "supplied resolved plan is not the plan this spec resolves to",

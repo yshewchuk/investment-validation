@@ -547,6 +547,13 @@ def test_spec_refuses_an_unknown_top_level_key_as_invalid_experiment_spec():
     assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+def test_experiment_document_rejects_non_mapping_input():
+    for malformed in (["fill", "mid"], 7):
+        with pytest.raises(OpsError) as excinfo:
+            experiments.experiment_spec_from_document(malformed)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_unused_economic_key_refuses_before_the_runner_is_invoked(tmp_path):
     spec = experiments.experiment_spec_from_document(
         _spec_document(economic_params={"fill": "mid", "slippage_bps": 5}))
@@ -692,3 +699,28 @@ def test_run_experiment_hands_in_the_same_supplied_resolved_plan(tmp_path):
     assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
     assert not invoked
     assert not refused_dir.exists()
+
+
+def test_run_experiment_rejects_mutable_supplied_plan_economics(tmp_path):
+    """Gate finding: canonical bytes can match while nested economics stay
+    editable -- a supplied plan whose ``economic_params`` is a mutable dict
+    is the same typed refusal, fired as a preflight before the run directory
+    or any evidence exists, and the runner is never invoked."""
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid"}))
+    plan = replace(experiments.resolve_experiment_plan(spec), economic_params={"fill": "mid"})
+    assert plan.json_bytes() == experiments.resolve_experiment_plan(spec).json_bytes()
+    invoked = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(execution_plan)
+
+    run_dir = tmp_path / "mutable-supplied"
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                   mode="smoke", synthetic=True, resolved_plan=plan)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not invoked
+    assert not run_dir.exists()
+    assert not (run_dir / "CAPABILITIES.json").exists()
+    assert not (tmp_path / "experiment_receipt.json").exists()
