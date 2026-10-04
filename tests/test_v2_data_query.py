@@ -1461,3 +1461,79 @@ def test_empty_list_or_tuple_key_filter_still_yields_full_bound(tmp_path, key_fi
     assert Repository(conn).scan_population_bound(
         snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
         key_filter=key_filter) == 4
+
+
+@pytest.mark.parametrize("values", [(1,), (True,)])
+def test_incompatible_document_valid_ticker_values_refuse_contract_mismatch(tmp_path, values):
+    """PR 365 second gate BLOCK: a document-valid ``KeyPredicate`` (an ``int``
+    or ``bool`` is a legal ``KeyPredicate`` scalar) whose value cannot compare
+    against the recorded string leading-key bounds (``"AAA".."BBB"``) refused
+    with a raw ``TypeError`` inside ``_leading_key_may_match``. Both planning
+    APIs now return the documented nonretryable ``CONTRACT_MISMATCH`` — never
+    a raw ``TypeError``, never a successful bound."""
+    conn, _store, snap = _securities_snapshot(tmp_path)
+    records = Repository(conn).fragment_records(snap, "securities")
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=values),)
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(_SEC, records, key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:  # no store: metadata planning only
+        Repository(conn).scan_population_bound(
+            snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+            key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+
+
+def test_float_ticker_predicate_value_refuses_query_not_bounded(tmp_path):
+    """The ``float`` sibling of the refusal above: ``contracts.data``'s
+    ``KeyPredicate.values`` excludes floats, so ``(1.5,)`` is refused by the
+    planner's own strict predicate re-decode (same typed nonretryable refusal
+    as every malformed predicate) before any key-bound comparison runs."""
+    conn, _store, snap = _securities_snapshot(tmp_path)
+    records = Repository(conn).fragment_records(snap, "securities")
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(1.5,)),)
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(_SEC, records, key_filter=key_filter)
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:
+        Repository(conn).scan_population_bound(
+            snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+            key_filter=key_filter)
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("values,expected_bound", [(("AAA",), 4), (("ZZZ",), 0)])
+def test_compatible_ticker_predicate_values_keep_exact_bounds(tmp_path, values, expected_bound):
+    """Positive controls for the same pruning comparison: a string value
+    inside both fragments' recorded bounds plans the full 4-row candidate
+    population; one beyond both bounds prunes every fragment to 0 -- exact
+    through both planning APIs."""
+    conn, _store, snap = _securities_snapshot(tmp_path)
+    records = Repository(conn).fragment_records(snap, "securities")
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=values),)
+    assert query_mod.plan_scan_population(
+        _SEC, records, key_filter=key_filter).row_count == expected_bound
+    assert Repository(conn).scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=key_filter) == expected_bound
+
+
+def test_scan_and_explain_refuse_incompatible_integer_ticker(tmp_path):
+    """The same incompatible comparison through the store-backed paths: an
+    integer ``ticker`` value refuses with the identical typed nonretryable
+    ``CONTRACT_MISMATCH`` in both ``scan`` and ``explain_dependencies``,
+    which share ``plan_scan_population`` with the bound APIs."""
+    conn, store, snap = _securities_snapshot(tmp_path)
+    repo = Repository(conn, store)
+    query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query(
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(1,)),)))
+    with pytest.raises(DataError) as err:
+        list(repo.scan(query, table_name="securities"))
+    assert err.value.code == "CONTRACT_MISMATCH" and err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:
+        repo.explain_dependencies(query, table_name="securities")
+    assert err.value.code == "CONTRACT_MISMATCH" and err.value.problem.retryable is False
