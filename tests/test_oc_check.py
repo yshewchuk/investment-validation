@@ -260,3 +260,74 @@ class TestSelfMetrics:
             oc_check.main()
         (line,) = self._lines()
         assert line["exit"] == 1
+
+    def test_a_malformed_wait_line_neither_crashes_the_run_nor_counts_as_wait(self, wt, monkeypatch):
+        """``retrying in 1..2s`` is not a float; parsing it must not kill the run,
+        and a line with no parseable number must contribute 0 to wait_s."""
+        self.stderr = "[bounded] RESOURCE WAIT: all test slots held; retrying in 1..2s\n"
+        assert self._main(monkeypatch, "tests/test_x.py") == 0
+        assert self._lines()[0]["wait_s"] == 0
+
+    def test_a_crash_while_writing_the_report_downgrades_the_verdict(self, wt, monkeypatch):
+        """tree_id runs after RUN.update(verdict=...), so a crash there leaves the
+        green verdict in place without a report behind it; the recorded row must
+        say NOT GREEN, not the verdict of a run that never finished."""
+        def boom(root):
+            raise RuntimeError("report creation failed")
+        monkeypatch.setattr(oc_check, "tree_id", boom)
+        monkeypatch.setattr(oc_check.sys, "argv", ["oc_check.py", "tests/test_x.py"])
+        with pytest.raises(RuntimeError):
+            oc_check.main()
+        (line,) = self._lines()
+        assert (line["exit"], line["verdict"]) == (1, "NOT GREEN")
+
+    def test_a_verify_after_a_normal_run_records_reset_state(self, wt, monkeypatch):
+        """STEPS/STEP_SECONDS/WAIT/RUN are module-level; a second run in the same
+        process (here --verify over the first run's report) must not inherit the
+        first run's wait, steps or target count."""
+        self.stderr = self.BOUNDED_WAIT
+        assert self._main(monkeypatch, "tests/test_x.py") == 0
+        self.stderr = ""
+        assert self._main(monkeypatch, "--verify") == 0
+        _, second = self._lines()
+        assert (second["mode"], second["verdict"], second["exit"], second["targets"],
+                second["steps"], second["wait_s"]) == ("verify", "VERIFIED", 0, 0, {}, 0)
+
+    def test_a_pytest_timeout_still_totals_wait_lines_from_bytes_and_text(self, wt, monkeypatch):
+        """TimeoutExpired carries stdout as bytes and stderr as text; both wait
+        lines must reach the shared total even though the step itself failed."""
+        exc = subprocess.TimeoutExpired(
+            ["pytest"], 900,
+            output=self.BOUNDED_WAIT.replace("in 5s", "in 3s").encode(),
+            stderr=self.BOUNDED_WAIT.replace("in 5s", "in 2s"),
+        )
+        def raiser(*args, **kwargs):
+            raise exc
+        monkeypatch.setattr(oc_check.subprocess, "run", raiser)
+        assert oc_check.run("pytest", ["x"], {}, 900) is False
+        assert oc_check.WAIT[0] == 5
+
+    @pytest.mark.parametrize("mode", ["normal", "timeout"])
+    def test_streams_are_parsed_separately_and_never_concatenate_a_fabricated_wait(
+        self, wt, monkeypatch, mode
+    ):
+        """CodeRabbit: stdout ending in a partial wait line and stderr opening
+        with its remainder fabricate a complete 'retrying in 12s' only once the
+        two streams are joined before parsing; each stream alone carries no
+        wait message. Both the completed-process and the TimeoutExpired path
+        must finish runner handling and contribute 0 to WAIT."""
+        prefix = "[bounded] RESOURCE WAIT: slots held; retrying in 1"
+        suffix = "2s\n"
+        monkeypatch.setattr(oc_check, "STEPS", [])
+        monkeypatch.setattr(oc_check, "STEP_SECONDS", {})
+        if mode == "normal":
+            done = subprocess.CompletedProcess(["x"], 0, prefix, suffix)
+            monkeypatch.setattr(oc_check.subprocess, "run", lambda *a, **k: done)
+            assert oc_check.run("pytest", ["x"], {}, 900) is True
+        else:
+            exc = subprocess.TimeoutExpired(["x"], 900, output=prefix.encode(), stderr=suffix)
+            def raiser(*args, **kwargs):
+                raise exc
+            monkeypatch.setattr(oc_check.subprocess, "run", raiser)
+            assert oc_check.run("pytest", ["x"], {}, 900) is False
+        assert oc_check.WAIT[0] == 0
