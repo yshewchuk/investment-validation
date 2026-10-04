@@ -589,6 +589,14 @@ def test_resolved_plan_is_immutable_and_its_json_bytes_are_canonical():
     assert direct_plan.json_bytes() == direct_bytes
 
 
+def test_resolver_rejects_non_mapping_economic_params():
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    for malformed in (["fill", "mid"], 7):
+        with pytest.raises(OpsError) as excinfo:
+            experiments.resolve_experiment_plan(replace(spec, economic_params=malformed))
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_changed_fill_changes_the_plan_the_runner_receives(tmp_path):
     received = []
 

@@ -145,7 +145,7 @@ def test_allowlisted_legacy_dag_submits_with_real_dependencies(tmp_path):
 
 def test_smoke_runner_requires_report_and_never_ledger(tmp_path):
     spec = ExperimentSpec("EXP-SYN", "plumbing", "fixture", ("fixture",), 7,
-                          ("fold-1",), {"fill": "mid"}, "synthetic")
+                          ("fold-1",), {}, "synthetic")
     receipt = run_experiment(spec, tmp_path, tmp_path / "run",
                              runner=synthetic_fixture_runner, mode="smoke",
                              synthetic=True)
@@ -170,7 +170,7 @@ def test_private_canary_compares_population_and_requires_selfcheck(tmp_path):
 
 def test_primary_backup_failure_is_retryable_without_rerun(tmp_path):
     spec = ExperimentSpec("EXP-SYN2", "plumbing", "fixture", ("fixture",), 7,
-                          ("fold-1",), {"fill": "mid"}, "synthetic")
+                          ("fold-1",), {}, "synthetic")
     calls = []
 
     def primary_runner(*, run_dir, no_ledger):
@@ -242,7 +242,7 @@ def test_request_from_plan_accepts_experiment_and_rejects_unknown_kind(tmp_path)
 
 def test_failure_evidence_carries_no_exception_text(tmp_path):
     spec = ExperimentSpec("EXP-D2", "plumbing", "fixture", ("fixture",), 7,
-                          ("fold-1",), {"fill": "mid"}, "synthetic")
+                          ("fold-1",), {}, "synthetic")
 
     def boom(*, run_dir, no_ledger):
         raise RuntimeError("password=hunter2 leaked-secret")
@@ -257,7 +257,7 @@ def test_failure_evidence_carries_no_exception_text(tmp_path):
 
 def test_failure_evidence_keeps_ops_failure_code_not_text(tmp_path):
     spec = ExperimentSpec("EXP-D2B", "plumbing", "fixture", ("fixture",), 7,
-                          ("fold-1",), {"fill": "mid"}, "synthetic")
+                          ("fold-1",), {}, "synthetic")
 
     def boom(*, run_dir, no_ledger):
         raise fail("VALIDATION_FAILED", "secret-token-xyz should never persist")

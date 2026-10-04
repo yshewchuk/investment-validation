@@ -189,6 +189,10 @@ class ResolvedExperimentPlan:
 
 def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
     """Refuse economically unused declarations, then freeze the one plan."""
+    if not isinstance(spec.economic_params, Mapping):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "economic_params must be a mapping",
+                   details={"type": type(spec.economic_params).__name__})
     unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
     if unused:
         raise fail("INVALID_EXPERIMENT_SPEC",
