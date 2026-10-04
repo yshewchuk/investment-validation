@@ -18,7 +18,7 @@ The factory accepts observed ISO session days and an event-through day. Exit pla
 
 ## Dependencies
 
-Pure standard-library arithmetic with no upward-layer imports. This module currently has no callers.
+Pure standard-library arithmetic with no upward-layer imports. `ops.nightly_calendar_inputs` composes its calendar and exit helpers for pinned raw-row inputs; the later `nightly_raw_row_producer` remains a planned caller.
 
 ## External systems and libraries
 
