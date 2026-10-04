@@ -65,7 +65,7 @@ STEPS = []
 STEP_SECONDS = {}
 WAIT = [0.0]  # seconds bounded_run reported sleeping for a slot, summed over the run
 RUN = {}  # set by main() once the worktree checks pass; empty means nothing is recorded
-WAIT_RE = re.compile(r"RESOURCE WAIT: .*retrying in ([0-9.]+)s")
+WAIT_RE = re.compile(r"RESOURCE WAIT: .*retrying in ([0-9]+(?:\.[0-9]+)?)s")
 VERDICT_BY_EXIT = {0: "VERIFIED", 1: "NOT GREEN", 2: "REFUSED", 3: "MISSING", 4: "STALE"}
 REPORT = Path(".oc_logs") / "oc_check_report.json"
 
@@ -89,7 +89,8 @@ def record_metrics(started, t0, code):
         code = code if isinstance(code, int) else (0 if code is None else 1)
         line = {"ts": started, "duration_s": round(time.monotonic() - t0, 1), "wait_s": round(WAIT[0], 1),
                 "steps": dict(STEP_SECONDS), "targets": RUN.get("targets", 0),
-                "verdict": RUN.get("verdict") or VERDICT_BY_EXIT.get(code, "EXIT"), "exit": code,
+                "verdict": ("NOT GREEN" if code and RUN.get("verdict") == "ALL GREEN"
+                            else RUN.get("verdict") or VERDICT_BY_EXIT.get(code, "EXIT")), "exit": code,
                 "mode": RUN["mode"], "worktree": Path.cwd().name}
         with open(d / "oc_check.jsonl", "a") as f:
             f.write(json.dumps(line) + "\n")
@@ -104,14 +105,15 @@ def run(label, cmd, env, timeout):
     except subprocess.TimeoutExpired as e:
         if label == "pytest":
             parts = [x.decode(errors="replace") if isinstance(x, bytes) else (x or "") for x in (e.stdout, e.stderr)]
-            WAIT[0] += sum(float(m) for m in WAIT_RE.findall("".join(parts)))
+            WAIT[0] += sum(float(m) for part in parts for m in WAIT_RE.findall(part))
         print(f"== {label}: TIMEOUT after {timeout}s")
         STEPS.append({"step": label, "result": "TIMEOUT"})
         return False
     finally:
         STEP_SECONDS[label] = round(time.monotonic() - t0, 1)
     if label == "pytest":
-        WAIT[0] += sum(float(m) for m in WAIT_RE.findall((p.stdout or "") + (p.stderr or "")))
+        streams = (p.stdout or "", p.stderr or "")
+        WAIT[0] += sum(float(m) for stream in streams for m in WAIT_RE.findall(stream))
     if label == "pytest" and p.returncode == EX_TEMPFAIL:
         print(f"== {label}: {RESOURCE_WAIT_MSG}")
         STEPS.append({"step": label, "result": "RESOURCE WAIT TIMEOUT",
@@ -175,6 +177,10 @@ def changed_tests(root):
 
 
 def main():
+    STEPS.clear()
+    STEP_SECONDS.clear()
+    WAIT[0] = 0.0
+    RUN.clear()
     started, t0, code = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic(), 0
     try:
         _main()
