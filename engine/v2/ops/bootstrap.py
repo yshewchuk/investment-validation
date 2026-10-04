@@ -23,10 +23,14 @@ __all__ = ["open_catalog"]
 #: engine.v2.ops.migrations.Migration objects (phase-2 guide §3.3: the data
 #: package never imports ops). This is the one place that wraps them, on
 #: ops's higher layer, before handing them to the existing migration
-#: machinery — the same shape submit()/etc. already expect.
-_DATA_MIGRATIONS = tuple(
-    Migration(version, name, statements) for version, name, statements in data_schema.MIGRATIONS
-)
+#: machinery — the same shape submit()/etc. already expect. A fourth element,
+#: when present, is the opt-in ``recreate_tables`` flag (R1-R6).
+def _data_migration(entry: tuple) -> Migration:
+    version, name, statements, *rest = entry
+    return Migration(version, name, statements, bool(rest[0]) if rest else False)
+
+
+_DATA_MIGRATIONS = tuple(_data_migration(entry) for entry in data_schema.MIGRATIONS)
 
 
 def open_catalog(path: Path | str, *, clock: Clock) -> sqlite3.Connection:
