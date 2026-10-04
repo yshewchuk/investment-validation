@@ -41,6 +41,7 @@ __all__ = ["scan_calendar_row_inputs", "scan_candidate_expiries", "scan_decision
 _CALENDAR_TICKER = "SPY"
 _CHAIN_TABLE = "option_chains"
 _CANDIDATE_COLUMNS = ("right", "strike", "expiry")
+_RIGHTS = frozenset({"C", "P"})
 #: STR-THRU/STR-RUNUP need a common call-and-put strike; every other native
 #: context (put menu, DYN-SV) is a listed put. Mirrors generation's own
 #: ``_select_listed_straddle`` (call ∩ put) vs ``_listed_put_expiries`` (put).
@@ -76,6 +77,28 @@ def _date_string(value: Any) -> str:
     return value.date().isoformat() if hasattr(value, "date") else str(value)[:10]
 
 
+def _validated_candidate(row: dict) -> tuple[str, str, float]:
+    """One projected row's ``(expiry day, normalized right, strike)``, validated
+    before any expiry filtering: a null ``expiry``/``strike``/``right``, a right
+    outside C/P or a non-finite/unconvertible strike is malformed pinned input
+    and refuses ``CONTRACT_MISMATCH`` -- for every row the scan returns,
+    including one whose expiry the candidate filter would drop."""
+    for field in _CANDIDATE_COLUMNS:
+        if row[field] is None:
+            raise data_fail("CONTRACT_MISMATCH", f"option chain row has a null {field} column")
+    right = str(row["right"]).upper()
+    if right not in _RIGHTS:
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has a right outside C/P")
+    try:
+        strike = float(row["strike"])
+    except (TypeError, ValueError):
+        raise data_fail("CONTRACT_MISMATCH",
+                        "option chain row has an unconvertible strike") from None
+    if not math.isfinite(strike):
+        raise data_fail("CONTRACT_MISMATCH", "option chain row has a non-finite strike")
+    return _date_string(row["expiry"]), right, strike
+
+
 def scan_decision_calendar(repository: Repository, snapshot: SnapshotRef, *,
                            decision_session: Any, event_through: Any) -> CalendarSessions:
     """The pinned session calendar: the SPY price series through the decision
@@ -96,7 +119,9 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
                             decision_session: Any) -> tuple[str, ...]:
     """One bounded ``option_chains`` scan of the exact ``(ticker, decision_session)``
     slice, projected to raw ``(right, strike, expiry)``: no other session, no
-    quote-usability filter, no expiry before the decision session. The eligible
+    quote-usability filter, no expiry before the decision session. Every
+    projected row's ``expiry``/``strike``/``right`` is validated before any
+    expiry filtering -- a malformed one is ``CONTRACT_MISMATCH``. The eligible
     domain follows the native strategy policy; the result is the sorted distinct
     ISO tuple, empty only when the domain is empty."""
     _require_key(key)
@@ -115,14 +140,13 @@ def scan_candidate_expiries(repository: Repository, snapshot: SnapshotRef, key: 
     puts: dict[str, set[float]] = {}
     for batch in repository.scan(query, table_name=_CHAIN_TABLE):
         for row in batch.to_pylist():
-            expiry_day = _date_string(row["expiry"])
+            expiry_day, right, strike = _validated_candidate(row)
             if expiry_day < session_day:
                 continue
-            right = str(row["right"]).upper()
             if right == "C":
-                calls.setdefault(expiry_day, set()).add(float(row["strike"]))
-            elif right == "P":
-                puts.setdefault(expiry_day, set()).add(float(row["strike"]))
+                calls.setdefault(expiry_day, set()).add(strike)
+            else:
+                puts.setdefault(expiry_day, set()).add(strike)
     if key.strategy in _STRADDLE_DOMAIN:
         expiries = {day for day in calls if calls[day] & puts.get(day, set())}
     else:

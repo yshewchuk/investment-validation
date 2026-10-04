@@ -182,6 +182,30 @@ def _domain_chain_rows() -> list[dict]:
     ]
 
 
+class _ProjectedBatch:
+    """A scan batch carrying exactly the projected ``(right, strike, expiry)``
+    row dicts it was given -- synthetic malformed input the physical publish
+    path itself would refuse."""
+
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def to_pylist(self) -> list[dict]:
+        return self._rows
+
+
+def _stage_projected_chain_rows(monkeypatch, repository, rows: list[dict]):
+    original = repository.scan
+
+    def staged(query, *, table_name):
+        if table_name != _CHAINS_NAME:
+            yield from original(query, table_name=table_name)
+            return
+        yield _ProjectedBatch(rows)
+
+    monkeypatch.setattr(repository, "scan", staged)
+
+
 def test_decision_calendar_pins_exact_spy_query_and_keeps_source_observed_max(
         tmp_path, monkeypatch):
     rows = [
@@ -311,6 +335,45 @@ def test_candidate_expiries_scan_failure_propagates(tmp_path, monkeypatch, code)
     assert exc.value is problem
 
 
+_PRE_SESSION = datetime(2024, 1, 4)
+_MALFORMED_ROWS = [
+    ("null_expiry", dict(expiry=None, strike=100.0, right="C")),
+    ("null_strike", dict(expiry=_PRE_SESSION, strike=None, right="C")),
+    ("null_right", dict(expiry=_PRE_SESSION, strike=100.0, right=None)),
+    ("invalid_right", dict(expiry=_PRE_SESSION, strike=100.0, right="X")),
+    ("nan_strike", dict(expiry=_PRE_SESSION, strike=float("nan"), right="P")),
+    ("infinite_strike", dict(expiry=_PRE_SESSION, strike=float("inf"), right="P")),
+    ("unconvertible_strike", dict(expiry=_PRE_SESSION, strike="not-a-strike", right="C")),
+]
+
+
+@pytest.mark.parametrize("row", [row for _, row in _MALFORMED_ROWS],
+                         ids=[name for name, _ in _MALFORMED_ROWS])
+def test_candidate_expiries_rejects_malformed_row_before_expiry_filtering(
+        tmp_path, monkeypatch, row):
+    repository, snapshot = _snapshot(
+        tmp_path,
+        chains=_common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0))
+    _stage_projected_chain_rows(monkeypatch, repository, [row])
+    with pytest.raises(DataError) as exc:
+        scan_candidate_expiries(repository, snapshot, _STRADDLE_KEY, decision_session=_SESSION)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+
+
+def test_candidate_expiries_normalizes_right_once_and_still_filters_pre_session(
+        tmp_path, monkeypatch):
+    repository, snapshot = _snapshot(
+        tmp_path,
+        chains=_common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0))
+    _stage_projected_chain_rows(monkeypatch, repository, [
+        dict(expiry=datetime(2024, 1, 19), strike=100.0, right="c"),
+        dict(expiry=datetime(2024, 1, 19), strike=100.0, right="P"),
+        dict(expiry=_PRE_SESSION, strike=100.0, right="P"),
+    ])
+    assert scan_candidate_expiries(repository, snapshot, _STRADDLE_KEY,
+                                   decision_session=_SESSION) == ("2024-01-19",)
+
+
 def test_calendar_row_inputs_uses_exact_raw_close_and_forwards_pinned_arguments(
         tmp_path, monkeypatch):
     rows = {
@@ -427,6 +490,20 @@ def test_calendar_row_inputs_option_scan_failure_propagates(tmp_path, monkeypatc
         scan_calendar_row_inputs(repository, snapshot, _STRADDLE_KEY,
                                  decision_session=_SESSION, calendar=_CALENDAR)
     assert exc.value is problem
+
+
+def test_calendar_row_inputs_propagates_malformed_option_row_contract_mismatch(
+        tmp_path, monkeypatch):
+    repository, snapshot = _snapshot(
+        tmp_path,
+        price={"AAA": [_price_row("AAA", _SESSION, close_raw=12.5)]},
+        chains=_common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 16), 100.0))
+    _stage_projected_chain_rows(monkeypatch, repository,
+                                [dict(expiry=_PRE_SESSION, strike=100.0, right="X")])
+    with pytest.raises(DataError) as exc:
+        scan_calendar_row_inputs(repository, snapshot, _STRADDLE_KEY,
+                                 decision_session=_SESSION, calendar=_CALENDAR)
+    assert exc.value.code == "CONTRACT_MISMATCH"
 
 
 def test_calendar_row_inputs_empty_candidates_is_no_resolvable_expiry(tmp_path):
