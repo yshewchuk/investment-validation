@@ -94,22 +94,39 @@ def _daily_version(snapshot: SnapshotRef) -> DatasetVersionRef:
     return version
 
 
-def _build_query(snapshot: SnapshotRef, version: DatasetVersionRef, contract: TableContract,
+def _build_query(data_repository: repository.Repository, snapshot: SnapshotRef,
+                 version: DatasetVersionRef, contract: TableContract,
                  ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> DataQuery:
     """The one bounded single-ticker read this module ever issues."""
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
+    time_interval = TimeInterval(
+        column="date",
+        start_inclusive=start.date().isoformat(),
+        end_exclusive=end.date().isoformat(),
+    )
+    max_batch_rows = min(contract.maximum_batch_rows, _BATCH_LIMIT)
+    max_result_rows = min(contract.maximum_result_rows, _RESULT_LIMIT)
+    population_bound = data_repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=_TABLE,
+        table_contract_ref=version.table_contract_ref,
+        key_filter=key_filter, time_interval=time_interval)
+    if population_bound > 0:
+        # Only a positive selected bound lowers the active result limit; a
+        # zero bound keeps it positive (zero-result queries arrive with slice E).
+        max_result_rows = min(max_result_rows, population_bound)
+    if max_result_rows > 0:
+        # A lowered positive result limit may not leave the batch limit above it
+        # (BATCH_EXCEEDS_RESULT is refused at decode): lower only as needed.
+        max_batch_rows = min(max_batch_rows, max_result_rows)
     return DataQuery(
         snapshot_id=snapshot.snapshot_id,
         table_contract_ref=version.table_contract_ref,
         columns=("ticker", "date", "src_iv", *panel_math.DAILY_STATE_FIELDS),
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),),
-        time_interval=TimeInterval(
-            column="date",
-            start_inclusive=start.date().isoformat(),
-            end_exclusive=end.date().isoformat(),
-        ),
+        key_filter=key_filter,
+        time_interval=time_interval,
         order_by=tuple(contract.primary_key),
-        max_batch_rows=min(contract.maximum_batch_rows, _BATCH_LIMIT),
-        max_result_rows=min(contract.maximum_result_rows, _RESULT_LIMIT),
+        max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows,
     )
 
 
@@ -184,7 +201,7 @@ def scan_daily_state_inputs(
     _resolve_snapshot(repository, snapshot)
     contract = repository.table_contract(snapshot, _TABLE)
     version = _daily_version(snapshot)
-    query = _build_query(snapshot, version, contract, ticker, start, end)
+    query = _build_query(repository, snapshot, version, contract, ticker, start, end)
     rows = _scan_rows(repository, query, ticker, start, end)
     values, source_session = _inputs_from_rows(rows, decision)
     return DailyStateInputs(

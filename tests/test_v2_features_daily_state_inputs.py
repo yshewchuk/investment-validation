@@ -129,6 +129,35 @@ class _Batch:
         return self._rows
 
 
+def _bound_row_selected(row, key_filter, time_interval) -> bool:
+    """Fake selection for ``scan_population_bound``: False only when an eq/in
+    key predicate or the half-open interval proves this row cannot match. An
+    uninspectable row stays a candidate — the real bound counts candidate
+    membership rows from metadata and never a proven miss it cannot show."""
+    if not isinstance(row, dict):
+        return True
+    for predicate in key_filter:
+        if predicate.operator not in ("eq", "in") or predicate.column not in row:
+            continue
+        if row[predicate.column] not in predicate.values:
+            return False
+    if time_interval is None or time_interval.column not in row:
+        return True
+    try:
+        day = pd.Timestamp(row[time_interval.column])
+        if pd.isna(day):
+            return True
+        if (time_interval.start_inclusive is not None
+                and day < pd.Timestamp(time_interval.start_inclusive)):
+            return False
+        if (time_interval.end_exclusive is not None
+                and day >= pd.Timestamp(time_interval.end_exclusive)):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return True
+    return True
+
+
 class _FakeRepository:
     """The ``Repository`` surface this module needs, with call counters."""
 
@@ -140,8 +169,10 @@ class _FakeRepository:
         self.resolve_calls = 0
         self.head_lookups = 0
         self.table_contract_calls = 0
+        self.population_bound_calls = 0
         self.scan_calls = 0
         self.queries = []
+        self.bounds = []
 
     def resolve(self, snapshot_id: str) -> SnapshotRef:
         self.resolve_calls += 1
@@ -162,6 +193,28 @@ class _FakeRepository:
             raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
                             details={"table_name": table_name})
         return self._contract
+
+    def scan_population_bound(self, snapshot_id: str, *, table_name: str,
+                              table_contract_ref, key_filter=(), time_interval=None) -> int:
+        """Count the fake's ``daily_market`` membership rows the supplied
+        snapshot, pinned contract identity, key predicates and half-open
+        interval select — the same selection ``scan`` below will stream."""
+        self.population_bound_calls += 1
+        self.bounds.append((snapshot_id, table_name, table_contract_ref,
+                            tuple(key_filter), time_interval))
+        if snapshot_id != self._snapshot.snapshot_id:
+            raise data_fail("SNAPSHOT_NOT_READY", "snapshot is not the pinned membership",
+                            details={"snapshot_id": snapshot_id})
+        version = self._snapshot.table_versions.get(table_name)
+        if version is None:
+            raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
+                            details={"table_name": table_name})
+        if table_contract_ref != version.table_contract_ref:
+            raise data_fail("CONTRACT_MISMATCH",
+                            "table_contract_ref does not match the pinned version",
+                            details={"table_name": table_name})
+        return sum(1 for batch in self._batches for row in batch.to_pylist()
+                   if _bound_row_selected(row, key_filter, time_interval))
 
     def scan(self, query, *, table_name: str):
         self.scan_calls += 1
@@ -230,6 +283,7 @@ def test_exact_query_mapping_parity_and_immutability():
 
     assert repo.resolve_calls == 1 and repo.head_lookups == 0
     assert repo.table_contract_calls == 1 and repo.scan_calls == 1
+    assert repo.population_bound_calls == 1
     ((query, table),) = repo.queries
     assert table == _TABLE
     assert query.snapshot_id == snapshot.snapshot_id
@@ -239,8 +293,15 @@ def test_exact_query_mapping_parity_and_immutability():
     assert query.time_interval == TimeInterval(column="date", start_inclusive="2024-01-02",
                                                end_exclusive="2024-01-17")
     assert query.order_by == _DM.primary_key
-    assert query.max_batch_rows == min(_DM.maximum_batch_rows, 1000)
-    assert query.max_result_rows == min(_DM.maximum_result_rows, 10000)
+    # Positive manifest bound: all 13 fake rows (11 eligible + 2 mcap-only,
+    # ticker AAA) are selected inside [2024-01-02, 2024-01-17), so the bound
+    # lowers the result limit and the batch limit follows it down.
+    assert query.max_result_rows == min(_DM.maximum_result_rows, 10000, 13)
+    assert query.max_batch_rows == min(_DM.maximum_batch_rows, 1000, 13)
+    (bound_selection,) = repo.bounds
+    assert bound_selection == (snapshot.snapshot_id, _TABLE,
+                               snapshot.table_versions[_TABLE].table_contract_ref,
+                               query.key_filter, query.time_interval)
 
     assert rows == originals
     assert dict(result.values) == panel_math.daily_state_lookup(rows, pd.Timestamp("2024-01-16"))
@@ -286,6 +347,50 @@ def test_plain_date_objects_are_accepted():
     assert result.values == _I10_VALUES
 
 
+def test_population_bound_applies_key_filter_and_half_open_interval():
+    snapshot = _snapshot()
+    rows = [*_eligible_rows(), _row("AAA", "2024-01-01"), _row("AAA", "2024-01-17"),
+            _row("BBB", "2024-01-10")]
+    repo = _FakeRepository(snapshot, batches=[_Batch(rows[:6]), _Batch(rows[6:])])
+    ref = snapshot.table_versions[_TABLE].table_contract_ref
+    interval = TimeInterval(column="date", start_inclusive="2024-01-02",
+                            end_exclusive="2024-01-17")
+
+    # 11 eligible AAA rows: 2024-01-01 is before the start, 2024-01-17 sits
+    # at end_exclusive (half-open), and the BBB row fails the ticker filter.
+    assert repo.scan_population_bound(snapshot.snapshot_id, table_name=_TABLE,
+                                      table_contract_ref=ref,
+                                      key_filter=(KeyPredicate(
+                                          column="ticker", operator="eq", values=("AAA",)),),
+                                      time_interval=interval) == 11
+    assert repo.scan_population_bound(snapshot.snapshot_id, table_name=_TABLE,
+                                      table_contract_ref=ref,
+                                      key_filter=(KeyPredicate(
+                                          column="ticker", operator="eq", values=("ZZZ",)),),
+                                      time_interval=interval) == 0
+
+
+def test_population_bound_refuses_selections_outside_the_pinned_membership():
+    snapshot = _snapshot()
+    repo = _FakeRepository(snapshot, batches=[_Batch(_fake_scan_rows())])
+    ref = snapshot.table_versions[_TABLE].table_contract_ref
+
+    with pytest.raises(DataError) as exc:
+        repo.scan_population_bound("snap-other", table_name=_TABLE, table_contract_ref=ref)
+    assert exc.value.code == "SNAPSHOT_NOT_READY"
+
+    with pytest.raises(DataError) as exc:
+        repo.scan_population_bound(snapshot.snapshot_id, table_name="securities",
+                                   table_contract_ref=_SEC_REF)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.problem.details == {"table_name": "securities"}
+
+    with pytest.raises(DataError) as exc:
+        repo.scan_population_bound(snapshot.snapshot_id, table_name=_TABLE,
+                                   table_contract_ref=_SEC_REF)
+    assert exc.value.code == "CONTRACT_MISMATCH"
+
+
 def test_values_are_deeply_immutable_and_not_aliased():
     source = {"im": 1.5}
     result = DailyStateInputs(values=source, source_session="2024-01-02",
@@ -311,6 +416,13 @@ def test_no_rows_or_no_eligible_rows_return_empty_without_session():
     empty = _FakeRepository(snapshot, batches=[_Batch([])])
     result = _scan(empty, snapshot, decision_session="2024-01-05")
     assert dict(result.values) == {} and result.source_session is None
+
+    assert empty.population_bound_calls == 1
+    ((query, _),) = empty.queries
+    # A zero selected bound keeps the existing positive limits; zero-result
+    # queries arrive with slice E.
+    assert query.max_result_rows == min(_DM.maximum_result_rows, 10000)
+    assert query.max_batch_rows == min(_DM.maximum_batch_rows, 1000)
 
     mcap_only = _FakeRepository(snapshot, batches=[_Batch([_mcap_only_row("AAA", "2024-01-03")])])
     result = _scan(mcap_only, snapshot, decision_session="2024-01-05")
