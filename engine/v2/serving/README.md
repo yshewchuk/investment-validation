@@ -88,8 +88,8 @@ content-derived `release_id`. A findings failure still publishes the receipt
 (`Problem.diagnostic_ref`) but writes no release row: no "current" pointer is
 created here, that is a later task's single published pointer. `get_release`,
 `list_events` (cursor-paginated, ordered `event_date, ticker, event_id`),
-`event_scores` (all matching summaries for one event, with optional filters),
-and `get_score_detail` (one document) are projection read helpers used by the
+`event_scores` (all matching summaries for one event, with optional score-row
+filters) and `get_score_detail` (one document) are projection read helpers used by the
 existing P3-2 read API. `GET /api/v1/events/{id}/scores` calls
 `projections.get_event`, which returns the event's full score summaries via
 `event_scores`. `connect`/`ensure_schema` open and migrate the file.
@@ -142,15 +142,13 @@ filtered `/events` route without a route ever touching a table directly:
 `event_query_hash` is the stable identity of one `/events` query (release
 plus every normalized filter, deliberately excluding `limit`/`cursor` — a
 page-size change or a page turn is not a different query), and `get_event`
-is the single-event lookup `/events/{id}/scores` wraps. `list_events`/
-`event_scores` grew optional `event_date_from`/`event_date_to`/`ticker`/
-`strategy`/`verdict` filters, backward compatible with every existing call
-(all new parameters default to `None`, unfiltered): a strategy/verdict
-filter selects EVENTS with at least one matching score row (an `EXISTS`
-against `serving_score_summary`) and, on the SAME call, narrows that event's
-own attached `scores` to the matching ones — §6's "selects matching events
-and their matching visible summaries consistently" — by construction, not by
-two independently-written filters that could drift apart.
+is the single-event lookup `/events/{id}/scores` wraps. `list_events` accepts
+optional `event_date_from`, `event_date_to`, and `ticker` event filters. Both
+`list_events` and `event_scores` accept optional score-row filters:
+`strategy`, `verdict`, `gate`, `out_of_domain`, and `disabled`. For
+`list_events`, strategy/verdict filters select events with at least one
+matching score row (an `EXISTS` against `serving_score_summary`) and narrow
+each returned event's attached `scores` to those same matching rows.
 
 api (P3-2): `create_app(*, serving_db, store_root, serving_root, token,
 resolver=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
