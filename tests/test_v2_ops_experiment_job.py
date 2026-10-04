@@ -576,6 +576,18 @@ def test_resolved_plan_is_immutable_and_its_json_bytes_are_canonical():
     document["economic_params"]["fill"] = "off"  # no mutable mapping leaks in
     assert plan.json_bytes() == first
 
+    arms, folds = ["fixture"], ["fold-1"]
+    direct = experiments.ExperimentSpec(
+        experiment_id="x", hypothesis="plumbing", primary_arm_id="fixture",
+        arms=arms, seed=7, folds=folds, economic_params={"fill": "mid"},
+        price_source="synthetic", runner="synthetic")
+    direct_plan = experiments.resolve_experiment_plan(direct)
+    direct_bytes = direct_plan.json_bytes()
+    arms.append("extra")
+    folds.append("fold-2")
+    assert direct_plan.arms == ("fixture",) and direct_plan.folds == ("fold-1",)
+    assert direct_plan.json_bytes() == direct_bytes
+
 
 def test_changed_fill_changes_the_plan_the_runner_receives(tmp_path):
     received = []

@@ -135,7 +135,7 @@ class ExperimentSpec:
                              "hypothesis": self.hypothesis,
                              "primary_arm_id": self.primary_arm_id,
                              "arms": self.arms, "seed": self.seed,
-                              "folds": self.folds, "economic_params": self.economic_params,
+                             "folds": self.folds, "economic_params": self.economic_params,
                               "price_source": self.price_source, "runner": self.runner})
 
 
@@ -196,7 +196,7 @@ def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
                    details={"keys": unused})
     return ResolvedExperimentPlan(
         schema_version="experiment_execution_plan.v1.0", experiment_id=spec.experiment_id,
-        arms=spec.arms, seed=spec.seed, folds=spec.folds,
+        arms=tuple(spec.arms), seed=spec.seed, folds=tuple(spec.folds),
         economic_params=_freeze(spec.economic_params), price_source=spec.price_source,
         runner=spec.runner)
 
