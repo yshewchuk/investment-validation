@@ -36,9 +36,13 @@ _EXIT_POST = frozenset({"STR-THRU", "DYN-SV", "TWIN-P", "TWIN-P5", "CND-PS",
 def _as_day(value: Any, field: str) -> date:
     """The v2 naive convention: a date, a naive datetime, or canonical text."""
     if isinstance(value, datetime):  # datetime subclasses date; check it first
-        if value.utcoffset() is not None:
+        try:
+            offset, day = value.utcoffset(), value.date()  # NaT accessors raise
+        except ValueError as err:
+            raise CalendarInputError(f"{field} is not a real calendar day: {value!r}") from err
+        if offset is not None:
             raise CalendarInputError(f"{field} must be naive: {value!r} carries a timezone")
-        return value.date()
+        return day
     if isinstance(value, date):
         return value
     if isinstance(value, str):
@@ -84,13 +88,12 @@ def _easter(year: int) -> date:
 
 def _holidays(year: int) -> set[date]:
     """The legacy scheduled NYSE rule set, observations applied."""
-    jan1 = date(year, 1, 1)
     out = {_nth_weekday(year, 1, 0, 3), _nth_weekday(year, 2, 0, 3),
            _easter(year) - timedelta(days=2), _last_weekday(year, 5, 0),
            _observed(date(year, 7, 4)), _nth_weekday(year, 9, 0, 1),
            _nth_weekday(year, 11, 3, 4), _observed(date(year, 12, 25))}
-    if jan1.weekday() != 5:  # a Saturday New Year takes no Friday observance
-        out.add(_observed(jan1))
+    if date(year, 1, 1).weekday() != 5:  # a Saturday New Year takes no Friday observance
+        out.add(_observed(date(year, 1, 1)))
     if year >= 2022:  # Juneteenth became a market holiday in 2022
         out.add(_observed(date(year, 6, 19)))
     return out
@@ -100,9 +103,7 @@ def _rule_sessions(start: date, end: date) -> list[date]:
     """Projected sessions in ``(start, end]`` — the legacy projection convention."""
     if end <= start:
         return []
-    holidays: set[date] = set()
-    for year in range(start.year, end.year + 1):
-        holidays |= _holidays(year)
+    holidays = {d for year in range(start.year, end.year + 1) for d in _holidays(year)}
     out: list[date] = []
     day = start + timedelta(days=1)
     while day <= end:
@@ -194,6 +195,4 @@ def planned_exit_date(key: CalendarEventKey, calendar: CalendarSessions) -> str:
     day = _as_day(event_date, "event_date")
     if day < days[0]:
         raise CalendarInputError(f"no calendar coverage before {day} ({days[0]} is first session)")
-    if strategy in _EXIT_PRE:
-        return _pre_anchor(day, session, days).isoformat()
-    return _post_anchor(day, session, days).isoformat()
+    return (_pre_anchor if strategy in _EXIT_PRE else _post_anchor)(day, session, days).isoformat()

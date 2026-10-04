@@ -26,7 +26,7 @@ None. This module does not access repositories, providers, loaders, models, legs
 
 ## Failure semantics
 
-Invalid/empty sessions, malformed dates, unknown strategy/session, or insufficient pre-print coverage raise `CalendarInputError(code="INVALID_REQUEST")`. R1–R6: source failures propagate at the adapter; no cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
+Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print coverage raise `CalendarInputError(code="INVALID_REQUEST")`. R1–R6: source failures propagate at the adapter; no cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
 
 ## Invariants
 

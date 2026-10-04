@@ -349,6 +349,60 @@ def test_error_envelope() -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate fix: missing dates (None, pandas NaT, numpy NaT) stay inside the
+# CalendarInputError INVALID_REQUEST envelope through both public entry points
+# --------------------------------------------------------------------------
+
+
+def test_none_event_dates_refused_both_entries(calendar: CalendarSessions) -> None:
+    with pytest.raises(CalendarInputError) as excinfo:
+        build_calendar_sessions(OBS_MAR, event_through=None)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-THRU", None, "AMC"), calendar)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_pandas_nat_refused_through_both_entries(calendar: CalendarSessions) -> None:
+    pd = pytest.importorskip("pandas")
+    with pytest.raises(CalendarInputError) as excinfo:
+        build_calendar_sessions(OBS_MAR, event_through=pd.NaT)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-RUNUP", pd.NaT, "AMC"), calendar)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    direct = CalendarSessions(("2024-03-11", pd.NaT, "2024-03-13"), "2024-03-15")
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), direct)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_pandas_timestamp_controls(calendar: CalendarSessions) -> None:
+    pd = pytest.importorskip("pandas")
+    naive = pd.Timestamp("2024-03-13 09:30")
+    assert planned_exit_date(_key("STR-THRU", naive, "AMC"), calendar) == "2024-03-14"
+    assert planned_exit_date(_key("STR-RUNUP", naive, "BMO"), calendar) == "2024-03-12"
+    aware = pd.Timestamp("2024-03-13 09:30", tz="UTC")
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-RUNUP", aware, "AMC"), calendar)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    with pytest.raises(CalendarInputError) as excinfo:
+        build_calendar_sessions(OBS_MAR, event_through=aware)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_numpy_datetime64_nat_refused(calendar: CalendarSessions) -> None:
+    np = pytest.importorskip("numpy")
+    nat = np.datetime64("NaT")
+    with pytest.raises(CalendarInputError) as excinfo:
+        build_calendar_sessions(OBS_MAR, event_through=nat)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-THRU", nat, "AMC"), calendar)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+# --------------------------------------------------------------------------
 # module isolation: stdlib-only imports, no legacy / provider / data reach
 # --------------------------------------------------------------------------
 
