@@ -115,6 +115,10 @@ def experiment_spec_from_document(document: dict) -> ExperimentSpec:
         if name not in document or document[name] is None:
             raise fail("INVALID_REQUEST", "experiment specification is missing a required field",
                        details={"field": name})
+    for name in ("arms", "folds"):
+        if name in document and not isinstance(document[name], list):
+            raise fail("INVALID_EXPERIMENT_SPEC", "arms and folds must be JSON arrays",
+                       details={"field": name, "type": type(document[name]).__name__})
     return ExperimentSpec(
         experiment_id=document.get("experiment_id", ""),
         hypothesis=document["hypothesis"],
@@ -287,10 +291,7 @@ def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "economic_params must be a mapping",
                    details={"type": type(spec.economic_params).__name__})
-    # Field validation runs before the unused-key sort: economic keys are
-    # checked to be strings here, so a mixed-type key set is the typed
-    # refusal, never the bare comparison ``TypeError`` the sort below would
-    # otherwise raise.
+    # Order matters: the field check types the economic keys before the sort.
     _validate_plan_fields(spec)
     unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
     if unused:

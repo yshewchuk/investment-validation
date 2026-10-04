@@ -555,6 +555,41 @@ def test_experiment_document_rejects_non_mapping_input():
         assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+@pytest.mark.parametrize("changes", (
+    pytest.param({"arms": "fixture"}, id="string-arms-document"),
+    pytest.param({"arms": {"fixture": True}}, id="mapping-arms-document"),
+    pytest.param({"folds": "fold-1"}, id="string-folds-document"),
+    pytest.param({"folds": {"fold-1": True}}, id="mapping-folds-document"),
+))
+def test_experiment_spec_parser_rejects_non_array_arm_and_fold_fields(changes):
+    """Gate round-3 finding: the parser ran ``tuple(...)`` over the raw
+    document value before any validation, so an explicitly present string
+    became character IDs and a mapping became its keys, and malformed
+    documents reached the plan-aware runners. The document boundary now
+    refuses every non-array value, and the refusal is parsing-level: a spec
+    rebuilt with ``dataclasses.replace`` is the other test's job."""
+    with pytest.raises(OpsError) as excinfo:
+        experiments.experiment_spec_from_document(_spec_document(**changes))
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", changes
+    assert excinfo.value.problem.details["field"] == next(iter(changes))
+
+    parsed = experiments.experiment_spec_from_document(_spec_document())
+    assert parsed.arms == ("fixture",) and parsed.folds == ("fold-1",)
+    optional = _spec_document()
+    del optional["arms"], optional["folds"]
+    defaulted = experiments.experiment_spec_from_document(optional)
+    assert defaulted.arms == () and defaulted.folds == ()
+
+    # A well-formed array whose items are not strings stays the resolver's
+    # refusal, exactly as before: the parser only checks the raw shape.
+    nested = experiments.experiment_spec_from_document(
+        _spec_document(arms=["fixture", ["mutable"]]))
+    assert nested.arms == ("fixture", ["mutable"])
+    with pytest.raises(OpsError) as excinfo:
+        experiments.resolve_experiment_plan(nested)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_experiment_plan_rejects_non_mapping_document_before_field_access(tmp_path):
     """CLI-facing entry point: a JSON document that is not a mapping -- even
     ``[{}]``, whose sole element is -- must be refused as the resolver's
