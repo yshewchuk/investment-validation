@@ -594,17 +594,15 @@ def test_resolved_plan_is_immutable_and_its_json_bytes_are_canonical():
     with pytest.raises(TypeError):
         plan.economic_params["fill"] = "off"
     document["economic_params"]["fill"] = "off"  # no mutable mapping leaks in
+    assert plan.economic_params["fill"] == "mid"
     assert plan.json_bytes() == first
 
-    arms, folds = ["fixture"], ["fold-1"]
     direct = experiments.ExperimentSpec(
         experiment_id="x", hypothesis="plumbing", primary_arm_id="fixture",
-        arms=arms, seed=7, folds=folds, economic_params={"fill": "mid"},
+        arms=("fixture",), seed=7, folds=("fold-1",), economic_params={"fill": "mid"},
         price_source="synthetic", runner="synthetic")
     direct_plan = experiments.resolve_experiment_plan(direct)
     direct_bytes = direct_plan.json_bytes()
-    arms.append("extra")
-    folds.append("fold-2")
     assert direct_plan.arms == ("fixture",) and direct_plan.folds == ("fold-1",)
     assert direct_plan.json_bytes() == direct_bytes
 
@@ -615,6 +613,46 @@ def test_resolver_rejects_non_mapping_economic_params():
         with pytest.raises(OpsError) as excinfo:
             experiments.resolve_experiment_plan(replace(spec, economic_params=malformed))
         assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("changes", (
+    pytest.param({"seed": {"n": 1}}, id="mutable-mapping-seed"),
+    pytest.param({"seed": True}, id="bool-seed"),
+    pytest.param({"seed": 7.5}, id="float-seed"),
+    pytest.param({"arms": ["fixture", ["mutable"]]}, id="mutable-list-arms"),
+    pytest.param({"arms": ["fixture"]}, id="plain-list-arms"),
+    pytest.param({"arms": "fixture"}, id="string-arms"),
+    pytest.param({"folds": ["fold-1", None]}, id="non-string-fold"),
+    pytest.param({"folds": ["fold-1"]}, id="plain-list-folds"),
+    pytest.param({"economic_params": {"fill": float("nan")}}, id="non-finite-nested"),
+    pytest.param({"economic_params": {"fill": {"nested": {1: "int key"}}}},
+                 id="non-string-nested-key"),
+    pytest.param({"economic_params": {"fill": [{"nested": {1, 2}}]}}, id="set-nested"),
+    pytest.param({"economic_params": {1: "int key", "slippage_bps": 5}},
+                 id="mixed-nonstring-key-with-unknown-string-key"),
+    pytest.param({"runner": ""}, id="empty-runner"),
+))
+def test_resolver_rejects_malformed_plan_field_types(changes):
+    """Gate round-2 finding: the spec's dataclass annotations check nothing
+    at runtime, so a JSON object supplied as ``seed`` was kept by reference
+    in the resolved plan and mutating that source rewrote the plan's
+    canonical bytes. The resolver now validates every field it copies into
+    ``ResolvedExperimentPlan`` before a plan exists, and each malformed
+    value is the same typed refusal -- never normalized or frozen into a
+    plan. A valid integer seed still resolves and serializes as that same
+    integer. Round-2 correction: a plain mutable list in ``arms``/``folds``
+    contradicts the fields' declared tuple types (the parser converts valid
+    document arrays; a hand-supplied list is refused), and economic keys are
+    type-checked before the unused-key sort, so a mixed non-string key set
+    beside an unknown string key is this typed refusal -- never the bare
+    comparison ``TypeError`` sorting mixed keys would raise."""
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    with pytest.raises(OpsError) as excinfo:
+        experiments.resolve_experiment_plan(replace(spec, **changes))
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", changes
+    plan = experiments.resolve_experiment_plan(spec)
+    assert plan.seed == 7 and isinstance(plan.seed, int)
+    assert b'"seed":7' in plan.json_bytes()
 
 
 def test_changed_fill_changes_the_plan_the_runner_receives(tmp_path):
@@ -747,23 +785,17 @@ def test_run_experiment_rejects_replaced_mutable_supplied_plan(tmp_path):
     rebuild loses the resolver's provenance marker, so each is the same
     typed refusal, fired as a preflight before any run directory or
     evidence exists, and the runner is never invoked. The resolver's own
-    plan is the contrasting case: mutating the input containers after
-    resolution -- including the values nested inside arms and folds --
-    never changes its content or its canonical bytes."""
+    plan is the contrasting case: mutating the source economics dictionary
+    after resolution -- it travels into the spec by reference -- never
+    changes its content or its canonical bytes."""
     source_params = {"fill": "mid"}
-    source_arms = ["fixture"]
-    source_folds = ["fold-1"]
     spec = experiments.ExperimentSpec(
         experiment_id="x", hypothesis="plumbing", primary_arm_id="fixture",
-        arms=source_arms, seed=7, folds=source_folds,
+        arms=("fixture",), seed=7, folds=("fold-1",),
         economic_params=source_params, price_source="synthetic", runner="synthetic")
     accepted = experiments.resolve_experiment_plan(spec)
     canonical = accepted.json_bytes()
     source_params["fill"] = "off"
-    source_arms.append("extra")
-    source_arms[0] = "poisoned"
-    source_folds.append("fold-2")
-    source_folds[0] = "poisoned"
     assert accepted.economic_params["fill"] == "mid"
     assert accepted.arms == ("fixture",) and accepted.folds == ("fold-1",)
     assert accepted.json_bytes() == canonical

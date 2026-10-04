@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -226,12 +227,71 @@ class ResolvedExperimentPlan:
                           ensure_ascii=False).encode("utf-8")
 
 
+def _validate_plan_fields(spec: ExperimentSpec) -> None:
+    """Refuse values that cannot become the plan's immutable, correctly
+    typed fields, before any plan is built or any field is frozen. A
+    dataclass annotation checks nothing at runtime, so a JSON object
+    supplied as ``seed`` used to travel into ``ResolvedExperimentPlan`` by
+    reference and mutating its source rewrote the plan's canonical bytes
+    after the fact. ``experiment_id``/``price_source``/``runner`` must be
+    non-empty strings; ``arms``/``folds`` must be tuples of strings -- the
+    fields' declared type, so a mutable list or a bare string is refused no
+    matter what it contains (the parser converts valid document arrays to
+    tuples); ``seed`` must be an ``int``, never a ``bool``; and
+    every nested economic value must be JSON-representable -- finite
+    numbers, strings, booleans, null, lists and string-keyed mappings --
+    anything else refused rather than frozen into a plan and handed to a
+    runner. Assumes the caller's mapping check already established
+    ``economic_params`` is a mapping."""
+    def json_value(value) -> bool:
+        if value is None or isinstance(value, (bool, int, str)):
+            return True
+        if isinstance(value, float):
+            return math.isfinite(value)
+        if isinstance(value, list):
+            return all(json_value(item) for item in value)
+        if isinstance(value, Mapping):
+            return all(isinstance(key, str) and json_value(item)
+                       for key, item in value.items())
+        return False
+
+    for name in ("experiment_id", "price_source", "runner"):
+        value = getattr(spec, name)
+        if not isinstance(value, str) or not value:
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment plan field must be a non-empty string",
+                       details={"field": name, "type": type(value).__name__})
+    for name in ("arms", "folds"):
+        value = getattr(spec, name)
+        if not isinstance(value, tuple) or not all(
+                isinstance(item, str) for item in value):
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment plan field must be a tuple of strings",
+                       details={"field": name, "type": type(value).__name__})
+    if isinstance(spec.seed, bool) or not isinstance(spec.seed, int):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment seed must be an integer",
+                   details={"type": type(spec.seed).__name__})
+    if not all(isinstance(key, str) and json_value(item)
+               for key, item in spec.economic_params.items()):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment economic parameters must be string-keyed "
+                   "JSON-representable values",
+                   details={"type": type(spec.economic_params).__name__})
+
+
 def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
-    """Refuse economically unused declarations, then freeze the one plan."""
+    """Refuse malformed plan fields and economically unused declarations,
+    then freeze the one plan."""
     if not isinstance(spec.economic_params, Mapping):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "economic_params must be a mapping",
                    details={"type": type(spec.economic_params).__name__})
+    # Field validation runs before the unused-key sort: economic keys are
+    # checked to be strings here, so a mixed-type key set is the typed
+    # refusal, never the bare comparison ``TypeError`` the sort below would
+    # otherwise raise.
+    _validate_plan_fields(spec)
     unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
     if unused:
         raise fail("INVALID_EXPERIMENT_SPEC",
