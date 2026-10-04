@@ -84,10 +84,12 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 ## Inputs
 
 Target research reads cover each full pinned partition, including null
-observation times, subject to caller predicates and batch filtering. The result
-bound is only the [data scan population rule](../data/ARCHITECTURE.md#invariants):
-the recorded row-count sum of pinned fragments surviving pruning, not a bound
-on total process memory; runtime still enforces the table cap until slice E.
+observation times, subject to caller predicates and batch filtering. The
+manifest population bound limits candidate rows, not RSS/process memory — the
+recorded row-count sum of pinned fragments surviving pruning
+([data scan population rule](../data/ARCHITECTURE.md#invariants)). Explicit
+smaller caller limits remain valid; runtime still enforces the table cap until
+slice E.
 
 The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
 optional `batch_filter` callback. They invoke it immediately after each Arrow
@@ -386,7 +388,7 @@ uncaught traceback instead.
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.
 - Every scan carries its own partition predicate alongside caller key
-  predicates, preventing duplicate reads across partitions.
+  predicates, so result rows cannot duplicate across partitions.
 - No production entrypoint derives its calendar from a local file or
   environment variable: `_replay_run.run` and `_build_run.run` resolve the
   planning calendar from the pinned snapshot's own `daily_market` table
