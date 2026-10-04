@@ -4,6 +4,7 @@ import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -554,6 +555,18 @@ def test_experiment_document_rejects_non_mapping_input():
         assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+def test_experiment_plan_rejects_non_mapping_document_before_field_access(tmp_path):
+    """CLI-facing entry point: a JSON document that is not a mapping -- even
+    ``[{}]``, whose sole element is -- must be refused as the resolver's
+    typed code before the ``document.get`` field access, not as the bare
+    ``AttributeError`` a list would otherwise raise through the CLI."""
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps([{}]))
+    with pytest.raises(OpsError) as excinfo:
+        experiment_plan(spec_path, smoke=True)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_unused_economic_key_refuses_before_the_runner_is_invoked(tmp_path):
     spec = experiments.experiment_spec_from_document(
         _spec_document(economic_params={"fill": "mid", "slippage_bps": 5}))
@@ -723,4 +736,64 @@ def test_run_experiment_rejects_mutable_supplied_plan_economics(tmp_path):
     assert not invoked
     assert not run_dir.exists()
     assert not (run_dir / "CAPABILITIES.json").exists()
+    assert not (tmp_path / "experiment_receipt.json").exists()
+
+
+def test_run_experiment_rejects_replaced_mutable_supplied_plan(tmp_path):
+    """Round-2 gate: the byte-equal impostor can hide mutability in fields
+    the immutable-economics shape check alone would wave through -- a plain
+    ``economic_params`` dict, a ``MappingProxyType`` over a caller-retained
+    mutable backing dict, a list ``arms``. Every ``dataclasses.replace``
+    rebuild loses the resolver's provenance marker, so each is the same
+    typed refusal, fired as a preflight before any run directory or
+    evidence exists, and the runner is never invoked. The resolver's own
+    plan is the contrasting case: mutating the input containers after
+    resolution -- including the values nested inside arms and folds --
+    never changes its content or its canonical bytes."""
+    source_params = {"fill": "mid"}
+    source_arms = ["fixture"]
+    source_folds = ["fold-1"]
+    spec = experiments.ExperimentSpec(
+        experiment_id="x", hypothesis="plumbing", primary_arm_id="fixture",
+        arms=source_arms, seed=7, folds=source_folds,
+        economic_params=source_params, price_source="synthetic", runner="synthetic")
+    accepted = experiments.resolve_experiment_plan(spec)
+    canonical = accepted.json_bytes()
+    source_params["fill"] = "off"
+    source_arms.append("extra")
+    source_arms[0] = "poisoned"
+    source_folds.append("fold-2")
+    source_folds[0] = "poisoned"
+    assert accepted.economic_params["fill"] == "mid"
+    assert accepted.arms == ("fixture",) and accepted.folds == ("fold-1",)
+    assert accepted.json_bytes() == canonical
+
+    dict_plan = replace(accepted, economic_params={"fill": "mid"})
+    backing = {"fill": "mid"}
+    proxy_plan = replace(accepted, economic_params=MappingProxyType(backing))
+    arms_plan = replace(accepted, arms=["fixture"])
+    for variant in (dict_plan, proxy_plan, arms_plan):
+        assert variant.json_bytes() == canonical
+
+    # Mutated after wrapping: the retained dict still edits the "read-only"
+    # proxy, proving the variant exercises the live alias, not a snapshot.
+    backing["fill"] = "off"
+    assert proxy_plan.economic_params["fill"] == "off"
+
+    invoked = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(execution_plan)
+
+    for name, variant in (("economic-dict", dict_plan),
+                          ("economic-proxy", proxy_plan),
+                          ("arms-list", arms_plan)):
+        run_dir = tmp_path / name
+        with pytest.raises(OpsError) as excinfo:
+            experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                       mode="smoke", synthetic=True, resolved_plan=variant)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", name
+        assert not invoked
+        assert not run_dir.exists()
+        assert not (run_dir / "CAPABILITIES.json").exists()
     assert not (tmp_path / "experiment_receipt.json").exists()
