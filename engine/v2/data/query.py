@@ -179,6 +179,7 @@ def plan_scan_population(contract: TableContract, records, *,
         _check_predicate_column(contract, predicate)
     if interval is not None:
         _check_time_interval_column(contract, interval)
+    _check_planning_timestamp_values(contract, predicates, interval)
     surviving = tuple(record for record in records
                       if _fragment_may_match(record, contract, predicates, interval))
     row_count = 0
@@ -215,6 +216,23 @@ def _decoded_interval(time_interval) -> TimeInterval | None:
         return documents.decode_document(TimeInterval, to_document(time_interval))
     except DocumentError as exc:
         raise fail("QUERY_NOT_BOUNDED", f"a time_interval is refused: {exc.code}") from exc
+
+
+def _check_planning_timestamp_values(contract: TableContract, predicates,
+                                     interval: TimeInterval | None) -> None:
+    """Planning-path timestamp-value validation; same static refusal as the row path."""
+    for predicate in predicates:
+        if not _physical_type(contract, predicate.column).startswith("timestamp"):
+            continue
+        for value in predicate.values:
+            if not isinstance(value, str):
+                raise fail("CONTRACT_MISMATCH",
+                           "key_filter values on a timestamp column must be strings")
+            _normalize_bound(value)
+    if interval is not None:
+        for bound in (interval.start_inclusive, interval.end_exclusive):
+            if bound is not None:
+                _normalize_bound(bound)
 
 
 def fragment_may_match(record: FragmentRecord, contract: TableContract, query: DataQuery) -> bool:

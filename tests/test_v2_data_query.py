@@ -1611,3 +1611,154 @@ def test_canonical_timestamp_string_leading_predicate_keeps_exact_bound(tmp_path
     assert Repository(conn).scan_population_bound(
         snap.snapshot_id, table_name="ts_leading", table_contract_ref=ref,
         key_filter=key_filter) == 2
+
+
+def test_malformed_timestamp_string_leading_predicate_refuses_contract_mismatch(tmp_path):
+    """PR 365 final gate finding: ``"2024-01-05garbage"`` lexically falls
+    inside this fragment's recorded leading-key bounds (2024-01-02 ..
+    2024-01-09), so the pre-fix planner returned the exact 2-row bound while
+    ``scan``/``explain`` refused with nonretryable ``CONTRACT_MISMATCH``. The
+    shared planner now refuses the malformed string itself through
+    ``_normalize_bound`` from both metadata planning APIs -- never a
+    successful bound. The canonical control test above still gets 2."""
+    conn, snap, contract, ref = _timestamp_leading_fixture(tmp_path)
+    records = Repository(conn).fragment_records(snap, "ts_leading")
+    key_filter = (KeyPredicate(column="timestamp", operator="eq",
+                               values=("2024-01-05garbage",)),)
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(contract, records, key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:  # no store: metadata planning only
+        Repository(conn).scan_population_bound(
+            snap.snapshot_id, table_name="ts_leading", table_contract_ref=ref,
+            key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+
+
+def _timestamp_nonleading_fixture(tmp_path):
+    """A legitimate pinned table with a string leading key ``ticker`` and a
+    non-leading nullable ``timestamp[us]`` filter column ``ts`` whose every
+    value is None: no predicate on ``ts`` is ever compared against fragment
+    key bounds (pre-fix a malformed predicate string there reached a
+    successful bound while ``scan`` refused), and ``inspect_fragment``
+    records no ``time_min``/``time_max`` (so ``_time_may_match``
+    short-circuits before ``_normalize_bound``). Normal
+    ``publish_and_inspect``/``commit_tables`` path with a content-hashed
+    contract identity, exactly like the leading fixture."""
+    import dataclasses
+
+    from engine.v2.data import manifests
+
+    fields = dict(
+        contract_id="tc_ts_nonleading", table_name="ts_nonleading", semantic_version="1.0",
+        columns=(ColumnContract(name="ticker", physical_type="string", nullable=False),
+                 ColumnContract(name="ts", physical_type="timestamp[us]", nullable=True)),
+        primary_key=("ticker",), duplicate_policy="reject", foreign_keys=(),
+        partition_columns=(), filterable_columns=("ticker", "ts"),
+        orderable_columns=("ticker", "ts"), observation_time_column="ts",
+        finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
+        coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
+        maximum_batch_rows=1000, maximum_result_rows=1000)
+    placeholder = TableContract(definition_hash=_H, **fields)
+    contract = dataclasses.replace(placeholder,
+                                   definition_hash=manifests.table_contract_hash(placeholder))
+    ref = contract_ref_for(contract)
+    conn, clock, store = catalog_and_store(tmp_path)
+    record = publish_and_inspect(
+        store, contract, ref,
+        [{"ticker": "AAA", "ts": None}, {"ticker": "BBB", "ts": None}], "2024")
+    snap = commit_tables(conn, clock, {"ts_nonleading": [record]}, {"ts_nonleading": contract})
+    return conn, store, snap, contract, ref
+
+
+def test_malformed_nonleading_timestamp_predicate_refuses_all_paths(tmp_path):
+    """PR 365 final gate finding, non-leading column: a predicate on the
+    nullable timestamp column ``ts`` (not the ``ticker`` leading key) was
+    never key-bound-pruned, so ``plan_scan_population`` and
+    ``scan_population_bound`` returned a successful bound while ``scan``
+    refused -- and ``explain`` (planning only) succeeded where ``scan``
+    refused. All four paths now raise the same static nonretryable
+    ``CONTRACT_MISMATCH`` the row path's ``_normalize_bound`` raises."""
+    conn, store, snap, contract, ref = _timestamp_nonleading_fixture(tmp_path)
+    records = Repository(conn).fragment_records(snap, "ts_nonleading")
+    key_filter = (KeyPredicate(column="ts", operator="eq", values=("2024-01-05garbage",)),)
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(contract, records, key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:  # no store: metadata planning only
+        Repository(conn).scan_population_bound(
+            snap.snapshot_id, table_name="ts_nonleading", table_contract_ref=ref,
+            key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+    repo = Repository(conn, store)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=ref, columns=("ticker",),
+        key_filter=key_filter, order_by=("ticker",), max_batch_rows=10, max_result_rows=10)
+    with pytest.raises(DataError) as err:
+        list(repo.scan(query, table_name="ts_nonleading"))
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:
+        repo.explain_dependencies(query, table_name="ts_nonleading")
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+
+
+def test_canonical_nonleading_timestamp_predicate_keeps_exact_bound(tmp_path):
+    """Positive control for the refusal above: a canonical timestamp string
+    still plans the exact 2-row population through both metadata planning
+    APIs, proving the fragment remains a candidate even though every
+    physical ``ts`` value is null (non-leading timestamps are never
+    key-bound-pruned)."""
+    conn, _store, snap, contract, ref = _timestamp_nonleading_fixture(tmp_path)
+    records = Repository(conn).fragment_records(snap, "ts_nonleading")
+    key_filter = (KeyPredicate(column="ts", operator="eq",
+                               values=("2024-01-02T00:00:00.000000",)),)
+    assert query_mod.plan_scan_population(
+        contract, records, key_filter=key_filter).row_count == 2
+    assert Repository(conn).scan_population_bound(
+        snap.snapshot_id, table_name="ts_nonleading", table_contract_ref=ref,
+        key_filter=key_filter) == 2
+
+
+def test_malformed_interval_with_absent_fragment_time_bounds_refuses(tmp_path):
+    """A malformed ``TimeInterval`` string refuses through both planning APIs
+    and ``scan`` even though every fragment here has absent time bounds
+    (``_time_may_match`` would short-circuit before ``_normalize_bound``):
+    the shared planner's strict decode refuses it first with the same static
+    nonretryable code for all three. A valid interval still plans the exact
+    2-row population."""
+    conn, store, snap, contract, ref = _timestamp_nonleading_fixture(tmp_path)
+    records = Repository(conn).fragment_records(snap, "ts_nonleading")
+    assert len(records) == 1
+    assert records[0].time_min is None and records[0].time_max is None
+    malformed = TimeInterval(column="ts", start_inclusive="2024-01-05garbage")
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(contract, records, time_interval=malformed)
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:  # no store: metadata planning only
+        Repository(conn).scan_population_bound(
+            snap.snapshot_id, table_name="ts_nonleading", table_contract_ref=ref,
+            time_interval=malformed)
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.problem.retryable is False
+    repo = Repository(conn, store)
+    query = DataQuery(
+        snapshot_id=snap.snapshot_id, table_contract_ref=ref, columns=("ticker",),
+        key_filter=(), time_interval=malformed, order_by=("ticker",),
+        max_batch_rows=10, max_result_rows=10)
+    with pytest.raises(DataError) as err:
+        list(repo.scan(query, table_name="ts_nonleading"))
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.problem.retryable is False
+    valid = TimeInterval(column="ts", start_inclusive="2024-01-01", end_exclusive="2024-02-01")
+    assert query_mod.plan_scan_population(
+        contract, records, time_interval=valid).row_count == 2
+    assert Repository(conn).scan_population_bound(
+        snap.snapshot_id, table_name="ts_nonleading", table_contract_ref=ref,
+        time_interval=valid) == 2
