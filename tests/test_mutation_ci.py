@@ -6,6 +6,7 @@ in the layout mutmut 3.8 uses (``mutants/<file>.meta``, ``mutmut-stats.json``).
 from __future__ import annotations
 # land: always-run
 
+import ast
 import csv
 import io
 import json
@@ -2916,11 +2917,14 @@ def test_select_pr_tests_conftest_as_root_does_not_taint_every_test(tmp_path, mo
 
 
 def test_select_pr_tests_re_compile_helper_does_not_taint_its_importer(tmp_path, monkeypatch):
-    # Guards the exact regression call3 found: a helper that is DYNAMIC only
-    # because `re.compile(...)` collides with `_is_dynamic_file`'s generic
-    # `compile` name check must NOT taint its importer -- it has no
-    # unresolved IMPORT attempt, so it should be selected only by the
-    # ordinary changed-path/closure intersection, same as any static file.
+    # Guards the exact regression call3 found, now stated as the precise
+    # contract: `re.compile(...)` only LOOKS like the bare `compile` name the
+    # OLD broad `_is_dynamic_file` allowlist banned (that function still
+    # returns True for it -- it is kept as the leaf/taint classifier, not the
+    # graph trigger), but `build_import_graph` never calls it. A method call
+    # on `re` is not an unresolved IMPORT attempt, so the helper gets NO
+    # catch-all edge and taints nothing: it is selected exactly like any
+    # static file, by the ordinary changed-path/closure intersection.
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "helper.py").write_text(
         "import re\n"
@@ -2934,8 +2938,11 @@ def test_select_pr_tests_re_compile_helper_does_not_taint_its_importer(tmp_path,
     tracked = ["tests/helper.py", "tests/test_a.py", "tests/test_b.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert "tests/helper.py" in pilot.dynamic_files(graph)  # sanity: still broadly DYNAMIC
-    assert "tests/helper.py" not in pilot.unresolved_import_files(tracked)  # but not an import attempt
+    source = (tmp_path / "tests" / "helper.py").read_text()
+    assert pilot._is_dynamic_file(pilot.ast.parse(source)) is True  # the OLD broad rule
+    assert graph["tests/helper.py"] == set()  # no catch-all, no edge of its own
+    assert "tests/helper.py" not in pilot.dynamic_files(graph)
+    assert "tests/helper.py" not in pilot.unresolved_import_files(tracked)
     selected = pilot.select_pr_tests(_SELECT_CFG, ["tests/helper.py"], graph=graph)
     assert selected == ["tests/test_a.py"]  # test_b not tainted into the selection
 
@@ -3218,10 +3225,15 @@ def test_build_import_graph_a_subprocess_dash_c_fails_safe(tmp_path, monkeypatch
     assert graph["tools/runner.py"] == {"engine/unrelated.py"}
 
 
-def test_build_import_graph_any_sys_path_mutation_fails_safe_including_the_file_relative_form(tmp_path, monkeypatch):
-    # The repo-root idiom, and any other sys.path mutation, is ALWAYS
-    # fail-safe again -- static __file__-relative evaluation for sys.path
-    # was removed in this round.
+def test_build_import_graph_the_known_repo_root_sys_path_insert_creates_no_catch_all(tmp_path, monkeypatch):
+    # The precise contract for the file-relative idiom every checks/ and
+    # tools/ script uses: `sys.path.insert(0,
+    # str(Path(__file__).resolve().parents[1]))` in a file exactly one
+    # directory deep IS a proof the target is the repository root, so it
+    # adds no catch-all -- only a mutation to a target the classifier cannot
+    # prove does. The same holds for the `REPO_ROOT = ...` +
+    # `sys.path.insert(0, str(REPO_ROOT))` two-statement form
+    # (tests/conftest.py's own, covered against the real file below).
     (tmp_path / "checks").mkdir()
     (tmp_path / "checks" / "script.py").write_text(
         "import sys\n"
@@ -3232,7 +3244,27 @@ def test_build_import_graph_any_sys_path_mutation_fails_safe_including_the_file_
     tracked = ["checks/script.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == set()
+    assert "checks/script.py" not in pilot.dynamic_files(graph)
+
+
+def test_build_import_graph_a_file_relative_sys_path_insert_that_is_not_the_root_fails_safe(tmp_path, monkeypatch):
+    # The contrast that makes the assertion above mean something: the same
+    # `Path(__file__)` shape at the WRONG depth (`parents[0]` is the file's
+    # own directory, not the root for a file one level down) is a mutation to
+    # an unknown directory, so it still gets the catch-all.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parents[0]))\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
     assert graph["checks/script.py"] == {"engine/unrelated.py"}
+    assert "checks/script.py" in pilot.dynamic_files(graph)
 
 
 def test_build_import_graph_a_conftest_pytest_plugins_literal_is_an_edge(tmp_path, monkeypatch):
@@ -3261,52 +3293,107 @@ def test_build_import_graph_a_conftest_pytest_plugins_non_literal_fails_safe(tmp
     assert graph["tests/conftest.py"] == {"engine/unrelated.py"}
 
 
-def test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert():
-    # tests/conftest.py itself does
-    # `REPO_ROOT = Path(__file__).resolve().parents[1]` then
-    # `sys.path.insert(0, str(REPO_ROOT))` -- a two-statement form this
-    # graph never resolves (no cross-statement variable tracking), so it
-    # fails safe. Every test file's dependency closure includes
-    # tests/conftest.py via `_conftest_ancestors`, so a change to
-    # tests/conftest.py itself (or reaching it) still selects broadly --
-    # module_dependency_closure no longer CASCADES this catch-all edge into
-    # every other module's dependency set (see test_scoring_stages_change_
-    # no_longer_selects_every_enabled_module below).
+def test_the_real_tests_conftest_is_not_dynamic_for_its_known_repo_root_insertion():
+    # tests/conftest.py does `REPO_ROOT = Path(__file__).resolve().parents[1]`
+    # then `sys.path.insert(0, str(REPO_ROOT))` -- exactly the one variable hop
+    # `_repo_root_names` follows, and a file at `tests/conftest.py` IS one
+    # directory deep, so that insertion is a PROVEN repository root and adds no
+    # catch-any import. Its two `npm` subprocess launches are provably
+    # non-Python, so they add nothing either. What is left is precisely its
+    # real imports -- the engine/experiments modules its own fixtures use, plus
+    # `engine/__init__.py` as the ancestor package Python must run first.
     graph = pilot.build_import_graph()
+    rel = "tests/conftest.py"
+    assert graph.precise[rel] == {
+        "engine/__init__.py",
+        "engine/paths.py",
+        "engine/structures.py",
+        "experiments/lib.py",
+    }
+    assert graph[rel] == graph.precise[rel]  # no catch-all unioned in
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(sorted(graph))
+    # Losing the catch-all does not lose the ancestry: every collected test
+    # still has tests/conftest.py as a closure root, which is what makes a
+    # change here select those tests (see the synthetic counterpart below).
     tracked_set = set(graph)
-    assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}
+    tests = pilot.pytest_test_files(tracked_set)
+    assert tests
+    assert all(rel in pilot._conftest_ancestors(t, tracked_set) for t in tests)
 
 
-def test_conftest_dynamic_classification_guards_static_analysis_holes():
-    # See https://github.com/yshewchuk/investment-validation/issues/42:
-    # `_is_dynamic_file`'s allowlist has several known holes (string-target
-    # monkeypatch.setattr/mock.patch, pytest.importorskip, getattr-based
-    # imports of importlib/sys, __import__ via globals()/builtins, asyncio
-    # subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
-    # outside a conftest.py or under an `if`, and `from pkg import *`
-    # re-exports). None of them matter today, because tests/conftest.py
-    # itself always classifies DYNAMIC (its own sys.path.insert): a change
-    # to tests/conftest.py itself, or reaching it, still selects broadly.
-    # (Reaching a DYNAMIC file no longer CASCADES into every other module's
-    # dependency set as of this round -- see module_dependency_closure's own
-    # docstring. That function walks `.precise` alone and never consults
-    # this raw catch-all edge, so it is NOT an operational backstop for a
-    # hole in tests/conftest.py's OWN unresolved constructs either: a
-    # changed file reachable from tests/conftest.py only through one of
-    # them is not selected for any module, same as the same holes in some
-    # OTHER test file reaching a changed file with no other real edge to it
-    # -- see issue #155 for both.) This is
-    # a dedicated guard, separate from
-    # test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert
-    # above, so a failure here points straight at issue #42 instead of only
-    # restating the fail-safe fact.
-    graph = pilot.build_import_graph()
-    tracked_set = set(graph)
-    assert graph["tests/conftest.py"] == tracked_set - {"tests/conftest.py"}, (
-        "tests/conftest.py is no longer fail-safe; mutation selection "
-        "would narrow and expose the static-analysis holes in issue #42. "
-        "Close them first."
-    )
+def test_a_proven_root_conftest_still_selects_the_tests_beneath_it_when_changed(tmp_path, monkeypatch):
+    # The other half of the contract above, stated as a selection: a
+    # conftest.py whose only sys.path mutation is the proven repo-root
+    # insertion is NOT dynamic and has NO edges of its own, yet pytest still
+    # applies it to every test under its directory, so changing it still
+    # selects those tests -- through `_conftest_ancestors` (a closure root),
+    # not through a catch-all edge.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+        "sys.path.insert(0, str(REPO_ROOT))\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "x.py").write_text("Z = 1\n")
+    (tmp_path / "tests" / "test_a.py").write_text("from engine import x\n")
+    (tmp_path / "tests" / "test_b.py").write_text("Y = 1\n")
+    tracked = ["engine/x.py", "tests/conftest.py", "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["tests/conftest.py"] == set()
+    assert "tests/conftest.py" not in pilot.dynamic_files(graph)
+    cfg = {"pr_selection": {"inert": ["*.md"], "inert_skip": [], "full_suite": []}}
+    assert pilot.select_pr_tests(cfg, ["tests/conftest.py"], graph=graph) == [
+        "tests/test_a.py", "tests/test_b.py"]
+    # And it taints nothing: a change only test_a's real closure reaches
+    # selects test_a alone, not every test sharing the conftest.
+    assert pilot.select_pr_tests(cfg, ["engine/x.py"], graph=graph) == ["tests/test_a.py"]
+
+
+_UNRESOLVED_CONFTEST_PLUGIN_SOURCES = [
+    pytest.param("import os\npytest_plugins = [os.environ.get('PLUGIN', 'x')]\n",
+                 id="non-literal-element"),
+    pytest.param("pytest_plugins: list = ['checks.myplugin']\n", id="annotated"),
+    pytest.param("pytest_plugins += ['checks.myplugin']\n", id="augmented"),
+]
+
+
+@pytest.mark.parametrize("source", _UNRESOLVED_CONFTEST_PLUGIN_SOURCES)
+def test_an_unresolved_conftest_pytest_plugins_assignment_is_caught_by_the_narrow_scanner(
+        source, tmp_path, monkeypatch):
+    # Replaces the old issue-#42 premise: tests/conftest.py is no longer
+    # blanket-DYNAMIC, so what protects a conftest whose plugin list cannot be
+    # resolved is the narrow scanner itself. Each supported-but-unresolved
+    # `pytest_plugins` shape -- a non-literal element, an annotated assignment,
+    # an augmented one -- must be flagged by `_has_unresolved_import_attempt`
+    # (via `unresolved_import_files`), which is what both adds the graph's
+    # catch-all AND fans `select_pr_tests` out to the tests beneath it (a
+    # fixture can load anything, so a test using one has an invisible runtime
+    # dependency). The literal `pytest_plugins = ['checks.myplugin']` form is
+    # the one shape resolved to a real edge instead -- see
+    # test_build_import_graph_a_conftest_pytest_plugins_literal_is_an_edge.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "myplugin.py").write_text("P = 1\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "x.py").write_text("Z = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text(source)
+    (tmp_path / "tests" / "test_a.py").write_text("from engine import x\n")
+    (tmp_path / "tests" / "test_b.py").write_text("Y = 1\n")
+    tracked = ["checks/myplugin.py", "engine/x.py", "tests/conftest.py",
+               "tests/test_a.py", "tests/test_b.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert "tests/conftest.py" in pilot.unresolved_import_files(tracked)
+    assert graph["tests/conftest.py"] == set(tracked) - {"tests/conftest.py"}
+    assert "tests/conftest.py" in pilot.dynamic_files(graph)
+    cfg = {"pr_selection": {"inert": ["*.md"], "inert_skip": [], "full_suite": []}}
+    # test_b never imports engine.x; it is selected only because its conftest
+    # ancestor is genuinely unresolved.
+    assert pilot.select_pr_tests(cfg, ["engine/x.py"], graph=graph) == [
+        "tests/test_a.py", "tests/test_b.py"]
 
 
 def test_build_import_graph_a_spec_from_file_location_call_always_fails_safe(tmp_path, monkeypatch):
@@ -3406,11 +3493,13 @@ def test_build_import_graph_an_env_var_sys_path_insert_still_fails_safe(tmp_path
     assert graph["checks/script.py"] == {"engine/unrelated.py"}
 
 
-def test_build_import_graph_a_python_subprocess_literal_script_always_fails_safe(tmp_path, monkeypatch):
-    # Subprocess edge inference is dropped entirely as of this round: EVERY
-    # subprocess call fails the whole file safe now, including one with a
-    # fully literal, `-u`-flagged Python script argv that an earlier round
-    # would have resolved to a specific edge.
+def test_build_import_graph_a_python_subprocess_literal_script_adds_only_that_edge(tmp_path, monkeypatch):
+    # A literal Python launch of a TRACKED script keeps the precise edge it
+    # resolved to -- `[sys.executable, '-u', 'tools/worker.py']` depends on
+    # tools/worker.py, and on nothing else: an inert `-u` does not stop the
+    # scan, and because the target WAS resolved there is no whole-file
+    # catch-all (compare the `-c`, variable-argv and unresolved-target tests
+    # above and below, which must still fail safe).
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "runner.py").write_text(
         "import subprocess, sys\n"
@@ -3421,12 +3510,16 @@ def test_build_import_graph_a_python_subprocess_literal_script_always_fails_safe
     tracked = ["tools/runner.py", "tools/worker.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["tools/runner.py"] == {"tools/worker.py", "engine/unrelated.py"}
+    assert graph["tools/runner.py"] == {"tools/worker.py"}
+    assert "tools/runner.py" not in pilot.dynamic_files(graph)
 
 
-def test_build_import_graph_a_python_subprocess_dash_m_always_fails_safe(tmp_path, monkeypatch):
-    # Same as above for `-m`, an absolute interpreter path, and `-X`/`-W`
-    # flags -- none of these ever earn a specific edge any more.
+def test_build_import_graph_a_python_subprocess_dash_m_adds_only_that_module(tmp_path, monkeypatch):
+    # Same precision for a literal `-m dotted.name`: an absolute interpreter
+    # path (`/usr/bin/python3`), the value-taking `-X utf8` / `-W ignore`
+    # flags, and the module target are all literals this scan resolves, so the
+    # only edge is `checks/worker.py` (with its tracked ancestor package
+    # `__init__.py` files, exactly like a normal import) -- never a catch-all.
     (tmp_path / "tools").mkdir()
     (tmp_path / "checks").mkdir()
     (tmp_path / "checks" / "worker.py").write_text("W = 1\n")
@@ -3439,7 +3532,8 @@ def test_build_import_graph_a_python_subprocess_dash_m_always_fails_safe(tmp_pat
     tracked = ["tools/runner.py", "checks/worker.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["tools/runner.py"] == {"checks/worker.py", "engine/unrelated.py"}
+    assert graph["tools/runner.py"] == {"checks/worker.py"}
+    assert "tools/runner.py" not in pilot.dynamic_files(graph)
 
 
 def test_build_import_graph_a_subprocess_dash_m_pytest_always_fails_safe(tmp_path, monkeypatch):
@@ -3474,13 +3568,13 @@ def test_build_import_graph_a_dynamic_python_subprocess_target_fails_safe(tmp_pa
     assert graph["tools/runner.py"] == {"engine/unrelated.py"}
 
 
-def test_build_import_graph_any_subprocess_use_fails_safe_even_a_non_python_command(tmp_path, monkeypatch):
-    # Reverses the pre-this-round behavior on purpose: subprocess edge
-    # inference is dropped entirely, so even a `git`/`gh`/non-Python
-    # command -- previously treated as provably inert -- now fails the
-    # whole file safe. The PR-owned test this replaces asserted the
-    # OPPOSITE (`graph["tools/runner.py"] == set()`) and could not be kept
-    # once every subprocess reference became unconditionally dynamic.
+def test_build_import_graph_a_provably_non_python_subprocess_command_adds_no_edges(tmp_path, monkeypatch):
+    # Using `subprocess` is not itself a reason to depend on everything: a
+    # literal argv whose first element is provably NOT a Python interpreter
+    # (`git`, `gh`, `npm`, ...) cannot load tracked repository code, so it adds
+    # neither an edge nor a catch-all -- even when the rest of the argv is a
+    # `*args` unpacking this graph cannot see. The Python-shaped and
+    # unresolvable argv forms above/below keep failing safe.
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "runner.py").write_text(
         "import subprocess\n"
@@ -3491,7 +3585,8 @@ def test_build_import_graph_any_subprocess_use_fails_safe_even_a_non_python_comm
     tracked = ["tools/runner.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["tools/runner.py"] == {"engine/unrelated.py"}
+    assert graph["tools/runner.py"] == set()
+    assert "tools/runner.py" not in pilot.dynamic_files(graph)
 
 
 def test_build_import_graph_from_sys_import_path_always_fails_safe(tmp_path, monkeypatch):
@@ -3510,10 +3605,11 @@ def test_build_import_graph_from_sys_import_path_always_fails_safe(tmp_path, mon
     assert graph["checks/script.py"] == {"engine/unrelated.py"}
 
 
-def test_build_import_graph_an_aliased_sys_path_reference_always_fails_safe(tmp_path, monkeypatch):
-    # `import sys as s` then `s.path` (or a bare `p = sys.path`, the same
-    # attribute-access node either way) -- aliasing `sys` does not escape
-    # the check, which tracks every name a file binds to the `sys` module.
+def test_build_import_graph_an_aliased_sys_path_read_adds_no_edges(tmp_path, monkeypatch):
+    # A `sys.path` READ -- aliased or not -- mutates nothing, so it is not a
+    # catch-all trigger any more (`if str(REPO_ROOT) not in sys.path:` in
+    # tests/conftest.py is exactly this). Aliasing is still followed, which is
+    # what the mutation test below proves.
     (tmp_path / "checks").mkdir()
     (tmp_path / "checks" / "script.py").write_text(
         "import sys as s\n"
@@ -3523,7 +3619,26 @@ def test_build_import_graph_an_aliased_sys_path_reference_always_fails_safe(tmp_
     tracked = ["checks/script.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
+    assert graph["checks/script.py"] == set()
+    assert "checks/script.py" not in pilot.dynamic_files(graph)
+
+
+def test_build_import_graph_an_aliased_sys_path_mutation_still_fails_safe(tmp_path, monkeypatch):
+    # The same alias tracked through a MUTATION: `import sys as s` then
+    # `s.path.insert(0, 'somewhere')` is an unknown directory, and the
+    # classifier follows every name a file binds to `sys` -- aliasing does not
+    # escape the check.
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "script.py").write_text(
+        "import sys as s\n"
+        "s.path.insert(0, 'somewhere')\n")
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
+    tracked = ["checks/script.py", "engine/unrelated.py"]
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
     assert graph["checks/script.py"] == {"engine/unrelated.py"}
+    assert "checks/script.py" in pilot.dynamic_files(graph)
 
 
 def test_build_import_graph_site_addsitedir_always_fails_safe(tmp_path, monkeypatch):
@@ -3556,10 +3671,13 @@ def test_build_import_graph_a_monkeypatch_syspath_prepend_always_fails_safe(tmp_
     assert graph["tests/test_x.py"] == {"engine/unrelated.py"}
 
 
-def test_build_import_graph_a_bare_pythonpath_string_always_fails_safe(tmp_path, monkeypatch):
-    # Not inside a subprocess call at all (subprocess already fails safe on
-    # its own) -- a bare "PYTHONPATH" string, e.g. an `os.environ` key, is
-    # checked as its own standalone trigger.
+def test_build_import_graph_a_bare_pythonpath_assignment_adds_no_edges(tmp_path, monkeypatch):
+    # A `PYTHONPATH` string/assignment alone is not a catch-all trigger: the
+    # environment variable is inert unless some process actually reads it, and
+    # a plain `os.environ[...] = ...` sets nothing this file imports. Only the
+    # in-process import-path MUTATION calls fail safe -- `sys.path.insert`/
+    # `append` to an unproven target, `site.addsitedir`, `syspath_prepend` --
+    # each of which has its own test here.
     (tmp_path / "checks").mkdir()
     (tmp_path / "checks" / "script.py").write_text(
         "import os\n"
@@ -3569,7 +3687,8 @@ def test_build_import_graph_a_bare_pythonpath_string_always_fails_safe(tmp_path,
     tracked = ["checks/script.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["checks/script.py"] == {"engine/unrelated.py"}
+    assert graph["checks/script.py"] == set()
+    assert "checks/script.py" not in pilot.dynamic_files(graph)
 
 
 def test_build_import_graph_import_module_with_a_positional_package_argument_fails_safe(tmp_path, monkeypatch):
@@ -3829,3 +3948,139 @@ def test_summarize_retested_this_run_is_none_when_no_snapshot_row_has_it():
     assert s["retested_this_run"] is None
     md = mr.markdown(s, rows, None)
     assert "cache reuse" not in md  # unknown provenance: say nothing, not a false count
+
+
+# -- property: independent AST import-chain soundness over the real checkout --
+
+def _tracked_py_paths() -> list[str]:
+    """Every tracked ``.py`` path in this checkout. `git ls-files` only lists
+    paths -- it computes no import edges -- so this does not couple the
+    expected graph to the production one."""
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z", "*.py"],
+                         check=True, capture_output=True).stdout
+    return sorted(p for p in out.decode("utf-8").split("\0") if p)
+
+
+def _independent_import_edges(tracked: list[str]) -> dict[str, set[str]]:
+    """TEST-ONLY static import graph: each tracked file mapped to the tracked
+    files it statically imports, from `ast.parse` over the real sources and a
+    test-local dotted-name/path map. Deliberately independent of
+    `build_import_graph`, `_resolve_dotted`, `_closure_from_roots`,
+    `dynamic_files` and `.precise`: an expectation computed from the
+    production graph would be self-certifying -- a production edge-resolution
+    bug could hide a test from the selector AND from the expectation at the
+    same time. This builder re-derives the same Python import semantics from
+    path structure alone (absolute dotted imports, relative from-imports,
+    from-import submodules, and the ancestor package initializers Python
+    runs before any submodule), so every edge here is an independent claim
+    the production selector must honour.
+
+    It adds NO edge the production graph cannot know: no catch-alls, no
+    conftest roots, no importlib/subprocess shapes. Expected chains are
+    therefore a subset of what the selector must reach -- never a wider
+    demand than the selector's own soundness contract."""
+    modules: dict[str, str] = {}
+    packages: dict[str, str] = {}
+    for rel in tracked:
+        parts = rel[:-3].split("/")
+        if parts[-1] == "__init__":
+            packages[".".join(parts[:-1])] = rel
+        else:
+            modules[".".join(parts)] = rel
+
+    def resolve(dotted: str) -> str | None:
+        # module file first, package __init__ second: the same order for the
+        # (non-)collision case Python's own finder uses.
+        return modules.get(dotted) or packages.get(dotted)
+
+    def ancestor_inits(parts: list[str]) -> set[str]:
+        return {packages[".".join(parts[:i])]
+                for i in range(1, len(parts)) if ".".join(parts[:i]) in packages}
+
+    edges: dict[str, set[str]] = {rel: set() for rel in tracked}
+    for rel in tracked:
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+        own = edges[rel]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    parts = alias.name.split(".")
+                    target = resolve(alias.name)
+                    if target:
+                        own.add(target)
+                    own |= ancestor_inits(parts)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    dir_parts = rel.split("/")[:-1]
+                    climb = node.level - 1
+                    if climb > len(dir_parts):
+                        continue  # climbs above the tracked tree's root
+                    parts = dir_parts[:len(dir_parts) - climb]
+                    if node.module:
+                        parts = parts + node.module.split(".")
+                elif node.module:
+                    parts = node.module.split(".")
+                else:
+                    continue
+                if not parts:
+                    continue
+                dotted = ".".join(parts)
+                target = resolve(dotted)
+                if target:
+                    own.add(target)
+                own |= ancestor_inits(parts)
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    sub = resolve(f"{dotted}.{alias.name}")
+                    if sub:
+                        own.add(sub)
+    return edges
+
+
+def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_selected():
+    # Property over the REAL checkout: changed inputs = every tracked non-test
+    # python source path; every test with a static AST import chain into that
+    # set must be selected. One production `select_pr_tests` call, one
+    # independent graph build.
+    tracked = _tracked_py_paths()
+    edges = _independent_import_edges(tracked)
+    tests = pilot.pytest_test_files(set(tracked))  # path filter only, no edges
+    changed = [p for p in tracked if not p.startswith("tests/")]
+    assert changed and tests
+    changed_set = set(changed)
+
+    chains: dict[str, list[str]] = {}
+    for t in tests:
+        parent: dict[str, str | None] = {t: None}
+        stack = [t]
+        hit = None
+        while stack:
+            cur = stack.pop()
+            if cur != t and cur in changed_set:
+                hit = cur
+                break
+            for nxt in edges[cur]:
+                if nxt not in parent:
+                    parent[nxt] = cur
+                    stack.append(nxt)
+        if hit is not None:
+            chain = [hit]
+            while chain[-1] != t:
+                chain.append(parent[chain[-1]])
+            chains[t] = list(reversed(chain))
+
+    assert chains, (
+        "vacuous property: no test file in this checkout has a static AST "
+        "import chain to any non-test source path, so the inclusion below "
+        "would prove nothing")
+
+    selected = pilot.select_pr_tests(CFG, changed)
+    selected_set = set(tests) if selected is None else set(selected)
+    missing = sorted(set(chains) - selected_set)
+    mode = "full-suite sentinel" if selected is None else "narrow selection"
+    detail = "; ".join(f"{t} reaches a changed file via {' -> '.join(chains[t])}"
+                       for t in missing[:10])
+    assert not missing, (
+        f"selector returned a {mode} that dropped {len(missing)} test(s) "
+        f"with an independent static import chain to the changed set: {detail}")

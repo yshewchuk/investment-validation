@@ -173,9 +173,12 @@ evidence. See the models and data component contracts.
     closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
-    `full_suite` paths, an unrecognized path, a deleted test file, or a graph failure still select
-    everything. The selection rule (leaf, taint, `full_suite`, conftest ancestors)
-    is documented in `select_pr_tests`'s and `_has_unresolved_import_attempt`'s docstrings, not here.
+    catch-all graph edges belong only to a file with a genuinely unresolved dynamic target, while
+    recognized constructs with resolvable targets contribute specific edges. `full_suite` paths,
+    an unrecognized path, a deleted test file, a graph or scan failure, or any selector error still
+    select everything. The selector must never turn an error into a narrow selection. The selection
+    rule (leaf, taint, `full_suite`, conftest ancestors) is documented in `select_pr_tests`'s and
+    `_has_unresolved_import_attempt`'s docstrings, not here.
 
 ## 2. Layers and allowed dependency direction
 

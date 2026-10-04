@@ -300,13 +300,29 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 # -- reverse import closure: what could a changed file affect? ---------------
 #
 # `build_import_graph` parses (never executes) EVERY git-tracked `.py` file
-# in the repo with `ast`, and classifies each one STATIC or DYNAMIC by an
-# ALLOWLIST, not a denylist (`_is_dynamic_file`): a file is STATIC only if
-# every import-affecting construct in it is one of exactly three shapes --
-# a plain `import x.y [as z]`/`from x.y import z` (including a relative
-# import), resolved to a repo file the same way as before (`import x.y`/
-# `from x.y import z` resolve the dotted name `x.y` to `x/y.py`, or, if that
-# is a package, to `x/y/__init__.py`; a relative import resolves against the
+# in the repo with `ast`, resolves each file's REAL import edges, and adds a
+# file-wide catch-all (`tracked_set - {rel}`) ONLY for a file with a
+# genuinely unresolved import/load attempt by
+# `_has_unresolved_import_attempt` (non-literal/aliased `importlib`, runpy,
+# `__import__`, loader constructs, bare exec/eval, a conftest.py's
+# non-literal or annotated top-level `pytest_plugins`, ...), an
+# import-path mutation to an unproven target by
+# `_has_unresolved_sys_path_mutation` (a `sys.path.insert`/`append` --
+# however `sys` is bound, `from sys import path` included -- a
+# `site.addsitedir`, or a `monkeypatch.syspath_prepend`, whose path
+# argument is not provably the file's own repository root), or a
+# `subprocess` launch `_subprocess_targets` cannot prove is either a
+# non-Python command or a tracked Python script/`-m` module
+# target (variable argv or interpreter, `-c`, `-m pytest`, an untracked
+# script or module, or an unsupported interpreter flag). Every other
+# file -- including one that only READS `sys.path`, imports `site` without
+# calling it, mentions `PYTHONPATH`, imports `subprocess` only for a
+# provably literal NON-Python command like `git`, or touches `pkgutil` or
+# `compile` -- keeps just its real ast-resolved edges: a plain
+# `import x.y [as z]`/`from x.y import z` (including a relative import),
+# resolved to a repo file the same way as before (`import x.y`/`from x.y
+# import z` resolve the dotted name `x.y` to `x/y.py`, or, if that is a
+# package, to `x/y/__init__.py`; a relative import resolves against the
 # importing file's own package first; a dotted name only resolves to a graph
 # node when its own top-level component is a tracked top-level package --
 # `_tracked_roots`, computed fresh from the tracked file list every run,
@@ -315,43 +331,31 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 # single literal call `importlib.import_module("<absolute.name>")`
 # (`_allowed_import_module_call`); or a plain, unannotated
 # `pytest_plugins = [...]` assignment of string literals, at a conftest.py's
-# top level only (`_pytest_plugins_targets`). A file is DYNAMIC -- and
-# depends on EVERY OTHER TRACKED FILE, no narrower edge attempted -- the
-# moment its AST references, in ANY form (an import, an alias, an attribute
-# access, or a bare name), `sys.path`, `site`, `runpy`, `subprocess`,
-# `multiprocessing`, `pkgutil`, a dynamic-exec `os` function, `importlib`
-# used any way other than the one literal shape, or one of a short list of
-# standalone dangerous names -- see `_is_dynamic_file` for the exact list.
-# `subprocess` and every loader construct (`spec_from_file_location`,
-# `SourceFileLoader`, `runpy.run_path`) are dropped ENTIRELY as of this
-# round: no static resolution of a subprocess target or a loader's
-# file-path argument is attempted any more, literal or not -- any reference
-# fails the whole file safe outright.
+# top level only (`_pytest_plugins_targets`). `_is_dynamic_file` remains the
+# older, broader ALLOWLIST classifier (and the exact list issue #42 is
+# about), but `build_import_graph` no longer calls it: the narrower
+# unresolved-import trigger above replaced its catch-all condition.
 #
-# This is conservative for the known set of constructs above, NOT sound in
-# general: see https://github.com/yshewchuk/investment-validation/issues/42
+# This is conservative for the known unresolved constructs above, NOT sound
+# in general: see https://github.com/yshewchuk/investment-validation/issues/42
 # for constructs it does not recognize at all (string-target
 # monkeypatch.setattr/mock.patch, pytest.importorskip, getattr-based
 # imports of importlib/sys, __import__ via globals()/builtins, asyncio
 # subprocess-exec calls, __path__/sys.meta_path edits, pytest_plugins
 # outside a conftest.py or under an `if`, and `from pkg import *`
-# re-exports). `tests/conftest.py` itself always classifies DYNAMIC (its own
-# `sys.path.insert`) and is a closure root for every test file
+# re-exports). A test file that depends on repository code only through one
+# of those, or any other runtime loading this analysis doesn't track, may be
+# omitted from a PR's narrowed selection, with the full suite on every push
+# to `main` and the weekly scheduled mutation run as the backstop.
+# `tests/conftest.py` is a closure root for every test file
 # (`_conftest_ancestors`), so a PR that changes `tests/conftest.py` itself
 # still selects broadly -- deliberate, since conftest.py is a genuinely
-# shared input. `module_dependency_closure` walks a DYNAMIC file's REAL
-# edges (`build_import_graph`'s `.precise`) rather than treating its
-# catch-all as something to expand further, so reaching `tests/conftest.py`
-# (or any other DYNAMIC file) no longer cascades into "every enabled module,
-# for every unrelated single-module change" the way it used to -- see
-# `module_dependency_closure`'s own docstring for the mechanism. Two
-# dedicated guards
-# (`test_the_real_tests_conftest_fails_safe_via_its_own_sys_path_insert`,
-# `test_conftest_dynamic_classification_guards_static_analysis_holes` in
-# `tests/test_mutation_ci.py`) still assert `tests/conftest.py`'s own
-# catch-all edge is intact; a synthetic-tree test fails loudly, naming issue
-# #42, if `tests/conftest.py` ever stops classifying DYNAMIC -- that guard is
-# unrelated to, and unaffected by, this fix.
+# shared input. `module_dependency_closure` walks a file's REAL edges
+# (`build_import_graph`'s `.precise`) rather than treating its catch-all as
+# something to expand further, so reaching an unresolved-import file no
+# longer cascades into "every enabled module, for every unrelated
+# single-module change" the way it used to -- see that function's own
+# docstring for the mechanism.
 def _tracked_roots(tracked_set: set[str]) -> set[str]:
     """Every top-level package/module name present in `tracked_set` -- the
     first path segment of each tracked `.py` file (or, for a tracked file
@@ -527,16 +531,15 @@ def _is_dynamic_file(tree: ast.Module) -> bool:
     top level, is the allowed shape (checked by `_pytest_plugins_targets`,
     called only for conftest.py).
 
-    `subprocess` is dropped ENTIRELY as of this round: earlier rounds tried
-    to tell a Python-launching subprocess call from any other one, and a
-    launched script's own path from an unresolvable one. That added
-    complexity for no real gain -- every module that reaches a `subprocess`
-    call already reaches `tests/conftest.py`'s own `sys.path.insert`, which
-    already fails safe -- so any reference to the module now fails the
-    whole file safe outright, with no attempt at a narrower edge. Loader
-    constructs (`spec_from_file_location`, `SourceFileLoader`, `runpy`) get
-    the same treatment: no static path evaluation is attempted for any of
-    them any more, literal or not."""
+    `subprocess` fails the whole file safe HERE with no narrower attempt:
+    this broad allowlist never resolves argv. `build_import_graph` does NOT
+    call this function; it uses `_subprocess_targets`, which resolves a
+    proved-Python launch of a tracked script or `-m` module to its precise
+    target edge(s), clears a literal provably non-Python command, and keeps
+    the catch-all for everything else. Loader constructs
+    (`spec_from_file_location`, `SourceFileLoader`, `runpy`) get the same
+    treatment in both: no static path evaluation is attempted for any of
+    them, literal or not."""
     sys_aliases = _bound_aliases(tree, "sys") | {"sys"}
     os_aliases = _bound_aliases(tree, "os") | {"os"}
     for node in ast.walk(tree):
@@ -625,6 +628,180 @@ def _pytest_plugins_targets(tree: ast.Module) -> tuple[bool, list[str] | None]:
     return (False, None)
 
 
+_SUBPROCESS_FUNCS = {"run", "call", "Popen", "check_call", "check_output"}
+
+
+def _is_python_executable_base(name: str) -> bool:
+    """True for a literal `python`/`python3`/`python3.11` basename (`git`,
+    `bash` and `python-config` are False: provably non-Python commands)."""
+    if not name.startswith("python"):
+        return False
+    rest = name[len("python"):]
+    return rest == "" or all(c.isdigit() or c == "." for c in rest)
+
+
+def _subprocess_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """(module aliases, directly-imported function names) for the `subprocess`
+    module: `import subprocess [as sp]` binds `subprocess`/`sp` for
+    `sp.run(...)`-style attribute calls; `from subprocess import run as
+    run_process` binds the bare name `run_process` for direct calls. Only the
+    five exec functions are followed."""
+    aliases: set[str] = set()
+    funcs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and not node.level \
+                and (node.module or "") == "subprocess":
+            for alias in node.names:
+                if alias.name in _SUBPROCESS_FUNCS:
+                    funcs.add(alias.asname or alias.name)
+    return aliases, funcs
+
+
+_PYTHON_NO_VALUE_FLAGS = frozenset({
+    "-b", "-B", "-d", "-E", "-h", "-?", "-i", "-I", "-O", "-OO", "-P",
+    "-q", "-R", "-s", "-S", "-u", "-v", "-V", "-x",
+    "--help", "--help-env", "--help-xoptions", "--help-all", "--version",
+})
+_PYTHON_VALUE_FLAGS = frozenset({"-W", "-X", "-Q", "--check-hash-based-pycs"})
+_PYTHON_VALUE_PREFIXES = ("-W", "-X", "-Q")
+
+
+def _is_python_interpreter_expr(node: ast.expr, sys_aliases: set[str]) -> bool:
+    """True for an argv[0] this scan can PROVE launches Python: a literal
+    `python`/`python3`/`python3.11` basename (with or without a directory),
+    or an attribute access `<sys alias>.executable` (the form the real
+    `engine/v2/ops/executor.py` launch uses)."""
+    if isinstance(node, ast.Attribute) and node.attr == "executable" \
+            and isinstance(node.value, ast.Name) and node.value.id in sys_aliases:
+        return True
+    return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and _is_python_executable_base(node.value.rsplit("/", 1)[-1]))
+
+
+def _literal_str(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _resolve_script_target(text: str, tracked_set: set[str]) -> str | None:
+    if text in tracked_set:
+        return text
+    normalized = os.path.normpath(text)
+    return normalized if normalized in tracked_set else None
+
+
+def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
+                         roots: set[str], sys_aliases: set[str]) -> tuple[set[str], bool]:
+    """(precise edges, unresolved) for one subprocess argv expression.
+
+    A literal argv whose first element is provably non-Python (`git`,
+    `npm`, ...) contributes no edge and is not unresolved. A proved-Python
+    first element (`python`/`python3`/versioned basename or
+    `<sys alias>.executable`) resolves exactly one literal script, or one
+    literal `-m dotted.name` module plus its tracked ancestor package
+    `__init__.py` files, through the interpreter's supported flags
+    (`-u`, `-X utf8`, `-W ignore`, `--`, ...). Everything else is
+    unresolved: a non-literal argv or first element, `-c`, `-m` of an
+    untracked module, a script that is not tracked, or an interpreter flag
+    this scan does not support. An unresolved launch keeps the whole-file
+    catch-all."""
+    if not (isinstance(argv, ast.List) and argv.elts):
+        return set(), True
+    first = argv.elts[0]
+    if not _is_python_interpreter_expr(first, sys_aliases):
+        if _literal_str(first) is not None:
+            return set(), False
+        return set(), True
+    elts = argv.elts
+    i = 1
+    while i < len(elts):
+        text = _literal_str(elts[i])
+        if text is None:
+            return set(), True
+        if text == "--":
+            i += 1
+            break
+        if text == "-" or text == "-c" or text.startswith("-c"):
+            return set(), True
+        if text == "-m" or text.startswith("-m"):
+            if text == "-m":
+                i += 1
+                if i >= len(elts):
+                    return set(), True
+                dotted = _literal_str(elts[i])
+                if dotted is None:
+                    return set(), True
+            else:
+                dotted = text[2:]
+            target = _resolve_dotted(dotted, tracked_set, roots)
+            if target is None:
+                return set(), True
+            return {target} | _ancestor_package_inits(dotted, tracked_set), False
+        if text in _PYTHON_VALUE_FLAGS:
+            if i + 1 >= len(elts) or _literal_str(elts[i + 1]) is None:
+                return set(), True
+            i += 2
+            continue
+        if text in _PYTHON_NO_VALUE_FLAGS:
+            i += 1
+            continue
+        if any(text.startswith(p) and len(text) > len(p)
+               for p in _PYTHON_VALUE_PREFIXES) \
+                or text.startswith("--check-hash-based-pycs="):
+            i += 1
+            continue
+        if text.startswith("-"):
+            return set(), True
+        target = _resolve_script_target(text, tracked_set)
+        if target is None:
+            return set(), True
+        return {target}, False
+    if i < len(elts):
+        text = _literal_str(elts[i])
+        if text is None:
+            return set(), True
+        target = _resolve_script_target(text, tracked_set)
+        if target is not None:
+            return {target}, False
+    return set(), True
+
+
+def _subprocess_targets(tree: ast.Module, tracked_set: set[str],
+                        roots: set[str]) -> tuple[set[str], bool]:
+    """(precise target edges, unresolved) for every `subprocess` launch in
+    `tree` (the five exec functions, however bound -- `import subprocess [as
+    sp]` or `from subprocess import run as launch`), each judged by
+    `_python_argv_targets`. `unresolved` is True if ANY launch on its own
+    cannot be proven safe, in which case `build_import_graph` adds the
+    whole-file catch-all on top of whatever precise edges were found."""
+    aliases, funcs = _subprocess_bindings(tree)
+    sys_aliases = _bound_aliases(tree, "sys") | {"sys"}
+    edges: set[str] = set()
+    unresolved = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            if func.attr not in _SUBPROCESS_FUNCS or not isinstance(func.value, ast.Name) \
+                    or func.value.id not in aliases:
+                continue
+        elif not (isinstance(func, ast.Name) and func.id in funcs):
+            continue
+        argv = node.args[0] if node.args else next(
+            (kw.value for kw in node.keywords if kw.arg in ("args", "cmd")), None)
+        call_edges, call_unresolved = _python_argv_targets(
+            argv, tracked_set, roots, sys_aliases)
+        edges |= call_edges
+        unresolved = unresolved or call_unresolved
+    return edges, unresolved
+
+
 class _ImportGraph(dict):
     """`build_import_graph`'s return value: behaves as a plain
     `dict[str, set[str]]` everywhere (subscripting, `.get`, `in`, `len`,
@@ -632,15 +809,15 @@ class _ImportGraph(dict):
     contents) -- every existing caller that treats it as exactly that type is
     unaffected. Carries one extra attribute, `precise`: a
     `dict[str, set[str]]` of each tracked file's REAL, ast-resolved edges
-    only, computed unconditionally (whether or not the file is also
-    DYNAMIC), before a DYNAMIC file's catch-all (`tracked_set - {rel}`) is
-    unioned into its entry in `self`. A DYNAMIC file's own real edges (if
-    any) are always a subset of its catch-all, so `self[rel]`'s VALUE is
-    unchanged by tracking them separately -- `precise` exists purely so
-    `module_dependency_closure` can walk real edges through a file that is
-    ALSO individually DYNAMIC, instead of losing that information the moment
-    the file fails safe. A caller that never asks for `.precise` (every
-    caller before this round) sees no difference at all."""
+    only, computed unconditionally, before an unresolved-import file's
+    catch-all (`tracked_set - {rel}`) is unioned into its entry in `self`. A
+    file's own real edges (if any) are always a subset of its catch-all, so
+    `self[rel]`'s VALUE is unchanged by tracking them separately -- `precise`
+    exists purely so `module_dependency_closure` can walk real edges through
+    a file that ALSO carries a catch-all, instead of losing that
+    information the moment the file fails safe. A caller that never asks
+    for `.precise` (every caller before this round) sees no difference at
+    all."""
 
 
 def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
@@ -654,37 +831,39 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     Python always runs a package's `__init__.py` before any of its
     submodules, so `import engine.pkg.inner` depends on
     `engine/pkg/__init__.py` even when neither the import statement nor
-    `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`.
+    `engine/pkg/__init__.py` itself ever names `engine.pkg.inner`. A
+    `subprocess` launch of a proved-Python interpreter (`python`/`python3`/
+    versioned basename or `<sys alias>.executable`) that names a tracked
+    literal script or `-m dotted.name` module adds that target (plus the
+    module's tracked ancestor package `__init__.py` files) as an edge the
+    same way (`_subprocess_targets`).
 
-    A file that is DYNAMIC by `_is_dynamic_file`'s allowlist (or has a
-    non-literal/annotated conftest.py `pytest_plugins`) still gets this
-    precise resolution (see `.precise` below), but ALSO depends on EVERY
+        A file with a genuinely unresolved import/load attempt by
+    `_has_unresolved_import_attempt` (including a non-literal or annotated
+    top-level conftest.py `pytest_plugins`), an import-path mutation to a
+    target that is not provably the file's own repository root by
+    `_has_unresolved_sys_path_mutation`, OR a `subprocess` launch
+    `_subprocess_targets` cannot prove is either a non-Python command or a
+    tracked Python script/module target,
+    still gets this precise resolution (see `.precise` below), but ALSO
+    depends on EVERY
     OTHER TRACKED FILE in its main entry (`edges |= tracked_set - {rel}`),
-    never a narrower guess for that added catch-all. This
-    classification is conservative for the constructs `_is_dynamic_file`
-    recognizes, NOT sound in general -- see
-    https://github.com/yshewchuk/investment-validation/issues/42 for
-    constructs it misses entirely (string-target monkeypatch/mock.patch,
-    pytest.importorskip, getattr-based imports, __import__ via
-    globals()/builtins, asyncio subprocess-exec calls, __path__/meta_path
-    edits, pytest_plugins outside a conftest.py, `from pkg import *`).
-    Today `tests/conftest.py` itself is always DYNAMIC (its own
-    `sys.path.insert`) and is included, via `_conftest_ancestors`, in every
-    test file's closure -- but `module_dependency_closure` stops expanding a
-    DYNAMIC file's catch-all edge past the one hop that reaches it (its own
-    docstring has the detail), so this no longer collapses every module's
-    dependency set into the whole tracked tree. It still means a change to
-    `tests/conftest.py` itself selects broadly: every test file's closure
-    includes it as a root (`_conftest_ancestors`), and `module_dependency_
-    closure` then follows ITS `.precise` edges too, so anything conftest.py
-    imports via a REAL, resolvable import also selects broadly. A change to
-    something conftest.py can reach ONLY through one of its own unresolved
-    constructs (issue #42's list) is NOT selected -- `module_dependency_
-    closure` walks `.precise` alone, never the catch-all, so that edge is
-    simply absent from every module's closure. Known PR-selection gap,
-    tracked in issue #155 (see ARCHITECTURE.md); push-to-main and the
-    weekly scheduled mutation run are unaffected (they mutate every module)
-    and are this gap's backstop. Every tracked file is a key, even one with no
+    never a narrower guess for that added catch-all. This classification is
+    deliberately narrower than the older broad `_is_dynamic_file`
+    allowlist: a `sys.path` READ or alias with no mutation, a bare
+    `PYTHONPATH` string or assignment, `import site` alone, a `subprocess`
+    import or call whose argv is provably NON-Python (e.g. `git`) or whose
+    Python target resolved to a tracked file, and
+    non-import constructs such as `pkgutil` or a bare `compile` reference
+    do not add the catch-all; the remaining gap is tracked in
+    https://github.com/yshewchuk/investment-validation/issues/42 and issue
+    #155, with push-to-main and the weekly scheduled mutation run as the
+    backstop. Today the real `tests/conftest.py` repository-root
+    `sys.path.insert` is a PROVEN root insertion (`REPO_ROOT =
+    Path(__file__).resolve().parents[1]` + `str(REPO_ROOT)`), so it is not
+    DYNAMIC; it remains a closure root for every test through
+    `_conftest_ancestors` regardless.
+ Every tracked file is a key, even one with no
     resolvable imports (an empty set), so `module_dependency_closure` can
     always look it up. Raises `SyntaxError` (via `ast.parse`) on the first
     file that fails to parse -- a real syntax error in the current tree,
@@ -714,21 +893,19 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
         except SyntaxError as exc:
             raise SyntaxError(f"{rel}: {exc}") from exc
         edges = graph[rel]
-        dynamic = _is_dynamic_file(tree)
-        if rel.rsplit("/", 1)[-1] == "conftest.py":
+        is_conftest = rel.rsplit("/", 1)[-1] == "conftest.py"
+        if is_conftest:
             found, dotted_names = _pytest_plugins_targets(tree)
-            if found:
-                if dotted_names is None:
-                    dynamic = True
-                else:
-                    for dotted in dotted_names:
-                        target = _resolve_dotted(dotted, tracked_set, roots)
-                        if target:
-                            edges.add(target)
-                        edges |= _ancestor_package_inits(dotted, tracked_set)
-        # Always resolve precise imports now, DYNAMIC or not -- the DYNAMIC
-        # check below only decides whether the catch-all is ALSO unioned in,
-        # never whether real edges are computed at all (see `_ImportGraph`).
+            if found and dotted_names is not None:
+                for dotted in dotted_names:
+                    target = _resolve_dotted(dotted, tracked_set, roots)
+                    if target:
+                        edges.add(target)
+                    edges |= _ancestor_package_inits(dotted, tracked_set)
+        # Always resolve precise imports now, unresolved or not -- the
+        # catch-all check below only decides whether the catch-all is ALSO
+        # unioned in, never whether real edges are computed at all (see
+        # `_ImportGraph`).
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -758,9 +935,15 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
                     if resolved:
                         edges.add(resolved)
                     edges |= _ancestor_package_inits(target, tracked_set)
+        subprocess_edges, subprocess_unresolved = _subprocess_targets(
+            tree, tracked_set, roots)
+        edges |= subprocess_edges
         precise[rel] = set(edges)
-        if dynamic:
+        if (_has_unresolved_import_attempt(tree, is_conftest)
+                or _has_unresolved_sys_path_mutation(tree, rel)
+                or subprocess_unresolved):
             edges |= tracked_set - {rel}
+
     graph.precise = precise
     return graph
 
@@ -981,7 +1164,16 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     through one of these constructs, or any other runtime loading this
     analysis doesn't track, may be omitted from a PR's narrowed
     selection, and the full suite on every push to `main` is the
-    backstop. Used only by select_pr_tests's taint rule."""
+    backstop. Used by select_pr_tests's taint rule AND by
+    `build_import_graph` as one of the two triggers for a catch-all edge
+    (import-path mutations are judged next door, by
+    `_has_unresolved_sys_path_mutation`)."""
+    if is_conftest:
+        for node in tree.body:
+            if isinstance(node, ast.AnnAssign) \
+                    and isinstance(node.target, ast.Name) \
+                    and node.target.id == "pytest_plugins":
+                return True
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -1018,12 +1210,52 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     return False
 
 
+def _has_unresolved_sys_path_mutation(tree: ast.Module, rel: str) -> bool:
+    """True if the file at tracked path `rel` mutates an import search path
+    (`sys.path.insert`/`append`, `site.addsitedir`, `monkeypatch.syspath_prepend`,
+    however bound) to a target not provably the repository root for that file."""
+    depth = rel.count("/")
+    root_texts = {f"Path(__file__).resolve().parents[{depth}]",
+                  f"pathlib.Path(__file__).resolve().parents[{depth}]"}
+    root_names = {n.targets[0].id for n in tree.body
+                  if isinstance(n, ast.Assign) and len(n.targets) == 1
+                  and isinstance(n.targets[0], ast.Name) and ast.unparse(n.value) in root_texts}
+    sysn, siten = _bound_aliases(tree, "sys") | {"sys"}, _bound_aliases(tree, "site")
+    pairs = {(n.module, a.asname or a.name, a.name) for n in ast.walk(tree)
+             if isinstance(n, ast.ImportFrom) and not n.level for a in n.names}
+    paths = {x for m, x, a in pairs if (m, a) == ("sys", "path")}
+    sitdirs = {x for m, x, a in pairs if (m, a) == ("site", "addsitedir")}
+    path_recvs = {f"{s}.path" for s in sysn} | paths
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        attr = getattr(f, "attr", None)
+        recv = ast.unparse(f.value) if attr else None
+        ok = (isinstance(f, ast.Name) and f.id in sitdirs) or attr == "syspath_prepend" or (
+            attr == "addsitedir" and recv in siten) or (
+            attr in ("insert", "append") and recv in path_recvs)
+        x = (n.args + [None, None])[1 if attr == "insert" else 0]
+        if isinstance(x, ast.Call) and not x.keywords and len(x.args) == 1 \
+                and isinstance(x.func, ast.Name) and x.func.id == "str":
+            x = x.args[0]
+        if ok and not (getattr(x, "id", None) in root_names
+                       or (x is not None and ast.unparse(x) in root_texts)):
+            return True
+    return False
+
+
 def unresolved_import_files(tracked: list[str]) -> set[str]:
     """The subset of `tracked` with an unresolved import attempt -- see
     `_has_unresolved_import_attempt`. Re-parses each file (a second AST
     pass beyond `build_import_graph`'s), since this classification is not
     otherwise exposed by the graph. Used only by select_pr_tests's taint
-    rule, never dynamic_files' broader leaf rule."""
+    rule, never dynamic_files' broader leaf rule. Import-path mutations
+    (`_has_unresolved_sys_path_mutation`) are deliberately NOT part of this
+    taint set: they add the graph's catch-all (so `dynamic_files` and the
+    #155 leaf rule still see them), but a conftest.py whose only such
+    construct is a path insertion is a closure ROOT for every test and must
+    not taint all of them -- only a genuine unresolved import there may."""
     out: set[str] = set()
     for rel in tracked:
         source = (REPO / rel).read_text(encoding="utf-8")

@@ -168,6 +168,21 @@ python3 tools/bounded_run.py --cores 8 -- python3 -m pytest -q -n 4 --dist loadg
 
 The `heavy_host` and `browser` tests keep their existing procedure (see above).
 
+### PR test selection
+
+On pull requests, `tools/mutation_pilot.py select-tests` uses the tracked-file
+import graph to select test files that can depend on changed files. Static
+imports and supported literal dynamic imports create specific graph edges.
+A file is treated as dynamic only when its own source contains a construct
+whose target cannot be resolved safely; that file's conservative fan-out is
+the selector's backstop for such unresolved dependencies. Conftest ancestors
+remain part of each test's roots, and the existing #155 fail-safe for
+dynamic or tainted selections remains in force.
+
+Selection must preserve every test with a real dependency on a changed file.
+An unknown changed path, graph construction or scan failure, or any selector
+error means run the full suite; it must never produce a narrower selection.
+
 ## Known thin spots
 
 Honest list, so nobody has to rediscover it:
