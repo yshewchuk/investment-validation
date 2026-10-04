@@ -13,7 +13,7 @@ from tests.fixtures.v2_ui_mock_api import build_default_state, serve_in_thread
 pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]
 TOKEN = "browser-secret"
 PROBLEM = {"code": "NO_CURRENT_RELEASE", "category": "unavailable", "retryable": True, "message": "no release"}
-SUMMARY = {"status": "available", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1", "compared_count": 12, "matched_row_count": 10, "mismatched_row_count": 2, "only_legacy_count": 1, "only_native_count": 1, "native_refused_count": 3, "native_refused_unmatched_count": 1, "native_refused_reasons": {"unknown_ticker": 2, "missing_field": 1}}
+SUMMARY = {"schema_version": "native_parity_summary.v1.0", "status": "available", "partial": False, "source_schema_version": "native_parity_report.v1.2", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1", "compared_count": 12, "matched_row_count": 10, "mismatched_row_count": 2, "only_legacy_count": 1, "only_native_count": 1, "native_refused_count": 3, "native_refused_unmatched_count": 1, "native_refused_reasons": {"unknown_ticker": 2, "missing_field": 1}}
 NO_REPORT = {"status": "no_report"}
 
 @pytest.fixture(scope="module")
