@@ -688,7 +688,7 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6 (design; implementation pending).** `nightly_calendar_inputs.scan_calendar_row_inputs`
+**Cutover PR-6: 4a.2 helpers implemented; 4b producer pending.** `nightly_calendar_inputs.scan_calendar_row_inputs`
 owns pinned spot, listed strategy-specific expiry and session-based planned exit; exit is independent of expiry.
 `nightly_raw_row_producer.build_native_score_batch_events` owns enumeration, shared panel inputs,
 per-key calendar/quotes and refusal documents; the sidecar stages both before submission. Forward `tier4_row` is `{}`.
@@ -698,12 +698,9 @@ Snapshot reads are SHADOW-only, un-admitted pending [#260](https://github.com/ys
 
 | Calendar sourcing condition (R1–R6) | Outcome |
 |---|---|
-| R1: missing/unusable exact spot, missing source table, malformed source row or repository failure | Whole build fails; `CONTRACT_MISMATCH` and other typed repository codes propagate |
-| R1: empty eligible expiry domain or native no-expiry GeometryRefusal | Per-key `NO_RESOLVABLE_EXPIRY`; unrelated geometry/input failures propagate |
-| R1: missing/ambiguous matched event | Existing `EVENT_NOT_FOUND` / `IDENTITY_CONFLICT` propagates |
-| R2: cache | No durable or negative helper cache; reuse is confined to one build and pinned snapshot |
-| R3: retry | No helper retry/provider fetch; unchanged inputs reproduce the result/refusal, repository errors reach the existing failure path |
-| R4/R5: transaction or interruption | Read-only composition; no catalog writes or partial result/document return |
+| R1: spot/source/row/repository failure; empty eligible expiry or native no-expiry refusal; missing/ambiguous event | Typed source/event/repository errors propagate; only empty domain or native no-expiry maps to `NO_RESOLVABLE_EXPIRY`; unrelated geometry failures propagate |
+| R2/R3: cache or retry | No durable/negative cache, retries or provider fetch; reuse is build- and snapshot-scoped |
+| R4/R5: transaction or interruption | Read-only; no catalog writes or partial result/document return |
 | R6: identity | Preserve exact event identity and earnings revision; content and candidate order are deterministic |
 
 ## Inputs
