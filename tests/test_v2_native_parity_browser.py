@@ -1,7 +1,9 @@
-"""Native-parity summary browser checks (#327); mismatch/unpaired rendering and pagination are an owner follow-up. Synthetic page.route mocks ONLY /api/v1/native_parity** and /api/v1/releases/current, which always answers a valid 503 Problem."""
+"""Native-parity summary browser checks (#327); mismatch/unpaired rendering and pagination are an owner follow-up. Synthetic page.route mocks ONLY /api/v1/native_parity** and /api/v1/releases/current, which always answers a valid 503 Problem, plus a /__data_client__/ harness serving ui/src/api/client.ts transpiled to ESM by the esbuild already installed in ui/node_modules, so the real DataClient parity detail reads run their own fetches through the mocked detail routes."""
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
@@ -161,5 +163,107 @@ def test_shared_board_link_reaches_parity_after_no_release(browser, server):
         expect(page.get_by_test_id("parity-summary")).to_be_visible()
         expect(page.get_by_test_id("parity-as-of")).to_have_text(SUMMARY["as_of"])
         assert len(parity) == 1
+    finally:
+        context.close()
+
+UI_ROOT = Path(__file__).resolve().parents[1] / "ui"
+HARNESS_PATH = "/__data_client__/harness.html"
+CLIENT_PATH = "/__data_client__/client.js"
+MISMATCH_PAGE = {"status": "available", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1",
+    "items": [
+        {"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts", "fields": {
+            "gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63},
+            "gate_threshold": {"status": "agree"}, "gate_pass": {"status": "agree"}}},
+        {"row_key": "MSFT|2026-09-18|STR-THRU", "dimension": "financial_diagnostics", "fields": {
+            "entry_cost_pct": {"status": "agree"},
+            "model_vs_market": {"status": "differ", "legacy": -0.015, "native": 0.02},
+            "fair_premium_pct": {"status": "agree"}, "premium_vs_fair": {"status": "agree"},
+            "cost_over_width": {"status": "agree"}}}],
+    "next_cursor": "mm-2"}
+UNPAIRED_PAGE = {"status": "available", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1",
+    "items": ["NVDA|2026-09-22|STR-THRU", "TSLA|2026-09-29|STR-THRU"], "next_cursor": None}
+
+def _transpile_client(tmp_path):
+    """`ui/src/api/client.ts` transpiled to plain ESM by the esbuild already in
+    `ui/node_modules` (present because the session `ui_dist_dir` fixture ran
+    `npm ci`), written under `tmp_path` for a Playwright route to serve. Only
+    the network is mocked below; the module, its `getJson`, `queryString` and
+    the two detail methods are the real client code."""
+    out = tmp_path / "client.js"
+    script = tmp_path / "transpile.cjs"
+    script.write_text(
+        "const fs = require('fs');\n"
+        f"const esbuild = require({json.dumps(str(UI_ROOT / 'node_modules' / 'esbuild'))});\n"
+        f"const source = fs.readFileSync({json.dumps(str(UI_ROOT / 'src' / 'api' / 'client.ts'))}, 'utf8');\n"
+        "const transpiled = esbuild.transformSync(source, {loader: 'ts', format: 'esm'});\n"
+        f"fs.writeFileSync({json.dumps(str(out))}, transpiled.code);\n", encoding="utf-8")
+    subprocess.run(["node", str(script)], check=True, capture_output=True, text=True, timeout=120)
+    js = out.read_text(encoding="utf-8")
+    assert "createHttpDataClient" in js and "import type" not in js
+    return js
+
+def _open_data_client(browser, server, client_js, route_name, body):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context = browser.new_context()
+    page = context.new_page()
+    calls = []
+    page.route(f"**{HARNESS_PATH}",
+        lambda r: r.fulfill(status=200, content_type="text/html", body="<html><body>data-client harness</body></html>"))
+    page.route(f"**{CLIENT_PATH}",
+        lambda r: r.fulfill(status=200, content_type="text/javascript", body=client_js))
+
+    def handle(route):
+        calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route(f"**/api/v1/native_parity/{route_name}**", handle)
+    return base, context, page, calls
+
+IMPORT_AND_CALL = ("async ([method, args]) => {"
+    " const mod = await import(" + json.dumps(CLIENT_PATH) + ");"
+    " const client = mod.createHttpDataClient(" + json.dumps("/api/v1") + ");"
+    " return await client[method](...args); }")
+
+def test_mismatches_no_report_is_status_only(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "mismatches", NO_REPORT)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityMismatches", [5, None]])
+        assert result == {"status": "no_report"}
+        assert calls == [base + "/api/v1/native_parity/mismatches?limit=5"]
+    finally:
+        context.close()
+
+def test_unpaired_no_report_is_status_only(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "unpaired", NO_REPORT)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityUnpaired", ["native", 4, None]])
+        assert result == {"status": "no_report"}
+        assert calls == [base + "/api/v1/native_parity/unpaired?side=native&limit=4"]
+    finally:
+        context.close()
+
+def test_mismatches_available_page_round_trips_exactly(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "mismatches", MISMATCH_PAGE)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityMismatches", [2, "mm-1"]])
+        assert result == MISMATCH_PAGE
+        assert calls == [base + "/api/v1/native_parity/mismatches?limit=2&cursor=mm-1"]
+    finally:
+        context.close()
+
+def test_unpaired_available_page_round_trips_exactly(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "unpaired", UNPAIRED_PAGE)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityUnpaired", ["legacy", 3, "uc-1"]])
+        assert result == UNPAIRED_PAGE
+        assert calls == [base + "/api/v1/native_parity/unpaired?side=legacy&limit=3&cursor=uc-1"]
     finally:
         context.close()
