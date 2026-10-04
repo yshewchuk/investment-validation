@@ -1,8 +1,5 @@
-"""Rule-based trading sessions and BMO/AMC exit anchoring (layer 0.5).
-
-Port legacy rules without cache/state. Future days are projected weekdays minus
-scheduled NYSE holidays, including the first session after ``event_through``.
-"""
+"""Rule-based trading sessions and BMO/AMC exit anchoring (layer 0.5): projected
+weekdays minus NYSE holidays, plus the first session after ``event_through``."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -88,12 +85,10 @@ def _easter(year: int) -> date:
 def _holidays(year: int) -> set[date]:
     """The legacy scheduled NYSE rule set, observations applied."""
     jan1 = date(year, 1, 1)
-    out = {
-        _nth_weekday(year, 1, 0, 3), _nth_weekday(year, 2, 0, 3),
-        _easter(year) - timedelta(days=2), _last_weekday(year, 5, 0),
-        _observed(date(year, 7, 4)), _nth_weekday(year, 9, 0, 1),
-        _nth_weekday(year, 11, 3, 4), _observed(date(year, 12, 25)),
-    }
+    out = {_nth_weekday(year, 1, 0, 3), _nth_weekday(year, 2, 0, 3),
+           _easter(year) - timedelta(days=2), _last_weekday(year, 5, 0),
+           _observed(date(year, 7, 4)), _nth_weekday(year, 9, 0, 1),
+           _nth_weekday(year, 11, 3, 4), _observed(date(year, 12, 25))}
     if jan1.weekday() != 5:  # a Saturday New Year takes no Friday observance
         out.add(_observed(jan1))
     if year >= 2022:  # Juneteenth became a market holiday in 2022
@@ -125,11 +120,9 @@ def _first_rule_session_after(day: date) -> date:
 
 
 def build_calendar_sessions(observed_sessions: tuple[str, ...], *, event_through: Any) -> CalendarSessions:
-    """R6: sorted unique observed sessions, projected through ``event_through``.
-
-    ``observed_through`` is the maximum deduplicated source session, never a
-    projection; ``days`` carries the first projected session strictly after
-    ``event_through`` so every valid event has a next close.
+    """R6: sorted unique observed sessions projected through ``event_through``;
+    ``observed_through`` is the max source session, never a projection, and
+    ``days`` appends the first projected session after it for a next close.
     """
     if not isinstance(observed_sessions, tuple) or not observed_sessions:
         raise CalendarInputError("observed_sessions must be a non-empty tuple of YYYY-MM-DD strings")
@@ -190,10 +183,16 @@ def planned_exit_date(key: CalendarEventKey, calendar: CalendarSessions) -> str:
         raise CalendarInputError(f"unknown session {session!r}")
     if not isinstance(strategy, str) or (strategy not in _EXIT_PRE and strategy not in _EXIT_POST):
         raise CalendarInputError(f"unknown strategy {strategy!r}")
-    if not isinstance(raw_days, tuple):
-        raise CalendarInputError("calendar days must be a tuple of YYYY-MM-DD strings")
-    days = sorted({_as_day(text, "calendar day") for text in raw_days})
+    if not isinstance(raw_days, tuple) or not raw_days:
+        raise CalendarInputError("calendar days must be a non-empty tuple of YYYY-MM-DD strings")
+    days = [_as_day(text, "calendar day") for text in raw_days]
+    if days != sorted(set(days)):
+        raise CalendarInputError("calendar days must be sorted and duplicate-free")
+    if any(d.weekday() > 4 or d in _holidays(d.year) for d in days):
+        raise CalendarInputError("calendar days must be weekday non-holiday sessions")
     day = _as_day(event_date, "event_date")
+    if day < days[0]:
+        raise CalendarInputError(f"no calendar coverage before {day} ({days[0]} is first session)")
     if strategy in _EXIT_PRE:
         return _pre_anchor(day, session, days).isoformat()
     return _post_anchor(day, session, days).isoformat()

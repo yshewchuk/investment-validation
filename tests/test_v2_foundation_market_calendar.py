@@ -257,6 +257,43 @@ def test_absent_structural_field_refused(calendar: CalendarSessions) -> None:
     assert excinfo.value.code == "INVALID_REQUEST"
 
 
+INVALID_DIRECT_DAYS = [
+    (),
+    ("2024-03-16",),
+    ("2024-12-25",),
+    ("2024-3-13",),
+    ("2024-03-13", "2024-03-13"),
+    ("2024-03-15", "2024-03-11"),
+]
+
+
+@pytest.mark.parametrize("days", INVALID_DIRECT_DAYS)
+def test_direct_calendar_days_validated_before_anchors(days: tuple) -> None:
+    """Empty, weekend, holiday, malformed, duplicated or unsorted direct days
+    are refused whole before any anchor is applied."""
+    direct = CalendarSessions(days, "2024-03-12")
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-THRU", "2024-03-12", "BMO"), direct)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_event_before_first_session_refused() -> None:
+    starts = CalendarSessions(("2024-03-11", "2024-03-12", "2024-03-13"), "2024-03-13")
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-THRU", "2024-03-08", "BMO"), starts)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-RUNUP", "2024-03-08", "AMC"), starts)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_event_on_first_session_keeps_existing_anchors() -> None:
+    starts = CalendarSessions(("2024-03-11", "2024-03-12", "2024-03-13"), "2024-03-13")
+    assert planned_exit_date(_key("STR-THRU", "2024-03-11", "BMO"), starts) == "2024-03-11"
+    assert planned_exit_date(_key("STR-RUNUP", "2024-03-11", "AMC"), starts) == "2024-03-11"
+    assert planned_exit_date(_key("TWIN-P", "2024-03-11", "AMC"), starts) == "2024-03-12"
+
+
 def test_error_envelope() -> None:
     assert issubclass(CalendarInputError, ValueError)
     assert CalendarInputError("x").code == "INVALID_REQUEST"
