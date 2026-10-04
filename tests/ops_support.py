@@ -6,9 +6,11 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.lifecycle import attempt_receipts
 from engine.v2.ops.profiles import DEFAULT_POLICY, MIB
 from engine.v2.ops.recovery import begin_epoch
 from engine.v2.ops.scheduler import Supervisor
+from engine.v2.ops.submission import get_job
 from tools.v2_ops_fixtures import Parameters, POLICY, REGISTRY, enqueue_claim, request, sample  # noqa: F401
 
 GIB = 1 << 30
@@ -30,25 +32,17 @@ class FakeClock:
         self.elapsed += seconds
 
 
-#: A small-memory mirror of DEFAULT_POLICY for any test that runs a job
-#: through a real ``Service.tick()``. Unlike ``claim_next(..., sample=sample(clock))``
-#: above (a fixed fake ``CapacitySample``), ``Service.tick()`` samples the
-#: host's *actual* free memory (``discovery.sample_capacity``). DEFAULT_POLICY
-#: reserves up to 11 GiB // 2 for its heavy profiles (profiles.py), which on a
-#: shared host makes admission race whatever else happens to be using memory
-#: at that moment -- a job stays "queued" past a test's fixed poll deadline
-#: whenever headroom is briefly short, with nothing wrong in the code under
-#: test. Every field is copied from DEFAULT_POLICY except each profile's
-#: memory_bytes, capped small, and its cpu_count, capped at
-#: ``_TEST_PROFILE_CPUS``. Admission compares cpu_count against this
-#: process's CPU affinity minus the reserved CPU, so DEFAULT_POLICY's 4- and
-#: 5-CPU profiles can never launch on a 4-CPU host (a standard GitHub runner,
-#: where mutation CI runs these tests): the job sits on
-#: PROFILE_EXCEEDS_CAPACITY. 3 fits any host with 4 or more CPUs. thread_count
-#: is pinned to DEFAULT_POLICY's effective value (``thread_count or
-#: cpu_count``), so an environment_ref built from DEFAULT_POLICY (production
-#: code and most tests still do) still matches what launch resolves under this
-#: policy.
+#: ``Service.tick()`` samples the host's real free memory and this process's
+#: CPU affinity, so DEFAULT_POLICY's heavy profiles (up to 11 GiB, 4-5 CPUs)
+#: make admission race whatever else is using the box -- or never fit at all:
+#: admission compares cpu_count against this process's affinity minus the
+#: reserved CPU, so a 4-CPU host (a standard GitHub runner) cannot launch the
+#: 4- and 5-CPU profiles at all. TEST_POLICY mirrors DEFAULT_POLICY with each
+#: profile's memory_bytes capped small and its cpu_count at
+#: ``_TEST_PROFILE_CPUS`` (3 fits any host with 4+ CPUs); thread_count stays
+#: DEFAULT_POLICY's effective ``thread_count or cpu_count`` so an
+#: environment_ref built from DEFAULT_POLICY still matches what launch
+#: resolves under this policy.
 _TEST_PROFILE_MEMORY_BYTES = 384 * MIB
 _TEST_PROFILE_CPUS = 3
 TEST_POLICY = replace(DEFAULT_POLICY, profiles=tuple(
@@ -67,41 +61,29 @@ def catalog(tmp_path):
 
 # -- bounded admission waits ---------------------------------------------------
 #
-# A test that drives a real ``Service.tick()`` loop depends on the HOST:
-# ``tick()`` samples this process's real CPU affinity, MemAvailable and free
-# disk (``discovery.sample_capacity``), and a job the sample cannot admit just
-# stays ``queued`` with a ``queue_reason_json``. Before these helpers each test
-# polled with its own deadline (18 s to 1800 s) and then returned "queued", so a
-# starved job read as ``assert 'queued' == 'succeeded'`` at best. In the 1800 s
-# corpus-parity loop it read as a sleeping xdist worker that never reported a
-# test name. ``run_until`` and ``AdmissionWatch`` fail the test instead, quoting
-# the queue reason's own numbers, as soon as the wait is known to be
-# environmental:
+# A test driving a real ``Service.tick()`` loop depends on the HOST: ``tick()``
+# samples this process's CPU affinity, MemAvailable and free disk
+# (``discovery.sample_capacity``), and a job the sample cannot admit just stays
+# ``queued`` with a ``queue_reason_json``. ``run_until`` and ``AdmissionWatch``
+# fail the test -- as ``RESOURCE WAIT``, never a skip -- as soon as the wait is
+# known to be environmental:
 #
-# * ``PROFILE_EXCEEDS_CAPACITY`` fails on the first sample. It compares the
-#   profile against host TOTAL memory and this process's CPU affinity, and
-#   neither changes while the test runs, so waiting can never help. Measured
-#   2026-09-19: under ``taskset -c 0-3`` (what ``bounded_run --cores 4`` does)
-#   4 allowed CPUs leave 3 worker CPUs, the 5-CPU ``legacy_score`` profile
-#   never fits, and a corpus-parity test that takes 10 s sat queued with the
-#   worker asleep. (TEST_POLICY now caps profiles at 3 CPUs, so 4 allowed
-#   CPUs fit; fewer still fail here.)
+# * ``PROFILE_EXCEEDS_CAPACITY`` (capacity the host can never offer) fails on
+#   the first sample.
 # * The other host-dependent reasons (``HOST_RESOURCE_REASONS``) fail once the
-#   job has sat continuously queued on them for ``ADMISSION_WAIT_SECONDS``
-#   (env ``OPS_TEST_ADMISSION_WAIT_S``, default 60), or at the caller's own
-#   deadline if that comes first. A shortage that clears inside the window
-#   (another process briefly holding memory) still just waits, exactly as the
-#   production scheduler does.
-#
-# Queue reasons that come from the test's OWN catalog (a dependency, a held
-# heavy slot, a store lease) are never treated as environmental: they fall
-# through to the caller's deadline and assertions unchanged.
-#
-# These are failures, not skips, on purpose: the check did not run, and a
-# skip is easy to read past in a summary that is otherwise green. Every message
-# starts with ``RESOURCE WAIT`` so it can be told apart from a code failure.
+#   job has sat continuously queued on them for ``ADMISSION_WAIT_SECONDS``, or
+#   at the caller's own deadline if that comes first. A shortage that clears
+#   inside the window still just waits, as the production scheduler does.
+# * Reasons from the test's OWN catalog (a dependency, a held heavy slot, a
+#   store lease) are never environmental: they fall through to the caller's
+#   ``run_until`` deadline and assertions unchanged.
 
 TERMINAL_STATES = ("succeeded", "failed", "blocked", "cancelled")
+
+#: ``tests/README.md`` gives every test a 600 s phase budget, so ``run_until``
+#: must finish -- return or fail -- strictly inside it. The cap only ever
+#: SHORTENS the wait: a caller timeout below it is preserved unchanged.
+RUN_UNTIL_TIMEOUT_CAP_SECONDS = 540.0
 
 #: Queue reasons (``engine.v2.ops.resources.decide``) whose outcome depends on
 #: the host sample rather than on other jobs in the test's own catalog.
@@ -203,13 +185,103 @@ def job_state(conn, job_id) -> str:
     return conn.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
 
 
+def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
+    """Deadline diagnostics from the public ops helpers (``get_job``,
+    ``attempt_receipts``) only, never ad-hoc SQL: every required label always
+    prints, a failing/absent one rendering ``n/a`` alone (catching ``Exception``,
+    never ``BaseException``)."""
+    def field(render_one, *, missing, label):
+        """Render one label; ``n/a`` for THIS field only on error/``None``.
+        The ``str()`` conversion is guarded too, so a value whose ``__str__``
+        raises fails THIS field alone instead of the whole formatter."""
+        try:
+            value = render_one()
+            if value is None:
+                return missing
+            return value if isinstance(value, str) else str(value)
+        except Exception as exc:
+            return f"n/a ({label} unavailable: {type(exc).__name__})"
+
+    def job_attr(name):
+        if job is None:
+            return None
+        return getattr(job, name)  # AttributeError on a bare receipt -> this field's n/a
+
+    def render_reason(reason):
+        if reason is None:
+            return None
+        return f"{reason.code} (needed={reason.needed}, available={reason.available})"
+
+    def render_progress(progress):
+        if progress is None:
+            return None
+        return f"{progress.kind} at {progress.recorded_at}: {progress.message[:200]}"
+
+    def render_heartbeat(attempts):
+        if attempts is None or not len(attempts):
+            return None
+        last = attempts[-1]
+        if last is None:
+            return None
+        return (f"attempt {last.attempt_number} ({last.state}) at "
+                f"{last.heartbeat_at or 'n/a (never heartbeated)'}")
+
+    # The labels that must never vanish -- job id, last state and its
+    # interpretation -- are guarded through ``field`` too, so the head below
+    # interpolates strings only and cannot itself raise.
+    job_text = field(lambda: str(job_id), missing="<unprintable>", label="job id")
+    state_text = field(lambda: repr(state), missing="n/a", label="state")
+    classified = field(lambda: {
+        "queued": "queued (never admitted)",
+        "retry_wait": "retrying (waiting for re-admission)",
+        "running": "admitted (running)",
+        "cancelling": "admitted (cancelling)",
+    }.get(state, state_text), missing=state_text, label="state interpretation")
+    elapsed_text = field(lambda: f"{float(timeout):.1f}s", missing="n/a", label="deadline")
+    reached_text = field(lambda: repr(list(states)), missing="n/a", label="target states")
+    head = (f"run_until deadline expired after {elapsed_text}: job {job_text} "
+            f"ended in state {state_text} -- {classified} -- without reaching any of "
+            f"{reached_text}; the wait was bounded and is not retried or extended. ")
+    try:
+        try:
+            job, job_note = get_job(conn, job_id), None
+        except Exception as exc:
+            job, job_note = None, f"n/a (get_job failed: {type(exc).__name__})"
+        count = field(lambda: job_attr("attempt_count"),
+                      missing=job_note or "n/a (no attempt count)", label="attempt count")
+        reason_text = field(lambda: render_reason(job_attr("queue_reason")),
+                            missing=job_note or "n/a (no queue reason recorded)",
+                            label="queue/admission reason")
+        tail = field(lambda: render_progress(job_attr("latest_progress")),
+                     missing=job_note or "n/a (no progress recorded)", label="log tail")
+        try:
+            attempts = attempt_receipts(conn, job_id)
+        except Exception as exc:
+            heartbeat = f"n/a (attempt_receipts failed: {type(exc).__name__})"
+        else:
+            heartbeat = field(lambda: render_heartbeat(attempts),
+                              missing="n/a (no attempts recorded)",
+                              label="last worker heartbeat")
+        return head + "; ".join([
+            f"attempt count: {count}",
+            f"queue/admission reason: {reason_text}",
+            f"last worker heartbeat: {heartbeat}",
+            f"log tail: {tail}",
+        ]) + "."
+    except Exception as exc:  # last resort: a diagnostic bug must never blank the failure
+        na = f"n/a (diagnostics failed: {type(exc).__name__})"
+        return (head + f"attempt count: {na}; queue/admission reason: {na}; "
+                f"last worker heartbeat: {na}; log tail: {na}.")
+
+
 def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.05) -> str:
-    """Tick ``service`` until ``job_id`` reaches one of ``states`` or ``timeout``
-    elapses, and return its state. This is the loop every real-Service test
-    used to carry, plus :class:`AdmissionWatch`: a job the host cannot admit
-    fails the test with its queue reason instead of sleeping to the deadline."""
+    """Tick ``service`` until ``job_id`` reaches one of ``states``, capping the wait
+    at ``RUN_UNTIL_TIMEOUT_CAP_SECONDS``; an unadmittable job fails ``RESOURCE
+    WAIT``, a deadline raises ``AssertionError`` with
+    :func:`_run_until_deadline_message`, never a returned nonterminal state."""
     watch = AdmissionWatch(conn, job_id, policy=getattr(service, "policy", TEST_POLICY))
-    deadline = time.monotonic() + timeout
+    effective = min(float(timeout), RUN_UNTIL_TIMEOUT_CAP_SECONDS)
+    deadline = time.monotonic() + effective
     state = job_state(conn, job_id)
     while time.monotonic() < deadline:
         service.tick()
@@ -219,4 +291,4 @@ def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.
         watch.check()
         time.sleep(poll)
     watch.check(final=True)
-    return state
+    raise AssertionError(_run_until_deadline_message(conn, job_id, state, states, effective))

@@ -116,6 +116,112 @@ def test_run_until_fails_fast_when_cpu_affinity_cannot_hold_the_profile(tmp_path
     assert "PROFILE_EXCEEDS_CAPACITY" in str(excinfo.value)
 
 
+def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monkeypatch):
+    """A job that simply never completes on a non-environmental reason must
+    fail with an AssertionError quoting the ops query helpers (get_job,
+    attempt_receipts), not be returned to the caller as ``assert 'queued'
+    == 'succeeded'`` (the #363/#358/#345 shape). A tiny deadline against a
+    never-ticking fake service: no real wait. The second half proves a
+    failing helper only ``n/a``s its own field: every required label stays
+    present and the other diagnostics still print their real values. The
+    third half proves a missing-attribute receipt cannot collapse several
+    fields to blank: a bare ``get_job`` object and a malformed
+    ``attempt_receipts`` item still print every required label, each value
+    field ``n/a`` on its own, while the job id and state classification
+    remain. The fourth half proves an unprintable REQUIRED value
+    (``attempt_count`` whose ``__str__`` raises) fails only its own field: the
+    other diagnostics keep their real values, with no whole-message
+    ``diagnostics failed`` fallback."""
+    conn, job_id = _queued_job(tmp_path, {"code": "DEPENDENCY_PENDING"})
+
+    class _NeverAdmits:
+        def tick(self):
+            pass
+
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as excinfo:
+        run_until(_NeverAdmits(), conn, job_id, timeout=0.2)
+    assert time.monotonic() - started < 10
+    message = str(excinfo.value)
+    assert job_id in message
+    assert "'queued'" in message and "never admitted" in message
+    assert "DEPENDENCY_PENDING" in message
+    assert "attempt count: 0" in message
+    assert "last worker heartbeat: n/a" in message  # absent field: placeholder
+    assert "log tail: n/a" in message               # absent field: placeholder
+
+    def _broken_attempt_receipts(*args, **kwargs):
+        raise RuntimeError("simulated helper failure")
+
+    monkeypatch.setattr("tests.ops_support.attempt_receipts", _broken_attempt_receipts)
+    with pytest.raises(AssertionError) as excinfo:
+        run_until(_NeverAdmits(), conn, job_id, timeout=0.2)
+    message = str(excinfo.value)
+    assert "last worker heartbeat: n/a" in message  # failed helper: placeholder
+    assert "attempt count: 0" in message            # other diagnostics survive
+    assert "DEPENDENCY_PENDING" in message
+    assert "log tail: n/a" in message
+    assert job_id in message
+    assert "'queued'" in message and "never admitted" in message
+
+    class _Blank:  # a receipt that carries none of the attributes the helper reads
+        pass
+
+    monkeypatch.setattr("tests.ops_support.get_job", lambda *a, **k: _Blank())
+    monkeypatch.setattr("tests.ops_support.attempt_receipts", lambda *a, **k: [_Blank()])
+    with pytest.raises(AssertionError) as excinfo:
+        run_until(_NeverAdmits(), conn, job_id, timeout=0.2)
+    message = str(excinfo.value)
+    # a bare get_job + a malformed attempt item blank only their OWN field; every
+    # required label is still printed, and the job id / state classification --
+    # formatted before the helpers -- never vanish.
+    assert job_id in message
+    assert "'queued'" in message and "never admitted" in message
+    for label in ("attempt count: n/a", "queue/admission reason: n/a",
+                  "last worker heartbeat: n/a", "log tail: n/a"):
+        assert label in message, message
+
+    class _RaisingStr:  # a REQUIRED value whose __str__ raises
+        def __str__(self):
+            raise ValueError("simulated __str__ failure")
+
+    class _Reason:
+        code = "DEPENDENCY_PENDING"
+        needed = {"dep": "job-x"}
+        available = None
+
+    class _Progress:
+        kind = "tick"
+        recorded_at = "2026-09-12T00:00:00+00:00"
+        message = "still queued"
+
+    class _Attempt:
+        attempt_number = 1
+        state = "queued"
+        heartbeat_at = "2026-09-12T00:00:05+00:00"
+
+    class _Receipt:  # unprintable attempt_count; every other required value present
+        attempt_count = _RaisingStr()
+        queue_reason = _Reason()
+        latest_progress = _Progress()
+
+    monkeypatch.setattr("tests.ops_support.get_job", lambda *a, **k: _Receipt())
+    monkeypatch.setattr("tests.ops_support.attempt_receipts", lambda *a, **k: [_Attempt()])
+    with pytest.raises(AssertionError) as excinfo:
+        run_until(_NeverAdmits(), conn, job_id, timeout=0.2)
+    message = str(excinfo.value)
+    # the guarded str() in field() confines the __str__ failure to attempt count:
+    # no whole-message fallback, every other required label keeps its real
+    # value, and the job id / state classification never vanish.
+    assert job_id in message
+    assert "'queued'" in message and "never admitted" in message
+    assert "diagnostics failed" not in message
+    assert "attempt count: n/a (attempt count unavailable: ValueError)" in message
+    assert "queue/admission reason: DEPENDENCY_PENDING" in message
+    assert "log tail: tick at" in message
+    assert "last worker heartbeat: attempt 1 (queued)" in message
+
+
 @pytest.mark.parametrize("workers", [["-p", "no:xdist"], ["-n", "2"]], ids=["serial", "xdist"])
 def test_per_test_timeout_fails_the_test_by_name_and_the_run_continues(tmp_path, workers):
     """Serial and under xdist: the alarm must fire in a worker too, since
