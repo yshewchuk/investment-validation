@@ -19,7 +19,7 @@ The [README](README.md) lists the checked exports (the only names other packages
 Not in the README's checked list, so not part of the public interface: the route
 enumeration `operations.route_table` (with `STATIC_ROUTES`, `PARAMETERIZED_ROUTES`), the
 read-only documents `analog_projection.analog_document`, `derivation_projection.derivation_document`
-and `native_parity_projection.native_parity_summary`, and the row builders
+and `native_parity_projection` summary/detail/freshness helpers, and the row builders
 `native_render.native_display_row` and `native_shadow_render.shadow_serving_row_source`.
 
 ## Inputs
@@ -34,7 +34,8 @@ remain a compatibility exception; their presentation still requires React migrat
 
 ## Dependencies
 Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.deployment`
-(`operations`) and `registry.strategies` (`derivation_projection`). `native_render` and
+(`operations`), `registry.strategies` (`derivation_projection`) and `parity`
+(shared field groups for retained mismatch details). `native_render` and
 `native_shadow_render` also import `scoring` for offline row building; no HTTP path does.
 Never imports `engine.v2.ops` (equal-layer peer) or legacy `engine.*`: ops-side pointers,
 reports and transaction/migration patterns are read as inert JSON or reimplemented.
@@ -56,6 +57,37 @@ FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
+`GET /api/v1/native_parity` exposes report identity and the existing aggregate.
+`/native_parity/mismatches` pages row-key/dimension entries with known fields
+marked agree/differ and stored values only for differing fields;
+`/native_parity/unpaired?side=legacy|native` pages unpaired row keys.
+Both detail routes accept an optional `row_key` filter. These authenticated
+reads consume one safely opened report per request and never rerun comparisons.
+The API and compatibility preview share validation of modern report fields,
+including dimension and finding-field membership in the shared field groups.
+Forwarded summary and detail values must encode as finite UTF-8 JSON; non-finite
+numbers, invalid Unicode and parser/encoder recursion failures receive the same
+malformed-report refusal. Legacy summaries still ignore saved mismatch values;
+legacy details validate the values they return.
+Finite numbers, large integers, nulls and string markers remain valid values.
+Pre-v1.2 reports and unstamped diagnostic comparisons retain their legacy
+summary behavior; the API requires complete run identity for v1.2 reports.
+The API takes an optional configured report path; no path means `no_report`.
+Freshness projection uses the API's current resolver, index opener and release reader; the API
+declares its recoverable resolver exception types, while the projection classifies
+SQLite failures and closes every opened connection. Standalone report
+summary reads do not query the serving index.
+
+| Native parity condition | Outcome |
+|---|---|
+| Report absent | `no_report` (200) |
+| Report malformed or cannot be read safely | `NATIVE_PARITY_REPORT_MALFORMED` Problem (503); no data |
+| Report `as_of` predates current release `resolved_as_of` | `stale` (200); all retained data still returned |
+| Current release cannot be resolved, including pointer read or SQLite operational failures | Report `available`; freshness indeterminate; serving-index integrity errors retain their normal propagation |
+| Detail `row_key` absent from the report | 404 Problem |
+| Cursor belongs to another report or detail filter | `CURSOR_MISMATCH` Problem (409) |
+| Cache/retry/transaction/partial write/idempotency | `no-store`, no ETag; no retries, jobs or writes; report-derived summary fields and detail items stay stable for the same report and query; freshness `status` may change with current-release resolution |
+
 API errors raised as `ApiError` share one `Problem` envelope (`code`, `category`, `retryable`);
 HTTP statuses are in parentheses. Index integrity failures (`ServingIndexError`, e.g. a schema
 newer than the code supports) are not caught by the API handler, so they are not returned as a

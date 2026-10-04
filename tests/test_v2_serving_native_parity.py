@@ -737,3 +737,19 @@ def test_captured_bool_rejected_outside_the_boolean_verdict_field(tmp_path):
             block["legacy"][group][field] = value
             block["native"][group][field] = value
             _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_lone_surrogate_in_forwarded_string_is_malformed(tmp_path):
+    """The captured projection forwards bounded strings verbatim; a lone
+    surrogate there is the strict encoder's refusal, not a raw byte write."""
+    block = _captured_block()
+    block["identity"]["ticker"] = "\ud800"
+    _assert_captured_malformed(tmp_path, block)
+
+
+def test_captured_lone_surrogate_in_forwarded_field_key_is_malformed(tmp_path):
+    block = _captured_block()
+    name = "field_\ud800"
+    for side in ("legacy", "native"):
+        block[side]["forecasts"][name] = 1.0
+    _assert_captured_malformed(tmp_path, block)

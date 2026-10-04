@@ -97,7 +97,7 @@ from engine.v2.foundation import (
     to_document,
 )
 
-from . import projections
+from . import native_parity_projection, projections
 
 __all__ = ["ApiError", "create_app", "main"]
 
@@ -120,6 +120,14 @@ def _problem(code: str, category: str, message: str, *, retryable: bool = False,
     return {"code": code, "category": category, "retryable": retryable, "message": message,
             "stage": None, "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
             "diagnostic_ref": None, "details": details or {}, "schema_version": "problem.v1.0"}
+
+
+def _handle_api_error(request: Request, exc: ApiError) -> Response:
+    """Render one Problem envelope; native parity responses are never cached or reused."""
+    headers = ({"Cache-Control": "no-store"}
+               if request.url.path.startswith("/api/v1/native_parity") else {})
+    return Response(content=canonical_json(exc.problem), media_type="application/json",
+                    status_code=exc.status_code, headers=headers)
 
 
 # --------------------------------------------------------------------------
@@ -588,13 +596,115 @@ def _operations_response(publication_root, response: Response, *, release_id: st
     return document
 
 
+def _parity_malformed() -> ApiError:
+    return ApiError(503, _problem(native_parity_projection.NATIVE_PARITY_REPORT_MALFORMED, "integrity",
+                                  "the native parity report is malformed"))
+
+
+def _native_parity_freshness(serving_db, resolve_current, as_of: str | None) -> str:
+    """Classify report freshness; an ApiError/OSError resolver means unknown current."""
+    return native_parity_projection.native_parity_freshness(
+        serving_db, resolve_current, as_of, _open, projections.get_release,
+        (ApiError, OSError))
+
+
+def _native_parity_encoded_response(document) -> Response:
+    """Serialize validated JSON directly, avoiding FastAPI's recursive re-encoding."""
+    try:
+        body = json.dumps(document, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError):
+        raise _parity_malformed() from None
+    return Response(content=body, media_type="application/json",
+                    headers={"Cache-Control": "no-store"})
+
+
+def _native_parity_screen_items(report, section: str, side: str | None, row_key: str | None):
+    """Return one screen's native parity items, mapping lookup/malformed failures to ApiError."""
+    try:
+        return native_parity_projection.native_parity_items(
+            report, section, side=side, row_key=row_key)
+    except LookupError:
+        raise ApiError(404, _problem("NATIVE_PARITY_ROW_NOT_FOUND", "validation",
+                                     "unknown native parity row key")) from None
+    except (ValueError, TypeError, RecursionError):
+        raise _parity_malformed() from None
+
+
+def _native_parity_response(serving_db, resolve_current, cursor_key: bytes, report_path,
+                            response: Response, *, section: str | None = None,
+                            side: str | None = None, row_key: str | None = None,
+                            limit: str | None = None, cursor: str | None = None) -> dict:
+    """Load, validate, then serve either the summary or one filtered detail screen."""
+    _status, summary, report = native_parity_projection.native_parity_snapshot(report_path)
+    response.headers["Cache-Control"] = "no-store"
+    if summary["status"] == "unavailable":
+        raise _parity_malformed()
+    if report is None:
+        return summary if section is None else {"status": "no_report"}
+    if (report["schema_version"] == "native_parity_report.v1.2"
+            and not {"as_of", "generated_at"} <= report.keys()):
+        raise _parity_malformed()
+    summary["status"] = _native_parity_freshness(serving_db, resolve_current, summary.get("as_of"))
+    if section is None:
+        return summary
+    if section == "unpaired" and side not in ("legacy", "native"):
+        raise ApiError(422, _problem("INVALID_REQUEST", "validation",
+                                     "side must be legacy or native"))
+    limit_value = min(_parse_limit(limit), projections.MAX_PAGE_SIZE)
+    try:
+        release_id = content_hash(report)
+    except (ValueError, TypeError, RecursionError):
+        raise _parity_malformed() from None
+    query_hash = content_hash({"section": section, "side": side, "row_key": row_key})
+    raw_cursor = _validated_raw_cursor(cursor, cursor_key, release_id, query_hash)
+    items = _native_parity_screen_items(report, section, side, row_key)
+    try:
+        offset = 0 if raw_cursor is None else int(raw_cursor)
+        if not 0 <= offset <= len(items):
+            raise ValueError(raw_cursor)
+    except ValueError:
+        raise ApiError(_CURSOR_MISMATCH_STATUS, _problem(
+            "CURSOR_MISMATCH", "validation", "cursor offset is invalid")) from None
+    end = offset + limit_value
+    next_cursor = (_pack_cursor(cursor_key, release_id, query_hash, str(end))
+                   if end < len(items) else None)
+    return {"status": summary["status"], "as_of": summary.get("as_of"),
+            "generated_at": summary.get("generated_at"),
+            "tolerance_policy_id": summary.get("tolerance_policy_id"),
+            "items": items[offset:end], "next_cursor": next_cursor}
+
+
+def _register_native_parity_routes(app, auth, serving_db, resolve_current, cursor_key,
+                                   report_path) -> None:
+    @app.get("/api/v1/native_parity", dependencies=auth)
+    def native_parity_summary_route(response: Response):
+        return _native_parity_encoded_response(
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response))
+
+    @app.get("/api/v1/native_parity/mismatches", dependencies=auth)
+    def native_parity_mismatches_route(response: Response, row_key: str | None = None,
+                                       limit: str | None = None, cursor: str | None = None):
+        return _native_parity_encoded_response(
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
+                                    section="mismatches", row_key=row_key, limit=limit, cursor=cursor))
+
+    @app.get("/api/v1/native_parity/unpaired", dependencies=auth)
+    def native_parity_unpaired_route(response: Response, side: str | None = None,
+                                     row_key: str | None = None, limit: str | None = None,
+                                     cursor: str | None = None):
+        return _native_parity_encoded_response(
+            _native_parity_response(serving_db, resolve_current, cursor_key, report_path, response,
+                                    section="unpaired", side=side, row_key=row_key,
+                                    limit=limit, cursor=cursor))
+
+
 # --------------------------------------------------------------------------
 # app wiring
 # --------------------------------------------------------------------------
 
 
 def create_app(*, serving_db, store_root, serving_root, token: str, resolver=None,
-              publication_root=None) -> FastAPI:
+              publication_root=None, native_parity_report_path=None) -> FastAPI:
     """Build the read-only API. ``resolver``, given, replaces the default
     current-release resolution with any zero-argument ``Callable[[], str |
     None]`` (may also raise ``ApiError``) -- tests use this to pin a
@@ -621,13 +731,7 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
             raise ApiError(401, _problem("UNAUTHORIZED", "validation", "missing or invalid credentials"))
 
     auth = [Depends(require_auth)]
-
-    @app.exception_handler(ApiError)
-    def _handle_api_error(request: Request, exc: ApiError) -> Response:
-        # Exactly the real `Problem` fields (`_problem`) -- no UI-specific
-        # alias. See the package README's "Problem field reference".
-        return Response(content=canonical_json(exc.problem), media_type="application/json",
-                        status_code=exc.status_code)
+    app.add_exception_handler(ApiError, _handle_api_error)
 
     @app.get("/api/v1/releases/current", dependencies=auth)
     def releases_current(request: Request, response: Response):
@@ -668,6 +772,9 @@ def create_app(*, serving_db, store_root, serving_root, token: str, resolver=Non
     def operations_route(response: Response, release_id: str | None = None):
         return _operations_response(publication_root, response, release_id=release_id)
 
+    _register_native_parity_routes(app, auth, serving_db, resolve_current, cursor_key,
+                                   native_parity_report_path)
+
     return app
 
 
@@ -686,6 +793,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--publication-root", default=None,
                         help="the fenced ops publisher's release root for this shadow scope "
                              "(<ops_root>/releases/<scope>); omit for no configured pointer")
+    parser.add_argument("--native-parity-report-path", default=None,
+                        help="the producer's native parity report JSON; omit for no_report")
     parser.add_argument("--allow-non-loopback", action="store_true")
     return parser.parse_args(argv)
 
@@ -701,7 +810,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     app = create_app(serving_db=args.serving_db, store_root=args.store_root,
                      serving_root=args.serving_root, token=token,
-                     publication_root=args.publication_root)
+                     publication_root=args.publication_root,
+                     native_parity_report_path=args.native_parity_report_path)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

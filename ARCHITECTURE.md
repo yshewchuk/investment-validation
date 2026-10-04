@@ -427,12 +427,14 @@ Only a tracked path absent from the worktree reads as empty.
   fields already say, never a second implementation of the one shared
   comparator (§5) — but the artifact itself can be stale, or was produced
   under a different tolerance policy than whichever is in effect when this
-  projection is read; this projection does not re-verify either. The
-  artifact now carries its own run identity (`as_of`/`generated_at`,
-  stamped once at the write step, PR #327 slice 1) but this projection
-  does not yet read or expose either field — a reader still cannot tell
-  which night produced it through this projection without the catalog;
-  surfacing them is a later slice of PR #327's design.
+  projection is read; this projection does not re-verify tolerance policy.
+  The projection exposes the artifact's `as_of`/`generated_at` identity.
+  The authenticated `/api/v1/native_parity*` routes also flag a report as
+  `stale` when its `as_of` predates the current release's `resolved_as_of`,
+  resolved through the same publication resolver as `/releases/current`.
+  An unavailable current release, including pointer-read or SQLite operational
+  failures, leaves freshness indeterminate and the
+  report `available`; retained counts and details are never withheld for age.
   `Service.tick()`'s sidecar submits a `native_parity` job once its
   paired inputs are ready, so `"no_report"` stays the answer whenever
   nothing has completed yet, not a degraded one.
@@ -442,6 +444,8 @@ Only a tracked path absent from the worktree reads as empty.
   Output document (`native_parity_summary.v1.0`), when a report is found and
   parses: `status: "available"`; `partial` (`true` when the artifact predates
   the `native_refused`/`native_refused_unmatched` fields); `source_schema_version`;
+  `as_of`/`generated_at` (null when absent from an older report or unstamped diagnostic export);
+  `tolerance_policy_id` (null when absent from an older report);
   `compared_count`/`only_legacy_count`/`only_native_count`;
   `matched_row_count`/`mismatched_row_count` (distinct row keys with zero
   vs. at least one dimension mismatch — `matched_row_count +
@@ -458,9 +462,14 @@ Only a tracked path absent from the worktree reads as empty.
   | No file at `report_path` | `status: "no_report"` (200) |
   | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
+  | Supplied modern identity, policy or mismatch values malformed (including non-finite JSON numbers), or mismatch dimension/field outside the shared field groups | Same `unavailable` (503) in the shared projection and both transports; null `as_of` remains valid |
+  | Forwarded summary or detail values cannot encode as finite UTF-8 JSON, or stored input exceeds parser/encoder recursion capacity | Malformed-report refusal (503); legacy summaries still ignore saved mismatch values, while details validate the values they return |
+  | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  The one consumer today is the read-only operations preview server's
+  Consumers are the authenticated FastAPI `/api/v1/native_parity` summary
+  and paginated `/native_parity/mismatches` and `/native_parity/unpaired`
+  routes, plus the read-only operations preview server's
   `GET /native_parity`/`GET /native_parity.json` routes
   (`engine/v2/serving/operations.py`), which read this document unchanged,
   wired through `engine/v2/dashboard/preview.py`'s optional

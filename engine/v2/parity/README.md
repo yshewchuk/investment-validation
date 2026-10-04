@@ -78,11 +78,12 @@ failure rather than a stale sentence.
   from `compare_dimension` and `NEVER_RAN_DIMENSIONS`.
 - engine/v2/diagnosis — re-exports the comparator core under its own module
   paths.
+- engine/v2/serving — projects stored mismatches using the shared field groups.
 
 `checks/phase4_real.py` imports the same names under the old underscore
 aliases, so its call sites and tests keep working unchanged.
 
-<!-- consumers: engine.v2.ops, engine.v2.diagnosis -->
+<!-- consumers: engine.v2.ops, engine.v2.diagnosis, engine.v2.serving -->
 
 ## Usage
 
