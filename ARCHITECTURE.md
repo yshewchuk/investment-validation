@@ -96,13 +96,10 @@ evidence. See the models and data component contracts.
   owners (`engine.v2.ops.executor`, `engine.v2.ops.legacy_adapter`). A
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
-- **`tools/*` and `experiments/*`.** Operator CLIs and research jobs. Both may
-  call `engine/v2` and legacy `engine`, but neither is a production package.
-  CI and test-runner infrastructure belongs in `tools/ci/`; independent phase,
-  capture, v2, dashboard, and research scripts stay directly under `tools/`
-  and use the selector's normal import-graph path with its existing fail-safe.
-  The two owner configs remain at
-  `tools/opencode_config.json` and `tools/opencode_review_config.json`.
+- **Operator CLIs and experiments.** These operator and research entrypoints
+  may call into the legacy and v2 engines, but neither is a production package
+  other packages depend on. Their callers are explicit commands, workflow
+  steps, or tests rather than shared runtime dependencies.
   - **Experiment grid runs** (`experiments/lib.evaluate_with_grid`, called by
     the `run.py` that `experiments/new_experiment.py` scaffolds): evaluates the
     preregistered primary spec, then each `grid` cell as a secondary arm
@@ -120,14 +117,13 @@ evidence. See the models and data component contracts.
     new `ran` rows. `engine.evaluate` takes an optional `report_dir` that
     redirects only the report and figures, never the run log that
     preregistration reads.
-  - **Mutation-testing PR module selection** (`tools/ci/mutation_pilot.py`,
-    shared by both `.github/workflows/mutation.yml` and
-    `mutation-mutmut.yml`): on a pull_request run, `changed_modules` selects
+  - **Mutation-testing PR module selection** (`changed_modules`, shared by
+    both mutation workflows): on a pull_request run, `changed_modules` selects
     only the enabled mutation-test modules a PR's diff can affect, never
-    zero for an unrecognized path (`tools/ci/mutation_pilot.py`'s own
+    zero for an unrecognized path (the selector's own
     "reverse import closure" comment block has the exact rule). Its input is
-    the PR's changed-file list plus `tools/ci/mutation_pilot.toml`'s module
-    partition and `[pr_selection]` allowlist; its output is the module
+    the PR's changed-file list plus the selector TOML's module partition and
+    `[pr_selection]` allowlist; its output is the module
     subset the CI matrix runs. `*ARCHITECTURE.md` entries are inert for
     selection. `module_dependency_closure` walks ONLY
     `build_import_graph`'s real, statically-resolved edges
@@ -160,7 +156,7 @@ evidence. See the models and data component contracts.
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
-  - **`test` CI PR selection** (`select_pr_tests` in `tools/ci/mutation_pilot.py`, used by
+  - **`test` CI PR selection** (`select_pr_tests`, used by
     `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
     `tests/test_*.py` files pytest collects to the subset the diff can affect, falling
     back to every test file when it can't prove a narrower subset is safe; push/
@@ -175,11 +171,10 @@ evidence. See the models and data component contracts.
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
     `full_suite` paths, an unrecognized path, a deleted test file, or a graph failure still select
-    everything. `tools/ci/*` remains the narrow full-suite boundary; a feature
-    script elsewhere under `tools/` follows normal import-graph selection.
-    The selection rule (leaf, taint, `full_suite`, conftest ancestors) is
-    documented in `select_pr_tests`'s and `_has_unresolved_import_attempt`'s
-    docstrings, not here.
+    everything. The current full-suite allowlist includes the operator-tool
+    namespace; a graph failure also selects everything. The selection rule
+    (leaf, taint, `full_suite`, conftest ancestors) is documented in
+    `select_pr_tests`'s and `_has_unresolved_import_attempt`'s docstrings, not here.
 
 ## 2. Layers and allowed dependency direction
 
