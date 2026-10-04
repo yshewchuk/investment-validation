@@ -678,9 +678,10 @@ class Repository:
         columns, predicates, and estimated/maximum rows a query would touch.
         Recipe/invalidation planning is Phase 3/4 — refused as
         ``UNSUPPORTED_CONTRACT`` here, never a guessed plan (task brief
-        decision 5): only ``DataQuery`` is supported in Phase 2; a
-        ``ChainQuery`` carries no ``snapshot_id`` to explain against, so it is
-        refused the same way.
+        decision 5): ``DataQuery`` remains supported; a ``ChainQuery`` carries
+        no ``snapshot_id`` to explain against, so dependency planning accepts
+        it only when the caller supplies an explicit pinned ``SnapshotRef`` —
+        a missing pin is refused with ``UNSUPPORTED_CONTRACT``.
         """
         if isinstance(query, DataQuery):
             if table_name is None:
