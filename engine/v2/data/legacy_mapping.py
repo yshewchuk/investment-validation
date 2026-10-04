@@ -129,12 +129,9 @@ SOURCE_PRIORITY_VERSION = "legacy_source_priority:" + content_hash(legacy_adapte
 MAPPING_SCHEMA_VERSION = "legacy_table_mapping.v1.0"
 CONTRACT_SEMANTIC_VERSION = "1.0.0"
 SCHEMA_EVOLUTION_POLICY = (
-    "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). "
-    "Changed units, key meaning, time meaning, or null policy require a new major "
-    "contract_id/semantic_version; a nullable-column addition is a minor "
-    "semantic-version change only with a new contract_id — any changed "
-    "definition under an already-registered contract_id, including a "
-    "nullable-only addition, conflicts and requires a new id."
+    "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). Changed "
+    "units, key meaning, time meaning, or null policy require a new major contract_id/semantic_version; "
+    "nullable additions require a minor version only."
 )
 
 

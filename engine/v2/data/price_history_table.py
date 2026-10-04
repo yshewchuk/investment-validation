@@ -63,10 +63,7 @@ PRICE_HISTORY_TABLE_NAME = "price_history"
 _SCHEMA_EVOLUTION_POLICY = (
     "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). "
     "Changed units, key meaning, time meaning, or null policy require a new major "
-    "contract_id/semantic_version; a nullable-column addition is a minor "
-    "semantic-version change only with a new contract_id — any changed "
-    "definition under an already-registered contract_id, including a "
-    "nullable-only addition, conflicts and requires a new id."
+    "contract_id/semantic_version; nullable additions require a minor version only."
 )
 
 _COLUMNS = (
