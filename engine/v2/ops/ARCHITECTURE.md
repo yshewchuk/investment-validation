@@ -1292,6 +1292,9 @@ input, cache, retry, transaction, partial write, idempotency); the
 conventions here apply package-wide unless a subsystem table says
 otherwise.
 
+Adopting a supplied `resolved_plan` requires that it was produced by
+`resolve_experiment_plan` and that its canonical bytes match the `ExperimentSpec`.
+
 | # | Convention |
 |---|---|
 | R1 | A missing/malformed input is a typed refusal (`Problem`/`OpsError`), never a default, except optional admission cache statistics: unavailable or invalid `file`/`shmem` falls back to valid `inactive_file`, then raw `memory.current`; `shmem > file` is invalid. A whole-call refusal is for a caller error that makes the request meaningless; anything scoped to one row of a batch is collected there instead, never sinking the batch. Experiment spec resolution refuses unknown or unconsumed fields as `INVALID_EXPERIMENT_SPEC` before work. It resolves immutable schema `experiment_execution_plan.v1.0`; worker output is `resolved_experiment_plan`. `run_experiment(..., resolved_plan=...)` requires canonical-byte equality with the spec. Only a runner declaring `execution_plan` can consume supported `fill`; the current worker and legacy callables refuse non-empty economics before writes or run-directory creation. <table><tr><th>Condition</th><th>Outcome</th></tr><tr><td>Worker or legacy callable gets non-empty economics</td><td><code>INVALID_EXPERIMENT_SPEC</code> before plan/receipt writes or run-directory creation.</td></tr><tr><td>Supplied plan mismatches spec</td><td><code>INVALID_EXPERIMENT_SPEC</code> before run-directory creation.</td></tr><tr><td>Plan write or later runner fails</td><td>A failing plain <code>write_bytes</code> may leave a partial file. After a successful write, runner failure leaves the complete plan in the failed attempt root; the attempt is unpublished and retry writes to a new attempt root.</td></tr></table> |
