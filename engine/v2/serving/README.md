@@ -21,7 +21,7 @@ not ownership of their presentation. Existing `operations.py` HTML and immutable
 legacy bundle previews remain compatibility exceptions with migration outstanding;
 extending them does not deliver the React application.
 
-- Bounded, paginated reads over saved score records.
+- Saved-record reads with route-specific pagination and bounds.
 - The financial display values §6.4 moves out of rendering.
 - Immutable release publication, one release per read.
 - Resolve-once release identity: `GET /release/current.json` returns
@@ -29,7 +29,7 @@ extending them does not deliver the React application.
   reuse, instead of re-following `/release/current`'s redirect on every
   navigation. `/release/current/...` keeps working for direct requests.
 - The read-only v2 dashboard API (`api.py`, P3-2): authenticated, paginated,
-  ETag'd JSON over `projections`' bounded read helpers — `/api/v1/releases/
+  ETag'd JSON over `projections`' route-specific read helpers — `/api/v1/releases/
   current`, `/api/v1/releases/{id}`, `/api/v1/events`, `/api/v1/events/{id}/
   scores`, `/api/v1/scores/{id}`, `/api/v1/operations`.
 - `native_parity_projection.native_parity_summary` (read-only): a compact,
@@ -88,8 +88,9 @@ content-derived `release_id`. A findings failure still publishes the receipt
 (`Problem.diagnostic_ref`) but writes no release row: no "current" pointer is
 created here, that is a later task's single published pointer. `get_release`,
 `list_events` (cursor-paginated, ordered `event_date, ticker, event_id`),
-`event_scores` and `get_score_detail` are the bounded read helpers a future
-read API (P3-2) wraps. `connect`/`ensure_schema` open and migrate the file.
+`event_scores` (all matching summaries for one event, with optional filters),
+and `get_score_detail` (one document) are the read helpers a future read API
+(P3-2) wraps. `connect`/`ensure_schema` open and migrate the file.
 
 **Summary-field gap (review fix, `EVENT_SCORE_SUMMARY_V1` v1.1).** The
 rendered row carries no single headline "expected return" or closed
@@ -150,7 +151,7 @@ and their matching visible summaries consistently" — by construction, not by
 two independently-written filters that could drift apart.
 
 api (P3-2): `create_app(*, serving_db, store_root, serving_root, token,
-resolver=None) -> FastAPI` wires §6's six routes over `projections`' bounded
+resolver=None) -> FastAPI` wires §6's six routes over `projections`' route-specific
 read helpers only — no route or app-startup path imports or initiates
 scoring, a provider, `engine.v2.ops` or legacy `engine.*` (`tests/
 test_v2_serving_api.py` proves this with a real subprocess and two
@@ -307,7 +308,7 @@ the mock disagree, §6 wins":**
   src/api/client.ts` sends) succeeds on every route, not just proves the
   logic exists.
 
-<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError, score_projection, legacy_score_projection -->
+<!-- public-interface: operations, create_server, bridge, LEGACY_DISPLAY_MAPPING_V1, build_bridges, projections, build_candidate, connect, ensure_schema, resolve_event_refs, get_release, list_events, event_scores, get_score_detail, get_event, event_query_hash, projection_binding, ServingIndexError, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, api, create_app, ApiError, legacy_bundle, load_legacy_bundle, load_score_document, LegacyBundleError, score_projection, legacy_score_projection -->
 
 ## Consumers
 

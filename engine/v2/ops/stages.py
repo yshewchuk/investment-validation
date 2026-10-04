@@ -305,9 +305,13 @@ def _native_parity_kind() -> JobKind:
     """Cutover PR-4 redo, slice 2B(a): reads the paired legacy "score" job's
     score.json and the native_score_batch job's records.json/refusals.json,
     and writes native_parity_report.json comparing them via
-    native_parity_report.compare_native_vs_legacy. No production caller
-    submits this kind yet -- the supervisor tick-loop sidecar and nightly
-    wiring that would submit it are slice 2B(b)/(c), a later PR. See
+    native_parity_report.compare_native_vs_legacy. Submission is wired:
+    supervisor.Service._reconcile_native_parity calls
+    nightly.submit_native_parity_if_ready every tick; that builder requires a
+    paired, fully succeeded score/native_score_batch identity and submits
+    this kind with BOTH job ids as explicit dependencies. Implemented wiring
+    alone is still not production activation -- the upstream native-score
+    raw-row producer remains pending. See
     engine/v2/ops/native_parity_report.py, ARCHITECTURE.md."""
     return JobKind(
         name="native_parity", worker="native_parity",
