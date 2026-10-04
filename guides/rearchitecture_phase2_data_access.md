@@ -220,7 +220,7 @@ TableContract (Definition):
   partition_columns, filterable_columns, orderable_columns
   observation_time_column?, publication_time_column?, receipt_time_column?
   finality_semantics, provenance_semantics, coverage_semantics
-  schema_evolution_policy, maximum_batch_rows, maximum_result_rows
+  schema_evolution_policy, maximum_batch_rows
   legacy_mapping_ref?
 
 TableContractRef (Handle):
@@ -311,7 +311,7 @@ IDs are content-derived from their deterministic payloads:
 Operational timestamps, attempt IDs, durations, and log refs live in import or
 commit receipts and are excluded from these IDs.
 
-### 5.3 Bounded query contracts
+### 5.3 Bounded query contracts (target contract)
 
 ```text
 KEY_PREDICATE_V1 = "key_predicate.v1.0"
@@ -331,12 +331,11 @@ DataQuery (Command):
   max_batch_rows, max_result_rows, deadline?
 ```
 
-Phase 2 requires both row limits to be finite positive integers. The contract
-may later gain a supervised unbounded-streaming mode, but do not create one in
-this phase. A full historical read is expressed with an explicit range and a
-finite limit derived from the pinned dataset manifest. Limits may not exceed
-the table contract. `deadline` is execution metadata and does not enter query
-identity.
+Batch limits are finite positive integers bounded by `maximum_batch_rows`.
+Result limits follow the single [scan population bound](../engine/v2/data/ARCHITECTURE.md#invariants)
+in the data component contract, including empty populations. Full historical
+reads name an explicit range and use the pinned manifest to construct their
+query. `deadline` is execution metadata and does not enter query identity.
 
 Only `eq` and `in` are supported now. Both time bounds are optional
 individually, but every query must contain at least one key predicate or one
@@ -874,7 +873,7 @@ not a suggestion to assert an implementation detail.
 | D02 | 0 | All six Tier-2 schemas plus panel, Tier-4, and legacy snapshot metadata have complete reviewed mappings. Removing or adding one source column fails. |
 | D03 | 0 | IDs exclude operational timestamps but include every semantic/member field. Reordering meaningful columns or fragments changes identity; changing duration does not. |
 | D04 | 0 | Catalog migrations are checksummed, idempotent, owner-scoped, and refuse edited/newer schemas. Immutable-table update/delete and duplicate conflicting IDs fail. |
-| D05 | 0 | Query validator rejects implicit latest, unknown/mismatched snapshot or contract, empty projection, unsupported predicate/order, missing bounds, and limits above contract caps. |
+| D05 | 0 | Query validator rejects implicit latest, unknown/mismatched snapshot or contract, empty projection, unsupported predicate/order, missing bounds, and invalid limits under §5.3. |
 | D06 | 0 | Synthetic scans return only projected/filter-matching rows in deterministic key order, synthesize only declared nullable historical columns, and fail rather than truncate. |
 | D07 | 0 | Event revision mismatch, ambiguous event identity, cross-security chain row, post-ceiling quote, and collapsed expected population each fail with the correct code. |
 | D08 | 0 | Logical hashes distinguish null/zero/empty/false and full-precision strikes, but remain unchanged when only Parquet physical encoding changes. Plant one row or key-order defect and catch it. |

@@ -271,6 +271,17 @@ and retryability come from that table, never guessed at a call site.
 | `STALE_EXPECTATION` | validation | no | `explain_dependencies`'s chain-query path sees a stale caller expectation |
 | `CALENDAR_UNAVAILABLE` | validation | no | registered here but raised only by `engine.v2.research`, never from inside this package |
 
+**Target contract: pinned scans and registration (R1–R6).**
+
+| Requirement | Outcome |
+|---|---|
+| R1 — missing or unsupported input | Missing members refuse with the codes above; snapshots containing an unsupported contract schema refuse `UNSUPPORTED_CONTRACT` before rows are returned. |
+| R2 — cache | Bounds come from the pinned fragment membership; no current-head fallback or cached bound from another snapshot. |
+| R3 — retry | No internal scan retry; integrity and result-limit refusals require corrected inputs. Registration retries retain the head fence. |
+| R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
+| R5 — partial result/write | A fragment footer count differing from its recorded count refuses `MANIFEST_CORRUPT` before that fragment yields rows. Earlier streamed batches may already have been consumed; they are not a successful complete result. Failed registration leaves the head unchanged and staged objects unreferenced. |
+| R6 — idempotency | An identical registration request reuses its committed receipt through the same head fence; a conflicting identity refuses. Scan completion requires exhaustion without an error. |
+
 **Snapshot commit (4c R1–R6).** Missing input: `INPUT_CHANGED`/
 `CONTRACT_MISMATCH` before any write; every contract/fragment/manifest is
 re-verified before the transaction opens. A caller-supplied `fence_check`
@@ -318,6 +329,15 @@ whole `resolve` walk. Idempotent: every row is append-only.
 
 Root doc §5 invariants this package is responsible for:
 
+- **Scan population bound (target contract).** Every scan states a finite nonnegative `max_result_rows`,
+  never above the sum of recorded row counts of the pinned fragments surviving
+  its pruning predicates. The running counter raises `RESULT_LIMIT_EXCEEDED`
+  before yielding a batch that would exceed that limit. Zero is valid for an
+  empty population; batch sizes remain positive and contract-bounded. The query
+  retains its explicit limit so a caller can refuse a smaller population for
+  its own retained-memory or cardinality requirement; exceeding the manifest
+  bound is `QUERY_NOT_BOUNDED`. Fragment counts bound candidate rows, not the
+  exact predicate-matching population or total process memory.
 - **Missing input → typed refusal, never a silent default** — every failure
   path raises a `DataError`/`Problem` from the table above.
 - **Snapshot/root isolation** — every store path resolves through
