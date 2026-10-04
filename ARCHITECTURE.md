@@ -97,9 +97,11 @@ evidence. See the models and data component contracts.
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
 - **Operator CLIs and experiments.** These operator and research entrypoints
-  may call into the legacy and v2 engines, but neither is a production package
-  other packages depend on. Their callers are explicit commands, workflow
-  steps, or tests rather than shared runtime dependencies.
+  may call into the legacy and v2 engines. They are not uniformly leaf-only:
+  `engine.v2.ops.training` imports the `phase5_training_job` module while
+  validating recipe and state parameters for `ops plan --kind training`.
+  Describe dependencies at the module level because some modules serve shared
+  runtime paths.
   - **Experiment grid runs** (`experiments/lib.evaluate_with_grid`, called by
     the `run.py` that `experiments/new_experiment.py` scaffolds): evaluates the
     preregistered primary spec, then each `grid` cell as a secondary arm
