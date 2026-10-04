@@ -412,8 +412,19 @@ def _mismatch_item(entry: dict[str, object]) -> dict[str, object]:
 def native_parity_items(report: dict, section: str, *,
                         side: str | None = None,
                         row_key: str | None = None) -> list:
-    """One detail collection; a row_key outside the report population raises LookupError."""
+    """One detail collection; a row_key outside the report population raises LookupError.
+
+    The population is every row the report names: the key lists, plus the
+    string ``row_key`` of each entry in the optional refusal collections (a
+    refused row was moved out of ``only_legacy`` by the writer, so without
+    this it would wrongly 404; unkeyed refusal entries carry a structured
+    dict key, which is not a row key, and mismatch row keys are already a
+    subset of ``compared`` per the loader's validation).
+    """
     population = set(report["compared"]) | set(report["only_legacy"]) | set(report["only_native"])
+    for field in _OPTIONAL_LIST_FIELDS:
+        population.update(entry["row_key"] for entry in report.get(field, [])
+                          if isinstance(entry.get("row_key"), str))
     if row_key is not None and row_key not in population:
         raise LookupError(row_key)
     if section == "unpaired":

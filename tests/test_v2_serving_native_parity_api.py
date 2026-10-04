@@ -31,6 +31,7 @@ from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.foundation import ArtifactStore, content_hash  # noqa: E402
 from engine.v2.ops.native_parity_report import (  # noqa: E402
     _stamp_report_identity,
+    apply_native_refusals,
     compare_native_vs_legacy,
     write_parity_report,
 )
@@ -296,6 +297,50 @@ def test_unknown_row_key(parity):
         document = json.loads(body)
         assert document["items"] == [], path
         assert document["next_cursor"] is None, path
+
+
+_REFUSAL_CODE = "MODEL_NOT_READY"
+_REFUSED_COLLECTIONS = (
+    pytest.param("native_refused", "DDD|S|2026-01-04", id="native_refused"),
+    pytest.param("native_refused_unmatched", "HHH|S|2026-01-08", id="native_refused_unmatched"),
+)
+
+
+@pytest.mark.parametrize("collection,refused_key", _REFUSED_COLLECTIONS)
+def test_keyed_refusal_entries_are_known_row_keys(parity, collection, refused_key):
+    """A keyed entry in either optional refusal collection is a report row:
+    the writer moved it out of ``only_legacy`` (or native-only refused it),
+    so it names no row in any other population -- both detail routes accept
+    the key and serve an empty page, and 404 stays reserved for keys no
+    population names."""
+    legacy, native = _source_rows()
+    report = compare_native_vs_legacy(legacy, native, ("forecasts", "simulation"))
+    report = apply_native_refusals(report, {refused_key: _REFUSAL_CODE})
+    report = _stamp_report_identity(report, as_of=AS_OF, clock=_FixedClock())
+    assert report[collection] == [{"row_key": refused_key, "refusal_code": _REFUSAL_CODE}]
+    other = ({"native_refused": "native_refused_unmatched",
+              "native_refused_unmatched": "native_refused"}[collection])
+    assert report[other] == [], collection
+    for field in ("compared", "only_legacy", "only_native"):
+        assert refused_key not in report[field], (collection, field)
+    write_parity_report(report, parity.report_path)
+
+    screens = (("/api/v1/native_parity/mismatches", {}),
+               ("/api/v1/native_parity/unpaired", {"side": "legacy"}))
+    for path, base_params in screens:
+        code, body, headers = _get(parity.base, path, token=parity.token,
+                                   params={**base_params, "row_key": refused_key})
+        assert code == 200, (collection, path)
+        _assert_no_store(headers)
+        document = json.loads(body)
+        assert document["items"] == [], (collection, path)
+        assert document["next_cursor"] is None, (collection, path)
+
+        code, body, headers = _get(parity.base, path, token=parity.token,
+                                   params={**base_params, "row_key": "ZZZ|S|2099-12-31"})
+        assert code == 404, (collection, path)
+        _assert_no_store(headers)
+        assert json.loads(body)["code"] == "NATIVE_PARITY_ROW_NOT_FOUND", (collection, path)
 
 
 def test_auth_required(parity):
