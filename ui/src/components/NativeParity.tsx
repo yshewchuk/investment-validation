@@ -87,6 +87,7 @@ export function NativeParity({ client }: { client: DataClient }) {
       {summary.status === "ready" && summary.data.status !== "no_report" && (
         <>
           {summary.data.status === "stale" && <p className="error-banner" data-testid="parity-stale">The native parity report is stale; its saved comparison is shown below.</p>}
+          {summary.data.partial === true && <p className="error-banner" role="alert" data-testid="parity-partial">This saved report is partial: its schema has no refusal breakdown, so the refusal counts below are incomplete, not confirmed zero.</p>}
           <dl data-testid="parity-summary">{summaryFields(summary.data).map(([label, testid, value]) => <Fragment key={testid}><dt>{label}</dt><dd data-testid={testid}>{value}</dd></Fragment>)}</dl>
           <h2>Refusal reasons</h2>
           {refusalReasons.length === 0 && <p data-testid="parity-refusal-reasons-empty">No refusal reasons.</p>}

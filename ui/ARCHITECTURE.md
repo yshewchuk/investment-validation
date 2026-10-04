@@ -38,6 +38,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Parity `stale` | Banner with saved identity, counts and refusal reasons still shown. |
 | Parity `unavailable` | Explicit error; failed data is withheld, never presented as an empty comparison. |
 | Parity zero counts or no refusal reasons | Saved zero counts remain visible; an explicit message identifies absent refusal reasons. |
+| Parity `partial` | Saved counts remain visible with an alert that refusal data is incomplete. |
 | Retry or navigation | Reads keep pinned identity; no durable transaction or partial publication. |
 
 ## Invariants

@@ -92,6 +92,7 @@ MALFORMED = {"code": "NATIVE_PARITY_REPORT_MALFORMED", "category": "unavailable"
 STALE = dict(SUMMARY, status="stale")
 ZERO = dict(SUMMARY, native_refused_reasons={},
     **{field: 0 for _, field in COUNT_FIELDS})
+PARTIAL = dict(ZERO, partial=True, source_schema_version="native_parity_report.v1.1")
 
 def test_stale_shows_saved_summary(browser, server):
     base, context, page, parity, _ = _open_parity(browser, server, body=STALE)
@@ -134,6 +135,17 @@ def test_zero_saved_counts_render_actual_zero(browser, server):
     expect(page.get_by_test_id("parity-no-report")).to_have_count(0)
     expect(page.get_by_test_id("parity-unavailable")).to_have_count(0)
     expect(page.get_by_test_id("parity-stale")).to_have_count(0)
+    assert len(parity) == 1
+    context.close()
+
+def test_partial_saved_summary_shows_incomplete_refusals_banner(browser, server):
+    base, context, page, parity, _ = _open_parity(browser, server, body=PARTIAL)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    expect(page.get_by_test_id("parity-partial")).to_be_visible()
+    expect(page.get_by_test_id("parity-partial")).to_contain_text("refusal counts below are incomplete")
+    expect(page.get_by_test_id("parity-native-refused")).to_have_text("0")
+    expect(page.get_by_test_id("parity-refusal-reasons-empty")).to_have_text("No refusal reasons.")
     assert len(parity) == 1
     context.close()
 

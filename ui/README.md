@@ -129,7 +129,8 @@ is owned by a separate PR.
 
 - **States covered**: loading, unauthenticated (401), `no_report`, `stale`
   banner with data retained, `unavailable` error without data, zero saved
-  counts and empty refusal reasons. Browser tests mock the
+  counts and empty refusal reasons, and partial saved reports with incomplete
+  refusal data. Browser tests mock the
   documented API contract (`tests/test_v2_native_parity_browser.py`).
 
 ### Routing (`src/routes.ts`, P3-3b)

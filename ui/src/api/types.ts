@@ -173,9 +173,11 @@ export interface EventQuery {
 }
 
 // Native-parity summary follows #327; malformed reads are 503 Problems.
-// Detail item spellings await merged API reconciliation.
+// #349 (merged): `partial`/`source_schema_version`/`schema_version` always on available/stale.
 export interface NativeParityReportSummary {
   status: "available" | "stale";
+  partial: boolean;
+  source_schema_version: string;
   as_of: string | null;
   generated_at: string | null;
   tolerance_policy_id: string | null;
@@ -187,25 +189,28 @@ export interface NativeParityReportSummary {
   native_refused_count: number | null;
   native_refused_unmatched_count: number | null;
   native_refused_reasons: Record<string, number>;
+  schema_version: SchemaVersion;
 }
-
 export type NativeParitySummary = NativeParityReportSummary | { status: "no_report" };
 
+// #349 wire shape (native_parity_projection.py `_mismatch_item`): `fields`
+// keyed by field name; every dimension field present; `legacy`/`native` only when it differs.
 export interface NativeParityMismatchField {
-  field: string;
   status: "agree" | "differ";
-  legacy_value?: unknown;
-  native_value?: unknown;
+  legacy?: unknown;
+  native?: unknown;
 }
-
 export interface NativeParityMismatchItem {
   row_key: string;
   dimension: string;
-  fields: NativeParityMismatchField[];
+  fields: Record<string, NativeParityMismatchField>;
 }
-
+// #349 detail-page envelope (api.py `_native_parity_response`): no `total_matching`.
 export interface NativeParityPage<T> {
+  status: "available" | "stale";
+  as_of: string | null;
+  generated_at: string | null;
+  tolerance_policy_id: string | null;
   items: T[];
   next_cursor: string | null;
-  total_matching: number;
 }
