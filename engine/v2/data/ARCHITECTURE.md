@@ -124,7 +124,12 @@ interface section; this names only the load-bearing entry points.
   documents or recomputes native values. Price-history captures follow the pinned
   receipt lineage; computed-moves captures retain their existing contract-wide
   scope. One read transaction pins the inventory; callers own supported source
-  identity validation, object-byte verification and publication.
+  identity validation, object-byte verification, publication, and computing
+  the canonical inventory hash (`engine.v2.foundation.content_hash` over the
+  returned payload) and comparing that hash with the exported expectation to
+  detect drift. Internally the tool builds every typed refusal through
+  `engine.v2.data.errors` and `engine.v2.contracts.data.DATA_FAILURE_CODES`:
+  its dependency on the data error catalog is part of this contract.
 
 ## Inputs
 
@@ -298,8 +303,9 @@ lineage refuse `INPUT_CHANGED`; inconsistent fragment metadata or row counts
 refuse `MANIFEST_CORRUPT`. Retryability follows the table above. There is no
 automatic retry or cached inventory and no catalog writes or artifact output.
 An active caller transaction refuses `INPUT_CHANGED` without altering it.
-The same pins and metadata yield the same inventory; comparing its hash to an
-exported inventory detects drift, including changed table membership.
+The same pins and metadata yield the same inventory; the caller-owned
+canonical `content_hash` of the payload, compared with the exported
+expectation, detects drift, including changed table membership.
 
 **Snapshot commit (4c R1–R6).** Missing input: `INPUT_CHANGED`/
 `CONTRACT_MISMATCH` before any write; every contract/fragment/manifest is
