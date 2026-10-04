@@ -694,14 +694,17 @@ owns pinned spot, listed strategy-specific expiry and session-based planned exit
 per-key calendar/quotes and refusal documents; the sidecar stages both before submission. Forward `tier4_row` is `{}`.
 Snapshot reads are SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
 
+`nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
+
 | Calendar sourcing condition (R1–R6) | Outcome |
 |---|---|
-| R1: missing source table, missing exact spot or repository failure | Fail the whole build; preserve `CONTRACT_MISMATCH` and other repository codes |
-| R1: no strategy-eligible listed expiry; missing/ambiguous event; intraday key | Per-key `NO_RESOLVABLE_EXPIRY`, event refusal or `INTRADAY_EVENT_NOT_ADMITTED`; exact intraday identity requires [#356](https://github.com/yshewchuk/investment-validation/issues/356) ([#243](https://github.com/yshewchuk/investment-validation/issues/243)) |
-| R2: cache | No durable helper cache; any reuse is scoped to the pinned build |
-| R3: retry | No helper retry or provider fetch; unchanged inputs reproduce the result/refusal |
-| R4/R5: transaction or interruption | Read-only helper; no catalog writes, publication or partial document return |
-| R6: identity | Preserve exact event identity and earnings revision; producer successes and refusals are disjoint |
+| R1: missing/unusable exact spot, missing source table, malformed source row or repository failure | Whole build fails; `CONTRACT_MISMATCH` and other typed repository codes propagate |
+| R1: empty eligible expiry domain or native no-expiry GeometryRefusal | Per-key `NO_RESOLVABLE_EXPIRY`; unrelated geometry/input failures propagate |
+| R1: missing/ambiguous matched event | Existing `EVENT_NOT_FOUND` / `IDENTITY_CONFLICT` propagates |
+| R2: cache | No durable or negative helper cache; reuse is confined to one build and pinned snapshot |
+| R3: retry | No helper retry/provider fetch; unchanged inputs reproduce the result/refusal, repository errors reach the existing failure path |
+| R4/R5: transaction or interruption | Read-only composition; no catalog writes or partial result/document return |
+| R6: identity | Preserve exact event identity and earnings revision; content and candidate order are deterministic |
 
 ## Inputs
 
