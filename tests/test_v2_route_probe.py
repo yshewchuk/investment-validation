@@ -14,13 +14,14 @@ never appears in a receipt.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from engine.v2.serving.operations import create_server, route_table
+from engine.v2.serving.operations import create_server, route_table, shell_document
 from tools import v2_route_probe as probe_mod
 
 
@@ -35,7 +36,6 @@ def _serve(tmp_path):
                                   "generated_at": "t1", "withheld_release": None}))
     calibration = tmp_path / "calibration-health.json"
     calibration.write_text(json.dumps({"generated_at": "t1", "n_scored": 0}))
-    native_parity_report_path = tmp_path / "native_parity_report.json"  # deliberately absent
     release_dir = tmp_path / "releases" / "r1"
     release_dir.mkdir(parents=True)
     (release_dir / "index.html").write_bytes(b"<!doctype html>board")
@@ -51,7 +51,6 @@ def _serve(tmp_path):
     server = create_server(("127.0.0.1", 0), token="secret", health_path=health,
                            release_root=tmp_path, frozen_at="t0",
                            calibration_health_path=calibration,
-                           native_parity_report_path=native_parity_report_path,
                            submit_refresh=_record("refresh", {"jobs": []}),
                            submit_whatif=_record("whatif", {"job_id": "job_probe"}),
                            fetch_whatif=lambda job_id: (200, {"job_id": job_id}))
@@ -339,3 +338,26 @@ def test_route_table_lists_get_and_post_paths_from_the_server_table():
     assert {("POST", row["path"]) for row in rows if row["method"] == "POST"} == {
         ("POST", "/actions/refresh"), ("POST", "/actions/whatif")}
     assert all(row["method"] == "GET" for row in rows if row["parameterized"])
+
+
+@pytest.mark.parametrize("path", ["/native_parity", "/native_parity.json"])
+def test_retired_native_parity_routes_answer_404(tmp_path, path):
+    """Regression for the retired screen: the OLD route code answered these
+    paths itself (HTML shell 200 / JSON 503), so this must fail on the wire,
+    not merely on the registry. HTTPConnection never follows redirects."""
+    server, thread, _, _ = _serve(tmp_path)
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        conn.request("GET", path, headers={"Authorization": "Bearer secret"})
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+    finally:
+        conn.close()
+        _stop(server, thread)
+
+    assert status == 404
+    declared = {row["path"] for row in route_table()}
+    assert "/native_parity" not in declared
+    assert "/native_parity.json" not in declared
+    assert b"native_parity" not in shell_document()

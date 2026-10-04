@@ -63,8 +63,8 @@ marked agree/differ and stored values only for differing fields;
 `/native_parity/unpaired?side=legacy|native` pages unpaired row keys.
 Both detail routes accept an optional `row_key` filter. These authenticated
 reads consume one safely opened report per request and never rerun comparisons.
-The API and compatibility preview share validation of modern report fields,
-including dimension and finding-field membership in the shared field groups.
+The API validates modern report fields, including dimension and finding-field
+membership in the shared field groups.
 Forwarded summary and detail values must encode as finite UTF-8 JSON; non-finite
 numbers, invalid Unicode and parser/encoder recursion failures receive the same
 malformed-report refusal. Legacy summaries still ignore saved mismatch values;
@@ -93,7 +93,7 @@ HTTP statuses are in parentheses. Index integrity failures (`ServingIndexError`,
 newer than the code supports) are not caught by the API handler, so they are not returned as a
 `Problem` document. Operations routes refuse with plain text for auth, not-configured and
 health-file failures (e.g. `/health.json` 503 `unknown`, `/analogs.json` 503 `analogs not
-configured`) and with typed JSON documents carrying a `reason_code` for index/parity refusals.
+configured`) and with typed JSON documents carrying a `reason_code` for index refusals.
 | Concern | Outcome |
 |---|---|
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Event-scores and score-detail routes without a release pin: `RELEASE_ID_REQUIRED` (400); no route searches across releases. `GET /events` without a pin uses the current release. |
@@ -134,7 +134,8 @@ flowchart LR
   Binding -.->|operator supplies as a publication input| Ops[ops publisher]
 ```
 Operations listener: `create_server` serves health files, shell/view pages, model-release
-resources, the release pointer and release bytes, the legacy shell, analog, derivation and
-parity documents, and what-if results. An authenticated `POST /actions/refresh` or
+resources, the release pointer and release bytes, the legacy shell, analog and derivation
+documents, and what-if results. Native parity has no operations HTML or JSON
+preview route; authorized GETs to the retired paths return 404. An authenticated `POST /actions/refresh` or
 `/actions/whatif` with a valid body reaches its injected callback; an unconfigured action returns
 503 (the dashboard preview wires only the refresh callback).

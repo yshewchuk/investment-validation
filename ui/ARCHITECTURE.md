@@ -49,8 +49,7 @@ fetch vendors. Preserve saved replay clocks and provenance without relabelling.
 Existing operations HTML/legacy previews are compatibility exceptions with
 migration outstanding, not evidence that a React application view is shipped.
 Native parity summary presentation belongs here; mismatch/unpaired detail is
-outside this component. The existing operations parity preview remains owned
-by serving/dashboard.
+outside this component. The operations parity HTML/JSON preview is retired.
 ## Diagrams
 ```mermaid
 flowchart LR

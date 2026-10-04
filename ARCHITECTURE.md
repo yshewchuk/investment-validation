@@ -463,19 +463,15 @@ Only a tracked path absent from the worktree reads as empty.
   | No file at `report_path` | `status: "no_report"` (200) |
   | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
-  | Supplied modern identity, policy or mismatch values malformed (including non-finite JSON numbers), or mismatch dimension/field outside the shared field groups | Same `unavailable` (503) in the shared projection and both transports; null `as_of` remains valid |
-  | Forwarded summary or detail values cannot encode as finite UTF-8 JSON, or stored input exceeds parser/encoder recursion capacity | Malformed-report refusal (503); legacy summaries still ignore saved mismatch values, while details validate the values they return |
+  | Supplied modern identity, policy or mismatch values malformed (including non-finite JSON numbers), or mismatch dimension/field outside the shared field groups | Same `unavailable` (503) in the shared projection and authenticated API; null `as_of` remains valid |
+  | Forwarded summary or detail values cannot encode as finite UTF-8 JSON, or stored input exceeds parser/encoder recursion capacity | Malformed-report refusal (503); summary responses omit saved mismatch values, but v1.2 report loading still validates them; detail responses validate the values they return. |
   | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  Consumers are the authenticated FastAPI `/api/v1/native_parity` summary
-  and paginated `/native_parity/mismatches` and `/native_parity/unpaired`
-  routes, plus the read-only operations preview server's
-  `GET /native_parity`/`GET /native_parity.json` routes
-  (`engine/v2/serving/operations.py`), which read this document unchanged,
-  wired through `engine/v2/dashboard/preview.py`'s optional
-  `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
-  for that route/CLI contract.
+  The authenticated FastAPI API exposes `/api/v1/native_parity` and paginated
+  `/api/v1/native_parity/mismatches` and `/api/v1/native_parity/unpaired` routes.
+  React currently presents the summary; row-level detail remains deferred. The
+  operations listener has no native-parity HTML or JSON preview routes.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;
   this report projection remains a read over retained evidence.
