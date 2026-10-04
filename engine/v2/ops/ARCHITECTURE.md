@@ -678,10 +678,10 @@ The optional guard compares the already-loaded `SnapshotRef.snapshot_id`,
 without a second head resolution. A mismatch raises `INPUT_CHANGED` before
 materialization request construction or registration; equality keeps that ref.
 Omitting the expected id preserves direct and legacy caller behavior.
-`nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward
-events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
-`nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)`
-returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
+`nightly_raw_rows.scan_forward_board_requests` enumerates pinned forward events without a `src_orats` filter; `pin_snapshot_inputs` returns `calendar_version`.
+`nightly_raw_rows.scan_calendar_row(repository, snapshot, key, **staged)` returns `CalendarRowInputs(calendar_revision, calendar_row)` with the matched event row ID and the pinned earnings-events dataset version, not the snapshot calendar placeholder.
+These two bounded earnings-event reads retain the active table-contract result cap and existing caller-specific ceilings; a zero bound leaves the active positive result limit unchanged.
+Ordinary repository scan validation and failure behavior still apply.
 Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validation covers shape, not strategy or sourcing.
 No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged/key/identity input → `INVALID_REQUEST`; repository failures propagate.
 `source_availability.verify_eod_availability(conn, store, repository, snapshot, *, table_name, session_date, decision_at)` validates canonical clocks, exact pinned identity and catalog-bound candidate receipt bytes, then always refuses; no source/finality validator is installed.
