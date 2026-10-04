@@ -163,9 +163,15 @@ def test_upper_boundary_projects_the_last_representable_session() -> None:
     assert built.observed_through == "9999-12-20"
 
 
+def test_upper_boundary_projects_date_max_as_the_tail_session() -> None:
+    built = build_calendar_sessions(("9999-12-30",), event_through="9999-12-30")
+    assert built.days == ("9999-12-30", "9999-12-31")
+    assert built.observed_through == "9999-12-30"
+
+
 def test_upper_boundary_without_a_later_date_refused() -> None:
     with pytest.raises(CalendarInputError) as excinfo:
-        build_calendar_sessions(("9999-12-30",), event_through="9999-12-31")
+        build_calendar_sessions(("9999-12-31",), event_through="9999-12-31")
     assert excinfo.value.code == "INVALID_REQUEST"
 
 
