@@ -35,8 +35,10 @@ _HISTORY_START = pd.Timestamp("2024-01-02")
 _EVENT = pd.Timestamp("2024-02-15")
 _DECISION = pd.Timestamp("2024-02-14")
 
-# The three contributing source dates, deliberately all different so the happy
-# path exercises ``max`` (not a tie): daily_state 02-05, regime 02-01, runup 01-20.
+# The three contributing MARKET source dates, deliberately all different so the
+# happy path exercises ``max`` (not a tie): daily_state 02-05, regime 02-01,
+# runup 01-20; the default kept history's availability (01-12) is earlier still,
+# so it never moves the default anchor.
 _DAILY_STATE_SOURCE = "2024-02-05"
 _REGIME_SOURCE = "2024-02-01"
 _RUNUP_SOURCE = "2024-01-20"
@@ -206,7 +208,8 @@ def test_1_happy_path_all_four_reads_and_max_anchor():
     assert "n_prior" in panel and panel["n_prior"] == 2
     assert "spy_ret21" in panel
     assert "signed_streak" in panel
-    # The three contributing dates differ; the anchor is the latest.
+    # The three MARKET source dates differ (the default kept history resolves to
+    # the earlier 2024-01-12); the anchor is the latest.
     assert result.panel_anchor == pd.Timestamp(_DAILY_STATE_SOURCE)
     # spy_* and runup_* keys survive as plain floats; the ema fallback is the mean.
     # regime.py's formula, mirrored over the same spots: every SPY date is
@@ -286,7 +289,7 @@ def test_7_retry_is_idempotent():
     _rows_equal(first.panel_row, second.panel_row)
 
 
-def test_8_all_three_anchors_absent_gives_none():
+def test_8_all_contributing_anchors_absent_gives_none():
     snapshot = _snapshot()
     batches = _default_batches()
     # No eligible daily_state row (src_iv absent) -> source_session None.
@@ -774,3 +777,100 @@ def test_27_negative_control_delayed_close_availability_bypass_is_detected(monke
     monkeypatch.setattr(panel_row_inputs, "_session_day", _bypass)
     with pytest.raises(AssertionError, match=r"assert 2 == 1"):
         test_19_delayed_close_amc_event_enters_history_only_at_producer_derived_availability()
+
+
+# --------------------------------------------------------------------------
+# panel_anchor: used-history outcome availability as a contributing date
+# --------------------------------------------------------------------------
+
+
+def _used_history_row():
+    """One kept prior move whose outcome became available late (2024-02-19) yet
+    still on or before the 2024-02-20 decision, with a legitimate far-later
+    computed_at write (2024-03-01) that must never become an anchor."""
+    return {**_computed_rows([("2024-02-12", 2.0, False)])[0],
+            "available_as_of_date": "2024-02-19",
+            "computed_at": "2024-03-01T00:00:00Z"}
+
+
+def _scan_at(batches, *, decision, event):
+    snapshot = _snapshot()
+    repo = _WindowedComputedRepository(snapshot, _contracts(), batches)
+    key = BoardRequest(ticker="AAA", strategy="STR-X", event_date=event, session="AMC")
+    return scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                          decision_session=decision)
+
+
+@pytest.mark.parametrize("price_count", [320, 10])
+def test_28_history_availability_is_latest_contributor(price_count):
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [_used_history_row()]
+    batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = _price_rows(n=price_count)
+    result = _scan_at(batches, decision=pd.Timestamp("2024-02-20"),
+                      event=pd.Timestamp("2024-02-21"))
+    panel = result.panel_row
+    assert result.panel_anchor == pd.Timestamp("2024-02-19")
+    assert result.panel_anchor <= pd.Timestamp("2024-02-20")
+    for market_source in (_DAILY_STATE_SOURCE, _REGIME_SOURCE, _RUNUP_SOURCE):
+        assert result.panel_anchor > pd.Timestamp(market_source)
+    # A 2024-02-10 freshness cutoff would have accepted the old max market
+    # anchor (2024-02-05); the used history's availability now outranks it.
+    assert result.panel_anchor > pd.Timestamp("2024-02-10") >= pd.Timestamp(_DAILY_STATE_SOURCE)
+    assert panel["n_prior"] == 1
+    assert panel["mean_prior_move"] == pytest.approx(2.0)
+    assert panel["signed_streak"] == 1.0
+    assert panel["ema12r_abs"] == 2.0
+    assert panel["date"] == "2024-02-21"
+    if price_count == 10:
+        assert math.isnan(panel["ret5"])
+
+
+@pytest.mark.parametrize("case", [
+    "empty_history",
+    "numeric_move_null_availability",
+    "numeric_move_availability_after_decision",
+    "skipped_row_with_availability",
+])
+def test_29_noncontributing_computed_rows_do_not_advance_anchor(case):
+    batches = _default_batches()
+    if case == "empty_history":
+        history_rows = []
+    elif case == "numeric_move_null_availability":
+        history_rows = [{**_computed_rows([("2024-02-12", 2.0, False)])[0],
+                         "available_as_of_date": None}]
+    elif case == "numeric_move_availability_after_decision":
+        history_rows = [{**_computed_rows([("2024-02-12", 2.0, False)])[0],
+                         "available_as_of_date": "2024-02-21"}]
+    else:
+        # Eligible to the availability scan yet deliberately unused by the
+        # arithmetic: the bound must come from kept_moves, not all scanned rows.
+        history_rows = [{"ticker": "AAA", "event_date": "2024-02-12",
+                         "realized_move_pct": None, "skipped": True,
+                         "available_as_of_date": "2024-02-19"}]
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = history_rows
+    result = _scan_at(batches, decision=pd.Timestamp("2024-02-20"),
+                      event=pd.Timestamp("2024-02-21"))
+    panel = result.panel_row
+    assert panel["n_prior"] == 0
+    assert panel["signed_streak"] == 0.0
+    assert result.panel_anchor == pd.Timestamp(_DAILY_STATE_SOURCE)
+
+
+def test_30_used_history_alone_resolves_anchor():
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = [_used_history_row()]
+    # Every market contributor's own date is unresolvable -- the daily-state
+    # query returns only rows without an eligible src_iv, SPY is empty, and
+    # ten price rows cannot resolve a runup anchor -- yet the queries still
+    # have real rows where required, so no empty-source refusal happens.
+    batches[("daily_market", "AAA")] = _dm_rows("AAA", ["2024-02-05"], src_iv=None)
+    batches[("daily_market", "SPY")] = []
+    batches[(PRICE_HISTORY_TABLE_NAME, "AAA")] = _price_rows(n=10)
+    result = _scan_at(batches, decision=pd.Timestamp("2024-02-20"),
+                      event=pd.Timestamp("2024-02-21"))
+    panel = result.panel_row
+    assert result.panel_anchor == pd.Timestamp("2024-02-19")
+    assert panel["n_prior"] == 1
+    assert panel["signed_streak"] == 1.0
+    assert panel["ema12r_abs"] == 2.0
+    assert math.isnan(panel["ret5"])

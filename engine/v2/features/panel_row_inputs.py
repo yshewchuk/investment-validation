@@ -29,7 +29,9 @@ The four always-made pinned-snapshot dependencies:
   ``runup_math.add_runup_features``.
 
 ``panel_anchor`` is the latest (freshest) of whichever
-contributing reads' own source dates resolve -- never a caller-asserted value.
+contributing reads' own source dates resolve, or -- for the computed-move
+history -- the outcome-availability dates of the rows actually used; never a
+caller-asserted value.
 """
 from __future__ import annotations
 
@@ -360,6 +362,7 @@ def scan_panel_row(
     computed_rows = _read_computed_moves(repository, snapshot, key.ticker, start, decision, event_day)
     kept_moves = _kept_prior_moves(computed_rows)
     history = _history_from_kept_moves(kept_moves)
+    history_asof = _anchor(*(row["available_as_of_date"] for row in kept_moves))
 
     spy_rows = _read_spy_market(repository, snapshot, start, decision)
     regime_features, regime_asof = _regime_from_spy(spy_rows, event_day, decision)
@@ -368,7 +371,8 @@ def scan_panel_row(
         repository, snapshot, key.ticker, decision, event_day, history, kept_moves,
     )
 
-    panel_anchor = _anchor(daily_state.source_session, regime_asof, runup_asof)
+    panel_anchor = _anchor(daily_state.source_session, regime_asof, runup_asof,
+                           history_asof)
     panel_row: dict[str, Any] = {
         **daily_state.values,
         **history,
