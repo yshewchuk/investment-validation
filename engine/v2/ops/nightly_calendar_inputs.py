@@ -35,6 +35,7 @@ from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     validated_as_of,
 )
+from engine.v2.scoring.source_inputs import SUPPORTED_STRATEGIES
 
 __all__ = ["scan_calendar_row_inputs", "scan_candidate_expiries", "scan_decision_calendar"]
 
@@ -46,6 +47,15 @@ _RIGHTS = frozenset({"C", "P"})
 #: context (put menu, DYN-SV) is a listed put. Mirrors generation's own
 #: ``_select_listed_straddle`` (call ∩ put) vs ``_listed_put_expiries`` (put).
 _STRADDLE_DOMAIN = frozenset({"STR-THRU", "STR-RUNUP"})
+#: The strategy/session domains whose expiry this staging can resolve at all.
+#: Strategies: the board universe's own values -- ``native_board_universe``
+#: builds every request from ``source_inputs.SUPPORTED_STRATEGIES`` plus the one
+#: ``DYN-SV`` meta-request, exactly the set the candidate policy above (straddle
+#: ∩ vs listed put) and ``planned_exit_date``'s exit anchor both know. Sessions:
+#: the two ``planned_exit_date`` anchors on. An unsupported nonempty value is
+#: malformed input, never a legitimately empty eligible expiry domain.
+_SUPPORTED_STRATEGIES = frozenset(SUPPORTED_STRATEGIES) | {"DYN-SV"}
+_SUPPORTED_SESSIONS = frozenset({"BMO", "AMC"})
 _TRANSLATABLE_REFUSALS = ("NO_EXPIRY_ON_OR_AFTER:", "NO_EXPIRY_DTE_AT_LEAST:")
 _NO_RESOLVABLE = "NO_RESOLVABLE_EXPIRY"
 _BATCH_CAP = 50_000
@@ -71,6 +81,18 @@ def _require_key(key: Any) -> BoardRequest:
     ):
         raise fail("INVALID_REQUEST", "calendar input key requires non-empty identity fields")
     return key
+
+
+def _require_supported_domains(key: BoardRequest) -> None:
+    """Strategy/session domain checks, raised before any expiry handling: an
+    unsupported nonempty value would otherwise be staged as if it were a real
+    request whose listed expiry domain simply came back empty, and land on
+    ``NO_RESOLVABLE_EXPIRY`` -- a refusal shape that hides malformed input
+    behind a data-shape one. Never echo the submitted value back."""
+    if key.strategy not in _SUPPORTED_STRATEGIES:
+        raise fail("INVALID_REQUEST", "calendar input key has an unsupported strategy")
+    if key.session not in _SUPPORTED_SESSIONS:
+        raise fail("INVALID_REQUEST", "calendar input key has an unsupported session")
 
 
 def _date_string(value: Any) -> str:
@@ -158,13 +180,16 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
                              decision_session: Any, calendar: CalendarSessions) -> CalendarRowInputs:
     """One row's pinned spot, resolved strategy expiry and independent planned
     exit staged into ``scan_calendar_row``. A missing/unusable exact-session
-    spot or a repository failure fails the whole call; an empty eligible expiry
-    domain, or the native no-expiry geometry refusals, are the one per-key
-    ``NO_RESOLVABLE_EXPIRY`` refusal -- every other geometry/input error
-    propagates."""
+    spot or a repository failure fails the whole call; the key's strategy and
+    session domains are checked first, so an unsupported value is
+    ``INVALID_REQUEST`` rather than a masked expiry refusal; an empty eligible
+    expiry domain, or the native no-expiry geometry refusals, are the one
+    per-key ``NO_RESOLVABLE_EXPIRY`` refusal -- every other geometry/input
+    error propagates."""
     from engine.v2.domain.generation import GeometryRefusal, resolve_expiry
 
     _require_key(key)
+    _require_supported_domains(key)
     _calendar_day(key.event_date, "event_date")
     session_day = _calendar_day(decision_session, "decision_session")
     series = get_price_series(repository, PriceQuery(

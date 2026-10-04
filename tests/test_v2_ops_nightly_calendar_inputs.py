@@ -549,6 +549,51 @@ def test_calendar_row_inputs_translates_runup_dte_no_expiry(tmp_path):
     assert exc.value.key is key
 
 
+_UNSUPPORTED_DOMAINS = [
+    ("strategy_empty_candidates", replace(_STRADDLE_KEY, strategy="NOT-A-STRATEGY"),
+     [_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0, right="C")]),
+    ("strategy_candidates", replace(_STRADDLE_KEY, strategy="NOT-A-STRATEGY"),
+     _common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 10), 100.0)),
+    ("session_empty_candidates", replace(_STRADDLE_KEY, session="OVD"),
+     [_chain_row("AAA", datetime(2024, 1, 5), datetime(2024, 1, 19), 100.0, right="C")]),
+    ("session_candidates", replace(_STRADDLE_KEY, session="OVD"),
+     _common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 10), 100.0)),
+]
+
+
+@pytest.mark.parametrize("key, chains",
+                         [(key, chains) for _, key, chains in _UNSUPPORTED_DOMAINS],
+                         ids=[name for name, _, _ in _UNSUPPORTED_DOMAINS])
+def test_calendar_row_inputs_rejects_unsupported_strategy_or_session_before_expiry(
+        tmp_path, key, chains):
+    """A genuinely empty eligible domain is ``NO_RESOLVABLE_EXPIRY``; an
+    unsupported nonempty strategy/session is malformed input and must refuse
+    ``INVALID_REQUEST`` -- whether the candidate scan came back empty (only a
+    call listed) or populated (the listed expiry is pre-event, the native
+    refusal this staging translates)."""
+    repository, snapshot = _snapshot(
+        tmp_path,
+        price={"AAA": [_price_row("AAA", _SESSION, close_raw=12.5)]},
+        chains=chains)
+    with pytest.raises(OpsError) as exc:
+        scan_calendar_row_inputs(repository, snapshot, key,
+                                 decision_session=_SESSION, calendar=_CALENDAR)
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_calendar_row_inputs_rejects_unsupported_domains_before_source_reads(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("source read before strategy/session validation")
+
+    monkeypatch.setattr(nci, "get_price_series", forbidden)
+    for key in (replace(_STRADDLE_KEY, strategy="NOT-A-STRATEGY"),
+                replace(_STRADDLE_KEY, session="OVD")):
+        with pytest.raises(OpsError) as exc:
+            scan_calendar_row_inputs(None, None, key,
+                                     decision_session=_SESSION, calendar=_CALENDAR)
+        assert exc.value.code == "INVALID_REQUEST"
+
+
 @pytest.mark.parametrize("code", [
     "EXPIRY_NOT_LISTED:2024-02-16", "NO_EXPIRY_ON_OR_AFTER", "UNRELATED_GEOMETRY"])
 def test_calendar_row_inputs_propagates_untranslated_geometry_refusals(
