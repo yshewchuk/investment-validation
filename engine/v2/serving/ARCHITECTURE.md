@@ -63,8 +63,8 @@ marked agree/differ and stored values only for differing fields;
 `/native_parity/unpaired?side=legacy|native` pages unpaired row keys.
 Both detail routes accept an optional `row_key` filter. These authenticated
 reads consume one safely opened report per request and never rerun comparisons.
-The API and compatibility preview share validation of modern report fields,
-including dimension and finding-field membership in the shared field groups.
+The API validates modern report fields, including dimension and finding-field
+membership in the shared field groups.
 Forwarded summary and detail values must encode as finite UTF-8 JSON; non-finite
 numbers, invalid Unicode and parser/encoder recursion failures receive the same
 malformed-report refusal. Legacy summaries still ignore saved mismatch values;
