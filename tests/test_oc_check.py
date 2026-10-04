@@ -253,9 +253,12 @@ class TestSelfMetrics:
         """A non-SystemExit crash from _main must reach the caller and still land
         one metrics line with exit=1 (main()'s BaseException branch), not swallow it."""
         def boom():
+            # mirrors a real run: _main populates RUN after main() has reset
+            # per-invocation state, so metrics only get recorded if RUN is
+            # filled from inside _main, not before main() is called
+            oc_check.RUN["mode"] = "normal"
             raise RuntimeError("unexpected crash")
         monkeypatch.setattr(oc_check, "_main", boom)
-        oc_check.RUN["mode"] = "normal"  # main() only records metrics once RUN is populated
         with pytest.raises(RuntimeError):
             oc_check.main()
         (line,) = self._lines()
