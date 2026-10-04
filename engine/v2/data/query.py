@@ -27,13 +27,15 @@ Judgement calls (this package's own, task brief P2-4):
   narrower reason this module cannot prove sound.
 
 Layer 1 of ``system_rearchitecture.md`` §4.1: imports only
-``engine.v2.contracts``, this package's own ``errors``/``time_formats``, and
-``pyarrow`` (for the physical-type -> Arrow-type table shared with
+``engine.v2.contracts``, ``engine.v2.foundation``'s document helpers, this
+package's own ``documents``/``errors``/``time_formats``, and ``pyarrow``
+(for the physical-type -> Arrow-type table shared with
 ``repository.py``'s scanner) — never ``engine.v2.ops`` or legacy ``engine.*``.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pyarrow as pa
@@ -46,18 +48,21 @@ from engine.v2.contracts.data import (
     TableContract,
     TimeInterval,
 )
+from engine.v2.foundation import DocumentError, to_document
 
-from . import time_formats
+from . import documents, time_formats
 from .errors import fail
 
 __all__ = [
     "ARROW_TYPES",
+    "ScanPopulation",
     "arrow_type_for",
     "compile_batch_matcher",
     "compile_row_matcher",
     "fragment_may_match",
     "null_array_for",
     "order_key",
+    "plan_scan_population",
     "row_matches",
     "validate_query",
 ]
@@ -141,46 +146,145 @@ def _check_time_interval_column(contract: TableContract, interval: TimeInterval)
 
 
 # --------------------------------------------------------------------------
-# §8.2 step 5: fragment pruning
+# §8.2 step 5: fragment pruning and membership-bound planning
 # --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScanPopulation:
+    """The candidate fragment set one selection opens, and the manifest row
+    count they carry in total. The bound counts candidate rows — never
+    matching output rows, and never a memory estimate."""
+
+    records: tuple[FragmentRecord, ...]
+    row_count: int
+
+
+def plan_scan_population(contract: TableContract, records, *,
+                         key_filter=(), time_interval=None) -> ScanPopulation:
+    """The one membership-planning path behind scans, explains, and
+    ``Repository.scan_population_bound``: prune with the exact partition/
+    leading-primary-key/time bounds the scan itself uses, then sum the
+    surviving fragments' recorded ``row_count`` (Python integers). Selection
+    predicates are strictly re-decoded (a malformed one is
+    ``QUERY_NOT_BOUNDED``, like a malformed ``DataQuery``), and a surviving
+    fragment with non-int or negative metadata is ``MANIFEST_CORRUPT`` before
+    any object is opened. No predicates is legal here — a whole-table bound
+    is metadata planning, not a scan, which still refuses unbounded queries
+    in ``documents._check_data_query``. Error messages carry no path or row
+    value (guide §7.2 redaction)."""
+    predicates = _decoded_predicates(key_filter)
+    interval = _decoded_interval(time_interval)
+    for predicate in predicates:
+        _check_predicate_column(contract, predicate)
+    if interval is not None:
+        _check_time_interval_column(contract, interval)
+    _check_planning_timestamp_values(contract, predicates, interval)
+    surviving = tuple(record for record in records
+                      if _fragment_may_match(record, contract, predicates, interval))
+    row_count = 0
+    for record in surviving:
+        count = record.row_count
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise fail("MANIFEST_CORRUPT",
+                       "a surviving fragment's recorded row_count is not valid metadata",
+                       details={"fragment_id": record.fragment_id})
+        row_count += count
+    return ScanPopulation(records=surviving, row_count=row_count)
+
+
+def _decoded_predicates(key_filter) -> tuple[KeyPredicate, ...]:
+    if not isinstance(key_filter, (list, tuple)):
+        raise fail("QUERY_NOT_BOUNDED", "key_filter must be a list or tuple of predicates")
+    decoded = []
+    for predicate in key_filter:
+        try:
+            decoded.append(documents.decode_document(KeyPredicate, to_document(predicate)))
+        except DocumentError as exc:
+            raise fail("QUERY_NOT_BOUNDED",
+                       f"a key_filter predicate is refused: {exc.code}") from exc
+    columns = [predicate.column for predicate in decoded]
+    if len(set(columns)) != len(columns):
+        raise fail("QUERY_NOT_BOUNDED", "the same column is filtered twice")
+    return tuple(decoded)
+
+
+def _decoded_interval(time_interval) -> TimeInterval | None:
+    if time_interval is None:
+        return None
+    try:
+        return documents.decode_document(TimeInterval, to_document(time_interval))
+    except DocumentError as exc:
+        raise fail("QUERY_NOT_BOUNDED", f"a time_interval is refused: {exc.code}") from exc
+
+
+def _check_planning_timestamp_values(contract: TableContract, predicates,
+                                     interval: TimeInterval | None) -> None:
+    """Planning-path timestamp-value validation; same static refusal as the row path."""
+    for predicate in predicates:
+        if not _physical_type(contract, predicate.column).startswith("timestamp"):
+            continue
+        for value in predicate.values:
+            if not isinstance(value, str):
+                raise fail("CONTRACT_MISMATCH",
+                           "key_filter values on a timestamp column must be strings")
+            _normalize_bound(value)
+    if interval is not None:
+        for bound in (interval.start_inclusive, interval.end_exclusive):
+            if bound is not None:
+                _normalize_bound(bound)
 
 
 def fragment_may_match(record: FragmentRecord, contract: TableContract, query: DataQuery) -> bool:
     """False only when partition/key/time bounds *prove* no row in ``record``
-    could satisfy ``query``. Never a false negative."""
-    if not _partition_may_match(record, contract, query):
-        return False
-    if not _leading_key_may_match(record, contract, query):
-        return False
-    return _time_may_match(record, query)
+    could satisfy ``query``. Never a false negative. The scan and explain
+    paths reach this through :func:`plan_scan_population`; it stays public
+    for its unchanged direct callers."""
+    return _fragment_may_match(record, contract, query.key_filter, query.time_interval)
 
 
-def _partition_may_match(record: FragmentRecord, contract: TableContract, query: DataQuery) -> bool:
-    for predicate in query.key_filter:
+def _fragment_may_match(record: FragmentRecord, contract: TableContract, key_filter,
+                        interval: TimeInterval | None) -> bool:
+    if not _partition_may_match(record, contract, key_filter):
+        return False
+    if not _leading_key_may_match(record, contract, key_filter):
+        return False
+    return _time_may_match(record, interval)
+
+
+def _partition_may_match(record: FragmentRecord, contract: TableContract, key_filter) -> bool:
+    for predicate in key_filter:
         if predicate.column in contract.partition_columns:
             if record.partition_key not in {str(v) for v in predicate.values}:
                 return False
     return True
 
 
-def _leading_key_may_match(record: FragmentRecord, contract: TableContract, query: DataQuery) -> bool:
+def _leading_key_may_match(record: FragmentRecord, contract: TableContract, key_filter) -> bool:
     if not contract.primary_key or record.primary_key_min is None:
         return True
     leading = contract.primary_key[0]
     physical = _physical_type(contract, leading)
     lo, hi = record.primary_key_min[0], record.primary_key_max[0]
-    for predicate in query.key_filter:
+    for predicate in key_filter:
         if predicate.column != leading:
             continue
-        values = [_comparable_value(v, physical) if not isinstance(v, str) else v
-                  for v in predicate.values]
-        if all(v < lo or v > hi for v in values):
-            return False
+        if physical.startswith("timestamp") and any(not isinstance(value, str)
+                                                    for value in predicate.values):
+            raise fail("CONTRACT_MISMATCH",
+                       "key_filter values are incompatible with fragment key bounds")
+        try:
+            values = [_comparable_value(v, physical) if not isinstance(v, str) else v
+                      for v in predicate.values]
+            if all(v < lo or v > hi for v in values):
+                return False
+        except TypeError:
+            raise fail("CONTRACT_MISMATCH",
+                       "key_filter values are incompatible with fragment key bounds") from None
     return True
 
 
-def _time_may_match(record: FragmentRecord, query: DataQuery) -> bool:
-    interval = query.time_interval
+def _time_may_match(record: FragmentRecord, interval: TimeInterval | None) -> bool:
     if interval is None or record.time_min is None or record.time_max is None:
         return True
     if interval.end_exclusive is not None and record.time_min >= _normalize_bound(interval.end_exclusive):

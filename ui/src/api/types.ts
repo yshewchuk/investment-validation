@@ -171,3 +171,46 @@ export interface EventQuery {
   cursor?: string;
   limit?: number;
 }
+
+// #327; #349 (merged): malformed reads are 503 Problems; `partial`/`source_schema_version`/`schema_version` always on available/stale.
+export interface NativeParityReportSummary {
+  status: "available" | "stale";
+  partial: boolean;
+  source_schema_version: string;
+  as_of: string | null;
+  generated_at: string | null;
+  tolerance_policy_id: string | null;
+  compared_count: number | null;
+  matched_row_count: number | null;
+  mismatched_row_count: number | null;
+  only_legacy_count: number | null;
+  only_native_count: number | null;
+  native_refused_count: number | null;
+  native_refused_unmatched_count: number | null;
+  native_refused_reasons: Record<string, number>;
+  schema_version: SchemaVersion;
+}
+export type NativeParitySummary = NativeParityReportSummary | { status: "no_report" };
+// #349 wire shape (native_parity_projection.py `_mismatch_item`): `fields` keyed by field name; every dimension field present; `legacy`/`native` only when it differs.
+export interface NativeParityMismatchField {
+  status: "agree" | "differ";
+  legacy?: unknown;
+  native?: unknown;
+}
+export interface NativeParityMismatchItem {
+  row_key: string;
+  dimension: string;
+  fields: Record<string, NativeParityMismatchField>;
+}
+// #349 detail-page envelope (api.py `_native_parity_response`): no `total_matching`;
+// merged API answers HTTP 200 `{"status":"no_report"}` when no report exists (both detail endpoints).
+export type NativeParityPage<T> =
+  | { status: "no_report" }
+  | {
+      status: "available" | "stale";
+      as_of: string | null;
+      generated_at: string | null;
+      tolerance_policy_id: string | null;
+      items: T[];
+      next_cursor: string | null;
+    };

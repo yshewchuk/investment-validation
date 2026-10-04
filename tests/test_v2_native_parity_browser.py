@@ -1,0 +1,269 @@
+"""Native-parity summary browser checks (#327); mismatch/unpaired rendering and pagination are an owner follow-up. Synthetic page.route mocks ONLY /api/v1/native_parity** and /api/v1/releases/current, which always answers a valid 503 Problem, plus a /__data_client__/ harness serving ui/src/api/client.ts transpiled to ESM by the esbuild already installed in ui/node_modules, so the real DataClient parity detail reads run their own fetches through the mocked detail routes."""
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+from playwright.sync_api import expect
+
+from tests.fixtures.v2_ui_mock_api import build_default_state, serve_in_thread
+
+pytestmark = [pytest.mark.xdist_group("serial"), pytest.mark.browser]
+TOKEN = "browser-secret"
+PROBLEM = {"code": "NO_CURRENT_RELEASE", "category": "unavailable", "retryable": True, "message": "no release"}
+SUMMARY = {"schema_version": "native_parity_summary.v1.0", "status": "available", "partial": False, "source_schema_version": "native_parity_report.v1.2", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1", "compared_count": 12, "matched_row_count": 10, "mismatched_row_count": 2, "only_legacy_count": 1, "only_native_count": 1, "native_refused_count": 3, "native_refused_unmatched_count": 1, "native_refused_reasons": {"unknown_ticker": 2, "missing_field": 1}}
+NO_REPORT = {"status": "no_report"}
+
+@pytest.fixture(scope="module")
+def dist_dir(ui_dist_dir): return ui_dist_dir
+
+@pytest.fixture
+def server(dist_dir):
+    srv, thread = serve_in_thread(build_default_state(dist_root=dist_dir, token=TOKEN))
+    try:
+        yield srv
+    finally:
+        srv.shutdown(); thread.join(timeout=2)
+
+@pytest.fixture(autouse=True)
+def _close_new_contexts(browser):
+    existing = set(browser.contexts)
+    yield
+    for context in list(browser.contexts):
+        if context not in existing:
+            context.close()
+
+def _open_parity(browser, server, *, code=200, body=SUMMARY, hold=False):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context = browser.new_context()
+    context.add_cookies([{"name": "operations_token", "value": TOKEN, "url": base}])
+    page = context.new_page()
+    parity, pending = [], []
+
+    def handle(route):
+        url = route.request.url
+        parity.append(url)
+        if not url.split("?")[0].endswith("/api/v1/native_parity"):
+            route.fulfill(status=500, content_type="application/json", body=json.dumps(PROBLEM))
+        elif hold:
+            pending.append(route)
+        else:
+            route.fulfill(status=code, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/v1/native_parity**", handle)
+    page.route("**/api/v1/releases/current", lambda r: r.fulfill(status=503, content_type="application/json", body=json.dumps(PROBLEM)))
+    return base, context, page, parity, pending
+
+def test_loading_then_saved_identity(browser, server):
+    base, context, page, parity, pending = _open_parity(browser, server, hold=True)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-loading")).to_be_visible()
+    expect(page.get_by_test_id("parity-summary")).to_have_count(0)
+    pending[0].fulfill(status=200, content_type="application/json", body=json.dumps(SUMMARY))
+    expect(page.get_by_test_id("parity-loading")).to_have_count(0)
+    expect(page.get_by_test_id("parity-as-of")).to_contain_text("2026-09-30")
+    expect(page.get_by_test_id("parity-generated-at")).to_contain_text("2026-10-01T02:00:00Z")
+    expect(page.get_by_test_id("parity-tolerance")).to_contain_text("tol-1")
+    assert len(parity) == 1
+    context.close()
+
+def test_401_summary_shows_unauthenticated(browser, server):
+    base, context, page, parity, _ = _open_parity(browser, server, code=401,
+        body={"code": "UNAUTHENTICATED", "category": "auth", "retryable": False, "message": "sign in"})
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-unauthenticated")).to_be_visible()
+    expect(page.get_by_test_id("parity-summary")).to_have_count(0)
+    assert len(parity) == 1
+    context.close()
+
+def test_no_report_summary(browser, server):
+    base, context, page, parity, _ = _open_parity(browser, server, body=NO_REPORT)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-no-report")).to_be_visible()
+    expect(page.get_by_test_id("parity-summary")).to_have_count(0)
+    assert len(parity) == 1
+    context.close()
+
+COUNT_FIELDS = [("parity-compared", "compared_count"), ("parity-matched", "matched_row_count"),
+    ("parity-mismatched", "mismatched_row_count"), ("parity-only-legacy", "only_legacy_count"),
+    ("parity-only-native", "only_native_count"), ("parity-native-refused", "native_refused_count"),
+    ("parity-native-refused-unmatched", "native_refused_unmatched_count")]
+MALFORMED = {"code": "NATIVE_PARITY_REPORT_MALFORMED", "category": "unavailable", "retryable": True, "message": "malformed report"}
+STALE = dict(SUMMARY, status="stale")
+ZERO = dict(SUMMARY, native_refused_reasons={},
+    **{field: 0 for _, field in COUNT_FIELDS})
+PARTIAL = dict(ZERO, partial=True, source_schema_version="native_parity_report.v1.1")
+
+def test_stale_shows_saved_summary(browser, server):
+    base, context, page, parity, _ = _open_parity(browser, server, body=STALE)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-stale")).to_be_visible()
+    expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    expect(page.get_by_test_id("parity-as-of")).to_have_text(STALE["as_of"])
+    expect(page.get_by_test_id("parity-generated-at")).to_have_text(STALE["generated_at"])
+    expect(page.get_by_test_id("parity-tolerance")).to_have_text(STALE["tolerance_policy_id"])
+    for testid, field in COUNT_FIELDS:
+        expect(page.get_by_test_id(testid)).to_have_text(str(STALE[field]))
+    expect(page.get_by_test_id("parity-refusal-reason")).to_have_count(2)
+    expect(page.get_by_test_id("parity-refusal-reason").filter(has_text="unknown_ticker: 2")).to_have_text("unknown_ticker: 2")
+    expect(page.get_by_test_id("parity-refusal-reason").filter(has_text="missing_field: 1")).to_have_text("missing_field: 1")
+    expect(page.get_by_test_id("parity-unavailable")).to_have_count(0)
+    expect(page.get_by_test_id("parity-no-report")).to_have_count(0)
+    assert len(parity) == 1 and parity[0].split("?")[0].endswith("/api/v1/native_parity")
+    context.close()
+
+def test_503_malformed_withheld_as_unavailable(browser, server):
+    base, context, page, parity, _ = _open_parity(browser, server, code=503, body=MALFORMED)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-unavailable")).to_contain_text("NATIVE_PARITY_REPORT_MALFORMED")
+    expect(page.get_by_test_id("parity-summary")).to_have_count(0)
+    expect(page.get_by_test_id("parity-no-report")).to_have_count(0)
+    expect(page.get_by_test_id("parity-stale")).to_have_count(0)
+    assert len(parity) == 1
+    context.close()
+
+def test_zero_saved_counts_render_actual_zero(browser, server):
+    base, context, page, parity, _ = _open_parity(browser, server, body=ZERO)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    for testid, field in COUNT_FIELDS:
+        expect(page.get_by_test_id(testid)).to_have_text("0")
+    expect(page.get_by_test_id("parity-as-of")).to_have_text(ZERO["as_of"])
+    expect(page.get_by_test_id("parity-tolerance")).to_have_text(ZERO["tolerance_policy_id"])
+    expect(page.get_by_test_id("parity-refusal-reasons-empty")).to_have_text("No refusal reasons.")
+    expect(page.get_by_test_id("parity-refusal-reason")).to_have_count(0)
+    expect(page.get_by_test_id("parity-no-report")).to_have_count(0)
+    expect(page.get_by_test_id("parity-unavailable")).to_have_count(0)
+    expect(page.get_by_test_id("parity-stale")).to_have_count(0)
+    assert len(parity) == 1
+    context.close()
+
+def test_partial_saved_summary_shows_incomplete_refusals_banner(browser, server):
+    base, context, page, parity, _ = _open_parity(browser, server, body=PARTIAL)
+    page.goto(base + "/#/native-parity")
+    expect(page.get_by_test_id("parity-summary")).to_be_visible()
+    expect(page.get_by_test_id("parity-partial")).to_be_visible()
+    expect(page.get_by_test_id("parity-partial")).to_contain_text("refusal counts below are incomplete")
+    expect(page.get_by_test_id("parity-native-refused")).to_have_text("0")
+    expect(page.get_by_test_id("parity-refusal-reasons-empty")).to_have_text("No refusal reasons.")
+    assert len(parity) == 1
+    context.close()
+
+def test_shared_board_link_reaches_parity_after_no_release(browser, server):
+    # releases/current is 503 in _open_parity, so the board opens into its
+    # no-release state; the shared link must still reach the parity summary.
+    base, context, page, parity, _ = _open_parity(browser, server)
+    try:
+        page.goto(base + "/#/")
+        expect(page.get_by_test_id("no-release")).to_be_visible()
+        page.get_by_test_id("native-parity-link").click()
+        expect(page).to_have_url(base + "/#/native-parity")
+        expect(page.get_by_test_id("parity-summary")).to_be_visible()
+        expect(page.get_by_test_id("parity-as-of")).to_have_text(SUMMARY["as_of"])
+        assert len(parity) == 1
+    finally:
+        context.close()
+
+UI_ROOT = Path(__file__).resolve().parents[1] / "ui"
+HARNESS_PATH = "/__data_client__/harness.html"
+CLIENT_PATH = "/__data_client__/client.js"
+MISMATCH_PAGE = {"status": "available", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1",
+    "items": [
+        {"row_key": "AAPL|2026-09-15|STR-THRU", "dimension": "verdicts", "fields": {
+            "gate_score": {"status": "differ", "legacy": 0.61, "native": 0.63},
+            "gate_threshold": {"status": "agree"}, "gate_pass": {"status": "agree"}}},
+        {"row_key": "MSFT|2026-09-18|STR-THRU", "dimension": "financial_diagnostics", "fields": {
+            "entry_cost_pct": {"status": "agree"},
+            "model_vs_market": {"status": "differ", "legacy": -0.015, "native": 0.02},
+            "fair_premium_pct": {"status": "agree"}, "premium_vs_fair": {"status": "agree"},
+            "cost_over_width": {"status": "agree"}}}],
+    "next_cursor": "mm-2"}
+UNPAIRED_PAGE = {"status": "available", "as_of": "2026-09-30", "generated_at": "2026-10-01T02:00:00Z", "tolerance_policy_id": "tol-1",
+    "items": ["NVDA|2026-09-22|STR-THRU", "TSLA|2026-09-29|STR-THRU"], "next_cursor": None}
+
+def _transpile_client(tmp_path):
+    """`ui/src/api/client.ts` transpiled to plain ESM by the esbuild already in
+    `ui/node_modules` (present because the session `ui_dist_dir` fixture ran
+    `npm ci`), written under `tmp_path` for a Playwright route to serve. Only
+    the network is mocked below; the module, its `getJson`, `queryString` and
+    the two detail methods are the real client code."""
+    out = tmp_path / "client.js"
+    script = tmp_path / "transpile.cjs"
+    script.write_text(
+        "const fs = require('fs');\n"
+        f"const esbuild = require({json.dumps(str(UI_ROOT / 'node_modules' / 'esbuild'))});\n"
+        f"const source = fs.readFileSync({json.dumps(str(UI_ROOT / 'src' / 'api' / 'client.ts'))}, 'utf8');\n"
+        "const transpiled = esbuild.transformSync(source, {loader: 'ts', format: 'esm'});\n"
+        f"fs.writeFileSync({json.dumps(str(out))}, transpiled.code);\n", encoding="utf-8")
+    subprocess.run(["node", str(script)], check=True, capture_output=True, text=True, timeout=120)
+    js = out.read_text(encoding="utf-8")
+    assert "createHttpDataClient" in js and "import type" not in js
+    return js
+
+def _open_data_client(browser, server, client_js, route_name, body):
+    base = f"http://127.0.0.1:{server.server_port}"
+    context = browser.new_context()
+    page = context.new_page()
+    calls = []
+    page.route(f"**{HARNESS_PATH}",
+        lambda r: r.fulfill(status=200, content_type="text/html", body="<html><body>data-client harness</body></html>"))
+    page.route(f"**{CLIENT_PATH}",
+        lambda r: r.fulfill(status=200, content_type="text/javascript", body=client_js))
+
+    def handle(route):
+        calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route(f"**/api/v1/native_parity/{route_name}**", handle)
+    return base, context, page, calls
+
+IMPORT_AND_CALL = ("async ([method, args]) => {"
+    " const mod = await import(" + json.dumps(CLIENT_PATH) + ");"
+    " const client = mod.createHttpDataClient(" + json.dumps("/api/v1") + ");"
+    " return await client[method](...args); }")
+
+def test_mismatches_no_report_is_status_only(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "mismatches", NO_REPORT)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityMismatches", [5, None]])
+        assert result == {"status": "no_report"}
+        assert calls == [base + "/api/v1/native_parity/mismatches?limit=5"]
+    finally:
+        context.close()
+
+def test_unpaired_no_report_is_status_only(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "unpaired", NO_REPORT)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityUnpaired", ["native", 4, None]])
+        assert result == {"status": "no_report"}
+        assert calls == [base + "/api/v1/native_parity/unpaired?side=native&limit=4"]
+    finally:
+        context.close()
+
+def test_mismatches_available_page_round_trips_exactly(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "mismatches", MISMATCH_PAGE)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityMismatches", [2, "mm-1"]])
+        assert result == MISMATCH_PAGE
+        assert calls == [base + "/api/v1/native_parity/mismatches?limit=2&cursor=mm-1"]
+    finally:
+        context.close()
+
+def test_unpaired_available_page_round_trips_exactly(browser, server, tmp_path):
+    base, context, page, calls = _open_data_client(
+        browser, server, _transpile_client(tmp_path), "unpaired", UNPAIRED_PAGE)
+    try:
+        page.goto(base + HARNESS_PATH)
+        result = page.evaluate(IMPORT_AND_CALL, ["getNativeParityUnpaired", ["legacy", 3, "uc-1"]])
+        assert result == UNPAIRED_PAGE
+        assert calls == [base + "/api/v1/native_parity/unpaired?side=legacy&limit=3&cursor=uc-1"]
+    finally:
+        context.close()

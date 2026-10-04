@@ -16,6 +16,9 @@ import type {
   EventQuery,
   EventScoreSummary,
   LegacyScoreBridge,
+  NativeParityMismatchItem,
+  NativeParityPage,
+  NativeParitySummary,
   OperationsHealth,
   PreviewRelease,
   ProblemEnvelope,
@@ -148,6 +151,19 @@ export interface DataClient {
    * never "current". */
   getScore(scoreId: string, releaseId: string, signal?: AbortSignal): Promise<LegacyScoreBridge>;
   getOperations(signal?: AbortSignal): Promise<OperationsHealth>;
+  /** #327 parity reads — no release pin, no `release_id` query parameter. */
+  getNativeParity(signal?: AbortSignal): Promise<NativeParitySummary>;
+  getNativeParityMismatches(
+    limit: number,
+    cursor: string | null,
+    signal?: AbortSignal,
+  ): Promise<NativeParityPage<NativeParityMismatchItem>>;
+  getNativeParityUnpaired(
+    side: "legacy" | "native",
+    limit: number,
+    cursor: string | null,
+    signal?: AbortSignal,
+  ): Promise<NativeParityPage<string>>;
 }
 
 /** The only implementation today: same-origin HTTP against §6's routes. */
@@ -177,6 +193,20 @@ export function createHttpDataClient(basePath = "/api/v1"): DataClient {
     },
     getOperations(signal) {
       return getJson<OperationsHealth>(`${basePath}/operations`, signal);
+    },
+    getNativeParity(signal) {
+      return getJson<NativeParitySummary>(`${basePath}/native_parity`, signal);
+    },
+    getNativeParityMismatches(limit, cursor, signal) {
+      const search = queryString({ limit, cursor: cursor ?? undefined });
+      return getJson<NativeParityPage<NativeParityMismatchItem>>(
+        `${basePath}/native_parity/mismatches${search}`,
+        signal,
+      );
+    },
+    getNativeParityUnpaired(side, limit, cursor, signal) {
+      const search = queryString({ side, limit, cursor: cursor ?? undefined });
+      return getJson<NativeParityPage<string>>(`${basePath}/native_parity/unpaired${search}`, signal);
     },
   };
 }

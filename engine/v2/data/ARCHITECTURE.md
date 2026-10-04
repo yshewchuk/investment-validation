@@ -52,6 +52,9 @@ interface section; this names only the load-bearing entry points.
   exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
   Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
   `get_close`, and `explain_dependencies`.
+  Metadata-only `scan_population_bound` sums recorded counts of surviving
+  fragments of the supplied snapshot, with no head fallback or object reads;
+  request limits are validated separately from this planning interface.
 - **Pure primitives, no I/O** — `query.py` and `documents.py` (`manifests.py`
   and `objects.py` are identity builders, not pure: `manifests.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which
@@ -114,6 +117,19 @@ interface section; this names only the load-bearing entry points.
   `Repository.get_price_series`/`.get_close`.
 - **Errors** — `errors.DataError`, built only from a registered
   `DATA_FAILURE_CODES` entry.
+- **Neutral snapshot inventory** — `tools.reregister_snapshot.neutral_inventory`
+  accepts explicit source snapshot, receipt, scope and generation pins and returns
+  deterministic table/object membership, partition/count/bound metadata,
+  reference bindings and native capture history. It never parses contract
+  documents or recomputes native values. Price-history captures follow the pinned
+  receipt lineage; computed-moves captures retain their existing contract-wide
+  scope. One read transaction pins the inventory; callers own supported source
+  identity validation, object-byte verification, publication, and computing
+  the canonical inventory hash (`engine.v2.foundation.content_hash` over the
+  returned payload) and comparing that hash with the exported expectation to
+  detect drift. Internally the tool builds every typed refusal through
+  `engine.v2.data.errors` and `engine.v2.contracts.data.DATA_FAILURE_CODES`:
+  its dependency on the data error catalog is part of this contract.
 
 ## Inputs
 
@@ -252,14 +268,14 @@ and retryability come from that table, never guessed at a call site.
 | `SNAPSHOT_NOT_FOUND` | dependency | no | unknown `snapshot_id` |
 | `SNAPSHOT_NOT_READY` | dependency | yes | scope has no committed head yet |
 | `SNAPSHOT_CONFLICT` | dependency | yes | head-fence or compare-and-swap mismatch |
-| `CONTRACT_MISMATCH` | validation | no | table/column absent from a snapshot or contract |
-| `QUERY_NOT_BOUNDED` | validation | no | an unbounded `DataQuery`/`ChainQuery` |
+| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including malformed timestamp key-predicate strings, non-string timestamp predicate values, or predicate scalars incompatible with fragment key bounds |
+| `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
-| `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row |
+| `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
 | `UNSUPPORTED_CONTRACT` | validation | no | an operation on a table contract this code path does not implement |
 | `EVENT_NOT_FOUND` | dependency | no | `events.get_event` for an unknown key |
@@ -279,8 +295,17 @@ and retryability come from that table, never guessed at a call site.
 | R2 — cache | Bounds come from the pinned fragment membership; no current-head fallback or cached bound from another snapshot. |
 | R3 — retry | No internal scan retry; integrity and result-limit refusals require corrected inputs. Registration retries retain the head fence. |
 | R4 — transaction | Re-registration commits complete new identities and the head CAS atomically; changed definitions never overwrite registered contracts. |
-| R5 — partial result/write | A fragment footer count differing from its recorded count refuses `MANIFEST_CORRUPT` before that fragment yields rows. Earlier streamed batches may already have been consumed; they are not a successful complete result. Failed registration leaves the head unchanged and staged objects unreferenced. |
+| R5 — partial result/write | Invalid surviving counts refuse `MANIFEST_CORRUPT` before streams open. A fragment footer count differing from its recorded count refuses `MANIFEST_CORRUPT` before that fragment yields rows. Earlier streamed batches may already have been consumed; they are not a successful complete result. Failed registration leaves the head unchanged and staged objects unreferenced. |
 | R6 — idempotency | An identical registration request reuses its committed receipt through the same head fence; a conflicting identity refuses. Scan completion requires exhaustion without an error. |
+
+For neutral inventory reads, missing relational members or invalid receipt
+lineage refuse `INPUT_CHANGED`; inconsistent fragment metadata or row counts
+refuse `MANIFEST_CORRUPT`. Retryability follows the table above. There is no
+automatic retry or cached inventory and no catalog writes or artifact output.
+An active caller transaction refuses `INPUT_CHANGED` without altering it.
+The same pins and metadata yield the same inventory; the caller-owned
+canonical `content_hash` of the payload, compared with the exported
+expectation, detects drift, including changed table membership.
 
 **Snapshot commit (4c R1–R6).** Missing input: `INPUT_CHANGED`/
 `CONTRACT_MISMATCH` before any write; every contract/fragment/manifest is
@@ -338,6 +363,8 @@ Root doc §5 invariants this package is responsible for:
   its own retained-memory or cardinality requirement; exceeding the manifest
   bound is `QUERY_NOT_BOUNDED`. Fragment counts bound candidate rows, not the
   exact predicate-matching population or total process memory.
+  Slice A supplies shared membership-bound planning and footer-count integrity;
+  slice E enables zero queries and enforces the manifest bound on request limits.
 - **Missing input → typed refusal, never a silent default** — every failure
   path raises a `DataError`/`Problem` from the table above.
 - **Snapshot/root isolation** — every store path resolves through

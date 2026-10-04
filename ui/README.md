@@ -118,13 +118,29 @@ index.html`) via `compatibilityLink()` (`src/format.ts`).
   is `unavailable` with no scores, null field vs. a real zero,
   a refusal row, and paging.
 
+**Native parity summary** (`#/native-parity`) reads `/api/v1/native_parity`
+through the same typed client and cookie. It shows saved status, as-of and
+generation identity, tolerance policy, counts and refusal reasons. This view
+works independently of board release discovery. The typed client exposes the
+documented detail endpoints for a follow-up view. Per-field legacy/native
+values, unpaired keys and their pagination are deferred to that slice
+(estimated 100–130 production lines plus browser tests). Preview retirement
+is owned by a separate PR.
+
+- **States covered**: loading, unauthenticated (401), `no_report`, `stale`
+  banner with data retained, `unavailable` error without data, zero saved
+  counts and empty refusal reasons, and partial saved reports with incomplete
+  refusal data. Browser tests mock the
+  documented API contract (`tests/test_v2_native_parity_browser.py`).
+
 ### Routing (`src/routes.ts`, P3-3b)
 
 Hash routes, no router library (three view shapes don't need one — guide
 §7): `#/release/<id>` (board), `#/release/<id>/events/<event_id>` (event
 detail), `#/release/<id>/scores/<score_id>` or `#/release/<id>/events/
 <event_id>/scores/<score_id>` (score detail, with or without an event
-context). Every route names `release_id` explicitly.
+context). These release views name `release_id` explicitly; the standalone
+`#/native-parity` route reads the latest parity report without a release pin.
 
 - **Pin resolution is route-aware** (`src/hooks.ts` `useResolvedRelease`,
   replacing P3-3a's `usePinnedRelease`): a bare `#/` or no hash pins to
