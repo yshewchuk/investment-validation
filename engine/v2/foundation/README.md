@@ -1,5 +1,7 @@
 # `engine/v2/foundation`
 
+See [component architecture](ARCHITECTURE.md) for detailed contracts, inputs and outputs, dependencies, and failure semantics.
+
 ## Ownership
 
 Implements the **paths, env, canonical JSON, session/calendar arithmetic, causality primitives** row of the §4 owner table of

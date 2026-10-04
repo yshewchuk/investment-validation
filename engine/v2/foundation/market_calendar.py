@@ -160,6 +160,8 @@ def _field(obj: Any, name: str) -> Any:
 
 def _pre_anchor(day: date, session: str, days: list[date]) -> date:
     """Last information-free close: the AMC event day itself, else the prior session."""
+    if not days or day > days[-1]:
+        raise CalendarInputError(f"no calendar coverage for {day} ({session})")
     if session == "AMC" and day in days:
         return day
     earlier = [d for d in days if d < day]

@@ -204,6 +204,30 @@ def test_insufficient_anchor_coverage(calendar: CalendarSessions) -> None:
     assert excinfo.value.code == "INVALID_REQUEST"
 
 
+def test_final_session_endpoint_events_keep_their_anchors(calendar: CalendarSessions) -> None:
+    final = calendar.days[-1]
+    assert final == "2024-03-18"
+    assert planned_exit_date(_key("STR-RUNUP", final, "BMO"), calendar) == "2024-03-15"
+    assert planned_exit_date(_key("STR-RUNUP", final, "AMC"), calendar) == final
+
+
+@pytest.mark.parametrize("session", ["BMO", "AMC"])
+def test_event_strictly_after_final_session_refused(calendar: CalendarSessions, session: str) -> None:
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-RUNUP", "2024-03-19", session), calendar)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
+def test_empty_calendar_refused() -> None:
+    empty = CalendarSessions((), "2024-03-15")
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-RUNUP", "2024-03-13", "AMC"), empty)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    with pytest.raises(CalendarInputError) as excinfo:
+        planned_exit_date(_key("STR-RUNUP", "2024-03-13", "BMO"), empty)
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
 INVALID_KEYS = [
     _key("CAL-P", "2024-03-13", "AMC"),
     _key("STR-RUNUP", "2024-03-13", "MOC"),

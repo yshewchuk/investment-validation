@@ -18,7 +18,7 @@ The factory accepts observed ISO session days and an event-through day. Exit pla
 
 ## Dependencies
 
-Pure standard-library arithmetic with no upward-layer imports. The future ops calendar adapter calls this module.
+Pure standard-library arithmetic with no upward-layer imports. This module currently has no callers.
 
 ## External systems and libraries
 
