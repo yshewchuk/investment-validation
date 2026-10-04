@@ -492,6 +492,10 @@ def test_every_pinned_metadata_family_changes_the_hash(tmp_path):
                              "availability_evidence_refs": ["a"]},
                 "fragments": [{"partition_key": "2026", "row_count": 10,
                                "byte_size": 100}],
+            }, {
+                "name": "daily_market",
+                "fragments": [{"partition_key": "2026", "row_count": 4,
+                               "byte_size": 40}],
             }],
             "finality": ["receipt-final"],
             "references": [{"legacy_path": "ref.csv", "kind": "calendar_csv",
@@ -529,6 +533,7 @@ def test_every_pinned_metadata_family_changes_the_hash(tmp_path):
         mode="observed",
         evidence={"coverage_receipt_refs": [],
                   "availability_evidence_refs": ["a"]}))
+    variant("table_removed", lambda k: k["tables"].pop())
 
     chained = build("lineage/catalog.sqlite")
     insert_receipt(chained["conn"], chained["clock"], receipt_id="receipt-base",
