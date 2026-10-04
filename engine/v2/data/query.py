@@ -251,6 +251,10 @@ def _leading_key_may_match(record: FragmentRecord, contract: TableContract, key_
     for predicate in key_filter:
         if predicate.column != leading:
             continue
+        if physical.startswith("timestamp") and any(not isinstance(value, str)
+                                                    for value in predicate.values):
+            raise fail("CONTRACT_MISMATCH",
+                       "key_filter values are incompatible with fragment key bounds")
         try:
             values = [_comparable_value(v, physical) if not isinstance(v, str) else v
                       for v in predicate.values]

@@ -255,7 +255,7 @@ and retryability come from that table, never guessed at a call site.
 | `SNAPSHOT_NOT_FOUND` | dependency | no | unknown `snapshot_id` |
 | `SNAPSHOT_NOT_READY` | dependency | yes | scope has no committed head yet |
 | `SNAPSHOT_CONFLICT` | dependency | yes | head-fence or compare-and-swap mismatch |
-| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including predicate scalars incompatible with fragment key bounds |
+| `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including non-string timestamp-key predicates or scalars incompatible with fragment key bounds |
 | `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |

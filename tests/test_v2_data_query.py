@@ -1537,3 +1537,77 @@ def test_scan_and_explain_refuse_incompatible_integer_ticker(tmp_path):
     with pytest.raises(DataError) as err:
         repo.explain_dependencies(query, table_name="securities")
     assert err.value.code == "CONTRACT_MISMATCH" and err.value.problem.retryable is False
+
+
+def _timestamp_leading_fixture(tmp_path):
+    """A legitimate pinned synthetic table whose sole column/primary key/
+    filterable column is ``timestamp[us]``: one fragment, two ``datetime``
+    rows, real recorded naive-wire-form ``primary_key`` bounds — published
+    through the normal ``publish_and_inspect``/``commit_tables`` path with a
+    content-hashed contract identity (``manifests.table_contract_hash``, the
+    same registration ``computed_moves_table`` uses). No monkeypatching: the
+    failure below is reached exactly as a real caller reaches it."""
+    import dataclasses
+    from datetime import datetime
+
+    from engine.v2.data import manifests
+
+    fields = dict(
+        contract_id="tc_ts_leading", table_name="ts_leading", semantic_version="1.0",
+        columns=(ColumnContract(name="timestamp", physical_type="timestamp[us]",
+                                nullable=False),),
+        primary_key=("timestamp",), duplicate_policy="reject", foreign_keys=(),
+        partition_columns=(), filterable_columns=("timestamp",),
+        orderable_columns=("timestamp",), observation_time_column="timestamp",
+        finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
+        coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
+        maximum_batch_rows=1000, maximum_result_rows=1000)
+    placeholder = TableContract(definition_hash=_H, **fields)
+    contract = dataclasses.replace(placeholder,
+                                   definition_hash=manifests.table_contract_hash(placeholder))
+    ref = contract_ref_for(contract)
+    conn, clock, store = catalog_and_store(tmp_path)
+    record = publish_and_inspect(
+        store, contract, ref,
+        [{"timestamp": datetime(2024, 1, 2)}, {"timestamp": datetime(2024, 1, 9)}], "2024")
+    snap = commit_tables(conn, clock, {"ts_leading": [record]}, {"ts_leading": contract})
+    return conn, snap, contract, ref
+
+
+@pytest.mark.parametrize("values", [(1,), (True,)])
+def test_nonstring_leading_timestamp_predicate_values_refuse_contract_mismatch(tmp_path, values):
+    """PR 365 CodeRabbit 4176425012: an ``int``/``bool`` is a document-valid
+    ``KeyPredicate`` scalar, but against a ``timestamp[us]`` leading key the
+    comparison routed it into ``_comparable_value`` -> ``strftime``, escaping
+    the ``TypeError`` handler as a raw ``AttributeError``. The narrow guard
+    now refuses non-string values on a timestamp-leading key with the
+    documented nonretryable ``CONTRACT_MISMATCH`` through both planning APIs,
+    never a conversion attempt."""
+    conn, snap, contract, ref = _timestamp_leading_fixture(tmp_path)
+    records = Repository(conn).fragment_records(snap, "ts_leading")
+    key_filter = (KeyPredicate(column="timestamp", operator="eq", values=values),)
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(contract, records, key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:  # no store: metadata planning only
+        Repository(conn).scan_population_bound(
+            snap.snapshot_id, table_name="ts_leading", table_contract_ref=ref,
+            key_filter=key_filter)
+    assert err.value.code == "CONTRACT_MISMATCH"
+    assert err.value.problem.retryable is False
+
+
+def test_canonical_timestamp_string_leading_predicate_keeps_exact_bound(tmp_path):
+    """The valid sibling of the refusal above: a canonical naive-wire-form
+    string inside the recorded bounds (2024-01-02 .. 2024-01-09) still plans
+    the fragment's exact 2-row population through both APIs."""
+    conn, snap, contract, ref = _timestamp_leading_fixture(tmp_path)
+    records = Repository(conn).fragment_records(snap, "ts_leading")
+    key_filter = (KeyPredicate(column="timestamp", operator="eq",
+                               values=("2024-01-02T00:00:00.000000",)),)
+    assert query_mod.plan_scan_population(
+        contract, records, key_filter=key_filter).row_count == 2
+    assert Repository(conn).scan_population_bound(
+        snap.snapshot_id, table_name="ts_leading", table_contract_ref=ref,
+        key_filter=key_filter) == 2
