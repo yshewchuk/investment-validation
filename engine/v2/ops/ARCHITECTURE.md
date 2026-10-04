@@ -697,7 +697,7 @@ Snapshot reads are SHADOW-only, un-admitted pending [#260](https://github.com/ys
 | Calendar sourcing condition (R1–R6) | Outcome |
 |---|---|
 | R1: missing source table, missing exact spot or repository failure | Fail the whole build; preserve `CONTRACT_MISMATCH` and other repository codes |
-| R1: no strategy-eligible listed expiry; missing/ambiguous event; intraday key | Per-key `NO_RESOLVABLE_EXPIRY`, event refusal or `INTRADAY_EVENT_NOT_ADMITTED`; exact intraday identity requires [#356](https://github.com/yshewchuk/investment-validation/issues/356) ([#243](https://github.com/yshewchuk/investment-validation/issues/243)) |
+| R1: no strategy-eligible listed expiry; missing/ambiguous event; intraday key | Per-key `NO_RESOLVABLE_EXPIRY`, event refusal or `INTRADAY_EVENT_NOT_ADMITTED`; refusal wire and key preserve naive intraday timestamps while midnight identities keep their existing day form ([#356](https://github.com/yshewchuk/investment-validation/issues/356), [#243](https://github.com/yshewchuk/investment-validation/issues/243)) |
 | R2: cache | No durable helper cache; any reuse is scoped to the pinned build |
 | R3: retry | No helper retry or provider fetch; unchanged inputs reproduce the result/refusal |
 | R4/R5: transaction or interruption | Read-only helper; no catalog writes, publication or partial document return |
@@ -896,22 +896,20 @@ material": `BoardRequest`'s own fields and
 (`native_score_batch.py:56`, `:82-91`). This redo makes that choice:
 
 - **The key.** One canonical string per row,
-  `f"{ticker}|{strategy}|{event_date_iso}|{session}"`, where
-  `event_date_iso = str(pd.Timestamp(event_date).date())` — the IDENTICAL
-  four fields, in the identical ISO-date form,
-  `NativeScoreBatchRowRefusal.as_document()`'s own `"key"` dict already
-  uses (`native_score_batch.py:87`); this redo flattens that dict into one
-  string, rather than inventing a new field set or date format, because a
-  JSON object's own keys must be strings. `BoardRequest` is `frozen`/`slots`
-  (`native_board_universe.py:56`, `:62-65`) and hashable, so `assembled` (a
-  `dict[BoardRequest, ...]`, `native_score_batch.py:332`'s own return
-  type) already carries this exact identity per successful row; no new
-  identity is derived, only re-formatted for JSON.
+  `f"{ticker}|{strategy}|{event_date_identity}|{session}"`. The date
+  component is `YYYY-MM-DD` for a midnight event (preserving existing
+  wire/key identity) and canonical naive ISO datetime for an intraday event.
+  The same strict
+  formatter feeds refusal documents and joined keys; relative dates,
+  timezone-aware values and non-canonical wire forms are rejected. Thus the
+  JSON string key preserves all four `BoardRequest` identity fields without
+  normalizing intraday events onto a calendar day.
   **The join character is validated out of every source field before
   encoding, not merely tolerated after (CodeRabbit round 3, real
-  finding).** `event_date_iso` can never contain `"|"` (a fixed
-  `YYYY-MM-DD` form), but `ticker`/`strategy`/`session` are free-text-shaped
-  inputs this design does not control at the source. A NEW per-row check,
+  finding).** `event_date_identity` can never contain `"|"` (the strict
+  date/datetime formats contain no separator), but
+  `ticker`/`strategy`/`session` are free-text-shaped inputs this design does
+  not control at the source. A NEW per-row check,
   `native_score_batch._board_request_key(key: BoardRequest) -> str`, raises
   a `NativeScoreBatchRowRefusal` (new code `INVALID_KEY_FIELD`, the same
   collected-never-raised per-row mechanism `UNSUPPORTED_STRATEGY` already
@@ -1348,13 +1346,16 @@ stored receipt, rather than raising a permanent refusal.
 
 ### `native_score_batch.py`
 
-Batch-level (raises, no per-row attempt): a malformed `binding`/`events`
-argument, two events sharing one key, an unresolvable release, a
-`request_hash` collision across two different keys, an invalid
-`as_of`/`snapshot_id`/`calendar_revision`, a malformed
-`producer_refusals.json` (bad `schema_version`, non-list `"refusals"`, or a
-missing `key`/`code`/`detail`), or a merged producer refusal keyed to an
-existing record (the same collision check below).
+Batch-level (raises, no per-row attempt): malformed binding/events, duplicate
+event identities, unresolvable release, request-hash collision, invalid
+worker identity fields, or malformed `producer_refusals.json` (including an
+invalid timestamp wire value). Decode and record/refusal disjointness checks
+finish before output publication. These input failures are deterministic and
+not retryable; they leave no `records.json` or `refusals.json` from this
+attempt. R1: invalid wire is `ValueError`, not a row refusal. R2: no cache.
+R3: no internal retry. R4: no catalog transaction. R5: outputs are written
+only after successful assembly, scoring and collision checks. R6: strict
+timestamp identity is used consistently for duplicate and overlap checks.
 
 Per row (collected as a refusal, never sinks the batch):
 

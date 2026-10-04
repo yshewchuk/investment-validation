@@ -1,6 +1,7 @@
 """Batch assembly and worker semantics for ``engine/v2/ops/native_score_batch``."""
 import hashlib
 import json
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
@@ -18,10 +19,11 @@ from engine.v2.models import (
     ReleaseRequirement,
 )
 from engine.v2.models import deployment
-from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.ops.native_board_universe import BoardRequest, board_requests
 from engine.v2.ops.native_score_batch import (
     NativeScoreBatchRowRefusal,
     NightlyEventInputs,
+    _board_request_key,
     _decode_producer_refusals,
     _native_score_batch_documents,
     assemble_score_batch_inputs,
@@ -519,6 +521,85 @@ def test_run_native_score_batch_worker_merges_producer_refusals_when_present(tmp
                          "EVENT_NOT_FOUND")
 
 
+def test_run_native_score_batch_worker_preserves_intraday_producer_refusal_beside_midnight_record(
+        tmp_path):
+    """Regression: a producer_refusals.json row carrying the SAME
+    ticker/strategy/calendar-day/session as a scored events.json row, but a
+    full naive intraday ``event_date`` timestamp, must never collapse onto
+    that midnight record's ``YYYY-MM-DD`` identity. The midnight record keeps
+    its existing date-only key; the intraday refusal keeps its timestamp-
+    preserving wire value under a distinct key; neither is dropped,
+    overwritten, or flagged as a record/refusal collision. Fails against the
+    current code because the decoder's ``YYYY-MM-DD``-only regex (and, if
+    that were relaxed, ``_iso``/``as_document()``'s date-truncation) reject
+    the timestamp-preserving wire form -- not because of a fixture error.
+    Issue #356 strengthens this by first proving the native board enumerator
+    itself produces both exact BoardRequest identities (midnight and
+    intraday, same ticker/day/session) before the same pair is replayed
+    through the real worker as a midnight event plus an intraday producer
+    refusal."""
+    _stage_release(tmp_path)
+    intraday = "2026-01-15T09:00:00"
+    midnight_request = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                                    event_date=pd.Timestamp("2026-01-15"),
+                                    session="am")
+    intraday_request = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                                    event_date=pd.Timestamp(intraday),
+                                    session="am")
+    enumerated = board_requests(_AS_OF, 7, ["TEST"], pd.DataFrame([
+        {"ticker": "TEST", "event_date": "2026-01-15", "session": "am"},
+        {"ticker": "TEST", "event_date": intraday, "session": "am"},
+    ]))
+    assert midnight_request != intraday_request
+    assert midnight_request in enumerated
+    assert intraday_request in enumerated
+
+    root = tmp_path / "staging"
+    root.mkdir()
+    (root / "events.json").write_text(json.dumps([_event_doc()]))
+    (root / "producer_refusals.json").write_text(json.dumps({
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "TEST", "strategy": "STR-THRU",
+                    "event_date": intraday, "session": "am"},
+            "code": "INTRADAY_EVENT_NOT_ADMITTED",
+            "detail": "intraday event not admitted to the midnight batch",
+        }],
+    }))
+
+    run_native_score_batch_worker(
+        _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+
+    midnight_identity = "TEST|STR-THRU|2026-01-15|am"
+    intraday_identity = f"TEST|STR-THRU|{intraday}|am"
+    assert midnight_identity != intraday_identity
+    # The enumerated BoardRequest identities encode to exactly the two
+    # distinct wire identities the published documents carry.
+    assert _board_request_key(midnight_request) == midnight_identity
+    assert _board_request_key(intraday_request) == intraday_identity
+
+    records_document = json.loads((root / "records.json").read_text())
+    assert midnight_identity in records_document["records"]
+    assert _record_matches_identity(
+        records_document["records"][midnight_identity],
+        event_id="evt-1", strategy_version="STR-THRU", deployment_id="d1")
+    assert len(records_document["records"]) == 1
+
+    refusals_document = json.loads((root / "refusals.json").read_text())
+    _refusal_matches_key(refusals_document, intraday_identity,
+                         "INTRADAY_EVENT_NOT_ADMITTED")
+    assert len(refusals_document["refusals"]) == 1
+    assert refusals_document["unkeyable_refusals"] == []
+
+    assert NativeScoreBatchRowRefusal(
+        intraday_request, "INTRADAY_EVENT_NOT_ADMITTED",
+        "intraday event not admitted",
+    ).as_document()["key"]["event_date"] == intraday
+    assert NativeScoreBatchRowRefusal(
+        midnight_request, "EVENT_NOT_FOUND", "legacy midnight refusal",
+    ).as_document()["key"]["event_date"] == "2026-01-15"
+
+
 def test_run_native_score_batch_worker_without_producer_refusals_file_matches_absent_and_empty(
         tmp_path):
     _stage_release(tmp_path)
@@ -614,6 +695,13 @@ def test_decode_producer_refusals_rejects_malformed_item():
         {**code_detail, "key": {**key, "event_date": "today"}},
         {**code_detail, "key": {**key, "event_date": "2026-01-01T00:00:00"}},
         {**code_detail, "key": {**key, "event_date": "2026/01/01"}},
+        {**code_detail, "key": {**key, "event_date": " 2026-01-01"}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01 "}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01T09:00:00Z"}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01T09:00:00+05:00"}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01 09:00:00"}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01T09:00"}},
+        {**code_detail, "key": {**key, "event_date": "2026-01-01T09:00:00.5"}},
         {**code_detail, "key": {**key, "event_date": "20260101"}},
         {**code_detail, "key": {**key, "event_date": "2026-13-01"}},
         {**code_detail, "key": {**key, "event_date": "2026-02-30"}},
@@ -621,6 +709,76 @@ def test_decode_producer_refusals_rejects_malformed_item():
         with pytest.raises(ValueError):
             _decode_producer_refusals(
                 {"schema_version": schema_version, "refusals": [item]})
+
+
+def test_decode_producer_refusals_accepts_canonical_intraday_datetime_identity():
+    """Issue #356: the canonical naive ISO datetime wire form decodes to the
+    exact intraday identity the producer encoded -- never a truncation of it
+    onto the calendar day, and never a re-normalized string."""
+    decoded = _decode_producer_refusals({
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{
+            "key": {"ticker": "TEST", "strategy": "STR-THRU",
+                    "event_date": "2026-01-15T09:00:00", "session": "am"},
+            "code": "INTRADAY_EVENT_NOT_ADMITTED",
+            "detail": "intraday event not admitted to the midnight batch",
+        }],
+    })
+    assert len(decoded) == 1
+    assert decoded[0].key == BoardRequest(
+        ticker="TEST", strategy="STR-THRU",
+        event_date=pd.Timestamp("2026-01-15 09:00:00"), session="am")
+    assert _board_request_key(decoded[0].key) == \
+        "TEST|STR-THRU|2026-01-15T09:00:00|am"
+    assert decoded[0].as_document()["key"]["event_date"] == "2026-01-15T09:00:00"
+
+
+@pytest.mark.parametrize("relative", ["today", "now"])
+def test_board_request_identity_rejects_relative_event_date_strings(relative):
+    """Issue #356: a relative string would resolve its identity at gate-run
+    time, not from the document's content -- the strict formatter refuses it
+    at the BoardRequest boundary, both for keys and for refusal documents."""
+    key = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                       event_date=relative, session="am")
+    with pytest.raises(ValueError):
+        _board_request_key(key)
+    with pytest.raises(ValueError):
+        NativeScoreBatchRowRefusal(
+            key, "UNSUPPORTED_STRATEGY", "detail").as_document()
+
+
+@pytest.mark.parametrize("aware_event_date", [
+    pd.Timestamp("2026-01-15 09:00", tz="UTC"),
+    datetime(2026, 1, 15, 9, 0, tzinfo=timezone.utc),
+])
+def test_board_request_identity_rejects_timezone_aware_event_date(aware_event_date):
+    """Issue #356: a timezone-aware instant has no naive wall clock to
+    preserve -- it is refused, never normalized onto some other day/time."""
+    key = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                       event_date=aware_event_date, session="am")
+    with pytest.raises(ValueError):
+        _board_request_key(key)
+    with pytest.raises(ValueError):
+        NativeScoreBatchRowRefusal(
+            key, "UNSUPPORTED_STRATEGY", "detail").as_document()
+
+
+def test_event_date_identity_keeps_legacy_day_form_and_preserves_intraday_time():
+    """Issue #356 compatibility anchor: exact midnight/day values encode
+    byte-identically to the legacy YYYY-MM-DD component, an intraday naive
+    datetime keeps its stated wall clock (no UTC shift, no day truncation),
+    and the two remain DISTINCT identities on the same calendar day."""
+    assert _board_request_key(BoardRequest(
+        ticker="TEST", strategy="STR-THRU", event_date=date(2026, 1, 15),
+        session="am")) == "TEST|STR-THRU|2026-01-15|am"
+    assert _board_request_key(BoardRequest(
+        ticker="TEST", strategy="STR-THRU",
+        event_date=pd.Timestamp("2026-01-15"), session="am")) == \
+        "TEST|STR-THRU|2026-01-15|am"
+    intraday_key = _board_request_key(BoardRequest(
+        ticker="TEST", strategy="STR-THRU",
+        event_date=pd.Timestamp("2026-01-15T09:30:15"), session="am"))
+    assert intraday_key == "TEST|STR-THRU|2026-01-15T09:30:15|am"
 
 
 def test_decode_producer_refusals_rejects_non_string_detail():
@@ -781,45 +939,73 @@ def test_native_score_batch_documents_rejects_length_mismatch():
 
 
 def test_native_score_batch_documents_rejects_duplicate_canonical_keys_in_records():
-    """CodeRabbit round 2: two DISTINCT BoardRequests differing only by time
-    of day collapse to one canonical key once _iso reduces both to the same
-    calendar date -- the later row must never silently overwrite the earlier
-    one's record."""
+    """CodeRabbit round 2 / issue #356: the duplicate-record guard must still
+    fire when two rows share ONE identity -- equal instants however
+    expressed (pandas Timestamp vs plain datetime). It must NOT fire merely
+    because two rows share a calendar day: the strict identity formatter
+    preserves the time of day, so distinct intraday instants are distinct
+    keys (see the companion test below)."""
     first = BoardRequest(ticker="TEST", strategy="STR-THRU",
                          event_date=pd.Timestamp("2026-01-15 09:00"), session="am")
     second = BoardRequest(ticker="TEST", strategy="STR-THRU",
-                          event_date=pd.Timestamp("2026-01-15 16:00"), session="am")
-    assert first != second
+                          event_date=datetime(2026, 1, 15, 9, 0), session="am")
+    assert first == second
+    assert _board_request_key(first) == _board_request_key(second)
     with pytest.raises(ValueError):
         _native_score_batch_documents((first, second), [{"a": 1}, {"b": 2}], ())
 
 
 def test_native_score_batch_documents_rejects_duplicate_canonical_keys_in_refusals():
-    """CodeRabbit round 2: the same canonical-key collision applies to the
-    keyed-refusals dict, not just records -- both routes must raise."""
+    """CodeRabbit round 2 / issue #356: the same one-identity duplicate guard
+    applies to the keyed-refusals dict, not just records -- both routes must
+    raise, and equal instants keep one identity however expressed."""
     first = NativeScoreBatchRowRefusal(
         BoardRequest(ticker="TEST", strategy="STR-THRU",
                      event_date=pd.Timestamp("2026-01-15 09:00"), session="am"),
         "UNSUPPORTED_STRATEGY", "first detail")
     second = NativeScoreBatchRowRefusal(
         BoardRequest(ticker="TEST", strategy="STR-THRU",
-                     event_date=pd.Timestamp("2026-01-15 16:00"), session="am"),
+                     event_date=datetime(2026, 1, 15, 9, 0), session="am"),
         "UNSUPPORTED_STRATEGY", "second detail")
-    assert first.key != second.key
+    assert first.key == second.key
     with pytest.raises(ValueError):
         _native_score_batch_documents((), (), (first, second))
 
 
 def test_native_score_batch_documents_rejects_cross_dict_canonical_key_collision():
-    """CodeRabbit round 3: two DISTINCT BoardRequests differing only by time
-    of day collide onto one canonical key -- when one succeeds (a record)
-    and the other fails (a refusal), neither dict's own internal duplicate
-    check can see the other, so the cross-dict overlap must raise too."""
+    """CodeRabbit round 3 / issue #356: when one row with ONE identity
+    succeeds (a record) and another row with that SAME identity fails (a
+    refusal), neither dict's own internal duplicate check can see the other,
+    so the cross-dict overlap must raise too."""
     record_key = BoardRequest(ticker="TEST", strategy="STR-THRU",
-                              event_date=pd.Timestamp("2026-01-15 09:00"), session="am")
+                              event_date=datetime(2026, 1, 15, 9, 0), session="am")
     refusal = NativeScoreBatchRowRefusal(
         BoardRequest(ticker="TEST", strategy="STR-THRU",
-                     event_date=pd.Timestamp("2026-01-15 16:00"), session="am"),
+                     event_date=pd.Timestamp("2026-01-15 09:00"), session="am"),
         "UNSUPPORTED_STRATEGY", "some detail")
+    assert record_key == refusal.key
     with pytest.raises(ValueError):
         _native_score_batch_documents((record_key,), [{"a": 1}], (refusal,))
+
+
+def test_native_score_batch_documents_keeps_same_day_instants_distinct():
+    """Issue #356: midnight and two distinct intraday instants of ONE
+    ticker/strategy/day/session never collapse onto one canonical key -- the
+    midnight record keeps its legacy day form, each intraday row keeps its
+    own time, and a midnight record beside an intraday refusal is disjoint,
+    never a cross-dict collision."""
+    midnight = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                            event_date=pd.Timestamp("2026-01-15"), session="am")
+    morning = BoardRequest(ticker="TEST", strategy="STR-THRU",
+                           event_date=pd.Timestamp("2026-01-15 09:00"), session="am")
+    evening_refusal = NativeScoreBatchRowRefusal(
+        BoardRequest(ticker="TEST", strategy="STR-THRU",
+                     event_date=pd.Timestamp("2026-01-15 16:00"), session="am"),
+        "INTRADAY_EVENT_NOT_ADMITTED", "not admitted")
+    records_document, refusals_document = _native_score_batch_documents(
+        (midnight, morning), [{"a": 1}, {"b": 2}], (evening_refusal,))
+    assert set(records_document["records"]) == {
+        "TEST|STR-THRU|2026-01-15|am",
+        "TEST|STR-THRU|2026-01-15T09:00:00|am"}
+    assert set(refusals_document["refusals"]) == {
+        "TEST|STR-THRU|2026-01-15T16:00:00|am"}
