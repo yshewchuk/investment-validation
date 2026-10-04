@@ -101,7 +101,10 @@ def run(label, cmd, env, timeout):
     t0 = time.monotonic()
     try:
         p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        if label == "pytest":
+            parts = [x.decode(errors="replace") if isinstance(x, bytes) else (x or "") for x in (e.stdout, e.stderr)]
+            WAIT[0] += sum(float(m) for m in WAIT_RE.findall("".join(parts)))
         print(f"== {label}: TIMEOUT after {timeout}s")
         STEPS.append({"step": label, "result": "TIMEOUT"})
         return False
