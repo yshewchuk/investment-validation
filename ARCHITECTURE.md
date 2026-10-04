@@ -467,8 +467,9 @@ Only a tracked path absent from the worktree reads as empty.
   | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  Native parity presentation belongs to the React screen through the serving API.
-  The operations listener has no native-parity HTML or JSON preview routes.
+  Consumers are the authenticated FastAPI `/api/v1/native_parity` summary and paginated
+  `/api/v1/native_parity/mismatches` and `/api/v1/native_parity/unpaired` routes, presented by
+  React. The operations listener has no native-parity HTML or JSON preview routes.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;
   this report projection remains a read over retained evidence.
