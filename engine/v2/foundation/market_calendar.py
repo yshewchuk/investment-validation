@@ -105,16 +105,16 @@ def _rule_sessions(start: date, end: date) -> list[date]:
         return []
     holidays = {d for year in range(start.year, end.year + 1) for d in _holidays(year)}
     out: list[date] = []
-    day = start + timedelta(days=1)
-    while day <= end:
+    for step in range(1, (end - start).days + 1):
+        day = start + timedelta(days=step)
         if day.weekday() < 5 and day not in holidays:
             out.append(day)
-        day += timedelta(days=1)
     return out
 
 
 def _first_rule_session_after(day: date) -> date:
-    following = _rule_sessions(day, day + timedelta(days=15))
+    horizon = min(15, (date.max - day).days)
+    following = _rule_sessions(day, day + timedelta(days=horizon))
     if not following:
         raise CalendarInputError(f"no projected session within 15 days after {day}")
     return following[0]
