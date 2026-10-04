@@ -689,6 +689,45 @@ def test_embedded_contract_shapes_are_refused_without_writes(tmp_path, target, v
     assert sorted(path.name for path in chain["path"].parent.iterdir()) == before_files
 
 
+@pytest.mark.parametrize("value", [
+    {},
+    {"time_max": "2026-01-01"},
+    {"time_min": "2026-01-01"},
+])
+def test_time_bounds_object_missing_a_required_bound_is_manifest_corrupt(tmp_path, value):
+    chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
+    trigger, table, column = _TAMPER["fragment_time"]
+    conn = chain["conn"]
+    conn.execute(f"DROP TRIGGER {trigger}")
+    conn.execute("PRAGMA ignore_check_constraints = ON")
+    conn.execute(f"UPDATE {table} SET {column} = ?", (json.dumps(value),))
+    before_changes = conn.total_changes
+    before_files = sorted(path.name for path in chain["path"].parent.iterdir())
+    problem = expect_refusal(chain, "MANIFEST_CORRUPT")
+    assert problem.message == "stored metadata is missing a required field"
+    assert str(tmp_path) not in problem.message
+    assert conn.total_changes == before_changes
+    assert sorted(path.name for path in chain["path"].parent.iterdir()) == before_files
+
+
+def test_explicit_null_time_bounds_are_accepted(tmp_path):
+    chain = build_chain(tmp_path, tables=[{
+        "name": "price_history", "contract": "price_history.v1",
+        "fragments": [
+            {"partition_key": "2026", "row_count": 2, "byte_size": 20,
+             "time_bounds": {"time_min": None, "time_max": None}},
+            {"partition_key": "2025", "row_count": 3, "byte_size": 30,
+             "time_bounds": {"time_min": None, "time_max": "2026-01-02"}},
+            {"partition_key": "2024", "row_count": 4, "byte_size": 40,
+             "time_bounds": {"time_min": "2026-01-01", "time_max": None}},
+        ]}])
+    payload = inventory(chain)
+    fragments = payload["tables"][0]["fragments"]
+    assert [(fragment["time_min"], fragment["time_max"]) for fragment in fragments] == [
+        (None, None), (None, "2026-01-02"), ("2026-01-01", None)]
+    assert fragments[0]["time_min"] is None and fragments[0]["time_max"] is None
+
+
 def test_cyclic_lineage_is_refused(tmp_path):
     chain = build_chain(tmp_path, tables=[{"name": "daily_market"}])
     conn, clock = chain["conn"], chain["clock"]

@@ -62,17 +62,28 @@ def _items(value, kinds):
     return [_shape(item, kinds) for item in value]
 
 
+_TIME_BOUNDS_FIELDS = (("time_min", (str, type(None))), ("time_max", (str, type(None))))
+
+
+def _time_bounds(raw):
+    if raw is None:
+        return {"time_min": None, "time_max": None}
+    value = _stored_json(raw, dict)
+    if any(name not in value for name, _ in _TIME_BOUNDS_FIELDS):
+        raise errors.fail("MANIFEST_CORRUPT", "stored metadata is missing a required field")
+    return {name: _shape(value[name], kinds) for name, kinds in _TIME_BOUNDS_FIELDS}
+
+
 def _fragment_document(row):
     bounds = _stored_mapping(row["key_bounds_json"], (("primary_key_min", list), ("primary_key_max", list)))
-    times = {} if row["time_bounds_json"] is None else _stored_json(row["time_bounds_json"], dict)
+    times = _time_bounds(row["time_bounds_json"])
     return {"fragment_id": row["fragment_id"],
             "object": {"kind": row["kind"], "object_id": row["object_id"],
                        "content_hash": row["content_hash"], "byte_size": row["byte_size"]},
             "partition_key": row["partition_key"], "row_count": row["row_count"],
             "primary_key_min": _items(bounds["primary_key_min"], (str, int, float, bool)),
             "primary_key_max": _items(bounds["primary_key_max"], (str, int, float, bool)),
-            "time_min": _shape(times.get("time_min"), (str, type(None))),
-            "time_max": _shape(times.get("time_max"), (str, type(None)))}
+            "time_min": times["time_min"], "time_max": times["time_max"]}
 
 
 def _fragments(conn, dataset_version_id, contract_id):
