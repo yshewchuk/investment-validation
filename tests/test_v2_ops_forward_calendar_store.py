@@ -501,6 +501,8 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
         repository, snapshot, "earnings_events", columns)
 
     assert result == baseline
+    assert result == [{"ticker": "AAA", "event_date": datetime(2025, 1, 15),
+                       "year": 2025, "src_orats": True}]
     assert captured[0].max_result_rows == expected
     assert captured[0].max_batch_rows == min(contract.maximum_batch_rows, 50_000, expected)
 
@@ -531,6 +533,8 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     result = forward_calendar_store._scan_rows(repository, snapshot, table_name, columns)
 
     assert result == baseline
+    assert result == [{"ticker": "AAA", "event_date": datetime(2025, 1, 15),
+                       "year": 2025, "src_orats": True}]
     assert captured[0].max_result_rows == min(existing, bound)
     assert captured[0].max_batch_rows <= captured[0].max_result_rows
     assert captured[0].max_batch_rows == min(contract.maximum_batch_rows, 50_000,

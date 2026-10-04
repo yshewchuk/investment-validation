@@ -1024,7 +1024,7 @@ def _scan_fixture(tmp_path):
 def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp_path,
                                                                              monkeypatch):
     repository, snapshot = _scan_fixture(tmp_path)
-    columns = ("ticker", "event_date", "year", "src_orats")
+    columns = ("event_id", "ticker", "event_date", "year", "src_orats")
     baseline = computed_moves_store._scan_rows(repository, snapshot,
                                                "earnings_events", columns)
     expected = min(_EVENTS.maximum_result_rows, computed_moves_store.MAX_SCAN_ROWS)
@@ -1035,6 +1035,9 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
                                              "earnings_events", columns)
 
     assert result == baseline
+    assert len(result) == len(_EVENT_DAYS)
+    assert all(r["ticker"] == "AAAA" for r in result)
+    assert {r["event_id"] for r in result} == {f"AAAA_{day.date()}" for day in _EVENT_DAYS}
     assert captured[0].max_result_rows == expected
     assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000)
 
@@ -1046,7 +1049,7 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     only as needed to keep ``max_batch_rows <= max_result_rows``, and the
     returned rows are unchanged."""
     repository, snapshot = _scan_fixture(tmp_path)
-    columns = ("ticker", "event_date", "year", "src_orats")
+    columns = ("event_id", "ticker", "event_date", "year", "src_orats")
     baseline = computed_moves_store._scan_rows(repository, snapshot,
                                                "earnings_events", columns)
     bound = _actual_population_bound(repository, snapshot, "earnings_events")
@@ -1058,6 +1061,9 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
                                              "earnings_events", columns)
 
     assert result == baseline
+    assert len(result) == len(_EVENT_DAYS)
+    assert all(r["ticker"] == "AAAA" for r in result)
+    assert {r["event_id"] for r in result} == {f"AAAA_{day.date()}" for day in _EVENT_DAYS}
     assert captured[0].max_result_rows == min(existing_limit, bound)
     assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, bound)
     assert captured[0].max_batch_rows <= captured[0].max_result_rows

@@ -249,6 +249,13 @@ def test_scan_quote_rows_keeps_limit_when_population_bound_is_at_or_above_curren
                              decision_session=_SESSION)
 
     assert result == baseline
+    assert result.quote_status == "recorded"
+    assert result.quote_rows == (
+        {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
+         "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+        {"ticker": "AAA", "right": "P", "strike": 105.0, "expiry": _EXPIRY,
+         "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
+    )
     assert captured[0].max_result_rows == expected
     assert captured[0].max_batch_rows == min(_CHAINS.maximum_batch_rows, 50_000)
 
@@ -271,6 +278,13 @@ def test_scan_quote_rows_uses_smaller_selected_population_bound(tmp_path, monkey
 
     existing_limit = min(_CHAINS.maximum_result_rows, _RESULT_CAP)
     assert result == baseline
+    assert result.quote_status == "recorded"
+    assert result.quote_rows == (
+        {"ticker": "AAA", "right": "C", "strike": 100.0, "expiry": _EXPIRY,
+         "bid": 1.0, "ask": 1.2, "observed_at": _SESSION},
+        {"ticker": "AAA", "right": "P", "strike": 105.0, "expiry": _EXPIRY,
+         "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
+    )
     assert 0 < bound < existing_limit
     assert captured[0].max_result_rows == min(existing_limit, bound)
     assert captured[0].max_batch_rows == min(
