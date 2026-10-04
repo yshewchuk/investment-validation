@@ -1232,7 +1232,7 @@ Top-level imports, all strictly below this package's own layer (7.0):
 `Geometry`/`Pricing`) are lazy-only, never at module top level.
 `engine.v2.domain.generation` supplies rescore/native-score-input geometry
 (`cli.py::_load_native_score_inputs`); the pending PR-6 calendar helper also
-uses its expiry resolver lazily. Native foundation supplies calendar arithmetic;
+uses its public expiry-only API lazily. Native foundation supplies calendar arithmetic;
 `engine.v2.models` (`no_fit`/`payoff_artifact`/`deployment`/`training`/
 `RuntimeFitForbidden`/`TrainingRefused`) has more call sites, spanning
 rescore (`cli.py`, `native_score_batch.py`, `worker.py`) as well as
