@@ -28,6 +28,11 @@ from engine.structures import (
     twin_peak_5,
     with_decision_offset,
 )
+from engine.v2.domain.generation import (
+    GeometryRefusal,
+    resolve_expiry,
+    structures as v2_structures,
+)
 
 
 class TestSelectors:
@@ -1300,10 +1305,6 @@ class TestLadderTooCoarseIsItsOwnFailure:
 # generation or pricing. Every case below is one the private resolver
 # already resolves today; nothing here introduces new strategy semantics.
 # --------------------------------------------------------------------------
-
-from engine.v2.domain.generation import resolve_expiry
-from engine.v2.domain.generation import structures as v2_structures
-from engine.v2.domain.generation import GeometryRefusal
 
 #: Two real Friday expirations one week apart — the same shape as
 #: ``_runup_chain`` above: 2025-05-09 is 24 DTE from a 2025-04-15 session
