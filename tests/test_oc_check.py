@@ -248,3 +248,15 @@ class TestSelfMetrics:
         self.stderr = self.BOUNDED_WAIT * 3
         assert self._main(monkeypatch, "tests/test_x.py") == 0
         assert self._lines()[0]["wait_s"] == 15
+
+    def test_unexpected_exception_propagates_and_records_exit_1(self, wt, monkeypatch):
+        """A non-SystemExit crash from _main must reach the caller and still land
+        one metrics line with exit=1 (main()'s BaseException branch), not swallow it."""
+        def boom():
+            raise RuntimeError("unexpected crash")
+        monkeypatch.setattr(oc_check, "_main", boom)
+        oc_check.RUN["mode"] = "normal"  # main() only records metrics once RUN is populated
+        with pytest.raises(RuntimeError):
+            oc_check.main()
+        (line,) = self._lines()
+        assert line["exit"] == 1
