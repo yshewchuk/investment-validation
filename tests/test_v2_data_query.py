@@ -1415,3 +1415,48 @@ def test_zero_population_bound_does_not_admit_zero_result_limit(tmp_path, case):
     with pytest.raises(DataError) as err:
         repo.explain_dependencies(query, table_name="securities")
     assert err.value.code == "QUERY_NOT_BOUNDED" and err.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("key_filter", [
+    None,
+    1,
+    True,
+    "",
+    "ticker",
+    {},
+    {"ticker": "AAA"},
+    b"",
+    set(),
+])
+def test_non_sequence_key_filter_container_refuses_query_not_bounded(tmp_path, key_filter):
+    """PR 365 gate finding: metadata planning refuses any ``key_filter``
+    that is not a list/tuple — None/integers used to raise a raw
+    ``TypeError``, while empty strings/mappings/bytes/sets iterated nothing
+    and silently selected ALL fragments. Both planning APIs refuse with a
+    nonretryable ``QUERY_NOT_BOUNDED`` before touching a record; no raw
+    ``TypeError`` escapes and no full-membership bound is ever returned."""
+    conn, _store, snap = _securities_snapshot(tmp_path)
+    records = Repository(conn).fragment_records(snap, "securities")
+    with pytest.raises(DataError) as err:
+        query_mod.plan_scan_population(_SEC, records, key_filter=key_filter)
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.problem.retryable is False
+    with pytest.raises(DataError) as err:  # no store: metadata planning only
+        Repository(conn).scan_population_bound(
+            snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+            key_filter=key_filter)
+    assert err.value.code == "QUERY_NOT_BOUNDED"
+    assert err.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("key_filter", [(), []])
+def test_empty_list_or_tuple_key_filter_still_yields_full_bound(tmp_path, key_filter):
+    """Positive control for the refusal above: the two legitimate empty
+    containers still plan whole-membership metadata (the full fixture bound
+    of 4 = two 2-row fragments) through both APIs."""
+    conn, _store, snap = _securities_snapshot(tmp_path)
+    records = Repository(conn).fragment_records(snap, "securities")
+    assert query_mod.plan_scan_population(_SEC, records, key_filter=key_filter).row_count == 4
+    assert Repository(conn).scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=key_filter) == 4

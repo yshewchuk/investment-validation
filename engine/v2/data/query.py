@@ -193,6 +193,8 @@ def plan_scan_population(contract: TableContract, records, *,
 
 
 def _decoded_predicates(key_filter) -> tuple[KeyPredicate, ...]:
+    if not isinstance(key_filter, (list, tuple)):
+        raise fail("QUERY_NOT_BOUNDED", "key_filter must be a list or tuple of predicates")
     decoded = []
     for predicate in key_filter:
         try:
