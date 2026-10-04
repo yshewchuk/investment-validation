@@ -157,6 +157,18 @@ def test_new_year_observance_rules() -> None:
     assert saturday.days == ("2021-12-31", "2022-01-03", "2022-01-04")  # no Friday call
 
 
+def test_upper_boundary_projects_the_last_representable_session() -> None:
+    built = build_calendar_sessions(("9999-12-20",), event_through="9999-12-20")
+    assert built.days == ("9999-12-20", "9999-12-21")
+    assert built.observed_through == "9999-12-20"
+
+
+def test_upper_boundary_without_a_later_date_refused() -> None:
+    with pytest.raises(CalendarInputError) as excinfo:
+        build_calendar_sessions(("9999-12-30",), event_through="9999-12-31")
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+
 INVALID_OBSERVED = [
     (),
     ("2024-03-16",),
