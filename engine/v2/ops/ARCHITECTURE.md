@@ -18,7 +18,7 @@ This doc also covers `native_board_universe.py`: a pure, answer-free
 enumerator that reproduces legacy `engine.score.score_calendar`'s event ×
 strategy enumeration for the strategies native scoring supports, without
 touching the legacy chain index or constructing a legacy `Scorer`. It has
-no production caller yet — see "Dependencies" below.
+no production caller yet — see "Dependencies" below; schema migrations follow the [checksummed R1–R6 table-recreate contract](MIGRATIONS.md).
 
 ## Primary contracts and public interfaces
 

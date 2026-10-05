@@ -40,16 +40,28 @@ _VERSIONS_DDL = """CREATE TABLE IF NOT EXISTS schema_versions (
 
 @dataclass(frozen=True)
 class Migration:
-    """One numbered schema step: its statements run in one transaction."""
+    """One numbered schema step: its statements run in one transaction.
+
+    ``recreate_tables`` (default false, checksum-protected when true) opts the
+    step into SQLite's table-recreate procedure: foreign-key enforcement is
+    disabled on this connection before the transaction opens, and
+    ``PRAGMA foreign_key_check`` runs inside it before commit (R2).
+    """
 
     version: int
     name: str
     statements: tuple[str, ...]
+    recreate_tables: bool = False
 
 
 def checksum(migration: Migration) -> str:
-    return content_hash({"version": migration.version, "name": migration.name,
-                         "statements": list(migration.statements)})
+    payload = {"version": migration.version, "name": migration.name,
+               "statements": list(migration.statements)}
+    # Only a true flag joins the payload: historical unflagged checksums stay
+    # byte-for-byte unchanged, while a toggle on an applied step refuses.
+    if migration.recreate_tables:
+        payload["recreate_tables"] = True
+    return content_hash(payload)
 
 
 def applied_versions(conn: sqlite3.Connection, owner: str) -> dict[int, str]:
@@ -68,16 +80,30 @@ def migrate(conn: sqlite3.Connection, owner: str, migrations: Sequence[Migration
     """Apply every pending migration for ``owner``; return the versions applied now."""
     _validate_sequence(owner, migrations)
     with transaction(conn):
-        conn.execute(_VERSIONS_DDL)
         _check_applied(owner, applied_versions(conn, owner), migrations)
     done: list[int] = []
     for migration in migrations:
-        with transaction(conn):
-            applied = applied_versions(conn, owner)
-            _check_applied(owner, applied, migrations)
-            if migration.version not in applied:
-                _apply(conn, owner, migration, clock, fault)
-                done.append(migration.version)
+        # R2: PRAGMA foreign_keys is a no-op inside a transaction, so it is
+        # issued here, before BEGIN IMMEDIATE. The version ledger is created
+        # inside each migration's own transaction (R4), so a failing first
+        # migration rolls its creation back too and the file stays untouched.
+        recreate = (migration.recreate_tables
+                    and migration.version not in applied_versions(conn, owner))
+        try:
+            if recreate:
+                conn.execute("PRAGMA foreign_keys = OFF")
+            with transaction(conn):
+                conn.execute(_VERSIONS_DDL)
+                applied = applied_versions(conn, owner)
+                _check_applied(owner, applied, migrations)
+                if migration.version not in applied:
+                    _apply(conn, owner, migration, clock, fault)
+                    if recreate:
+                        _require_fk_integrity(conn, owner, migration)
+                    done.append(migration.version)
+        finally:
+            if recreate:
+                conn.execute("PRAGMA foreign_keys = ON")  # R5, every exit
     return done
 
 
@@ -90,6 +116,20 @@ def require_current(conn: sqlite3.Connection, owner: str,
     if missing:
         raise fail("INTEGRITY_FAILED", f"{owner} schema is missing migrations",
                    details={"reason": "schema_older", "owner": owner, "missing": missing})
+
+
+def _require_fk_integrity(conn: sqlite3.Connection, owner: str,
+                          migration: Migration) -> None:
+    """Refuse a recreate that left foreign keys dangling, without echoing rows."""
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        offenders = {(str(row[0]), row[1]) for row in violations}
+        raise fail("INTEGRITY_FAILED",
+                   f"{owner} migration {migration.version} left foreign-key violations",
+                   details={"reason": "foreign_key_check_failed", "owner": owner,
+                            "version": migration.version,
+                            "tables": sorted({table for table, _ in offenders}),
+                            "violation_count": len(offenders)})
 
 
 def _validate_sequence(owner: str, migrations: Sequence[Migration]) -> None:
