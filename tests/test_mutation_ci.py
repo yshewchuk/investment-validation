@@ -4170,13 +4170,15 @@ def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_
         "would prove nothing")
 
     graph = _edge_only_graph(pilot.build_import_graph())
-    # Edge-only narrowing is what makes a MISSING precise edge visible: an
-    # unresolved-import attempt would either re-widen the closure or trip
-    # select_pr_tests' #155 fail-safe, and either outcome could hand this
-    # property a selection that includes the test for the wrong reason. This
-    # call only is silenced; the real classification is asserted elsewhere.
-    monkeypatch.setattr(pilot, "_has_unresolved_import_attempt",
-                        lambda tree, is_conftest: False)
+    # Edge-only narrowing is what makes a MISSING precise edge visible: any
+    # source select_pr_tests' #155 fail-safe can classify as unresolved --
+    # an import attempt, a sys.path mutation, a process launch -- could hand
+    # this property a selection that includes the test for the wrong reason.
+    # Patching only _has_unresolved_import_attempt is insufficient (the
+    # other taint categories stay live), so the WHOLE narrow scan returns
+    # empty for this call only; the real classification and fail-safe
+    # behavior are covered by their separate regression tests.
+    monkeypatch.setattr(pilot, "unresolved_import_files", lambda *a, **k: set())
     selected = pilot.select_pr_tests(CFG, eligible, graph=graph)
     assert selected is not None, (
         f"selector refused to narrow at all on {len(eligible)} eligible "
@@ -4325,6 +4327,62 @@ def test_build_import_graph_an_eval_or_exec_reference_is_unresolved(source, tmp_
     assert graph[rel] == set(tracked) - {rel}
     assert rel in pilot.dynamic_files(graph)
     assert rel in pilot.unresolved_import_files(tracked)
+
+
+_BUILTINS_ALIAS_UNRESOLVED_SOURCES = [
+    pytest.param("import builtins as b\n\ndef go(code):\n    return b.eval(code)\n",
+                 id="aliased-builtins-eval-call"),
+    pytest.param("import builtins as b\n\nrunner = b.exec\n",
+                 id="aliased-builtins-exec-loaded-as-a-value"),
+    pytest.param("from builtins import eval as run_eval\n\ndef go(code):\n"
+                 "    return run_eval(code)\n",
+                 id="from-builtins-eval-alias-loaded"),
+    pytest.param("from builtins import exec as run_exec\n\nHANDLERS = [run_exec]\n",
+                 id="from-builtins-exec-alias-in-a-collection"),
+]
+
+
+@pytest.mark.parametrize("source", _BUILTINS_ALIAS_UNRESOLVED_SOURCES)
+def test_build_import_graph_a_builtins_alias_of_eval_or_exec_is_unresolved(
+        source, tmp_path, monkeypatch):
+    # The gate found the alias gap: `builtins.exec`/`builtins.eval` is the
+    # same risk under ANY proven binding of the module -- `import builtins
+    # as b` then `b.eval(...)` or a loaded `b.exec` value counts exactly
+    # like the plain spelling -- and `from builtins import eval/exec as
+    # alias` binds the builtin under a new name, so every LOAD-context use
+    # of that imported alias (call, assignment, collection element) is
+    # unresolved too, with the same STORE-name exemption as the bare
+    # builtins (the dataclass-field test above is that contrast).
+    rel = "engine/dyn.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is True
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+_BUILTINS_ALIAS_PRECISE_SOURCES = [
+    pytest.param("class Evaluator:\n    def eval(self, code):\n        return code\n\n"
+                 "e = Evaluator()\ne.eval('1 + 1')\n",
+                 id="unrelated-object-eval-method"),
+    pytest.param("thing = object()\nthing.exec()\n", id="unrelated-thing-exec-method"),
+]
+
+
+@pytest.mark.parametrize("source", _BUILTINS_ALIAS_PRECISE_SOURCES)
+def test_build_import_graph_an_unrelated_eval_or_exec_method_stays_resolved(
+        source, tmp_path, monkeypatch):
+    # The receiver precision the alias rules above rely on: `b.eval`/`b.exec`
+    # taints only for a receiver `import builtins`/`import builtins as b`
+    # PROVES, so a method named `eval` or `exec` on an unrelated object is
+    # not a builtin reference -- the file keeps its real (empty) edges, no
+    # catch-all, no taint.
+    rel = "engine/clean.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is False
+    assert graph[rel] == set()
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
 
 
 _METADATA_SAFE_SOURCES = [
@@ -4567,6 +4625,80 @@ def test_build_import_graph_shell_and_executable_keywords_control_precision(tail
         assert graph[rel] == set()
         assert rel not in pilot.dynamic_files(graph)
         assert rel not in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_a_python_subprocess_script_launch_with_a_non_none_cwd_fails_safe(tmp_path, monkeypatch):
+    # `[sys.executable, 'tools/worker.py']` alone keeps the precise edge (the
+    # literal-script test above); a non-None `cwd=` takes it away. The
+    # relative script resolves against the CHILD's working directory, which
+    # this scan cannot see -- literal (`cwd='engine'`) or not (`cwd=root`),
+    # any non-None spelling could redirect the launch to a different tracked
+    # file than the edge it would have named, so the whole file fails safe.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": (
+            "import subprocess, sys\n"
+            "root = 'somewhere'\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'], cwd=root)\n"),
+        "tools/worker.py": "W = 1\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_a_python_subprocess_dash_m_launch_with_a_non_none_cwd_fails_safe(tmp_path, monkeypatch):
+    # The same rule on the `-m` branch: sys.path and package discovery follow
+    # the child's cwd, so a non-None `cwd=` on an otherwise-resolvable
+    # `python -m checks.worker` makes the resolved module name point at a
+    # file the child may not actually run. Literal spelling of the value is
+    # irrelevant -- anything but `None` fails safe.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": (
+            "import subprocess\n"
+            "subprocess.run(['python3', '-m', 'checks.worker'], cwd='engine')\n"),
+        "checks/worker.py": "W = 1\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_a_python_subprocess_launch_with_literal_cwd_none_stays_precise(tmp_path, monkeypatch):
+    # The explicit, literal `cwd=None` is exactly the directory modelled by
+    # the precise script edge above (the child inherits the parent's cwd),
+    # so precision is unchanged: one resolved edge, no catch-all, no taint.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'], cwd=None)\n"),
+        "tools/worker.py": "W = 1\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == {"tools/worker.py"}
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_an_allowlisted_npm_launch_with_a_non_none_cwd_stays_precise(tmp_path, monkeypatch):
+    # The shape of the REAL tests/conftest.py's two npm launches (cwd=REPO_ROOT
+    # plus ordinary kwargs): a literal argv headed by an allowlisted
+    # non-Python command loads no tracked module however its cwd is set, so
+    # `cwd=` alone adds no unprovable edge and the launch stays precise -- the
+    # narrow taint set must never name conftest.py for it.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tests/conftest.py": (
+            "import subprocess\n"
+            "from pathlib import Path\n"
+            "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+            "subprocess.run(['npm', '--prefix', 'ui', 'run', 'build'],\n"
+            "               cwd=REPO_ROOT, capture_output=True, text=True)\n"),
+    })
+    rel = "tests/conftest.py"
+    assert graph[rel] == set()
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
 
 
 # (c) process-launch: the shape-only classifier, direct and by-reference

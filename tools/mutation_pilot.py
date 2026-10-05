@@ -320,8 +320,11 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 #     `subprocess` exec function used as a value) or a `subprocess` launch
 #     `_subprocess_targets` cannot prove is either a non-Python command or a
 #     tracked Python script/`-m` module target (variable argv or
-#     interpreter, `-c`, `-m pytest`, an untracked script or module, or an
-#     unsupported interpreter flag).
+#     interpreter, `-c`, `-m pytest`, an untracked script or module, an
+#     unsupported interpreter flag, a non-literal `cwd=` on a launch whose
+#     argv is not a literal `_SAFE_NON_PYTHON_COMMANDS` command, or
+#     positional arguments beyond argv, whose relative targets the
+#     scanner cannot resolve).
 #
 # All three categories contribute both to the whole-file catch-all and to
 # `unresolved_import_files`'s taint set, so a test that reaches one of these
@@ -822,18 +825,42 @@ def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
 
 
 def _subprocess_launch_unresolved(node: ast.Call) -> bool:
-    """True if a supported `subprocess` call's own keywords hide or redirect
+    """True if a supported `subprocess` call's own arguments hide or redirect
     what it launches, before any argv analysis: an `executable=` override
     replaces the program `_python_argv_targets` would have proved, an active
     or non-literal `shell=` hands the command to a shell instead of
-    executing argv directly, and a `**kwargs` expansion could carry either.
-    An explicit literal `shell=False` is the one accepted shell spelling;
-    absent keywords are fine."""
+    executing argv directly, and a `**kwargs` expansion could carry either --
+    each unresolved regardless of argv. A `cwd=` that is not the literal
+    `None` is unresolved whenever the argv is NOT a literal list headed by a
+    `_SAFE_NON_PYTHON_COMMANDS` executable: a relative script or `-m` target
+    in a Python or unknown-command launch resolves against the CHILD's
+    working directory, which this scan cannot see, so the graph edge could
+    name a different tracked file than the one the child actually runs, and
+    an unknown command is never proven not to load repo code however its cwd
+    is set. An allowlisted non-Python command launches nothing tracked at
+    all, so its `cwd=` alone adds no unprovable edge and stays precise.
+    Extra positional arguments (more than the one argv) are unresolved as
+    well, whatever the argv heads: only `Popen` accepts them, and they can
+    carry `executable`, `shell`, or `cwd` by position, which the current
+    scanner cannot safely interpret. An explicit literal `shell=False` is the
+    one accepted shell spelling and an explicit literal `cwd=None` keeps
+    normal resolution; absent keywords and ordinary single-argv calls are
+    fine."""
+    if len(node.args) > 1:
+        return True
+    argv = node.args[0] if node.args else next(
+        (kw.value for kw in node.keywords if kw.arg in ("args", "cmd")), None)
+    allowlisted_non_python = (isinstance(argv, ast.List) and bool(argv.elts)
+                              and _literal_str(argv.elts[0])
+                              in _SAFE_NON_PYTHON_COMMANDS)
     for kw in node.keywords:
         if kw.arg is None or kw.arg == "executable":
             return True
         if kw.arg == "shell" and not (
                 isinstance(kw.value, ast.Constant) and kw.value.value is False):
+            return True
+        if kw.arg == "cwd" and not allowlisted_non_python and not (
+                isinstance(kw.value, ast.Constant) and kw.value.value is None):
             return True
     return False
 
@@ -844,13 +871,21 @@ def _subprocess_targets(tree: ast.Module, tracked_set: set[str],
     `tree` (the five exec functions, however bound -- `import subprocess [as
     sp]` or `from subprocess import run as launch`), each judged by
     `_python_argv_targets` once `_subprocess_launch_unresolved` clears its
-    keywords. A call with an `executable=` override, an active or
+    arguments. A call with an `executable=` override, an active or
     non-literal `shell=`, or a `**kwargs` that could carry either is
-    unresolved and contributes no edge: its argv no longer proves what
-    runs. An explicit `shell=False` keeps the normal argv analysis, as does
-    an absent keyword. `unresolved` is True if ANY launch on its own cannot
-    be proven safe, in which case `build_import_graph` adds the whole-file
-    catch-all on top of whatever precise edges were found."""
+    unresolved whatever its argv, as is any positional argument beyond argv;
+    a non-literal `cwd=` is unresolved unless the argv is a literal list
+    headed by a `_SAFE_NON_PYTHON_COMMANDS` command -- an allowlisted
+    non-Python launch loads no tracked module, so the child's directory
+    cannot redirect an edge the graph would miss. Each such call contributes no edge: its argv
+    no longer proves what runs -- or, for `cwd=` on a Python or unknown
+    command and the positional form, where a relative target resolves or
+    what `executable`/`shell`/`cwd` value landed in the child's parameter
+    slots. An explicit `shell=False` keeps the normal argv analysis, as does
+    an absent keyword (a literal `cwd=None`, or any `cwd=` on a literal
+    allowlisted non-Python argv). `unresolved` is True if ANY launch on its
+    own cannot be proven safe, in which case `build_import_graph` adds the
+    whole-file catch-all on top of whatever precise edges were found."""
     aliases, funcs = _subprocess_bindings(tree)
     sys_aliases = _bound_aliases(tree, "sys") | {"sys"}
     edges: set[str] = set()
@@ -913,8 +948,8 @@ def _has_unresolved_process_launch(tree: ast.Module) -> bool:
 
     A direct call to one of the five is deliberately NOT flagged here:
     `_subprocess_targets` decides it from argv plus its `shell=`/
-    `executable=` keywords, so an ordinary proved-safe
-    `subprocess.run([...])` stays resolved. Module aliases (`import os as
+    `executable=`/`cwd=` keywords and any positional arguments beyond argv,
+    so an ordinary proved-safe `subprocess.run([...])` stays resolved. Module aliases (`import os as
     o`, `import subprocess as sp`, `import os.path`) and `from os import
     ...`/`from subprocess import ...` aliases are followed; a wildcard
     from-import of either module is unresolved. An attribute on any other
@@ -1030,18 +1065,22 @@ def build_import_graph(tracked: list[str] | None = None) -> dict[str, set[str]]:
     deliberately narrower than the older broad `_is_dynamic_file`
     allowlist: a `sys.path` READ or alias with no mutation, a bare
     `PYTHONPATH` string or assignment, `import site` alone, a `subprocess`
-    import or direct call whose argv is provably NON-Python (e.g. `git`)
-    or whose Python target resolved to a tracked file, and
+    import or direct single-argv call whose argv is provably NON-Python
+    (e.g. `git`; a literal `_SAFE_NON_PYTHON_COMMANDS` argv stays precise
+    even with a `cwd=`) or whose Python target resolved to a tracked file
+    with no non-literal `cwd=`, and
     non-import constructs such as `pkgutil` or a bare `compile` reference
     do not add the catch-all; the remaining gap is tracked in
     https://github.com/yshewchuk/investment-validation/issues/42 and issue
     #155, with push-to-main and the weekly scheduled mutation run as the
     backstop. Today the real `tests/conftest.py` repository-root
     `sys.path.insert` is a PROVEN root insertion (`REPO_ROOT =
-    Path(__file__).resolve().parents[1]` + `str(REPO_ROOT)`), so it is not
-    DYNAMIC and neither that insertion nor its provably non-Python `npm`
-    subprocess calls put it in `unresolved_import_files`; it remains a
-    closure root for every test through `_conftest_ancestors` regardless.
+    Path(__file__).resolve().parents[1]` + `str(REPO_ROOT)`), so the
+    insertion itself is not DYNAMIC, and its two `npm` subprocess calls are
+    literal `_SAFE_NON_PYTHON_COMMANDS` launches: `npm` loads no tracked
+    module, so their non-literal `cwd=REPO_ROOT` is allowlist-qualified and
+    they add no catch-all. It still remains a closure root for every test
+    through `_conftest_ancestors`.
  Every tracked file is a key, even one with no
     resolvable imports (an empty set), so `module_dependency_closure` can
     always look it up. Raises `SyntaxError` (via `ast.parse`) on the first
@@ -1354,7 +1393,15 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
      `.eval`); or, for a conftest.py only, an
     ANNOTATED or non-literal top-level `pytest_plugins` assignment. The
     qualified `builtins.exec`/`builtins.eval` form is also caught, since
-    it is the exact same risk under a different spelling.
+    it is the exact same risk under a different spelling -- under ANY
+    proven binding of the module: `import builtins as b` then `b.eval(...)`
+    or `b.exec` as a value counts exactly like `builtins.eval`, while a
+    receiver only `import builtins`/`import builtins as X` proves, so an
+    unrelated `thing.eval()` stays precise. A name bound by
+    `from builtins import eval as dynamic` (or the `exec` alias) is the
+    same reference: any LOAD-context use of it -- call, assignment, or
+    passed value -- is unresolved, with the same STORE-name exemption as
+    the bare builtins.
     Deliberately narrower than `_is_dynamic_file`: this function checks
     only for import-statement-shaped dynamic loading (the forms listed
     above). The other runtime-loading mechanisms this scan DOES track are
@@ -1383,6 +1430,10 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
                     and isinstance(node.target, ast.Name) \
                     and node.target.id == "pytest_plugins":
                 return True
+    builtins_names = _bound_aliases(tree, "builtins") | {"builtins"}
+    builtins_fn_names = {a.asname for n in ast.walk(tree)
+                         if isinstance(n, ast.ImportFrom) and n.module == "builtins"
+                         for a in n.names if a.asname and a.name in ("exec", "eval")}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -1403,9 +1454,9 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
         elif isinstance(node, ast.Attribute):
             if node.attr in ("__import__", "spec_from_file_location", "SourceFileLoader"):
                 return True
-            if isinstance(node.value, ast.Name) and node.value.id == "builtins" \
+            if isinstance(node.value, ast.Name) and node.value.id in builtins_names \
                     and node.attr in ("exec", "eval"):
-                return True
+                return True  # `builtins.eval` or an `import builtins as b` alias, called or as a value
             if isinstance(node.value, ast.Attribute) and node.value.attr == "metadata" \
                     and isinstance(node.value.value, ast.Name) \
                     and node.value.value.id == "importlib":
@@ -1418,8 +1469,9 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
             if node.id in ("__import__", "spec_from_file_location",
                            "SourceFileLoader"):
                 return True
-            if isinstance(node.ctx, ast.Load) and node.id in ("exec", "eval"):
-                return True  # a reference to the builtin, not only its direct call
+            if isinstance(node.ctx, ast.Load) and (
+                    node.id in ("exec", "eval") or node.id in builtins_fn_names):
+                return True  # a reference to the builtin, or a proven `from builtins import` alias, not only its direct call
         elif isinstance(node, ast.Call):
             if _looks_like_import_module_call(node.func) and _allowed_import_module_call(node) is None:
                 return True
@@ -1520,10 +1572,13 @@ def unresolved_import_files(tracked: list[str]) -> set[str]:
     Every category above taints deliberately: a test whose real-edge
     closure reaches one of these files cannot trust that closure, because
     the reached file can import, add to the import path, or launch code
-    this static analysis cannot see. The real `tests/conftest.py` is NOT in
-    this set: its known repository-root `sys.path.insert` is a PROVEN root
-    insertion and its `npm` launches are provably non-Python, so it taints
-    nothing."""
+    this static analysis cannot see. The real `tests/conftest.py` is NOT
+    in this set: its repository-root `sys.path.insert` alone is a PROVEN
+    root insertion, and its two `npm` launches are literal
+    `_SAFE_NON_PYTHON_COMMANDS` argvs, so their `cwd=REPO_ROOT` is
+    allowlist-qualified -- a non-Python command loads no tracked module
+    however the child's directory is set, so there is no relative target
+    for `_subprocess_launch_unresolved` to fail safe on."""
     tracked_set = set(tracked)
     roots = _tracked_roots(tracked_set)
     out: set[str] = set()
