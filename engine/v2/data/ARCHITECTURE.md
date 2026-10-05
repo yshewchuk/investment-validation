@@ -352,6 +352,40 @@ out-of-band access to the store). No retry beyond that bounded re-verify, no
 partial write (read-only). One read-only transaction covers a
 whole `resolve` walk. Idempotent: every row is append-only.
 
+**`data_normalizations` v13 recreate (contract; migration 13 defined by this PR).**
+This PR defines `data`-owner migration 13 as a pending step: it recreates
+`data_normalizations` through the migration framework's opt-in
+foreign-key-off table-recreate procedure and removes exactly one thing —
+v10's `UNIQUE (raw_hash, normalizer_id, contract_id)` — changing nothing
+else. Existing normalization rows are carried over, `normalization_id`
+stays the primary key, `contract_id` continues to reference
+`data_contracts`, and the table's other columns, `CHECK`s and immutability
+triggers are unchanged; committed
+`data_daily_market_revisions.normalization_id` references to
+`data_normalizations.normalization_id` survive the rebuild, which is
+precisely what the enforcement-off procedure is for. This is a new numbered
+step, never an edit of v10: applied steps stay checksum-protected and the
+recreate flag itself joins the new step's checksum. Cache identity is
+untouched — `cache_normalization` still keys on
+`(raw_hash, normalizer_id, contract_id)` and `unit.expected_keys` is not
+folded in; that belongs to the follow-up identity slice of
+[#133](https://github.com/yshewchuk/investment-validation/issues/133).
+
+The refusal is the migration framework's typed `OpsError`/`INTEGRITY_FAILED`
+integrity failure, not a `DATA_FAILURE_CODES` entry, and the concurrency and
+rollback rules below are the framework's: see
+[`engine/v2/ops/MIGRATIONS.md`](../ops/MIGRATIONS.md), which governs this step
+and is not restated in full here.
+
+| Requirement (framework numbering) | Outcome for migration 13 |
+|---|---|
+| R1 — ordinary migration | Not this step: it opts into the recreate procedure, so enforcement is off on the migration connection for its duration only. |
+| R2 — recreate migration | `PRAGMA foreign_keys = OFF` before `BEGIN IMMEDIATE`; the rebuild statements and the post-rebuild `PRAGMA foreign_key_check` run inside that transaction, before commit. |
+| R3 — violation | A dangling reference after the rebuild is a non-retryable integrity failure until the underlying data/schema problem is corrected; a failing rebuild or version-record statement is not retyped here — SQLite errors otherwise propagate. |
+| R4 — rollback | Any statement, the FK check or the version record failing rolls back the whole migration: no rebuilt table and no advance of the `data` catalog's recorded versions. |
+| R5 — restoration and concurrency | Enforcement returns to `ON` on every exit, including the refusal path. The pragma is per connection, so another connection's setting or open transaction is untouched, though `BEGIN IMMEDIATE` may serialize or reject a concurrent schema write. |
+| R6 — retry | Retrying after the cause is corrected reattempts the still-pending step; no internal retry. |
+
 ## Invariants
 
 Root doc §5 invariants this package is responsible for:
@@ -423,7 +457,10 @@ Root doc §5 invariants this package is responsible for:
   shared `raw_hash`. It does not yet fold in a fetch unit's own
   expected-key set, so two fetches of the same payload under different
   context universes can still collide — tracked as issue
-  [#133](https://github.com/yshewchuk/investment-validation/issues/133).
+  [#133](https://github.com/yshewchuk/investment-validation/issues/133). The
+  v13 recreate (Failure semantics) drops only that tuple's
+  database-level `UNIQUE`; the key computed here, and any
+  `unit.expected_keys` contribution, stay the follow-up identity slice's.
 - **`daily_market` mcap carry-forward is scoped to loaded partitions** — a
   winner row's null `mcap_usd` is backfilled only from an observation
   already loaded in this build, never by scanning further back; deliberate,
