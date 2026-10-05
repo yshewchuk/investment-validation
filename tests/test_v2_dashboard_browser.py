@@ -18,6 +18,7 @@ the real read API (P3-2, in progress) shaped exactly from
 from __future__ import annotations
 
 import json
+import types
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -279,6 +280,107 @@ def test_no_token_in_url_or_local_storage(browser, server):
         storage = page.evaluate(
             "() => Object.entries(localStorage).map(([k,v]) => k + '=' + v).join(';')")
         assert TOKEN not in storage
+    finally:
+        context.close()
+
+
+# --------------------------------------------------------------------------
+# unit regression: percentage-point fields and counts render in their own
+# units (test-first: expected RED on the current UI, which re-scales pp
+# values by 100 and renders coverage counts as percentages)
+# --------------------------------------------------------------------------
+
+
+_UNIT_FIELD_OVERRIDES = {
+    "driver_forecast": 5.0,        # already percentage points -> "5.0%"
+    "market_implied_move": 5.0,    # already percentage points -> "5.0%"
+    "expected_return_model": 0.05, # fraction -> "5.0%"
+    "planned_population": 121,     # count -> "121", never a %
+    "entry_premium": None,         # null -> "—"
+}
+
+
+def _override_fields_by_key(node, _seen: set[int] | None = None) -> None:
+    """Set every `_UNIT_FIELD_OVERRIDES` key by name, recursively, across all
+    dicts, lists and plain objects reachable from ``node`` -- without relying
+    on the mock fixture's internal structure."""
+    if node is None or isinstance(node, (str, bytes, bytearray, int, float,
+                                         complex, bool, type, types.ModuleType)):
+        return
+    if callable(node):
+        return
+    if _seen is None:
+        _seen = set()
+    if id(node) in _seen:
+        return
+    _seen.add(id(node))
+    if isinstance(node, dict):
+        for key in list(node):
+            if key == "coverage_summary" and isinstance(node[key], dict):
+                node[key]["compared_population"] = 87
+                _override_fields_by_key(node[key], _seen)
+            elif key in _UNIT_FIELD_OVERRIDES:
+                node[key] = _UNIT_FIELD_OVERRIDES[key]
+            else:
+                _override_fields_by_key(node[key], _seen)
+    elif isinstance(node, (list, tuple, set, frozenset)):
+        for item in node:
+            _override_fields_by_key(item, _seen)
+    else:
+        attrs = getattr(node, "__dict__", None)
+        if isinstance(attrs, dict):
+            for key in list(attrs):
+                if key in _UNIT_FIELD_OVERRIDES:
+                    try:
+                        setattr(node, key, _UNIT_FIELD_OVERRIDES[key])
+                    except (AttributeError, TypeError):
+                        pass
+                else:
+                    _override_fields_by_key(attrs[key], _seen)
+
+
+def test_percentage_point_and_count_fields_render_in_their_own_units(
+        browser, server, state):
+    """driver_forecast / market_implied_move are percentage points: 5.0 must
+    render as "5.0%", never the re-scaled "500.0%"; expected_return_model is
+    a fraction: 0.05 -> "5.0%"; null entry_premium -> "—"; coverage
+    planned_population is a count: its .coverage-item has exact text
+    "planned_population: 121" with no "%" (other fractional coverage items
+    legitimately render "%"). Asserted on the board row and again on the
+    event detail row opened from it."""
+    _override_fields_by_key(state)
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    try:
+        page.goto(base + "/")
+        row = page.locator('[data-score-id="r1-score-0-a"]')
+        expect(row).to_be_visible()
+        expect(row.get_by_test_id("driver-forecast-cell")).to_have_text("5.0%")
+        expect(row.locator("td").nth(6)).to_have_text("5.0%")  # market implied move
+        expect(row).not_to_contain_text("500.0%")
+        expect(row.get_by_test_id("expected-return-cell")).to_contain_text("5.0%")
+        expect(row.get_by_test_id("entry-premium-cell")).to_have_text("—")
+
+        coverage = page.get_by_test_id("release-coverage")
+        population_item = coverage.locator(
+            ".coverage-item", has_text="planned_population")
+        expect(population_item).to_have_text("planned_population: 121")
+        expect(population_item).not_to_contain_text("%")
+
+        compared_item = coverage.locator(
+            ".coverage-item", has_text="compared_population")
+        expect(compared_item).to_have_text("compared_population: 87")
+        expect(compared_item).not_to_contain_text("%")
+
+        row.get_by_test_id("open-event-link").click()
+        expect(page.get_by_test_id("event-detail")).to_be_visible()
+        expect(page.get_by_test_id("event-scores-table")).to_be_visible()
+        detail_row = page.locator(
+            '[data-testid="event-score-row"][data-score-id="r1-score-0-a"]')
+        expect(detail_row).to_be_visible()
+        expect(detail_row.locator("td").nth(2)).to_have_text("5.0%")  # driver forecast
+        expect(detail_row.locator("td").nth(3)).to_have_text("5.0%")  # market implied move
+        expect(detail_row).not_to_contain_text("500.0%")
     finally:
         context.close()
 

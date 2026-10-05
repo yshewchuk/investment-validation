@@ -25,6 +25,41 @@ export function fmtText(value: string | null): string {
   return value === null ? "—" : value;
 }
 
+/**
+ * For values that ALREADY arrive in percentage points (e.g. a 5.0 meaning
+ * "5.0 percentage points"): print the given number with one decimal place
+ * followed by `%`. The value is never multiplied by 100 — that scaling is
+ * `fmtPercent`'s job for fractional ratios.
+ */
+export function fmtPercentagePoint(value: number | null, digits = 1): string {
+  if (value === null) {
+    return "—";
+  }
+  return `${fmtNumber(value, digits)}%`;
+}
+
+/** Coverage-summary keys that are whole-number counts, not fractional ratios. */
+const COVERAGE_COUNT_KEYS: ReadonlySet<string> = new Set([
+  "planned_population",
+  "compared_population",
+]);
+
+/**
+ * One `coverage_summary` entry from the serving release: count keys
+ * (`planned_population`, `compared_population`) render as whole numbers with
+ * no `%`; every other entry is a fractional ratio and renders via
+ * `fmtPercent` (fraction × 100). Null is "missing" either way.
+ */
+export function fmtCoverageEntry(key: string, value: number | null): string {
+  if (value === null) {
+    return "—";
+  }
+  if (COVERAGE_COUNT_KEYS.has(key)) {
+    return fmtNumber(value, 0);
+  }
+  return fmtPercent(value);
+}
+
 /** Builds the immutable compatibility-surface link (§6): `/release/<id>/...`. */
 export function compatibilityLink(releaseId: string, path = "index.html"): string {
   return `/release/${encodeURIComponent(releaseId)}/${path}`;

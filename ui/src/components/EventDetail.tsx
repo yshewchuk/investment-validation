@@ -1,5 +1,5 @@
 import type { DataClient } from "../api/client";
-import { compatibilityLink, fmtPercent, fmtNumber, fmtText, headlineExpectedReturn } from "../format";
+import { compatibilityLink, fmtPercent, fmtPercentagePoint, fmtNumber, fmtText, headlineExpectedReturn } from "../format";
 import { useEventScores } from "../hooks";
 import { boardHash, scoreHash } from "../routes";
 
@@ -95,8 +95,8 @@ export function EventDetail({ client, releaseId, eventId, meta }: Props) {
                       <span data-testid="raw-verdict">gate_pass: {fmtText(score.verdict)}</span>
                     )}
                   </td>
-                  <td>{fmtPercent(score.driver_forecast)}</td>
-                  <td>{fmtPercent(score.market_implied_move)}</td>
+                  <td>{fmtPercentagePoint(score.driver_forecast)}</td>
+                  <td>{fmtPercentagePoint(score.market_implied_move)}</td>
                   <td data-testid="entry-premium-cell">{fmtNumber(score.entry_premium)}</td>
                   <td data-testid="expected-return-cell">
                     {fmtPercent(headline.value)}
