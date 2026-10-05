@@ -146,6 +146,35 @@ def test_coverage_requires_every_explicit_denominator_member():
     assert complete.covered_tickers == ("AAA", "BBB")
 
 
+def test_exact_denominator_with_keyless_present_outcome_is_never_partial():
+    contract = _contract("daily_market")
+    ref = TableContractRef(
+        contract_id=contract.contract_id, definition_hash=contract.definition_hash)
+    keys = (
+        CoverageKey(item_key="AAA", session_date="2026-09-15", ticker="AAA"),
+        CoverageKey(item_key="BBB", session_date="2026-09-15", ticker="BBB"),
+    )
+    outcomes = (
+        CoverageOutcome(
+            key=keys[0], status="present", receipt_id="raw-a", revision_id=None,
+            finality="final"),
+        CoverageOutcome(
+            key=keys[1], status="missing", receipt_id="raw-b", revision_id=None,
+            finality="final"),
+    )
+
+    coverage = build_completed_coverage(
+        ref, source="orats", endpoint="summaries",
+        interval=TimeInterval(
+            column="date", start_inclusive="2026-09-15", end_exclusive="2026-09-16"),
+        expected=keys, outcomes=outcomes,
+        acquisition_receipt_refs=("raw-a", "raw-b"),
+        completed_at="2026-09-16T00:00:00.000000Z")
+
+    assert coverage.state == "incomplete"
+    assert coverage.completed_at is None
+
+
 def test_tombstone_survives_lower_priority_later_revision():
     contract = _contract("daily_market")
     base = _daily_market_rows()[0]

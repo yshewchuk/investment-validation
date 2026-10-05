@@ -170,11 +170,11 @@ def test_native_nightly_refresh_plan_is_built_and_commits_end_to_end(tmp_path, m
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
     _plan, requests = _build_requests(conn, store, clock, tmp_path)
     request = requests[0]
-    assert request.job.parameters["provider_calls"] == 6
+    assert request.job.parameters["provider_calls"] == 12
     assert request.job.provider_budget_ref == NATIVE_DAILY_MARKET_ACCOUNT
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
@@ -194,7 +194,7 @@ def test_missing_staged_refresh_identity_fails_the_job(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
     _plan, requests = _build_requests(conn, store, clock, tmp_path)
     receipt = submit(conn, registry(), POLICY, requests[0], clock=clock)
 
@@ -237,12 +237,12 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
     extra = "ZZZ"
     _plan, requests = _build_requests(conn, store, clock, tmp_path)
     request = requests[0]
-    assert request.job.parameters["provider_calls"] == 6
+    assert request.job.parameters["provider_calls"] == 12
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
     _run_native(conn, clock, tmp_path, receipt, monkeypatch, explode=False,
@@ -258,15 +258,21 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 
 
-def test_a_missing_expected_ticker_refuses_the_refresh_without_committing(tmp_path, monkeypatch):
+def test_a_missing_expected_ticker_commits_rows_and_records_a_coverage_gap(
+        tmp_path, monkeypatch):
+    """One retry later, BBB is still absent from both non-empty 2xx pairs:
+    the refresh commits every returned ticker's row, advances the head, and
+    records a typed ``partial`` coverage whose only ``missing`` outcome is
+    BBB, receipt-backed and never asserted as a complete response."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
+    missing = "BBB"
     _plan, requests = _build_requests(conn, store, clock, tmp_path,
-                                      context_tickers=(TICKER, "BBB"))
+                                      context_tickers=(TICKER, missing))
     request = requests[0]
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
@@ -283,29 +289,56 @@ def test_a_missing_expected_ticker_refuses_the_refresh_without_committing(tmp_pa
                 break
             clock.advance(70)
             state = run_until(service, conn, receipt.job_id, timeout=60, states=states)
+        if state != "succeeded":
+            _raise_attempt_failure(conn, service, receipt.job_id, state)
     finally:
         service.close()
 
-    assert state != "succeeded"
-    assert state == "failed"
-    failure = json.loads(conn.execute(
-        "SELECT failure_json FROM jobs WHERE job_id = ?",
-        (receipt.job_id,)).fetchone()[0])
-    assert failure["code"] == "TRANSIENT_SOURCE"
-    unchanged = _head(conn)
-    assert (unchanged["snapshot_id"], unchanged["generation"]) == (
-        head["snapshot_id"], head["generation"])
-    assert conn.execute("SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 0
+    new_head = _head(conn)
+    assert new_head["generation"] == head["generation"] + 1
+    assert new_head["snapshot_id"] != head["snapshot_id"]
+    revisions = conn.execute(
+        "SELECT ticker, session_date FROM data_daily_market_revisions").fetchall()
+    assert [(row["ticker"], row["session_date"]) for row in revisions] == [(TICKER, SESSION)]
+    assert missing not in {row["ticker"] for row in revisions}
+
+    coverage_row = conn.execute(
+        "SELECT coverage_json FROM data_snapshot_coverage "
+        "WHERE snapshot_id = ? AND table_name = ?",
+        (new_head["snapshot_id"], "daily_market")).fetchone()
+    assert coverage_row is not None
+    coverage = json.loads(coverage_row["coverage_json"])
+    assert coverage["state"] == "partial"
+    assert {key["ticker"] for key in coverage["expected"]} == {TICKER, missing}
+    outcomes = {outcome["key"]["ticker"]: outcome for outcome in coverage["outcomes"]}
+    assert set(outcomes) == {TICKER, missing}
+    assert outcomes[TICKER]["status"] == "present"
+    assert [outcome["key"]["ticker"] for outcome in coverage["outcomes"]
+            if outcome["status"] == "missing"] == [missing]
+    gap = outcomes[missing]
+    assert gap["key"]["ticker"] == missing
+    assert gap["key"]["session_date"] == SESSION
+    assert gap["receipt_id"] in coverage["acquisition_receipt_refs"]
+
+    raw_receipt = conn.execute(
+        "SELECT response_kind, response_meta_json FROM data_raw_receipts "
+        "WHERE raw_receipt_id = ?", (gap["receipt_id"],)).fetchone()
+    assert raw_receipt is not None
+    assert raw_receipt["response_kind"] == "partial"
+    response_meta = json.loads(raw_receipt["response_meta_json"])
+    assert response_meta["attempts"] == 2
+    assert (response_meta["summaries_status"], response_meta["cores_status"]) == (200, 200)
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 
 
 def test_second_native_refresh_for_the_same_session_is_cache_only(tmp_path, monkeypatch):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
     _first_plan, first_requests = _build_requests(conn, store, clock, tmp_path)
-    assert first_requests[0].job.parameters["provider_calls"] == 6
+    assert first_requests[0].job.parameters["provider_calls"] == 12
     first_receipt = submit(conn, registry(), POLICY, first_requests[0], clock=clock)
     _run_native(conn, clock, tmp_path, first_receipt, monkeypatch, explode=False)
     head_after_first = _head(conn)
@@ -367,13 +400,16 @@ def test_provider_account_cli_admits_native_refresh_and_absent_row_is_refused(tm
 
 CACHED_SESSION = "2026-09-19"
 CACHED_TICKER = "AAPL"
+_CACHED_ORATS_PAYLOAD = (
+    b'{"summaries":{"data":[{"ticker":"AAPL","tradeDate":"2026-09-19"}]},'
+    b'"cores":{"data":[]}}')
 
 
 def _cached_request_id():
     return "eod-" + CACHED_SESSION + "-market"
 
 
-def _seed_market_pull(conn, store, clock, response_kind, payload=b"{}"):
+def _seed_market_pull(conn, store, clock, response_kind, payload=_CACHED_ORATS_PAYLOAD):
     """One raw receipt keyed by the exact request document ``_fetch_unit``
     builds, so ``_native_cached_outcome``'s ``content_hash`` lookup finds it.
     The payload distinguishes the receipt identity (the receipt id hashes the
@@ -418,7 +454,7 @@ def test_cached_outcome_reverifies_a_legitimate_empty_pull(tmp_path):
     refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
     assert [unit.request_id for unit in refresh_plan.fetch_units] == [_cached_request_id()]
     assert refresh_plan.cached == ()
-    assert refresh_plan.provider_calls == 6
+    assert refresh_plan.provider_calls == 12
 
 
 def test_cached_outcome_selects_the_later_complete_receipt(tmp_path):
@@ -430,7 +466,9 @@ def test_cached_outcome_selects_the_later_complete_receipt(tmp_path):
     _commit_parent(conn, store, clock)
     _seed_market_pull(conn, store, clock, "legitimate_empty")
     clock.advance(3600)
-    _seed_market_pull(conn, store, clock, "complete", payload=b'{"AAPL": 1}')
+    _seed_market_pull(conn, store, clock, "complete", payload=(
+        b'{"summaries":{"data":[{"ticker":"AAPL","tradeDate":"2026-09-19",'
+        b'"stockPrice":250.0}]},"cores":{"data":[]}}'))
 
     refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
     assert refresh_plan.fetch_units == ()
@@ -453,3 +491,22 @@ def test_cached_outcome_still_reuses_a_complete_pull(tmp_path):
     assert refresh_plan.cached[0].cache_hit is True
     assert refresh_plan.cached[0].receipt_ref
     assert refresh_plan.provider_calls == 0
+
+
+def test_incomplete_reconstruction_demotes_the_unit_to_a_budgeted_fetch(tmp_path):
+    """A receipt stored ``complete`` whose payload no longer reconstructs the
+    expected session row (here a ticker with no ``tradeDate``) must be caught
+    while planning, before any job is accepted: the unit lands in
+    ``fetch_units`` with no cached outcome and the full 12-call budget (three
+    planner attempts x four ORATS calls), never a zero-call cache hit."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    _commit_parent(conn, store, clock)
+    _seed_market_pull(conn, store, clock, "complete", payload=(
+        b'{"summaries":{"data":[{"ticker":"AAPL","stockPrice":250.0}]},'
+        b'"cores":{"data":[]}}'))
+
+    refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
+    assert [unit.request_id for unit in refresh_plan.fetch_units] == [_cached_request_id()]
+    assert refresh_plan.cached == ()
+    assert refresh_plan.provider_calls == 12
