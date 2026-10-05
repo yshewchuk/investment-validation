@@ -17,7 +17,9 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.computed_moves_store import _capture_id_for, _fence_check_for
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import RefreshParameters, RefreshUnit
-from tests.data_scan_support import commit_tables, contract_for, contract_ref_for, publish_and_inspect
+from tests.data_scan_support import (
+    commit_tables, contract_for, contract_ref_for, hand_built_record, publish_and_inspect,
+    table_from_rows)
 from tests.ops_support import FakeClock, catalog, enqueue_claim
 
 
@@ -1077,6 +1079,49 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     assert captured[0].max_result_rows == min(existing_limit, bound)
     assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, bound)
     assert captured[0].max_batch_rows <= captured[0].max_result_rows
+
+
+def test__scan_rows_committed_zero_row_year_fragment_is_a_valid_empty_result(tmp_path,
+                                                                              monkeypatch):
+    """Gate finding (#407): a partition that exists but holds zero rows is a
+    valid EMPTY selected population, not a refusal and not a zero batch
+    ceiling. A real committed ``earnings_events`` fragment with
+    ``row_count == 0`` (the established hand-built shape of
+    ``tests/test_v2_data_query.py::test_zero_row_fragment_metadata_has_zero_bound_and_scans_empty``
+    -- ``publish_and_inspect`` itself refuses an empty partition, since a
+    ``fragment_record`` needs non-empty primary-key bounds) keeps the year
+    partition present, so ``_scan_rows`` does NOT take its no-fragments
+    short-circuit: the real ``scan_population_bound`` for its exact year
+    selection is 0, ``max_result_rows`` correctly lowers to 0, and the batch
+    ceiling must stay positive. No refusal is swallowed: the real scan runs
+    and simply yields no rows."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    zero_record = hand_built_record(
+        store, _EVENTS, _EVENTS_REF, table_from_rows(_EVENTS, []),
+        partition_key="2024", row_count=0,
+        primary_key_min=("AAAA_2024-01-01",), primary_key_max=("ZZZZ_2024-12-31",))
+    commit_tables(conn, clock, {"earnings_events": [zero_record]}, {"earnings_events": _EVENTS})
+
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(_head_row(conn)["snapshot_id"])
+
+    records = repository.fragment_records(snapshot, "earnings_events")
+    assert len(records) == 1
+    assert records[0].row_count == 0
+    assert int(records[0].partition_key) == 2024  # the year partition really exists
+    assert _actual_population_bound(repository, snapshot, "earnings_events") == 0
+
+    captured = _capture_scans(monkeypatch, repository)
+    columns = ("event_id", "ticker", "event_date", "year", "src_orats")
+
+    result = computed_moves_store._scan_rows(repository, snapshot,
+                                             "earnings_events", columns)
+
+    assert result == []
+    assert len(captured) == 1
+    assert captured[0].max_result_rows == 0
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000) > 0
 
 
 # --------------------------------------------------------------------------

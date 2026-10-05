@@ -143,8 +143,10 @@ def _scan_rows(repository: Repository, snapshot, table_name: str, columns) -> li
     max_result_rows = min(MAX_SCAN_ROWS, population_bound)
     max_batch_rows = min(contract.maximum_batch_rows, 50_000)
     if population_bound > 0:
-        max_batch_rows = min(max_batch_rows, population_bound)
-    max_batch_rows = min(max_batch_rows, max_result_rows)
+        # A zero bound is a valid empty population: max_result_rows stays 0,
+        # but the batch ceiling must not be capped to zero -- only positive
+        # bounds keep max_batch_rows <= max_result_rows.
+        max_batch_rows = min(max_batch_rows, population_bound, max_result_rows)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
         columns=tuple(columns),
