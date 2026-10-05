@@ -33,7 +33,6 @@ from contextlib import contextmanager
 from engine.v2.contracts import (
     LEGACY_SCORE_BRIDGE_V1,
     ArtifactRef,
-    DataQuery,
     EventPage,
     EventPageItem,
     EventRef,
@@ -281,11 +280,11 @@ def resolve_event_refs(repository: Repository, snapshot_ref: SnapshotRef,
 
 
 def _rows_by_ticker(repository: Repository, snapshot_ref: SnapshotRef, contract_ref, ticker: str) -> list[dict]:
-    query = DataQuery(
-        snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=contract_ref,
-        columns=("event_id", "ticker", "event_date"),
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),),
-        order_by=("event_id",), max_batch_rows=_LOOKUP_BATCH_CAP, max_result_rows=_LOOKUP_RESULT_CAP)
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
+    query = repository._prepared_query(
+        snapshot_ref.snapshot_id, _EVENTS_TABLE, contract_ref,
+        ("event_id", "ticker", "event_date"), key_filter, ("event_id",),
+        max_batch_rows=_LOOKUP_BATCH_CAP, max_result_rows=_LOOKUP_RESULT_CAP)
     rows: list[dict] = []
     for batch in repository.scan(query, table_name=_EVENTS_TABLE):
         rows.extend(batch.to_pylist())

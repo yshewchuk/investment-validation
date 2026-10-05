@@ -114,6 +114,10 @@ newer than the code supports) are not caught by the API handler, so they are not
 `Problem` document. Operations routes refuse with plain text for auth, not-configured and
 health-file failures (e.g. `/health.json` 503 `unknown`, `/analogs.json` 503 `analogs not
 configured`) and with typed JSON documents carrying a `reason_code` for index refusals.
+Projection event resolution keeps its 1,000-row lookup ceiling and prepares that limit against
+the selected pinned event population before scanning; a smaller population lowers only the
+effective ceiling, while a larger population retains the caller limit.
+
 | Concern | Outcome |
 |---|---|
 | Missing input: identity | No or wrong token: `UNAUTHORIZED` (401). Event-scores and score-detail routes without a release pin: `RELEASE_ID_REQUIRED` (400); no route searches across releases. `GET /events` without a pin uses the current release. |
