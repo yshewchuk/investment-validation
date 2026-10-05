@@ -464,10 +464,17 @@ def test_nonmatching_vectorized_filter_materializes_zero_row_dicts(tmp_path, mon
             yield row
 
     monkeypatch.setattr(Repository, "_decode_rows", counting_decode)
+    key_filter = (KeyPredicate(column="ticker", operator="in", values=("AAB",)),)
+    bound = repo.scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=key_filter, time_interval=None)
+    max_result_rows = min(10, bound)
+    max_batch_rows = min(10, max_result_rows) if max_result_rows > 0 else 10
     query = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=("ticker", "year"),
-        key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAB",)),),
-        order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+        key_filter=key_filter,
+        order_by=("ticker", "year"), max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
     batches = list(repo.scan(query, table_name="securities"))
     assert sum(batch.num_rows for batch in batches) == 0
     assert decoded_rows == []
@@ -510,11 +517,25 @@ def test_forced_row_fallback_agrees_with_vectorized_filter(tmp_path, monkeypatch
             order_by=("ticker", "obs_date", "expiry", "strike", "right"),
             max_batch_rows=10, max_result_rows=10)
 
-    vectorized = [row for batch in repo.scan(_query(), table_name="option_chains")
+    base = _query()
+    bound = repo.scan_population_bound(
+        base.snapshot_id, table_name="option_chains",
+        table_contract_ref=base.table_contract_ref,
+        key_filter=base.key_filter, time_interval=base.time_interval)
+    max_result_rows = min(base.max_result_rows, bound)
+    max_batch_rows = (min(base.max_batch_rows, max_result_rows) if max_result_rows > 0
+                      else base.max_batch_rows)
+    query = DataQuery(
+        snapshot_id=base.snapshot_id, table_contract_ref=base.table_contract_ref,
+        columns=base.columns, key_filter=base.key_filter,
+        time_interval=base.time_interval, order_by=base.order_by,
+        max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
+
+    vectorized = [row for batch in repo.scan(query, table_name="option_chains")
                   for row in batch.to_pylist()]
     monkeypatch.setattr(query_mod, "compile_batch_matcher",
-                        lambda contract, query: None)
-    fallback = [row for batch in repo.scan(_query(), table_name="option_chains")
+                        lambda contract, q: None)
+    fallback = [row for batch in repo.scan(query, table_name="option_chains")
                 for row in batch.to_pylist()]
     assert len(vectorized) == 3  # the two AAA rows plus the 2025 BBB row; null ticker excluded
     assert sorted(r["ticker"] for r in vectorized) == ["AAA", "AAA", "BBB"]
@@ -537,13 +558,25 @@ def test_time_interval_query_always_takes_row_path(tmp_path):
                          100.0, "C"))
     snap = commit_tables(conn, clock, {"option_chains": [frag_2025]}, {"option_chains": _OC})
     repo = Repository(conn, store)
-    query = DataQuery(
+    base = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_OC_REF,
         columns=("ticker", "obs_date"), key_filter=(),
         time_interval=TimeInterval(column="obs_date", start_inclusive="2024-01-01",
                                    end_exclusive="2026-01-01"),
         order_by=("ticker", "obs_date", "expiry", "strike", "right"),
         max_batch_rows=10, max_result_rows=10)
+    bound = repo.scan_population_bound(
+        base.snapshot_id, table_name="option_chains",
+        table_contract_ref=base.table_contract_ref,
+        key_filter=base.key_filter, time_interval=base.time_interval)
+    max_result_rows = min(base.max_result_rows, bound)
+    max_batch_rows = (min(base.max_batch_rows, max_result_rows) if max_result_rows > 0
+                      else base.max_batch_rows)
+    query = DataQuery(
+        snapshot_id=base.snapshot_id, table_contract_ref=base.table_contract_ref,
+        columns=base.columns, key_filter=base.key_filter,
+        time_interval=base.time_interval, order_by=base.order_by,
+        max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
     assert query_mod.compile_batch_matcher(_OC, query) is None
     rows = [row for batch in repo.scan(query, table_name="option_chains")
             for row in batch.to_pylist()]
@@ -565,10 +598,17 @@ def test_batch_matcher_evaluation_failure_falls_back_for_that_fragment(tmp_path,
                                  [_securities_row(t, 2024) for t in ("AAA", "BBB", "CCC")], "2024")
     snap = commit_tables(conn, clock, {"securities": [record]}, {"securities": _SEC})
     repo = Repository(conn, store)
+    key_filter = (KeyPredicate(column="ticker", operator="in", values=("AAA", "BBB")),)
+    bound = repo.scan_population_bound(
+        snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
+        key_filter=key_filter, time_interval=None)
+    max_result_rows = min(10, bound)
+    max_batch_rows = min(10, max_result_rows) if max_result_rows > 0 else 10
     query = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=("ticker", "year"),
-        key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "BBB")),),
-        order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+        key_filter=key_filter,
+        order_by=("ticker", "year"), max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
     # Independently known from _securities_row/the query alone, not derived
     # from any scan: AAA and BBB (year 2024) in ticker order; CCC is
     # excluded by the key_filter.
