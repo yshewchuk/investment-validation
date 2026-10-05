@@ -47,7 +47,8 @@ interface section; this names only the load-bearing entry points.
   run/build/commit/merge functions and shared merge primitives in
   `incremental_tables.py` (also used by `engine.v2.research`/
   `forward_calendar_store`). See Invariants for revision identity/ordering,
-  `normalizer_id` versioning, coverage completeness, and mcap carry-forward.
+  planned-unit key validation, `normalizer_id` versioning, coverage
+  completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
   exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
   Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
@@ -275,7 +276,7 @@ and retryability come from that table, never guessed at a call site.
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
-| `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
+| `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, expected keys missing/malformed/empty at the normalization boundary, or a planned unit whose `expected_keys` field is missing, malformed or empty refused at refresh acquisition (Invariants) |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
@@ -365,11 +366,11 @@ triggers are unchanged; committed
 `data_normalizations.normalization_id` survive the rebuild, which is
 precisely what the enforcement-off procedure is for. This is a new numbered
 step, never an edit of v10: applied steps stay checksum-protected and the
-recreate flag itself joins the new step's checksum. Cache identity is
-untouched — `cache_normalization` still keys on
-`(raw_hash, normalizer_id, contract_id)` and `unit.expected_keys` is not
-folded in; that belongs to the follow-up identity slice of
-[#133](https://github.com/yshewchuk/investment-validation/issues/133).
+recreate flag itself joins the new step's checksum. This step removes only
+that schema-level uniqueness rule, computes no cache identity and rekeys no
+stored row. The current identity contract
+(Invariants) folds the fetch unit's expected-key set into the writer's
+`normalization_id`.
 
 The refusal is the migration framework's typed `OpsError`/`INTEGRITY_FAILED`
 integrity failure, not a `DATA_FAILURE_CODES` entry, and the concurrency and
@@ -450,17 +451,43 @@ Root doc §5 invariants this package is responsible for:
 - **`daily_market` coverage is measured against what was requested**, not
   what came back — a response missing an expected ticker is a genuine,
   detectable `TRANSIENT_SOURCE` gap, never a tautological "complete."
-- **`daily_market` normalizer versioning.** `cache_normalization` keys on
-  `(raw_hash, normalizer_id, contract_id)`; `normalizer_id` must be bumped
-  in the same PR as any change to what a normalized document contains for
-  the same raw input, or an old-mapping session replays unchanged under a
-  shared `raw_hash`. It does not yet fold in a fetch unit's own
-  expected-key set, so two fetches of the same payload under different
-  context universes can still collide — tracked as issue
-  [#133](https://github.com/yshewchuk/investment-validation/issues/133). The
-  v13 recreate (Failure semantics) drops only that tuple's
-  database-level `UNIQUE`; the key computed here, and any
-  `unit.expected_keys` contribution, stay the follow-up identity slice's.
+- **`daily_market` planned refresh units are validated before
+  acquisition.** A planned fetch unit's expected-key set must be a
+  nonempty tuple/list of nonempty strings, checked before the provider is
+  invoked, before any cache work, and before any coercion — for fetched
+  units and for cached units reconstructed from a caller-supplied plan
+  alike. A planned unit with an absent `expected_keys` field is invalid, and a
+  missing, malformed or empty planned set refuses with the registered
+  retryable `INPUT_CHANGED` before any provider call, cache/store work,
+  receipt/cache write or key coercion — never a `str()`-coerced member, never a
+  silent empty set. Valid
+  keys are preserved as strings on the way to the receipt request and the
+  normalization boundary below.
+- **`daily_market` normalizer versioning.** `cache_normalization` keys
+  `normalization_id` on a canonical hash of the fetch unit's expected-key set
+  folded together with `raw_hash`, `normalizer_id` and `contract_id`; expected
+  keys are the canonical set of nonempty string ticker keys: order and
+  duplicates never change the hash. At the normalization boundary the
+  expected-key sequence must be nonempty and every member must be a nonempty
+  string ticker key; a raw receipt needed for normalization carries that
+  sequence specifically as a nonempty `request.keys` list. A missing, null,
+  non-list or malformed saved list, or an empty or malformed sequence passed
+  directly, fails closed with the registered retryable `INPUT_CHANGED` before
+  any normalization identity is derived or written — never a coerced member,
+  never a silent empty set. The same raw payload and normalizer under different
+  expected-key sets therefore produce distinct normalization identities and
+  rows; repeated requests with the same set stay idempotent. A payload
+  conflict under the same resulting identity still refuses with non-retryable
+  `IDENTITY_CONFLICT`; distinct expected-key sets must never surface a raw
+  SQLite uniqueness `IntegrityError`. `normalizer_id` must be bumped in the
+  same PR as any change to what a normalized document contains for the same
+  raw input, or an old-mapping session replays unchanged under a shared
+  `raw_hash`. A row stored under the old triple-only formula carries no
+  expected-key metadata, so it is never safely reused as a cache hit: it and
+  its references stay unchanged and addressable by their stored legacy id,
+  and the next request writes/uses a new expected-set-scoped id — no rekey or
+  delete migration is performed. The v13 recreate (Failure semantics) dropped
+  only that tuple's database-level `UNIQUE` and rewrote no row's id.
 - **`daily_market` mcap carry-forward is scoped to loaded partitions** — a
   winner row's null `mcap_usd` is backfilled only from an observation
   already loaded in this build, never by scanning further back; deliberate,
