@@ -618,6 +618,11 @@ tests = [
     "tests/test_v2_ops_worker_typed_failures.py",
 ]
 
+[modules.ops_experiment_folds]
+why = "Fold-local experiment fitting: an experiment's fit must stay inside its own fold boundaries; a leaked boundary or wrong fold map contaminates the out-of-sample result."
+mutate = ["engine/v2/ops/experiment_folds.py"]
+tests = ["tests/test_v2_ops_experiment_folds.py"]
+
 [modules.ops_runtime]
 why = "Supervisor, workers, executors, resources, recovery and provider budget: job execution and admission."
 mutate = [

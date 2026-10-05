@@ -668,29 +668,29 @@ class Service:
         return identity
 
     def _reconcile_native_score_batch_shadow(self):
-        """Cutover PR-7a: the ONLY place native_score_batch is ever
+        """Cutover PR-7a slice 5: the ONLY place native_score_batch is ever
         submitted -- called every tick(), right alongside
-        _reconcile_computed_moves_refresh, never through
-        build_legacy_job_requests. See
-        nightly.submit_native_score_batch_shadow_if_ready and
-        ARCHITECTURE.md "Outputs"/"Failure semantics" for the full account.
+        _reconcile_computed_moves_refresh, never through build_legacy_job_requests.
+        See nightly.submit_native_score_batch_shadow_if_ready and ARCHITECTURE.md
+        "Outputs"/"Failure semantics" for the full account.
 
-        R2 (two independent memos): _native_release_root_or_none runs
-        FIRST, every tick, unconditionally; a release-unavailable outcome
-        returns immediately and NEVER touches self._native_score_batch_memo's
-        own attempt count. _native_score_batch_identity_or_none runs next,
-        with its OWN dedicated identity: None memo bucket for a lookup
-        failure, in self._native_score_batch_lookup_memo (CodeRabbit
-        round 6/7: never conflated with a real identity's build-attempt
-        count in self._native_score_batch_memo). Only past both does this method reach the
-        SAME bounded backoff schedule _reconcile_computed_moves_refresh
-        uses (_COMPUTED_MOVES_MAX_ATTEMPTS/_COMPUTED_MOVES_BACKOFF_SECONDS)
-        to decide whether to attempt a build+submit this tick. Every
-        exception past the release gate and the identity lookup is caught
-        and reported the same redacted way _reconcile_publication_status
-        reports its own, never left to crash the tick or block dispatch of
-        any other job."""
+        R2 (two independent memos): _native_release_root_or_none runs FIRST, every
+        tick, and a release-unavailable outcome NEVER touches
+        self._native_score_batch_memo's own attempt count;
+        _native_score_batch_identity_or_none runs next into its OWN
+        self._native_score_batch_lookup_memo, never conflated with a real
+        identity's build-attempt count. Only past both does this method reach the
+        SAME bounded backoff schedule _reconcile_computed_moves_refresh uses.
+        Past the memo gate a snapshot-pinned identity stages its COMPLETE
+        events.json/producer_refusals.json pair -- produce, publish, register in
+        ONE catalog transaction -- before the builder is reached, so no failure
+        path can leave a job referencing a one-sided stage; every exception is
+        caught and reported the same redacted way _reconcile_publication_status
+        reports its own, never crashing the tick."""
+        from engine.v2.data.repository import Repository
+        from engine.v2.foundation import canonical_json
         from engine.v2.ops.nightly import submit_native_score_batch_shadow_if_ready
+        from engine.v2.ops.nightly_raw_row_producer import build_native_score_batch_events
         from engine.v2.ops.snapshot_stages import _catalog_path
         from engine.v2.ops.submission import NamespacePolicy
 
@@ -701,6 +701,7 @@ class Service:
         identity = self._native_score_batch_identity_or_none(now)
         if identity is None:
             return
+        session, _scope_hash, producer_parameters = identity
         memo = self._native_score_batch_memo
         if memo is None or memo["identity"] != identity:
             memo = {"identity": identity, "attempts": 0, "not_before": 0.0}
@@ -710,10 +711,33 @@ class Service:
             return
         policy = NamespacePolicy({"operator": frozenset({"shadow"})})
         try:
+            events_ref = producer_refusals_ref = calendar_revision = snapshot_id = None
+            if producer_parameters:
+                repository = Repository(self.conn, self.store)
+                snapshot = repository.resolve(producer_parameters.snapshot_generation_id)
+                events, refusals = build_native_score_batch_events(repository, snapshot,
+                    as_of=session, horizon_days=producer_parameters.horizon_days,
+                    tickers=producer_parameters.tickers or None)
+                earnings = snapshot.table_versions["earnings_events"]
+                calendar_revision = earnings.dataset_version_id
+                events_ref = self.store.publish_bytes(
+                    canonical_json(events).encode(),
+                    schema_ref="native_score_batch_events.v1.0")
+                producer_refusals_ref = self.store.publish_bytes(
+                    canonical_json(refusals).encode(),
+                    schema_ref="native_score_batch_producer_refusals.v1.0")
+                with transaction(self.conn):
+                    register_artifact(self.conn, events_ref, None, self.clock)
+                    register_artifact(self.conn, producer_refusals_ref, None, self.clock)
+                events_ref, producer_refusals_ref = (events_ref.artifact_id,
+                    producer_refusals_ref.artifact_id)
+                snapshot_id = snapshot.snapshot_id
             receipt = submit_native_score_batch_shadow_if_ready(
                 self.conn, self.registry, policy, self.store, release_root,
                 catalog_path=_catalog_path(self.conn), objects_root=str(self.root),
-                code_source=self.code_source, clock=self.clock)
+                code_source=self.code_source, clock=self.clock, snapshot_id=snapshot_id,
+                calendar_revision=calendar_revision, events_ref=events_ref,
+                producer_refusals_ref=producer_refusals_ref)
         except Exception as exc:
             self._native_score_batch_backoff(memo, now)
             self._report_native_score_batch_problem(exc)

@@ -83,8 +83,11 @@ function is401(error: unknown): boolean {
  * page load can) must not silently repin.
  *
  * A background poll (`pollIntervalMs`) keeps checking `current` without
- * ever moving the pin — it only flags `changedReleaseId` so the UI can
- * offer a reload.
+ * ever moving the pin — it publishes the latest `current` identity and
+ * flags `changedReleaseId` so the UI can offer a reload. It is
+ * latest-request-wins: a superseded reply is ignored, and a failed newest
+ * read clears the published identity rather than leaving the last one
+ * latched; the next scheduled tick retries on its own.
  */
 export function useResolvedRelease(
   client: DataClient,
@@ -179,21 +182,51 @@ export function useResolvedRelease(
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let sequence = 0;
     const timer = window.setInterval(() => {
       if (pinnedIdRef.current === null) return;
+      const request = ++sequence;
       client
         .getRelease()
         .then((release) => {
-          if (release.release_id !== pinnedIdRef.current) {
-            setChangedReleaseId(release.release_id);
-          }
+          // Only the newest scheduled poll may publish an identity; a
+          // superseded reply or one landing after cleanup changes nothing.
+          if (cancelled || request !== sequence) return;
+          const pin = pinnedIdRef.current;
+          setState((prev) =>
+            prev.status === "ready"
+              ? {
+                  ...prev,
+                  isCurrent: release.release_id === pin,
+                  currentReleaseId: release.release_id,
+                  currentError: null,
+                }
+              : prev,
+          );
+          setChangedReleaseId(release.release_id === pin ? null : release.release_id);
         })
-        .catch(() => {
-          // A transient poll failure is not the pinned session's problem;
-          // the board keeps showing the last good pinned release.
+        .catch((error: unknown) => {
+          // A failed newest read means the published identity is unknown
+          // until a later tick succeeds; clear it, never latch it.
+          if (cancelled || request !== sequence) return;
+          setState((prev) =>
+            prev.status === "ready"
+              ? {
+                  ...prev,
+                  isCurrent: false,
+                  currentReleaseId: null,
+                  currentError: toApiError(error),
+                }
+              : prev,
+          );
+          setChangedReleaseId(null);
         });
     }, pollMs);
-    return () => window.clearInterval(timer);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [client, pollMs]);
 
   return { state, changedReleaseId };

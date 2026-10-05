@@ -119,6 +119,11 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # binds: the row has no resolved snapshot behind it, and the same preload
     # can never resolve on a retry.
     "SNAPSHOT_UNRESOLVED": ("dependency", False),
+    # Pure experiment fold fit (ops/experiment_folds.py): deterministic
+    # model/threshold failure; retrying the same inputs/model does not
+    # repair it. Typed transient infrastructure failures keep their own
+    # registered code and retry policy.
+    "EXPERIMENT_VARIANT_FAILED": ("internal", False),
     "UNAUTHORIZED_NAMESPACE": ("validation", False),
     "STALE_EXPECTATION": ("validation", False),
     "INTEGRITY_FAILED": ("integrity", False),
