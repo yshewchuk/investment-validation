@@ -1263,9 +1263,9 @@ per the root doc's §1); `experiments/*` runners submitting plans;
 `checks/rearchitecture_*.py` verification scripts; and the
 `tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package above
 layer 7.0 imports this package, and no legacy `engine/**` module does
-either, except that one documented dashboard caller. `board_requests`'s
-real caller is the raw-row producer ("Cutover PR-6" above), once
-implemented.
+either, except that one documented dashboard caller. The implemented
+slice-4b raw-row producer consumes `board_requests` as a library; it has no
+production caller yet.
 
 ## External systems and libraries
 
@@ -1611,8 +1611,7 @@ flowchart LR
     SI["source_inputs.SUPPORTED_STRATEGIES"] --> BR
     DM["registry.strategies.DYNAMIC_MENU\n(consistency check only)"] --> BR
     BR --> OUT["tuple[BoardRequest]\n(ticker, strategy, event_date, session)"]
-    OUT --> RRP["raw-row producer\n(Cutover PR-6, design)"]
-    RRP --> NC[(nightly.submit_native_score_batch_shadow_if_ready)]
+    OUT --> RRP["nightly_raw_row_producer.build_native_score_batch_events\n(slice 4b library API; no production caller yet)"]
 ```
 
 `board_requests` itself only consumes an `events_table` a caller passes
@@ -1623,8 +1622,9 @@ which belongs to `computed_moves_store._scan_once` instead, a different
 boundary. It is reachable today for `nightly_trigger._default_plan`'s
 scheduled `"score"` job specifically (see "Primary contracts"); a plan
 built directly with the lower-level plan builder can still default to
-`legacy` input mode instead. The raw-row producer ("Cutover PR-6" above)
-is `board_requests`' real caller once implemented (see "Dependencies" →
+`legacy` input mode instead. The slice-4b raw-row producer consumes these
+requests as a library API, but has no production caller yet. Slice 5 will add
+the worker/sidecar staging and submission wiring (see "Dependencies" →
 "Callers").
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
