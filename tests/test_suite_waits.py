@@ -21,6 +21,11 @@ from pathlib import Path
 
 import pytest
 
+from engine.v2.contracts import ProcessIdentity, ProgressEvent, ResolvedResources
+from engine.v2.ops import executor_watchdog
+from engine.v2.ops.catalog import dumps
+from engine.v2.ops.lifecycle import record_progress
+from engine.v2.ops.recovery import read_boot_id
 from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import (
@@ -147,8 +152,13 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     assert "'queued'" in message and "never admitted" in message
     assert "DEPENDENCY_PENDING" in message
     assert "attempt count: 0" in message
-    assert "last worker heartbeat: n/a" in message  # absent field: placeholder
-    assert "log tail: n/a" in message               # absent field: placeholder
+    # absent fields: each names itself, and the two heartbeats never blur
+    assert "attempt lease heartbeat: unavailable (no attempts recorded)" in message
+    assert "latest progress event: unavailable (no progress event recorded)" in message
+    assert ("latest non-heartbeat progress event: unavailable "
+            "(no non-heartbeat progress event recorded)") in message
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
+    assert "log tail: unavailable (no progress recorded)" in message
 
     def _broken_attempt_receipts(*args, **kwargs):
         raise RuntimeError("simulated helper failure")
@@ -157,12 +167,16 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     with pytest.raises(AssertionError) as excinfo:
         run_until(_NeverAdmits(), conn, job_id, timeout=0.2)
     message = str(excinfo.value)
-    assert "last worker heartbeat: n/a" in message  # failed helper: placeholder
     assert "attempt count: 0" in message            # other diagnostics survive
     assert "DEPENDENCY_PENDING" in message
-    assert "log tail: n/a" in message
+    assert "log tail: unavailable (no progress recorded)" in message
     assert job_id in message
     assert "'queued'" in message and "never admitted" in message
+    # a failing attempt_receipts n/a's ONLY the lease-heartbeat field: process
+    # family liveness is rendered independently and keeps its real value
+    assert ("attempt lease heartbeat: unavailable (attempt_receipts failed: RuntimeError)"
+            in message)
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
 
     class _Blank:  # a receipt that carries none of the attributes the helper reads
         pass
@@ -177,9 +191,18 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     # formatted before the helpers -- never vanish.
     assert job_id in message
     assert "'queued'" in message and "never admitted" in message
-    for label in ("attempt count: n/a", "queue/admission reason: n/a",
-                  "last worker heartbeat: n/a", "log tail: n/a"):
+    for label in ("attempt count: unavailable (attempt count failed: AttributeError)",
+                  "queue/admission reason: unavailable "
+                  "(queue/admission reason failed: AttributeError)",
+                  "attempt lease heartbeat: unavailable "
+                  "(attempt lease heartbeat failed: AttributeError)",
+                  "latest progress event: unavailable "
+                  "(latest progress event failed: AttributeError)",
+                  "latest non-heartbeat progress event: unavailable "
+                  "(no non-heartbeat progress event recorded)",
+                  "log tail: unavailable (log tail failed: AttributeError)"):
         assert label in message, message
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
 
     class _RaisingStr:  # a REQUIRED value whose __str__ raises
         def __str__(self):
@@ -199,6 +222,7 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
         attempt_number = 1
         state = "queued"
         heartbeat_at = "2026-09-12T00:00:05+00:00"
+        lease_expires_at = "2026-09-12T00:00:35+00:00"
 
     class _Receipt:  # unprintable attempt_count; every other required value present
         attempt_count = _RaisingStr()
@@ -216,10 +240,13 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     assert job_id in message
     assert "'queued'" in message and "never admitted" in message
     assert "diagnostics failed" not in message
-    assert "attempt count: n/a (attempt count unavailable: ValueError)" in message
+    assert "attempt count: unavailable (attempt count failed: ValueError)" in message
     assert "queue/admission reason: DEPENDENCY_PENDING" in message
     assert "log tail: tick at" in message
-    assert "last worker heartbeat: attempt 1 (queued)" in message
+    assert ("attempt lease heartbeat: attempt 1 (queued): heartbeat at "
+            "2026-09-12T00:00:05+00:00, lease expires at 2026-09-12T00:00:35+00:00") in message
+    assert "latest progress event: tick at 2026-09-12T00:00:00+00:00" in message
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
 
     # The final-poll race CodeRabbit flagged on #377: a job that completes
     # DURING the last sleep -- i.e. after the deadline already elapsed -- is a
@@ -243,6 +270,116 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     monkeypatch.setattr("tests.ops_support.time", _FakeTime())
     monkeypatch.setattr("tests.ops_support.job_state", _final_poll_state)
     assert run_until(_NeverAdmits(), conn, job_id, timeout=fake_deadline) == "succeeded"
+
+
+def _controlled_stat_line(pid: int, *, start_ticks: int) -> str:
+    """A syntactically real ``/proc/<pid>/stat`` row for the controlled process
+    table: live state ``S``, this pid, this recorded start time, and a process
+    group / session that match the ``ProcessIdentity`` the test writes (111).
+    Local (not imported from another test module) so this suite adds no
+    cross-test import edge; the field positions mirror what
+    ``executor_watchdog.process_info`` reads after ``rfind(")")``."""
+    fields = ["S", "1", "111", "111", "0", "-1", "0", "0", "0", "0", "0",
+              "0", "0", "0", "0", "0", "0", "1", "0", str(start_ticks), "0", "10"]
+    return f"{pid} (fake) " + " ".join(fields)
+
+
+def _install_controlled_process_table(monkeypatch, tmp_path, pid: int, start_ticks: int):
+    """Point the seam ``diagnostics.process_family_liveness`` walks
+    (``executor_watchdog.process_table``, the default ``table=`` argument of
+    the existing ``observe`` ownership proof) at a synthetic ``/proc`` tree
+    holding exactly one row: this pid, this recorded start time, live (state
+    ``S``). Liveness is then proved from a fixture instead of the host -- a
+    positive ``live`` count without an unrelated process, and a dead family
+    without a pid the kernel could never hand out -- and no production
+    identity mechanism is added for the test's benefit."""
+    proc = tmp_path / "proc"
+    entry = proc / str(pid)
+    entry.mkdir(parents=True)
+    (entry / "stat").write_text(_controlled_stat_line(pid, start_ticks=start_ticks))
+    real = executor_watchdog.process_table
+    monkeypatch.setattr(executor_watchdog, "process_table",
+                        lambda boot_id: real(boot_id, proc=proc))
+
+
+def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypatch):
+    """The fenced lease stamp (``attempts.heartbeat_at``), a throttled
+    supervisor ``heartbeat`` observation event, the latest meaningful
+    non-heartbeat step and the diagnostic-only process-family counts each
+    print as their own labelled field, so a stalled worker's two different
+    heartbeats never read as one -- and the family count exposes no cgroup
+    path or command line. The family counts are read off a controlled process
+    table (see the helper above), so ``live`` is a positive number the test
+    actually proves rather than an artifact of a pid no kernel could assign."""
+    conn, job_id = _queued_job(tmp_path, {"code": "DEPENDENCY_PENDING",
+                                          "needed": {"dep": 1}})
+    boot_id = read_boot_id()
+    epoch = conn.execute("SELECT epoch_id FROM supervisor_epochs").fetchone()[0]
+    pid, start_ticks = 424242, 4242
+    _install_controlled_process_table(monkeypatch, tmp_path, pid, start_ticks)
+    identity = ProcessIdentity(boot_id=boot_id, pid=pid, start_ticks=start_ticks,
+                               process_group=111)
+    resources = ResolvedResources(
+        effective_host_budget_bytes=1 << 30, reserved_memory_bytes=1 << 29,
+        assigned_cpu_ids=(0,), thread_count=1, scratch_limit_bytes=1 << 28,
+        executor_mode="fake", containment="none", provider_leases=(),
+        resource_profile_version="test")
+    conn.execute(
+        "INSERT INTO attempts (attempt_id, job_id, attempt_number, fence, "
+        "supervisor_epoch, host_boot_id, state, process_state, process_json, "
+        "resources_json, created_at, heartbeat_at, lease_expires_at) "
+        "VALUES (?, ?, 1, 1, ?, ?, 'failed', 'exited', ?, ?, ?, ?, ?)",
+        ("att_never", job_id, epoch, boot_id, dumps(identity), dumps(resources),
+         "2026-09-12T00:00:00+00:00", "2026-09-12T00:00:05+00:00",
+         "2026-09-12T00:00:35+00:00"))
+    conn.execute("INSERT INTO process_members (attempt_id, pid, start_ticks, "
+                 "identity_json) VALUES (?, ?, ?, ?)",
+                 ("att_never", identity.pid, identity.start_ticks, dumps(identity)))
+    conn.execute("UPDATE jobs SET attempt_count = 1 WHERE job_id = ?", (job_id,))
+    record_progress(conn, ProgressEvent(
+        job_id=job_id, attempt_id="att_never", stage_id=None, sequence=1,
+        recorded_at="2026-09-12T00:00:08+00:00", kind="progress",
+        elapsed_seconds=8.0, message="step complete", step="ramp",
+        step_duration_seconds=3.0, step_units=10))
+    record_progress(conn, ProgressEvent(
+        job_id=job_id, attempt_id="att_never", stage_id=None, sequence=2,
+        recorded_at="2026-09-12T00:00:12+00:00", kind="heartbeat",
+        elapsed_seconds=12.0, message="still running", step="ramp"))
+
+    class _NeverTicks:
+        def tick(self):
+            pass
+
+    with pytest.raises(AssertionError) as excinfo:
+        run_until(_NeverTicks(), conn, job_id, timeout=0.2)
+    message = str(excinfo.value)
+    assert job_id in message
+    assert "'queued'" in message and "never admitted" in message
+    assert ("attempt lease heartbeat: attempt 1 (failed): heartbeat at "
+            "2026-09-12T00:00:05+00:00, lease expires at "
+            "2026-09-12T00:00:35+00:00") in message
+    assert ("latest progress event: heartbeat at 2026-09-12T00:00:12+00:00 "
+            "(progress/observation event, not a lease signal)") in message
+    assert ("latest non-heartbeat progress event: progress at "
+            "2026-09-12T00:00:08+00:00 (step ramp): step complete") in message
+    assert "process family liveness: 1 live / 1 tracked (diagnostic only)" in message
+    assert "attempt count: 1" in message
+    assert "queue/admission reason: DEPENDENCY_PENDING" in message
+    assert "log tail: heartbeat at 2026-09-12T00:00:12+00:00: still running" in message
+    assert "cgroup" not in message
+    assert "command line" not in message
+    # the documented family output is only the live/tracked counts: that one
+    # rendered field carries nothing beyond them -- no pid or boot identity --
+    # and the controlled live row above makes BOTH counts nonzero, so a
+    # "0 live" that only proves an impossible pid can never pass here
+    family_fields = [part for part in message.split("; ")
+                     if part.startswith("process family liveness:")]
+    assert family_fields == ["process family liveness: 1 live / 1 tracked "
+                             "(diagnostic only)"]
+    counts = family_fields[0].split(": ", 1)[1].split(" (", 1)[0]
+    live_text, tracked_text = counts.split(" live / ")
+    assert int(live_text) > 0 and int(tracked_text.split()[0]) > 0
+    assert str(identity.pid) not in message and boot_id not in message
 
 
 @pytest.mark.parametrize("workers", [["-p", "no:xdist"], ["-n", "2"]], ids=["serial", "xdist"])

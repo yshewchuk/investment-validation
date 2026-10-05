@@ -1045,7 +1045,7 @@ starts working with no change of its own.
   evidence, while returned rows and typed missing-ticker coverage commit
   against the raw receipt, never as complete. Empty or literal-404 stays
   not_final under the normal retry policy; endpoint outcomes classify
-   independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
+    independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
@@ -1299,7 +1299,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | Plan write or later runner failure | Typed attempt failure; candidate stays unpublished. A failed plan write may leave partial bytes in the failed attempt root. |
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report. |
 
-Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect.
+Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect. Two distinct heartbeats govern a live attempt: `attempts.heartbeat_at` is the fenced lease-renewal stamp (`lifecycle.heartbeat`), while a `progress_events` row of `kind="heartbeat"` is only a throttled supervisor observation event (`HEARTBEAT_EVENT_SECONDS` or a state change) and never a lease signal; failure diagnostics expose the lease heartbeat stamp and the worker process-family liveness (recorded launch `ProcessIdentity`, ownership proof) separately from the latest progress event/step.
 
 ### `board_requests` (`native_board_universe.py`)
 
