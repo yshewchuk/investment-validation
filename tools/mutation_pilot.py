@@ -1605,9 +1605,8 @@ def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
     that transitively imports it cannot trust its own closure either.
 
     `taint_exempt` is normally just `{t}` (the test file itself): its OWN
-    narrow-unresolved status is handled by the separate, broader leaf rule
-    in `select_pr_tests` (`t in dyn`, where `dyn` is the broad
-    `dynamic_files` set, a superset of `unresolved_import_files`), so
+    status is handled separately by `select_pr_tests`, using the
+    catch-all-edge set from `dynamic_files(graph)` (`t in dyn` there), so
     re-tainting it here would be redundant. It is NOT the test file's
     conftest ancestors: a conftest ancestor with a genuine unresolved
     import SHOULD taint its dependents, because a test using one of that
@@ -1621,8 +1620,8 @@ def _closure_from_roots(roots: set[str], graph: dict[str, set[str]],
 
     `tests/conftest.py` never taints anything even though it is passed in
     `roots` as every test's ancestor: this function is only ever called
-    with the NARROW `unresolved_import_files` set as `dyn`, never the
-    broad `dynamic_files` set, and that narrow set contains only files
+    with the `unresolved_import_files` set as `dyn`, never the
+    `dynamic_files` catch-all-edge set, and that set contains only files
     with a genuinely unresolved construct. The real `tests/conftest.py`
     has none -- its known repository-root `sys.path.insert` is a PROVEN
     root insertion and its `npm` launches are provably non-Python -- so it
@@ -1652,23 +1651,24 @@ def select_pr_tests(cfg: dict, changed: list[str], *,
     An empty `changed` returns [] (no diff -> nothing to run), matching
     changed_modules; a docs-only diff no test reads returns [] too.
 
-    Fan-out limits: the #155 fail-safe set (DYNAMIC or tainted tests) is
-    added only when the diff touches a non-test python file; a collected
-    test file is a leaf (selects itself and its static importers), and a doc
-    path (`is_doc_changed_path`) selects only the tests whose closure names
-    that doc (`_doc_reader_tests`). A diff of only those selects a narrow set.
+    Fan-out limits: the #155 fail-safe set (catch-all-edge or tainted
+    tests) is added only when the diff touches a non-test python file; a
+    collected test file is a leaf (selects itself and its static
+    importers), and a doc path (`is_doc_changed_path`) selects only the
+    tests whose closure names that doc (`_doc_reader_tests`). A diff of
+    only those selects a narrow set.
 
-    #155 (unresolved dynamic loading) handling: a test file that is ITSELF
-    classified DYNAMIC (_is_dynamic_file) is selected whenever the diff
-    touches a non-test python file, and so is a
+    #155 (unresolved dynamic loading) handling: a test file that ITSELF
+    carries a catch-all edge, as identified by `dynamic_files(graph)`, is
+    selected whenever the diff touches a non-test python file, and so is a
     test file that reaches, via a real import edge, some OTHER file in
     `unresolved_import_files` -- one with a genuine unresolved import
     attempt, import-path mutation, or process launch (a "helper" that can
     load or run code this scan cannot see) -- both via _closure_from_roots's
     `tainted` return.
-    Only the test file's OWN narrow-unresolved status is exempted here
-    (handled separately by the `t in dyn` leaf rule, using the broader
-    dynamic_files set); a conftest ANCESTOR with a genuine unresolved
+    Only the test file's OWN status is exempted here, by the separate
+    `t in dyn` leaf rule over the catch-all-edge set from
+    `dynamic_files(graph)`; a conftest ANCESTOR with a genuine unresolved
     construct DOES taint its dependents, because a test using one of its
     fixtures can have a real, invisible runtime dependency on whatever
     that fixture loads -- see _closure_from_roots's own docstring."""
