@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from engine.v2.contracts import JobSpec, SubmitRequest
+from engine.v2.contracts import JobSpec, ProgressEvent, SubmitRequest
 from engine.v2.foundation import SystemClock, content_hash
 from engine.v2.ops import executor
 from engine.v2.ops import worker as worker_module
@@ -31,7 +31,7 @@ from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import transaction
 from engine.v2.ops.cli import _render_explain_text, _render_progress_text, explain_command
 from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
-from engine.v2.ops.lifecycle import Outcome, commit_attempt
+from engine.v2.ops.lifecycle import Outcome, commit_attempt, record_progress
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.scheduler import claim_next
 from engine.v2.ops.stages import registry
@@ -361,6 +361,57 @@ def supervisor_root(conn):
     # own view of the open database file.
     path = conn.execute("PRAGMA database_list").fetchone()[2]
     return str(Path(path).parent)
+
+
+# --------------------------------------------------------------------------
+# 5. latest_progress_event: exactly get_job's recorded-time-then-sequence
+#    ordering, while the step timeline keeps walking sequence order
+# --------------------------------------------------------------------------
+
+
+def test_latest_progress_event_uses_get_job_ordering_not_sequence_order(tmp_path):
+    """``explain``'s ``latest_progress_event`` names the SAME event
+    ``get_job.latest_progress`` does: latest by ``recorded_at``, with
+    ``sequence`` breaking an equal timestamp only. A bare ``events[-1]`` off
+    the timeline's ``ORDER BY sequence`` read reports a row with an earlier
+    stamp whenever a late sequence number lands out of time order (a
+    throttled supervisor observation after a worker row), so the fixture
+    conflicts on both axes at once: sequence 4 is the last row yet the
+    earliest step, the :00:05 pair ties (sequence 3's ``checkpoint`` wins
+    over sequence 2's ``heartbeat``), and the timeline itself stays in
+    sequence order -- ``alpha`` (recorded last) before ``beta``."""
+    conn, clock, supervisor = catalog(tmp_path)
+    submit(conn, TINY_REGISTRY, TINY_POLICY, request("ordering"), clock=clock)
+    claim = claim_next(conn, policy=DEFAULT_POLICY, sample=sample(clock), supervisor=supervisor,
+                       clock=clock, registry=TINY_REGISTRY)
+    #: (sequence, kind, recorded_at, message, step)
+    rows = (
+        (0, "progress", "2026-09-14T12:00:04+00:00", "step complete", "alpha"),
+        (1, "progress", "2026-09-14T12:00:02+00:00", "step complete", "beta"),
+        (2, "heartbeat", "2026-09-14T12:00:05+00:00", "worker observed", None),
+        (3, "checkpoint", "2026-09-14T12:00:05+00:00", "checkpoint written", None),
+        (4, "error", "2026-09-14T12:00:03+00:00", "late sequence, early stamp", None),
+    )
+    for sequence, kind, recorded_at, message, step in rows:
+        record_progress(conn, ProgressEvent(
+            job_id=claim.job_id, attempt_id=claim.attempt_id, stage_id="tiny",
+            sequence=sequence, recorded_at=recorded_at, kind=kind,
+            elapsed_seconds=float(sequence), message=message, step=step,
+            step_duration_seconds=1.0 if step else None, step_units=1 if step else None))
+
+    document = explain_command(SimpleNamespace(job_id=claim.job_id), conn,
+                               Path(supervisor_root(conn)))
+    attempt = document["attempts"][0]
+    assert attempt["latest_progress_event"] == {
+        "kind": "checkpoint", "recorded_at": "2026-09-14T12:00:05+00:00"}
+    latest = get_job(conn, claim.job_id).latest_progress
+    assert (latest.kind, latest.recorded_at, latest.sequence) == (
+        "checkpoint", "2026-09-14T12:00:05+00:00", 3)
+    assert [entry["step"] for entry in attempt["steps"]] == ["alpha", "beta"]
+
+    text = _render_explain_text(document)
+    assert "latest progress event: checkpoint at 2026-09-14T12:00:05+00:00" in text
+    assert "latest progress event: error at" not in text
 
 
 def test_logs_follow_renders_step_events_as_text(tmp_path, monkeypatch):

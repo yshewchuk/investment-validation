@@ -1238,7 +1238,16 @@ def _explain_attempt(conn, store, receipt):
     events = [json.loads(row[0]) for row in rows]
     reserved = (receipt.resolved_resources.reserved_memory_bytes
                 if receipt.resolved_resources else None)
-    latest_event = events[-1] if events else None
+    # ``latest_progress_event`` uses exactly ``get_job``'s ordering -- recorded
+    # time first, sequence only to break a tie -- not the sequence ordering the
+    # step timeline is walked in: a worker (or a throttled supervisor
+    # observation) can append a row with a later sequence but an EARLIER
+    # recorded time, and ``events[-1]`` would then report that stale row as the
+    # attempt's last progress, contradicting what ``get_job`` itself returns.
+    latest = conn.execute("SELECT body_json FROM progress_events WHERE attempt_id = ? "
+                          "ORDER BY recorded_at DESC, sequence DESC LIMIT 1",
+                          (receipt.attempt_id,)).fetchone()
+    latest_event = None if latest is None else json.loads(latest[0])
     return {"attempt_id": receipt.attempt_id, "attempt_number": receipt.attempt_number,
             "state": receipt.state, "process_state": receipt.process_state,
             "started_at": receipt.started_at, "ended_at": receipt.ended_at,

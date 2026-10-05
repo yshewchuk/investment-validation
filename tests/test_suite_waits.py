@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from engine.v2.contracts import ProcessIdentity, ProgressEvent, ResolvedResources
+from engine.v2.ops import executor_watchdog
 from engine.v2.ops.catalog import dumps
 from engine.v2.ops.lifecycle import record_progress
 from engine.v2.ops.recovery import read_boot_id
@@ -36,6 +37,7 @@ from tests.ops_support import (
     request,
     run_until,
 )
+from tests.test_v2_ops_executor_faults import _fake_stat_line
 
 REPO = Path(__file__).resolve().parents[1]
 GIB = 1 << 30
@@ -271,19 +273,41 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     assert run_until(_NeverAdmits(), conn, job_id, timeout=fake_deadline) == "succeeded"
 
 
-def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path):
+def _install_controlled_process_table(monkeypatch, tmp_path, pid: int, start_ticks: int):
+    """Point the seam ``diagnostics.process_family_liveness`` walks
+    (``executor_watchdog.process_table``, the default ``table=`` argument of
+    the existing ``observe`` ownership proof) at a synthetic ``/proc`` tree
+    holding exactly one row: this pid, this recorded start time, live (state
+    ``S``). Liveness is then proved from a fixture instead of the host -- a
+    positive ``live`` count without an unrelated process, and a dead family
+    without a pid the kernel could never hand out -- and no production
+    identity mechanism is added for the test's benefit."""
+    proc = tmp_path / "proc"
+    entry = proc / str(pid)
+    entry.mkdir(parents=True)
+    (entry / "stat").write_text(_fake_stat_line(pid, start_ticks=start_ticks))
+    real = executor_watchdog.process_table
+    monkeypatch.setattr(executor_watchdog, "process_table",
+                        lambda boot_id: real(boot_id, proc=proc))
+
+
+def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path, monkeypatch):
     """The fenced lease stamp (``attempts.heartbeat_at``), a throttled
     supervisor ``heartbeat`` observation event, the latest meaningful
     non-heartbeat step and the diagnostic-only process-family counts each
     print as their own labelled field, so a stalled worker's two different
     heartbeats never read as one -- and the family count exposes no cgroup
-    path or command line."""
+    path or command line. The family counts are read off a controlled process
+    table (see the helper above), so ``live`` is a positive number the test
+    actually proves rather than an artifact of a pid no kernel could assign."""
     conn, job_id = _queued_job(tmp_path, {"code": "DEPENDENCY_PENDING",
                                           "needed": {"dep": 1}})
     boot_id = read_boot_id()
     epoch = conn.execute("SELECT epoch_id FROM supervisor_epochs").fetchone()[0]
-    identity = ProcessIdentity(boot_id=boot_id, pid=(1 << 30) + 7, start_ticks=4242,
-                               process_group=1)
+    pid, start_ticks = 424242, 4242
+    _install_controlled_process_table(monkeypatch, tmp_path, pid, start_ticks)
+    identity = ProcessIdentity(boot_id=boot_id, pid=pid, start_ticks=start_ticks,
+                               process_group=111)
     resources = ResolvedResources(
         effective_host_budget_bytes=1 << 30, reserved_memory_bytes=1 << 29,
         assigned_cpu_ids=(0,), thread_count=1, scratch_limit_bytes=1 << 28,
@@ -327,18 +351,23 @@ def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path):
             "(progress/observation event, not a lease signal)") in message
     assert ("latest non-heartbeat progress event: progress at "
             "2026-09-12T00:00:08+00:00 (step ramp): step complete") in message
-    assert "process family liveness: 0 live / 1 tracked (diagnostic only)" in message
+    assert "process family liveness: 1 live / 1 tracked (diagnostic only)" in message
     assert "attempt count: 1" in message
     assert "queue/admission reason: DEPENDENCY_PENDING" in message
     assert "log tail: heartbeat at 2026-09-12T00:00:12+00:00: still running" in message
     assert "cgroup" not in message
     assert "command line" not in message
     # the documented family output is only the live/tracked counts: that one
-    # rendered field carries nothing beyond them -- no pid or boot identity
+    # rendered field carries nothing beyond them -- no pid or boot identity --
+    # and the controlled live row above makes BOTH counts nonzero, so a
+    # "0 live" that only proves an impossible pid can never pass here
     family_fields = [part for part in message.split("; ")
                      if part.startswith("process family liveness:")]
-    assert family_fields == ["process family liveness: 0 live / 1 tracked "
+    assert family_fields == ["process family liveness: 1 live / 1 tracked "
                              "(diagnostic only)"]
+    counts = family_fields[0].split(": ", 1)[1].split(" (", 1)[0]
+    live_text, tracked_text = counts.split(" live / ")
+    assert int(live_text) > 0 and int(tracked_text.split()[0]) > 0
     assert str(identity.pid) not in message and boot_id not in message
 
 
