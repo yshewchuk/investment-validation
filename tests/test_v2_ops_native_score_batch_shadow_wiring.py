@@ -17,16 +17,20 @@ submitted through the real ``submit_graph``, and only then UPDATEd to
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from engine.v2.contracts import JobReceipt
-from engine.v2.foundation import ArtifactStore
+from engine.v2.data.repository import Repository
+from engine.v2.foundation import ArtifactStore, canonical_json
 from engine.v2.models import deployment
 from engine.v2.ops import nightly
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError
-from engine.v2.ops.stages import registry
+from engine.v2.ops.stages import LegacyParameters, registry
 from engine.v2.ops.submission import (
     NamespacePolicy,
     job_id_for,
@@ -377,32 +381,192 @@ def test_submit_builds_one_shadow_batch_request_from_the_slice5_refs(tmp_path, m
     assert _native_score_batch_job_count(conn) == 0
 
 
-def test_service_backs_off_one_attempt_when_snapshot_pinned_and_producer_missing(tmp_path, monkeypatch):
-    """CodeRabbit round 8: B2's own raise (above) must surface through
-    ``Service._reconcile_native_score_batch_shadow``'s catch/backoff, not
-    just through a direct ``submit_native_score_batch_shadow_if_ready``
-    call -- exactly one spent attempt, and ``not_before`` pushed into the
-    future, so the very next tick does not immediately retry and re-raise."""
+def test_service_backs_off_one_attempt_when_pinned_producer_fails(tmp_path, monkeypatch):
+    """Slice 5's whole-producer-failure path: a snapshot-pinned identity whose
+    ``Repository.resolve`` succeeds but whose PR-6 ``build_native_score_batch_events``
+    raise must surface through ``Service._reconcile_native_score_batch_shadow``'s
+    catch/backoff -- the exception lands BEFORE any publish/register/submit, so
+    nothing is submitted or registered -- with exactly one spent sidecar build
+    attempt and ``not_before`` pushed into the future, while the separate
+    identity-LOOKUP memo (whose own lookup succeeded this tick) stays untouched."""
     conn, clock, _ = catalog(tmp_path)
-    score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
-    session, scope_hash = nightly._session_scope_from_score_key(score_key)
+    session = "2026-01-01"
+    scope_hash = "sha256:0123456789abcdef01234567"
+    snapshot_id = "snap-2026-01-01-producer-fails-99"
+    earnings_revision = "earnings-dataset-revision-1313"
+    tickers = ("FILTER-A", "FILTER-B")
+    horizon_days = 21
+    snapshot = SimpleNamespace(
+        snapshot_id=snapshot_id,
+        table_versions={"earnings_events": SimpleNamespace(
+            dataset_version_id=earnings_revision)})
+    producer_parameters = LegacyParameters(
+        expected_ids=(session + "|" + scope_hash,), session=session,
+        tickers=tickers, horizon_days=horizon_days,
+        snapshot_generation_id=snapshot_id)
+
+    resolved = []
+
+    def _resolve(repository, snapshot_generation_id):
+        resolved.append(snapshot_generation_id)
+        return snapshot
+
+    monkeypatch.setattr(Repository, "resolve", _resolve)
+
+    producer_calls = []
+
+    def _producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
+        producer_calls.append({"as_of": as_of, "horizon_days": horizon_days,
+                               "tickers": tickers})
+        raise RuntimeError("planted whole-producer failure")
+
+    monkeypatch.setattr(
+        "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
+        _producer)
     monkeypatch.setattr(nightly, "_native_score_batch_identity",
-                        lambda conn: (session, scope_hash, True))
+                        lambda conn: (session, scope_hash, producer_parameters))
+
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
-    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: "fake-root")
+    monkeypatch.setattr(service, "_native_release_root_or_none",
+                        lambda: str(tmp_path / "verified-release-root"))
 
     service._reconcile_native_score_batch_shadow()  # must not raise
 
+    assert resolved == [snapshot_id]  # resolve ran, on the pinned generation id
+    assert len(producer_calls) == 1
+    call = producer_calls[0]
+    assert call["as_of"] == session
+    assert call["horizon_days"] == horizon_days
+    assert call["tickers"] == tickers
     assert _native_score_batch_job_count(conn) == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == 0
     memo = service._native_score_batch_memo
     assert memo is not None
-    assert memo["identity"] == (session, scope_hash, True)
+    assert memo["identity"] == (session, scope_hash, producer_parameters)
     assert memo["attempts"] == 1
-    assert memo["not_before"] > 0
+    assert memo["not_before"] > clock.monotonic()
     # the identity lookup itself succeeded this tick -- its own failure
     # memo must be untouched (None), never conflated with this backoff.
     assert service._native_score_batch_lookup_memo is None
+
+
+def test_service_stages_both_producer_documents_before_shadow_submission(tmp_path, monkeypatch):
+    """Slice 5's core claim: a snapshot-pinned identity reaches the REAL
+    shadow submission only after the sidecar's full staging path ran -- the
+    raw-row producer is called exactly once for this session with the
+    identity's own nondefault ``horizon_days`` and ticker filter and the
+    exact snapshot ``Repository.resolve`` returned, both JSON-ready
+    documents are then published into the real artifact store AND
+    registered in the catalog, and the submitted job binds the SAME two
+    artifact ids that its ``input_bindings`` name (in the producer's own
+    order) -- so a job can never reference a one-sided stage. Everything
+    except the four documented seams stays real: the catalog connection,
+    the ``Service`` and its ``ArtifactStore``, ``register_artifact``,
+    ``Repository`` itself, and ``submit_native_score_batch_shadow_if_ready``
+    (the test never intercepts the submission boundary)."""
+    conn, clock, _ = catalog(tmp_path)
+    session = "2026-01-01"
+    scope_hash = "sha256:0123456789abcdef01234567"
+    snapshot_id = "snap-2026-01-01-staged-77"
+    earnings_revision = "earnings-dataset-revision-4242"
+    tickers = ("FILTER-A", "FILTER-B")
+    horizon_days = 21
+    release_root = str(tmp_path / "verified-release-root")
+    snapshot = SimpleNamespace(
+        snapshot_id=snapshot_id,
+        table_versions={"earnings_events": SimpleNamespace(
+            dataset_version_id=earnings_revision)})
+    producer_parameters = LegacyParameters(
+        expected_ids=(session + "|" + scope_hash,), session=session,
+        tickers=tickers, horizon_days=horizon_days,
+        snapshot_generation_id=snapshot_id)
+
+    events_document = [
+        {"event_id": session + "|" + scope_hash + "|FILTER-A",
+         "ticker": "FILTER-A", "as_of": session, "horizon_days": horizon_days},
+    ]
+    refusals_document = {
+        "schema_version": "native_score_batch_producer_refusals.v1.0",
+        "refusals": [{"event_id": session + "|" + scope_hash + "|FILTER-B",
+                      "code": "INTRADAY_EVENT_NOT_ADMITTED"}]}
+
+    resolved = []
+
+    def _resolve(repository, snapshot_generation_id):
+        resolved.append(snapshot_generation_id)
+        return snapshot
+
+    monkeypatch.setattr(Repository, "resolve", _resolve)
+
+    producer_calls = []
+
+    def _producer(repository, resolved_snapshot, *, as_of, horizon_days, tickers):
+        producer_calls.append({
+            "repository": repository, "snapshot": resolved_snapshot,
+            "as_of": as_of, "horizon_days": horizon_days, "tickers": tickers})
+        return events_document, refusals_document
+
+    monkeypatch.setattr(
+        "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
+        _producer)
+    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+                        lambda conn: (session, scope_hash, producer_parameters))
+
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    monkeypatch.setattr(service, "_native_release_root_or_none", lambda: release_root)
+
+    service._reconcile_native_score_batch_shadow()  # must not raise
+
+    assert resolved == [snapshot_id]
+    assert len(producer_calls) == 1
+    call = producer_calls[0]
+    assert isinstance(call["repository"], Repository)
+    assert call["snapshot"] is snapshot
+    assert call["as_of"] == session
+    assert call["horizon_days"] == horizon_days
+    assert call["tickers"] == tickers
+
+    assert _native_score_batch_job_count(conn) == 1
+    row = conn.execute(
+        "SELECT namespace, state, spec_json FROM jobs WHERE kind = ?",
+        ("native_score_batch",)).fetchone()
+    assert row["namespace"] == "shadow"
+    assert row["state"] == "queued"
+    spec = json.loads(row["spec_json"])
+
+    events_ref, producer_refusals_ref = spec["input_refs"]
+    assert len({events_ref, producer_refusals_ref, snapshot_id, earnings_revision,
+                scope_hash}) == 5
+    parameters = spec["parameters"]
+    assert parameters["input_bindings"] == {
+        "events.json": events_ref, "producer_refusals.json": producer_refusals_ref}
+    assert parameters["snapshot_id"] == snapshot_id
+    assert parameters["calendar_revision"] == earnings_revision
+    assert parameters["as_of"] == session
+    assert parameters["release_root"] == release_root
+    assert parameters["expected_ids"] == [session + "|" + scope_hash]
+
+    registered = {ref: registered_artifact(conn, ref)
+                  for ref in (events_ref, producer_refusals_ref)}
+    assert set(registered) == {events_ref, producer_refusals_ref}
+    assert registered[events_ref].schema_ref == "native_score_batch_events.v1.0"
+    assert registered[producer_refusals_ref].schema_ref == \
+        "native_score_batch_producer_refusals.v1.0"
+    assert service.store.read_verified(registered[events_ref]) == \
+        canonical_json(events_document).encode()
+    assert service.store.read_verified(registered[producer_refusals_ref]) == \
+        canonical_json(refusals_document).encode()
+
+    artifact_rows_before = conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"]
+
+    service._reconcile_native_score_batch_shadow()  # existing job: must be a pure no-op
+
+    assert len(producer_calls) == 1
+    assert _native_score_batch_job_count(conn) == 1
+    assert conn.execute("SELECT COUNT(*) AS n FROM artifacts").fetchone()["n"] == \
+        artifact_rows_before
 
 
 # --------------------------------------------------------------------------
