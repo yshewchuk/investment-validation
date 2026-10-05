@@ -1045,7 +1045,7 @@ starts working with no change of its own.
   evidence, while returned rows and typed missing-ticker coverage commit
   against the raw receipt, never as complete. Empty or literal-404 stays
   not_final under the normal retry policy; endpoint outcomes classify
-   independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
+    independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
@@ -1294,14 +1294,11 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 
 | Condition | Outcome |
 |---|---|
-| Input refusal | Malformed specs and unsafe feature reads receive typed refusals before candidate publication. A linked or replaced staging-path component, or a pinned runner that cannot start, is refused as non-retryable `VALIDATION_FAILED` before report annotation; staged output stays unpublished, external bytes stay unchanged, and no report artifact, run, or ledger row commits. |
-| Candidate/report publication | Failed attempts keep candidates unpublished; failed reports remain staged. Successful variant reports publish as `experiment_variant_report` and carry the variant identity/count; every receipt records one attempted variant, including failures. |
-| Retry reuse | A matching delivered backup outbox row supplies the stored receipt; identical primary replay reuses its run without a duplicate ledger row, while changed input conflicts. Retryable experiment attempts may relaunch the worker and invoke the runner. |
-| Worker cleanup | Exit status determines `WORKER_FAILED`; a clean exit with a live straggler reaps it without that failure. |
+| Spec, feature, or staging refusal | Unknown/unused spec fields, mismatched resolved plans, or declared economics without runner `execution_plan` receive `INVALID_EXPERIMENT_SPEC` before runner/candidate work. Feature snapshot mismatch -> `SNAPSHOT_UNRESOLVED`; no match -> `FEATURES_MISSING`; post-entry match -> non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); conflicting tie at latest eligible instant -> `INVALID_EXPERIMENT_SPEC`. Feature refusal returns no value, artifact, or report. A linked/replaced staging component or pinned runner unable to start -> non-retryable `VALIDATION_FAILED` before annotation; staged output stays unpublished, external bytes unchanged, and no report artifact, run, or ledger row commits. |
+| Plan and report outcomes | Plan-write or later runner failure is a typed attempt failure; candidate stays unpublished and failed reports stay staged. A failed plan write may leave partial bytes in the failed attempt root. Successful variant reports publish as `experiment_variant_report` with variant identity/count; every receipt records one attempted variant, including failures. |
+| Retry, worker, and lease outcomes | A delivered backup outbox row supplies the retry receipt and short-circuits the effect; identical primary replay reuses its run without a duplicate ledger row, while changed input conflicts. Retryable experiment attempts may relaunch the worker and runner. Exit status determines `WORKER_FAILED`; a clean exit with a live straggler reaps without that failure. `attempts.heartbeat_at` is the fenced lease-renewal stamp (`lifecycle.heartbeat`); `progress_events` with `kind="heartbeat"` are throttled supervisor observations (`HEARTBEAT_EVENT_SECONDS` or a state change), never lease signals. Diagnostics expose lease heartbeat and process-family liveness separately from the latest progress event/step. |
 | Deferred holdout behavior | Slice 2a exposes no sweep or holdout reads; typed `HOLDOUT_ACCESS_DENIED` is deferred to the pinned trade-loader slice. |
-| Primary identity, registered vs synthetic (slice 2a) | The report, durable evidence, and primary ledger `spec_hash` use the registered legacy hash for registered specs and `ExperimentSpec.spec_hash` for synthetic specs. |
-| Smoke identity (slice 2a) | The report and durable evidence use `ExperimentSpec.spec_hash`; the runner receives `--no-ledger` and writes no legacy ledger row. |
-| Explicit receipt identity mismatch (slice 2a) | Missing, malformed, or empty variant evidence, a missing, empty, or mismatched `variant_id` (checked against the resolved identity), or `variants_tried` other than integer 1 is a non-retryable `INVALID_EXPERIMENT_SPEC` before ledger append; transaction rollback leaves no run or hypothesis row and preserves prior ledger bytes. |
+| Slice 2a identity and receipt evidence | Registered primary runs use the registered legacy hash for report, durable evidence, and primary ledger `spec_hash`; synthetic primary and smoke runs use `ExperimentSpec.spec_hash`. Smoke passes `--no-ledger` and writes no legacy ledger row. Missing, malformed, or empty variant evidence, missing/empty/mismatched `variant_id`, or `variants_tried` other than integer 1 is non-retryable `INVALID_EXPERIMENT_SPEC` before ledger append; rollback leaves no run/hypothesis row and preserves prior ledger bytes. |
 
 ### `board_requests` (`native_board_universe.py`)
 | Condition | Outcome |
