@@ -1398,9 +1398,31 @@ def test_unsupported_query_and_snapshot_binding_are_refused(tmp_path):
     conn.close()
 
 
-def test_evidence_scoped_materialization_retains_scan_cap(tmp_path):
-    conn, _, _, repo, snapshot, query = oversized_case(tmp_path, "option_chains")
-    with pytest.raises(DataError, match="QUERY_NOT_BOUNDED"):
-        lm.explain_materialization_dependencies(repo, snapshot, "option_chains",
-                                               dataclasses.replace(query, max_result_rows=ROW_COUNT))
+def test_evidence_scoped_materialization_keeps_exact_row_count_and_caller_limit(tmp_path):
+    """No TableContract result-row cap remains to refuse an evidence-scoped
+    materialization query: its recorded ``DataQuery.max_result_rows`` is exactly
+    the selected pinned-membership row count, and both explain paths admit that
+    ceiling with the same provenance, snapshot, columns and predicates. A caller
+    that states a SMALLER limit keeps it, and the scan enforces it as
+    RESULT_LIMIT_EXCEEDED once the rows it actually selects exceed that ceiling
+    — never a silent clamp."""
+    conn, _, _, repo, snapshot, query = oversized_case(tmp_path / "recorded", "option_chains")
+    assert query.max_result_rows == ROW_COUNT
+    plan = lm.explain_materialization_dependencies(repo, snapshot, "option_chains", query)
+    assert plan.request_hash == content_hash(to_document(query))
+    assert plan.snapshot_ref == snapshot
+    assert sum(item.estimated_rows for item in plan.dependencies) == ROW_COUNT
+    assert all(item.maximum_rows == ROW_COUNT and item.columns == query.columns
+               and item.predicates == query.key_filter for item in plan.dependencies)
+    assert repo.explain_dependencies(query, table_name="option_chains") == plan
+    conn.close()
+
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    scoped = lm._build_table_query(repository, snap, "option_chains", EVIDENCE_SCOPE)
+    assert scoped.max_result_rows == sum(len(rows) for rows in CHAIN_ROWS.values())
+    smaller = dataclasses.replace(scoped, max_result_rows=1, max_batch_rows=1)
+    with pytest.raises(DataError) as err:
+        list(repository.scan(smaller, table_name="option_chains"))
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
     conn.close()
