@@ -311,6 +311,26 @@ class TestSelfMetrics:
         assert oc_check.WAIT[0] == 5
 
     @pytest.mark.parametrize("mode", ["normal", "timeout"])
+    @pytest.mark.parametrize("text", [
+        "[bounded] RESOURCE WAIT: slots held; retrying in 5seconds\n",
+        "> [bounded] RESOURCE WAIT: slots held; retrying in 5s\n",
+        "pytest said: [bounded] RESOURCE WAIT: slots held; retrying in 5s\n",
+    ])
+    def test_only_complete_bounded_run_lines_count_as_wait(self, wt, monkeypatch, mode, text):
+        """A malformed suffix, a quoted line or embedded diagnostic text is not a
+        bounded_run wait message; both the completed and the timed-out path ignore it."""
+        if mode == "normal":
+            self.stderr = text
+            assert self._main(monkeypatch, "tests/test_x.py") == 0
+            assert self._lines()[0]["wait_s"] == 0
+        else:
+            def raiser(*args, **kwargs):
+                raise subprocess.TimeoutExpired(["pytest"], 900, output=b"", stderr=text)
+            monkeypatch.setattr(oc_check.subprocess, "run", raiser)
+            assert oc_check.run("pytest", ["x"], {}, 900) is False
+            assert oc_check.WAIT[0] == 0
+
+    @pytest.mark.parametrize("mode", ["normal", "timeout"])
     def test_streams_are_parsed_separately_and_never_concatenate_a_fabricated_wait(
         self, wt, monkeypatch, mode
     ):

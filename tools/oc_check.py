@@ -65,7 +65,7 @@ STEPS = []
 STEP_SECONDS = {}
 WAIT = [0.0]  # seconds bounded_run reported sleeping for a slot, summed over the run
 RUN = {}  # set by main() once the worktree checks pass; empty means nothing is recorded
-WAIT_RE = re.compile(r"RESOURCE WAIT: .*retrying in ([0-9]+(?:\.[0-9]+)?)s")
+WAIT_RE = re.compile(r"^\[bounded\] RESOURCE WAIT: [^\n]*; retrying in ([0-9]+(?:\.[0-9]+)?)s$", re.M)
 VERDICT_BY_EXIT = {0: "VERIFIED", 1: "NOT GREEN", 2: "REFUSED", 3: "MISSING", 4: "STALE"}
 REPORT = Path(".oc_logs") / "oc_check_report.json"
 
