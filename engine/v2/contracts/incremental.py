@@ -113,10 +113,16 @@ class CoverageKey:
 
 @dataclass(frozen=True, kw_only=True)
 class CoverageOutcome:
-    """The classified result for one expected coverage member."""
+    """The classified result for one expected coverage member.
+
+    A status of "missing" means the expected ticker/session key was not
+    present in a non-empty 2xx market response after the provider's bounded
+    retry. It is a terminal observation for that receipt: not a present
+    revision and not a retryable exception.
+    """
 
     key: CoverageKey
-    status: Literal["present", "legitimate_empty", "unsupported"]
+    status: Literal["present", "legitimate_empty", "unsupported", "missing"]
     receipt_id: str
     revision_id: str | None
     finality: Literal["provisional", "final"]
@@ -125,7 +131,13 @@ class CoverageOutcome:
 
 @dataclass(frozen=True, kw_only=True)
 class CompletedCoverage:
-    """Coverage over an explicit set, never an inferred maximum date."""
+    """Coverage over an explicit set, never an inferred maximum date.
+
+    A state of "partial" means every expected key has a typed outcome, at
+    least one outcome is "missing", and the acquisition completed
+    successfully. It is distinct from "incomplete" (an expected key has no
+    outcome) and "complete" (all keys are represented and none are missing).
+    """
 
     coverage_id: str
     table_contract_ref: TableContractRef
@@ -136,7 +148,7 @@ class CompletedCoverage:
     outcomes: tuple[CoverageOutcome, ...]
     covered_tickers: tuple[str, ...]
     acquisition_receipt_refs: tuple[str, ...]
-    state: Literal["incomplete", "complete"]
+    state: Literal["incomplete", "complete", "partial"]
     completed_at: str | None
     prior_coverage_id: str | None = None
     schema_version: str = COMPLETED_COVERAGE_V1

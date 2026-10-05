@@ -50,5 +50,12 @@ def test_in_range_value_is_not_clipped():
     assert row["iv10"] == 24.0
 
 
+def test_duplicate_ticker_rows_merge_instead_of_replace():
+    retry_row = {"ticker": "AAA", "tradeDate": "2026-04-30", "stockPrice": 151.0}
+    row = _merge_ticker_rows([SUMMARY_ROW, retry_row], [], expected_keys=["AAA"])[0]
+    assert row["spot"] == 151.0
+    assert row["iv10"] == 24.0
+
+
 def test_native_plausible_ranges_mirror_the_legacy_table():
     assert NATIVE_RANGES == LEGACY_RANGES

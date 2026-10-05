@@ -47,7 +47,8 @@ interface section; this names only the load-bearing entry points.
   run/build/commit/merge functions and shared merge primitives in
   `incremental_tables.py` (also used by `engine.v2.research`/
   `forward_calendar_store`). See Invariants for revision identity/ordering,
-  `normalizer_id` versioning, coverage completeness, and mcap carry-forward.
+  planned-unit key validation, `normalizer_id` versioning, coverage
+  completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
   exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
   Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
@@ -274,8 +275,9 @@ and retryability come from that table, never guessed at a call site.
 | `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
-| `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
-| `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
+| `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty; in `daily_market` a response labeled `complete` that omits an expected key is refused before it is cached, while omissions on a `partial` response after the provider's bounded retry are committed as typed `missing` coverage outcomes |
+| `SOURCE_NOT_FINAL` | source | yes | a `daily_market` refresh unit has expected keys but the response is a `legitimate_empty`; the data layer refuses before caching the response, leaving no receipt, coverage, or snapshot write |
+| `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, expected keys missing/malformed/empty at the normalization boundary, or a planned unit whose `expected_keys` field is missing, malformed or empty refused at refresh acquisition (Invariants) |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
@@ -288,6 +290,31 @@ and retryability come from that table, never guessed at a call site.
 | `TIER4_CACHE_STALE` | validation | no | a pinned Tier-4 serving-cache ref's embedded panel hash disagrees with the actual panel object |
 | `STALE_EXPECTATION` | validation | no | `explain_dependencies`'s chain-query path sees a stale caller expectation |
 | `CALENDAR_UNAVAILABLE` | validation | no | registered here but raised only by `engine.v2.research`, never from inside this package |
+
+**`daily_market` missing-ticker outcome (R1–R6).** A non-empty 2xx ORATS
+response that remains incomplete after the provider's single paired retry is
+committable as partial coverage. It does not turn an absent ticker into a
+revision or mark the response complete.
+
+| Requirement | Outcome |
+|---|---|
+| R1 — typed result | Every expected ticker has a `CoverageOutcome`: observed tickers are `present`, each carrying a non-null `revision_id` under both `complete` and `partial` coverage; a `present` outcome without a revision makes coverage `incomplete`, so it cannot advance the snapshot. Omitted tickers are `missing`, keyed by ticker and session date and linked to the response's raw receipt id. |
+| R2 — storage and query | The existing `data_snapshot_coverage.coverage_json` stores the typed outcomes and expected denominator. Consumers query by snapshot/table coverage, then select `missing` outcomes; no DDL or new migration is required. |
+| R3 — retry/cache | The provider retries the summaries/cores pair once for missing keys; a partial gap stays receipt-backed and is never recorded as `complete`. Before native planning accepts a complete receipt as a cache hit it reconstructs the rows and verifies every expected key; a missing reconstructed key demotes the unit to `fetch_units` so the normal provider-call budget is reserved, and cache-only workers never issue provider calls. |
+| R4 — transaction | Returned ticker revisions and the partial coverage record enter the same snapshot candidate and head-CAS commit. A commit refusal leaves the head unchanged. |
+| R5 — visible residue | A successful commit contains all returned rows, no fabricated row for a missing ticker, and a queryable gap with session date and raw receipt identity. Empty/not-final responses still refuse under normal source retry semantics. |
+| R6 — idempotency/downstream | Deterministic replay holds for a valid complete receipt: it reconstructs the same outcomes and coverage identity. An incomplete reconstruction is skipped at planning and followed by a budgeted fresh acquisition with a new receipt identity. Downstream consumers continue to read the stored coverage state and gap outcomes instead of inferring completeness from rows. |
+
+A cache-only receipt is reusable only when `complete` and its recorded requested `keys`
+exactly match the refresh unit's `expected_keys` after string normalization and sorting; a
+mismatch or non-complete cached receipt refuses retryable integrity `INPUT_CHANGED` before
+reading/staging ticker rows, leaving no coverage or snapshot write; re-running with the
+matching receipt/unit is idempotent. Every planned `daily_market` unit must carry a nonempty
+sequence of nonempty string ticker keys: an absent, malformed or empty planned key set refuses
+retryable integrity `INPUT_CHANGED` before any provider call, cache/store read or write, or key
+coercion. For such a valid keyed unit `legitimate_empty` is never an accepted answer — it refuses
+retryable source `SOURCE_NOT_FINAL` before a raw receipt, coverage, or snapshot write; the caller's
+source retry policy owns retry.
 
 **Target contract: pinned scans and registration (R1–R6).**
 
@@ -365,11 +392,11 @@ triggers are unchanged; committed
 `data_normalizations.normalization_id` survive the rebuild, which is
 precisely what the enforcement-off procedure is for. This is a new numbered
 step, never an edit of v10: applied steps stay checksum-protected and the
-recreate flag itself joins the new step's checksum. Cache identity is
-untouched — `cache_normalization` still keys on
-`(raw_hash, normalizer_id, contract_id)` and `unit.expected_keys` is not
-folded in; that belongs to the follow-up identity slice of
-[#133](https://github.com/yshewchuk/investment-validation/issues/133).
+recreate flag itself joins the new step's checksum. This step removes only
+that schema-level uniqueness rule, computes no cache identity and rekeys no
+stored row. The current identity contract
+(Invariants) folds the fetch unit's expected-key set into the writer's
+`normalization_id`.
 
 The refusal is the migration framework's typed `OpsError`/`INTEGRITY_FAILED`
 integrity failure, not a `DATA_FAILURE_CODES` entry, and the concurrency and
@@ -447,20 +474,51 @@ Root doc §5 invariants this package is responsible for:
   processes CAN tie on ordinal; if their content also differs, that tie is
   `IDENTITY_CONFLICT` — an unresolvable ordering ambiguity, never silently
   picked either way.
-- **`daily_market` coverage is measured against what was requested**, not
-  what came back — a response missing an expected ticker is a genuine,
-  detectable `TRANSIENT_SOURCE` gap, never a tautological "complete."
-- **`daily_market` normalizer versioning.** `cache_normalization` keys on
-  `(raw_hash, normalizer_id, contract_id)`; `normalizer_id` must be bumped
-  in the same PR as any change to what a normalized document contains for
-  the same raw input, or an old-mapping session replays unchanged under a
-  shared `raw_hash`. It does not yet fold in a fetch unit's own
-  expected-key set, so two fetches of the same payload under different
-  context universes can still collide — tracked as issue
-  [#133](https://github.com/yshewchuk/investment-validation/issues/133). The
-  v13 recreate (Failure semantics) drops only that tuple's
-  database-level `UNIQUE`; the key computed here, and any
-  `unit.expected_keys` contribution, stay the follow-up identity slice's.
+- **`daily_market` coverage is measured against requested keys**, not what
+  came back: after the provider's bounded retry, expected tickers omitted on
+  a `partial` response are recorded as typed `missing` outcomes and coverage
+  is `partial`; a response labeled `complete` that omits an expected key is
+  refused with `TRANSIENT_SOURCE` before caching — never a tautological
+  "complete."
+- **`daily_market` planned refresh units are validated before
+  acquisition.** A planned fetch unit's expected-key set must be a
+  nonempty tuple/list of nonempty strings, checked before the provider is
+  invoked, before any cache work, and before any coercion — for fetched
+  units and for cached units reconstructed from a caller-supplied plan
+  alike. A planned unit with an absent `expected_keys` field is invalid, and a
+  missing, malformed or empty planned set refuses with the registered
+  retryable `INPUT_CHANGED` before any provider call, cache/store work,
+  receipt/cache write or key coercion — never a `str()`-coerced member, never a
+  silent empty set. Valid
+  keys are preserved as strings on the way to the receipt request and the
+  normalization boundary below.
+- **`daily_market` normalizer versioning.** `cache_normalization` keys
+  `normalization_id` on a canonical hash of the fetch unit's expected-key set
+  folded together with `raw_hash`, `normalizer_id` and `contract_id`; expected
+  keys are the canonical set of nonempty string ticker keys: order and
+  duplicates never change the hash. At the normalization boundary the
+  expected-key sequence must be nonempty and every member must be a nonempty
+  string ticker key; a raw receipt needed for normalization carries that
+  sequence specifically as a nonempty `request.keys` list. A missing, null,
+  non-list or malformed saved list, or an empty or malformed sequence passed
+  directly, fails closed with the registered retryable `INPUT_CHANGED` before
+  any normalization identity is derived or written — never a coerced member,
+  never a silent empty set. The same raw payload and normalizer under different
+  expected-key sets therefore produce distinct normalization identities and
+  rows; repeated requests with the same set stay idempotent. A payload
+  conflict under the same resulting identity still refuses with non-retryable
+  `IDENTITY_CONFLICT`; distinct expected-key sets must never surface a raw
+  SQLite uniqueness `IntegrityError`. `normalizer_id` must be bumped in the
+  same PR as any change to what a normalized document contains for the same
+  raw input, or an old-mapping session replays unchanged under a shared
+  `raw_hash`. A row stored under the old triple-only formula carries no
+  expected-key metadata, so it is never safely reused as a cache hit: it and
+  its references stay unchanged and addressable by their stored legacy id,
+  and the next request writes/uses a new expected-set-scoped id — no rekey or
+  delete migration is performed. The v13 recreate (Failure semantics) dropped
+  only that tuple's database-level `UNIQUE` and rewrote no row's id; this
+  expected-key-scoped identity work is tracked as issue
+  [#133](https://github.com/yshewchuk/investment-validation/issues/133).
 - **`daily_market` mcap carry-forward is scoped to loaded partitions** — a
   winner row's null `mcap_usd` is backfilled only from an observation
   already loaded in this build, never by scanning further back; deliberate,

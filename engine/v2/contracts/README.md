@@ -12,6 +12,8 @@ Replaces (§4.4): `the dataclasses currently declared inside score.py`.
 
 - Declare every named type in component_contracts.md, with its kind suffix (§2.5) and its schema version.
 - Define the shared failure envelope (§2.4) and the reason-code vocabulary (§9.4).
+- Keep `DATA_FAILURE_CODES`, the source classification codes consumed by `engine/v2.data`, aligned with the operations `FAILURE_CODES` where names overlap.
+  - `SOURCE_NOT_FINAL` — category `source`, retryable `true` — a keyed `daily_market` unit receiving `legitimate_empty`.
 
 ## Non-responsibilities
 
