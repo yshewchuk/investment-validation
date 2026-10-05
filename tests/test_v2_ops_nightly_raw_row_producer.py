@@ -584,6 +584,7 @@ def test_projected_decision_session_is_not_observed_history(tmp_path, monkeypatc
 def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     """The real panel reader keeps available moves older than the regime window."""
     import tests.test_v2_features_panel_row_inputs as fixture
+    from engine.v2.ops.nightly_raw_row_producer import _shared_panel_rows
 
     history = pd.bdate_range(end=fixture._DECISION, periods=300)
     old_day = history[20].date().isoformat()
@@ -592,7 +593,24 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     batches[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] = \
         fixture._computed_rows([(old_day, 4.0, False)])
     snapshot = fixture._snapshot()
-    repository = fixture._FakeRepository(snapshot, fixture._contracts(), batches)
+    
+    # Create an interval-aware repository subclass
+    class IntervalAwareRepository(fixture._FakeRepository):
+        def scan(self, query, *, table_name):
+            # Apply the interval/key predicate filtering if query has time_interval
+            if query.time_interval is not None:
+                ticker = query.key_filter[0].values[0]
+                filtered_rows = []
+                rows = self._batches.get((table_name, ticker), [])
+                for row in rows:
+                    if fixture._bound_row_selected(row, query.key_filter, query.time_interval):
+                        filtered_rows.append(row)
+                yield fixture._Batch(filtered_rows)
+            else:
+                # Fall back to original behavior
+                yield from super().scan(query, table_name=table_name)
+
+    repository = IntervalAwareRepository(snapshot, fixture._contracts(), batches)
 
     def enumerate_one(repo, snap, *, as_of, horizon_days, tickers=None):
         from engine.v2.ops.native_board_universe import BoardRequest
@@ -628,6 +646,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
                   "scan_calendar_row_inputs", calendar_row)
     _patch_reader(monkeypatch, nightly_quote_rows, "scan_quote_rows", quote_rows)
 
+    # First, run the unrestricted call and verify it passes its existing full-history assertions
     events, refusals = nrp.build_native_score_batch_events(
         repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
         horizon_days=_HORIZON_DAYS)
@@ -635,6 +654,40 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     assert refusals["refusals"] == []
     assert events[0]["panel_row"]["n_prior"] == 1
     assert events[0]["panel_row"]["mean_prior_move"] == 4.0
+
+    # Add a negative control that forces the same producer path to call _shared_panel_rows 
+    # with history_start=history[-253] (the defective trailing cutoff)
+    def mock_shared_panel_rows_with_truncated_history(repository, snapshot, keys, *, decision_session, history_start):
+        # Force history_start to be the defective trailing cutoff
+        truncated_history_start = history[-253].date().isoformat()
+        return _shared_panel_rows(repository, snapshot, keys, decision_session=decision_session, history_start=truncated_history_start)
+
+    # Use monkeypatch.context() to temporarily override _shared_panel_rows
+    with monkeypatch.context() as m:
+        m.setattr("engine.v2.ops.nightly_raw_row_producer._shared_panel_rows", mock_shared_panel_rows_with_truncated_history)
+        
+        # Invoke build_native_score_batch_events again under that temporary override
+        events_negative, refusals_negative = nrp.build_native_score_batch_events(
+            repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
+            horizon_days=_HORIZON_DAYS)
+        
+        # The negative control should show different results (truncated history)
+        # The old row should be excluded due to the truncated history
+        assert len(events_negative) == 1
+        assert refusals_negative["refusals"] == []
+        # The negative-control event should have the actual truncated result
+        assert events_negative[0]["panel_row"]["n_prior"] == 0
+        assert events_negative[0]["panel_row"]["mean_prior_move"] is None
+        
+        # Now assert that the full-history expectation fails for the negative control
+        # by checking that the original assertion would fail
+        # In the original test, we expect n_prior == 1 and mean_prior_move == 4.0
+        # But with the truncated history, we get n_prior == 0 and mean_prior_move is None
+        # So asserting the original expectation should fail
+        with pytest.raises(AssertionError):
+            assert events_negative[0]["panel_row"]["n_prior"] == 1
+        with pytest.raises(AssertionError):
+            assert events_negative[0]["panel_row"]["mean_prior_move"] == 4.0
 
 
 def test_exact_mixed_refusal_order(tmp_path, monkeypatch):
