@@ -8,6 +8,8 @@ leaves nothing behind.
 """
 from __future__ import annotations
 
+import decimal
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -51,12 +53,86 @@ def test_iso_entry_string_is_accepted_and_bound():
     assert context.feature("gap") == 0.25
 
 
+def test_entry_instant_in_another_utc_offset_is_accepted():
+    offset = timezone(timedelta(hours=-5))
+    context = _context(_row("gap", ENTRY_AT.astimezone(offset), 0.25))
+    assert context.feature("gap") == 0.25
+
+
 def test_post_entry_row_refuses_even_with_an_older_eligible_row():
-    context = _context(_row("gap", ENTRY_AT - timedelta(days=2), 0.10),
-                       _row("gap", ENTRY_AT + timedelta(seconds=1), 0.99))
+    eligible = _row("gap", ENTRY_AT - timedelta(days=2), 0.10)
+    passing = _context(eligible)
+    assert passing.feature("gap") == 0.10
+    leaking = _context(eligible, _row("gap", ENTRY_AT + timedelta(seconds=1), 0.99))
+    with pytest.raises(OpsError) as excinfo:
+        leaking.feature("gap")
+    assert excinfo.value.code == "FEATURE_LOOKAHEAD"
+    assert not excinfo.value.problem.retryable
+
+
+def test_one_microsecond_past_entry_refuses_as_lookahead():
+    eligible = _row("gap", ENTRY_AT - timedelta(days=2), 0.10)
+    passing = _context(eligible)
+    assert passing.feature("gap") == 0.10
+    leaking = _context(eligible, _row("gap", ENTRY_AT + timedelta(microseconds=1), 0.99))
+    with pytest.raises(OpsError) as excinfo:
+        leaking.feature("gap")
+    assert excinfo.value.code == "FEATURE_LOOKAHEAD"
+    assert not excinfo.value.problem.retryable
+
+
+def test_latest_tied_observations_with_agreeing_values_return_that_value():
+    context = _context(_row("gap", ENTRY_AT - timedelta(days=1), 0.10),
+                       _row("gap", ENTRY_AT, 0.30),
+                       _row("gap", ENTRY_AT, 0.30))
+    assert context.feature("gap") == 0.30
+
+
+def test_latest_tied_observations_with_conflicting_values_are_refused():
+    context = _context(_row("gap", ENTRY_AT, 0.30), _row("gap", ENTRY_AT, 0.31))
     with pytest.raises(OpsError) as excinfo:
         context.feature("gap")
-    assert excinfo.value.code == "FEATURE_LOOKAHEAD"
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not excinfo.value.problem.retryable
+
+
+def test_latest_tied_nan_observations_agree_and_return_nan():
+    context = _context(_row("gap", ENTRY_AT, float("nan")),
+                       _row("gap", ENTRY_AT, float("nan")))
+    value = context.feature("gap")
+    assert isinstance(value, float) and math.isnan(value)
+
+
+@pytest.mark.parametrize("values", (
+    pytest.param((float("nan"), 0.30), id="nan-then-number"),
+    pytest.param((0.30, float("nan")), id="number-then-nan"),
+))
+def test_latest_tied_nan_and_number_conflict(values):
+    context = _context(_row("gap", ENTRY_AT, values[0]),
+                       _row("gap", ENTRY_AT, values[1]))
+    with pytest.raises(OpsError) as excinfo:
+        context.feature("gap")
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not excinfo.value.problem.retryable
+
+
+def test_latest_tied_decimal_nan_observations_agree_and_return_nan():
+    context = _context(_row("gap", ENTRY_AT, decimal.Decimal("NaN")),
+                       _row("gap", ENTRY_AT, decimal.Decimal("NaN")))
+    value = context.feature("gap")
+    assert isinstance(value, decimal.Decimal) and value.is_nan()
+
+
+@pytest.mark.parametrize("values", (
+    pytest.param((decimal.Decimal("NaN"), 0.30), id="decimal-nan-then-number"),
+    pytest.param((0.30, decimal.Decimal("NaN")), id="number-then-decimal-nan"),
+))
+def test_latest_tied_decimal_nan_and_number_conflict(values):
+    context = _context(_row("gap", ENTRY_AT, values[0]),
+                       _row("gap", ENTRY_AT, values[1]))
+    with pytest.raises(OpsError) as excinfo:
+        context.feature("gap")
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
     assert not excinfo.value.problem.retryable
 
 
@@ -84,20 +160,26 @@ def test_missing_requested_observation_uses_the_typed_missing_input_code():
     assert excinfo.value.code == "FEATURES_MISSING"
 
 
-def test_malformed_identity_time_and_request_inputs_are_typed():
+@pytest.mark.parametrize("case", (
+    pytest.param(
+        lambda: _context(_row("gap", ENTRY_AT, 0.10),
+                         entry_at=datetime(2026, 1, 15, 21, 0)),
+        id="naive-entry"),
+    pytest.param(
+        lambda: _context(_row("gap", "no-such-instant", 0.10)),
+        id="malformed-observation-instant"),
+    pytest.param(
+        lambda: _context(_row("gap", ENTRY_AT, 0.10), snapshot_id=None),
+        id="empty-snapshot-id"),
+    pytest.param(
+        lambda: _context({"snapshot_id": SNAPSHOT}).feature("gap"),
+        id="incomplete-observation-mapping"),
+    pytest.param(
+        lambda: _context(_row("gap", ENTRY_AT, 0.10)).feature("gap",
+                                                              observed_at=ENTRY_AT),
+        id="unsupported-observed-at-request"),
+))
+def test_malformed_identity_time_and_request_inputs_are_typed(case):
     with pytest.raises(OpsError) as excinfo:
-        _context(_row("gap", ENTRY_AT, 0.10), entry_at=datetime(2026, 1, 15, 21, 0))
-    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
-    with pytest.raises(OpsError) as excinfo:
-        _context(_row("gap", "no-such-instant", 0.10))
-    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
-    with pytest.raises(OpsError) as excinfo:
-        _context(_row("gap", ENTRY_AT, 0.10), snapshot_id=None)
-    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
-    with pytest.raises(OpsError) as excinfo:
-        _context({"snapshot_id": SNAPSHOT}).feature("gap")
-    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
-    context = _context(_row("gap", ENTRY_AT, 0.10))
-    with pytest.raises(OpsError) as excinfo:
-        context.feature("gap", observed_at=ENTRY_AT)
+        case()
     assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"

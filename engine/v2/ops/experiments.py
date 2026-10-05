@@ -806,6 +806,35 @@ def _aware_instant(value, *, field_name: str) -> datetime:
     return instant
 
 
+def _tied_values_agree(value, other) -> bool:
+    """Whether two observations tied at the latest instant agree.
+
+    A tie is answered only by agreement, never by row order: NaN agrees with
+    NaN -- each is the same "missing measurement" marker -- while a NaN and a
+    non-NaN value conflict, as any unequal pair does. NaN is recognized for
+    every numeric scalar ``math.isnan`` accepts (ordinary float and
+    ``Decimal("NaN")`` alike), not floats only. A value ``math.isnan``
+    rejects carries no recognized NaN and falls through to ordinary equality,
+    where an equality that raises or resolves ambiguously is disagreement --
+    never a pick by row order. Only the type/value/arithmetic errors
+    ``math.isnan`` and equality may raise are caught; anything else is a
+    programming error and travels untouched.
+    """
+    def nan_flag(item) -> bool:
+        try:
+            return math.isnan(item)
+        except (TypeError, ValueError, ArithmeticError):
+            return False
+
+    value_nan, other_nan = nan_flag(value), nan_flag(other)
+    if value_nan or other_nan:
+        return value_nan and other_nan
+    try:
+        return bool(value == other)
+    except (TypeError, ValueError, ArithmeticError):
+        return False
+
+
 @dataclass(frozen=True)
 class ExperimentFeatureContext:
     """Entry-relative feature reads over ONE already-resolved snapshot.
@@ -877,7 +906,11 @@ class ExperimentFeatureContext:
         quietly answered one. Rows for other features or other events are
         never consulted and can never trigger the refusal for this request. A
         feature the snapshot never observed for this event is the typed
-        missing-input refusal ``FEATURES_MISSING``, never a default.
+        missing-input refusal ``FEATURES_MISSING``, never a default. When
+        several eligible rows tie at the latest ``observed_at``, their value is
+        returned only if every tied value agrees (NaN with NaN included);
+        conflicting ties are the typed ``INVALID_EXPERIMENT_SPEC`` refusal,
+        never a silent pick by row order.
         """
         if observed_at != ENTRY:
             raise fail("INVALID_EXPERIMENT_SPEC",
@@ -899,4 +932,12 @@ class ExperimentFeatureContext:
                        "no pinned observation of the requested feature at or before entry",
                        details={"snapshot_id": self.snapshot_id, "event_id": self.event_id,
                                 "feature": name})
-        return max(eligible, key=lambda row: row["observed_at"])["value"]
+        latest = max(row["observed_at"] for row in eligible)
+        tied = [row["value"] for row in eligible if row["observed_at"] == latest]
+        value = tied[0]
+        if not all(_tied_values_agree(value, other) for other in tied[1:]):
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "tied latest observations disagree on the requested feature value",
+                       details={"snapshot_id": self.snapshot_id, "event_id": self.event_id,
+                                "feature": name})
+        return value
