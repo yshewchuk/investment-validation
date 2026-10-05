@@ -35,6 +35,14 @@ def _unique_index_column_sets(conn, table: str) -> set[frozenset]:
 
 
 def test_v13_recreate_drops_only_the_unique_triple(tmp_path):
+    """Assert v13's recreate drops only the unique triple on a real catalog.
+
+    Builds a disk-backed catalog through v12, seeds a committed parent/child
+    pair, reopens so the real ``migrate`` applies production v13, then checks
+    the step's checksum, survival of both rows, the sole primary key, the
+    gone UNIQUE, intact and enforced FKs, and the reissued immutability
+    trigger rejecting an UPDATE of the seeded normalization row.
+    """
     v13 = next((m for m in _DATA_MIGRATIONS if m.version == 13), None)
     assert v13 is not None, ("the data owner has no version-13 migration: the "
                              "planned data_normalizations recreate (#133) is "
@@ -78,6 +86,11 @@ def test_v13_recreate_drops_only_the_unique_triple(tmp_path):
                      " ('rev-2', 'r-1', 'rr-1', 'missing', 'BBB', '2026-01-06',"
                      " 'src', 0, 1, 0, 0, ?, ?)",
                      (content_hash({"v13": "row-2"}), ts))
+    with pytest.raises(sqlite3.IntegrityError):  # immutability trigger pair reissued
+        conn.execute("UPDATE data_normalizations SET row_count = 42"
+                     " WHERE normalization_id = 'n-1'")
+    assert tuple(conn.execute("SELECT * FROM data_normalizations"
+                              " WHERE normalization_id = 'n-1'").fetchone()) == norm_before
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     conn.close()
