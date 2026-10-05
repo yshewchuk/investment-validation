@@ -529,6 +529,18 @@ def _rollback_round_trip(release_root: Path, candidate: str, first_deployment: b
     with tempfile.TemporaryDirectory(prefix="p5-6-rollback-") as scratch:
         root = Path(scratch)
         _copy_pointer_state(deployment_root(release_root), root)
+        # The rehearsal's promote requires a staging-completion record and the
+        # real store only gets one once the whole gate passes (see ``main``),
+        # so bind success to the candidate and the copied incumbent inside
+        # this temporary copy; the real release root is never written here.
+        try:
+            deployment.mark_staging_succeeded(root, candidate)
+            incumbent = deployment.current_pointer(root)
+            if incumbent is not None:
+                deployment.mark_staging_succeeded(root, incumbent.release_id)
+        except deployment.DeploymentError as exc:
+            findings.add(PROMOTE_REFUSED, "rollback", type(exc).__name__)
+            return {"status": PROMOTE_REFUSED}
         return _round_trip(root, candidate, first_deployment, findings)
 
 
@@ -816,6 +828,17 @@ def main(argv=None) -> int:
         return 2
     out = args.artifact_root / "evidence.json"
     out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    if evidence["release_ok"] is True:
+        # The last release-store side effect, only once the evidence file and
+        # the report (+ completeness check) are done: publish the success
+        # record that makes the accepted release promotable in the real store.
+        try:
+            deployment.mark_staging_succeeded(deployment_root(args.release_root),
+                                               evidence["release_id"])
+        except deployment.DeploymentError:
+            print("refusing to publish the staging success record for this release",
+                  file=sys.stderr)
+            return 2
     print(json.dumps({"status": evidence["status"], "evidence": str(out),
                       "report": evidence.get("report"),
                       "finding_codes": evidence["finding_codes"]}, indent=2))

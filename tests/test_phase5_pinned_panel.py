@@ -199,13 +199,7 @@ def test_pinned_panel_integration_writes_verified_identity_and_descriptor(tmp_pa
     prep.write_release(out, *args, states, pinned_panel=context)
     assert len(loads) == 1
     staged_dir = out / "deployment" / "releases" / "r1"
-    assert (staged_dir / "staging-status.json").is_file()
-    status = json.loads((staged_dir / "staging-status.json").read_text())
-    assert status == {
-        "release_id": "r1",
-        "release_hash": json.loads((staged_dir / "manifest.json").read_text())["release_hash"],
-        "state": "succeeded",
-    }
+    assert not (staged_dir / "staging-status.json").exists()
     body = layout.read_manifest(out)
     assert {key: body["sources"][key] for key in IDENTITY_KEYS} == identity
     assert deployment.current_pointer(out / "deployment") is None

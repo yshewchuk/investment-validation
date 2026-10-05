@@ -1004,3 +1004,52 @@ def test_rollback_refuses_an_unreadable_target_manifest(tmp_path):
         rollback(tmp_path)
     assert error.value.issues[0].code == "MANIFEST_UNREADABLE"
     assert deployment_module.current_pointer(tmp_path).release_id == "r2"
+
+
+def test_promote_refuses_stale_staging_status_after_restage(tmp_path):
+    """A success record bound to a legacy hash is never trusted across a
+    restage: marking success while the legacy manifest hash is current, then
+    restaging to the semantic hash (which rewrites the manifest but leaves the
+    old sidecar in place), refuses promote with StagingNotSuccessful -- the
+    stale record binds a hash the live manifest no longer carries -- before
+    any pointer or history write, and the sidecar itself is untouched."""
+    _stage_legacy_hashed(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    status_path = tmp_path / "releases" / "r1" / "staging-status.json"
+    old_hash = json.loads(status_path.read_text())["release_hash"]
+
+    restaged = restage_semantic_hash(tmp_path, "r1")
+    assert restaged.release_hash != old_hash
+
+    with pytest.raises(deployment_module.StagingNotSuccessful):
+        promote(tmp_path, "r1")
+
+    assert not (tmp_path / "DEPLOYED").exists()
+    assert not (tmp_path / "history").exists()
+    assert json.loads(status_path.read_text())["release_hash"] == old_hash
+
+
+def test_mark_staging_succeeded_converts_status_write_oserror_to_typed_refusal(
+        tmp_path, monkeypatch):
+    """A status-record write that fails with a bare OSError is converted to a
+    typed, non-retryable StagingRefused(STATUS_UNWRITABLE) -- chained from the
+    original OSError -- before anything lands: no staging-status.json, no
+    DEPLOYED, no history/."""
+    release, inventory, payloads = _fixture("r1")
+    stage_release(tmp_path, release, inventory, payloads)
+
+    boom = OSError("simulated status-write failure")
+
+    def _fail(path, data):
+        raise boom
+
+    monkeypatch.setattr(deployment_module, "_atomic_write_bytes", _fail)
+
+    with pytest.raises(deployment_module.StagingRefused) as error:
+        deployment_module.mark_staging_succeeded(tmp_path, "r1")
+
+    assert error.value.issues[0].code == "STATUS_UNWRITABLE"
+    assert error.value.__cause__ is boom
+    assert not (tmp_path / "releases" / "r1" / "staging-status.json").exists()
+    assert not (tmp_path / "DEPLOYED").exists()
+    assert not (tmp_path / "history").exists()

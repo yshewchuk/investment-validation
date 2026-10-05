@@ -615,8 +615,10 @@ def mark_staging_succeeded(root: Path, release_id: str) -> None:
     ``release_id``, :class:`StagingRefused` (``MANIFEST_UNREADABLE``) when the
     staged manifest cannot be read or parsed, :class:`StagingRefused`
     (``RELEASE_ID_MISMATCH``) when that manifest declares a different release
-    than the path it sits on, and :class:`CorruptManifest` when its declared
-    hash no longer matches its own content. A success record may only bind a
+    than the path it sits on, :class:`CorruptManifest` when its declared
+    hash no longer matches its own content, and :class:`StagingRefused`
+    (``STATUS_UNWRITABLE``) when the completion record itself cannot be
+    written. A success record may only bind a
     manifest this module would itself deploy -- never a hash invented from
     whatever bytes happen to be on disk.
     """
@@ -643,7 +645,13 @@ def mark_staging_succeeded(root: Path, release_id: str) -> None:
         "release_hash": manifest.release_hash,
         "state": STAGING_STATE_SUCCEEDED,
     }
-    _atomic_write_bytes(_staging_status_path(root, release_id), _encode(status))
+    try:
+        _atomic_write_bytes(_staging_status_path(root, release_id), _encode(status))
+    except OSError as exc:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}].staging-status", code="STATUS_UNWRITABLE",
+            detail="the staging completion record could not be written",
+        ),)) from exc
 
 
 def resolve_release(root: Path, release_id: str) -> ModelRelease:

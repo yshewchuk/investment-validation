@@ -233,6 +233,7 @@ def _incumbent(tmp_path: Path) -> Path:
     store = tmp_path / "incumbent"
     release, inventory, payloads = _models("rel-incumbent", intercept=100.0)
     stage_release(store, release, inventory, payloads)
+    gate.deployment.mark_staging_succeeded(store, "rel-incumbent")
     promote(store, "rel-incumbent")
     return store
 
@@ -256,6 +257,20 @@ def _run(tmp_path: Path, release_root: Path, **kwargs) -> dict:
     return gate.build_evidence(
         release_root, report_dir=tmp_path / "report",
         watch_dirs=[cache, layout.deployment_root(release_root)], **kwargs)
+
+
+def _cli_build_evidence(tmp_path: Path, monkeypatch) -> None:
+    """Route ``gate.main``'s build through this file's reduced catalog."""
+    cache = tmp_path / "model-cache"
+    cache.mkdir(exist_ok=True)
+    original = gate.build_evidence
+
+    def patched(release_root, **kwargs):
+        kwargs.update(consumers=CONSUMERS, state_specs=SPECS,
+                      watch_dirs=[cache, layout.deployment_root(Path(release_root))])
+        return original(release_root, **kwargs)
+
+    monkeypatch.setattr(gate, "build_evidence", patched)
 
 
 def test_complete_release_passes(tmp_path):
@@ -679,3 +694,40 @@ def test_preparer_builds_the_chooser_pool_from_its_parquet(tmp_path):
     assert [row[1] for row in pool.rows_for("CTR5")] == [float(i) for i in range(12)]
     assert prep.frozen_state_payloads([tmp_path / "pool.json"]) == found
     assert prep.chooser_pool_payloads(tmp_path / "absent.parquet") == {}
+
+
+def test_acceptance_main_marks_release_only_after_release_pass(tmp_path, monkeypatch):
+    root = _release(tmp_path)
+    sidecar = (layout.deployment_root(root) / "releases" / "rel-candidate"
+               / "staging-status.json")
+    assert not sidecar.exists()
+    _cli_build_evidence(tmp_path, monkeypatch)
+    artifacts = tmp_path / "artifacts"
+
+    assert gate.main(["--release-root", str(root),
+                      "--artifact-root", str(artifacts)]) == 0
+
+    evidence = json.loads((artifacts / "evidence.json").read_text())
+    assert (artifacts / "evidence.json").is_file()
+    assert evidence["release_ok"] is True
+    assert evidence["status"] == "RELEASE_PASS"
+    assert Path(evidence["report"]).is_file()
+    manifest = gate.deployment._read_manifest(layout.deployment_root(root), "rel-candidate")
+    assert json.loads(sidecar.read_text()) == {
+        "release_id": "rel-candidate", "release_hash": manifest.release_hash,
+        "state": "succeeded"}
+
+
+def test_acceptance_main_does_not_mark_release_when_gate_fails(tmp_path, monkeypatch):
+    states = _state_payloads()
+    del states["payoff_line:STR-THRU"]
+    root = _release(tmp_path, states=states)
+    _cli_build_evidence(tmp_path, monkeypatch)
+    artifacts = tmp_path / "artifacts"
+
+    assert gate.main(["--release-root", str(root),
+                      "--artifact-root", str(artifacts)]) == 1
+
+    assert json.loads((artifacts / "evidence.json").read_text())["status"] == "FAIL"
+    assert not (layout.deployment_root(root) / "releases" / "rel-candidate"
+                / "staging-status.json").exists()

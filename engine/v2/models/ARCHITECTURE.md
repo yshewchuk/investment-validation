@@ -67,6 +67,9 @@ The full list is `README.md`'s `<!-- public-interface: ... -->` directive
 - `deployment.restage_semantic_hash(root, release_id) -> StagedManifest`
   — rewrite an already-staged manifest's hash to the current semantic
   version, in place, with no retraining; see §7.5.
+- `deployment.mark_staging_succeeded(root, release_id) -> None`
+  — after the Phase 5 acceptance gate passes, atomically record success for
+  the exact staged `release_id` and `release_hash`; see §7.2.
 - `release_bindings.resolve_release_binding(release_root) -> ScoringReleaseBinding`
   and `release_bindings.resolve_production_release_binding() -> ScoringReleaseBinding`
   live in `engine/v2/scoring/` (layer 5.0, below `models` — this package
@@ -311,6 +314,26 @@ independently of whatever staged it.
 `promote`'s optional `expected_previous_release_id` guard: design only, not
 yet implemented — see #192, #137.
 
+#### `mark_staging_succeeded`
+
+This record is separate from the immutable model manifest. `stage_release`
+may leave a manifest behind when later Phase 5 work fails, so staging alone
+never writes a success record. `checks/phase5_acceptance.py` publishes the
+record only after its evidence and report are complete and every release
+subject passes (`RELEASE_PASS` without a Phase 4 corpus, or `PASS` with one).
+Its rollback probe writes temporary success records only into its scratch
+copy, never into the real release store.
+
+| Condition | Outcome |
+|---|---|
+| No manifest under `release_id` | `mark_staging_succeeded` refuses `ReleaseNotStaged` |
+| Manifest unreadable, path identity differs, or its content hash is invalid | Refuses `StagingRefused` (`MANIFEST_UNREADABLE` / `RELEASE_ID_MISMATCH`) or `CorruptManifest`; writes no success record |
+| Valid manifest; success record write fails | Refuses `StagingRefused` (`STATUS_UNWRITABLE`); no deployment pointer/history is changed and no partial success record is accepted |
+| Valid manifest and atomic status write succeeds | Writes exactly `release_id`, `release_hash`, and `state: succeeded` to `staging-status.json` beside that manifest |
+| Same manifest marked again | Idempotent: writes the same record |
+| Manifest hash changes after marking, including `restage_semantic_hash` | Existing record is stale; complete acceptance again and record the new hash before promotion or rollback |
+| Release staged before status records existed | Remains ineligible until it passes the same Phase 5 acceptance gate; no automatic backfill from a prior pointer/history entry or manifest hash alone, because neither proves that post-stage checks passed |
+
 ### 7.3 `resolve_release` / `current_release` (read-only)
 
 | Condition | Outcome |
@@ -344,6 +367,7 @@ Both share one `MODEL_RELEASE_ROOT` environment variable;
 | Already at the current semantic hash version | No-op: returns unchanged |
 | Legacy (member-only) manifest | Its own verification covers `release_id` and every member's `content_hash`, not `adapter`/`feature_order`/`output_names`; the semantic hash this call writes covers all of them going forward, not retroactively |
 | Write | One atomic rewrite of `manifest.json` only; nothing else under the release store is touched |
+| Existing staging-success record | If the rewrite changes `release_hash`, the old record no longer matches and promotion/rollback refuse; rerun Phase 5 acceptance and record success for the new hash |
 | Idempotency | Same starting manifest always produces the same rewritten manifest; a second call hits the "already at current version" no-op above |
 
 ### 7.6 Phase-5 state catalogs (staging-tool ownership)

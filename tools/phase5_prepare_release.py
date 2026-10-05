@@ -407,9 +407,7 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
                 objects[-1]["serving_fold"] = to_document(descriptor)
         rows.append(member_row(build.spec, build.status, objects, build.detail))
     body = manifest_body(release.release_id, release.deployment_id, rows, sources or {})
-    manifest = write_manifest(out, body)
-    deployment.mark_staging_succeeded(root, release.release_id)
-    return manifest
+    return write_manifest(out, body)
 
 
 def _plan(release: ModelRelease, states: list[StateBuild]) -> dict:
