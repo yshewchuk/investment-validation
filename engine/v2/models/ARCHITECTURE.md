@@ -330,6 +330,8 @@ promotion and rollback refuse without matching staging success.
 
 | Condition | Outcome |
 |---|---|
+| No prior status record for the candidate | `invalidate_staging_success` is a no-op; preparation continues |
+| Removing a prior status record fails | Refuses `StagingRefused` (`STATUS_INVALIDATION_FAILED`) before staging the candidate manifest or writing its Phase 5 state; a deployment root or incumbent copy may remain |
 | No manifest under `release_id` | `mark_staging_succeeded` refuses `ReleaseNotStaged` |
 | Manifest unreadable, path identity differs, or its content hash is invalid | Refuses `StagingRefused` (`MANIFEST_UNREADABLE` / `RELEASE_ID_MISMATCH`) or `CorruptManifest`; writes no success record |
 | Valid manifest; success record write fails | Refuses `StagingRefused` (`STATUS_UNWRITABLE`); no deployment pointer/history is changed and no partial success record is accepted |
