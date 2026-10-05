@@ -2899,12 +2899,21 @@ def test_select_pr_tests_qualified_builtins_exec_helper_taints_its_importer(tmp_
 
 def test_select_pr_tests_conftest_as_root_does_not_taint_every_test(tmp_path, monkeypatch):
     # Guards the fix above from regressing into the mass-collapse #153
-    # already fixed at the module level: tests/conftest.py is DYNAMIC (its
-    # own sys.path.insert) and a root for every test file, but must not, by
-    # itself, taint every test's selection -- only a DYNAMIC file reached
-    # via a real EDGE (not root membership) should.
+    # already fixed at the module level: tests/conftest.py is a closure root
+    # for EVERY test file, but root membership alone must not taint every
+    # test's selection -- only a DYNAMIC file reached via a real EDGE should.
+    # The insertion is the provable repository-root form: a bare
+    # `sys.path.insert(0, '.')` is CWD-relative, not this file's root, so the
+    # scanner reads it as an unresolved import-path mutation and fans every
+    # test into the failsafe -- the exact collapse asserted away below.
     (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "conftest.py").write_text("import sys\nsys.path.insert(0, '.')\n")
+    (tmp_path / "tests" / "conftest.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "\n"
+        "ROOT = Path(__file__).resolve().parents[1]\n"
+        "# '.' is not a static proof of the repository root\n"
+        "sys.path.insert(0, str(ROOT))\n")
     (tmp_path / "engine").mkdir()
     (tmp_path / "engine" / "x.py").write_text("Z = 1\n")
     (tmp_path / "tests" / "test_a.py").write_text("from engine import x\n")
@@ -4039,51 +4048,124 @@ def _independent_import_edges(tracked: list[str]) -> dict[str, set[str]]:
 
 
 def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_selected():
-    # Property over the REAL checkout: changed inputs = every tracked non-test
-    # python source path; every test with a static AST import chain into that
-    # set must be selected. One production `select_pr_tests` call, one
-    # independent graph build.
+    # Property over the REAL checkout: every test with a static AST import
+    # chain into a changed non-test source must be in that run's selection.
+    # Expected chains come ONLY from the independent importer
+    # (`_independent_import_edges`) -- never from production graph edges,
+    # which would certify themselves -- and ONE production graph build is
+    # handed to `select_pr_tests` explicitly.
     tracked = _tracked_py_paths()
     edges = _independent_import_edges(tracked)
     tests = pilot.pytest_test_files(set(tracked))  # path filter only, no edges
-    changed = [p for p in tracked if not p.startswith("tests/")]
-    assert changed and tests
-    changed_set = set(changed)
+    non_test = {p for p in tracked if not p.startswith("tests/")}
+    assert tests and non_test
 
     chains: dict[str, list[str]] = {}
+    reached: dict[str, set[str]] = {}
     for t in tests:
         parent: dict[str, str | None] = {t: None}
         stack = [t]
-        hit = None
+        hits: set[str] = set()
+        example: list[str] | None = None
         while stack:
             cur = stack.pop()
-            if cur != t and cur in changed_set:
-                hit = cur
-                break
+            if cur != t and cur in non_test:
+                hits.add(cur)
+                if example is None:
+                    chain = [cur]
+                    while chain[-1] != t:
+                        chain.append(parent[chain[-1]])
+                    example = list(reversed(chain))
             for nxt in edges[cur]:
                 if nxt not in parent:
                     parent[nxt] = cur
                     stack.append(nxt)
-        if hit is not None:
-            chain = [hit]
-            while chain[-1] != t:
-                chain.append(parent[chain[-1]])
-            chains[t] = list(reversed(chain))
+        if hits:
+            chains[t] = example  # one independent chain per test, for reporting
+            reached[t] = hits
 
-    assert chains, (
+    # The changed inputs the selector is allowed to narrow on: every non-test
+    # source any independent chain reaches, minus the paths [pr_selection]
+    # full_suite legitimately sends to the sentinel anyway (demanding
+    # inclusion there would prove nothing about narrowing).
+    eligible = sorted({s for hits in reached.values() for s in hits
+                       if not pilot.forces_full_suite(CFG, s)})
+    assert eligible, (
+        "vacuous property: every non-test source an independent chain reaches "
+        "is on the full_suite allowlist, so no narrowed selection is exercised")
+    expected = {t for t, hits in reached.items() if hits & set(eligible)}
+    assert expected, (
         "vacuous property: no test file in this checkout has a static AST "
         "import chain to any non-test source path, so the inclusion below "
         "would prove nothing")
 
-    selected = pilot.select_pr_tests(CFG, changed)
-    selected_set = set(tests) if selected is None else set(selected)
-    missing = sorted(set(chains) - selected_set)
-    mode = "full-suite sentinel" if selected is None else "narrow selection"
+    production_graph = pilot.build_import_graph()
+    selected = pilot.select_pr_tests(CFG, eligible, graph=production_graph)
     detail = "; ".join(f"{t} reaches a changed file via {' -> '.join(chains[t])}"
-                       for t in missing[:10])
+                       for t in sorted(expected)[:10])
+    assert selected is not None, (
+        f"selector refused to narrow at all on {len(eligible)} eligible "
+        f"changed source(s); example independent chains: {detail}")
+    missing = sorted(expected - set(selected))
+    dropped = "; ".join(f"{t} reaches a changed file via {' -> '.join(chains[t])}"
+                        for t in missing[:10])
     assert not missing, (
-        f"selector returned a {mode} that dropped {len(missing)} test(s) "
-        f"with an independent static import chain to the changed set: {detail}")
+        f"selector returned a narrow selection that dropped {len(missing)} "
+        f"test(s) with an independent static import chain to the changed set: "
+        f"{dropped}")
+
+
+def test_independent_chain_negative_control_removing_one_edge_removes_the_test(tmp_path, monkeypatch):
+    # Non-vacuity control for the property above, over a TINY tracked tree:
+    # `tests/test_via_helper.py` is selected ONLY because of the real edge
+    # chain test -> helper -> module. The independent importer proves that
+    # chain exists; removing the helper -> module edge from a COPY of the
+    # production graph (the intact graph is never mutated) must then drop
+    # that test. A selector that ignored the passed graph, or an expectation
+    # read off production edges, would leave the test present and fail here --
+    # which is what makes the real-checkout property above mean something.
+    tracked = _write_repo(tmp_path, {
+        "engine/mod.py": "VALUE = 1\n",
+        "tests/helper.py": "from engine.mod import VALUE\n",
+        "tests/test_via_helper.py": "from tests.helper import VALUE\n",
+        # reaches the changed module directly: keeps the post-removal answer a
+        # real narrowed selection rather than the unrecognized-path sentinel,
+        # so "the test is missing" is actually observable.
+        "tests/test_direct.py": "import engine.mod\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+    edges = _independent_import_edges(tracked)
+    assert "tests/helper.py" in edges["tests/test_via_helper.py"]
+    assert "engine/mod.py" in edges["tests/helper.py"]
+
+    graph = pilot.build_import_graph(tracked)
+    # Nothing here is dynamic or tainted: selection is edge-only, so removing
+    # this one edge is the only thing that can move it.
+    assert not pilot.dynamic_files(graph)
+    assert not pilot.unresolved_import_files(tracked)
+    intact = pilot.select_pr_tests(_SELECT_CFG, ["engine/mod.py"], graph=graph)
+    assert intact is not None
+    assert "tests/test_via_helper.py" in intact
+
+    class _GraphCopy(dict):
+        """The `dict[str, set[str]]`-plus-`.precise` shape build_import_graph
+        returns, assembled from set COPIES so removals can never touch the
+        intact production graph or its real-edge map."""
+
+    broken = _GraphCopy({rel: set(out) for rel, out in graph.items()})
+    precise = getattr(graph, "precise", None)
+    if precise is not None:
+        broken.precise = {rel: set(out) for rel, out in precise.items()}
+    broken["tests/helper.py"].discard("engine/mod.py")
+    if getattr(broken, "precise", None) is not None:
+        broken.precise["tests/helper.py"].discard("engine/mod.py")
+    assert "engine/mod.py" in graph["tests/helper.py"]  # the intact graph is untouched
+
+    after = pilot.select_pr_tests(_SELECT_CFG, ["engine/mod.py"], graph=broken)
+    assert after is not None
+    assert "tests/test_direct.py" in after
+    assert "tests/test_via_helper.py" not in after
 
 
 # -- PR #390 regressions: narrow unresolved-import, subprocess, process-launch,
