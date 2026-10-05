@@ -796,6 +796,52 @@ def test_event_inputs_from_document_rejects_relative_and_aware_event_date(event_
         _event_inputs_from_document(doc)
 
 
+def test_top_level_quote_max_age_sessions_survives_to_native_inputs_context(tmp_path):
+    """Issue #169: a top-level ``quote_max_age_sessions`` in the event
+    document must travel the whole
+    event-document -> NightlyEventInputs -> bundle assembly -> identity-context
+    merge -> native inputs path and be preserved (with the valid quote rows'
+    ``quote_date``) in ``NativeScoreInputs.context``, with no refusals."""
+    binding = _stage_release(tmp_path)
+    doc = _event_doc()
+    doc["quote_max_age_sessions"] = 2
+    event = _event_inputs_from_document(doc)
+    assert event.quote_max_age_sessions == 2
+    assembled, refusals = _assemble(binding, [event])
+    assert refusals == ()
+    _, native_inputs = assembled[event.key]
+    assert native_inputs.context["quote_max_age_sessions"] == 2
+    assert native_inputs.context["quote_date"] == "2026-01-09"
+
+
+@pytest.mark.parametrize("bad_max_age", [-1, True, 2.0, "2"])
+def test_event_inputs_from_document_rejects_invalid_quote_max_age_sessions(bad_max_age):
+    """Issue #169: before the decoder validation, an invalid top-level
+    ``quote_max_age_sessions`` (negative int, bool, float, numeric string)
+    was not rejected at event decoding; ARCHITECTURE.md's
+    ``quote_max_age_sessions`` contract requires rejection there."""
+    doc = _event_doc()
+    doc["quote_max_age_sessions"] = bad_max_age
+    with pytest.raises(ValueError):
+        _event_inputs_from_document(doc)
+
+
+@pytest.mark.parametrize("bad_max_age", [-1, True, 2.0, "2"])
+def test_assemble_score_batch_inputs_rejects_invalid_quote_max_age_sessions(
+        tmp_path, bad_max_age):
+    """Issue #169: exported ``assemble_score_batch_inputs`` must apply the
+    same batch-level guard to directly constructed ``NightlyEventInputs``
+    (never routed through the decoder): a ``quote_max_age_sessions`` that is
+    neither ``null`` nor a non-negative int raises, before any per-row
+    assembly is attempted."""
+    binding = _stage_release(tmp_path)
+    event = _event_inputs(quote_max_age_sessions=bad_max_age)
+    with pytest.raises(
+            ValueError,
+            match="quote_max_age_sessions must be null or a non-negative integer"):
+        _assemble(binding, [event])
+
+
 def test_event_inputs_from_document_keeps_midnight_and_intraday_success_events():
     """PR #384 companion anchor: the two canonical wire forms the producer
     itself writes must keep decoding successfully -- the legacy midnight

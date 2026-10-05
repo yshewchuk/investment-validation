@@ -8,13 +8,14 @@ it does not, from synthetic source-owned inputs (no corpus needed).
 import math
 
 from engine.v2.contracts import ScoreRequest
-from engine.v2.scoring import application
+from engine.v2.scoring import application, stages
 from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
     StageReceipt,
     assemble_native_values,
+    flags_refuse,
 )
 
 
@@ -125,6 +126,160 @@ def test_stale_quote_does_not_fire_when_quote_matches_entry():
         "entry_date": "2026-09-16", "quote_date": "2026-09-16",
     }))
     assert "STALE_QUOTE" not in values["flags"]
+
+
+def test_stale_quote_issue_169_out_of_bound_age_refuses_with_no_chain():
+    # Issue #169's exact direct-stage case: a raw quote years older than the
+    # requested entry date under a 1-session caller bound. The age is far out
+    # of bound, so the quote is unusable -- a non-advisory NO_CHAIN, not the
+    # advisory STALE_QUOTE. Before the production fix this path (age bound
+    # unchecked) stamped only the advisory STALE_QUOTE, so all three asserts
+    # below would fail; they pin the refused behaviour, not an annotation.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2026-09-28",
+            "quote_date": "2020-01-01",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "NO_CHAIN" in flags
+    assert "STALE_QUOTE" not in flags
+    assert flags_refuse(flags)
+
+
+def test_stale_quote_in_bound_age_across_weekend_and_holiday_stays_advisory():
+    # The in-bound counterpart of the case above: Friday 2024-05-24 quote used
+    # for a Tuesday 2024-05-28 entry (Memorial Day Monday 2024-05-27 closed).
+    # Canonical NYSE sessions in (quote, entry] is just Tuesday, so age 1 is
+    # in bound under a 1-session caller bound: the advisory STALE_QUOTE, not a
+    # refusing NO_CHAIN.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2024-05-28",
+            "quote_date": "2024-05-24",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "STALE_QUOTE" in flags
+    assert "NO_CHAIN" not in flags
+    assert not flags_refuse(flags)
+
+
+def test_stale_quote_age_counts_the_january_2025_nyse_closure():
+    # Thursday 2025-01-09 was a full NYSE closure (National Day of Mourning),
+    # so the canonical sessions in (quote, entry] for a 2025-01-08 quote used
+    # on a 2025-01-10 entry is just Friday 2025-01-10: age 1, in bound under a
+    # 1-session caller bound -- the advisory STALE_QUOTE, not a refusing
+    # NO_CHAIN. A naive calendar-day or weekday count would call this 2 (or
+    # worse) and wrongly refuse the row.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2025-01-10",
+            "quote_date": "2025-01-08",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "STALE_QUOTE" in flags
+    assert "NO_CHAIN" not in flags
+    assert not flags_refuse(flags)
+
+
+def test_stale_quote_age_counts_the_december_2018_nyse_closure():
+    # Wednesday 2018-12-05 was a full NYSE closure (National Day of Mourning
+    # for George H. W. Bush), so the canonical sessions in (quote, entry] for
+    # a 2018-12-04 quote used on a 2018-12-06 entry is just Thursday 2018-12-06:
+    # age 1, in bound under a 1-session caller bound -- the advisory
+    # STALE_QUOTE, not a refusing NO_CHAIN. Before the fix the production
+    # calendar still counted 2018-12-05 as a session, making the age 2 and
+    # refusing the row; the test was written to catch that pre-fix behavior.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2018-12-06",
+            "quote_date": "2018-12-04",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "STALE_QUOTE" in flags
+    assert "NO_CHAIN" not in flags
+    assert not flags_refuse(flags)
+
+
+def test_stale_quote_age_counts_the_october_2012_sandy_closures():
+    # Monday 2012-10-29 and Tuesday 2012-10-30 were full NYSE closures
+    # (Hurricane Sandy), so the canonical sessions in (quote, entry] for a
+    # 2012-10-26 quote used on a 2012-10-31 entry is just Wednesday
+    # 2012-10-31: age 1, in bound under a 1-session caller bound -- the
+    # advisory STALE_QUOTE, not a refusing NO_CHAIN. Before the fix the
+    # production calendar still counted both closure dates as sessions,
+    # making the age 3 and refusing the row; this test is written to catch
+    # that pre-fix behavior.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2012-10-31",
+            "quote_date": "2012-10-26",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "STALE_QUOTE" in flags
+    assert "NO_CHAIN" not in flags
+    assert not flags_refuse(flags)
+
+
+def test_stale_quote_unrepresentable_date_refuses_no_chain():
+    # A quote date no calendar can convert (year 0 is below datetime.min).
+    # The conversion must not leak an exception out of the stage: the age is
+    # uncomputable, so the quote is unusable -- refusing NO_CHAIN, not the
+    # advisory STALE_QUOTE.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2025-01-02",
+            "quote_date": "0000-01-01",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "NO_CHAIN" in flags
+    assert "STALE_QUOTE" not in flags
+    assert flags_refuse(flags)
+
+
+def test_stale_quote_bounded_direct_dates_reject_malformed_full_values():
+    # The bounded path parses every date with the full-string parser
+    # ``_quote_age_day``, so a malformed suffix on any of the three date fields
+    # -- the earliest quote observation, its latest one, or entry -- is unusable
+    # evidence: a deterministic refusing NO_CHAIN, never a raise, a retry or the
+    # silently truncated ten-character prefix the previous parser accepted. A
+    # leaked exception fails the call below outright, which is the "no
+    # exception" half of each case.
+    dates = {
+        "quote_date": "2026-01-08",
+        "quote_latest_date": "2026-01-08",
+        "entry_date": "2026-01-09",
+    }
+    for field, day in dates.items():
+        flags: list[str] = []
+        stages._check_stale_quote(
+            {
+                **dates,
+                field: day + "junk",
+                "quote_max_age_sessions": 1,
+            },
+            flags,
+        )
+        assert "NO_CHAIN" in flags, field
+        assert "STALE_QUOTE" not in flags, field
+        assert flags_refuse(flags), field
 
 
 def test_out_of_domain_fires_below_mcap_floor():
