@@ -1162,7 +1162,27 @@ def narrow_query_to_year(query: DataQuery, contract: TableContract, year: int) -
 
 
 def scanned_rows(repository, query: DataQuery, table_name: str) -> list[dict]:
-    return [row for batch in repository.scan(query, table_name=table_name) for row in batch.to_pylist()]
+    """Scan ``query`` and collect its rows.
+
+    Callers may hand in a query whose ``time_interval`` has been narrowed (see
+    :func:`narrow_query_to_year`) while its ``max_result_rows`` still carries
+    the wider query's population, which ``Repository._check_population_bound``
+    refuses as an unbound. The result limit is therefore prepared against
+    exactly the bound that rule enforces for THIS selection — the same
+    ``scan_population_bound``/``_prepared_query`` recipe as everywhere else
+    (kept when the membership admits it, lowered to the bound otherwise, with
+    the batch limit following it down and staying positive for a zero bound).
+    Every other field, the output ordering and the scan's own refusals are the
+    caller's."""
+    bound = repository.scan_population_bound(
+        query.snapshot_id, table_name=table_name, table_contract_ref=query.table_contract_ref,
+        key_filter=query.key_filter, time_interval=query.time_interval)
+    max_result_rows = min(query.max_result_rows, bound)
+    max_batch_rows = (min(query.max_batch_rows, max_result_rows) if max_result_rows > 0
+                      else query.max_batch_rows)
+    prepared = dataclasses.replace(query, max_result_rows=max_result_rows,
+                                  max_batch_rows=max_batch_rows)
+    return [row for batch in repository.scan(prepared, table_name=table_name) for row in batch.to_pylist()]
 
 
 def _normalize_value(value):

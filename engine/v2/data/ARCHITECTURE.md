@@ -60,7 +60,10 @@ interface section; this names only the load-bearing entry points.
   authoritative selected-population bound: both paths check a request's
   `max_result_rows` against it before row streaming. A query-level limit
   stays explicit caller intent — legal below the bound, refused
-  `QUERY_NOT_BOUNDED` above it.
+  `QUERY_NOT_BOUNDED` above it. Retained caller guards must be prepared as
+  `min(caller_guard, selected_population_bound)` before constructing a scan
+  query; this preserves caller-side ceilings without weakening the direct-query
+  refusal. Do not clamp a caller-supplied `DataQuery` inside the validator.
 - **Pure primitives, no I/O** — `query.py` and `documents.py` (`manifests.py`
   and `objects.py` are identity builders, not pure: `manifests.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which
