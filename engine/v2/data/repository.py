@@ -320,10 +320,44 @@ class Repository:
                       details={"contract_id": contract_id})
         return documents.decode_document(TableContract, json.loads(row["definition_json"]))
 
+    def _check_population_bound(self, query: DataQuery, population) -> None:
+        """The one result-limit rule :meth:`scan` and :meth:`explain_dependencies`
+        share: a stated ``max_result_rows`` above the recorded row counts of the
+        pinned fragments surviving the same pruning is not a bound at all, so it
+        is refused here, before any fragment is opened (finiteness/nonnegativity
+        already decided by ``_validated_query``). A limit at or below the bound
+        is left exactly as the caller wrote it; zero is admitted only by a
+        zero-row membership, whose batch limit stays positive."""
+        if query.max_result_rows > population.row_count:
+            raise errors.fail("QUERY_NOT_BOUNDED",
+                              "max_result_rows exceeds the pinned population bound",
+                              details={"max_result_rows": query.max_result_rows,
+                                       "population_bound": population.row_count})
+
+    def _prepared_query(self, snapshot_id: str, table_name: str,
+                        table_contract_ref: TableContractRef, columns: tuple,
+                        key_filter: tuple, order_by: tuple, *,
+                        max_batch_rows: int, max_result_rows: int) -> DataQuery:
+        """One internal bounded lookup, its limits prepared against exactly the
+        bound :meth:`_check_population_bound` enforces: the requested result
+        limit is kept when the pinned membership admits it and lowered to the
+        bound otherwise; the batch limit follows it down, staying positive for
+        a zero bound. Metadata-only — no object is opened to prepare a query."""
+        bound = self.scan_population_bound(
+            snapshot_id, table_name=table_name, table_contract_ref=table_contract_ref,
+            key_filter=key_filter)
+        result = min(max_result_rows, bound)
+        batch = min(max_batch_rows, result) if result > 0 else max_batch_rows
+        return DataQuery(
+            snapshot_id=snapshot_id, table_contract_ref=table_contract_ref,
+            columns=columns, key_filter=key_filter, order_by=order_by,
+            max_batch_rows=batch, max_result_rows=result)
+
     def _execute_scan(self, contract: TableContract, records: list[FragmentRecord],
                       query: DataQuery):
         population = query_mod.plan_scan_population(
             contract, records, key_filter=query.key_filter, time_interval=query.time_interval)
+        self._check_population_bound(query, population)
         needed = tuple(dict.fromkeys((*query.columns, *contract.primary_key, *self._hidden_columns(query))))
         batch_cap = min(query.max_batch_rows, contract.maximum_batch_rows)
         streams = [self._fragment_rows(r, contract, needed, query, batch_cap)
@@ -626,7 +660,7 @@ class Repository:
     # ----------------------------------------------------------------------
     # P2-6: table_contract — the one public contract lookup a query planner
     # needs before it can build a DataQuery (observation_time_column, primary
-    # key, per-table row caps). Reuses the same private ``_full_contract``
+    # key, batch ceiling). Reuses the same private ``_full_contract``
     # ``resolve``/``scan`` already trust, so a planner never re-derives
     # contract facts by hand.
     # ----------------------------------------------------------------------
@@ -659,8 +693,12 @@ class Repository:
         ``row_count``, summed. Pure metadata planning: shares
         ``query_mod.plan_scan_population`` with ``scan``/``explain`` so the
         bound is by construction exactly the population those paths open,
-        and needs no ``ArtifactStore`` (no bytes, no cap, no head fallback).
-        Not yet enforced against ``max_result_rows`` — that is slice E."""
+        and needs no ``ArtifactStore`` (no bytes, no head fallback).
+        :meth:`_check_population_bound` is the one rule that enforces it —
+        every explicit ``max_result_rows``, caller's or prepared, is checked
+        against exactly this number before explain or scan opens a stream;
+        a smaller limit stays unchanged, and a zero-row membership admits a
+        zero limit with a positive batch size."""
         snap = self.resolve(snapshot_id)
         contract, records = self._table_records(snap, table_name, table_contract_ref)
         population = query_mod.plan_scan_population(
@@ -678,10 +716,9 @@ class Repository:
         columns, predicates, and estimated/maximum rows a query would touch.
         Recipe/invalidation planning is Phase 3/4 — refused as
         ``UNSUPPORTED_CONTRACT`` here, never a guessed plan (task brief
-        decision 5): ``DataQuery`` remains supported; a ``ChainQuery`` carries
-        no ``snapshot_id`` to explain against, so dependency planning accepts
-        it only when the caller supplies an explicit pinned ``SnapshotRef`` —
-        a missing pin is refused with ``UNSUPPORTED_CONTRACT``.
+        decision 5): only ``DataQuery`` is supported in Phase 2; a
+        ``ChainQuery`` carries no ``snapshot_id`` to explain against, so it is
+        refused the same way.
         """
         if isinstance(query, DataQuery):
             if table_name is None:
@@ -707,7 +744,8 @@ class Repository:
         and the quote fragments for the resolved ticker/session.  Build the
         same bounded ``DataQuery`` shapes used by the chain reader so the
         explanation is independently checkable and remains pinned to the
-        caller's snapshot.
+        caller's snapshot; every internal limit is prepared against the same
+        membership bound the public paths enforce.
         """
         if snapshot_ref.snapshot_id != self.resolve(snapshot_ref.snapshot_id).snapshot_id:
             raise errors.fail("STALE_EXPECTATION", "chain explanation snapshot is not resolvable")
@@ -716,13 +754,12 @@ class Repository:
         ticker, _security_id = chains._resolve_ticker(self, query, snapshot_ref)
         dependencies = []
         security_ref = snapshot_ref.table_versions["securities"].table_contract_ref
-        security_query = DataQuery(
-            snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=security_ref,
-            columns=("ticker", "year"),
-            key_filter=(KeyPredicate(column="year", operator="eq",
-                                     values=(int(str(query.session_date)[:4]),)),),
-            order_by=("ticker", "year"), max_batch_rows=50000,
-            max_result_rows=2000000)
+        security_predicates = (KeyPredicate(column="year", operator="eq",
+                                            values=(int(str(query.session_date)[:4]),)),)
+        security_query = self._prepared_query(
+            snapshot_ref.snapshot_id, "securities", security_ref, ("ticker", "year"),
+            security_predicates, ("ticker", "year"),
+            max_batch_rows=50000, max_result_rows=2000000)
         dependencies.extend(self._explain_data_query(
             security_query, "securities").dependencies)
         if query.event_ref is not None:
@@ -733,41 +770,40 @@ class Repository:
                 "event_id", "ticker", "event_date", "session", "session_src",
                 "date_agree", "date_conflict", "event_cluster_id",
             )
-            event_query = DataQuery(
-                snapshot_id=snapshot_ref.snapshot_id,
-                table_contract_ref=event_ref.table_contract_ref,
-                columns=event_columns,
-                key_filter=(KeyPredicate(column="event_id", operator="eq",
-                                         values=(query.event_ref.event_id,)),),
-                order_by=("event_id",), max_batch_rows=1000, max_result_rows=1000)
+            event_predicates = (KeyPredicate(column="event_id", operator="eq",
+                                             values=(query.event_ref.event_id,)),)
+            event_query = self._prepared_query(
+                snapshot_ref.snapshot_id, "earnings_events", event_ref.table_contract_ref,
+                event_columns, event_predicates, ("event_id",),
+                max_batch_rows=1000, max_result_rows=1000)
             dependencies.extend(self._explain_data_query(
                 event_query, "earnings_events").dependencies)
             event_rows = []
             for batch in self.scan(event_query, table_name="earnings_events"):
                 event_rows.extend(batch.to_pylist())
             if event_rows and event_rows[0].get("event_cluster_id") is not None:
-                cluster_query = DataQuery(
-                    snapshot_id=snapshot_ref.snapshot_id,
-                    table_contract_ref=event_ref.table_contract_ref,
-                    columns=("event_id", "ticker", "event_cluster_id"),
-                    key_filter=(KeyPredicate(
-                        column="ticker", operator="eq",
-                        values=(event_rows[0]["ticker"],)),),
-                    order_by=("event_id",), max_batch_rows=1000, max_result_rows=1000)
+                cluster_predicates = (KeyPredicate(
+                    column="ticker", operator="eq", values=(event_rows[0]["ticker"],)),)
+                cluster_query = self._prepared_query(
+                    snapshot_ref.snapshot_id, "earnings_events",
+                    event_ref.table_contract_ref,
+                    ("event_id", "ticker", "event_cluster_id"),
+                    cluster_predicates, ("event_id",),
+                    max_batch_rows=1000, max_result_rows=1000)
                 dependencies.extend(self._explain_data_query(
                     cluster_query, "earnings_events").dependencies)
         chain_ref = snapshot_ref.table_versions.get("option_chains")
         if chain_ref is None:
             raise errors.fail("CONTRACT_MISMATCH", "snapshot has no option_chains table")
-        chain_query = DataQuery(
-            snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=chain_ref.table_contract_ref,
-            columns=("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask",
-                     "mid", "iv", "delta", "volume", "open_interest", "bid_size",
-                     "ask_size", "src", "src_file", "quote_repaired"),
-            key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
-                        KeyPredicate(column="obs_date", operator="eq",
-                                     values=(query.session_date,))),
-            order_by=("ticker", "obs_date", "expiry", "strike", "right"),
+        chain_predicates = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
+                            KeyPredicate(column="obs_date", operator="eq",
+                                         values=(query.session_date,)))
+        chain_query = self._prepared_query(
+            snapshot_ref.snapshot_id, "option_chains", chain_ref.table_contract_ref,
+            ("ticker", "obs_date", "expiry", "strike", "right", "bid", "ask",
+             "mid", "iv", "delta", "volume", "open_interest", "bid_size",
+             "ask_size", "src", "src_file", "quote_repaired"),
+            chain_predicates, ("ticker", "obs_date", "expiry", "strike", "right"),
             max_batch_rows=min(50000, query.max_contracts),
             max_result_rows=query.max_contracts)
         dependencies.extend(self._explain_data_query(
@@ -779,18 +815,18 @@ class Repository:
                 "dependencies": [to_document(item) for item in dependencies],
             }), snapshot_ref=snapshot_ref, dependencies=tuple(dependencies))
 
-    def _explain_data_query(self, query: DataQuery, table_name: str, *,
-                            query_validator=query_mod.validate_query) -> DependencyPlan:
-        # Materialization supplies its whole-table copy policy here. Structural
-        # decoding, snapshot/contract identity and the original query hash stay
-        # common; public explain_dependencies always uses the scan policy.
+    def _explain_data_query(self, query: DataQuery, table_name: str) -> DependencyPlan:
+        # Structural decoding, snapshot/contract identity and the original query
+        # hash stay common; explain always uses the scan validation policy, then
+        # the shared population-bound rule.
         validated = self._validated_query(query)
         snap = self.resolve(validated.snapshot_id)
         contract, records = self._table_records(snap, table_name, validated.table_contract_ref)
-        query_validator(contract, validated)
+        query_mod.validate_query(contract, validated)
         population = query_mod.plan_scan_population(
             contract, records, key_filter=validated.key_filter,
             time_interval=validated.time_interval)
+        self._check_population_bound(validated, population)
         dependencies = tuple(
             DependencyEntry(table_name=table_name, dataset_version_ref=snap.table_versions[table_name],
                             fragment_ref=manifests.fragment_ref(record), columns=validated.columns,

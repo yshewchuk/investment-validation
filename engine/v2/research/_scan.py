@@ -8,20 +8,23 @@ a sentinel bound invented out of thin air. Every read therefore stays inside
 ``Repository.scan``'s bounded-scan contract (§8.2): no ``read_table()``
 convenience, no implicit "latest".
 
-The table contract's ``maximum_result_rows`` caps ONE scan, and a real year
-partition can exceed it (``option_chains`` carries 2.1M-4.3M rows in every
-year 2018-2026 against a 2,000,000 cap). Each partition is therefore first
-scanned whole, scoped to its own partition key by a ``KeyPredicate`` and with
-NO time interval — so a row whose observation time is NULL (a normal state
-when the observation column is nullable, as ``trades.entry_date`` is) comes
-back like any other row. A partition that exceeds the cap needs finer splits:
-its calendar months are scanned (days on a further overflow), every scan still
-scoped to the partition key. Because an interval can never match a NULL
-observation time, the month/day split would silently drop null-valued rows —
-so a partition that overflows while its ``observation_time_column`` is
-nullable refuses with ``RESULT_LIMIT_EXCEEDED`` instead of splitting, and only
-a single day that still exceeds the cap refuses for a non-nullable column.
-Every split keeps the one ``snapshot_id`` the caller resolved.
+Each scan is bounded by its own pinned membership bound —
+``Repository.scan_population_bound`` for exactly that scan's snapshot, table,
+pinned contract ref, predicates and interval, the recorded row counts of the
+fragments that selection survives — so a complete partition is read whole.
+Each partition is first scanned scoped to its own partition key by a
+``KeyPredicate`` and with NO time interval — so a row whose observation time is
+NULL (a normal state when the observation column is nullable, as
+``trades.entry_date`` is) comes back like any other row. A scan that still
+overflows its bound needs finer splits: its calendar months are scanned (days
+on a further overflow), every scan still scoped to the partition key and
+bounded to the fragments its own interval survives. Because an interval can
+never match a NULL observation time, the month/day split would silently drop
+null-valued rows — so a partition that overflows while its
+``observation_time_column`` is nullable refuses with ``RESULT_LIMIT_EXCEEDED``
+instead of splitting, and only a single day that still overflows refuses for a
+non-nullable column. Every split keeps the one ``snapshot_id`` the caller
+resolved.
 
 A caller's ``key_filter`` is threaded into every one of those scans (alongside
 this module's own partition-key equality), so a reader that needs only specific
@@ -89,11 +92,12 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
     when given, is called on each batch frame right after ``to_pandas()`` and
     before it accumulates, and must return the frame narrowed to the rows the
     caller wants (``None`` may be returned for "keep nothing"); a ``None`` or
-    omitted ``batch_filter`` changes nothing. A table absent from the snapshot
-    refuses with ``CONTRACT_MISMATCH``; a partition that overflows the cap and
-    must fall back to calendar splitting still needs its fragments' recorded
-    time bounds and refuses with ``CONTRACT_MISMATCH`` when they are missing
-    rather than scanning a guess.
+    omitted ``batch_filter`` changes nothing. Every scan is bounded by its own
+    pinned membership bound, so a complete partition is read fully. A table
+    absent from the snapshot refuses with ``CONTRACT_MISMATCH``; a partition
+    that must fall back to calendar splitting still needs its fragments'
+    recorded time bounds and refuses with ``CONTRACT_MISMATCH`` when they are
+    missing rather than scanning a guess.
     """
     if table_name not in snapshot_ref.table_versions:
         raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
@@ -122,26 +126,19 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
 
     The first attempt scans the whole partition scoped to its own key, with NO
     time interval, so it returns every row — including one whose observation
-    time is NULL, which no interval can match. Only when that attempt exceeds
-    the contract's ``maximum_result_rows`` does this fall back to calendar
-    month/day scans; that fallback can only place rows with a non-NULL
-    observation time in an interval, so a nullable observation column refuses
-    ``RESULT_LIMIT_EXCEEDED`` instead of silently dropping its null-valued
-    rows. A day that still exceeds the cap propagates the error — the table
-    needs finer partitions than this rule can supply.
+    time is NULL, which no interval can match — bounded by the recorded row
+    counts of the partition's own fragments. Only a scan that still overflows
+    that bound falls back to calendar month/day scans; that fallback can only
+    place rows with a non-NULL observation time in an interval, so a nullable
+    observation column refuses ``RESULT_LIMIT_EXCEEDED`` instead of silently
+    dropping its null-valued rows. A day that still overflows its bound
+    propagates the error — the table needs finer partitions than this rule can
+    supply.
 
     The full-scan attempt returns its (already batch-filtered) frames only on
     success, so a late ``RESULT_LIMIT_EXCEEDED`` — one raised after batches
     were yielded — leaves none of them retained, and the narrower-interval
     retry cannot duplicate those rows.
-
-    An unfiltered, non-nullable partition whose manifest row count already
-    exceeds the cap skips the doomed full-scan attempt and splits directly,
-    since the full scan could not possibly succeed there. A predicate-filtered
-    or nullable-column partition still tries the full scan first: a predicate
-    can bring the true row count under the cap even when the manifest's raw
-    total is over it, and the nullable case is the null-preservation reason
-    above.
     """
     partition_filter = _partition_filter(contract, table_name, records)
     if partition_filter is None:
@@ -150,14 +147,6 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
             _partition_interval(contract, table_name, records), tuple(key_filter),
             batch_filter=batch_filter)
     predicates = (*key_filter, partition_filter)
-    if (not key_filter
-            and not _observation_column_is_nullable(contract)
-            and sum(record.row_count for record in records)
-                    > contract.maximum_result_rows):
-        return _split_by_calendar(
-            repository, snapshot_ref, table_name, contract, columns,
-            _partition_interval(contract, table_name, records), predicates,
-            batch_filter=batch_filter)
     try:
         return _scan_interval(repository, snapshot_ref, table_name, contract, columns,
                               predicates, None, batch_filter=batch_filter)
@@ -168,11 +157,11 @@ def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, cont
             raise errors.fail(
                 "RESULT_LIMIT_EXCEEDED",
                 f"{table_name}: partition {records[0].partition_key!r} exceeds "
-                "maximum_result_rows and its observation-time column "
+                "its scan result bound and its observation-time column "
                 f"{contract.observation_time_column!r} is nullable, so a row with a null "
                 "observation time cannot be placed in any time interval and would be "
                 "silently dropped; this table needs a different split strategy before "
-                "this partition can exceed the cap",
+                "this partition can overflow its bound",
                 details={"table_name": table_name, "partition_key": records[0].partition_key})
     return _split_by_calendar(
         repository, snapshot_ref, table_name, contract, columns,
@@ -232,11 +221,12 @@ def _split_by_calendar(repository, snapshot_ref: SnapshotRef, table_name: str, c
     """Calendar month scans over ``interval`` (its days on month overflow).
 
     Every scan carries ``predicates`` — the caller's ``key_filter`` plus the
-    partition-key equality — so no month or day read can escape its partition.
-    A month scan that yields batches and then overflows late retains none of
+    partition-key equality — so no month or day read can escape its partition,
+    and each one bounds itself to the fragments its own interval survives. A
+    month scan that yields batches and then overflows late retains none of
     them: its frames are local to the failed call and the day-by-day retry
     starts from an empty list, so no row is duplicated between the failed
-    month scan and its narrower retries. A day that still exceeds the cap
+    month scan and its narrower retries. A day that still overflows its bound
     propagates ``RESULT_LIMIT_EXCEEDED``.
     """
     frames: list[pd.DataFrame] = []
@@ -268,13 +258,12 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
                    *, batch_filter=None) -> list[pd.DataFrame]:
     """One bounded scan over ``interval`` (or the whole partition when ``None``).
 
-    The query's result cap starts at the contract's ``maximum_result_rows`` and
-    is lowered — never raised — by ``Repository.scan_population_bound`` for
-    exactly this snapshot, table, pinned contract ref, predicate set and
-    interval. Only a positive bound lowers it: a zero bound keeps the active
-    positive table cap (a zero-result query still needs a positive limit), and
-    the batch cap keeps its own contract cap while never exceeding the result
-    cap it shares with that query.
+    The query's result bound is exactly ``Repository.scan_population_bound``
+    for this snapshot, table, pinned contract ref, predicate set and interval —
+    the recorded row counts of the fragments that selection survives, zero for
+    an empty membership — and the batch limit follows it: at most the
+    contract's ``maximum_batch_rows``, lowered by a positive result bound and
+    kept positive when the bound is zero.
 
     Each Arrow batch becomes pandas, passes through ``batch_filter`` when one
     is given, and only the surviving (non-empty) frames are returned — so rows
@@ -287,18 +276,17 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
     """
     predicates = tuple(key_filter)
     contract_ref = snapshot_ref.table_versions[table_name].table_contract_ref
-    result_cap = contract.maximum_result_rows
-    population_bound = repository.scan_population_bound(
-        snapshot_ref.snapshot_id, table_name=table_name,
-        table_contract_ref=contract_ref, key_filter=predicates, time_interval=interval)
-    if population_bound > 0:
-        result_cap = min(result_cap, population_bound)
-    batch_cap = min(contract.maximum_batch_rows, result_cap)
+    max_result_rows = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
+        key_filter=predicates, time_interval=interval)
+    max_batch_rows = (min(contract.maximum_batch_rows, max_result_rows)
+                      if max_result_rows > 0 else contract.maximum_batch_rows)
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id,
         table_contract_ref=contract_ref,
         columns=tuple(columns), key_filter=predicates, time_interval=interval,
-        order_by=contract.primary_key, max_batch_rows=batch_cap, max_result_rows=result_cap)
+        order_by=contract.primary_key, max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
     frames: list[pd.DataFrame] = []
     for batch in repository.scan(query, table_name=table_name):
         frame = batch.to_pandas()

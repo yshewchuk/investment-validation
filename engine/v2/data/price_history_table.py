@@ -99,9 +99,9 @@ _COLUMNS = (
 
 def _build() -> TableContract:
     fields = dict(
-        contract_id="price_history.v2",
+        contract_id="price_history.v3",
         table_name=PRICE_HISTORY_TABLE_NAME,
-        semantic_version="2.0.0",
+        semantic_version="3.0.0",
         columns=_COLUMNS,
         primary_key=("ticker", "date", "retrieved_at"),
         duplicate_policy="none_by_construction -- diff_retrieval never emits two rows for the "
@@ -125,7 +125,6 @@ def _build() -> TableContract:
                            "been captured at all.",
         schema_evolution_policy=_SCHEMA_EVOLUTION_POLICY,
         maximum_batch_rows=65536,
-        maximum_result_rows=500_000,
         legacy_mapping_ref=None,
     )
     placeholder = TableContract(definition_hash="sha256:" + "0" * 64, **fields)

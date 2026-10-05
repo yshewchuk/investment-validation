@@ -1319,6 +1319,19 @@ def oversized_case(tmp_path, table_name="daily_market"):
 
 
 def test_whole_copy_keeps_exact_query_provenance_and_public_cap(tmp_path):
+    """The TableContract public ``maximum_result_rows`` cap is gone: the
+    recorded query's own explicit ``DataQuery.max_result_rows`` -- exactly the
+    pinned-membership count :func:`lm._build_table_query` built it as -- is the
+    only result ceiling, and a copy-shaped query is exempt from nothing.
+    ``Repository.explain_dependencies`` answers the recorded query with the
+    IDENTICAL plan the materialization-side explain returns (one shared scan
+    validation policy naming every surviving pinned fragment), and the scan
+    accepts the exact ceiling and proceeds to open exactly those fragments --
+    refusing here only on this fixture's deliberately inflated manifest row
+    count vs its real one-row bytes, the footer-vs-manifest integrity check
+    that keeps whole-copy output complete/correct. A ceiling hand-widened past
+    the surviving membership still refuses as QUERY_NOT_BOUNDED, from the one
+    shared population-bound rule."""
     conn, _, _, repo, snapshot, query = oversized_case(tmp_path)
     assert query.max_result_rows == ROW_COUNT
     plan = lm.explain_materialization_dependencies(repo, snapshot, "daily_market", query)
@@ -1327,28 +1340,47 @@ def test_whole_copy_keeps_exact_query_provenance_and_public_cap(tmp_path):
     assert sum(item.estimated_rows for item in plan.dependencies) == ROW_COUNT
     assert all(item.maximum_rows == ROW_COUNT and item.columns == query.columns
                and item.predicates == query.key_filter for item in plan.dependencies)
+    assert repo.explain_dependencies(query, table_name="daily_market") == plan
+
+    widened = dataclasses.replace(query, max_result_rows=ROW_COUNT + 1)
     with pytest.raises(DataError, match="QUERY_NOT_BOUNDED"):
-        repo.explain_dependencies(query, table_name="daily_market")
+        repo.explain_dependencies(widened, table_name="daily_market")
     with pytest.raises(DataError, match="QUERY_NOT_BOUNDED"):
+        next(repo.scan(widened, table_name="daily_market"))
+    with pytest.raises(DataError, match="MANIFEST_CORRUPT"):
         next(repo.scan(query, table_name="daily_market"))
     conn.close()
 
 
-@pytest.mark.parametrize("change", [
-    {"time_interval": None},
-    {"max_batch_rows": ROW_COUNT},
-    {"key_filter": (KeyPredicate(column="ticker", operator="in", values=("AAA",)),)},
-    {"columns": ("ticker",)},
-    {"columns": ("not_a_column",)},
-    {"order_by": ("year",)},
-    {"time_interval": TimeInterval(column="date", start_inclusive="2020-01-02",
-                                   end_exclusive="2021-01-01")},
-    {"time_interval": TimeInterval(column="date", start_inclusive=None, end_exclusive=None)},
-])
-def test_copy_exception_cannot_hide_invalid_or_scoped_queries(tmp_path, change):
+@pytest.mark.parametrize("change, admitted", [
+    ({"time_interval": None}, False),
+    ({"max_batch_rows": ROW_COUNT}, False),
+    ({"key_filter": (KeyPredicate(column="ticker", operator="in", values=("AAA",)),)}, True),
+    ({"columns": ("ticker",)}, True),
+    ({"columns": ("not_a_column",)}, False),
+    ({"order_by": ("year",)}, False),
+    ({"time_interval": TimeInterval(column="date", start_inclusive="2020-01-02",
+                                    end_exclusive="2021-01-01")}, True),
+    ({"time_interval": TimeInterval(column="date", start_inclusive=None, end_exclusive=None)}, False),
+], ids=["change0", "change1", "change2", "change3", "change4", "change5", "change6", "change7"])
+def test_copy_exception_cannot_hide_invalid_or_scoped_queries(tmp_path, change, admitted):
     conn, _, _, repo, snapshot, query = oversized_case(tmp_path)
-    with pytest.raises(DataError):
-        lm.explain_materialization_dependencies(repo, snapshot, "daily_market", dataclasses.replace(query, **change))
+    scoped = dataclasses.replace(query, **change)
+    if not admitted:
+        with pytest.raises(DataError):
+            lm.explain_materialization_dependencies(repo, snapshot, "daily_market", scoped)
+        conn.close()
+        return
+    plan = lm.explain_materialization_dependencies(repo, snapshot, "daily_market", scoped)
+    assert repo.explain_dependencies(scoped, table_name="daily_market") == plan
+    assert plan.request_hash == content_hash(to_document(scoped))
+    assert plan.snapshot_ref == snapshot
+    assert all(item.columns == scoped.columns and item.predicates == scoped.key_filter
+               for item in plan.dependencies)
+    contract = repo.table_contract(snapshot, "daily_market")
+    assert not lm._whole_table_copy_eligible(repo, snapshot, "daily_market", contract, scoped)
+    with pytest.raises(DataError, match="MANIFEST_CORRUPT"):
+        next(repo.scan(scoped, table_name="daily_market"))
     conn.close()
 
 
@@ -1366,9 +1398,31 @@ def test_unsupported_query_and_snapshot_binding_are_refused(tmp_path):
     conn.close()
 
 
-def test_evidence_scoped_materialization_retains_scan_cap(tmp_path):
-    conn, _, _, repo, snapshot, query = oversized_case(tmp_path, "option_chains")
-    with pytest.raises(DataError, match="QUERY_NOT_BOUNDED"):
-        lm.explain_materialization_dependencies(repo, snapshot, "option_chains",
-                                               dataclasses.replace(query, max_result_rows=ROW_COUNT))
+def test_evidence_scoped_materialization_keeps_exact_row_count_and_caller_limit(tmp_path):
+    """No TableContract result-row cap remains to refuse an evidence-scoped
+    materialization query: its recorded ``DataQuery.max_result_rows`` is exactly
+    the selected pinned-membership row count, and both explain paths admit that
+    ceiling with the same provenance, snapshot, columns and predicates. A caller
+    that states a SMALLER limit keeps it, and the scan enforces it as
+    RESULT_LIMIT_EXCEEDED once the rows it actually selects exceed that ceiling
+    — never a silent clamp."""
+    conn, _, _, repo, snapshot, query = oversized_case(tmp_path / "recorded", "option_chains")
+    assert query.max_result_rows == ROW_COUNT
+    plan = lm.explain_materialization_dependencies(repo, snapshot, "option_chains", query)
+    assert plan.request_hash == content_hash(to_document(query))
+    assert plan.snapshot_ref == snapshot
+    assert sum(item.estimated_rows for item in plan.dependencies) == ROW_COUNT
+    assert all(item.maximum_rows == ROW_COUNT and item.columns == query.columns
+               and item.predicates == query.key_filter for item in plan.dependencies)
+    assert repo.explain_dependencies(query, table_name="option_chains") == plan
+    conn.close()
+
+    conn, store, snap = _build_snapshot(tmp_path)
+    repository = Repository(conn, store)
+    scoped = lm._build_table_query(repository, snap, "option_chains", EVIDENCE_SCOPE)
+    assert scoped.max_result_rows == sum(len(rows) for rows in CHAIN_ROWS.values())
+    smaller = dataclasses.replace(scoped, max_result_rows=1, max_batch_rows=1)
+    with pytest.raises(DataError) as err:
+        list(repository.scan(smaller, table_name="option_chains"))
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
     conn.close()

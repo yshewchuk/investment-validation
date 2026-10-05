@@ -104,7 +104,9 @@ def null_array_for(physical_type: str, length: int) -> pa.Array:
 def validate_query(contract: TableContract, query: DataQuery) -> None:
     """Everything ``documents.decode_document`` cannot check because it needs
     the contract: known columns, filterable predicate/interval columns, the
-    v1 full-primary-key order, and limits within the contract's own caps.
+    v1 full-primary-key order, and the batch limit within the contract's own
+    cap. A table states no result-row cap, so ``max_result_rows`` is the
+    query's own bound and is not compared against the contract here.
     """
     declared = {c.name for c in contract.columns}
     _check_columns_known(query.columns, declared)
@@ -125,8 +127,6 @@ def _check_columns_known(columns, declared: set) -> None:
 def _check_limits(contract: TableContract, query: DataQuery) -> None:
     if query.max_batch_rows > contract.maximum_batch_rows:
         raise fail("QUERY_NOT_BOUNDED", "max_batch_rows exceeds the table contract's cap")
-    if query.max_result_rows > contract.maximum_result_rows:
-        raise fail("QUERY_NOT_BOUNDED", "max_result_rows exceeds the table contract's cap")
 
 
 def _check_order_by(contract: TableContract, query: DataQuery) -> None:

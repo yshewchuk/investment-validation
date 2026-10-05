@@ -16,7 +16,7 @@ module (phase-2 guide §4); calling it from here is an intra-package v2->v2
 edge, never a new legacy one, so this module carries no
 ``checks/legacy_adapters.json`` entries of its own.
 
-:func:`build_legacy_mapping` produces one ``legacy_table_mapping.v1.0``
+:func:`build_legacy_mapping` produces one ``legacy_table_mapping.v2.0``
 document: one ``TableContract`` (as a strict document) per dataset in guide
 §5.1's table, in order, a top-level ``knowledge_mode_by_table`` (every legacy
 table is ``reconstructed`` — no accepted attestation or availability receipt
@@ -126,8 +126,15 @@ SNAPSHOT_RELATIVE_PATH = "features/SNAPSHOT"
 #: its own legacy import (§4.2: one adapter module per package).
 SOURCE_PRIORITY_VERSION = "legacy_source_priority:" + content_hash(legacy_adapter.legacy_source_priority())
 
-MAPPING_SCHEMA_VERSION = "legacy_table_mapping.v1.0"
-CONTRACT_SEMANTIC_VERSION = "1.0.0"
+#: v2.0 (PR #360 slice E): the serialized ``TableContract`` shape changed, so
+#: every registered definition changed and the mapping document with it. The
+#: embedded contract is a breaking v2.0 document and no mixed-schema path
+#: remains, so the schema advances to ``legacy_table_mapping.v2.0``; the eight
+#: contract families/semantic versions advance one major each
+#: (``legacy.<table>.v2`` / ``2.0.0``) — the registered ``.v1`` definitions are
+#: never re-edited under their old ids (phase-2 guide §5.1).
+MAPPING_SCHEMA_VERSION = "legacy_table_mapping.v2.0"
+CONTRACT_SEMANTIC_VERSION = "2.0.0"
 SCHEMA_EVOLUTION_POLICY = (
     "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). Changed "
     "units, key meaning, time meaning, or null policy require a new major contract_id/semantic_version; "
@@ -151,7 +158,7 @@ class LegacyMappingError(RuntimeError):
 
 
 def build_legacy_mapping(annotations: dict[str, object] | None = None) -> dict[str, object]:
-    """The ``legacy_table_mapping.v1.0`` document for all eight datasets.
+    """The ``legacy_table_mapping.v2.0`` document for all eight datasets.
 
     ``annotations`` defaults to the reviewed ``legacy_annotations.json`` beside
     this module; a caller may pass a modified copy (tests do) to prove a
@@ -317,7 +324,7 @@ def _finalize(dataset: str, spec: dict[str, object], columns: tuple[ColumnContra
     _check_declared_subset(dataset, "orderable_columns", list(orderable), declared)
 
     fields = dict(
-        contract_id=f"legacy.{dataset}.v1",
+        contract_id=f"legacy.{dataset}.v2",
         table_name=dataset,
         semantic_version=CONTRACT_SEMANTIC_VERSION,
         columns=columns,
@@ -335,7 +342,6 @@ def _finalize(dataset: str, spec: dict[str, object], columns: tuple[ColumnContra
         coverage_semantics=spec["coverage_semantics"],
         schema_evolution_policy=SCHEMA_EVOLUTION_POLICY,
         maximum_batch_rows=spec["maximum_batch_rows"],
-        maximum_result_rows=spec["maximum_result_rows"],
         legacy_mapping_ref=legacy_mapping_ref,
     )
     # definition_hash is computed by this registration function, never by the

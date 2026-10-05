@@ -327,9 +327,18 @@ def _reversioned(contract):
     """A second, genuinely registered contract for the same table: new
     contract_id, definition_hash recomputed by the real registration recipe
     (``legacy_mapping``'s own two-pass placeholder), so ``commit_snapshot``'s
-    ``table_contract_hash`` re-verification accepts it."""
-    fields = dataclasses.replace(contract, contract_id=contract.contract_id.replace(".v1", ".v2"),
-                                 semantic_version=contract.semantic_version + ".candidate")
+    ``table_contract_hash`` re-verification accepts it.
+
+    The identity is a MAJOR bump on the registered one, exactly as the schema
+    evolution policy prescribes and as ``price_history.v3``/``computed_moves.v3``
+    are named: ``contract_id``'s trailing ``.v<n>`` segment and
+    ``semantic_version``'s major both advance, so the candidate version is a
+    distinct ``contract_id`` — reusing the registered id with different content
+    would trip ``_insert_contract``'s ``IDENTITY_CONFLICT`` before promotion."""
+    prefix, _, registered_major = contract.contract_id.rpartition(".v")
+    major = int(registered_major) + 1
+    fields = dataclasses.replace(contract, contract_id=f"{prefix}.v{major}",
+                                 semantic_version=f"{major}.0.0")
     placeholder = dataclasses.replace(fields, definition_hash="sha256:" + "0" * 64)
     return dataclasses.replace(placeholder, definition_hash=manifests.table_contract_hash(placeholder))
 

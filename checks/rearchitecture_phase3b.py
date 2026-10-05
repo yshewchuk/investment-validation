@@ -432,7 +432,7 @@ def _daily_market_contract() -> TableContract:
         finality_semantics="eod_final.v1", provenance_semantics="raw_receipt.v1",
         coverage_semantics="ticker_session_denominator.v1",
         schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=1000, maximum_result_rows=10000)
+        maximum_batch_rows=1000)
 
 
 def _daily_revision(*, ticker: str, session_date: str, row: dict | None,
