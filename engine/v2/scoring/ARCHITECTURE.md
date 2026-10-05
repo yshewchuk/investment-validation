@@ -299,20 +299,25 @@ in `engine.v2.foundation.market_calendar`.
 An absent or `None` bound means no caller policy was supplied; a supplied
 bound must be a non-negative integer. With a bound, missing or invalid age
 evidence, a quote dated after entry, or an age greater than the bound makes
-the quote unusable and adds non-advisory `NO_CHAIN`. Scoring returns its
-ordinary refused `ScoreRecord` (`readiness="refused"`), not an exception;
-parity therefore agrees with legacy's no-eligible-chain refusal. An
-in-bound older quote may still carry advisory `STALE_QUOTE`. The refusal is
-deterministic and not retried internally; a caller can retry a later score
-with a refreshed source quote. Scoring writes nothing, and a refusal leaves
-no selected score values as a ready result.
+the quote unusable and adds non-advisory `NO_CHAIN`. If a nightly bundle has
+multiple quote observation dates, it preserves the earliest date for the
+conservative age check and the latest date as `quote_latest_date`; any latest
+date after entry refuses even when an earlier call observation is on entry.
+Scoring returns its ordinary refused `ScoreRecord` (`readiness="refused"`),
+not an exception; parity therefore agrees with legacy's no-eligible-chain
+refusal. An in-bound older quote may still carry advisory `STALE_QUOTE`. The
+refusal is deterministic and not retried internally; a caller can retry a
+later score with refreshed source quotes. Scoring writes nothing, and a
+refusal leaves no selected score values as a ready result.
 
 The nightly source bundle preserves a supplied bound in its context and omits
-that optional key when unset. `native_score_batch` carries the caller policy
-into scoring; `None` continues to mean no policy and no numeric age default is
-invented. Quote rows retain their source date and feed the same scoring check.
-This policy is independent of the assembler's `as_of` upper-bound check, which
-only prevents future observations.
+that optional key when unset. When quote rows exist, `quote_date` is their
+earliest validated `observed_at` date and `quote_latest_date` is their latest;
+both dates have passed the assembler's `as_of` upper-bound check. An allowed
+empty quote domain carries neither date. `native_score_batch` carries the
+caller policy into scoring; `None` continues to mean no policy and no numeric
+age default is invented. This policy is independent of the assembler's
+`as_of` upper-bound check, which only prevents future observations.
 
 **Planned-exit simulation values each leg by its own right.** The
 `planned_exit` simulation (`stages._planned_exit_simulation`) prices a call

@@ -405,6 +405,82 @@ def _check_projected_calendar(values: Mapping[str, Any], flags: list[str]) -> No
         _add_flag(flags, "PROJECTED_CALENDAR")
 
 
+def _quote_session_day(day: Any) -> Any:
+    """A Python ``date`` from a day value: ``date``, pandas-like or numpy.
+
+    ``_rule_sessions`` walks ``date`` arithmetic, so the parsed days are
+    converted here without assuming a numpy scalar; anything unconvertible
+    comes back ``None`` and the caller refuses instead of raising. A result
+    that is not a ``date`` -- the integer numpy returns for a value below
+    ``datetime.min`` (e.g. ``"0000-01-01"``, whose ``.item()`` is a raw day
+    count) -- is likewise unconvertible: returning it would leak a
+    ``TypeError`` from the session walk, so it is refused as missing
+    quote-age evidence instead.
+    """
+    if day is None:
+        return None
+    try:
+        stamp = np.datetime64(str(day)[:10], "D")
+        if np.isnat(stamp):
+            return None
+        value = stamp.item()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if isinstance(value, date) else None
+
+
+def _quote_session_age(quote_day: Any, entry_day: Any) -> int | None:
+    """The quote's age: canonical NYSE sessions in ``(quote_day, entry_day]``.
+
+    ``market_calendar._rule_sessions``, legacy's session convention. ``None``
+    means the age is uncomputable because a day will not convert to a calendar
+    date -- unusable age evidence, reported as such rather than guessed.
+    """
+    quote_session_day = _quote_session_day(quote_day)
+    entry_session_day = _quote_session_day(entry_day)
+    if quote_session_day is None or entry_session_day is None:
+        return None
+    return len(_rule_sessions(quote_session_day, entry_session_day))
+
+
+def _quote_latest_date_unusable(values: Mapping[str, Any], quote_day: Any,
+                                entry_day: Any) -> bool:
+    """True when a supplied ``quote_latest_date`` is unusable observation evidence.
+
+    ``nightly_source_bundle`` pairs ``quote_date``'s earliest validated quote
+    observation with ``quote_latest_date``, the newest one, so a later
+    observation is judged on its own date and not on the earliest one alone.
+    A missing or ``None`` value carries no latest evidence and is not a
+    problem: direct callers that pass only ``quote_date`` keep working. When
+    present the value must parse via ``_to_day``, sit on or after the earliest
+    observation, and sit on or before ``entry_date`` -- a latest observation
+    after entry is future-dated quote evidence, refusing even when the earliest
+    date is the entry date itself.
+    """
+    latest_raw = values.get("quote_latest_date")
+    if latest_raw is None:
+        return False
+    latest_day = _to_day(latest_raw)
+    return (latest_day is None or latest_day < quote_day
+            or latest_day > entry_day)
+
+
+def _quote_age_evidence_usable(values: Mapping[str, Any], policy: Any,
+                               quote_day: Any, entry_day: Any) -> bool:
+    """True when the caller bound and the quote's observation dates hold up.
+
+    The bound must be a built-in non-bool ``int >= 0``; both dates must parse
+    via ``_to_day``; the earliest observation must not be after entry; and a
+    supplied latest observation must pass ``_quote_latest_date_unusable``.
+    Evidence failures return rather than raise.
+    """
+    if not isinstance(policy, int) or isinstance(policy, bool) or policy < 0:
+        return False
+    if quote_day is None or entry_day is None or quote_day > entry_day:
+        return False
+    return not _quote_latest_date_unusable(values, quote_day, entry_day)
+
+
 def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
     """STALE_QUOTE / NO_CHAIN -- engine/score.py:1687 (fallback chain substitution).
 
@@ -418,17 +494,16 @@ def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
 
     Without a policy the trigger stays date-only, as above. The optional
     ``quote_max_age_sessions`` in the input context (issue #169) carries the
-    caller's bound; when supplied it must be a built-in non-bool ``int >= 0``,
-    both dates must parse via ``_to_day``, the quote must not be future-dated,
-    and the quote's age -- the count of canonical NYSE sessions in
-    ``(quote_date, entry_date]``, ``market_calendar._rule_sessions``, legacy's
-    session convention -- must not exceed the bound. Invalid or absent age
-    evidence, a future-dated quote or an out-of-bound age makes the quote
-    unusable: a non-advisory ``NO_CHAIN``, matching legacy's
-    no-eligible-chain refusal (engine/score.py:2368), which ``flags_refuse``
-    turns into an ordinary refused ``ScoreRecord`` -- never an exception, and
-    nothing is written. An in-bound quote predating entry keeps the advisory
-    ``STALE_QUOTE``.
+    caller's bound; under it ``quote_date`` stays the conservative earliest
+    observation for the session age, and a supplied ``quote_latest_date`` is
+    checked before any in-bound or advisory result (see
+    ``_quote_age_evidence_usable`` and ``_quote_latest_date_unusable``).
+    Invalid or absent age evidence, a future-dated quote, a latest observation
+    after entry or an out-of-bound age makes the quote unusable: a non-advisory
+    ``NO_CHAIN``, matching legacy's no-eligible-chain refusal
+    (engine/score.py:2368), which ``flags_refuse`` turns into an ordinary
+    refused ``ScoreRecord`` -- never an exception, and nothing is written. An
+    in-bound quote predating entry keeps the advisory ``STALE_QUOTE``.
     """
     policy = values.get("quote_max_age_sessions")
     quote_day = _to_day(values.get("quote_date"))
@@ -439,43 +514,11 @@ def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
         if quote_day < entry_day:
             _add_flag(flags, "STALE_QUOTE")
         return
-    if not isinstance(policy, int) or isinstance(policy, bool) or policy < 0:
+    if not _quote_age_evidence_usable(values, policy, quote_day, entry_day):
         _add_flag(flags, "NO_CHAIN")
         return
-    if quote_day is None or entry_day is None or quote_day > entry_day:
-        _add_flag(flags, "NO_CHAIN")
-        return
-
-    def to_session_day(day: Any) -> Any:
-        """A Python ``date`` from a day value: ``date``, pandas-like or numpy.
-
-        ``_rule_sessions`` walks ``date`` arithmetic, so the parsed days are
-        converted here without assuming a numpy scalar; anything unconvertible
-        comes back ``None`` and the caller refuses instead of raising. A result
-        that is not a ``date`` -- the integer numpy returns for a value below
-        ``datetime.min`` (e.g. ``"0000-01-01"``, whose ``.item()`` is a raw day
-        count) -- is likewise unconvertible: returning it would leak a
-        ``TypeError`` from the session walk, so it is refused as missing
-        quote-age evidence instead.
-        """
-        if day is None:
-            return None
-        try:
-            stamp = np.datetime64(str(day)[:10], "D")
-            if np.isnat(stamp):
-                return None
-            value = stamp.item()
-        except (TypeError, ValueError, OverflowError):
-            return None
-        return value if isinstance(value, date) else None
-
-    quote_session_day = to_session_day(quote_day)
-    entry_session_day = to_session_day(entry_day)
-    if quote_session_day is None or entry_session_day is None:
-        _add_flag(flags, "NO_CHAIN")
-        return
-    age = len(_rule_sessions(quote_session_day, entry_session_day))
-    if age > policy:
+    age = _quote_session_age(quote_day, entry_day)
+    if age is None or age > policy:
         _add_flag(flags, "NO_CHAIN")
         return
     if quote_day < entry_day:
