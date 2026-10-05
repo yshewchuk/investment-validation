@@ -332,7 +332,9 @@ def _rows_by_ticker(rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str,
     indexed: dict[str, Mapping[str, Any]] = {}
     for row in rows:
         if isinstance(row, dict) and row.get("ticker"):
-            indexed[str(row["ticker"])] = row
+            ticker = str(row["ticker"])
+            previous = indexed.get(ticker)
+            indexed[ticker] = row if previous is None else {**previous, **row}
     return indexed
 
 

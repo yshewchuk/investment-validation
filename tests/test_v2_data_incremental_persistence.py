@@ -458,10 +458,11 @@ def test_normalizer_id_bump_changes_cache_identity(tmp_path):
     assert record_v1.normalization_id != record_v2.normalization_id
 
 
-def _cache_scope_plan(receipt_id):
+def _cache_scope_plan(receipt_id, expected_keys=("AAA",)):
     return {
         "units": [{"request_id": "req-1", "table_name": "daily_market",
-                   "partition_key": "2026-09-15", "expected_keys": ["AAA"]}],
+                   "partition_key": "2026-09-15",
+                   "expected_keys": list(expected_keys)}],
         "cached": [{"request_id": "req-1", "receipt_ref": receipt_id}],
         "fetch_units": [],
     }
@@ -510,6 +511,61 @@ def test_cached_fetched_units_refuses_scope_mismatch_before_store_verify(tmp_pat
         "SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
     assert conn.execute(
         "SELECT COUNT(*) FROM data_snapshot_heads").fetchone()[0] == 0
+
+
+def test_cached_fetched_units_reacquires_when_complete_receipt_loses_a_key(tmp_path):
+    """#142: a cached receipt that claims ``complete`` and carries the unit's own
+    key set but no longer reconstructs every expected key is a cache MISS, not
+    missing coverage -- the unit is reacquired through the provider instead of
+    replaying the unusable receipt and staging ``missing`` outcomes against it."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    aaa_row = dict(_obj_daily_market_rows()[0], date="2026-09-15", year=2026)
+    raw = data_incremental.cache_raw_receipt(
+        conn, store,
+        data_incremental.RawPayload(
+            payload=json.dumps({"summaries": {"data": [
+                {"ticker": "AAA", "tradeDate": "2026-09-15", "stockPrice": 100.0}]},
+                "cores": {"data": []}}).encode(),
+            response_kind="complete", response_meta={}),
+        source=data_incremental.FETCH_SOURCE, endpoint="daily_market",
+        request={"request_id": "req-1", "table_name": "daily_market",
+                 "partition_key": "2026-09-15", "keys": ["AAA", "BBB"]},
+        received_at=clock.now().isoformat())
+
+    def merge_ticker_rows(summaries, cores, expected_keys=None):
+        del cores, expected_keys
+        return [dict(aaa_row) for row in summaries
+                if str(row.get("ticker")) == "AAA"]
+
+    calls = []
+
+    def fetcher(unit):
+        calls.append(unit)
+        payload = {"summaries": {"data": [
+                       {"ticker": "AAA", "tradeDate": "2026-09-15",
+                        "stockPrice": 101.0}]},
+                   "cores": {"data": []}}
+        return (json.dumps(payload).encode(), "partial", {"attempts": 2},
+                [dict(aaa_row)])
+
+    fetcher.merge_ticker_rows = merge_ticker_rows
+
+    fetched = data_incremental._cached_fetched_units(
+        conn, store, _DAILY_MARKET_CONTRACT,
+        _cache_scope_plan(raw.raw_receipt_id, expected_keys=("AAA", "BBB")), fetcher)
+
+    assert [call["request_id"] for call in calls] == ["req-1"]
+    assert len(fetched) == 1
+    fetched_unit = fetched[0]
+    assert fetched_unit.receipt_id != raw.raw_receipt_id
+    assert fetched_unit.raw_payload["response_kind"] == "partial"
+    assert fetched_unit.raw_payload["response_meta"] == {"attempts": 2}
+    assert [(outcome.key.ticker, outcome.status)
+            for outcome in fetched_unit.outcomes] == [
+                ("AAA", "present"), ("BBB", "missing")]
+    assert all(outcome.receipt_id == fetched_unit.receipt_id
+               for outcome in fetched_unit.outcomes)
 
 
 def _empty_keyed_unit(*, expected_keys):
