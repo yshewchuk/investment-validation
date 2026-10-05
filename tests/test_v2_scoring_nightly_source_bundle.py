@@ -13,6 +13,8 @@ from engine.v2.scoring.nightly_source_bundle import (
     quote_domain_map,
     validated_as_of,
 )
+from engine.v2.scoring.source_inputs import build_native_score_inputs
+from engine.v2.scoring.stages import assemble_native_values, flags_refuse
 
 
 def _valid_kwargs(**overrides):
@@ -699,3 +701,57 @@ def test_historical_row_panel_anchor_equal_event_date_is_allowed():
     )
     bundle = assemble_nightly_source_bundle(**kwargs)
     assert bundle.feature_vector["signal"] == 1.5
+
+
+# --- Issue #169: quote staleness provenance in context ---
+
+def test_quote_max_age_sessions_and_earliest_quote_date_go_to_context():
+    # stages._check_stale_quote needs the caller's session budget and one
+    # canonical observation date (the earliest quote observed_at, so rows
+    # disagreeing on date are treated conservatively) recorded in context --
+    # while raw_quotes stays the bid/ask domain, never gaining provenance
+    # keys of its own.
+    quote_rows = [dict(row) for row in _valid_kwargs()["quote_rows"]]
+    quote_rows[0]["observed_at"] = "2026-01-08"  # row[1] stays "2026-01-09"; both <= as_of
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        quote_rows=quote_rows, quote_max_age_sessions=1))
+    assert bundle.context["quote_max_age_sessions"] == 1
+    assert bundle.context["quote_date"] == "2026-01-08"
+    assert bundle.raw_quotes == {
+        "C:100.0:2026-01-16": {"bid": 1.0, "ask": 1.2},
+        "P:100.0:2026-01-16": {"bid": 1.1, "ask": 1.3},
+    }
+    assert all(set(quote) == {"bid", "ask"} for quote in bundle.raw_quotes.values())
+
+
+def test_quote_latest_date_after_entry_refuses_assembled_bundle():
+    # Gate round 3 regression (issue #169): a put observed AFTER entry but
+    # within as_of must not hide behind the entry-day call. Assembly records
+    # both provenance dates; scoring judges the latest observation on its own
+    # date -- future-dated relative to entry -- and flags the quote unusable
+    # as the non-advisory NO_CHAIN without raising. Pre-fix, quote_latest_date
+    # was never recorded, so the entry-day call alone looked fresh. The
+    # declared driver_prediction recipe (a pass-through, not an external
+    # fixture) keeps build_native_score_inputs from refusing the undeclared
+    # strategy contract, so the refusal is the quote's, not the recipe's.
+    kwargs = _valid_kwargs(
+        as_of="2026-01-16",
+        quote_max_age_sessions=1,
+        quote_rows=[
+            {"right": "C", "strike": 100.0, "expiry": "2026-01-16",
+             "bid": 1.0, "ask": 1.2, "observed_at": "2026-01-15"},
+            {"right": "P", "strike": 100.0, "expiry": "2026-01-16",
+             "bid": 1.1, "ask": 1.3, "observed_at": "2026-01-16"},
+        ],
+        forecast_recipes={"driver_prediction": {"intercept": 0.0, "coefficients": {}}},
+        model_artifact_refs={"driver_prediction": "sha256:quote-latest-regression"},
+        gate_recipe={"model": {"intercept": 0.0, "coefficients": {}}, "threshold": 0.0},
+    )
+    bundle = assemble_nightly_source_bundle(**kwargs)
+    assert bundle.context["quote_date"] == "2026-01-15"
+    assert bundle.context["quote_latest_date"] == "2026-01-16"
+    values = assemble_native_values(
+        build_native_score_inputs(bundle), strategy="STR-THRU")
+    assert "NO_CHAIN" in values["flags"]
+    assert "STALE_QUOTE" not in values["flags"]
+    assert flags_refuse(values["flags"]) is True
