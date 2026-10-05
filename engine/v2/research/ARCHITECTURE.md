@@ -83,6 +83,18 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 
 ## Inputs
 
+Target research reads cover each full pinned partition, including null
+observation times, subject to caller predicates and batch filtering. The
+manifest population bound limits candidate rows, not RSS/process memory — the
+recorded row-count sum of pinned fragments surviving pruning
+([data scan population rule](../data/ARCHITECTURE.md#invariants)). Explicit
+smaller caller limits remain valid; runtime still enforces the table cap until
+slice E. Each interval scan — month/day split scans independently — may use
+the shared pinned `scan_population_bound` for the same selection to lower its
+`max_result_rows` only when that bound is positive; a zero bound retains the
+positive cap. Retry/split behavior, error codes, frame population and ordering
+are unchanged.
+
 The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
 optional `batch_filter` callback. They invoke it immediately after each Arrow
 batch becomes a pandas frame, before retaining frames; it returns narrowed
@@ -92,9 +104,7 @@ pairs while reading one manifest year at a time; stored dates retain their
 original timestamp semantics and requested dates use the existing normalization.
 Independent ticker and date memberships may prune a scan batch, but only the
 exact pair mask — never their cross product — defines the retained rows.
-Failed capped attempts discard their filtered frames before narrower retries;
-successful frames retain ordering and duplicates. Scan caps and terminal error
-codes are unchanged; a narrower retry runs outside the failed attempt's handler.
+Successful frames retain ordering and duplicates.
 This bounds retained unmatched rows, not total process RSS.
 
 - `--catalog` (sqlite path) and `--store-root` (`ArtifactStore` root):
@@ -179,10 +189,8 @@ adapter.
 `_pricing.trading_calendar_from_snapshot`) and
 `_snapshot.py` (used by `_chains.py`'s replay reads and
 `_trades_publish.py`'s build/reconcile reads) are still two independent
-modules. Since issue #107, `_snapshot.read_table` delegates its scan to
-`_scan.read_table` (see "`_snapshot.read_table` splits like `_scan.py`
-(issue #107)" below), so the two no longer duplicate the bounded-scan
-splitting itself; `_snapshot.py` still keeps its own partition-key
+modules. `_snapshot.read_table` delegates its scan to `_scan.read_table`,
+forwarding caller `key_filter` predicates; `_snapshot.py` keeps its partition-key
 resolution, its own no-partition refusal, and its own empty-result frame
 shape. Merging the two remains issue #69: that would change both
 modules' callers, outside this PR's one concern.
@@ -265,22 +273,12 @@ uncaught traceback instead.
     `Repository.resolve`/`resolve_full`/`scan` raises `MANIFEST_CORRUPT`
     (`category="integrity"`, not retryable) — a tampered snapshot is
     refused rather than read.
-  - **A table absent from the resolved snapshot, or one whose fragments
-    must split by calendar and carry no recorded time bounds** (`_scan.py`'s
-    path). `CONTRACT_MISMATCH` (`category="validation"`, not retryable).
+  - **A table absent from the resolved snapshot** (`_scan.py`'s path).
+    `CONTRACT_MISMATCH` (`category="validation"`, not retryable).
     `_scan.read_table` itself returns an *empty* frame, not a refusal, when
-    a partition filter simply matches no fragment records. Missing
-    `time_min`/`time_max` is only reached — and only then raised — when a
-    partition actually needs a calendar split: `_scan_partition` tries one
-    full-partition scan first (needing no time bounds at all), so a
-    partition small enough to read in that one scan never touches this
-    refusal even if its fragments carry no recorded bounds; the refusal
-    fires once splitting is required, whether because that whole-partition
-    scan overflowed or because an unfiltered, non-nullable partition's own
-    manifest row count already exceeds the cap. This is also what a replay
-    or build-trades
-    run gets when its pinned snapshot has no `daily_market` table at all
-    (no table_version, not just an empty one):
+    a partition filter simply matches no fragment records. A replay or
+    build-trades run receives the same refusal when its pinned snapshot
+    has no `daily_market` table:
     `_pricing.trading_calendar_from_snapshot` reads `daily_market` through
     this same `_scan.read_table` path, so a snapshot that cannot supply a
     calendar is refused here rather than falling back to
@@ -314,14 +312,6 @@ uncaught traceback instead.
     one condition escapes as an uncaught traceback rather than the typed
     refusal every other condition here gets. Pre-existing, not introduced
     or fixed by this doc; tracked as a follow-up (issue #70).
-  - **A whole-partition scan with a nullable observation-time column that
-    exceeds `maximum_result_rows`, or a single day-partition scan that still
-    exceeds `maximum_result_rows`** (`_scan.py`'s path, and — since issue
-    #107 — `_snapshot.py`'s: see "`_snapshot.read_table` splits like
-    `_scan.py` (issue #107)" below). `RESULT_LIMIT_EXCEEDED`
-    (`category="resource"`, not retryable): the table needs finer
-    partitioning (or, for the nullable case, a different split strategy)
-    than this rule can supply; it never truncates or drops rows silently.
   - **No overlap rows after a join/filter** (fill quality's
     `since`-filtered join, or `experiment_trades.load_trades`'s
     strategy/provenance filter on the read `trades` table).
@@ -390,65 +380,6 @@ uncaught traceback instead.
   `SNAPSHOT_CONFLICT` fence, not on this package silently no-op-ing a
   duplicate call.
 
-**`_snapshot.read_table` splits like `_scan.py` (issue #107).**
-`_snapshot.read_table` delegates each requested partition's read (or, with
-no `partition_keys` given, every partition the snapshot has) to
-`_scan.read_table`, instead of issuing one capped, unsplit `DataQuery` of
-its own. It keeps its own signature plus an optional `key_filter` (issue
-#271, forwarded straight through to `_scan.read_table`; omitted or `()`
-changes nothing), its own pre-`_scan` guard for "no declared partition
-column, or no partition values available at all" (the bare `ValueError`
-case above, issue #70, unchanged), and its own empty-result frame shape
-(`pd.Series(dtype="object")` per requested column). The five direct
-callers (`_chains.read_chain_keys`, `_chains.read_chains_for_years`,
-`_trades_publish.read_event_rows`, `_trades_publish.read_existing_trades`,
-`_replay_run.events_frame`) and the `_chains.load_chain_index` wrapper
-(through `read_chains_for_years`) keep their existing interfaces, except
-`read_chains_for_years`/`load_chain_index` (issue #271): `load_chain_index`
-now also pushes the wanted `(ticker, obs_date)` pairs' ticker and date sets
-down as `KeyPredicate("in", ...)` `key_filter` entries, the same cartesian-
-superset pattern `fill_quality._chain_key_filter` already uses — never the
-exact pairs, which `KeyPredicate` cannot express. This lets a request for a
-narrow key set scan a whole year partition once instead of always falling
-back to the month/day split: `_scan_partition`'s existing "a predicate can
-bring the true row count under the cap" rule (no `_scan.py` change) now
-applies to these calls, and the `maximum_result_rows` cap is checked
-against the key-filtered row count, not the raw partition size. The exact-
-pair `batch_filter` still narrows further after decoding, so results are
-unchanged; a key set too broad to fit under the cap still falls back to the
-split, exactly as before. `read_chain_keys` has no caller-known keys to
-filter by (it discovers the whole key universe) and is unaffected — it
-still always calendar-splits a partition over the cap.
-
-A partition scan, whether reached through `_snapshot.read_table` or one of
-`_scan.read_table`'s other direct callers (`polygon_fills.read_trades`,
-`fill_quality.py`, `signal_screen.py`,
-`_pricing.trading_calendar_from_snapshot` — none touched by this PR, all
-sharing this same code):
-
-| Condition | Outcome |
-|---|---|
-| Partition fits under `maximum_result_rows` in one scan | One full-partition scan, no time interval — includes null-valued observation rows. |
-| Partition overflows, observation column not nullable | Falls back to a calendar split: by month, then by day within an overflowing month. |
-| Whole partition overflows and its observation column is nullable | Refuses `RESULT_LIMIT_EXCEEDED` — a null can never match a time interval, so splitting would silently drop it. |
-| A single day-partition scan still overflows | Refuses `RESULT_LIMIT_EXCEEDED`. |
-| No declared partition column, or no partition values at all | `_snapshot.read_table` raises a bare `ValueError` (issue #70, unchanged). |
-| Valid partition key(s) with no matching data | Empty result, object dtypes — not a refusal. |
-
-Every scan — full-partition or split — carries a `KeyPredicate` scoped to
-its own partition (`_partition_filter`) alongside any caller `key_filter`,
-so a result row can never duplicate across partitions.
-
-This also changes `polygon_fills.read_trades`'s behavior, since it shares
-`_scan.py` with `_snapshot.read_table`'s new delegation: `trades` rows with
-a null `entry_date` are now returned instead of dropped, and cross-year
-duplicate rows are eliminated. `option_chains` and `earnings_events` are
-unaffected — `legacy_annotations.json` documents both of their partition
-columns as derived from their own observation column, so neither defect
-could arise for them; `trades`' partition column (the earnings event's
-year) is not tied to `entry_date`, which is what exposed both defects for
-it.
-
 ## Invariants
 
 - One `resolve`/`resolve_pinned` call per run; the resulting `snapshot_id`
@@ -460,6 +391,8 @@ it.
 - Never reads the legacy mutable Tier-2 store (`engine.data.store`) —
   every table read is a bounded `Repository.scan` against the one resolved
   snapshot.
+- Every scan carries its own partition predicate alongside caller key
+  predicates, so result rows cannot duplicate across partitions.
 - No production entrypoint derives its calendar from a local file or
   environment variable: `_replay_run.run` and `_build_run.run` resolve the
   planning calendar from the pinned snapshot's own `daily_market` table

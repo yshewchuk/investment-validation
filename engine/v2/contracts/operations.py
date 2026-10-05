@@ -103,6 +103,22 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "PUBLICATION_REFUSED": ("validation", False),
     "IDEMPOTENCY_CONFLICT": ("validation", False),
     "INVALID_REQUEST": ("validation", False),
+    # P6 experiment platform (ops/experiments.py, ARCHITECTURE.md section R1):
+    # the spec resolver's typed refusal for an unknown spec field or an
+    # economically unused declaration. Registered here -- the established
+    # code registry -- never as an import-time side effect in the raising
+    # module, so ``make_problem`` is an OpsError in every import order.
+    "INVALID_EXPERIMENT_SPEC": ("validation", False),
+    # Phase-6 slice 3 experiment feature context (ops/experiments.py, ops
+    # ARCHITECTURE.md R1): a preloaded snapshot observation dated after the
+    # event's entry instant is refused outright -- never clipped, shifted or
+    # dropped for an older value -- and a retry re-reads the same leak, so it
+    # is non-retryable for that spec and snapshot.
+    "FEATURE_LOOKAHEAD": ("validation", False),
+    # An observation row whose snapshot ID is not the one the feature context
+    # binds: the row has no resolved snapshot behind it, and the same preload
+    # can never resolve on a retry.
+    "SNAPSHOT_UNRESOLVED": ("dependency", False),
     "UNAUTHORIZED_NAMESPACE": ("validation", False),
     "STALE_EXPECTATION": ("validation", False),
     "INTEGRITY_FAILED": ("integrity", False),

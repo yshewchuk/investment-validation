@@ -382,9 +382,20 @@ def _dispatch_experiment(parameters, root):
     A registered legacy runner that exits nonzero is a typed failure, never
     a success with whatever REPORT.md it happened to write first; its stderr
     tail travels in the problem's details.
+
+    ``resolve_experiment_plan`` runs before any run artifact is written and
+    its canonical ``json_bytes`` are persisted as ``resolved_experiment_plan``
+    beside the receipt -- the same plan value ``run_experiment`` resolves
+    deterministically for the callable, byte-for-byte. Both runner shapes
+    here (the synthetic fixture, the legacy-script wrapper) declare no
+    ``execution_plan`` channel, so a non-empty economic stance is refused,
+    as the resolver's ``INVALID_EXPERIMENT_SPEC``, before the plan is
+    persisted or the script invoked; fixed single-variant runs carry empty
+    economics.
     """
     from engine.v2.ops.experiments import (
         experiment_spec_from_document,
+        resolve_experiment_plan,
         run_experiment,
         synthetic_fixture_runner,
     )
@@ -393,6 +404,11 @@ def _dispatch_experiment(parameters, root):
     mode = "smoke" if parameters.get("no_ledger", True) else "primary"
     document = json.loads((root / "spec.json").read_text())
     spec = experiment_spec_from_document(document)
+    plan = resolve_experiment_plan(spec)
+    if plan.economic_params:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "the experiment worker's runner declares no execution_plan input",
+                   details={"economic_keys": sorted(plan.economic_params)})
     runner_id = parameters["runner"]
     if runner_id == "synthetic":
         runner, synthetic = synthetic_fixture_runner, True
@@ -405,13 +421,18 @@ def _dispatch_experiment(parameters, root):
                                     "stderr_tail": (completed.stderr or "")[-2000:]})
             return {"returncode": completed.returncode, "headline": _runner_headline(root)}
         synthetic = False
-    receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic)
+    (root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
+    receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
+                             resolved_plan=plan)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)
     expected = parameters["expected_ids"]
     return {"outputs": [{"name": "experiment_receipt", "path": "experiment_receipt.json",
-                         "schema": "experiment_receipt.v1.0"}],
+                         "schema": "experiment_receipt.v1.0"},
+                        {"name": "resolved_experiment_plan",
+                         "path": "resolved_experiment_plan.json",
+                         "schema": "experiment_execution_plan.v1.0"}],
             "completed_ids": list(expected), "no_work": False}
 
 

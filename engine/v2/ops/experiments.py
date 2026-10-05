@@ -4,8 +4,12 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Callable
 
 from engine.v2.foundation import content_hash
@@ -19,6 +23,16 @@ from engine.v2.ops.fingerprints import (
 )
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 
+#: The closed top-level field set of a spec document: a key this resolver
+#: cannot interpret is refused, never quietly ignored into a runner call.
+SPEC_FIELDS = frozenset({"experiment_id", "hypothesis", "primary_arm_id", "arms",
+                         "seed", "folds", "economic_params", "price_source",
+                         "input_files", "runner"})
+
+#: The only economic declaration with a defined execution meaning today;
+#: any other key is an unused declaration, refused before the runner.
+SUPPORTED_ECONOMIC_KEYS = frozenset({"fill"})
+
 
 def default_checkout_root() -> Path:
     """The code checkout whose ``experiments/`` tree owns pre-registration.
@@ -31,6 +45,16 @@ def default_checkout_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _require_mapping(document) -> None:
+    """Refuse a non-mapping spec document as the resolver's typed code, before
+    any ``.get`` or key enumeration touches it. The plan entry point and direct
+    ``experiment_spec_from_document`` callers both pass through here."""
+    if not isinstance(document, Mapping):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment specification document is not a mapping",
+                   details={"type": type(document).__name__})
+
+
 def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | None = None):
     """Create an immutable plan for a supervised smoke or primary experiment run."""
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
@@ -39,6 +63,7 @@ def experiment_plan(spec_path: Path | str, *, smoke=True, root: Path | str | Non
     if not path.is_file() or path.is_symlink():
         raise fail("INPUT_CHANGED", "experiment specification is missing")
     document = json.loads(path.read_text())
+    _require_mapping(document)
     experiment_id = document.get("experiment_id")
     if not isinstance(experiment_id, str) or not experiment_id:
         raise fail("INVALID_REQUEST", "experiment specification has no experiment_id")
@@ -81,10 +106,20 @@ def experiment_spec_from_document(document: dict) -> ExperimentSpec:
     durable attempt record -- is built, so a missing required field is refused
     once, as an ``OpsError``, never a bare ``KeyError``.
     """
+    _require_mapping(document)
+    unknown = sorted(set(document) - SPEC_FIELDS)
+    if unknown:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment specification declares fields this resolver does not know",
+                   details={"fields": unknown})
     for name in ("hypothesis", "primary_arm_id", "economic_params", "price_source"):
         if name not in document or document[name] is None:
             raise fail("INVALID_REQUEST", "experiment specification is missing a required field",
                        details={"field": name})
+    for name in ("arms", "folds"):
+        if name in document and not isinstance(document[name], list):
+            raise fail("INVALID_EXPERIMENT_SPEC", "arms and folds must be JSON arrays",
+                       details={"field": name, "type": type(document[name]).__name__})
     return ExperimentSpec(
         experiment_id=document.get("experiment_id", ""),
         hypothesis=document["hypothesis"],
@@ -119,7 +154,184 @@ class ExperimentSpec:
                              "primary_arm_id": self.primary_arm_id,
                              "arms": self.arms, "seed": self.seed,
                              "folds": self.folds, "economic_params": self.economic_params,
-                             "price_source": self.price_source, "runner": self.runner})
+                              "price_source": self.price_source, "runner": self.runner})
+
+
+def _freeze(value):
+    """Immutable snapshot over FRESH dicts: a proxy over the parsed document's
+    own mapping would still let that document mutate the "immutable" plan."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _require_immutable_economics(spec: ExperimentSpec,
+                                 plan: ResolvedExperimentPlan) -> None:
+    """Accept a supplied plan's economics only in the shapes ``_freeze``
+    itself produces: immutable JSON scalars, tuples of immutable values, and
+    read-only mapping proxies with immutable keys and values. Built-in dicts,
+    lists, and any other mutable container are refused as the same typed
+    refusal -- canonical bytes can match while the nested values are still
+    editable behind the adopted plan's back."""
+    def immutable(value) -> bool:
+        if isinstance(value, MappingProxyType):
+            return all(immutable(key) and immutable(item)
+                       for key, item in value.items())
+        if isinstance(value, tuple):
+            return all(immutable(item) for item in value)
+        return isinstance(value, (str, int, float, bool, type(None)))
+    if not immutable(plan.economic_params):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "supplied resolved plan carries mutable nested economics",
+                   details={"experiment_id": spec.experiment_id})
+
+
+def _thaw(value):
+    """Plain JSON structures rebuilt at serialization time, never stored."""
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class ResolvedExperimentPlan:
+    """The one execution plan an ``ExperimentSpec`` resolves to.
+
+    Deeply immutable (a frozen dataclass over frozen mappings), and its
+    ``json_bytes`` are canonical: sorted keys, compact separators, one stable
+    UTF-8 encoding. A runner that declares ``execution_plan`` receives this
+    plan -- never the raw document it was parsed from.
+    """
+    schema_version: str
+    experiment_id: str
+    arms: tuple[str, ...]
+    seed: int
+    folds: tuple[str, ...]
+    economic_params: Mapping
+    price_source: str
+    runner: str
+    #: Set by :func:`resolve_experiment_plan` on the exact object it returns.
+    #: A non-init field whose ``dataclasses.replace`` default is ``False``, so a
+    #: rebuilt or hand-built plan never carries the resolver's provenance and
+    #: :func:`_adopt_resolved_plan` refuses adoption before any filesystem
+    #: effect. Excluded from ``repr``/``compare`` to keep canonical identity.
+    _provenance: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def as_document(self) -> dict:
+        return {"schema_version": self.schema_version, "experiment_id": self.experiment_id,
+                "arms": list(self.arms), "seed": self.seed, "folds": list(self.folds),
+                "economic_params": _thaw(self.economic_params),
+                "price_source": self.price_source, "runner": self.runner}
+
+    def json_bytes(self) -> bytes:
+        return json.dumps(self.as_document(), sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8")
+
+
+def _validate_plan_fields(spec: ExperimentSpec) -> None:
+    """Refuse values that cannot become the plan's immutable, correctly
+    typed fields, before any plan is built or any field is frozen. A
+    dataclass annotation checks nothing at runtime, so a JSON object
+    supplied as ``seed`` used to travel into ``ResolvedExperimentPlan`` by
+    reference and mutating its source rewrote the plan's canonical bytes
+    after the fact. ``experiment_id``/``price_source``/``runner`` must be
+    non-empty strings; ``arms``/``folds`` must be tuples of strings -- the
+    fields' declared type, so a mutable list or a bare string is refused no
+    matter what it contains (the parser converts valid document arrays to
+    tuples); ``seed`` must be an ``int``, never a ``bool``; and
+    every nested economic value must be JSON-representable -- finite
+    numbers, strings, booleans, null, lists and string-keyed mappings --
+    anything else refused rather than frozen into a plan and handed to a
+    runner. Assumes the caller's mapping check already established
+    ``economic_params`` is a mapping."""
+    def json_value(value) -> bool:
+        if value is None or isinstance(value, (bool, int, str)):
+            return True
+        if isinstance(value, float):
+            return math.isfinite(value)
+        if isinstance(value, list):
+            return all(json_value(item) for item in value)
+        if isinstance(value, Mapping):
+            return all(isinstance(key, str) and json_value(item)
+                       for key, item in value.items())
+        return False
+
+    for name in ("experiment_id", "price_source", "runner"):
+        value = getattr(spec, name)
+        if not isinstance(value, str) or not value:
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment plan field must be a non-empty string",
+                       details={"field": name, "type": type(value).__name__})
+    for name in ("arms", "folds"):
+        value = getattr(spec, name)
+        if not isinstance(value, tuple) or not all(
+                isinstance(item, str) for item in value):
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment plan field must be a tuple of strings",
+                       details={"field": name, "type": type(value).__name__})
+    if isinstance(spec.seed, bool) or not isinstance(spec.seed, int):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment seed must be an integer",
+                   details={"type": type(spec.seed).__name__})
+    if not all(isinstance(key, str) and json_value(item)
+               for key, item in spec.economic_params.items()):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment economic parameters must be string-keyed "
+                   "JSON-representable values",
+                   details={"type": type(spec.economic_params).__name__})
+
+
+def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
+    """Refuse malformed plan fields and economically unused declarations,
+    then freeze the one plan."""
+    if not isinstance(spec.economic_params, Mapping):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "economic_params must be a mapping",
+                   details={"type": type(spec.economic_params).__name__})
+    # Order matters: the field check types the economic keys before the sort.
+    _validate_plan_fields(spec)
+    unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
+    if unused:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment declares economically unused parameters",
+                   details={"keys": unused})
+    plan = ResolvedExperimentPlan(
+        schema_version="experiment_execution_plan.v1.0", experiment_id=spec.experiment_id,
+        arms=_freeze(list(spec.arms)), seed=spec.seed, folds=_freeze(list(spec.folds)),
+        economic_params=_freeze(spec.economic_params), price_source=spec.price_source,
+        runner=spec.runner)
+    object.__setattr__(plan, "_provenance", True)
+    return plan
+
+
+def _adopt_resolved_plan(spec: ExperimentSpec,
+                         resolved_plan: ResolvedExperimentPlan) -> ResolvedExperimentPlan:
+    """Seal plan adoption to the exact object ``resolve_experiment_plan`` stamped.
+
+    Only a resolver-produced plan carries the private provenance marker; a
+    ``dataclasses.replace`` rebuild or a hand-built plan loses it, so a
+    byte-equal impostor hiding a mutable ``economic_params`` dict, a
+    ``MappingProxyType`` over a caller-held mapping, or mutable ``arms``/other
+    fields is refused here -- the resolver's typed ``INVALID_EXPERIMENT_SPEC``
+    -- before ``run_experiment`` touches the filesystem. The immutable-economics
+    shape check and canonical-byte equality are kept as defense in depth, and
+    the accepted object is returned unchanged so its identity reaches the
+    runner.
+    """
+    if not resolved_plan._provenance:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "supplied resolved plan was not produced by this resolver",
+                   details={"experiment_id": spec.experiment_id})
+    _require_immutable_economics(spec, resolved_plan)
+    if resolved_plan.json_bytes() != resolve_experiment_plan(spec).json_bytes():
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "supplied resolved plan is not the plan this spec resolves to",
+                   details={"experiment_id": spec.experiment_id})
+    return resolved_plan
 
 
 def experiments_ledger_path(repo_root: Path | str) -> Path:
@@ -425,12 +637,45 @@ def runner_manifest(root: Path | str, script: str) -> dict:
             "removal_phase": entry["removal_phase"]}
 
 
-def _call_runner(runner: Callable, run_dir: Path, *, no_ledger: bool):
+def _execution_plan_compatibility(runner: Callable,
+                                  execution_plan: ResolvedExperimentPlan) -> None:
+    """Refuse a legacy callable that cannot carry the plan's economic stance.
+
+    A callable without an ``execution_plan`` parameter has no channel for
+    ``economic_params``, so silently dropping a declared economic stance is
+    refused as the resolver's typed ``INVALID_EXPERIMENT_SPEC``. Called by
+    :func:`run_experiment` as a preflight -- before the run directory or any
+    evidence exists -- and again by :func:`_call_runner` as defense in depth.
+    """
+    if not execution_plan.economic_params:
+        return
+    if "execution_plan" in {name for name in inspect.signature(runner).parameters}:
+        return
+    raise fail("INVALID_EXPERIMENT_SPEC",
+               "experiment runner does not declare execution_plan but the "
+               "resolved plan carries economic parameters",
+               details={"economic_keys": sorted(execution_plan.economic_params)})
+
+
+def _call_runner(runner: Callable, run_dir: Path, *, no_ledger: bool,
+                 execution_plan: ResolvedExperimentPlan):
+    """Invoke one runner with the resolved plan as its ``execution_plan``.
+
+    A callable that declares ``execution_plan`` receives exactly that plan --
+    never the raw document. A callable that does not is the legacy shape and
+    stays compatible only while the resolved plan carries no
+    ``economic_params``: the refusal is the shared preflight above, which
+    ``run_experiment`` already ran before any artifact existed and which is
+    re-checked here as defense in depth.
+    """
     signature = inspect.signature(runner)
     if "no_ledger" not in signature.parameters:
         raise fail("INVALID_REQUEST", "experiment runner lacks required no-ledger control")
+    _execution_plan_compatibility(runner, execution_plan)
     kwargs = {"run_dir": run_dir, "no_ledger": no_ledger}
     accepted = {name for name in signature.parameters}
+    if "execution_plan" in accepted:
+        kwargs["execution_plan"] = execution_plan
     return runner(**{key: value for key, value in kwargs.items() if key in accepted})
 
 
@@ -447,12 +692,31 @@ def _report_evidence(run_dir: Path) -> dict:
 
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    *, runner: Callable, mode="smoke", backup: Callable | None = None,
-                   synthetic=False) -> dict:
+                   synthetic=False,
+                   resolved_plan: ResolvedExperimentPlan | None = None) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity."""
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
     if mode == "smoke" and backup is not None:
         raise fail("INVALID_REQUEST", "smoke runs cannot request backup")
+    # Resolved once, here: an unused economic declaration is a typed refusal
+    # before any directory is created, any evidence persisted, or the runner
+    # is invoked, and the very plan is the one handed to the callable below.
+    # A supplied plan is adopted only when it is the exact object this resolver
+    # produced -- its private provenance marker, which a ``dataclasses.replace``
+    # rebuild loses -- so a byte-equal plan hiding a mutable dict, a proxy over
+    # a caller-held mapping, or mutable ``arms``/other fields is refused before
+    # any filesystem effect; its canonical bytes must still match, and the
+    # accepted object then travels to the runner unchanged, so a caller's plan
+    # identity survives the call unchanged.
+    if resolved_plan is None:
+        plan = resolve_experiment_plan(spec)
+    else:
+        plan = _adopt_resolved_plan(spec, resolved_plan)
+    # The legacy-callable compatibility check is the same kind of preflight:
+    # a runner with no ``execution_plan`` channel is refused, typed, before
+    # the run directory, ``CAPABILITIES.json``, or any receipt can exist.
+    _execution_plan_compatibility(runner, plan)
     base = Path(root).resolve()
     destination = Path(run_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -464,8 +728,8 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
     (destination / "CAPABILITIES.json").write_text(json.dumps(capabilities, indent=2,
                                                                 sort_keys=True))
     try:
-        result = _call_runner(runner, destination,
-                              no_ledger=(mode == "smoke" or synthetic))
+        result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
+                              execution_plan=plan)
         report = _report_evidence(destination)
         receipt.evidence.update(report)
         receipt.evidence["runner_result"] = result if isinstance(result, dict) else str(result)
@@ -500,3 +764,198 @@ def synthetic_fixture_runner(*, run_dir: Path, no_ledger: bool) -> dict:
                                          "*Generated by engine.report v1.0.*\n"
                                          "No trading metrics.\n")
     return {"fixture": True, "metrics": {}, "ledger": "disabled"}
+
+
+#: The one entry-relative as-of point an experiment feature read accepts.
+#: ENTRY means ``entry_at`` of the bound :class:`ExperimentFeatureContext` --
+#: anything else is a request this slice does not have a defined meaning for,
+#: refused as ``INVALID_EXPERIMENT_SPEC``, never quietly treated as an instant.
+ENTRY = "ENTRY"
+
+#: The five columns every preloaded observation row must carry. Each row is one
+#: selected snapshot's ``Repository.scan`` row plus a ``snapshot_id`` binding the
+#: caller attaches from its ``SnapshotRef`` -- the scan itself does not emit
+#: ``snapshot_id``, and the context performs no resolution and no I/O of its own.
+OBSERVATION_COLUMNS = ("snapshot_id", "event_id", "feature", "observed_at", "value")
+
+
+def _aware_instant(value, *, field_name: str) -> datetime:
+    """A timezone-aware ``datetime``, from one or from ISO text.
+
+    Naive values of either shape are refused, never assumed UTC: assuming a
+    zone here would invent the very causal boundary an as-of read exists to
+    police, and every comparison downstream is entry-relative.
+    """
+    if isinstance(value, datetime):
+        instant = value
+    elif isinstance(value, str):
+        try:
+            instant = datetime.fromisoformat(value)
+        except ValueError:
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "timestamp is not valid ISO-8601 text",
+                       details={"field": field_name}) from None
+    else:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "timestamp must be a timezone-aware datetime or ISO string",
+                   details={"field": field_name, "type": type(value).__name__})
+    if instant.tzinfo is None or instant.tzinfo.utcoffset(instant) is None:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "timestamp is not timezone-aware",
+                   details={"field": field_name})
+    return instant
+
+
+def _utc_instant(instant: datetime) -> datetime:
+    """One aware instant re-expressed in UTC: the only basis for comparing instants.
+
+    Aware datetimes sharing the same ``tzinfo`` object compare on their naive
+    wall-clock fields, so through a DST rollback the second occurrence
+    (``fold=1``) of a repeated local time compares equal to -- never after --
+    the first (``fold=0``), hiding a post-entry observation inside the
+    ambiguous hour. Converting before comparing resolves ``fold`` into one
+    true instant, so every ordering and tie decision in
+    :meth:`ExperimentFeatureContext.feature` compares instants, not wall-clock
+    labels; the stored datetimes themselves are untouched.
+    """
+    return instant.astimezone(timezone.utc)
+
+
+def _tied_values_agree(value, other) -> bool:
+    """Whether two observations tied at the latest instant agree.
+
+    A tie is answered only by agreement, never by row order: NaN agrees with
+    NaN -- each is the same "missing measurement" marker -- while a NaN and a
+    non-NaN value conflict, as any unequal pair does. NaN is recognized for
+    every numeric scalar ``math.isnan`` accepts (ordinary float and
+    ``Decimal("NaN")`` alike), not floats only. A value ``math.isnan``
+    rejects carries no recognized NaN and falls through to ordinary equality,
+    where an equality that raises or resolves ambiguously is disagreement --
+    never a pick by row order. Only the type/value/arithmetic errors
+    ``math.isnan`` and equality may raise are caught; anything else is a
+    programming error and travels untouched.
+    """
+    def nan_flag(item) -> bool:
+        try:
+            return math.isnan(item)
+        except (TypeError, ValueError, ArithmeticError):
+            return False
+
+    value_nan, other_nan = nan_flag(value), nan_flag(other)
+    if value_nan or other_nan:
+        return value_nan and other_nan
+    try:
+        return bool(value == other)
+    except (TypeError, ValueError, ArithmeticError):
+        return False
+
+
+@dataclass(frozen=True)
+class ExperimentFeatureContext:
+    """Entry-relative feature reads over ONE already-resolved snapshot.
+
+    The caller resolves a ``SnapshotRef``, scans the feature rows it wants
+    through ``Repository.scan``, and hands those rows here; construction
+    validates and freezes them -- every ``observed_at`` parsed once, every row
+    bound to ``snapshot_id`` -- so :meth:`feature` is a pure lookup with no
+    resolution, no I/O and no mutation of anything. A context is therefore
+    deterministic for one spec/snapshot pair: the same rows answer the same
+    request the same way, and a refusal is never a retryable condition.
+
+    Scope (§R1 of ``ops/ARCHITECTURE.md``): ENTRY-instant reads only.
+    Preregistration, reports/ledger identity, refusal writes, holdout access,
+    sweeps and exit walking are other slices and appear nowhere here.
+    """
+
+    snapshot_id: str
+    event_id: str
+    entry_at: datetime
+    observations: tuple
+
+    def __post_init__(self) -> None:
+        for name in ("snapshot_id", "event_id"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise fail("INVALID_EXPERIMENT_SPEC",
+                           "experiment feature context needs a non-empty identity string",
+                           details={"field": name, "type": type(value).__name__})
+        if not isinstance(self.observations, (tuple, list)):
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "observations must be the preloaded sequence of scan rows",
+                       details={"type": type(self.observations).__name__})
+        entry = _aware_instant(self.entry_at, field_name="entry_at")
+        rows = []
+        for index, row in enumerate(self.observations):
+            if not isinstance(row, Mapping) or not set(OBSERVATION_COLUMNS) <= set(row):
+                raise fail("INVALID_EXPERIMENT_SPEC",
+                           "observation row must carry the five scan columns",
+                           details={"index": index, "columns": list(OBSERVATION_COLUMNS)})
+            if row["snapshot_id"] != self.snapshot_id:
+                raise fail("SNAPSHOT_UNRESOLVED",
+                           "observation row belongs to a snapshot this context does not bind",
+                           details={"index": index})
+            for name in ("event_id", "feature"):
+                value = row[name]
+                if not isinstance(value, str) or not value:
+                    raise fail("INVALID_EXPERIMENT_SPEC",
+                               "observation identity must be a non-empty string",
+                               details={"index": index, "field": name})
+            rows.append({"snapshot_id": row["snapshot_id"],
+                         "event_id": row["event_id"],
+                         "feature": row["feature"],
+                         "observed_at": _aware_instant(row["observed_at"],
+                                                       field_name="observed_at"),
+                         "value": row["value"]})
+        object.__setattr__(self, "entry_at", entry)
+        object.__setattr__(self, "observations",
+                           tuple(MappingProxyType(row) for row in rows))
+
+    def feature(self, name: str, *, observed_at: str = ENTRY):
+        """The value from the LATEST observation of ``name`` at or before entry.
+
+        The leak rule is absolute and precedes selection: if any row for the
+        requested feature and this context's event is dated after ``entry_at``,
+        the read refuses ``FEATURE_LOOKAHEAD`` even when an eligible older row
+        also exists -- clipping, shifting, silently dropping the future row or
+        choosing an older value to evade would all turn a detected leak into a
+        quietly answered one. Rows for other features or other events are
+        never consulted and can never trigger the refusal for this request. A
+        feature the snapshot never observed for this event is the typed
+        missing-input refusal ``FEATURES_MISSING``, never a default. When
+        several eligible rows tie at the latest ``observed_at``, their value is
+        returned only if every tied value agrees (NaN with NaN included);
+        conflicting ties are the typed ``INVALID_EXPERIMENT_SPEC`` refusal,
+        never a silent pick by row order. Every ordering and equality decision
+        below is made on UTC-normalized instants, so a same-zone wall-clock
+        tie across a DST fold is never mistaken for the same instant.
+        """
+        if observed_at != ENTRY:
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "only the ENTRY as-of instant is supported by this context",
+                       details={"field": "observed_at", "type": type(observed_at).__name__})
+        if not isinstance(name, str) or not name:
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "feature request must be a non-empty string",
+                       details={"type": type(name).__name__})
+        matching = [(row, _utc_instant(row["observed_at"])) for row in self.observations
+                    if row["event_id"] == self.event_id and row["feature"] == name]
+        entry = _utc_instant(self.entry_at)
+        if any(instant > entry for _, instant in matching):
+            raise fail("FEATURE_LOOKAHEAD",
+                       "a snapshot observation postdates the event entry instant",
+                       details={"event_id": self.event_id, "feature": name})
+        eligible = [(row, instant) for row, instant in matching if instant <= entry]
+        if not eligible:
+            raise fail("FEATURES_MISSING",
+                       "no pinned observation of the requested feature at or before entry",
+                       details={"snapshot_id": self.snapshot_id, "event_id": self.event_id,
+                               "feature": name})
+        latest = max(instant for _, instant in eligible)
+        tied = [row["value"] for row, instant in eligible if instant == latest]
+        value = tied[0]
+        if not all(_tied_values_agree(value, other) for other in tied[1:]):
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "tied latest observations disagree on the requested feature value",
+                       details={"snapshot_id": self.snapshot_id, "event_id": self.event_id,
+                                "feature": name})
+        return value

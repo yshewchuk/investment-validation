@@ -19,6 +19,7 @@ import pytest
 from engine import paths
 from engine.v2.ops import cli, effects_graph, experiments, worker
 from engine.v2.ops.catalog import transaction
+from engine.v2.ops.errors import OpsError
 from engine.v2.ops.experiments import experiment_spec_from_document
 from tests.ops_support import catalog
 
@@ -65,7 +66,7 @@ def test_primary_run_produces_a_real_engine_report(tmp_path):
     real_ledger = paths.ROOT / "experiments" / "LEDGER.csv"
     before = real_ledger.read_bytes() if real_ledger.is_file() else None
 
-    def real_report_runner(*, run_dir, no_ledger):
+    def real_report_runner(*, run_dir, no_ledger, execution_plan):
         from engine.v2.ops.legacy_adapter import invoke_evaluate
 
         return invoke_evaluate(tmp_path, EVALUATE_SPEC, _trades(), run_dir=run_dir,
@@ -127,7 +128,7 @@ def _tiny_checkout(tmp_path, *, with_metrics=True):
                       path=ledger)
     spec_path = checkout / "spec.json"
     spec_path.write_text(json.dumps(_experiment_document(
-        experiment_id="EXP-182", runner=REGISTERED_RUNNER)))
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER, economic_params={})))
     return checkout, spec_path, ledger, planned_hash
 
 
@@ -152,6 +153,16 @@ def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
 
     result = worker.dispatch("experiment", plan["parameters"], checkout)
     assert result["completed_ids"] == ["experiment:EXP-182"]
+    assert [output["name"] for output in result["outputs"]] == [
+        "experiment_receipt", "resolved_experiment_plan"]
+    plan_artifact = checkout / "resolved_experiment_plan.json"
+    assert plan_artifact.is_file()
+    persisted = plan_artifact.read_bytes()
+    assert persisted == experiments.resolve_experiment_plan(
+        experiment_spec_from_document(json.loads(spec_path.read_text()))).json_bytes()
+    assert persisted == json.dumps(json.loads(persisted), sort_keys=True,
+                                   separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert json.loads(persisted)["schema_version"] == "experiment_execution_plan.v1.0"
     receipt = json.loads((checkout / "experiment_receipt.json").read_text())
     assert receipt["status"] == "succeeded"
     assert receipt["evidence"]["report_bytes"] > 0
@@ -176,6 +187,17 @@ def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
     assert float(ran["sharpe_trade"]) == pytest.approx(1.5)
     assert "notes" not in frame.columns, "the legacy ledger format stays at 7 columns"
     assert not (ops / "experiments").exists()
+
+    refused = tmp_path / "refused"
+    refused.mkdir()
+    (refused / "spec.json").write_text(json.dumps(_experiment_document(
+        experiment_id="EXP-182", runner=REGISTERED_RUNNER)))
+    with pytest.raises(OpsError) as excinfo:
+        worker.dispatch("experiment", {"expected_ids": ["experiment:EXP-182"],
+                                       "runner": REGISTERED_RUNNER, "no_ledger": True}, refused)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not (refused / "resolved_experiment_plan.json").exists()
+    assert not (refused / "experiment_receipt.json").exists()
 
 
 def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(tmp_path):

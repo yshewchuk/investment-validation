@@ -1,5 +1,7 @@
 # `engine/v2/foundation`
 
+See [component architecture](ARCHITECTURE.md) for detailed contracts, inputs and outputs, dependencies, and failure semantics.
+
 ## Ownership
 
 Implements the **paths, env, canonical JSON, session/calendar arithmetic, causality primitives** row of the §4 owner table of
@@ -43,7 +45,7 @@ underscore convention, and an import of a name absent from this list fails
 | `artifact_reference` | The identity `ArtifactStore.publish_bytes` would give some bytes, computed without touching storage — so a worker or coordinator that already holds the exact bytes of a published artifact can recompute its `ArtifactRef` and agree with the store by construction. |
 | `safe_relative_path`, `ensure_directory`, `fsync_directory` | The path and durability primitives the store is built from. |
 
-<!-- public-interface: canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed -->
+<!-- public-interface: canonical_json, content_hash, CONTENT_HASH_PREFIX, tag_nonfinite, untag_nonfinite, from_document, to_document, parse_schema_version, DocumentError, Clock, SystemClock, format_timestamp, parse_timestamp, ArtifactStore, ArtifactError, artifact_reference, safe_relative_path, ensure_directory, fsync_directory, artifacts, canonical, clock, typed, market_calendar -->
 
 ## Consumers
 

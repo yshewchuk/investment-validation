@@ -45,7 +45,14 @@ from engine.v2.ops.snapshot_roots import default_materialization_base, materiali
 from engine.v2.ops.stages import registry
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import TEST_POLICY
-from tests.test_v2_data_catalog import H, _assert_immutable, build_chain, catalog, insert_receipt
+from tests.test_v2_data_catalog import (
+    H,
+    _as_migration,
+    _assert_immutable,
+    build_chain,
+    catalog,
+    insert_receipt,
+)
 from tests.test_v2_data_import import (
     REFERENCE_MODEL_ID,
     ROOT,
@@ -554,9 +561,10 @@ def test_v5_v6_migrations_are_checksummed_idempotent_and_append_only(tmp_path):
     assert reopened.execute("SELECT version, name, checksum FROM schema_versions WHERE owner='data' "
                             "ORDER BY version").fetchall() == versions
     reopened.close()
-    edited = [Migration(v, n, s) for v, n, s in data_schema.MIGRATIONS]
-    version, name, statements = data_schema.MIGRATIONS[5]
-    edited[5] = Migration(version, name, statements + ("SELECT 1",))
+    edited = [_as_migration(entry) for entry in data_schema.MIGRATIONS]
+    original = edited[5]
+    edited[5] = Migration(original.version, original.name,
+                          original.statements + ("SELECT 1",), original.recreate_tables)
     raw = sqlite3.connect(str(tmp_path / "catalog.sqlite"), isolation_level=None)
     try:
         with pytest.raises(OpsError) as err:

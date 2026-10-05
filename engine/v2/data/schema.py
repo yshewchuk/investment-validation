@@ -767,8 +767,56 @@ _V12 = (
     *_immutable_triggers("data_computed_moves_captures"),
 )
 
+# --------------------------------------------------------------------------
+# v13 - data_normalizations recreate (#133): rebuild the table through the
+# framework's opt-in enforcement-off recreate and remove exactly one thing,
+# v10's UNIQUE (raw_hash, normalizer_id, contract_id). Never edit v1-v12 above:
+# an applied step is checksum-protected, so the drop is a new numbered step and
+# the recreate flag itself joins this step's checksum.
+# --------------------------------------------------------------------------
+#
+# Every other clause is copied verbatim from v10 -- the columns and their
+# NOT NULLs, ``normalization_id`` as the sole PRIMARY KEY, the ``contract_id``
+# FK to ``data_contracts``, ``row_count >= 0``, the hash/JSON CHECKs and STRICT
+# -- so nothing but the named UNIQUE changes. ``INSERT ... SELECT`` names its
+# columns instead of ``SELECT *`` so a future column cannot be positionally
+# misfiled. The immutability trigger pair is reissued after the rename because
+# ``DROP TABLE`` takes the old table's triggers with it; the table has no other
+# named index or view to carry over. Committed
+# ``data_daily_market_revisions.normalization_id`` children keep pointing at it
+# throughout, which is what the flag buys: enforcement off before
+# ``BEGIN IMMEDIATE``, ``PRAGMA foreign_key_check`` before commit, so a rebuild
+# that dangled a reference rolls back whole as the framework's
+# ``INTEGRITY_FAILED`` instead of publishing a half-rebuilt parent. Cache
+# identity is untouched — ``cache_normalization`` still keys on that triple in
+# Python; folding ``unit.expected_keys`` in is #133's follow-up identity slice.
+_V13 = (
+    f"""CREATE TABLE data_normalizations_rebuild (
+        normalization_id TEXT PRIMARY KEY,
+        raw_hash TEXT NOT NULL,
+        normalizer_id TEXT NOT NULL,
+        contract_id TEXT NOT NULL REFERENCES data_contracts(contract_id),
+        normalized_hash TEXT NOT NULL,
+        artifact_ref_json TEXT NOT NULL,
+        row_count INTEGER NOT NULL CHECK (row_count >= 0),
+        created_at TEXT NOT NULL,
+        CHECK ({_hash_check('raw_hash')}),
+        CHECK ({_hash_check('normalized_hash')}),
+        CHECK ({_json_check('artifact_ref_json')})
+    ) STRICT""",
+    """INSERT INTO data_normalizations_rebuild (normalization_id, raw_hash, normalizer_id,
+        contract_id, normalized_hash, artifact_ref_json, row_count, created_at)
+        SELECT normalization_id, raw_hash, normalizer_id, contract_id,
+        normalized_hash, artifact_ref_json, row_count, created_at
+        FROM data_normalizations""",
+    "DROP TABLE data_normalizations",
+    "ALTER TABLE data_normalizations_rebuild RENAME TO data_normalizations",
+    *_immutable_triggers("data_normalizations"),
+)
+
 #: Plain ``(version, name, statements)`` tuples — never ``ops.migrations.Migration``
-#: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these.
+#: (module docstring). ``engine/v2/ops/bootstrap.py`` wraps these; a fourth
+#: element, when present, is the opt-in ``recreate_tables`` flag.
 MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _V2),
              (3, "import_receipt_scope", _V3), (4, "dataset_version_partition_hashes", _V4),
              (5, "import_reference_inputs", _V5), (6, "import_reference_input_fold", _V6),
@@ -776,4 +824,5 @@ MIGRATIONS = ((1, "snapshot_catalog", _V1), (2, "fragment_input_receipt_refs", _
              (9, "price_captures_contract_scope", _V9),
              (10, "incremental_eod_controls", _V10),
              (11, "generic_incremental_revisions", _V11),
-             (12, "computed_moves_captures", _V12))
+             (12, "computed_moves_captures", _V12),
+             (13, "normalizations_unique_triple_removed", _V13, True))

@@ -46,7 +46,7 @@ request body and, if durable, in the operator guides instead — see
 | Component | Doc |
 |---|---|
 | `engine/v2/contracts/` | (pending) |
-| `engine/v2/foundation/` | (pending) |
+| `engine/v2/foundation/` | [`engine/v2/foundation/ARCHITECTURE.md`](engine/v2/foundation/ARCHITECTURE.md) |
 | `engine/v2/data/` | [`engine/v2/data/ARCHITECTURE.md`](engine/v2/data/ARCHITECTURE.md) |
 | `engine/v2/features/` | [`engine/v2/features/ARCHITECTURE.md`](engine/v2/features/ARCHITECTURE.md) |
 | `engine/v2/models/` | [`engine/v2/models/ARCHITECTURE.md`](engine/v2/models/ARCHITECTURE.md) |
@@ -96,12 +96,15 @@ evidence. See the models and data component contracts.
   owners (`engine.v2.ops.executor`, `engine.v2.ops.legacy_adapter`). A
   legacy module importing `checks/` or `tests/`, or shelling out from
   outside those two modules, is not enforced against by either rule.
-- **`tools/*` and `experiments/*`.** Operator CLIs and the research program.
-  Both may call into `engine/v2` and legacy `engine`, but neither is a
-  production package other packages depend on. Not a tracked component (no
-  `(pending)` entry above): `tools/*` documents itself inline, in extensive
-  module-level comments beside the code they describe, rather than in a
-  separate file.
+- **Operator CLIs and experiments.** These operator and research entrypoints
+  may call into the legacy and v2 engines. They are not uniformly leaf-only:
+  `engine.v2.ops.training` imports the `phase5_training_job` module while
+  validating recipe and state parameters for `ops plan --kind training`.
+  Describe dependencies at the module level because some modules serve shared
+  runtime paths.
+  - `tools/oc_check.py` appends one best-effort JSONL line per run to
+    `$OC_METRICS_DIR/oc_check.jsonl` (default `.oc_logs/oc_check.jsonl`, per worktree);
+    its module docstring defines the fields and failure behavior.
   - **Experiment grid runs** (`experiments/lib.evaluate_with_grid`, called by
     the `run.py` that `experiments/new_experiment.py` scaffolds): evaluates the
     preregistered primary spec, then each `grid` cell as a secondary arm
@@ -119,14 +122,13 @@ evidence. See the models and data component contracts.
     new `ran` rows. `engine.evaluate` takes an optional `report_dir` that
     redirects only the report and figures, never the run log that
     preregistration reads.
-  - **Mutation-testing PR module selection** (`tools/mutation_pilot.py`,
-    shared by both `.github/workflows/mutation.yml` and
-    `mutation-mutmut.yml`): on a pull_request run, `changed_modules` selects
+  - **Mutation-testing PR module selection** (`changed_modules`, shared by
+    both mutation workflows): on a pull_request run, `changed_modules` selects
     only the enabled mutation-test modules a PR's diff can affect, never
-    zero for an unrecognized path (`tools/mutation_pilot.py`'s own
+    zero for an unrecognized path (the selector's own
     "reverse import closure" comment block has the exact rule). Its input is
-    the PR's changed-file list plus `tools/mutation_pilot.toml`'s module
-    partition and `[pr_selection]` allowlist; its output is the module
+    the PR's changed-file list plus the selector TOML's module partition and
+    `[pr_selection]` allowlist; its output is the module
     subset the CI matrix runs. `*ARCHITECTURE.md` entries are inert for
     selection. `module_dependency_closure` walks ONLY
     `build_import_graph`'s real, statically-resolved edges
@@ -159,7 +161,7 @@ evidence. See the models and data component contracts.
     section describes applies to `pull_request` runs only: a push to main
     and the weekly scheduled run mutate every enabled module unfiltered, so
     this gap costs informational PR coverage, never an unmutated merge.
-  - **`test` CI PR selection** (`select_pr_tests` in `tools/mutation_pilot.py`, used by
+  - **`test` CI PR selection** (`select_pr_tests`, used by
     `.github/workflows/tests.yml`'s `test` job): on `pull_request`, narrows which
     `tests/test_*.py` files pytest collects to the subset the diff can affect, falling
     back to every test file when it can't prove a narrower subset is safe; push/
@@ -173,11 +175,12 @@ evidence. See the models and data component contracts.
     closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
-    catch-all graph edges belong only to a file with a genuinely unresolved dynamic target, while
-    recognized constructs with resolvable targets contribute specific edges. `full_suite` paths,
-    an unrecognized path, a deleted test file, a graph or scan failure, or any selector error still
-    select everything. The selector must never turn an error into a narrow selection. The selection
-    rule (leaf, taint, `full_suite`, conftest ancestors) is documented in `select_pr_tests`'s and
+    catch-all graph edges apply only to a file with a genuinely unresolved dynamic target;
+    recognized constructs with resolvable targets create specific edges. `full_suite` paths, an
+    unrecognized path, a deleted test file, a graph or scan failure, or any selector error still
+    select everything -- an error must never become a silent narrow selection. The full-suite
+    allowlist includes the operator-tool namespace. The selection rule (leaf, taint, `full_suite`,
+    conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
 
 ## 2. Layers and allowed dependency direction
@@ -465,19 +468,15 @@ Only a tracked path absent from the worktree reads as empty.
   | No file at `report_path` | `status: "no_report"` (200) |
   | `report_path` is a symlink | Treated as missing/unavailable; never followed or read |
   | File present but not a JSON object, or missing/mis-typed `schema_version`/`compared`/`only_legacy`/`only_native`/`mismatches` | `status: "unavailable"`, `reason_code: NATIVE_PARITY_REPORT_MALFORMED` (503) |
-  | Supplied modern identity, policy or mismatch values malformed (including non-finite JSON numbers), or mismatch dimension/field outside the shared field groups | Same `unavailable` (503) in the shared projection and both transports; null `as_of` remains valid |
-  | Forwarded summary or detail values cannot encode as finite UTF-8 JSON, or stored input exceeds parser/encoder recursion capacity | Malformed-report refusal (503); legacy summaries still ignore saved mismatch values, while details validate the values they return |
+  | Supplied modern identity, policy or mismatch values malformed (including non-finite JSON numbers), or mismatch dimension/field outside the shared field groups | Same `unavailable` (503) in the shared projection and authenticated API; null `as_of` remains valid |
+  | Forwarded summary or detail values cannot encode as finite UTF-8 JSON, or stored input exceeds parser/encoder recursion capacity | Malformed-report refusal (503); summary responses omit saved mismatch values, but v1.2 report loading still validates them; detail responses validate the values they return. |
   | Unstamped diagnostic comparison with neither identity field | Compatibility summary remains `available`; the API rejects incomplete v1.2 run identity (503) |
   | Valid report missing the optional `native_refused`/`native_refused_unmatched` fields (pre-refusal schema) | `status: "available"`, `partial: true`, refusal counts `0` |
 
-  Consumers are the authenticated FastAPI `/api/v1/native_parity` summary
-  and paginated `/native_parity/mismatches` and `/native_parity/unpaired`
-  routes, plus the read-only operations preview server's
-  `GET /native_parity`/`GET /native_parity.json` routes
-  (`engine/v2/serving/operations.py`), which read this document unchanged,
-  wired through `engine/v2/dashboard/preview.py`'s optional
-  `--native-parity-report-path` — see `engine/v2/dashboard/ARCHITECTURE.md`
-  for that route/CLI contract.
+  The authenticated FastAPI API exposes `/api/v1/native_parity` and paginated
+  `/api/v1/native_parity/mismatches` and `/api/v1/native_parity/unpaired` routes.
+  React currently presents the summary; row-level detail remains deferred. The
+  operations listener has no native-parity HTML or JSON preview routes.
   The [serving component architecture](engine/v2/serving/ARCHITECTURE.md)
   records whole-package ownership, interfaces and its boundary with React;
   this report projection remains a read over retained evidence.

@@ -43,6 +43,13 @@ returns `QuoteRowInputs` from a pinned `option_chains` snapshot for an exact
 `(ticker, decision_session)` request. It has no production caller; see the
 component architecture contract.
 
+`nightly_calendar_inputs.scan_decision_calendar`,
+`nightly_calendar_inputs.scan_candidate_expiries`, and
+`nightly_calendar_inputs.scan_calendar_row_inputs` are internal staging APIs
+for pinned raw-row calendar inputs. They compose decision-calendar sessions,
+strategy-eligible expiries and calendar-row inputs; this slice adds no
+production caller. See the component architecture contract.
+
 <!-- public-interface: registered_artifact, verify_eod_availability -->
 
 ## Consumers

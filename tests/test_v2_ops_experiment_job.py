@@ -4,6 +4,7 @@ import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -46,7 +47,7 @@ def test_experiment_kind_is_registered_with_experiment_heavy_profile():
 
 
 def test_experiment_worker_runs_synthetic_runner_and_writes_receipt(tmp_path):
-    (tmp_path / "spec.json").write_text(json.dumps(_spec_document()))
+    (tmp_path / "spec.json").write_text(json.dumps(_spec_document(economic_params={})))
     result = worker.dispatch("experiment", {"expected_ids": ["experiment:x"],
                                             "runner": "synthetic", "no_ledger": True}, tmp_path)
     assert result["completed_ids"] == ["experiment:x"]
@@ -207,7 +208,8 @@ def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path
     runner_path.parent.mkdir(parents=True)
     runner_path.write_text("if __name__ == '__main__':\n    pass\n")
     (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
-    (tmp_path / "spec.json").write_text(json.dumps(_spec_document(runner=runner_id)))
+    (tmp_path / "spec.json").write_text(
+        json.dumps(_spec_document(runner=runner_id, economic_params={})))
 
     commands = []
 
@@ -241,7 +243,8 @@ def test_worker_refuses_a_legacy_runner_that_exits_nonzero_after_the_report(tmp_
         "print('runner exploded', file=sys.stderr)\n"
         "sys.exit(1)\n")
     (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
-    (tmp_path / "spec.json").write_text(json.dumps(_spec_document(runner=runner_id)))
+    (tmp_path / "spec.json").write_text(
+        json.dumps(_spec_document(runner=runner_id, economic_params={})))
 
     with pytest.raises(OpsError) as excinfo:
         worker.dispatch("experiment",
@@ -407,7 +410,7 @@ def test_experiment_plan_names_a_runner_and_experiment_heavy_profile(tmp_path):
 
 def _submit_experiment(conn, root, clock, key, *, document=None, no_ledger=True,
                        preregistration_root=None):
-    document = document or _spec_document()
+    document = document or _spec_document(economic_params={})
     store = ArtifactStore(root)
     spec_ref = store.publish_bytes(json.dumps(document, sort_keys=True).encode(),
                                    schema_ref="experiment_spec.v1.0")
@@ -481,7 +484,7 @@ def test_cli_experiment_plan_and_submit_run_under_the_planned_profile(tmp_path, 
     hard-coded 1-thread identity and every CLI submission was refused)."""
     root = tmp_path / "ops"
     spec_path = tmp_path / "spec.json"
-    spec_path.write_text(json.dumps(_spec_document()))
+    spec_path.write_text(json.dumps(_spec_document(economic_params={})))
     job_id = _cli_plan_and_submit(root, spec_path, capsys)
 
     clock = SystemClock()
@@ -531,9 +534,333 @@ def test_cli_experiment_with_stale_thread_count_is_refused_input_changed(
         finally:
             service.close()
         failure = json.loads(conn.execute("SELECT failure_json FROM attempts WHERE job_id=?",
-                                          (job_id,)).fetchone()[0])
+                                           (job_id,)).fetchone()[0])
         assert failure["code"] == "INPUT_CHANGED"
         assert conn.execute("SELECT state FROM jobs WHERE job_id=?",
-                            (job_id,)).fetchone()[0] != "succeeded"
+                             (job_id,)).fetchone()[0] != "succeeded"
     finally:
         conn.close()
+
+
+def test_spec_refuses_an_unknown_top_level_key_as_invalid_experiment_spec():
+    with pytest.raises(OpsError) as excinfo:
+        experiments.experiment_spec_from_document(_spec_document(author="operator"))
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_experiment_document_rejects_non_mapping_input():
+    for malformed in (["fill", "mid"], 7):
+        with pytest.raises(OpsError) as excinfo:
+            experiments.experiment_spec_from_document(malformed)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("changes", (
+    pytest.param({"arms": "fixture"}, id="string-arms-document"),
+    pytest.param({"arms": {"fixture": True}}, id="mapping-arms-document"),
+    pytest.param({"folds": "fold-1"}, id="string-folds-document"),
+    pytest.param({"folds": {"fold-1": True}}, id="mapping-folds-document"),
+))
+def test_experiment_spec_parser_rejects_non_array_arm_and_fold_fields(changes):
+    """Gate round-3 finding: the parser ran ``tuple(...)`` over the raw
+    document value before any validation, so an explicitly present string
+    became character IDs and a mapping became its keys, and malformed
+    documents reached the plan-aware runners. The document boundary now
+    refuses every non-array value, and the refusal is parsing-level: a spec
+    rebuilt with ``dataclasses.replace`` is the other test's job."""
+    with pytest.raises(OpsError) as excinfo:
+        experiments.experiment_spec_from_document(_spec_document(**changes))
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", changes
+    assert excinfo.value.problem.details["field"] == next(iter(changes))
+
+    parsed = experiments.experiment_spec_from_document(_spec_document())
+    assert parsed.arms == ("fixture",) and parsed.folds == ("fold-1",)
+    optional = _spec_document()
+    del optional["arms"], optional["folds"]
+    defaulted = experiments.experiment_spec_from_document(optional)
+    assert defaulted.arms == () and defaulted.folds == ()
+
+    # A well-formed array whose items are not strings stays the resolver's
+    # refusal, exactly as before: the parser only checks the raw shape.
+    nested = experiments.experiment_spec_from_document(
+        _spec_document(arms=["fixture", ["mutable"]]))
+    assert nested.arms == ("fixture", ["mutable"])
+    with pytest.raises(OpsError) as excinfo:
+        experiments.resolve_experiment_plan(nested)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_experiment_plan_rejects_non_mapping_document_before_field_access(tmp_path):
+    """CLI-facing entry point: a JSON document that is not a mapping -- even
+    ``[{}]``, whose sole element is -- must be refused as the resolver's
+    typed code before the ``document.get`` field access, not as the bare
+    ``AttributeError`` a list would otherwise raise through the CLI."""
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps([{}]))
+    with pytest.raises(OpsError) as excinfo:
+        experiment_plan(spec_path, smoke=True)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_unused_economic_key_refuses_before_the_runner_is_invoked(tmp_path):
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid", "slippage_bps": 5}))
+    invoked = []
+
+    def runner(*, run_dir, no_ledger):
+        invoked.append(run_dir)
+
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, tmp_path / "run", runner=runner,
+                                   mode="smoke", synthetic=True)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not invoked and not (tmp_path / "run").exists()
+
+
+def test_resolved_plan_is_immutable_and_its_json_bytes_are_canonical():
+    document = _spec_document(economic_params={"fill": "mid"})
+    plan = experiments.resolve_experiment_plan(
+        experiments.experiment_spec_from_document(document))
+    first = plan.json_bytes()
+    assert first == plan.json_bytes()
+    assert b'"fill":"mid"' in first and b": " not in first
+    payload = json.loads(first.decode("utf-8"))
+    assert list(payload) == sorted(payload)
+    with pytest.raises(TypeError):
+        plan.economic_params["fill"] = "off"
+    document["economic_params"]["fill"] = "off"  # no mutable mapping leaks in
+    assert plan.economic_params["fill"] == "mid"
+    assert plan.json_bytes() == first
+
+    direct = experiments.ExperimentSpec(
+        experiment_id="x", hypothesis="plumbing", primary_arm_id="fixture",
+        arms=("fixture",), seed=7, folds=("fold-1",), economic_params={"fill": "mid"},
+        price_source="synthetic", runner="synthetic")
+    direct_plan = experiments.resolve_experiment_plan(direct)
+    direct_bytes = direct_plan.json_bytes()
+    assert direct_plan.arms == ("fixture",) and direct_plan.folds == ("fold-1",)
+    assert direct_plan.json_bytes() == direct_bytes
+
+
+def test_resolver_rejects_non_mapping_economic_params():
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    for malformed in (["fill", "mid"], 7):
+        with pytest.raises(OpsError) as excinfo:
+            experiments.resolve_experiment_plan(replace(spec, economic_params=malformed))
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("changes", (
+    pytest.param({"seed": {"n": 1}}, id="mutable-mapping-seed"),
+    pytest.param({"seed": True}, id="bool-seed"),
+    pytest.param({"seed": 7.5}, id="float-seed"),
+    pytest.param({"arms": ["fixture", ["mutable"]]}, id="mutable-list-arms"),
+    pytest.param({"arms": ["fixture"]}, id="plain-list-arms"),
+    pytest.param({"arms": "fixture"}, id="string-arms"),
+    pytest.param({"folds": ["fold-1", None]}, id="non-string-fold"),
+    pytest.param({"folds": ["fold-1"]}, id="plain-list-folds"),
+    pytest.param({"economic_params": {"fill": float("nan")}}, id="non-finite-nested"),
+    pytest.param({"economic_params": {"fill": {"nested": {1: "int key"}}}},
+                 id="non-string-nested-key"),
+    pytest.param({"economic_params": {"fill": [{"nested": {1, 2}}]}}, id="set-nested"),
+    pytest.param({"economic_params": {1: "int key", "slippage_bps": 5}},
+                 id="mixed-nonstring-key-with-unknown-string-key"),
+    pytest.param({"runner": ""}, id="empty-runner"),
+))
+def test_resolver_rejects_malformed_plan_field_types(changes):
+    """Gate round-2 finding: the spec's dataclass annotations check nothing
+    at runtime, so a JSON object supplied as ``seed`` was kept by reference
+    in the resolved plan and mutating that source rewrote the plan's
+    canonical bytes. The resolver now validates every field it copies into
+    ``ResolvedExperimentPlan`` before a plan exists, and each malformed
+    value is the same typed refusal -- never normalized or frozen into a
+    plan. A valid integer seed still resolves and serializes as that same
+    integer. Round-2 correction: a plain mutable list in ``arms``/``folds``
+    contradicts the fields' declared tuple types (the parser converts valid
+    document arrays; a hand-supplied list is refused), and economic keys are
+    type-checked before the unused-key sort, so a mixed non-string key set
+    beside an unknown string key is this typed refusal -- never the bare
+    comparison ``TypeError`` sorting mixed keys would raise."""
+    spec = experiments.experiment_spec_from_document(_spec_document())
+    with pytest.raises(OpsError) as excinfo:
+        experiments.resolve_experiment_plan(replace(spec, **changes))
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", changes
+    plan = experiments.resolve_experiment_plan(spec)
+    assert plan.seed == 7 and isinstance(plan.seed, int)
+    assert b'"seed":7' in plan.json_bytes()
+
+
+def test_changed_fill_changes_the_plan_the_runner_receives(tmp_path):
+    received = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        received.append(execution_plan)
+        (run_dir / "REPORT.md").write_text(
+            "# plan probe\n\n*Generated by engine.report v1.0.*\n")
+
+    for fill in ("mid", "off"):
+        spec = experiments.experiment_spec_from_document(
+            _spec_document(economic_params={"fill": fill}))
+        receipt = experiments.run_experiment(spec, tmp_path, tmp_path / fill, runner=runner,
+                                             mode="smoke", synthetic=True)
+        assert receipt["status"] == "succeeded"
+    assert [type(plan) for plan in received] == [experiments.ResolvedExperimentPlan] * 2
+    assert [plan.economic_params["fill"] for plan in received] == ["mid", "off"]
+    assert received[0].json_bytes() != received[1].json_bytes()
+
+
+def test_legacy_callable_without_execution_plan_still_runs_empty_economics(tmp_path):
+    spec = experiments.experiment_spec_from_document(_spec_document(economic_params={}))
+    seen = []
+
+    def runner(*, run_dir, no_ledger):
+        seen.append(no_ledger)
+        (run_dir / "REPORT.md").write_text(
+            "# legacy\n\n*Generated by engine.report v1.0.*\n")
+
+    receipt = experiments.run_experiment(spec, tmp_path, tmp_path / "legacy", runner=runner,
+                                         mode="smoke", synthetic=True)
+    assert receipt["status"] == "succeeded"
+    assert seen == [True]
+
+
+def test_legacy_callable_without_execution_plan_refuses_declared_economics(tmp_path):
+    """A legacy callable has no channel for ``execution_plan``, so a resolved
+    plan carrying economic parameters is a typed refusal before the call --
+    never an invocation that silently drops the declared stance -- and the
+    refusal is a preflight in ``run_experiment`` itself: no run directory,
+    no ``CAPABILITIES.json``, no receipt exists when it fires."""
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid"}))
+    invoked = []
+
+    def runner(*, run_dir, no_ledger):
+        invoked.append(run_dir)
+
+    run_dir = tmp_path / "legacy-refusal"
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                   mode="smoke", synthetic=True)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert excinfo.value.problem.details["economic_keys"] == ["fill"]
+    assert not invoked
+    assert not run_dir.exists()
+    assert not (run_dir / "CAPABILITIES.json").exists()
+    assert not (tmp_path / "experiment_receipt.json").exists()
+
+
+def test_run_experiment_hands_in_the_same_supplied_resolved_plan(tmp_path):
+    """A supplied plan whose canonical bytes match the spec's resolution is
+    adopted as-is -- the callable receives that exact object -- and a plan
+    that resolves differently is a typed refusal before the run directory
+    or any evidence can exist."""
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid"}))
+    plan = experiments.resolve_experiment_plan(spec)
+    received = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        received.append(execution_plan)
+        (run_dir / "REPORT.md").write_text(
+            "# supplied plan\n\n*Generated by engine.report v1.0.*\n")
+
+    run_dir = tmp_path / "supplied"
+    receipt = experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                         mode="smoke", synthetic=True, resolved_plan=plan)
+    assert receipt["status"] == "succeeded"
+    assert len(received) == 1
+    assert received[0] is plan
+
+    mismatched = experiments.resolve_experiment_plan(
+        replace(spec, economic_params={"fill": "off"}))
+    refused_dir = tmp_path / "mismatched"
+    invoked = []
+
+    def spy_runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(execution_plan)
+
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, refused_dir, runner=spy_runner,
+                                   mode="smoke", synthetic=True, resolved_plan=mismatched)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not invoked
+    assert not refused_dir.exists()
+
+
+def test_run_experiment_rejects_mutable_supplied_plan_economics(tmp_path):
+    """Gate finding: canonical bytes can match while nested economics stay
+    editable -- a supplied plan whose ``economic_params`` is a mutable dict
+    is the same typed refusal, fired as a preflight before the run directory
+    or any evidence exists, and the runner is never invoked."""
+    spec = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={"fill": "mid"}))
+    plan = replace(experiments.resolve_experiment_plan(spec), economic_params={"fill": "mid"})
+    assert plan.json_bytes() == experiments.resolve_experiment_plan(spec).json_bytes()
+    invoked = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(execution_plan)
+
+    run_dir = tmp_path / "mutable-supplied"
+    with pytest.raises(OpsError) as excinfo:
+        experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                   mode="smoke", synthetic=True, resolved_plan=plan)
+    assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert not invoked
+    assert not run_dir.exists()
+    assert not (run_dir / "CAPABILITIES.json").exists()
+    assert not (tmp_path / "experiment_receipt.json").exists()
+
+
+def test_run_experiment_rejects_replaced_mutable_supplied_plan(tmp_path):
+    """Round-2 gate: the byte-equal impostor can hide mutability in fields
+    the immutable-economics shape check alone would wave through -- a plain
+    ``economic_params`` dict, a ``MappingProxyType`` over a caller-retained
+    mutable backing dict, a list ``arms``. Every ``dataclasses.replace``
+    rebuild loses the resolver's provenance marker, so each is the same
+    typed refusal, fired as a preflight before any run directory or
+    evidence exists, and the runner is never invoked. The resolver's own
+    plan is the contrasting case: mutating the source economics dictionary
+    after resolution -- it travels into the spec by reference -- never
+    changes its content or its canonical bytes."""
+    source_params = {"fill": "mid"}
+    spec = experiments.ExperimentSpec(
+        experiment_id="x", hypothesis="plumbing", primary_arm_id="fixture",
+        arms=("fixture",), seed=7, folds=("fold-1",),
+        economic_params=source_params, price_source="synthetic", runner="synthetic")
+    accepted = experiments.resolve_experiment_plan(spec)
+    canonical = accepted.json_bytes()
+    source_params["fill"] = "off"
+    assert accepted.economic_params["fill"] == "mid"
+    assert accepted.arms == ("fixture",) and accepted.folds == ("fold-1",)
+    assert accepted.json_bytes() == canonical
+
+    dict_plan = replace(accepted, economic_params={"fill": "mid"})
+    backing = {"fill": "mid"}
+    proxy_plan = replace(accepted, economic_params=MappingProxyType(backing))
+    arms_plan = replace(accepted, arms=["fixture"])
+    for variant in (dict_plan, proxy_plan, arms_plan):
+        assert variant.json_bytes() == canonical
+
+    # Mutated after wrapping: the retained dict still edits the "read-only"
+    # proxy, proving the variant exercises the live alias, not a snapshot.
+    backing["fill"] = "off"
+    assert proxy_plan.economic_params["fill"] == "off"
+
+    invoked = []
+
+    def runner(*, run_dir, no_ledger, execution_plan):
+        invoked.append(execution_plan)
+
+    for name, variant in (("economic-dict", dict_plan),
+                          ("economic-proxy", proxy_plan),
+                          ("arms-list", arms_plan)):
+        run_dir = tmp_path / name
+        with pytest.raises(OpsError) as excinfo:
+            experiments.run_experiment(spec, tmp_path, run_dir, runner=runner,
+                                       mode="smoke", synthetic=True, resolved_plan=variant)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", name
+        assert not invoked
+        assert not run_dir.exists()
+        assert not (run_dir / "CAPABILITIES.json").exists()
+    assert not (tmp_path / "experiment_receipt.json").exists()
