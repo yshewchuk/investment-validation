@@ -716,7 +716,20 @@ def _annotate_variant_identity(report_path: Path, variant_id: str) -> dict:
     One fixed variant per run: the section always states
     ``Variants tried: 1``, and a rerun replaces its prior section between the
     markers rather than duplicating it, so annotation is idempotent.
+
+    The directory entry is inspected with ``lstat()`` before any read or
+    write: a symlink, a non-regular entry, or a hardlink (``st_nlink > 1``)
+    is refused before any write with a generic, public-safe
+    ``VALIDATION_FAILED`` -- registered non-retryable -- leaving the staged
+    report's link and target bytes unchanged. ``run_experiment`` captures
+    that refusal as the typed failure receipt the worker re-raises, so no
+    successful report artifact, durable run, or ledger row is committed.
     """
+    import stat
+
+    entry = report_path.lstat()
+    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink > 1:
+        raise fail("VALIDATION_FAILED", "experiment report is not a regular file")
     start = "<!-- variant-identity:start -->"
     end = "<!-- variant-identity:end -->"
     text = report_path.read_text()
