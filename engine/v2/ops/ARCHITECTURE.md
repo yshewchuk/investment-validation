@@ -93,7 +93,9 @@ resolves the release once, reads staged `events.json` (plus an optional
 "Failure semantics" below), assembles, scores under `no_fit_guard()`, and
 writes `records.json`/`refusals.json`. **Supports `STR-THRU` only** — any
 other strategy refuses per-row. `supervisor.Service`'s tick sidecar (below) is
-its one production caller, though it never actually submits a job today.
+its one production caller: once it has staged and registered both documents it
+submits the shadow JobSpec for a new eligible snapshot-pinned identity, while
+the production-default `legacy`/unpinned path stays a no-op.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
