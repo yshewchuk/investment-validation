@@ -1252,10 +1252,11 @@ def _native_score_batch_identity(conn):
     snapshot-mode rerun, say) differ only in ``scope_hash``, a content
     hash with no time meaning, so picking by ``max(scope_hash)`` (the
     original, wrong version of this function) picked whichever happened to
-    hash higher, not whichever ran later -- and whether that SPECIFIC job
-    pinned a snapshot (``_stage_parameters`` only sets
-    ``snapshot_generation_id`` when a plan's ``input_mode="snapshot"``;
-    production's own default, ``"legacy"``, never does).
+    hash higher, not whichever ran later -- and retains that SPECIFIC job's
+    decoded ``LegacyParameters`` only when it pinned a snapshot
+    (``_stage_parameters`` only sets ``snapshot_generation_id`` when a
+    plan's ``input_mode="snapshot"``; production's own default,
+    ``"legacy"``, never does), else ``None``.
 
     A row whose ``created_at`` is missing or blank (the schema declares the
     column ``NOT NULL``, so this should never happen, but this function
@@ -1268,8 +1269,15 @@ def _native_score_batch_identity(conn):
 
     Returns ``None`` when no legacy "score" job has ever succeeded, or none
     of its rows carry both a parseable idempotency key and a usable
-    ``created_at``.
+    ``created_at``. Otherwise the third value is the selected row's decoded
+    ``LegacyParameters`` when its ``snapshot_generation_id`` is nonempty --
+    the exact selected snapshot id, ``horizon_days`` and ``tickers`` the
+    Slice 5 sidecar needs, with no second identity query -- and ``None``
+    for a legacy/unpinned/missing snapshot.
     """
+    from engine.v2.foundation import from_document
+    from engine.v2.ops.stages import LegacyParameters
+
     rows = conn.execute(
         "SELECT idempotency_key, spec_json, created_at FROM jobs WHERE kind = ? AND state = 'succeeded'",
         (_LEGACY_SCORE_KIND,)).fetchall()
@@ -1287,43 +1295,44 @@ def _native_score_batch_identity(conn):
     session, _, scope_hash, spec_json = max(
         candidates, key=lambda item: (item[0], item[1], item[2]))
     parameters = json.loads(spec_json).get("parameters") or {}
-    snapshot_pinned = bool(parameters.get("snapshot_generation_id"))
-    return session, scope_hash, snapshot_pinned
+    if not parameters.get("snapshot_generation_id"):
+        return session, scope_hash, None
+    return session, scope_hash, from_document(LegacyParameters, parameters)
 
 
 def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, release_root, *,
-                                              catalog_path, objects_root, code_source, clock):
+                                              catalog_path, objects_root, code_source, clock,
+                                              events_ref=None, producer_refusals_ref=None,
+                                              calendar_revision=None, snapshot_id=None):
     """Cutover PR-7a: the ONLY place ``native_score_batch`` is ever
     submitted -- called every ``supervisor.Service.tick()``
     (``Service._reconcile_native_score_batch_shadow``), never by
     ``build_legacy_job_requests``. Mirrors
-    ``submit_computed_moves_refresh_if_ready`` in shape; see
-    ARCHITECTURE.md "Outputs"/"Failure semantics" for the full R1-R6
-    account.
+    ``submit_computed_moves_refresh_if_ready`` in shape; see ARCHITECTURE.md
+    "Outputs"/"Failure semantics" for the full R1-R6 account.
+    ``release_root`` is the caller's ALREADY verified production release
+    root; a release-unavailable outcome never reaches here (R2).
 
-    ``release_root``: the caller's ALREADY cheap-checked-and-memo-verified
-    production release root (a plain path string) --
-    ``Service._reconcile_native_score_batch_shadow`` runs the
-    ``deployment.production_release_root()`` / ``deployment.current_pointer()``
-    / memo-gated ``release_bindings.resolve_production_release_binding()``
-    gate described in ARCHITECTURE.md's "Inputs" section BEFORE ever calling
-    this function, so a release-unavailable outcome never reaches here and
-    never spends one of the caller's own build-attempt-memo attempts (R2).
-    ``registry``/``policy``/``store``/``catalog_path``/``objects_root``/
-    ``code_source``/``clock`` are unused today -- kept in this signature,
-    matching ``submit_computed_moves_refresh_if_ready``'s own parameter
-    list, so cutover PR-6's still-missing raw-row producer can add the
-    real build+submit call without changing this function's call site in
-    ``supervisor.py``.
+    The Slice 5 refs are the caller-gathered producer-staged artifacts for
+    this session's ``events.json``/``producer_refusals.json``, the pinned
+    earnings calendar revision, and the exact pinned ``snapshot_id``; "the
+    builder only builds" -- it never calls the producer, never re-reads a
+    source, and never resolves the release binding. All four are required
+    before anything is built or submitted: the snapshot-pinned path is
+    REACHABLE today, so a missing ref raises the typed ops error rather
+    than returning nothing, letting the caller's problem-reporting/backoff
+    surface it. Both staged refs appear in ``input_refs`` (a direct artifact
+    binding is admitted only through ``spec.input_refs``, ``input_bindings.py:66``).
 
     Returns ``None`` when there is nothing to do yet (no catalog, no
-    succeeded "score" job to key a session off, that job pinning no
-    snapshot -- production's default "legacy" input mode, per
-    ARCHITECTURE.md "Inputs" -- or today's session already has a job under
-    this key, in any state). Any exception past that point is the caller's
-    ``Service`` to catch, exactly like ``submit_computed_moves_refresh_if_ready``.
+    succeeded "score" job, that job pinning no snapshot, or a job already
+    exists under this key). Later exceptions are the caller's to catch.
     """
-    from engine.v2.ops.submission import job_id_for
+    from engine.v2.contracts import JobSpec, SubmitRequest
+    from engine.v2.foundation import to_document
+    from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
+    from engine.v2.ops.stages import NativeScoreBatchParameters
+    from engine.v2.ops.submission import job_id_for, submit
 
     if conn is None:
         return None
@@ -1332,28 +1341,45 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
         return None
     session, scope_hash, snapshot_pinned = identity
     if not snapshot_pinned:
-        # R1: production's default "legacy" input mode pins no snapshot for
-        # "score" -- there is no BoardRequest universe to enumerate against.
-        # See ARCHITECTURE.md "Cutover PR-7a's input sourcing".
+        # R1: production's default "legacy" input mode pins no snapshot --
+        # see ARCHITECTURE.md "Cutover PR-7a's input sourcing".
         return None
     key = _native_score_batch_key(session, scope_hash)
-    job_id = job_id_for("shadow", key)
-    exists = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    exists = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?",
+                          (job_id_for("shadow", key),)).fetchone()
     if exists is not None:
         return None
-    # The still-missing raw-row producer (cutover PR-6) would enumerate
-    # native_board_universe.board_requests against this session's pinned
-    # snapshot and stage per-event events.json rows here. Not built by this
-    # PR (explicitly out of scope; see ARCHITECTURE.md). REACHABLE today --
-    # an operator's `--input-mode snapshot` plan pins a snapshot on "score"
-    # -- so this raises rather than silently doing nothing, letting the
-    # caller's existing problem-reporting/backoff machinery surface it
-    # instead of burning attempts with no visible cause.
-    raise fail(
-        "VALIDATION_FAILED",
-        "native_score_batch's raw-row producer (cutover PR-6) is not built "
-        "yet; cannot enumerate BoardRequests for a session whose \"score\" "
-        "job pinned a snapshot")
+    missing = tuple(name for name, ref in (("events_ref", events_ref),
+                                           ("producer_refusals_ref", producer_refusals_ref),
+                                           ("calendar_revision", calendar_revision),
+                                           ("snapshot_id", snapshot_id))
+                    if not ref)
+    if missing:
+        raise fail(
+            "VALIDATION_FAILED",
+            "native_score_batch cannot be built without its staged producer "
+            "refs, the pinned earnings calendar revision, and the pinned snapshot id",
+            details={"missing": missing, "session": session, "scope_hash": scope_hash})
+    parameters = NativeScoreBatchParameters(
+        expected_ids=(session + "|" + scope_hash,),
+        release_root=str(release_root), as_of=session, snapshot_id=snapshot_id,
+        calendar_revision=str(calendar_revision), feature_names=(),
+        input_bindings={"events.json": events_ref,
+                        "producer_refusals.json": producer_refusals_ref})
+    job = JobSpec(
+        kind="native_score_batch",
+        implementation_ref=content_hash(worker_source_manifest(code_source)),
+        spec_hash=None,
+        environment_ref=content_hash(environment_identity(_thread_count("native_score_batch"))),
+        parameters=to_document(parameters),
+        input_refs=(events_ref, producer_refusals_ref),
+        dependency_job_ids=(),
+        output_namespace="shadow",
+        resource_class="io_fetch",
+        retry_policy_ref="bounded",
+        checkpoint_contract_ref="native_score_batch_records.v2.0")
+    request = SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
+    return submit(conn, registry, policy, request, clock=clock)
 
 
 def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, year_end,
