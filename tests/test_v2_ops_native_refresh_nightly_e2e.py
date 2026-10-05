@@ -258,15 +258,21 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 
 
-def test_a_missing_expected_ticker_refuses_the_refresh_without_committing(tmp_path, monkeypatch):
+def test_a_missing_expected_ticker_commits_rows_and_records_a_coverage_gap(
+        tmp_path, monkeypatch):
+    """One retry later, BBB is still absent from both non-empty 2xx pairs:
+    the refresh commits every returned ticker's row, advances the head, and
+    records a typed ``partial`` coverage whose only ``missing`` outcome is
+    BBB, receipt-backed and never asserted as a complete response."""
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
     configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
 
+    missing = "BBB"
     _plan, requests = _build_requests(conn, store, clock, tmp_path,
-                                      context_tickers=(TICKER, "BBB"))
+                                      context_tickers=(TICKER, missing))
     request = requests[0]
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
@@ -283,19 +289,46 @@ def test_a_missing_expected_ticker_refuses_the_refresh_without_committing(tmp_pa
                 break
             clock.advance(70)
             state = run_until(service, conn, receipt.job_id, timeout=60, states=states)
+        if state != "succeeded":
+            _raise_attempt_failure(conn, service, receipt.job_id, state)
     finally:
         service.close()
 
-    assert state != "succeeded"
-    assert state == "failed"
-    failure = json.loads(conn.execute(
-        "SELECT failure_json FROM jobs WHERE job_id = ?",
-        (receipt.job_id,)).fetchone()[0])
-    assert failure["code"] == "TRANSIENT_SOURCE"
-    unchanged = _head(conn)
-    assert (unchanged["snapshot_id"], unchanged["generation"]) == (
-        head["snapshot_id"], head["generation"])
-    assert conn.execute("SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 0
+    new_head = _head(conn)
+    assert new_head["generation"] == head["generation"] + 1
+    assert new_head["snapshot_id"] != head["snapshot_id"]
+    revisions = conn.execute(
+        "SELECT ticker, session_date FROM data_daily_market_revisions").fetchall()
+    assert [(row["ticker"], row["session_date"]) for row in revisions] == [(TICKER, SESSION)]
+    assert missing not in {row["ticker"] for row in revisions}
+
+    coverage_row = conn.execute(
+        "SELECT coverage_json FROM data_snapshot_coverage "
+        "WHERE snapshot_id = ? AND table_name = ?",
+        (new_head["snapshot_id"], "daily_market")).fetchone()
+    assert coverage_row is not None
+    coverage = json.loads(coverage_row["coverage_json"])
+    assert coverage["state"] == "partial"
+    assert {key["ticker"] for key in coverage["expected"]} == {TICKER, missing}
+    outcomes = {outcome["key"]["ticker"]: outcome for outcome in coverage["outcomes"]}
+    assert set(outcomes) == {TICKER, missing}
+    assert outcomes[TICKER]["status"] == "present"
+    assert [outcome["key"]["ticker"] for outcome in coverage["outcomes"]
+            if outcome["status"] == "missing"] == [missing]
+    gap = outcomes[missing]
+    assert gap["key"]["ticker"] == missing
+    assert gap["key"]["session_date"] == SESSION
+    assert gap["receipt_id"] in coverage["acquisition_receipt_refs"]
+
+    raw_receipt = conn.execute(
+        "SELECT response_kind, response_meta_json FROM data_raw_receipts "
+        "WHERE raw_receipt_id = ?", (gap["receipt_id"],)).fetchone()
+    assert raw_receipt is not None
+    assert raw_receipt["response_kind"] == "partial"
+    response_meta = json.loads(raw_receipt["response_meta_json"])
+    assert response_meta["attempts"] == 2
+    assert (response_meta["summaries_status"], response_meta["cores_status"]) == (200, 200)
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
 
 
 def test_second_native_refresh_for_the_same_session_is_cache_only(tmp_path, monkeypatch):

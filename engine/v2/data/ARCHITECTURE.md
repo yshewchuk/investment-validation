@@ -274,7 +274,7 @@ and retryability come from that table, never guessed at a call site.
 | `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
-| `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
+| `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty; `daily_market` missing tickers after the provider's bounded retry are committed as typed partial coverage instead |
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
@@ -288,6 +288,20 @@ and retryability come from that table, never guessed at a call site.
 | `TIER4_CACHE_STALE` | validation | no | a pinned Tier-4 serving-cache ref's embedded panel hash disagrees with the actual panel object |
 | `STALE_EXPECTATION` | validation | no | `explain_dependencies`'s chain-query path sees a stale caller expectation |
 | `CALENDAR_UNAVAILABLE` | validation | no | registered here but raised only by `engine.v2.research`, never from inside this package |
+
+**`daily_market` missing-ticker outcome (R1–R6).** A non-empty 2xx ORATS
+response that remains incomplete after the provider's single paired retry is
+committable as partial coverage. It does not turn an absent ticker into a
+revision or mark the response complete.
+
+| Requirement | Outcome |
+|---|---|
+| R1 — typed result | Every expected ticker has a `CoverageOutcome`: observed tickers are `present`; omitted tickers are `missing`, keyed by ticker and session date and linked to the response's raw receipt id. |
+| R2 — storage and query | The existing `data_snapshot_coverage.coverage_json` stores the typed outcomes and expected denominator. Consumers query by snapshot/table coverage, then select `missing` outcomes; no DDL or new migration is required. |
+| R3 — retry/cache | The provider retries the summaries/cores pair once for missing keys. A remaining gap is stored with response kind `partial`, never reused as a `complete` cache hit; a later refresh can retry it with a fresh response. |
+| R4 — transaction | Returned ticker revisions and the partial coverage record enter the same snapshot candidate and head-CAS commit. A commit refusal leaves the head unchanged. |
+| R5 — visible residue | A successful commit contains all returned rows, no fabricated row for a missing ticker, and a queryable gap with session date and raw receipt identity. Empty/not-final responses still refuse under normal source retry semantics. |
+| R6 — idempotency/downstream | Replaying the same receipt reconstructs the same outcomes and coverage identity. New response evidence gets a new receipt identity; downstream consumers read the coverage state and gap outcomes instead of inferring completeness from rows. |
 
 **Target contract: pinned scans and registration (R1–R6).**
 
