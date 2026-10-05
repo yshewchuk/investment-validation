@@ -341,9 +341,10 @@ def test_percentage_point_and_count_fields_render_in_their_own_units(
     """driver_forecast / market_implied_move are percentage points: 5.0 must
     render as "5.0%", never the re-scaled "500.0%"; exp_pnl_model is a
     fraction: 0.05 -> "5.0%"; null entry_premium -> "—"; coverage
-    planned_population is a count: "planned_population: 121", with no "%"
-    anywhere. Asserted on the board row and again on the event detail row
-    opened from it."""
+    planned_population is a count: its .coverage-item has exact text
+    "planned_population: 121" with no "%" (other fractional coverage items
+    legitimately render "%"). Asserted on the board row and again on the
+    event detail row opened from it."""
     _override_fields_by_key(state)
     base = f"http://127.0.0.1:{server.server_port}"
     context, page = _authed_page(browser, server, base)
@@ -358,8 +359,10 @@ def test_percentage_point_and_count_fields_render_in_their_own_units(
         expect(row.get_by_test_id("entry-premium-cell")).to_have_text("—")
 
         coverage = page.get_by_test_id("release-coverage")
-        expect(coverage).to_contain_text("planned_population: 121")
-        expect(coverage).not_to_contain_text("%")
+        population_item = coverage.locator(
+            ".coverage-item", has_text="planned_population")
+        expect(population_item).to_have_text("planned_population: 121")
+        expect(population_item).not_to_contain_text("%")
 
         row.get_by_test_id("open-event-link").click()
         expect(page.get_by_test_id("event-detail")).to_be_visible()

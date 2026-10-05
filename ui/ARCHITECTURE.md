@@ -20,6 +20,17 @@ summary component does not request those pages.
 React DOM and chart pixels, navigation/deep links, loading/error/refusal states
 and links to the same pinned compatibility release. No engine records are written.
 
+## Financial display units
+The serving contract defines wire units for both legacy-via-v2 and native rows;
+the React app formats those values once. `fmtPercentagePoint` displays
+`driver_forecast` and `market_implied_move` with `%` and no multiplication by
+100. Fractional `headline_expected_return` values and non-count
+`coverage_summary` ratios use fraction-times-100 percent formatting.
+`planned_population` and `compared_population` display as whole-number counts.
+`entry_premium` is USD, and null display values remain an em dash. The existing
+operations HTML and legacy previews remain compatibility exceptions; this
+formatting contract applies to the React presentation layer.
+
 ## Dependencies
 React components use typed client/hooks; the browser calls serving over HTTP.
 No direct scoring/model/ledger/evaluation/provider access; browser users enter
