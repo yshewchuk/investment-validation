@@ -163,8 +163,8 @@ def test_native_refresh_mode_without_override_builds_its_plan(tmp_path):
         assert refresh.job.kind == "incremental_refresh"
         assert refresh.job.parameters["parent_snapshot_id"] == head
         assert refresh.job.parameters["expected_ids"] == ["eod-2026-09-18-market"]
-        # one market-wide unit x 3 bounded attempts x 2 ORATS calls per unit.
-        assert refresh.job.parameters["provider_calls"] == 6
+        # one market-wide fetch unit x 3 job attempts x 4 possible HTTP calls per unit.
+        assert refresh.job.parameters["provider_calls"] == 12
         assert refresh.job.provider_budget_ref == NATIVE_DAILY_MARKET_ACCOUNT
         # the freshly built plan is published and bound exactly like an override.
         binding = refresh.job.parameters["input_bindings"]["refresh_plan.json"]
