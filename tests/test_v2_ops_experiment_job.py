@@ -204,10 +204,12 @@ def test_cli_experiment_plan_without_either_flag_still_refuses(tmp_path, capsys)
 def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path,
                                                                         monkeypatch):
     runner_id = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
-    runner_path = tmp_path / runner_id
+    checkout = tmp_path
+    runner_path = checkout / runner_id
     runner_path.parent.mkdir(parents=True)
     runner_path.write_text("if __name__ == '__main__':\n    pass\n")
-    (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
+    legacy_spec = runner_path.parent / "spec.yaml"
+    legacy_spec.write_text("id: EXP-182\n")
     (tmp_path / "spec.json").write_text(
         json.dumps(_spec_document(runner=runner_id, economic_params={})))
 
@@ -222,10 +224,25 @@ def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = worker.dispatch("experiment",
                              {"expected_ids": ["experiment:x"], "runner": runner_id,
-                              "no_ledger": False}, tmp_path)
+                              "no_ledger": False, "preregistration_root": str(checkout)},
+                             tmp_path)
     assert result["completed_ids"] == ["experiment:x"]
     assert len(commands) == 1
-    assert "--no-ledger" in commands[0]
+    assert "--no-ledger" in commands[0], "the runner never gets ledger writes"
+
+    from experiments import lib
+
+    registered = lib.spec_hash(lib.load_spec(legacy_spec))
+    resolved = experiments.experiment_spec_from_document(
+        json.loads((tmp_path / "spec.json").read_text())).spec_hash
+    report_text = (tmp_path / "REPORT.md").read_text()
+    assert f"Variant ID: {registered}\nVariants tried: 1\n" in report_text, \
+        "the report carries the registered identity, not the resolved hash"
+    assert f"Variant ID: {resolved}" not in report_text
+    report_output = next(output for output in result["outputs"]
+                         if output["name"] == "experiment_variant_report")
+    assert report_output["path"] == "REPORT.md"
+    assert report_output["schema"] == "experiment_variant_report.v1.0"
 
 
 def test_worker_refuses_a_legacy_runner_that_exits_nonzero_after_the_report(tmp_path):
@@ -289,6 +306,15 @@ def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path
             service.close()
         assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 1
+        # The durable run carries the SAME variant identity the ledger row
+        # joins on: no legacy spec source for the synthetic runner, so the
+        # registered hash is None and the resolved spec hash stands.
+        expected_variant = experiments.experiment_spec_from_document(
+            _spec_document(economic_params={})).spec_hash
+        evidence = json.loads(conn.execute(
+            "SELECT evidence_json FROM experiment_runs").fetchone()[0])
+        assert evidence["variant_id"] == expected_variant
+        assert evidence["variants_tried"] == 1
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
                                         {"id": "x", "stage": "ran"}]
         assert not (ops_root / "experiments").exists(), \
@@ -304,6 +330,10 @@ def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path
                 effect(conn_)
         assert _ledger_rows(ledger) == [{"id": "x", "stage": "planned"},
                                         {"id": "x", "stage": "ran"}]
+        retried = json.loads(conn_.execute(
+            "SELECT evidence_json FROM experiment_runs").fetchone()[0])
+        assert retried["variant_id"] == expected_variant
+        assert retried["variants_tried"] == 1
     finally:
         conn.close()
 
@@ -688,6 +718,32 @@ def test_resolver_rejects_malformed_plan_field_types(changes):
     plan = experiments.resolve_experiment_plan(spec)
     assert plan.seed == 7 and isinstance(plan.seed, int)
     assert b'"seed":7' in plan.json_bytes()
+
+
+def test_resolver_refuses_a_spec_that_is_not_exactly_its_primary_arm():
+    """Fixed-arm guard: execution resolves one plan for one arm, so a spec
+    declaring more than one arm -- or a single arm the spec does not name
+    primary -- is refused by the resolver as ``INVALID_EXPERIMENT_SPEC``
+    before any plan exists, leaving no artifact, receipt, report, or ledger
+    row behind. The code is non-retryable, so the caller registers a
+    corrected spec as a new identity rather than retrying this one. A
+    well-formed one-arm spec whose primary is that arm still resolves."""
+    for changes, arm_count in (
+            ({"arms": []}, 0),
+            ({"arms": ["fixture", "challenger"]}, 2),
+            ({"primary_arm_id": "challenger"}, 1)):
+        malformed = experiments.experiment_spec_from_document(_spec_document(**changes))
+        with pytest.raises(OpsError) as excinfo:
+            experiments.resolve_experiment_plan(malformed)
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", changes
+        assert excinfo.value.problem.retryable is False, changes
+        assert excinfo.value.problem.details["arm_count"] == arm_count, changes
+        assert excinfo.value.problem.details["arms"] == list(malformed.arms), changes
+
+    plan = experiments.resolve_experiment_plan(
+        experiments.experiment_spec_from_document(_spec_document()))
+    assert plan.arms == ("fixture",)
+    assert json.loads(plan.json_bytes())["arms"] == ["fixture"]
 
 
 def test_changed_fill_changes_the_plan_the_runner_receives(tmp_path):

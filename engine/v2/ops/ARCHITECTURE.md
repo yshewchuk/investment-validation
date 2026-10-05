@@ -1305,7 +1305,7 @@ Two standing fixes worth stating as rules: a worker's exit code, not just
 process-family liveness, decides `WORKER_FAILED` (a clean `exit_code == 0`
 with a still-live straggler is reaped, never failed); and an effect whose
 outbox row is already `delivered` short-circuits on retry with that row's
-stored receipt, rather than raising a permanent refusal.
+stored receipt, rather than raising a permanent refusal. Slice 2a accepts exactly one arm, refusing malformed or multi-arm specs as `INVALID_EXPERIMENT_SPEC` before artifacts or ledger writes; its spec hash identifies the single variant in reports and durable run evidence, matching the registered hash in the seven-column ledger. Reports count one variant including failed attempts; changed-input retries refuse as `IDEMPOTENCY_CONFLICT`, identical retries add no row, and smoke uses `--no-ledger`. The worker publishes `REPORT.md` as `experiment_variant_report`; annotation failure leaves it staged and commits no index or ledger row. No sweep or holdout-read option exists in 2a; typed exclusion belongs to the pinned trade-loader slice.
 
 ### `board_requests` (`native_board_universe.py`)
 

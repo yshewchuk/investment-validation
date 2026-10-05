@@ -285,14 +285,34 @@ def _validate_plan_fields(spec: ExperimentSpec) -> None:
 
 
 def resolve_experiment_plan(spec: ExperimentSpec) -> ResolvedExperimentPlan:
-    """Refuse malformed plan fields and economically unused declarations,
-    then freeze the one plan."""
+    """Refuse malformed plan fields, any spec that is not exactly its declared
+    primary arm, and economically unused declarations, then freeze the one
+    plan."""
     if not isinstance(spec.economic_params, Mapping):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "economic_params must be a mapping",
                    details={"type": type(spec.economic_params).__name__})
     # Order matters: the field check types the economic keys before the sort.
     _validate_plan_fields(spec)
+    # Fixed-arm execution: exactly one arm resolves to a plan, and it must be
+    # the arm the spec declares primary. ``_validate_plan_fields`` already
+    # typed ``arms`` as a tuple of strings, so the count and the match are the
+    # only things left to check. Both refusals fire before a plan exists, so no
+    # artifact, receipt, report, or ledger row can be left behind, and the code
+    # is non-retryable by registry -- a corrected spec is a new identity, never
+    # a retry of this one.
+    if len(spec.arms) != 1:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment plan must declare exactly one arm",
+                   details={"experiment_id": spec.experiment_id,
+                            "arm_count": len(spec.arms), "arms": list(spec.arms)})
+    if spec.arms[0] != spec.primary_arm_id:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "primary_arm_id must name the experiment's single arm",
+                   details={"experiment_id": spec.experiment_id,
+                            "arm_count": len(spec.arms),
+                            "primary_arm_id": spec.primary_arm_id,
+                            "arms": list(spec.arms)})
     unused = sorted(set(spec.economic_params) - SUPPORTED_ECONOMIC_KEYS)
     if unused:
         raise fail("INVALID_EXPERIMENT_SPEC",
@@ -689,10 +709,34 @@ def _report_evidence(run_dir: Path) -> dict:
             "report_bytes": report.stat().st_size}
 
 
+def _annotate_variant_identity(report_path: Path, variant_id: str) -> dict:
+    """Replace-or-append the marker-delimited variant section, re-hash the report.
+
+    One fixed variant per run: the section always states
+    ``Variants tried: 1``, and a rerun replaces its prior section between the
+    markers rather than duplicating it, so annotation is idempotent.
+    """
+    start = "<!-- variant-identity:start -->"
+    end = "<!-- variant-identity:end -->"
+    text = report_path.read_text()
+    section = (f"{start}\n## Variant identity\n\n"
+               f"Variant ID: {variant_id}\nVariants tried: 1\n{end}")
+    if start in text and end in text:
+        head, _, rest = text.partition(start)
+        _, _, tail = rest.partition(end)
+        text = head + section + tail
+    else:
+        text = text.rstrip("\n") + "\n\n" + section + "\n"
+    report_path.write_text(text)
+    return {"report_hash": file_hash(report_path),
+            "report_bytes": report_path.stat().st_size}
+
+
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                    *, runner: Callable, mode="smoke", backup: Callable | None = None,
                    synthetic=False,
-                   resolved_plan: ResolvedExperimentPlan | None = None) -> dict:
+                   resolved_plan: ResolvedExperimentPlan | None = None,
+                   variant_id: str | None = None) -> dict:
     """Run one isolated hypothesis; retries reuse its exact spec/input identity."""
     if mode not in ("smoke", "primary"):
         raise fail("INVALID_REQUEST", "unknown experiment mode")
@@ -730,7 +774,11 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
         result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
                               execution_plan=plan)
         report = _report_evidence(destination)
+        variant = spec.spec_hash if variant_id is None else variant_id
+        report.update(_annotate_variant_identity(Path(report["report"]), variant))
         receipt.evidence.update(report)
+        receipt.evidence["variant_id"] = variant
+        receipt.evidence["variants_tried"] = 1
         receipt.evidence["runner_result"] = result if isinstance(result, dict) else str(result)
         receipt.evidence["synthetic"] = bool(synthetic)
         receipt.status = "succeeded"

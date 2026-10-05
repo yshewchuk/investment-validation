@@ -828,7 +828,9 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
     accepted the attempt — a lost fence never reaches the append at all. The
     append is additionally idempotent by the run's own identity, so a retry
     after a crash between register and append appends exactly one row; it is
-    never gated on ``register_hypothesis``'s ``created`` flag.
+    never gated on ``register_hypothesis``'s ``created`` flag. The same
+    transaction persists the run's variant identity into
+    ``experiment_runs.evidence_json`` before that append.
 
     ``code_source``/``store_root`` name the checkout whose ``experiments/``
     tree owns the ledger (``Service.store_root`` defaults to
@@ -840,6 +842,7 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
     from engine.v2.ops.experiments import (
         experiment_spec_from_document,
         register_hypothesis_in_transaction,
+        registered_spec_hash,
         require_preregistration,
     )
 
@@ -865,6 +868,24 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
             require_preregistration(checkout_root, spec)
         run_id, _created = register_hypothesis_in_transaction(
             txn, spec, receipt["input_hash"], mode=mode, run_id=claim.attempt_id)
+        # Durable variant identity, persisted BEFORE the append: a receipt
+        # reporting another one is a non-retryable refusal that rolls the whole
+        # transaction back, so no evidence, report or ledger byte changes.
+        variant = ((registered_spec_hash(checkout_root, spec) or spec.spec_hash)
+                   if mode == "primary" else spec.spec_hash)
+        reported = (receipt.get("evidence") or {}).get("variant_id")
+        if reported is not None and reported != variant:
+            raise fail("INVALID_EXPERIMENT_SPEC",
+                       "experiment receipt variant identity differs from the "
+                       "checkout's registered one",
+                       details={"expected": variant, "reported": reported})
+        current = txn.execute("SELECT evidence_json FROM experiment_runs "
+                              "WHERE run_id=?", (run_id,)).fetchone()
+        if current is not None:  # existing keys (metrics_source) survive
+            current = dict(json.loads(current[0] or "{}"),
+                           variant_id=variant, variants_tried=1)
+            txn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
+                        (json.dumps(current, sort_keys=True), run_id))
         if mode == "primary":
             _append_ledger_row(txn, checkout_root, spec, receipt, run_id=run_id)
 

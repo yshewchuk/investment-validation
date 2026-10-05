@@ -395,6 +395,7 @@ def _dispatch_experiment(parameters, root):
     """
     from engine.v2.ops.experiments import (
         experiment_spec_from_document,
+        registered_spec_hash,
         resolve_experiment_plan,
         run_experiment,
         synthetic_fixture_runner,
@@ -421,9 +422,17 @@ def _dispatch_experiment(parameters, root):
                                     "stderr_tail": (completed.stderr or "")[-2000:]})
             return {"returncode": completed.returncode, "headline": _runner_headline(root)}
         synthetic = False
+    # The report's variant identity: smoke/synthetic runs carry the resolved
+    # ``spec_hash``; a primary run carries the registered legacy hash its
+    # PLANNED row used, so report and ledger row join on one identity. A
+    # ``registered_spec_hash`` refusal propagates typed, before any report or
+    # output set exists.
+    variant = spec.spec_hash
+    if mode == "primary" and parameters.get("preregistration_root"):
+        variant = registered_spec_hash(parameters["preregistration_root"], spec) or variant
     (root / "resolved_experiment_plan.json").write_bytes(plan.json_bytes())
     receipt = run_experiment(spec, root, root, runner=runner, mode=mode, synthetic=synthetic,
-                             resolved_plan=plan)
+                             resolved_plan=plan, variant_id=variant)
     (root / "experiment_receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     if receipt["status"] != "succeeded":
         raise _experiment_failure(receipt)
@@ -432,7 +441,9 @@ def _dispatch_experiment(parameters, root):
                          "schema": "experiment_receipt.v1.0"},
                         {"name": "resolved_experiment_plan",
                          "path": "resolved_experiment_plan.json",
-                         "schema": "experiment_execution_plan.v1.0"}],
+                         "schema": "experiment_execution_plan.v1.0"},
+                        {"name": "experiment_variant_report", "path": "REPORT.md",
+                         "schema": "experiment_variant_report.v1.0"}],
             "completed_ids": list(expected), "no_work": False}
 
 
