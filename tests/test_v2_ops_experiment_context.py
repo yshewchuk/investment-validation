@@ -59,6 +59,16 @@ def test_entry_instant_in_another_utc_offset_is_accepted():
     assert context.feature("gap") == 0.25
 
 
+def test_one_microsecond_past_entry_in_another_utc_offset_refuses_as_lookahead():
+    offset = timezone(timedelta(hours=-5))
+    leaking_at = (ENTRY_AT + timedelta(microseconds=1)).astimezone(offset)
+    context = _context(_row("gap", leaking_at, 0.99))
+    with pytest.raises(OpsError) as excinfo:
+        context.feature("gap")
+    assert excinfo.value.code == "FEATURE_LOOKAHEAD"
+    assert not excinfo.value.problem.retryable
+
+
 def test_post_entry_row_refuses_even_with_an_older_eligible_row():
     eligible = _row("gap", ENTRY_AT - timedelta(days=2), 0.10)
     passing = _context(eligible)
