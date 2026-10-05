@@ -1119,20 +1119,52 @@ REGISTERED_RUNNERS = frozenset({
 LEGACY_RUNNER_TIMEOUT_S = 3600
 
 
-def run_legacy_script(root, script, args=()):
-    """Run a registered legacy runner in a private root with smoke protection."""
-    _rooted_import(root)
-    base = Path(root).resolve()
+def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = None):
+    """Run a registered legacy runner in a private root with smoke protection.
+
+    ``staging_dir_fd`` (pinned-staging handoff): when the caller has pinned
+    the staging directory, the child's working directory, its staging-root
+    environment value AND its executable are all ``/proc/self/fd/<fd>``-rooted
+    -- the script path is ``/proc/self/fd/<fd>/<registered-relative-script>``,
+    never derived from ``Path(root).resolve()`` or the lexical root -- with
+    that descriptor passed through ``pass_fds``, so neither the staging root
+    nor the child's own executable is resolved through the mutable lexical
+    path: after a path swap the child still runs and writes the SAME pinned
+    stage. The descriptor stays caller-owned and open; this function never
+    closes it. A subprocess that cannot start refuses with a generic,
+    public-safe, non-retryable ``VALIDATION_FAILED`` (no report is published
+    and no ledger row is committed), while a nonzero exit stays the caller's
+    existing typed ``VALIDATION_FAILED``. The registered-runner-name and
+    no-args refusals are unchanged, and with no fd every path, cwd,
+    environment and subprocess detail is exactly as before.
+    """
     relative = str(Path(script))
-    script_path = (base / relative).resolve()
-    if relative not in REGISTERED_RUNNERS or not script_path.is_relative_to(base):
+    if relative not in REGISTERED_RUNNERS:
         raise fail("INVALID_REQUEST", "legacy experiment runner is unaudited")
     if tuple(args):
         raise fail("INVALID_REQUEST", "legacy runner may not enable ledger writes")
     import subprocess
-    command = [sys.executable, "-u", str(script_path), "--no-ledger"]
-    return subprocess.run(command, cwd=base, check=False,
-                          capture_output=True, text=True, timeout=LEGACY_RUNNER_TIMEOUT_S)
+    if staging_dir_fd is None:
+        _rooted_import(root)
+        base = Path(root).resolve()
+        script_path = (base / relative).resolve()
+        if not script_path.is_relative_to(base):
+            raise fail("INVALID_REQUEST", "legacy experiment runner is unaudited")
+        command = [sys.executable, "-u", str(script_path), "--no-ledger"]
+        return subprocess.run(command, cwd=base, check=False,
+                              capture_output=True, text=True,
+                              timeout=LEGACY_RUNNER_TIMEOUT_S)
+    pinned = f"/proc/self/fd/{staging_dir_fd}"
+    command = [sys.executable, "-u", f"{pinned}/{relative}", "--no-ledger"]
+    try:
+        return subprocess.run(command, cwd=pinned,
+                              env=dict(os.environ, INVESTING_PLAN_ROOT=pinned),
+                              check=False, capture_output=True, text=True,
+                              timeout=LEGACY_RUNNER_TIMEOUT_S,
+                              pass_fds=(staging_dir_fd,))
+    except (OSError, ValueError) as exc:
+        raise fail("VALIDATION_FAILED",
+                   "pinned legacy runner subprocess did not start") from exc
 
 
 # --------------------------------------------------------------------------

@@ -1297,7 +1297,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 
 | Condition | Outcome |
 |---|---|
-| Input refusal | Malformed specs and unsafe feature reads receive typed refusals before candidate publication. |
+| Input refusal | Malformed specs and unsafe feature reads receive typed refusals before candidate publication. A linked or replaced staging-path component, or a pinned runner that cannot start, is refused as non-retryable `VALIDATION_FAILED` before report annotation; staged output stays unpublished, external bytes stay unchanged, and no report artifact, run, or ledger row commits. |
 | Candidate/report publication | Failed attempts keep candidates unpublished; failed reports remain staged. Successful variant reports publish as `experiment_variant_report` and carry the variant identity/count; every receipt records one attempted variant, including failures. |
 | Retry reuse | A matching delivered backup outbox row supplies the stored receipt; identical primary replay reuses its run without a duplicate ledger row, while changed input conflicts. Retryable experiment attempts may relaunch the worker and invoke the runner. |
 | Worker cleanup | Exit status determines `WORKER_FAILED`; a clean exit with a live straggler reaps it without that failure. |
