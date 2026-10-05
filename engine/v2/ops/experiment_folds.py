@@ -7,6 +7,18 @@ from dataclasses import dataclass
 from engine.v2.ops.errors import OpsError, fail
 
 
+def _validated_fraction(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
+    try:
+        fraction = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]") from None
+    if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
+    return fraction
+
+
 @dataclass(frozen=True)
 class TrainFoldRule:
     top_fraction: float = 0.5
@@ -14,15 +26,7 @@ class TrainFoldRule:
     def fit_threshold(self, scores: Sequence[float], labels: Sequence[int]) -> float:
         import numpy as np
 
-        fraction = self.top_fraction
-        if isinstance(fraction, bool) or not isinstance(fraction, numbers.Real):
-            raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
-        try:
-            fraction = float(fraction)
-        except (OverflowError, TypeError, ValueError):
-            raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]") from None
-        if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
-            raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
+        fraction = _validated_fraction(self.top_fraction)
         try:
             values = np.asarray(scores, dtype=float)
             targets = np.asarray(labels, dtype=float)
@@ -111,15 +115,7 @@ def fit_walk_forward_fold(estimator, train_features, train_labels, test_features
                           threshold_rule: TrainFoldRule) -> WalkForwardFoldFit:
     if not isinstance(threshold_rule, TrainFoldRule):
         raise fail("INVALID_EXPERIMENT_SPEC", "fold threshold rule has an unsupported type")
-    fraction = threshold_rule.top_fraction
-    if isinstance(fraction, bool) or not isinstance(fraction, numbers.Real):
-        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
-    try:
-        fraction = float(fraction)
-    except (OverflowError, TypeError, ValueError):
-        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]") from None
-    if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
-        raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
+    _validated_fraction(threshold_rule.top_fraction)
     _validate_feature_columns(train_features, test_features)
     matrix, labels = _training_arrays(train_features, train_labels)
     test_matrix = _feature_matrix(test_features)
