@@ -688,7 +688,7 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_calendar_inputs.scan_calendar_row_inputs` owns pinned spot, listed strategy-specific expiry and session-based planned exit (independent of expiry). `nightly_raw_row_producer.build_native_score_batch_events(repository, snapshot, *, as_of, horizon_days, tickers=None) -> tuple[list[dict[str, Any]], dict[str, Any]]` exists and enumerates `scan_forward_board_requests` in order, preserves original timestamps, and returns empty JSON-ready documents before context reads when there are no requests. It has no production caller yet; slice 5 will add the worker/sidecar staging and submission wiring.
+**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_calendar_inputs.scan_calendar_row_inputs` owns pinned spot, listed strategy-specific expiry and session-based planned exit (independent of expiry). `nightly_raw_row_producer.build_native_score_batch_events(repository, snapshot, *, as_of, horizon_days, tickers=None) -> tuple[list[dict[str, Any]], dict[str, Any]]` exists and enumerates `scan_forward_board_requests` in order, preserves original timestamps, and returns empty JSON-ready documents before context reads when there are no requests. It has no production caller yet.
 The producer refuses intraday keys as `INTRADAY_EVENT_NOT_ADMITTED` before context reads or identity normalization; `scan_calendar_row_inputs` itself raises `INVALID_REQUEST` for such keys, making the producer the admission boundary in [#243](https://github.com/yshewchuk/investment-validation/issues/243). For admitted keys it requires the decision session and the full earlier observed-session history needed by the panel's longest regime window. Calendar coverage comes from pinned SPY `price_history`, but that alone does not establish regime-input coverage: after reading each shared panel row, the producer verifies that the `spy_ret252` result from pinned SPY `daily_market` is usable. If the decision session or required observed history is absent, or the actual `daily_market` inputs do not produce that regime value, each affected admitted key gets a fixed-detail `PANEL_HISTORY_NOT_AVAILABLE` typed refusal; no calendar-row or quote composition is attempted for it. The separate runup-history query remains governed by the panel reader. Otherwise it shares panel rows/anchors per `(ticker, event_date, session)`, and composes calendar/quotes per request; only complete compositions yield JSON-ready events (`key`, `calendar_row`, `panel_row`, `panel_anchor`, `tier4_row={}`, `quote_rows`, `quote_status`). Fixed public-safe `{key, code, detail}` refusals and successes are disjoint; any build failure returns no partial tuple. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
@@ -1393,7 +1393,7 @@ job.
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|
-| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request raises `VALIDATION_FAILED` today because the producer has no production caller yet; slice 5 adds the worker/sidecar wiring | the specific succeeded score job read, not session alone |
+| `native_score_batch` shadow | no succeeded legacy score / no promoted release — reported, not submitted; a pinned-snapshot request raises `VALIDATION_FAILED` today because the producer has no production caller yet | the specific succeeded score job read, not session alone |
 | `native_parity` | no paired, succeeded `native_score_batch`/`score` identity yet — returns without submitting; a CONFIRMED schema mismatch parks that `native_score_batch_job_id`, skipping the artifact read and attempt spend on every later tick carrying it (the identity/existing-job lookup itself still runs on eligible ticks) | the specific `native_score_batch` identity read |
 | `_ensure_shadow_snapshot` | the legacy store has not caught up to `as_of` yet — `"not_yet"`/`"snapshot_not_yet"`, resumable, no attempt consumed | `(as_of, attempt)`; a genuine retry after a terminal failure mints a fresh `attempt`, never reusing a dead key |
 | pool-nightly refresh | design only, not yet implemented — see [#192](https://github.com/yshewchuk/investment-validation/issues/192) | — |
@@ -1515,9 +1515,8 @@ both out of every job-submission stage list by name (see "Outputs").
 `native_score_batch`'s sidecar returns a normal no-op if the selected
 `"score"` job pinned no snapshot (never a JobSpec, never a raise); for a
 new eligible snapshot-pinned job it raises `VALIDATION_FAILED` today because
-the raw-row producer has no production caller yet. Slice 5 will route it to
-`submission.submit` through that producer — see "Outputs"/"Failure semantics"
-for both cases.
+the raw-row producer has no production caller yet — see "Outputs"/"Failure
+semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
 (`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through
@@ -1623,9 +1622,7 @@ boundary. It is reachable today for `nightly_trigger._default_plan`'s
 scheduled `"score"` job specifically (see "Primary contracts"); a plan
 built directly with the lower-level plan builder can still default to
 `legacy` input mode instead. The slice-4b raw-row producer consumes these
-requests as a library API, but has no production caller yet. Slice 5 will add
-the worker/sidecar staging and submission wiring (see "Dependencies" →
-"Callers").
+requests as a library API, but has no production caller yet.
 
 ### Native nightly pool/residual refresh (Cutover PR-13a)
 
