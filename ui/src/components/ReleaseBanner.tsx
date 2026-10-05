@@ -54,7 +54,7 @@ export function reloadToCurrent(): void {
 }
 
 function sessionDate(value: string): string | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value) ?? /^.+-(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const match = /^(?:eng-night-)?(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   const year = match?.[1];
   const month = match?.[2];
   const day = match?.[3];

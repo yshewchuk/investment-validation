@@ -303,7 +303,8 @@ def test_current_release_rollback_to_pin_clears_drift_hint(browser, server, stat
 def test_malformed_or_future_resolved_session_is_unknown(browser, server, state):
     """Operations session evidence the board cannot stand behind renders
     unknown, never current, on an otherwise fully valid r1 status: nonempty
-    but malformed requested/resolved identifiers, and ISO date-suffixed
+    but malformed requested/resolved identifiers, malformed identifiers whose
+    only well-formed part is a trailing ISO date, and ISO date-suffixed
     identifiers whose resolved date is later than the requested date. Neither
     may crash the page or disturb the pinned r1 board."""
     base_status = {
@@ -338,6 +339,18 @@ def test_malformed_or_future_resolved_session_is_unknown(browser, server, state)
         # valid status renders current -- the unknowns below are caused by
         # the session evidence alone.
         expect(page.get_by_test_id("operations-status")).to_contain_text("operations: current")
+
+        # Regression: a nonempty malformed identifier that merely ENDS in an
+        # ISO date. Identical requested/resolved values must not be read as
+        # agreeing session evidence -- the date tail never rescues an unknown
+        # prefix, so this is unknown, never current, and the pin stands.
+        served["status"] = {**base_status,
+                            "requested_session": "unexpected-2026-10-03",
+                            "resolved_session": "unexpected-2026-10-03"}
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: unknown")
+        expect(page.get_by_test_id("operations-status")).not_to_contain_text("operations: current")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        expect(page.get_by_test_id("event-table")).to_be_visible()
 
         # Nonempty malformed requested/resolved session identifiers.
         served["status"] = {**base_status,
