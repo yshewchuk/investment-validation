@@ -1067,3 +1067,85 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     assert captured[0].max_result_rows == min(existing_limit, bound)
     assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, bound)
     assert captured[0].max_batch_rows <= captured[0].max_result_rows
+
+
+# --------------------------------------------------------------------------
+# issue #179 (contract: engine/v2/ops/ARCHITECTURE.md, "capture and inherited
+# fragments respect as_of"): a run at an EARLIER as_of that would inherit a
+# committed fragment reaching on/after that as_of must be refused -- the
+# capture-time truncation only bounds rows THIS run writes.
+# --------------------------------------------------------------------------
+
+
+def test_earlier_as_of_refuses_inherited_future_dated_fragment(tmp_path):
+    """Run A captures ``BBBB`` at the later ``_AS_OF`` and commits a fragment
+    whose ``event_date`` rows extend past the earlier ``as_of`` run B will
+    request. Run B pins run A's committed snapshot as its parent and targets
+    only ``AAAA``, so only carry-forward could preserve that fragment: the
+    contract refuses the whole generation with a non-retryable
+    ``VALIDATION_FAILED``, leaving the head at run A's snapshot and its
+    planted row intact."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        targets = ["BBBB"]
+        monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot",
+                            lambda *a, **k: (list(targets), {}))
+        conn, clock, _ = catalog(tmp_path)
+        store = ArtifactStore(tmp_path)
+        events_rows = ([_event_row("AAAA", d) for d in _BDAYS[:5]]  # 5 events before 2024-01-25
+                       + [_event_row("BBBB", d) for d in _EVENT_DAYS])  # planted 2024-01-26 tail
+        head = _build_parent(conn, clock, store, events_rows=events_rows)
+
+        fetcher = _CountingFetcher(_closes_csv())
+        root_a = tmp_path / "attempt_a"
+        _write_input(root_a, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path,
+                     head=head)
+        parameters_a = _parameters(head, expected_ids=("BBBB",),
+                                   catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+        first = computed_moves_store.run_computed_moves_refresh(
+            parameters_a, root_a, as_of=_AS_OF, fetcher=fetcher)
+        assert first.status == "complete"  # run A really committed the tail
+
+        # Confirm the regressed inheritance from the committed parent, via
+        # the same DataQuery reader the issue #99 test uses: at least one
+        # BBBB row already reaches on/after the earlier as_of run B asks for.
+        committed_parent = dict(_head_row(conn))
+        earlier_as_of = "2024-01-25"  # < _AS_OF, < the planted tail date
+        planted = str(_EVENT_DAYS[-1].date())
+
+        from engine.v2.contracts import DataQuery
+        from engine.v2.data.computed_moves_table import COMPUTED_MOVES_TABLE_NAME
+
+        repository = Repository(conn, store)
+        snapshot = repository.resolve(committed_parent["snapshot_id"])
+        dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+        query = DataQuery(
+            snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
+            columns=("event_date",),
+            key_filter=(KeyPredicate(column="ticker", operator="eq", values=("BBBB",)),),
+            order_by=("ticker", "event_date"), max_batch_rows=100, max_result_rows=100)
+        bbbb_dates = [str(r["event_date"])
+                      for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
+                      for r in batch.to_pylist()]
+        assert planted in bbbb_dates
+        assert any(d >= earlier_as_of for d in bbbb_dates)
+
+        targets[:] = ["AAAA"]  # BBBB survives run B only by carry-forward
+        root_b = tmp_path / "attempt_b"
+        _write_input(root_b, catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path,
+                     head=committed_parent, as_of=earlier_as_of)
+        parameters_b = _parameters(committed_parent, expected_ids=("AAAA",),
+                                   catalog_path=tmp_path / "ops.sqlite", objects_root=tmp_path)
+
+        with pytest.raises(OpsError) as err:
+            computed_moves_store.run_computed_moves_refresh(
+                parameters_b, root_b, as_of=earlier_as_of, fetcher=fetcher)
+        assert err.value.code == "VALIDATION_FAILED"
+        assert err.value.problem.retryable is False
+
+        # The refusal rewrote nothing: head is still run A's committed
+        # snapshot, and that snapshot's BBBB rows still carry the planted date.
+        assert dict(_head_row(conn)) == committed_parent
+        still = [str(r["event_date"])
+                 for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
+                 for r in batch.to_pylist()]
+        assert planted in still
