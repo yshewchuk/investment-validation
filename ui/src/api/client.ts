@@ -19,7 +19,7 @@ import type {
   NativeParityMismatchItem,
   NativeParityPage,
   NativeParitySummary,
-  OperationsHealth,
+  OperationsStatus,
   PreviewRelease,
   ProblemEnvelope,
 } from "./types";
@@ -150,7 +150,7 @@ export interface DataClient {
    * `_score_detail_response`: 400 if missing) -- always the pinned release,
    * never "current". */
   getScore(scoreId: string, releaseId: string, signal?: AbortSignal): Promise<LegacyScoreBridge>;
-  getOperations(signal?: AbortSignal): Promise<OperationsHealth>;
+  getOperations(signal?: AbortSignal): Promise<OperationsStatus>;
   /** #327 parity reads — no release pin, no `release_id` query parameter. */
   getNativeParity(signal?: AbortSignal): Promise<NativeParitySummary>;
   getNativeParityMismatches(
@@ -192,7 +192,7 @@ export function createHttpDataClient(basePath = "/api/v1"): DataClient {
       return getJson<LegacyScoreBridge>(`${basePath}/scores/${encodeURIComponent(scoreId)}${search}`, signal);
     },
     getOperations(signal) {
-      return getJson<OperationsHealth>(`${basePath}/operations`, signal);
+      return getJson<OperationsStatus>(`${basePath}/operations`, signal);
     },
     getNativeParity(signal) {
       return getJson<NativeParitySummary>(`${basePath}/native_parity`, signal);

@@ -77,6 +77,25 @@ FastAPI/uvicorn and the operations HTTP listener, SQLite and filesystem artifact
 storage. Authentication supports bearer or cookie; React uses same-origin cookie.
 
 ## Failure semantics
+The authenticated `GET /api/v1/operations` reads the publisher's
+`operations_status.json` sidecar without importing ops or mutating the
+release. The document carries the published and attempted release ids,
+requested/resolved sessions, and the scheduled engineering history. Missing,
+malformed, or unreadable status raises `OPERATIONS_UNAVAILABLE` (503,
+retryable); an optional `release_id` that differs from the sidecar's release
+raises `OPERATIONS_STATUS_NOT_FOR_RELEASE` (409, not retryable). Success is
+`no-store`. Serving does not infer a missing observation from wall-clock age;
+it returns the recorded history unchanged. Clients compare its release ids
+with their own pin and current-release discovery, and must show unknown when
+the status cannot be read. The shell accepts requested/resolved session ids
+only in the producer `YYYY-MM-DD` form or the UI `eng-night-YYYY-MM-DD` form,
+with valid calendar dates and resolved no later than requested; missing or
+unrecognized evidence refuses `current` without raising and displays unknown.
+It ignores superseded health and current-release poll replies; unavailable
+health or publication identity is unknown. These read failures do not change
+the pin; clients only re-read on their next scheduled poll, and serving never
+retries. Reads have no write or partial artifact.
+
 `GET /api/v1/native_parity` exposes report identity and the existing aggregate.
 `/native_parity/mismatches` pages row-key/dimension entries with known fields
 marked agree/differ and stored values only for differing fields;
