@@ -748,15 +748,19 @@ def _literal_script_imports_tracked_sibling(target: str, tracked_set: set[str]) 
 
     This is deliberately narrow: only `import name` or `from name import ...`,
     where `name` has no leading dot, is checked -- against
-    `<script-dir>/head.py` and `<script-dir>/head/__init__.py`, where `head` is
-    `name.split(".", 1)[0]`. A dotted import resolves the same way at runtime
-    (`import helpers.util` runs `<script-dir>/helpers/__init__.py` before
-    anything else), and a dotted name whose head shadows a tracked sibling
-    package (e.g. `import engine.v2` with a sibling `engine` package) can be
-    answered out of the script's own directory rather than the repo root. Such
-    a launch can load a sibling module that repo-root import resolution would
-    never name, so the process target stays unresolved instead of keeping only
-    the precise script edge. Read or parse failures are unresolved too."""
+    `<script-dir>/head.py` and against ANY tracked Python file beneath
+    `<script-dir>/head/`, where `head` is `name.split(".", 1)[0]`. A dotted
+    import resolves the same way at runtime (`import helpers.util` runs
+    `<script-dir>/helpers/util.py` before anything else whether or not that
+    directory is a regular package -- a namespace package with no
+    `__init__.py`, and a module nested deeper under it, are both loaded out of
+    the script's own directory), and a dotted name whose head shadows a tracked
+    sibling package (e.g. `import engine.v2` with a sibling `engine` package)
+    can be answered out of the script's own directory rather than the repo
+    root. Such a launch can load a sibling module that repo-root import
+    resolution would never name, so the process target stays unresolved instead
+    of keeping only the precise script edge. Read or parse failures are
+    unresolved too."""
     script_dir = os.path.dirname(target)
     if not script_dir:
         return False
@@ -775,8 +779,10 @@ def _literal_script_imports_tracked_sibling(target: str, tracked_set: set[str]) 
             head = name.split(".", 1)[0]
             if not head:
                 continue
+            sibling_dir = f"{script_dir}/{head}/"
             if (f"{script_dir}/{head}.py" in tracked_set
-                    or f"{script_dir}/{head}/__init__.py" in tracked_set):
+                    or any(p.startswith(sibling_dir) and p.endswith(".py")
+                           for p in tracked_set)):
                 return True
     return False
 

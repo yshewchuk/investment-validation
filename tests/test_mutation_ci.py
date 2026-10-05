@@ -3641,6 +3641,45 @@ def test_build_import_graph_a_literal_python_script_dotted_sibling_import_fails_
     assert "tests/test_clean.py" not in selected
 
 
+def test_build_import_graph_a_literal_python_script_namespace_package_sibling_import_fails_safe(
+        tmp_path, monkeypatch):
+    # The namespace-package gap: `import helpers.util` in a launched script
+    # loads `<script-dir>/helpers/util.py` at runtime even with no
+    # `helpers/__init__.py` anywhere, and a module nested deeper under that
+    # directory behaves the same -- a tracked Python file BENEATH the matching
+    # sibling directory fails the launch safe too, not only a tracked sibling
+    # `__init__.py`. Changing tools/helpers/util.py then reaches the launcher's
+    # static importer through the #155 fail-safe (the launcher is unresolved),
+    # the test importing it directly through the precise edge, and never the
+    # clean test. `_SELECT_CFG`'s `tools/*` would force the full-suite sentinel
+    # for the changed path asserted here, so this cfg keeps only the conftest.
+    cfg = {"pr_selection": {"inert": ["*.md"], "inert_skip": [],
+                           "full_suite": ["tests/conftest.py"]}}
+    tracked = _write_repo(tmp_path, {
+        "tools/launcher.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
+            "VALUE = 1\n"),
+        "tools/worker.py": "import helpers.util\n",
+        "tools/helpers/util.py": "thing = 2\n",
+        "engine/unrelated.py": "Z = 1\n",
+        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
+        "tests/test_direct.py": "import tools.helpers.util\n",
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    launcher = "tools/launcher.py"
+    assert graph[launcher] == set(tracked) - {launcher}
+    assert launcher in pilot.dynamic_files(graph)
+    assert launcher in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(cfg, ["tools/helpers/util.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_launcher.py" in selected
+    assert "tests/test_direct.py" in selected
+    assert "tests/test_clean.py" not in selected
+
+
 def test_build_import_graph_a_literal_python_script_without_sibling_import_stays_precise(
         tmp_path, monkeypatch):
     # The contrast that keeps #413 from widening every script launch: a dotted

@@ -179,7 +179,9 @@ evidence. See the models and data component contracts.
     non-`None` subprocess `env=` override, a path mutation through a shadowed or reassigned root
     alias, or a literal Python script launch whose target script's non-root directory holds a
     tracked sibling module or package named by the first component of one of that script's
-    absolute imports (dotted imports such as `helpers.util` included) -- and recognized
+    absolute imports (dotted imports such as `helpers.util` included; a tracked Python module
+    beneath the matching sibling directory counts too, namespace packages without `__init__.py`
+    included) -- and recognized
     constructs with resolvable targets create specific edges. Recognized
     unresolved targets add catch-all graph edges and can widen selection through the #155 fail-safe
     test set; this does not always mean every test is selected. `full_suite` paths, an unrecognized
