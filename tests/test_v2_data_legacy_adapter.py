@@ -69,7 +69,14 @@ def test_all_eight_datasets_present_in_order():
     doc = build_legacy_mapping()
     assert tuple(doc["tables"].keys()) == EXPECTED_ORDER
     assert legacy_mapping.DATASET_ORDER == EXPECTED_ORDER
-    assert doc["schema_version"] == "legacy_table_mapping.v1.1"
+    assert doc["schema_version"] == "legacy_table_mapping.v2.0"
+
+
+def test_emitted_mapping_embeds_table_contract_v2():
+    doc = build_legacy_mapping()
+    assert doc["schema_version"] == "legacy_table_mapping.v2.0"
+    for name in EXPECTED_ORDER:
+        assert doc["tables"][name]["schema_version"] == "table_contract.v2.0", name
 
 
 def test_tier2_columns_match_legacy_source_exactly():

@@ -65,7 +65,7 @@ __all__ = [
     "SNAPSHOT_IMPORT_REQUEST_V1",
     "SNAPSHOT_REF_V1",
     "TABLE_CONTRACT_REF_V1",
-    "TABLE_CONTRACT_V1",
+    "TABLE_CONTRACT_V2",
     "TIME_INTERVAL_V1",
     "ChainMember",
     "ChainQuery",
@@ -105,7 +105,7 @@ COLUMN_CONTRACT_V1 = "column_contract.v1.0"
 #: package's own ``major_on_meaning_change`` evolution policy -- old v1.x docs
 #: fail cleanly as ``UNSUPPORTED_VERSION``, with no deprecated field, ignored
 #: decoder key, or mixed-schema shim to bridge them.
-TABLE_CONTRACT_V1 = "table_contract.v2.0"
+TABLE_CONTRACT_V2 = "table_contract.v2.0"
 TABLE_CONTRACT_REF_V1 = "table_contract_ref.v1.0"
 OBJECT_REF_V1 = "object_ref.v1.0"
 FRAGMENT_REF_V1 = "fragment_ref.v1.0"
@@ -261,7 +261,7 @@ class TableContract:
     schema_evolution_policy: str
     maximum_batch_rows: int
     legacy_mapping_ref: str | None = None
-    schema_version: str = TABLE_CONTRACT_V1
+    schema_version: str = TABLE_CONTRACT_V2
 
 
 @dataclass(frozen=True, kw_only=True)

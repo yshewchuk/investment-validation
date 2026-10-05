@@ -16,7 +16,7 @@ module (phase-2 guide §4); calling it from here is an intra-package v2->v2
 edge, never a new legacy one, so this module carries no
 ``checks/legacy_adapters.json`` entries of its own.
 
-:func:`build_legacy_mapping` produces one ``legacy_table_mapping.v1.1``
+:func:`build_legacy_mapping` produces one ``legacy_table_mapping.v2.0``
 document: one ``TableContract`` (as a strict document) per dataset in guide
 §5.1's table, in order, a top-level ``knowledge_mode_by_table`` (every legacy
 table is ``reconstructed`` — no accepted attestation or availability receipt
@@ -126,13 +126,14 @@ SNAPSHOT_RELATIVE_PATH = "features/SNAPSHOT"
 #: its own legacy import (§4.2: one adapter module per package).
 SOURCE_PRIORITY_VERSION = "legacy_source_priority:" + content_hash(legacy_adapter.legacy_source_priority())
 
-#: v1.1 (PR #360 slice E): the serialized ``TableContract`` shape changed, so
+#: v2.0 (PR #360 slice E): the serialized ``TableContract`` shape changed, so
 #: every registered definition changed and the mapping document with it. The
-#: schema advances exactly one minor version; the eight contract
-#: families/semantic versions advance one major each (``legacy.<table>.v2`` /
-#: ``2.0.0``) — the registered ``.v1`` definitions are never re-edited under
-#: their old ids (phase-2 guide §5.1).
-MAPPING_SCHEMA_VERSION = "legacy_table_mapping.v1.1"
+#: embedded contract is a breaking v2.0 document and no mixed-schema path
+#: remains, so the schema advances to ``legacy_table_mapping.v2.0``; the eight
+#: contract families/semantic versions advance one major each
+#: (``legacy.<table>.v2`` / ``2.0.0``) — the registered ``.v1`` definitions are
+#: never re-edited under their old ids (phase-2 guide §5.1).
+MAPPING_SCHEMA_VERSION = "legacy_table_mapping.v2.0"
 CONTRACT_SEMANTIC_VERSION = "2.0.0"
 SCHEMA_EVOLUTION_POLICY = (
     "Never edit a registered definition under the same contract_id (phase-2 guide §5.1). Changed "
@@ -157,7 +158,7 @@ class LegacyMappingError(RuntimeError):
 
 
 def build_legacy_mapping(annotations: dict[str, object] | None = None) -> dict[str, object]:
-    """The ``legacy_table_mapping.v1.1`` document for all eight datasets.
+    """The ``legacy_table_mapping.v2.0`` document for all eight datasets.
 
     ``annotations`` defaults to the reviewed ``legacy_annotations.json`` beside
     this module; a caller may pass a modified copy (tests do) to prove a

@@ -92,8 +92,9 @@ research query interval is bound by that same pinned-manifest
 membership/population bound — the one `scan_population_bound` result the data
 query explain and scan paths use for the same snapshot, contract ref,
 predicate set and interval — so research adds no second, research-side result
-limit. An explicit smaller research request limit remains caller intent,
-honored below the bound rather than widened back to it. Each interval scan —
+limit. No smaller caller-side research request limit is
+threaded through the visible research scan API: research scans request the
+shared population bound, not a research-side result limit. Each interval scan —
 month/day split scans independently — carries its own bound, and an empty
 selected membership may query with zero result rows and a positive batch size.
 Retry/split behavior, error codes, frame population and ordering are
