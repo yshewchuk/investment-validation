@@ -94,6 +94,64 @@ def test_release_banner_shows_stale_reasons(browser, server, state):
         context.close()
 
 
+def test_operations_status_marks_old_pinned_board_and_missing_scheduled_session(browser, server, state):
+    """Issue reproduction: a 24-day-old operations-status sidecar that reports a
+    missing scheduled session must never read as ``current``, and the board stays
+    pinned to the release it loaded even after ``current`` moves on -- asserted
+    without a click or a reload."""
+    operations_status = {
+        "schema_version": "operations_status.v1.0",
+        "generated_at": "2026-09-10T00:00:00Z",
+        "release_id": "r1",
+        "attempted_release_id": "r1",
+        "requested_session": "eng-night-2026-09-10",
+        "resolved_session": "eng-night-2026-09-10",
+        "engineering_history": [{"occurrence": "2026-09-20", "status": "unknown"}],
+        "stale": False,
+        "withheld": False,
+        "failed_update": False,
+    }
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    page.route(
+        "**/api/v1/operations",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(operations_status)))
+    # Freeze only the browser wall clock (not setInterval -- the release poll
+    # still ticks in real time); `?pollMs=100` accelerates the polls instead.
+    page.add_init_script(
+        'Date.now = function () { return Date.parse("2026-10-04T00:00:00Z"); };')
+    try:
+        page.goto(base + "/?pollMs=100")
+
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        status = page.get_by_test_id("operations-status")
+        expect(status).to_contain_text("2026-09-20")  # the missing occurrence is named
+        expect(status).to_contain_text("scheduled observations missing")  # the explicit reason phrase
+        expect(status).to_contain_text("24d")  # frozen clock -> observation age
+        expect(status).not_to_contain_text("operations: current")
+        identities = page.get_by_test_id("operations-identities")
+        expect(identities).to_contain_text("board pin r1")
+        expect(identities).to_contain_text("health/status-described r1")
+        expect(identities).to_contain_text("latest published r1")
+        sessions = page.get_by_test_id("operations-sessions")
+        expect(sessions).to_contain_text("requested session eng-night-2026-09-10")
+        expect(sessions).to_contain_text("resolved session eng-night-2026-09-10")
+        expect(page.get_by_test_id("operations-attempt")).to_contain_text("attempted release r1")
+
+        state.set_current("r2")
+        stale = page.get_by_test_id("operations-board-stale")
+        expect(stale).to_be_visible()
+        expect(stale).to_contain_text("r1")
+        expect(stale).to_contain_text("r2")
+        expect(stale).to_contain_text("24d")  # still shows the observation age
+        expect(stale.get_by_role("button")).to_be_visible()
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+    finally:
+        context.close()
+
+
 # --------------------------------------------------------------------------
 # pagination: walks all pages, no duplicates
 # --------------------------------------------------------------------------
