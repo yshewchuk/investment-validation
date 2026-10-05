@@ -127,7 +127,7 @@ def fit_walk_forward_fold(estimator, train_features, train_labels, test_features
         from sklearn.base import clone
 
         fitted = clone(estimator)
-        fitted.fit(matrix, labels)
+        fitted.fit(matrix.copy(), labels)
         train_scores = _positive_scores(fitted, matrix)
         threshold = threshold_rule.fit_threshold(train_scores, labels)
         test_scores = _positive_scores(fitted, test_matrix)

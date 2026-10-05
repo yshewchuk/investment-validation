@@ -112,6 +112,7 @@ def test_nonfinite_fold_quantile_is_a_typed_variant_failure():
 
 
 def test_estimator_mutation_cannot_change_reused_fold_rows():
+    from sklearn.base import clone
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
 
@@ -124,6 +125,9 @@ def test_estimator_mutation_cannot_change_reused_fold_rows():
                           ("model", LogisticRegression(random_state=0))])
     rule = TrainFoldRule(top_fraction=0.5)
     first_fold = fit_walk_forward_fold(estimator, train_x, train_y, test_x, rule)
+    reference = clone(estimator).fit(train_snapshot.copy(), train_y)
+    expected_scores = reference.predict_proba(train_snapshot.copy())[:, 1]
+    assert first_fold.threshold == float(np.quantile(expected_scores, 0.5))
     assert np.asarray(first_fold.test_scores).shape == (test_x.shape[0],)
     np.testing.assert_array_equal(train_x, train_snapshot)
     np.testing.assert_array_equal(test_x, test_snapshot)
