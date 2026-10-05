@@ -384,6 +384,32 @@ def test_experiment_effect_lost_fence_appends_no_ran_row(tmp_path):
         conn.close()
 
 
+def test_experiment_effect_records_synthetic_variant_in_ledger(tmp_path):
+    """Review fix item 5: the ran row's ``spec_hash`` joins the durable
+    identity. The default synthetic spec has no registered legacy hash, so
+    the resolved ``ExperimentSpec.spec_hash`` is what both the checkout
+    ledger and ``experiment_runs.evidence_json.variant_id`` carry -- the old
+    implementation appended the ran row with an empty spec hash."""
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(tmp_path)
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    try:
+        commit_attempt(conn, claim.attempt_id, claim.fence,
+                       Outcome(True, "verified_dead", 0), clock=clock,
+                       effects=lambda txn: effect(txn))
+        spec = experiments.experiment_spec_from_document(
+            _spec_document(economic_params={}))
+        with open(ledger, newline="") as fh:
+            ran = [row for row in csv.DictReader(fh) if row["stage"] == "ran"]
+        assert len(ran) == 1
+        assert ran[0]["id"] == "x"
+        assert ran[0]["spec_hash"] == spec.spec_hash
+        evidence = json.loads(conn.execute(
+            "SELECT evidence_json FROM experiment_runs").fetchone()[0])
+        assert evidence["variant_id"] == spec.spec_hash
+    finally:
+        conn.close()
+
+
 def test_experiment_effect_rejects_receipt_variant_mismatch_atomically(tmp_path):
     """A receipt reporting a variant identity other than the checkout's
     registered one is a typed ``INVALID_EXPERIMENT_SPEC`` refusal before the
@@ -417,11 +443,12 @@ def test_experiment_effect_retry_after_crash_appends_exactly_one_row(tmp_path, m
     real_append = effects_graph._append_ledger_row
     crashed = []
 
-    def flaky(txn, checkout_root, spec, receipt, *, run_id):
+    def flaky(txn, checkout_root, spec, receipt, *, run_id, variant_id):
         if not crashed:
             crashed.append(True)
             raise RuntimeError("crash after register, before append")
-        return real_append(txn, checkout_root, spec, receipt, run_id=run_id)
+        return real_append(txn, checkout_root, spec, receipt, run_id=run_id,
+                           variant_id=variant_id)
 
     monkeypatch.setattr(effects_graph, "_append_ledger_row", flaky)
     try:

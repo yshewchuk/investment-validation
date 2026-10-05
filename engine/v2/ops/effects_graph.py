@@ -887,7 +887,8 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
             txn.execute("UPDATE experiment_runs SET evidence_json=? WHERE run_id=?",
                         (json.dumps(current, sort_keys=True), run_id))
         if mode == "primary":
-            _append_ledger_row(txn, checkout_root, spec, receipt, run_id=run_id)
+            _append_ledger_row(txn, checkout_root, spec, receipt,
+                               run_id=run_id, variant_id=variant)
 
     return _commit, ()
 
@@ -932,7 +933,7 @@ def _mark_metrics_source(conn, run_id, source):
                  (json.dumps(evidence, sort_keys=True), run_id))
 
 
-def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
+def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id, variant_id):
     """Append the "ran" row for one primary experiment to the checkout's
     ``experiments/LEDGER.csv`` (``experiments_ledger_path``), never to the
     operations store root.
@@ -941,18 +942,19 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
     ``engine.*`` (``checks/import_layers.py`` records no edge and
     ``checks/legacy_adapters.json`` stays at 75/75); its ``ledger_append``
     carries the append-only prefix check this writer would otherwise have to
-    duplicate. ``spec_hash`` is the LEGACY identity of the registered
-    runner's ``spec.yaml`` computed by the same
-    :func:`experiments.legacy_spec_hash` the PLANNED row used, so planned
-    and ran rows join. The runner's own results JSON supplies the headline
-    metrics; when it did not write them the columns stay empty and the fact
+    duplicate. ``spec_hash`` is the caller-resolved ``variant_id`` -- the
+    registered runner hash or the ``ExperimentSpec.spec_hash`` fallback --
+    passed in by the effect caller, which already computed the same LEGACY
+    identity the PLANNED row used, so planned and ran rows join. The
+    runner's own results JSON supplies the headline metrics; when it did not
+    write them the columns stay empty and the fact
     is recorded on the durable run's evidence as
     ``metrics_source: unavailable`` (the legacy ledger format stays at its
     fixed 7 columns).
     """
     from datetime import datetime, timezone
 
-    from engine.v2.ops.experiments import experiments_ledger_path, registered_spec_hash
+    from engine.v2.ops.experiments import experiments_ledger_path
     from experiments.lib import LEDGER_COLUMNS, ledger_append
 
     ledger = experiments_ledger_path(checkout_root)
@@ -963,7 +965,7 @@ def _append_ledger_row(conn, checkout_root, spec, receipt, *, run_id):
             _mark_metrics_source(conn, run_id, "unavailable")
         return
     row = {"id": spec.experiment_id,
-           "spec_hash": registered_spec_hash(checkout_root, spec) or "",
+           "spec_hash": variant_id,
            "date": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
            "stage": "ran", "oos_mean_mid": mean, "sharpe_trade": sharpe,
            "promoted": "False"}

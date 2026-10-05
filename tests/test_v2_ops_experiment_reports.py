@@ -179,7 +179,8 @@ def test_ops_plan_worker_and_legacy_runner_report_reaches_the_checkout_ledger(
     spec = experiments.experiment_spec_from_document(document)
     conn, _clock, _ = catalog(ops)
     try:
-        effects_graph._append_ledger_row(conn, checkout, spec, receipt, run_id="exp-run")
+        effects_graph._append_ledger_row(conn, checkout, spec, receipt, run_id="exp-run",
+                                         variant_id=receipt["evidence"]["variant_id"])
     finally:
         conn.close()
 
@@ -209,7 +210,7 @@ def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(t
     """Review fix item 5: no results JSON -> empty headline columns, the
     legacy ledger keeps its fixed 7 columns, and the durable run's evidence
     records ``metrics_source: unavailable``."""
-    checkout, spec_path, ledger, _planned_hash = _tiny_checkout(tmp_path, with_metrics=False)
+    checkout, spec_path, ledger, planned_hash = _tiny_checkout(tmp_path, with_metrics=False)
     document = json.loads(spec_path.read_text())
     spec = experiments.experiment_spec_from_document(document)
     ops = tmp_path / "ops"
@@ -222,7 +223,7 @@ def test_ran_row_records_metrics_source_unavailable_when_the_runner_wrote_none(t
         effects_graph._append_ledger_row(
             conn, checkout, spec,
             {"status": "succeeded", "evidence": {"runner_result": {"returncode": 0}}},
-            run_id=run_id)
+            run_id=run_id, variant_id=planned_hash)
 
         from experiments import lib
 
