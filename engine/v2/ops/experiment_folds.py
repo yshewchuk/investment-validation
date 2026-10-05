@@ -92,10 +92,15 @@ def _positive_scores(estimator, matrix):
     import numpy as np
 
     try:
+        classes = np.asarray(estimator.classes_)
+        if classes.ndim != 1 or classes.shape[0] != 2 \
+                or not np.array_equal(np.sort(classes), (0, 1)):
+            raise ValueError("estimator classes are not binary 0 and 1")
+        positive_index = int(np.flatnonzero(classes == 1)[0])
         probabilities = np.asarray(estimator.predict_proba(matrix), dtype=float)
         if probabilities.shape != (matrix.shape[0], 2) or not np.all(np.isfinite(probabilities)):
             raise ValueError("estimator returned invalid binary scores")
-        return probabilities[:, 1]
+        return probabilities[:, positive_index]
     except OpsError:
         raise
     except Exception:

@@ -135,3 +135,72 @@ def test_estimator_mutation_cannot_change_reused_fold_rows():
     assert second_fold.threshold == first_fold.threshold
     np.testing.assert_array_equal(train_x, train_snapshot)
     np.testing.assert_array_equal(test_x, test_snapshot)
+
+
+def test_positive_scores_follow_classes_order_and_reject_malformed_classes():
+    import math
+
+    import pytest
+    from sklearn.base import BaseEstimator
+
+    from engine.v2.ops.errors import OpsError
+
+    def class_one_probability(value):
+        return 1.0 / (1.0 + math.exp(-2.0 * value))
+
+    class _ClassesOrderEstimator(BaseEstimator):
+        """Synthetic scorer whose ``predict_proba`` columns follow ``classes_``."""
+
+        def __init__(self, class_order=(0, 1), has_classes=True):
+            self.class_order = class_order
+            self.has_classes = has_classes
+
+        def fit(self, features, labels):
+            if self.has_classes:
+                self.classes_ = np.asarray(self.class_order)
+            return self
+
+        def predict_proba(self, features):
+            positive = np.array([class_one_probability(float(row[0]))
+                                 for row in np.asarray(features, dtype=float)])
+            return np.column_stack([positive if int(label) == 1 else 1.0 - positive
+                                    for label in self.classes_])
+
+    train_values = (-2.0, -1.5, 1.0, 3.0)
+    test_values = (-1.5, 0.5, 4.0)
+    train_x = np.array(train_values).reshape(4, 1)
+    test_x = np.array(test_values).reshape(3, 1)
+    train_labels = [0, 0, 1, 1]
+    rule = TrainFoldRule(top_fraction=0.5)
+    expected_scores = np.array([class_one_probability(v) for v in test_values])
+    train_positive = np.array([class_one_probability(v) for v in train_values])
+    expected_threshold = float(np.quantile(train_positive, 0.5))
+
+    reversed_caller = _ClassesOrderEstimator(class_order=np.array([1, 0], dtype=object))
+    reversed_fold = fit_walk_forward_fold(reversed_caller, train_x, train_labels, test_x, rule)
+    np.testing.assert_array_equal(reversed_fold.test_scores, expected_scores)
+    assert reversed_fold.threshold == expected_threshold
+    assert reversed_fold.estimator is not reversed_caller
+    np.testing.assert_array_equal(reversed_fold.estimator.classes_, (1, 0))
+    column_one = reversed_fold.estimator.predict_proba(test_x)[:, 1]
+    np.testing.assert_array_equal(column_one, 1.0 - expected_scores)
+    assert not np.array_equal(reversed_fold.test_scores, column_one)
+
+    forward_caller = _ClassesOrderEstimator(class_order=(0, 1))
+    forward_fold = fit_walk_forward_fold(forward_caller, train_x, train_labels, test_x, rule)
+    np.testing.assert_array_equal(forward_fold.test_scores, expected_scores)
+    assert forward_fold.threshold == expected_threshold
+    np.testing.assert_array_equal(forward_fold.test_scores, reversed_fold.test_scores)
+    assert not hasattr(reversed_caller, "classes_")
+    assert not hasattr(forward_caller, "classes_")
+
+    for malformed in ((0, 2), (0, 0)):
+        with pytest.raises(OpsError) as raised:
+            fit_walk_forward_fold(_ClassesOrderEstimator(class_order=malformed),
+                                  train_x, train_labels, test_x, rule)
+        assert raised.value.code == "EXPERIMENT_VARIANT_FAILED"
+
+    with pytest.raises(OpsError) as raised:
+        fit_walk_forward_fold(_ClassesOrderEstimator(has_classes=False),
+                              train_x, train_labels, test_x, rule)
+    assert raised.value.code == "EXPERIMENT_VARIANT_FAILED"
