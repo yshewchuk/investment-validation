@@ -87,11 +87,14 @@ raises `OPERATIONS_STATUS_NOT_FOR_RELEASE` (409, not retryable). Success is
 `no-store`. Serving does not infer a missing observation from wall-clock age;
 it returns the recorded history unchanged. Clients compare its release ids
 with their own pin and current-release discovery, and must show unknown when
-the status cannot be read. The shell rejects absent or mismatched requested /
-resolved session evidence as unknown, and ignores superseded current-release
-poll replies; unavailable publication identity is unknown. These read failures
-do not change the pin; clients only re-read on their next scheduled poll, and
-serving never retries. Reads have no write or partial artifact.
+the status cannot be read. The shell accepts requested/resolved session ids
+only in the producer `YYYY-MM-DD` form or the UI `eng-night-YYYY-MM-DD` form,
+with valid calendar dates and resolved no later than requested; missing or
+unrecognized evidence refuses `current` without raising and displays unknown.
+It ignores superseded current-release poll replies; unavailable publication
+identity is unknown. These read failures do not change the pin; clients only
+re-read on their next scheduled poll, and serving never retries. Reads have no
+write or partial artifact.
 
 `GET /api/v1/native_parity` exposes report identity and the existing aggregate.
 `/native_parity/mismatches` pages row-key/dimension entries with known fields

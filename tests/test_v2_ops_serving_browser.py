@@ -160,7 +160,9 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
     """Session evidence and a live published id are hard preconditions of "current".
 
     Regression for issue #161: missing requested/resolved session evidence must
-    read unknown (never current), and an aborted current-release poll must fall
+    read unknown (never current), malformed full session identifiers do the
+    same without moving the frame pin, and an aborted current-release poll
+    must fall
     back to the existing "published current unavailable" unknown reason while
     the frame keeps its r1 pin.
     """
@@ -218,6 +220,31 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
             assert "current" not in state
             assert "session identity evidence missing or malformed" in state
 
+            health.write_text(json.dumps({**health_document,
+                                          "requested_session": "2026-10-04",
+                                          "resolved_session": "2026-10-02"}))
+            page.wait_for_function(
+                '() => document.querySelector("#state").textContent === "current"',
+                timeout=2000,
+            )
+
+            # Malformed full identifiers (not date-only) refuse current: the
+            # SAME missing-or-malformed unknown reason, and the frame keeps
+            # its r1 pin without throwing.
+            health.write_text(json.dumps({**health_document,
+                                          "requested_session": "unexpected-2026-10-04",
+                                          "resolved_session": "unexpected-2026-10-02"}))
+            page.wait_for_function(
+                '() => document.querySelector("#state").textContent'
+                '.indexOf("session identity evidence missing or malformed") >= 0',
+                timeout=2000,
+            )
+            state = page.locator("#state").inner_text()
+            assert state.startswith("unknown")
+            assert "current" not in state
+            assert "/release/r1/" in (page.locator("#legacy").get_attribute("src") or "")
+
+            # Valid date-only session evidence restores current.
             health.write_text(json.dumps({**health_document,
                                           "requested_session": "2026-10-04",
                                           "resolved_session": "2026-10-02"}))
