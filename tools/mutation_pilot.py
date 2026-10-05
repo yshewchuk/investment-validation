@@ -305,8 +305,9 @@ def module_owns_changed_path(cfg: dict, name: str, path: str) -> bool:
 # the unresolved constructs its three classifiers track:
 #   - an unresolved import/load attempt by
 #     `_has_unresolved_import_attempt` (non-literal/aliased `importlib`,
-#     runpy, `__import__`, loader constructs, bare exec/eval, a conftest.py's
-#     non-literal or annotated top-level `pytest_plugins`, ...);
+#     a non-allowlisted `importlib.metadata` name such as `entry_points`,
+#     runpy, `__import__`, loader constructs, any eval/exec Load reference,
+#     a conftest.py's non-literal or annotated top-level `pytest_plugins`, ...);
 #   - an import-path mutation to an unproven target by
 #     `_has_unresolved_sys_path_mutation`: a `sys.path` write (`insert`,
 #     `append`, or `extend`; a rebinding of the list or a write to one of
@@ -1309,14 +1310,30 @@ def forces_full_suite(cfg: dict, path: str) -> bool:
                for pat in cfg.get("pr_selection", {}).get("full_suite", []))
 
 
+_IMPORTLIB_METADATA_SAFE_QUERIES = {
+    "version", "metadata", "distribution", "distributions",
+    "PackageNotFoundError", "files", "requires", "packages_distributions",
+}
+# The ONLY `importlib.metadata` names the narrow scanner treats as precise:
+# each is a pure query (a version string, a distribution's own metadata,
+# files or requires, a package->distribution lookup, or the exception type),
+# and none of them can load a module. `entry_points` is deliberately absent
+# -- an entry point names a module to import -- and so is every other name
+# beneath the namespace, however spelled (dotted attribute, `from
+# importlib.metadata import ...`, an alias).
+
+
 def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     """True if `tree` attempts to load some OTHER module by a construct
     whose target cannot be statically resolved: `importlib` used any way
     other than the one literal `importlib.import_module("<literal>")`
-    shape, a bare `importlib.reload(...)` call, or an access through the
-    unaliased `importlib.metadata` namespace (the sole non-loading
-    `importlib` spelling allowed; its version/entry-point queries cannot
-    reach a module). `reload` is allowed
+    shape, a bare `importlib.reload(...)` call, or a QUERY-ONLY access
+    through the unaliased `importlib.metadata` namespace -- the sole
+    non-loading `importlib` spelling allowed, and allowed BY NAME: a name in
+    `_IMPORTLIB_METADATA_SAFE_QUERIES`, dotted or `from importlib.metadata
+    import ...` (alias included), stays precise, while `entry_points` --
+    which can name a module to load -- and every other name beneath the
+    namespace stay unresolved. `reload` is allowed
     unconditionally (unlike `import_module`, there is no literal-argument
     shape to check): it only re-executes a module that was already
     obtained some other way, so it cannot by itself introduce a new,
@@ -1327,12 +1344,14 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     import ...`, any other `importlib.*` attribute, or a non-literal
     `import_module(...)` call;
     the standalone name `__import__`, however bound;
-    `spec_from_file_location` or `SourceFileLoader` as a bare name or an
-    attribute's `.attr`; any `import runpy` or `from runpy import ...`; a
-    bare `ast.Name` `exec` or `eval` used as the direct `func` of an
-    `ast.Call` (an `eval`/`exec` name in any other position -- an
-    annotation, a store target, a call argument, an unrelated attribute --
-    is not a dynamic-load attempt); or, for a conftest.py only, an
+     `spec_from_file_location` or `SourceFileLoader` as a bare name or an
+     attribute's `.attr`; any `import runpy` or `from runpy import ...`; an
+     `eval` or `exec` bare `ast.Name` in LOAD context -- called directly,
+     assigned to another name, or passed as a value, since a reference to
+     the dynamic builtin is callable wherever it travels (a STORE name only
+     declares something: a dataclass field `eval: dict = field(...)` is not
+     a dynamic-load attempt, and neither is an unrelated attribute's
+     `.eval`); or, for a conftest.py only, an
     ANNOTATED or non-literal top-level `pytest_plugins` assignment. The
     qualified `builtins.exec`/`builtins.eval` form is also caught, since
     it is the exact same risk under a different spelling.
@@ -1375,7 +1394,11 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
             top = (node.module or "").split(".")[0] if node.module else ""
             if top == "runpy":
                 return True
-            if top == "importlib":
+            if node.module == "importlib.metadata":
+                if any(alias.name not in _IMPORTLIB_METADATA_SAFE_QUERIES
+                       for alias in node.names):
+                    return True  # `entry_points`, an unknown name or a star import
+            elif top == "importlib":
                 return True
         elif isinstance(node, ast.Attribute):
             if node.attr in ("__import__", "spec_from_file_location", "SourceFileLoader"):
@@ -1383,16 +1406,21 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
             if isinstance(node.value, ast.Name) and node.value.id == "builtins" \
                     and node.attr in ("exec", "eval"):
                 return True
-            if isinstance(node.value, ast.Name) and node.value.id == "importlib" \
+            if isinstance(node.value, ast.Attribute) and node.value.attr == "metadata" \
+                    and isinstance(node.value.value, ast.Name) \
+                    and node.value.value.id == "importlib":
+                if node.attr not in _IMPORTLIB_METADATA_SAFE_QUERIES:
+                    return True  # entry_points (or an unknown name) can load a module
+            elif isinstance(node.value, ast.Name) and node.value.id == "importlib" \
                     and node.attr not in ("import_module", "reload", "metadata"):
                 return True
         elif isinstance(node, ast.Name):
             if node.id in ("__import__", "spec_from_file_location",
                            "SourceFileLoader"):
                 return True
+            if isinstance(node.ctx, ast.Load) and node.id in ("exec", "eval"):
+                return True  # a reference to the builtin, not only its direct call
         elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in ("exec", "eval"):
-                return True
             if _looks_like_import_module_call(node.func) and _allowed_import_module_call(node) is None:
                 return True
     if is_conftest:

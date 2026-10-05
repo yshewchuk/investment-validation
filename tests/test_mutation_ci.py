@@ -4047,19 +4047,13 @@ def _independent_import_edges(tracked: list[str]) -> dict[str, set[str]]:
     return edges
 
 
-def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_selected():
-    # Property over the REAL checkout: every test with a static AST import
-    # chain into a changed non-test source must be in that run's selection.
-    # Expected chains come ONLY from the independent importer
-    # (`_independent_import_edges`) -- never from production graph edges,
-    # which would certify themselves -- and ONE production graph build is
-    # handed to `select_pr_tests` explicitly.
-    tracked = _tracked_py_paths()
-    edges = _independent_import_edges(tracked)
-    tests = pilot.pytest_test_files(set(tracked))  # path filter only, no edges
-    non_test = {p for p in tracked if not p.startswith("tests/")}
-    assert tests and non_test
-
+def _independent_chain_reach(edges: dict[str, set[str]], tests: list[str],
+                             non_test: set[str]) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
+    """Traverse the INDEPENDENT static chains in `edges` (never production
+    graph edges) from each collected test. Returns `chains` (one example
+    test -> ... -> source path per reaching test, for reporting) and `reached`
+    (each test -> the non-test sources its independent chain reaches). Tests
+    that reach nothing are omitted from both."""
     chains: dict[str, list[str]] = {}
     reached: dict[str, set[str]] = {}
     for t in tests:
@@ -4081,8 +4075,52 @@ def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_
                     parent[nxt] = cur
                     stack.append(nxt)
         if hits:
-            chains[t] = example  # one independent chain per test, for reporting
+            chains[t] = example
             reached[t] = hits
+    return chains, reached
+
+
+def _missing_tests(expected: set[str], selected: set[str],
+                   chains: dict[str, list[str]]) -> tuple[list[str], str]:
+    """expected-minus-selected, plus an example independent chain for each
+    dropped test (capped, so a real failure stays readable)."""
+    missing = sorted(expected - selected)
+    detail = "; ".join(f"{t} reaches a changed file via {' -> '.join(chains[t])}"
+                       for t in missing[:10])
+    return missing, detail
+
+
+class _EdgeOnlyGraph(dict):
+    """The `dict[str, set[str]]`-plus-`.precise` shape build_import_graph
+    returns, assembled from set COPIES so removals can never touch the intact
+    production graph or its real-edge map."""
+
+
+def _edge_only_graph(graph: dict[str, set[str]]) -> _EdgeOnlyGraph:
+    """A copy of `graph` carrying ONLY real edges: BOTH the normal map and
+    `.precise` are fresh copies of the production graph's `.precise`, so no
+    DYNAMIC file's catch-all widens the closure the selector walks."""
+    precise = getattr(graph, "precise", None)
+    source = graph if precise is None else precise
+    copy = _EdgeOnlyGraph({rel: set(source.get(rel, ())) for rel in graph})
+    copy.precise = {rel: set(out) for rel, out in source.items()}
+    return copy
+
+
+def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_selected(monkeypatch):
+    # Property over the REAL checkout: every test with a static AST import
+    # chain into a changed non-test source must be in that run's selection.
+    # Expected chains come ONLY from the independent importer
+    # (`_independent_import_edges`) -- never from production graph edges,
+    # which would certify themselves -- and ONE production graph build is
+    # narrowed to an edge-only copy handed to `select_pr_tests` explicitly.
+    tracked = _tracked_py_paths()
+    edges = _independent_import_edges(tracked)
+    tests = pilot.pytest_test_files(set(tracked))  # path filter only, no edges
+    non_test = {p for p in tracked if not p.startswith("tests/")}
+    assert tests and non_test
+
+    chains, reached = _independent_chain_reach(edges, tests, non_test)
 
     # The changed inputs the selector is allowed to narrow on: every non-test
     # source any independent chain reaches, minus the paths [pr_selection]
@@ -4099,16 +4137,20 @@ def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_
         "import chain to any non-test source path, so the inclusion below "
         "would prove nothing")
 
-    production_graph = pilot.build_import_graph()
-    selected = pilot.select_pr_tests(CFG, eligible, graph=production_graph)
-    detail = "; ".join(f"{t} reaches a changed file via {' -> '.join(chains[t])}"
-                       for t in sorted(expected)[:10])
+    graph = _edge_only_graph(pilot.build_import_graph())
+    # Edge-only narrowing is what makes a MISSING precise edge visible: an
+    # unresolved-import attempt would either re-widen the closure or trip
+    # select_pr_tests' #155 fail-safe, and either outcome could hand this
+    # property a selection that includes the test for the wrong reason. This
+    # call only is silenced; the real classification is asserted elsewhere.
+    monkeypatch.setattr(pilot, "_has_unresolved_import_attempt",
+                        lambda tree, is_conftest: False)
+    selected = pilot.select_pr_tests(CFG, eligible, graph=graph)
     assert selected is not None, (
         f"selector refused to narrow at all on {len(eligible)} eligible "
-        f"changed source(s); example independent chains: {detail}")
-    missing = sorted(expected - set(selected))
-    dropped = "; ".join(f"{t} reaches a changed file via {' -> '.join(chains[t])}"
-                        for t in missing[:10])
+        f"changed source(s); example independent chains: "
+        f"{_missing_tests(expected, set(), chains)[1]}")
+    missing, dropped = _missing_tests(expected, set(selected), chains)
     assert not missing, (
         f"selector returned a narrow selection that dropped {len(missing)} "
         f"test(s) with an independent static import chain to the changed set: "
@@ -4119,11 +4161,12 @@ def test_independent_chain_negative_control_removing_one_edge_removes_the_test(t
     # Non-vacuity control for the property above, over a TINY tracked tree:
     # `tests/test_via_helper.py` is selected ONLY because of the real edge
     # chain test -> helper -> module. The independent importer proves that
-    # chain exists; removing the helper -> module edge from a COPY of the
-    # production graph (the intact graph is never mutated) must then drop
-    # that test. A selector that ignored the passed graph, or an expectation
-    # read off production edges, would leave the test present and fail here --
-    # which is what makes the real-checkout property above mean something.
+    # chain exists; removing the helper -> module edge from an edge-only COPY
+    # of the production graph (the intact graph is never mutated) must then
+    # drop that test. A selector that ignored the passed graph, or an
+    # expectation read off production edges, would leave the test present and
+    # fail here -- which is what makes the real-checkout property mean
+    # something.
     tracked = _write_repo(tmp_path, {
         "engine/mod.py": "VALUE = 1\n",
         "tests/helper.py": "from engine.mod import VALUE\n",
@@ -4139,6 +4182,11 @@ def test_independent_chain_negative_control_removing_one_edge_removes_the_test(t
     assert "tests/helper.py" in edges["tests/test_via_helper.py"]
     assert "engine/mod.py" in edges["tests/helper.py"]
 
+    chains, reached = _independent_chain_reach(edges, pilot.pytest_test_files(set(tracked)),
+                                               {p for p in tracked if not p.startswith("tests/")})
+    expected = {t for t, hits in reached.items() if "engine/mod.py" in hits}
+    assert expected == {"tests/test_via_helper.py", "tests/test_direct.py"}
+
     graph = pilot.build_import_graph(tracked)
     # Nothing here is dynamic or tainted: selection is edge-only, so removing
     # this one edge is the only thing that can move it.
@@ -4146,26 +4194,19 @@ def test_independent_chain_negative_control_removing_one_edge_removes_the_test(t
     assert not pilot.unresolved_import_files(tracked)
     intact = pilot.select_pr_tests(_SELECT_CFG, ["engine/mod.py"], graph=graph)
     assert intact is not None
-    assert "tests/test_via_helper.py" in intact
+    missing, detail = _missing_tests(expected, set(intact), chains)
+    assert not missing, detail
 
-    class _GraphCopy(dict):
-        """The `dict[str, set[str]]`-plus-`.precise` shape build_import_graph
-        returns, assembled from set COPIES so removals can never touch the
-        intact production graph or its real-edge map."""
-
-    broken = _GraphCopy({rel: set(out) for rel, out in graph.items()})
-    precise = getattr(graph, "precise", None)
-    if precise is not None:
-        broken.precise = {rel: set(out) for rel, out in precise.items()}
+    broken = _edge_only_graph(graph)
     broken["tests/helper.py"].discard("engine/mod.py")
-    if getattr(broken, "precise", None) is not None:
-        broken.precise["tests/helper.py"].discard("engine/mod.py")
+    broken.precise["tests/helper.py"].discard("engine/mod.py")
     assert "engine/mod.py" in graph["tests/helper.py"]  # the intact graph is untouched
 
     after = pilot.select_pr_tests(_SELECT_CFG, ["engine/mod.py"], graph=broken)
     assert after is not None
+    missing, detail = _missing_tests(expected, set(after), chains)
+    assert missing == ["tests/test_via_helper.py"], detail
     assert "tests/test_direct.py" in after
-    assert "tests/test_via_helper.py" not in after
 
 
 # -- PR #390 regressions: narrow unresolved-import, subprocess, process-launch,
@@ -4227,33 +4268,119 @@ def test_build_import_graph_a_direct_dynamic_call_is_unresolved(construct, tmp_p
     assert rel in pilot.unresolved_import_files(tracked)
 
 
-@pytest.mark.parametrize("snippet", [
-    pytest.param('importlib.metadata.version("somepkg")', id="version-call"),
-    pytest.param('importlib.metadata.PackageNotFoundError', id="not-found-attr"),
-    pytest.param('importlib.metadata.distributions()', id="distributions-call"),
-])
-def test_build_import_graph_importlib_metadata_is_not_unresolved(snippet, tmp_path, monkeypatch):
-    # `importlib.metadata` (and any attribute beneath it) is the one non-
-    # loading `importlib` spelling: version/entry-point queries cannot reach a
-    # repo module, so they must NOT be caught by the "any other importlib.*"
-    # rule. This file keeps only its real (empty) edges -- no catch-all.
-    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
-        "engine/meta.py": (
-            "import importlib.metadata\n"
-            "\n"
-            "def go():\n"
-            f"    return {snippet}\n"),
-    })
+_EVAL_EXEC_REFERENCE_SOURCES = [
+    pytest.param("fn = eval\n", id="eval-assigned-to-a-name"),
+    pytest.param("runner = eval\nrunner('x = 1')\n", id="eval-assigned-then-called-via-alias"),
+    pytest.param("def apply(fn, code):\n    return fn(code)\n\napply(eval, '1 + 1')\n",
+                 id="eval-passed-as-a-value"),
+    pytest.param("runner = exec\n", id="exec-assigned-to-a-name"),
+    pytest.param("HANDLERS = [eval, exec]\n", id="eval_exec-in-a-collection"),
+]
+
+
+@pytest.mark.parametrize("source", _EVAL_EXEC_REFERENCE_SOURCES)
+def test_build_import_graph_an_eval_or_exec_reference_is_unresolved(source, tmp_path, monkeypatch):
+    # The scanner used to catch ONLY the direct `eval(...)`/`exec(...)` call
+    # shape, so binding the builtin to another name (`fn = eval`, a passed
+    # `eval` reference) hid a live dynamic executor from the analysis: the
+    # alias call is resolved nowhere and the builtin reference itself is the
+    # risk, callable wherever it travels. Every LOAD-context `eval`/`exec`
+    # name is unresolved now -- the dataclass-field test above is the STORE
+    # contrast that keeps declarations (`eval: dict = field(...)`) precise.
+    rel = "engine/dyn.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is True
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+_METADATA_SAFE_SOURCES = [
+    pytest.param("import importlib.metadata\n\ndef go():\n"
+                 "    return importlib.metadata.version('somepkg')\n",
+                 id="dotted-version-call"),
+    pytest.param("from importlib.metadata import version\n\ndef go():\n"
+                 "    return version('somepkg')\n",
+                 id="from-import-version"),
+    pytest.param("from importlib.metadata import version as pkg_version\n\ndef go():\n"
+                 "    return pkg_version('somepkg')\n",
+                 id="from-import-version-alias"),
+    pytest.param("import importlib.metadata\n\ndef go():\n"
+                 "    return importlib.metadata.PackageNotFoundError\n",
+                 id="dotted-not-found-attr"),
+    pytest.param("import importlib.metadata\n\ndef go():\n"
+                 "    return importlib.metadata.distributions()\n",
+                 id="dotted-distributions-call"),
+    pytest.param("import importlib.metadata\n\ndef go():\n"
+                 "    return (importlib.metadata.files('somepkg'),\n"
+                 "            importlib.metadata.requires('somepkg'),\n"
+                 "            importlib.metadata.distribution('somepkg'),\n"
+                 "            importlib.metadata.metadata('somepkg'),\n"
+                 "            importlib.metadata.packages_distributions())\n",
+                 id="dotted-every-allowlisted-name"),
+]
+
+
+@pytest.mark.parametrize("source", _METADATA_SAFE_SOURCES)
+def test_build_import_graph_importlib_metadata_safe_queries_are_not_unresolved(
+        source, tmp_path, monkeypatch):
+    # The named safe-query allowlist (`version`, `metadata`, `distribution`,
+    # `distributions`, `PackageNotFoundError`, `files`, `requires`,
+    # `packages_distributions`) is the only non-loading `importlib` spelling:
+    # each is a pure metadata query that cannot reach a repo module, so it
+    # must NOT be caught by the "any other importlib.*" rule -- in either
+    # spelling, alias included. This file keeps only its real (empty) edges
+    # -- no catch-all.
     rel = "engine/meta.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is False
     assert graph[rel] == set()
     assert rel not in pilot.dynamic_files(graph)
     assert rel not in pilot.unresolved_import_files(tracked)
 
 
+_METADATA_UNRESOLVED_SOURCES = [
+    pytest.param("import importlib.metadata\n\ndef go():\n"
+                 "    return importlib.metadata.entry_points()\n",
+                 id="dotted-entry-points-call"),
+    pytest.param("import importlib.metadata\n\nuse = importlib.metadata.entry_points\n",
+                 id="dotted-entry-points-reference"),
+    pytest.param("from importlib.metadata import entry_points\n\ndef go():\n"
+                 "    return entry_points()\n",
+                 id="from-import-entry-points"),
+    pytest.param("from importlib.metadata import entry_points as load_points\n\ndef go():\n"
+                 "    return load_points()\n",
+                 id="from-import-entry-points-alias"),
+    pytest.param("import importlib.metadata\n\ndef go():\n"
+                 "    return importlib.metadata.distributions_all('somepkg')\n",
+                 id="dotted-unknown-attr"),
+    pytest.param("from importlib.metadata import EntryPoint\n", id="from-import-unknown-name"),
+    pytest.param("from importlib.metadata import version, entry_points\n",
+                 id="from-import-mixed-safe-and-loading"),
+]
+
+
+@pytest.mark.parametrize("source", _METADATA_UNRESOLVED_SOURCES)
+def test_build_import_graph_an_unresolved_importlib_metadata_name_is_caught(
+        source, tmp_path, monkeypatch):
+    # The blanket namespace allowance was too wide: `entry_points` names a
+    # module to LOAD, and an unknown attribute is the same risk unproven. The
+    # allowlist is by NAME and by SPELLING -- a dotted attribute beneath
+    # `importlib.metadata` or a `from importlib.metadata import ...` name
+    # outside it (an alias or a star included) fails the whole file safe.
+    rel = "engine/meta.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is True
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
 def test_build_import_graph_importlib_import_module_of_a_variable_is_unresolved(tmp_path, monkeypatch):
     # The flip side: the SAME attribute spelled `import_module` with a
     # non-literal argument cannot be resolved, so it fails safe -- the
-    # `metadata` allowance above is specifically about the non-loading forms.
+    # `importlib.metadata` safe-query ALLOWLIST above is specifically about
+    # the named non-loading forms, not the whole namespace.
     tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
         "engine/dyn.py": (
             "import importlib\n"

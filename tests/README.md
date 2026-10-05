@@ -187,6 +187,8 @@ changed file only through such a pattern may be omitted from a narrowed PR run;
 the full suite on pushes to `main` is the backstop. An unknown changed path,
 graph construction or scan failure, or any selector error means run the full
 suite; it must never produce a narrower selection.
+If the selector command exits nonzero, the workflow writes the `__ALL__`
+sentinel and continues to pytest with the full suite.
 
 ## Known thin spots
 
@@ -415,16 +417,16 @@ its 330-minute step timeout.
 | trigger | mode | state |
 |---|---|---|
 | push to main | incremental | restores the module's newest cached mutmut state |
-| pull_request, via `workflow_run` once its `Tests` run succeeds | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects every ENABLED module that owns a changed path OR transitively depends on it (a static `ast` import-graph closure over every tracked `.py` file, ALLOWLIST-classified (`build_import_graph`/`_is_dynamic_file`): a plain import, the one literal `importlib.import_module("x.y")` call, or a conftest.py's plain `pytest_plugins` list resolve to specific edges (including `conftest.py` closure roots); anything else the file references at all -- `sys.path`, `subprocess`, a loader construct, `__import__` in any form, or a short list of other dangerous names/modules -- fails the WHOLE FILE safe, depending on every other tracked file (`module_dependency_closure`), else nothing for a path on the small docs-only `[pr_selection] inert` allowlist minus `inert_skip` (`tools/mutation_pilot.toml`), else EVERY enabled module for anything else -- an unrecognized path, or one the import graph itself cannot be built for (a syntax error or any other failure), is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix. Never saves back to the cache: a PR run must not overwrite main's incremental state. |
+| pull_request, via `workflow_run` once its `Tests` run succeeds | incremental, matrix narrowed to the modules the PR's diff can affect | restores the module's newest cached mutmut state; `plan` diffs the PR against its base (`git diff -z --no-renames --name-only`) and passes `--changed-files` to `matrix`, which selects every ENABLED module that owns a changed path OR transitively depends on it (a static `ast` import-graph closure over every tracked `.py` file): supported static imports, literal dynamic imports, and conftest `pytest_plugins` entries resolve to specific edges; the shared graph adds catch-all edges only where a dynamic import, import-path mutation, or process launch remains unresolved. The matrix uses the graph's precise edges when it can prove targets and the conservative closure for unresolved targets; docs-only paths use the small `[pr_selection] inert` allowlist minus `inert_skip` (`tools/mutation_pilot.toml`). Anything else -- an unrecognized path, or one the import graph cannot be built for (a syntax error or other failure) -- is never assumed safe to skip, so a PR touching the selector's own files (`tools/mutation_pilot.py`, `tools/gremlin_pilot.py`, `tools/mutation_results.py`, either mutation workflow) runs the full matrix. Never saves back to the cache: a PR run must not overwrite main's incremental state. |
 | weekly (gremlins Sun 05:23 UTC, mutmut Sun 22:23 UTC — staggered) | full | no restore: every mutant from scratch |
 | workflow_dispatch | full by default; untick `fresh` for incremental | `modules` picks a comma-separated subset |
 
-- **Static analysis is conservative, not sound.** The import-graph
-  classifier used above (`build_import_graph`/`_is_dynamic_file`) only
-  resolves the three shapes named in the table row; anything else fails
-  the whole file DYNAMIC rather than guessing narrower. That is
-  conservative for the constructs it recognizes, NOT a sound analysis in
-  general -- see [issue #42](https://github.com/yshewchuk/investment-validation/issues/42)
+- **Static analysis is conservative, not sound.** The import graph records
+  resolved import and supported subprocess targets as precise edges. It adds
+  catch-all edges only for constructs whose dynamic target remains unresolved;
+  unsupported runtime loading can still escape static analysis. That is
+  conservative for unresolved constructs, NOT a sound analysis in general --
+  see [issue #42](https://github.com/yshewchuk/investment-validation/issues/42)
   for constructs it does not recognize at all (string-target
   `monkeypatch.setattr`/`mock.patch`, `pytest.importorskip`,
   `getattr`-based imports, `__import__` via `globals()`/`builtins`,

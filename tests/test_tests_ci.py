@@ -1,7 +1,10 @@
 """Validate CI workflow configuration against conftest LOCAL_ONLY_MARKERS."""
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -123,3 +126,81 @@ def test_upload_step_warns_instead_of_failing_on_no_junit():
     steps = workflow["jobs"]["test"]["steps"]
     step = next(s for s in steps if s.get("name") == "Upload test results")
     assert step["with"]["if-no-files-found"] == "warn"
+
+
+def _workflow_step_run(name):
+    """The shipped shell body of one `test`-job step, never a hand copy."""
+    with open(WORKFLOW_PATH) as f:
+        workflow = yaml.safe_load(f)
+    steps = workflow["jobs"]["test"]["steps"]
+    return next(s for s in steps if s.get("name") == name)["run"]
+
+
+def _run_selection_then_pytest(tmp_path, selector_rc, pytest_rc):
+    """Runs BOTH shipped step scripts back to back in bash, with `git`,
+    `python3` (the selector) and `python` (pytest) stubbed on PATH, and
+    returns (select_rc, pytest_rc_seen, channel_text, pytest_args)."""
+    work = Path(tempfile.mkdtemp(dir=tmp_path))  # one isolated job run per call
+    runner_temp = work / "runner-temp"
+    runner_temp.mkdir()
+    bindir = work / "bin"
+    bindir.mkdir()
+    channel = runner_temp / "pr-test-selection.txt"
+    args_file = work / "pytest-args.txt"
+
+    (bindir / "git").write_text("#!/bin/sh\nexit 0\n")
+    # Simulates a selector that dies partway: it prints one narrowed path (the
+    # thing that must NOT survive as a silent narrow selection) and exits
+    # nonzero, like an unhandled crash in `select-tests`.
+    (bindir / "python3").write_text(
+        "#!/bin/sh\n"
+        'if [ "$2" = "select-tests" ]; then\n'
+        '  echo "tests/test_only_changed_area.py"\n'
+        f"  exit {selector_rc}\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    (bindir / "python").write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{args_file}"\n'
+        f"exit {pytest_rc}\n"
+    )
+    for p in (bindir / "git", bindir / "python3", bindir / "python"):
+        p.chmod(0o755)
+
+    env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
+               RUNNER_TEMP=str(runner_temp), BASE_SHA="0" * 40)
+    select = subprocess.run(["bash", "-c", _workflow_step_run("Select PR test files")],
+                            capture_output=True, text=True, env=env, cwd=work)
+    # The `Run pytest` step's SELECTION_FILE is a GitHub expression; for a
+    # pull_request run it resolves to this same channel path under runner.temp.
+    pytest_env = dict(env, SELECTION_FILE=str(channel))
+    run = subprocess.run(["bash", "-c", _workflow_step_run("Run pytest")],
+                         capture_output=True, text=True, env=pytest_env, cwd=work)
+    args = args_file.read_text().splitlines() if args_file.exists() else []
+    text = channel.read_text() if channel.exists() else None
+    return select.returncode, run.returncode, text, args
+
+
+def test_selector_crash_falls_back_to_all_sentinel_and_runs_full_suite(tmp_path):
+    """The `test` job must not die in the selection step: a nonzero selector
+    writes the exact __ALL__ sentinel to the channel the next step reads (over
+    any partial narrowed output) and pytest then runs the full `tests/` dir.
+    A pytest failure still propagates -- the fallback covers the selector, not
+    the suite."""
+    rc, pytest_rc, channel_text, args = _run_selection_then_pytest(tmp_path, 1, 0)
+    assert rc == 0, "the selection step must not fail the job on a selector crash"
+    assert channel_text == "__ALL__\n"
+    assert args[-1] == "tests/"  # full suite, not the narrowed partial path
+    assert "tests/test_only_changed_area.py" not in args
+    assert pytest_rc == 0
+
+    rc, pytest_rc_fail, _, _ = _run_selection_then_pytest(tmp_path, 1, 1)
+    assert rc == 0 and pytest_rc_fail == 1  # never a green run from a red pytest
+
+    rc, pytest_ok, stale_channel, stale_args = _run_selection_then_pytest(tmp_path, 0, 0)
+    assert rc == 0 and pytest_ok == 0
+    # A selector that exits 0 is untouched by the fallback: its own narrowed
+    # output, not __ALL__, still reaches pytest.
+    assert stale_channel == "tests/test_only_changed_area.py\n"
+    assert stale_args[-1] == "tests/test_only_changed_area.py"
