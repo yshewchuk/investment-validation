@@ -21,6 +21,10 @@ from pathlib import Path
 
 import pytest
 
+from engine.v2.contracts import ProcessIdentity, ProgressEvent, ResolvedResources
+from engine.v2.ops.catalog import dumps
+from engine.v2.ops.lifecycle import record_progress
+from engine.v2.ops.recovery import read_boot_id
 from engine.v2.ops.submission import submit
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import (
@@ -147,8 +151,13 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     assert "'queued'" in message and "never admitted" in message
     assert "DEPENDENCY_PENDING" in message
     assert "attempt count: 0" in message
-    assert "last worker heartbeat: n/a" in message  # absent field: placeholder
-    assert "log tail: n/a" in message               # absent field: placeholder
+    # absent fields: each names itself, and the two heartbeats never blur
+    assert "attempt lease heartbeat: unavailable (no attempts recorded)" in message
+    assert "latest progress event: unavailable (no progress event recorded)" in message
+    assert ("latest non-heartbeat progress event: unavailable "
+            "(no non-heartbeat progress event recorded)") in message
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
+    assert "log tail: unavailable (no progress recorded)" in message
 
     def _broken_attempt_receipts(*args, **kwargs):
         raise RuntimeError("simulated helper failure")
@@ -157,12 +166,16 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     with pytest.raises(AssertionError) as excinfo:
         run_until(_NeverAdmits(), conn, job_id, timeout=0.2)
     message = str(excinfo.value)
-    assert "last worker heartbeat: n/a" in message  # failed helper: placeholder
     assert "attempt count: 0" in message            # other diagnostics survive
     assert "DEPENDENCY_PENDING" in message
-    assert "log tail: n/a" in message
+    assert "log tail: unavailable (no progress recorded)" in message
     assert job_id in message
     assert "'queued'" in message and "never admitted" in message
+    # a failing attempt_receipts n/a's ONLY the lease-heartbeat field: process
+    # family liveness is rendered independently and keeps its real value
+    assert ("attempt lease heartbeat: unavailable (attempt_receipts failed: RuntimeError)"
+            in message)
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
 
     class _Blank:  # a receipt that carries none of the attributes the helper reads
         pass
@@ -177,9 +190,18 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     # formatted before the helpers -- never vanish.
     assert job_id in message
     assert "'queued'" in message and "never admitted" in message
-    for label in ("attempt count: n/a", "queue/admission reason: n/a",
-                  "last worker heartbeat: n/a", "log tail: n/a"):
+    for label in ("attempt count: unavailable (attempt count failed: AttributeError)",
+                  "queue/admission reason: unavailable "
+                  "(queue/admission reason failed: AttributeError)",
+                  "attempt lease heartbeat: unavailable "
+                  "(attempt lease heartbeat failed: AttributeError)",
+                  "latest progress event: unavailable "
+                  "(latest progress event failed: AttributeError)",
+                  "latest non-heartbeat progress event: unavailable "
+                  "(no non-heartbeat progress event recorded)",
+                  "log tail: unavailable (log tail failed: AttributeError)"):
         assert label in message, message
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
 
     class _RaisingStr:  # a REQUIRED value whose __str__ raises
         def __str__(self):
@@ -199,6 +221,7 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
         attempt_number = 1
         state = "queued"
         heartbeat_at = "2026-09-12T00:00:05+00:00"
+        lease_expires_at = "2026-09-12T00:00:35+00:00"
 
     class _Receipt:  # unprintable attempt_count; every other required value present
         attempt_count = _RaisingStr()
@@ -216,10 +239,13 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     assert job_id in message
     assert "'queued'" in message and "never admitted" in message
     assert "diagnostics failed" not in message
-    assert "attempt count: n/a (attempt count unavailable: ValueError)" in message
+    assert "attempt count: unavailable (attempt count failed: ValueError)" in message
     assert "queue/admission reason: DEPENDENCY_PENDING" in message
     assert "log tail: tick at" in message
-    assert "last worker heartbeat: attempt 1 (queued)" in message
+    assert ("attempt lease heartbeat: attempt 1 (queued): heartbeat at "
+            "2026-09-12T00:00:05+00:00, lease expires at 2026-09-12T00:00:35+00:00") in message
+    assert "latest progress event: tick at 2026-09-12T00:00:00+00:00" in message
+    assert "process family liveness: 0 live / 0 tracked (diagnostic only)" in message
 
     # The final-poll race CodeRabbit flagged on #377: a job that completes
     # DURING the last sleep -- i.e. after the deadline already elapsed -- is a
@@ -243,6 +269,69 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     monkeypatch.setattr("tests.ops_support.time", _FakeTime())
     monkeypatch.setattr("tests.ops_support.job_state", _final_poll_state)
     assert run_until(_NeverAdmits(), conn, job_id, timeout=fake_deadline) == "succeeded"
+
+
+def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path):
+    """The fenced lease stamp (``attempts.heartbeat_at``), a throttled
+    supervisor ``heartbeat`` observation event, the latest meaningful
+    non-heartbeat step and the diagnostic-only process-family counts each
+    print as their own labelled field, so a stalled worker's two different
+    heartbeats never read as one -- and the family count exposes no cgroup
+    path or command line."""
+    conn, job_id = _queued_job(tmp_path, {"code": "DEPENDENCY_PENDING",
+                                          "needed": {"dep": 1}})
+    boot_id = read_boot_id()
+    epoch = conn.execute("SELECT epoch_id FROM supervisor_epochs").fetchone()[0]
+    identity = ProcessIdentity(boot_id=boot_id, pid=(1 << 30) + 7, start_ticks=4242,
+                               process_group=1)
+    resources = ResolvedResources(
+        effective_host_budget_bytes=1 << 30, reserved_memory_bytes=1 << 29,
+        assigned_cpu_ids=(0,), thread_count=1, scratch_limit_bytes=1 << 28,
+        executor_mode="fake", containment="none", provider_leases=(),
+        resource_profile_version="test")
+    conn.execute(
+        "INSERT INTO attempts (attempt_id, job_id, attempt_number, fence, "
+        "supervisor_epoch, host_boot_id, state, process_state, process_json, "
+        "resources_json, created_at, heartbeat_at, lease_expires_at) "
+        "VALUES (?, ?, 1, 1, ?, ?, 'failed', 'exited', ?, ?, ?, ?, ?)",
+        ("att_never", job_id, epoch, boot_id, dumps(identity), dumps(resources),
+         "2026-09-12T00:00:00+00:00", "2026-09-12T00:00:05+00:00",
+         "2026-09-12T00:00:35+00:00"))
+    conn.execute("INSERT INTO process_members (attempt_id, pid, start_ticks, "
+                 "identity_json) VALUES (?, ?, ?, ?)",
+                 ("att_never", identity.pid, identity.start_ticks, dumps(identity)))
+    conn.execute("UPDATE jobs SET attempt_count = 1 WHERE job_id = ?", (job_id,))
+    record_progress(conn, ProgressEvent(
+        job_id=job_id, attempt_id="att_never", stage_id=None, sequence=1,
+        recorded_at="2026-09-12T00:00:08+00:00", kind="progress",
+        elapsed_seconds=8.0, message="step complete", step="ramp",
+        step_duration_seconds=3.0, step_units=10))
+    record_progress(conn, ProgressEvent(
+        job_id=job_id, attempt_id="att_never", stage_id=None, sequence=2,
+        recorded_at="2026-09-12T00:00:12+00:00", kind="heartbeat",
+        elapsed_seconds=12.0, message="still running", step="ramp"))
+
+    class _NeverTicks:
+        def tick(self):
+            pass
+
+    with pytest.raises(AssertionError) as excinfo:
+        run_until(_NeverTicks(), conn, job_id, timeout=0.2)
+    message = str(excinfo.value)
+    assert job_id in message
+    assert "'queued'" in message and "never admitted" in message
+    assert ("attempt lease heartbeat: attempt 1 (failed): heartbeat at "
+            "2026-09-12T00:00:05+00:00, lease expires at "
+            "2026-09-12T00:00:35+00:00") in message
+    assert ("latest progress event: heartbeat at 2026-09-12T00:00:12+00:00 "
+            "(progress/observation event, not a lease signal)") in message
+    assert ("latest non-heartbeat progress event: progress at "
+            "2026-09-12T00:00:08+00:00 (step ramp): step complete") in message
+    assert "process family liveness: 0 live / 1 tracked (diagnostic only)" in message
+    assert "attempt count: 1" in message
+    assert "queue/admission reason: DEPENDENCY_PENDING" in message
+    assert "log tail: heartbeat at 2026-09-12T00:00:12+00:00: still running" in message
+    assert "cgroup" not in message
 
 
 @pytest.mark.parametrize("workers", [["-p", "no:xdist"], ["-n", "2"]], ids=["serial", "xdist"])

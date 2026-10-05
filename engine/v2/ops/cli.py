@@ -23,6 +23,7 @@ from engine.v2.ops import executor
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import integrity_errors, transaction
 from engine.v2.ops.checkpoints import artifact, register_artifact
+from engine.v2.ops.diagnostics import process_family_liveness
 from engine.v2.ops.diagnostics import report as diagnostic_report
 from engine.v2.ops.discovery import sample_capacity
 from engine.v2.ops.errors import OpsError, fail
@@ -1222,10 +1223,13 @@ def explain_command(args, conn, root):
     job = get_job(conn, args.job_id)
     store = ArtifactStore(root)
     attempts = [_explain_attempt(conn, store, receipt)
-               for receipt in attempt_receipts(conn, args.job_id)]
+                for receipt in attempt_receipts(conn, args.job_id)]
     return {"job_id": args.job_id, "state": job.state,
             "queue_reason": to_document(job.queue_reason),
-            "failure": to_document(job.failure), "attempts": attempts}
+            "failure": to_document(job.failure),
+            "worker_process_family": process_family_liveness(
+                conn, job_id=args.job_id, boot_id=read_boot_id()),
+            "attempts": attempts}
 
 
 def _explain_attempt(conn, store, receipt):
@@ -1233,12 +1237,18 @@ def _explain_attempt(conn, store, receipt):
                         "ORDER BY sequence", (receipt.attempt_id,)).fetchall()
     events = [json.loads(row[0]) for row in rows]
     reserved = (receipt.resolved_resources.reserved_memory_bytes
-               if receipt.resolved_resources else None)
+                if receipt.resolved_resources else None)
+    latest_event = events[-1] if events else None
     return {"attempt_id": receipt.attempt_id, "attempt_number": receipt.attempt_number,
             "state": receipt.state, "process_state": receipt.process_state,
             "started_at": receipt.started_at, "ended_at": receipt.ended_at,
             "duration_seconds": _duration(receipt.started_at, receipt.ended_at),
             "exit_code": receipt.exit_code,
+            "lease": {"heartbeat_at": receipt.heartbeat_at,
+                      "lease_expires_at": receipt.lease_expires_at},
+            "latest_progress_event": (None if latest_event is None else {
+                "kind": latest_event.get("kind"),
+                "recorded_at": latest_event.get("recorded_at")}),
             "memory": {"peak_bytes": receipt.memory_peak_bytes, "reserved_bytes": reserved},
             "step_events_recorded": any(e.get("kind") == "progress" for e in events),
             "steps": _step_timeline(events),
@@ -1340,6 +1350,10 @@ def _fmt_seconds(value):
 
 def _render_explain_text(document):
     lines = [f"job {document['job_id']}: {document['state']}"]
+    family = document.get("worker_process_family")
+    if family is not None:
+        lines.append(f"  worker process family: {family['live']} live / "
+                     f"{family['tracked']} tracked (diagnostic liveness)")
     failure = document.get("failure")
     if failure:
         lines.append(f"  job failure: {failure['code']}: {failure['message']}")
@@ -1357,6 +1371,17 @@ def _render_attempt_text(attempt):
             f"duration {_fmt_seconds(attempt['duration_seconds'])}, exit {attempt['exit_code']}",
             f"  memory: peak {_human_bytes(mem['peak_bytes'])} / "
             f"reserved {_human_bytes(mem['reserved_bytes'])}"]
+    lease = attempt["lease"]
+    lines.append(f"  lease: heartbeat {lease['heartbeat_at'] or 'never renewed'} / "
+                 f"expires {lease['lease_expires_at']}")
+    event = attempt.get("latest_progress_event")
+    if event is None:
+        lines.append("  latest progress event: none recorded")
+    else:
+        observation = (" (throttled supervisor observation, not a lease signal)"
+                       if event["kind"] == "heartbeat" else "")
+        lines.append(f"  latest progress event: {event['kind']} at "
+                     f"{event['recorded_at']}{observation}")
     lines.extend(_render_steps_text(attempt["steps"]) if attempt["steps"]
                 else ["  steps: no step events recorded"])
     lines.extend(_render_failure_text(attempt["failure"], attempt["stderr_tail"]))

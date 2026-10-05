@@ -6,9 +6,11 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.cli import _progress_rows
+from engine.v2.ops.diagnostics import process_family_liveness
 from engine.v2.ops.lifecycle import attempt_receipts
 from engine.v2.ops.profiles import DEFAULT_POLICY, MIB
-from engine.v2.ops.recovery import begin_epoch
+from engine.v2.ops.recovery import begin_epoch, read_boot_id
 from engine.v2.ops.scheduler import Supervisor
 from engine.v2.ops.submission import get_job
 from tools.v2_ops_fixtures import Parameters, POLICY, REGISTRY, enqueue_claim, request, sample  # noqa: F401
@@ -186,12 +188,21 @@ def job_state(conn, job_id) -> str:
 
 
 def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
-    """Deadline diagnostics from the public ops helpers (``get_job``,
-    ``attempt_receipts``) only, never ad-hoc SQL: every required label always
-    prints, a failing/absent one rendering ``n/a`` alone (catching ``Exception``,
-    never ``BaseException``)."""
+    """Deadline diagnostics from the existing ops read helpers (``get_job``,
+    ``attempt_receipts``, ``cli._progress_rows``,
+    ``diagnostics.process_family_liveness``) only, never ad-hoc SQL: every
+    required label always prints, an unavailable one rendering
+    ``unavailable`` alone (catching ``Exception``, never ``BaseException``).
+
+    The two heartbeats never blur: ``attempts.heartbeat_at`` is the fenced
+    lease-renewal stamp (``lifecycle.heartbeat``), while a ``progress_events``
+    row of ``kind="heartbeat"`` is only a throttled supervisor observation
+    event; the lease stamp, that observation event, the latest meaningful
+    non-heartbeat progress step/event and the diagnostic-only process-family
+    live/tracked counts each get their own labelled field.
+    """
     def field(render_one, *, missing, label):
-        """Render one label; ``n/a`` for THIS field only on error/``None``.
+        """Render one label; ``unavailable`` for THIS field only on error/``None``.
         The ``str()`` conversion is guarded too, so a value whose ``__str__``
         raises fails THIS field alone instead of the whole formatter."""
         try:
@@ -200,12 +211,12 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
                 return missing
             return value if isinstance(value, str) else str(value)
         except Exception as exc:
-            return f"n/a ({label} unavailable: {type(exc).__name__})"
+            return f"unavailable ({label} failed: {type(exc).__name__})"
 
     def job_attr(name):
         if job is None:
             return None
-        return getattr(job, name)  # AttributeError on a bare receipt -> this field's n/a
+        return getattr(job, name)  # AttributeError on a bare receipt -> this field unavailable
 
     def render_reason(reason):
         if reason is None:
@@ -217,28 +228,50 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
             return None
         return f"{progress.kind} at {progress.recorded_at}: {progress.message[:200]}"
 
-    def render_heartbeat(attempts):
-        if attempts is None or not len(attempts):
+    def render_latest_progress(progress):
+        if progress is None:
+            return None
+        stamp = f"{progress.kind} at {progress.recorded_at}"
+        if progress.kind == "heartbeat":
+            stamp += " (progress/observation event, not a lease signal)"
+        return stamp
+
+    def render_lease(attempts):
+        if attempts is None or not len(attempts) or attempts[-1] is None:
             return None
         last = attempts[-1]
-        if last is None:
+        return (f"attempt {last.attempt_number} ({last.state}): heartbeat at "
+                f"{last.heartbeat_at or 'never renewed'}, lease expires at "
+                f"{last.lease_expires_at}")
+
+    def render_step(events):
+        steps = [event for event in events if event.get("kind") != "heartbeat"]
+        if not steps:
             return None
-        return (f"attempt {last.attempt_number} ({last.state}) at "
-                f"{last.heartbeat_at or 'n/a (never heartbeated)'}")
+        last = steps[-1]
+        step = f" (step {last['step']})" if last.get("step") else ""
+        message = f": {last['message'][:120]}" if last.get("message") else ""
+        return f"{last.get('kind')} at {last.get('recorded_at')}{step}{message}"
+
+    def render_family():
+        summary = process_family_liveness(conn, job_id=job_id, boot_id=read_boot_id())
+        return f"{summary['live']} live / {summary['tracked']} tracked (diagnostic only)"
 
     # The labels that must never vanish -- job id, last state and its
     # interpretation -- are guarded through ``field`` too, so the head below
     # interpolates strings only and cannot itself raise.
     job_text = field(lambda: str(job_id), missing="<unprintable>", label="job id")
-    state_text = field(lambda: repr(state), missing="n/a", label="state")
+    state_text = field(lambda: repr(state), missing="unavailable", label="state")
     classified = field(lambda: {
         "queued": "queued (never admitted)",
         "retry_wait": "retrying (waiting for re-admission)",
         "running": "admitted (running)",
         "cancelling": "admitted (cancelling)",
     }.get(state, state_text), missing=state_text, label="state interpretation")
-    elapsed_text = field(lambda: f"{float(timeout):.1f}s", missing="n/a", label="deadline")
-    reached_text = field(lambda: repr(list(states)), missing="n/a", label="target states")
+    elapsed_text = field(lambda: f"{float(timeout):.1f}s", missing="unavailable",
+                         label="deadline")
+    reached_text = field(lambda: repr(list(states)), missing="unavailable",
+                         label="target states")
     head = (f"run_until deadline expired after {elapsed_text}: job {job_text} "
             f"ended in state {state_text} -- {classified} -- without reaching any of "
             f"{reached_text}; the wait was bounded and is not retried or extended. ")
@@ -246,32 +279,47 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
         try:
             job, job_note = get_job(conn, job_id), None
         except Exception as exc:
-            job, job_note = None, f"n/a (get_job failed: {type(exc).__name__})"
+            job, job_note = None, f"unavailable (get_job failed: {type(exc).__name__})"
         count = field(lambda: job_attr("attempt_count"),
-                      missing=job_note or "n/a (no attempt count)", label="attempt count")
+                      missing=job_note or "unavailable (no attempt count)",
+                      label="attempt count")
         reason_text = field(lambda: render_reason(job_attr("queue_reason")),
-                            missing=job_note or "n/a (no queue reason recorded)",
+                            missing=job_note or "unavailable (no queue reason recorded)",
                             label="queue/admission reason")
+        progress_text = field(lambda: render_latest_progress(job_attr("latest_progress")),
+                              missing=job_note or "unavailable (no progress event recorded)",
+                              label="latest progress event")
         tail = field(lambda: render_progress(job_attr("latest_progress")),
-                     missing=job_note or "n/a (no progress recorded)", label="log tail")
+                     missing=job_note or "unavailable (no progress recorded)",
+                     label="log tail")
+        step_text = field(lambda: render_step(_progress_rows(conn, job_id)),
+                          missing="unavailable (no non-heartbeat progress event recorded)",
+                          label="progress rows")
         try:
             attempts = attempt_receipts(conn, job_id)
         except Exception as exc:
-            heartbeat = f"n/a (attempt_receipts failed: {type(exc).__name__})"
+            lease = f"unavailable (attempt_receipts failed: {type(exc).__name__})"
         else:
-            heartbeat = field(lambda: render_heartbeat(attempts),
-                              missing="n/a (no attempts recorded)",
-                              label="last worker heartbeat")
+            lease = field(lambda: render_lease(attempts),
+                          missing="unavailable (no attempts recorded)",
+                          label="attempt lease heartbeat")
+        family = field(render_family, missing="unavailable (no liveness summary)",
+                       label="process family liveness")
         return head + "; ".join([
             f"attempt count: {count}",
             f"queue/admission reason: {reason_text}",
-            f"last worker heartbeat: {heartbeat}",
+            f"attempt lease heartbeat: {lease}",
+            f"latest progress event: {progress_text}",
+            f"latest non-heartbeat progress event: {step_text}",
+            f"process family liveness: {family}",
             f"log tail: {tail}",
         ]) + "."
     except Exception as exc:  # last resort: a diagnostic bug must never blank the failure
-        na = f"n/a (diagnostics failed: {type(exc).__name__})"
+        na = f"unavailable (diagnostics failed: {type(exc).__name__})"
         return (head + f"attempt count: {na}; queue/admission reason: {na}; "
-                f"last worker heartbeat: {na}; log tail: {na}.")
+                f"attempt lease heartbeat: {na}; latest progress event: {na}; "
+                f"latest non-heartbeat progress event: {na}; process family "
+                f"liveness: {na}; log tail: {na}.")
 
 
 def run_until(service, conn, job_id, *, timeout, states=TERMINAL_STATES, poll=0.05) -> str:
