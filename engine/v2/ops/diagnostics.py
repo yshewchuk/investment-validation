@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 
+from engine.v2.contracts import ProcessIdentity
 from engine.v2.foundation import content_hash
+from engine.v2.ops.catalog import load_json
 from engine.v2.ops.executor_cgroup import probe
-from engine.v2.ops.executor_watchdog import process_table
+from engine.v2.ops.executor_watchdog import observe, process_table
 from engine.v2.ops.fingerprints import environment_identity
 from engine.v2.ops.profiles import DEFAULT_POLICY
 
@@ -71,6 +73,34 @@ def unmanaged_processes(conn, *, boot_id: str) -> list[dict]:
         rows.append({"pid": identity.pid, "start_ticks": identity.start_ticks,
                      "comm": comm, "state": state, "rss_bytes": rss})
     return sorted(rows, key=lambda row: row["pid"])
+
+
+def process_family_liveness(conn, *, job_id: str, boot_id: str) -> dict:
+    """Diagnostic-only worker process-family liveness for one job: aggregate
+    live/tracked counts over the exact kernel identities the supervisor
+    already recorded — persisted ``process_members``, falling back to the
+    launch ``ProcessIdentity`` — walked by the existing ``observe`` ownership
+    proof. Counts only: never a cgroup path, never a command line, and no
+    signal, mutation or lease effect whatsoever.
+    """
+    tracked = live = 0
+    rows = conn.execute("SELECT attempt_id, host_boot_id, process_json FROM attempts "
+                        "WHERE job_id = ?", (job_id,)).fetchall()
+    for row in rows:
+        if row["host_boot_id"] != boot_id:
+            # Another boot's identities are not comparable to this process table.
+            continue
+        members = conn.execute("SELECT identity_json FROM process_members "
+                               "WHERE attempt_id = ?", (row["attempt_id"],)).fetchall()
+        identities = tuple(load_json(ProcessIdentity, member[0]) for member in members)
+        if not identities and row["process_json"]:
+            identities = (load_json(ProcessIdentity, row["process_json"]),)
+        if not identities:
+            continue
+        known, alive, _ = observe(identities, boot_id)
+        tracked += len(known)
+        live += len(alive)
+    return {"live": live, "tracked": tracked}
 
 
 def environment_status(conn) -> dict:
