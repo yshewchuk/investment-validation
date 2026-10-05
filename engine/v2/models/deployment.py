@@ -21,6 +21,14 @@ any point leaves either the old pointer or the new one, never a partial file.
 Staging never opens or writes ``DEPLOYED``; only :func:`promote` and
 :func:`rollback` do.
 
+A staged manifest is not by itself promotable. :func:`mark_staging_succeeded`
+— called by the staging workflow only once every post-stage check has passed —
+publishes the ``releases/<release_id>/staging-status.json`` record that binds
+success to one exact manifest identity, and :func:`promote`/:func:`rollback`
+refuse :class:`StagingNotSuccessful` before any pointer or history write when
+that record is missing, unreadable, not a success, or bound to a different
+``release_id`` or ``release_hash`` than the manifest they are about to deploy.
+
 Every promotion and rollback also appends one immutable, sequence-numbered
 file under ``history/`` — a record nothing ever rewrites — so a deployment's
 past pointer states are auditable independent of what ``DEPLOYED`` shows now.
@@ -64,10 +72,12 @@ __all__ = [
     "PointerState",
     "ReleaseNotStaged",
     "StagedManifest",
+    "StagingNotSuccessful",
     "StagingRefused",
     "StaleReleaseHash",
     "current_pointer",
     "current_release",
+    "mark_staging_succeeded",
     "pointer_history",
     "production_deployment_root",
     "production_release_root",
@@ -84,6 +94,8 @@ DEPLOYMENT_REFUSAL = "MODEL_DEPLOYMENT_REFUSED"
 RELEASE_HASH_MEMBER_V1 = "member_only.v1"
 RELEASE_HASH_SEMANTIC_V2 = "semantic_manifest.v2"
 MODEL_RELEASE_ROOT_ENV = "MODEL_RELEASE_ROOT"
+STAGING_STATUS_FILENAME = "staging-status.json"
+STAGING_STATE_SUCCEEDED = "succeeded"
 
 
 class DeploymentError(Exception):
@@ -148,6 +160,23 @@ class CorruptManifest(DeploymentError):
         self.release_id = release_id
         super().__init__(f"{self.code}: {release_id}'s staged manifest content "
                           f"hash does not match its declared release_hash")
+
+
+class StagingNotSuccessful(DeploymentError):
+    """A promote/rollback target has no successful staging completion record.
+
+    Typed, non-retryable refusal: a release that never finished staging
+    cannot be promoted, and re-asking without re-staging changes nothing.
+    """
+
+    code = "STAGING_NOT_SUCCESSFUL"
+    retryable = False
+
+    def __init__(self, release_id: str) -> None:
+        """Build the STAGING_NOT_SUCCESSFUL refusal message, naming the release."""
+        self.release_id = release_id
+        super().__init__(f"{self.code}: {release_id} has no successful staging "
+                          f"completion record")
 
 
 # --------------------------------------------------------------------------
@@ -242,6 +271,10 @@ def _manifest_path(root: Path, release_id: str) -> Path:
 
 def _object_relpath(member_hash: str) -> str:
     return "objects/" + member_hash.removeprefix("sha256:")
+
+
+def _staging_status_path(root: Path, release_id: str) -> Path:
+    return _release_dir(root, release_id) / STAGING_STATUS_FILENAME
 
 
 def _pointer_path(root: Path) -> Path:
@@ -560,6 +593,59 @@ def restage_semantic_hash(root: Path, release_id: str) -> StagedManifest:
     return rewritten
 
 
+def mark_staging_succeeded(root: Path, release_id: str) -> None:
+    """Publish ``release_id``'s durable staging-completion record.
+
+    The manifest ``stage_release`` writes only says a release landed in the
+    store; it is this sidecar — the success state bound to that manifest's
+    actual identity — that makes the release promotable at all. Call it from
+    the staging workflow AFTER every post-stage check has passed (Phase 5
+    verification and anything else gating the release), never from
+    :func:`stage_release` itself, whose manifest necessarily precedes them.
+
+    Writes ``releases/<release_id>/staging-status.json`` atomically — the same
+    temp/fsync/rename/fsync-directory path as every other durable artifact
+    here — containing exactly ``release_id``, that staged manifest's
+    ``release_hash`` and ``state`` set to ``"succeeded"``. Re-marking an
+    unchanged release rewrites an identical record; marking one whose manifest
+    was since restaged rebinds to the new hash. Reads only: a manifest or any
+    staged object is never rewritten, so re-running it is safe.
+
+    Refuses :class:`ReleaseNotStaged` when nothing is staged under
+    ``release_id``, :class:`StagingRefused` (``MANIFEST_UNREADABLE``) when the
+    staged manifest cannot be read or parsed, :class:`StagingRefused`
+    (``RELEASE_ID_MISMATCH``) when that manifest declares a different release
+    than the path it sits on, and :class:`CorruptManifest` when its declared
+    hash no longer matches its own content. A success record may only bind a
+    manifest this module would itself deploy -- never a hash invented from
+    whatever bytes happen to be on disk.
+    """
+    root = Path(root)
+    try:
+        manifest = _read_manifest(root, release_id)
+    except (OSError, ValueError) as exc:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="MANIFEST_UNREADABLE",
+            detail="the staged manifest could not be read",
+        ),)) from exc
+    if manifest is None:
+        raise ReleaseNotStaged(release_id)
+    if manifest.release.release_id != release_id:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}]", code="RELEASE_ID_MISMATCH",
+            detail=f"staged manifest at this path declares release_id "
+                   f"{manifest.release.release_id!r}, not {release_id!r}",
+        ),))
+    if not _manifest_hash_matches(manifest):
+        raise CorruptManifest(release_id)
+    status = {
+        "release_id": release_id,
+        "release_hash": manifest.release_hash,
+        "state": STAGING_STATE_SUCCEEDED,
+    }
+    _atomic_write_bytes(_staging_status_path(root, release_id), _encode(status))
+
+
 def resolve_release(root: Path, release_id: str) -> ModelRelease:
     """The exact staged ``ModelRelease`` for ``release_id`` — by id, not by pointer.
 
@@ -625,15 +711,60 @@ def _repair_history(root: Path) -> None:
         _append_history(root, pointer)
 
 
+def _status_field(document: object, key: str) -> str:
+    """One text field of a staging-status document.
+
+    ``""`` for an absent key, a non-string value, or a document that is not an
+    object at all -- every one of which simply fails to equal what a real
+    success record must carry, so no separate malformed-shape branch is needed.
+    """
+    if not isinstance(document, dict):
+        return ""
+    value = document.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _require_staging_success(
+    root: Path, release_id: str, manifest: StagedManifest,
+) -> None:
+    """Refuse a staged release whose staging never reported success.
+
+    The staged manifest alone does not make a release promotable: staging is
+    the durable store AND its completion record, and
+    :func:`mark_staging_succeeded` is what publishes that record -- bound to
+    this exact ``release_id`` and ``release_hash``. Anything else refuses
+    :class:`StagingNotSuccessful`: no sidecar at all (a staging job that
+    crashed, was abandoned, or failed a post-stage check), one that cannot be
+    read or parsed, one whose ``state`` is not ``"succeeded"``, one written for
+    a different release id, or one left behind by an earlier generation of this
+    id whose manifest has since been restaged under a different hash. A stale
+    record is never trusted across a hash change.
+
+    Raises:
+        StagingNotSuccessful: No success record bound to this exact
+            ``release_id`` and ``release_hash`` could be read.
+    """
+    path = _staging_status_path(root, release_id)
+    try:
+        document = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError) as exc:
+        raise StagingNotSuccessful(release_id) from exc
+    if (_status_field(document, "release_id") != release_id
+            or _status_field(document, "release_hash") != manifest.release_hash
+            or _status_field(document, "state") != STAGING_STATE_SUCCEEDED):
+        raise StagingNotSuccessful(release_id)
+
+
 def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> PointerState:
     """Validate a staged release, then move ``DEPLOYED`` to it.
 
     Shared by both :func:`promote` and :func:`rollback`. Refuses
     :class:`ReleaseNotStaged`, :class:`StaleReleaseHash`,
     :class:`CorruptManifest`, :class:`StagingRefused` (``MANIFEST_UNREADABLE``
-    when the target manifest cannot be read or parsed, duplicate bindings)
-    before the pointer ever moves; a no-op if ``release_id`` is
-    already live.
+    when the target manifest cannot be read or parsed, duplicate bindings) and
+    :class:`StagingNotSuccessful` (no staging-completion record bound to this
+    exact ``release_id`` and ``release_hash``) before the pointer ever moves;
+    a no-op if ``release_id`` is already live.
     """
     try:
         manifest = _read_manifest(root, release_id)
@@ -651,6 +782,9 @@ def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> Poi
     duplicate_issues = _duplicate_binding_issues(manifest.release)
     if duplicate_issues:
         raise StagingRefused(duplicate_issues)
+    # Last gate before anything is written: a refusal here touches no pointer,
+    # no history entry and no temp file, and leaves the staged store intact.
+    _require_staging_success(root, release_id, manifest)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:
@@ -675,7 +809,9 @@ def promote(root: Path, release_id: str, *, clock: Clock = SystemClock()) -> Poi
 
     Refuses an unstaged release (:class:`ReleaseNotStaged`) or one staged
     under a superseded ``release_hash_version`` (:class:`StaleReleaseHash`)
-    -- see :func:`restage_semantic_hash`.
+    -- see :func:`restage_semantic_hash` -- and one whose staging workflow
+    never published a success record for this exact release and hash
+    (:class:`StagingNotSuccessful`), see :func:`mark_staging_succeeded`.
     """
     return _swap_pointer(Path(root), release_id, "promote", clock)
 
@@ -738,7 +874,9 @@ def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:
     """Point ``DEPLOYED`` back at the release the current one was promoted
     from. Refuses :class:`NoPriorRelease` with nothing to roll back to, or
     :class:`StaleReleaseHash`/:class:`CorruptManifest` if THAT prior release
-    is itself staged under a superseded hash version or a tampered manifest.
+    is itself staged under a superseded hash version or a tampered manifest,
+    or :class:`StagingNotSuccessful` if THAT prior release's staging never
+    published a success record for its current manifest.
     Also refuses :class:`StagingRefused` when a recorded pointer-history
     entry can't be read (``HISTORY_UNREADABLE``), the replayed sequences
     aren't exactly contiguous (``HISTORY_SEQUENCE_GAP``), or the top of the

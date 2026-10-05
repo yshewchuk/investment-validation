@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import sqlite3
 from pathlib import Path
 
@@ -197,6 +198,14 @@ def test_pinned_panel_integration_writes_verified_identity_and_descriptor(tmp_pa
     args = _inputs(cache)
     prep.write_release(out, *args, states, pinned_panel=context)
     assert len(loads) == 1
+    staged_dir = out / "deployment" / "releases" / "r1"
+    assert (staged_dir / "staging-status.json").is_file()
+    status = json.loads((staged_dir / "staging-status.json").read_text())
+    assert status == {
+        "release_id": "r1",
+        "release_hash": json.loads((staged_dir / "manifest.json").read_text())["release_hash"],
+        "state": "succeeded",
+    }
     body = layout.read_manifest(out)
     assert {key: body["sources"][key] for key in IDENTITY_KEYS} == identity
     assert deployment.current_pointer(out / "deployment") is None
@@ -216,6 +225,29 @@ def test_pinned_panel_integration_writes_verified_identity_and_descriptor(tmp_pa
     prep.write_release(out, *args, states, pinned_panel=context)
     assert layout.read_manifest(out) == first
     assert deployment.current_pointer(out / "deployment") is None
+
+
+def test_write_release_refuses_after_staged_manifest_publishes_no_staging_status(tmp_path, cache,
+                                                                                 monkeypatch):
+    """An incomplete staging workflow cannot publish success after a post-stage
+    failure: ``write_manifest`` refusing once ``stage_release`` has already
+    landed the model manifest leaves that manifest staged and its adjacent
+    ``staging-status.json`` never written."""
+    context, _store, _snapshot, _records, _panel = build_pinned(tmp_path, ALL_ONE)
+    cache["tier3_snapshot"] = verify_panel_copy(context)["panel_copy_sha256"]
+    name, raw, policy = _name(cache), _bytes(cache), _policy(cache)
+    states = prep.build_states({"tier4_folds:size": {name: raw}}, size_fold_policy=policy)
+
+    def refusing_write_manifest(*_args, **_kwargs):
+        raise prep.PrepareRefused("simulated manifest write failure after staging")
+
+    monkeypatch.setattr(prep, "write_manifest", refusing_write_manifest)
+    out = tmp_path / "out"
+    with pytest.raises(prep.PrepareRefused):
+        prep.write_release(out, *_inputs(cache), states, pinned_panel=context)
+    staged = out / "deployment" / "releases" / "r1"
+    assert (staged / "manifest.json").is_file()
+    assert not (staged / "staging-status.json").exists()
 
 
 def test_write_release_publishes_preflighted_bytes_after_caller_mutation(tmp_path, cache, monkeypatch):
