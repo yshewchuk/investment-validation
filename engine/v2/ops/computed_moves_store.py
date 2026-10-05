@@ -374,7 +374,7 @@ def _fence_check_for(staged_attempt_id, staged_fence, clock):
 
 
 def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempts, clock,
-                       expected_head, generation, request_hash,
+                       expected_head, generation, request_hash, as_of,
                        staged_attempt_id=None, staged_fence=None):
     prior_manifest = parent.table_manifests.get(COMPUTED_MOVES_TABLE_NAME)
     prior_records = tuple(record for record in parent.records
@@ -382,6 +382,24 @@ def _commit_generation(conn, store, scope, *, parent, records_by_ticker, attempt
                           == COMPUTED_MOVES_CONTRACT.contract_id)
     rewritten = set(records_by_ticker)
     kept = tuple(record for record in prior_records if record.partition_key not in rewritten)
+    # Issue #179 (contract: engine/v2/ops/ARCHITECTURE.md, "capture and
+    # inherited fragments respect as_of"): capture-time truncation only
+    # bounds the fragments THIS run writes, so a run at an earlier as_of
+    # would inherit a prior fragment whose committed event dates reach on or
+    # after that as_of -- realized data from the future, carried forward
+    # untouched. Refuse the whole generation, non-retryably, BEFORE the
+    # catalog transaction opens: the parent snapshot, head, and capture-log
+    # rows all stay exactly as they were. Only inherited fragments are
+    # inspected -- a rewritten ticker's old fragment is excluded here and
+    # bounded by the capture-time truncation instead. `event_date` is the
+    # second primary-key component and a normalized YYYY-MM-DD string, so it
+    # compares directly against the job's own normalized as_of day.
+    day = _as_of_day(as_of)
+    for record in kept:
+        if str(record.primary_key_max[1]) >= day:
+            raise fail("VALIDATION_FAILED",
+                       "computed moves refresh would inherit a committed fragment with "
+                       "event dates on or after this run's as_of")
     new_records = tuple(sorted((*kept, *records_by_ticker.values()),
                                key=lambda item: (item.partition_key, item.primary_key_min)))
     parent_version = (prior_manifest.dataset_version_ref.dataset_version_id
@@ -620,7 +638,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
     ``computed_at`` derives from ``as_of``, so identical inputs commit
     identical bytes.
     """
-    _as_of_day(as_of)  # validated before any I/O; raises INVALID_REQUEST on a bad value
+    as_of_day = _as_of_day(as_of)  # validated before any I/O; a bad value raises
     _validate_job_identity(parameters)
     root = Path(root)
     document = _input_document(root)
@@ -656,7 +674,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
         fragment_records, attempts = _capture_targets(
             conn, store, plan, fetcher, clock,
             events_by_ticker=_group_by_ticker(events),
-            daily_by_ticker=_group_by_ticker(daily), as_of_day=_as_of_day(as_of))
+            daily_by_ticker=_group_by_ticker(daily), as_of_day=as_of_day)
         if not fragment_records:
             # ``targets`` -- the whole derived universe -- is what "completed"
             # means here, whether or not this particular run wrote a fragment
@@ -670,7 +688,7 @@ def run_computed_moves_refresh(parameters, root, *, as_of, fetcher=None) -> Refr
                           for ticker, record in sorted(fragment_records.items())}})
         receipt = _commit_generation(
             conn, store, str(document["scope"]), parent=parent,
-            records_by_ticker=fragment_records, attempts=attempts, clock=clock,
+            records_by_ticker=fragment_records, attempts=attempts, clock=clock, as_of=as_of_day,
             expected_head=document.get("expected_head_snapshot_id",
                                        parameters.parent_snapshot_id),
             generation=int(document["expected_head_generation"]), request_hash=request_hash,

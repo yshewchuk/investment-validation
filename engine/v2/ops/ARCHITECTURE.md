@@ -1417,14 +1417,14 @@ job.
 | the scoring context years | derived from `as_of` on every call, mirroring legacy's own formula — never a fixed window that ages past its end |
 | crash after `plan_fn` returns but before the `"submitting"` receipt is durable (issue #186) | accepted risk: a retry may produce the same or a different plan; only the plan named by the durable receipt is submitted or scored. If the rebuilt plan differs, the first artifact is orphaned. Fresh retries recheck the window and probe; resume retries skip the window check and may submit after it closes. |
 
-### `computed_moves_store.py`: capture never sees data from after `as_of`
+### `computed_moves_store.py`: capture and inherited fragments respect `as_of`
 
 | Condition | Outcome |
 |---|---|
 | a fetched price series | truncated to on-or-before `as_of` before hashing; an event outside the as-of-bounded window is filtered, both before rows are built |
 | truncation empties the series | degrades to the existing "too few" outcome, never a raise |
 | an event survives the filter but its exit price still falls past the truncated series | the existing out-of-range guard returns nothing; folded into an ordinary skipped row |
-| a same-`as_of` rerun with an unchanged provider fetch | truncates identically both times — same hash, same no-op/re-resolve behavior |
+| a same-`as_of` rerun with an unchanged provider fetch | truncates identically both times — same hash, same no-op/re-resolve behavior; a fragment inherited into a run whose `as_of` is at or before its `primary_key_max` event date refuses the whole generation with non-retryable `VALIDATION_FAILED` before catalog commit. Rewritten tickers use the capture-time truncation above. Refusal leaves the parent, head and capture-log rows unchanged; already-published fragment objects and completed raw-unit receipts may remain. The same parent/`as_of` cannot succeed on retry; use a parent whose inherited rows precede `as_of` or request a later `as_of`. |
 
 ## Invariants
 
