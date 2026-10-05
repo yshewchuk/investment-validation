@@ -1128,11 +1128,18 @@ def test_earlier_as_of_refuses_inherited_future_dated_fragment(tmp_path):
         repository = Repository(conn, store)
         snapshot = repository.resolve(committed_parent["snapshot_id"])
         dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+        key_filter = (KeyPredicate(column="ticker", operator="eq", values=("BBBB",)),)
+        bound = repository.scan_population_bound(
+            snapshot.snapshot_id, table_name=COMPUTED_MOVES_TABLE_NAME,
+            table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+        result_limit = min(100, bound)
+        batch_limit = min(100, result_limit) if result_limit > 0 else 100
         query = DataQuery(
             snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
             columns=("event_date",),
-            key_filter=(KeyPredicate(column="ticker", operator="eq", values=("BBBB",)),),
-            order_by=("ticker", "event_date"), max_batch_rows=100, max_result_rows=100)
+            key_filter=key_filter,
+            order_by=("ticker", "event_date"),
+            max_batch_rows=batch_limit, max_result_rows=result_limit)
         bbbb_dates = [str(r["event_date"])
                       for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
                       for r in batch.to_pylist()]
