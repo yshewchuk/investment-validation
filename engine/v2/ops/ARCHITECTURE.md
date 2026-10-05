@@ -697,7 +697,7 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 | R1: per-key producer refusal (`NO_RESOLVABLE_EXPIRY`, `EVENT_NOT_FOUND`/`IDENTITY_CONFLICT`, `INTRADAY_EVENT_NOT_ADMITTED`, `PANEL_HISTORY_NOT_AVAILABLE`, or a calendar/expiry refusal) | The typed refusal is included in the refusal artifact and complete successful rows for the other keys can still be submitted. Missing eligible score identity, a job that already exists, an unavailable required release, or a sidecar tick that never reaches production means no submission on that tick. |
 | R2: producer-wide failure (missing source table or exact spot, malformed source input, or a repository failure) | Returns no partial tuple and writes no files, and no job is submitted; unrelated geometry failures propagate too. Existing sidecar redacted reporting and retry/backoff behavior handles the error. The producer keeps no durable/negative cache and never fetches from a provider: reuse is build- and snapshot-scoped, and unchanged inputs reproduce the same result or refusal. |
 | R3: late or unavailable prerequisite, or a readiness no-op | No producer refusal and no job; the next eligible sidecar tick reevaluates under existing scheduling/backoff behavior — no specific retry time is promised. |
-| R4: caller and builder boundaries | The sidecar is the sole producer caller, and the read-only producer makes no catalog writes; `submit_native_score_batch_shadow_if_ready` consumes the supplied references only — it never reads source inputs or reruns the producer. |
+| R4: caller and builder boundaries | The sidecar is the sole producer caller, and the read-only producer makes no catalog writes; `submit_native_score_batch_shadow_if_ready` consumes the supplied references only — it never reads source inputs or reruns the producer. For a new eligible snapshot-pinned identity, if any of the two staged artifact refs, the calendar revision, or the snapshot ID is absent, that builder raises `VALIDATION_FAILED` before creating or submitting a JobSpec. |
 | R5: staging and registration | The sidecar stages/registers both complete documents before submission; if production or either stage/register step fails there is no submission and no partial tuple or job. An object already published before a later stage/register error may remain unreferenced in the artifact store, with no job referencing it; staging side effects do not roll back atomically. |
 | R6: preserved invariants | Event order and deterministic document content, exact event identity and earnings dataset revision, timestamp-preserving refusal identity — `YYYY-MM-DD` for midnight and canonical naive ISO for intraday, including `INTRADAY_EVENT_NOT_ADMITTED` ([#356](https://github.com/yshewchuk/investment-validation/issues/356)) — disjoint event and refusal keys, the shadow/smoke namespace and `(session, scope_hash)` idempotency, and compatibility with a missing optional refusal artifact. |
 
@@ -996,19 +996,18 @@ material": `BoardRequest`'s own fields and
   in production today — see "Cutover PR-4 (redo)" above) would break; no
   such caller exists to migrate.
 
-**Cited, not solved here: `native_score_batch` does not submit at all under
-today's production default.** `#88`'s own R1 (above, "Per-event raw
-rows") found that in the production default `"legacy"` input mode, the
-selected `"score"` job pins no snapshot, so PR-7a's shadow batch "does not
-submit at all, full stop" until a future PR changes the production input
-mode — NOT designed here or by `#88`. This redo does not solve that gap
-either: `_native_parity_identity` (above) simply keeps returning `None`
-(R1, "Failure semantics" below) for as long as no `native_score_batch` job
-ever succeeds — the SAME graceful "nothing to do yet" outcome it already
-has for the ordinary case of a night that has not reached that point yet,
-not a distinct failure mode this redo needs to handle specially. Once
-PR-7b unblocks `native_score_batch`'s own submission, `native_parity`
-starts working with no change of its own.
+**Cited, not solved here: `native_score_batch`'s submission contract.** The
+tick-loop sidecar does submit for an eligible snapshot-pinned `"score"`
+identity once its required producer inputs are staged; production's default
+`"legacy"` input mode pins no snapshot, so there it stays a normal no-op —
+`None`, no JobSpec, no raise. For a NEW eligible identity a missing
+`events_ref`, `producer_refusals_ref`, `calendar_revision` or `snapshot_id`
+raises typed `VALIDATION_FAILED` before any job is created. Until some
+`native_score_batch` job has succeeded, `_native_parity_identity` (above)
+keeps returning `None` (R1, "Failure semantics" below) — the same graceful
+"nothing to do yet" outcome as a night that has not reached that point yet,
+not a distinct failure mode this redo handles specially: `native_parity`
+waits without submitting until its paired succeeded inputs are ready.
 
 ## Outputs
 
@@ -1510,11 +1509,11 @@ node (`"native_parity": ("score",)`) describes the separate inline handler
 **Production job submission does not walk this diagram's graph at all** — it
 uses the separately maintained `_DAG_STAGES`, never containing
 `native_parity`, `computed_moves_refresh` or `native_score_batch`. Their only
-path is `supervisor.Service`'s tick loop: `computed_moves_refresh`'s sidecar
-does reach `submission.submit`; `native_score_batch`'s does not today (see
-"Outputs"); `native_parity` has a built, tested nightly-side builder
-(`nightly.submit_native_parity_if_ready`/`_native_parity_identity`), called
-by `Service._reconcile_native_parity` to submit jobs independently of the graph.
+path is `supervisor.Service`'s tick loop: `computed_moves_refresh`'s and
+`native_score_batch`'s sidecars both reach `submission.submit`, the latter
+for an eligible snapshot-pinned identity once its producer refs are staged
+(see "Outputs"); `native_parity` submits through its own tested builder
+(`nightly.submit_native_parity_if_ready`), also called from the tick loop.
 
 ### CLI → catalog → coordinator effect
 
