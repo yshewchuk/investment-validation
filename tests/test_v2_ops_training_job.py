@@ -22,6 +22,7 @@ from engine.v2.models import (
     current_release,
     stage_release,
 )
+from engine.v2.models import deployment
 from engine.v2.models.training import ReceiptIssue, TrainingRefused, current_recipes
 from engine.v2.ops import cli, executor, nightly, stages, training
 from engine.v2.ops.bootstrap import open_catalog
@@ -447,6 +448,7 @@ def test_promote_worker_refuses_when_unstaged(tmp_path):
 def test_promote_worker_promotes_a_staged_release(tmp_path):
     release, inventory, payloads = _release_fixture("r1")
     stage_release(tmp_path, release, inventory, payloads)
+    deployment.mark_staging_succeeded(tmp_path, "r1")
     result = training.run_promote_worker(
         {"expected_ids": ["models_promote"], "release_root": str(tmp_path),
          "release_id": "r1"}, tmp_path)
@@ -684,6 +686,7 @@ def test_e2e_submit_training_then_promote_through_supervisor(tmp_path, monkeypat
             # phase5_prepare_release.py's job, out of scope this slice).
             release, inventory, payloads = _release_fixture("r-e2e")
             stage_release(tmp_path, release, inventory, payloads)
+            deployment.mark_staging_succeeded(tmp_path, "r-e2e")
 
             promote_plan = training.promote_plan(release_root=str(tmp_path),
                                                  release_id="r-e2e")

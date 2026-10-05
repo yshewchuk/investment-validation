@@ -105,6 +105,7 @@ def _stage_and_promote(root: Path, *, release_id: str = _RELEASE_ID) -> ModelRel
         artifact_manifest_ref="manifest://r", evidence_refs=("evidence://r",),)
     dep_root = _dep_root(root)
     deployment.stage_release(dep_root, release, inventory, {member_hash: payload})
+    deployment.mark_staging_succeeded(dep_root, release_id)
     deployment.promote(dep_root, release_id)
     return deployment.resolve_release(dep_root, release_id)
 

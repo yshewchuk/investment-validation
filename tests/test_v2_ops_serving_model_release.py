@@ -19,6 +19,7 @@ from engine.v2.models import (
     ModelReleaseInventory,
     ReleaseBinding,
     ReleaseRequirement,
+    deployment,
     promote,
     stage_release,
 )
@@ -67,6 +68,13 @@ def _fixture(release_id):
         artifact_manifest_ref="manifest://r", evidence_refs=("evidence://r",),
     )
     return release, inventory, {member_hash: payload}, member_hash
+
+
+def _stage(models_root, release, inventory, payloads):
+    """Write the manifest, then publish the staging-success record that a
+    successful ``promote`` requires."""
+    stage_release(models_root, release, inventory, payloads)
+    deployment.mark_staging_succeeded(models_root, release.release_id)
 
 
 def _serve(tmp_path, **kwargs):
@@ -124,7 +132,7 @@ def test_no_release_deployed_is_an_explicit_refusal_not_empty_success(tmp_path):
 def test_deployed_release_is_visible_end_to_end(tmp_path):
     models_root = tmp_path / "models"
     release, inventory, payloads, member_hash = _fixture("r1")
-    stage_release(models_root, release, inventory, payloads)
+    _stage(models_root, release, inventory, payloads)
     promote(models_root, "r1")
     server, thread, base = _serve(tmp_path, model_release_root=models_root)
     try:
@@ -150,7 +158,7 @@ def test_deployed_release_is_visible_end_to_end(tmp_path):
 def test_deployed_release_document_marks_itself_unbound_from_the_board(tmp_path):
     models_root = tmp_path / "models"
     release, inventory, payloads, _ = _fixture("r1")
-    stage_release(models_root, release, inventory, payloads)
+    _stage(models_root, release, inventory, payloads)
     promote(models_root, "r1")
     server, thread, base = _serve(tmp_path, model_release_root=models_root)
     try:
@@ -169,8 +177,8 @@ def test_rollback_lineage_is_reported_as_a_dependency(tmp_path):
     models_root = tmp_path / "models"
     release1, inventory1, payloads1, _ = _fixture("r1")
     release2, inventory2, payloads2, _ = _fixture("r2")
-    stage_release(models_root, release1, inventory1, payloads1)
-    stage_release(models_root, release2, inventory2, payloads2)
+    _stage(models_root, release1, inventory1, payloads1)
+    _stage(models_root, release2, inventory2, payloads2)
     promote(models_root, "r1")
     promote(models_root, "r2")
     server, thread, base = _serve(tmp_path, model_release_root=models_root)
@@ -185,7 +193,7 @@ def test_rollback_lineage_is_reported_as_a_dependency(tmp_path):
 def test_unresolvable_pointer_is_unavailable_not_empty_success(tmp_path):
     models_root = tmp_path / "models"
     release, inventory, payloads, _ = _fixture("r1")
-    stage_release(models_root, release, inventory, payloads)
+    _stage(models_root, release, inventory, payloads)
     promote(models_root, "r1")
     (models_root / "releases" / "r1" / "manifest.json").unlink()
     server, thread, base = _serve(tmp_path, model_release_root=models_root)

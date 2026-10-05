@@ -389,6 +389,7 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     root.mkdir(parents=True, exist_ok=True)
     if incumbent is not None:
         _copy_incumbent(incumbent, root)
+    deployment.invalidate_staging_success(root, release.release_id)
     staged = deployment.stage_release(root, release, inventory, dict(payloads))
     rows = []
     for build in states:

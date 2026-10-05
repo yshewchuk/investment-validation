@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from checks import phase5_acceptance as acceptance
 from checks import phase5_release as layout
 from engine.v2.foundation import content_hash
 from engine.v2.models import deployment
@@ -51,6 +52,7 @@ def _stage(root, rid="A", alpha=0.55, incumbent=None):
     release, inventory, models = _models(rid, keys=(("gate", "STR-THRU"),))
     states = [s for s in prep.build_states(payloads) if s.spec.member_id in payloads]
     path = prep.write_release(root, release, inventory, models, states, incumbent=incumbent)
+    deployment.mark_staging_succeeded(layout.deployment_root(root), rid)
     return path, (payoff.content_hash, recal.content_hash, analog.content_hash)
 
 
@@ -293,3 +295,31 @@ def test_interrupted_root_publication_keeps_complete_files_and_retry_works(tmp_p
     assert resolve_release_binding(tmp_path).release_id == "A"
     assert _stage(tmp_path, "B", 0.65)[0] == _local(tmp_path, "B")
     assert layout.read_manifest(tmp_path)["release_id"] == "B"
+
+
+def test_reprepare_failed_acceptance_invalidates_prior_approval(tmp_path):
+    _stage(tmp_path)
+    dep = layout.deployment_root(tmp_path)
+    deployment.promote(dep, "A")
+    manifest = deployment._manifest_path(dep, "A")
+    staged_model_manifest = manifest.read_bytes()
+    pointer = (dep / "DEPLOYED").read_bytes()
+    history = {p.name: p.read_bytes() for p in (dep / "history").glob("*.json")}
+    release, inventory, models = _models("A", keys=(("gate", "STR-THRU"),))
+    states = prep.build_states({})
+    prep.write_release(tmp_path, release, inventory, models, states)
+    assert manifest.read_bytes() == staged_model_manifest
+    findings = acceptance._Findings()
+    specs = tuple(s for s in layout.STATE_SPECS if s.member_id == "payoff_line:STR-THRU")
+    rows, _loaded = acceptance._state_member_rows(
+        tmp_path, layout.read_manifest(tmp_path), findings, specs)
+    row = next(item for item in rows if item["member_id"] == "payoff_line:STR-THRU")
+    assert row["status"] == layout.MISSING
+    assert row["verdict"] == acceptance.MEMBER_MISSING
+    assert acceptance.MEMBER_MISSING in {item["code"] for item in findings.rows}
+    with pytest.raises(deployment.StagingNotSuccessful) as error:
+        deployment.promote(dep, "A")
+    assert error.value.retryable is False
+    assert (dep / "DEPLOYED").read_bytes() == pointer
+    assert {p.name: p.read_bytes() for p in (dep / "history").glob("*.json")} == history
+    assert not deployment._staging_status_path(dep, "A").exists()
