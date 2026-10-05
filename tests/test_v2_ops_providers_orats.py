@@ -84,7 +84,9 @@ def test_complete_response_builds_ported_ticker_rows():
 
     assert kind == "complete"
     assert meta == {"summaries_status": 200, "cores_status": 200,
-                    "trade_date": SESSION_DATE}
+                    "trade_date": SESSION_DATE, "attempts": 1,
+                    "attempt_statuses": [{"summaries_status": 200,
+                                          "cores_status": 200}]}
     assert json.loads(raw_bytes) == {
         "summaries": {"data": [SUMMARIES_ROW], "message": "ok"},
         "cores": {"data": [CORES_ROW], "message": "ok"}}
@@ -143,17 +145,47 @@ def test_unauthorized_is_credential_invalid_and_never_echoes_the_key():
     assert secret not in str(exc.value)
 
 
-def test_missing_expected_ticker_is_partial_and_refuses():
+def test_missing_expected_ticker_retries_once_then_returns_partial():
     unit = dict(UNIT, expected_keys=["AAA", "BBB"])
     extra = dict(SUMMARIES_ROW, ticker="ZZZ")
-    fake = _FakeHttp({"hist/summaries": (200, {}, _body([SUMMARIES_ROW, extra])),
-                      "hist/cores": (200, {}, _body([CORES_ROW]))})
-    fetcher = orats_daily_market_fetcher(http_get=fake, api_key="test-key")
+    # Both observations are market-wide 2xx responses that omit BBB: the
+    # provider's one paired retry sees the same gap again, so the unit ends
+    # partial rather than raising.
+    observations = {
+        "hist/summaries": [(200, {}, _body([SUMMARIES_ROW, extra])),
+                           (200, {}, _body([SUMMARIES_ROW, extra]))],
+        "hist/cores": [(200, {}, _body([CORES_ROW])),
+                       (200, {}, _body([CORES_ROW]))],
+    }
+    calls: list[tuple[str, float]] = []
+    seen: dict[str, int] = {}
 
-    with pytest.raises(OpsError) as exc:
-        fetcher(unit)
+    def http_get(url, *, timeout):
+        calls.append((url, timeout))
+        for endpoint, responses in observations.items():
+            if f"/{endpoint}?" in url:
+                index = seen.get(endpoint, 0)
+                if index >= len(responses):
+                    raise AssertionError(f"{endpoint} was called more than twice")
+                seen[endpoint] = index + 1
+                return responses[index]
+        raise AssertionError(f"unexpected url {url!r}")
 
-    assert exc.value.code == "TRANSIENT_SOURCE"
+    fetcher = orats_daily_market_fetcher(http_get=http_get, api_key="test-key")
+
+    _, kind, meta, rows = fetcher(unit)
+
+    assert kind == "partial"
+    assert [row["ticker"] for row in rows] == ["AAA"]
+    assert "BBB" not in {row["ticker"] for row in rows}
+    assert meta["trade_date"] == SESSION_DATE
+    assert meta["attempts"] == 2
+    summaries_url = (f"https://api.orats.io/datav2/hist/summaries"
+                     f"?tradeDate={SESSION_DATE}&token=test-key")
+    cores_url = (f"https://api.orats.io/datav2/hist/cores"
+                 f"?tradeDate={SESSION_DATE}&token=test-key")
+    assert calls == [(summaries_url, 30.0), (cores_url, 30.0),
+                     (summaries_url, 30.0), (cores_url, 30.0)]
 
 
 def test_extra_unrequested_rows_are_ignored_when_all_expected_present():
@@ -491,7 +523,7 @@ def test_refresh_plan_table_name_mismatch_is_contract_mismatch(tmp_path):
     assert exc.value.code == "CONTRACT_MISMATCH"
 
 
-def test_refresh_plan_unit_missing_expected_keys_is_contract_mismatch(tmp_path):
+def test_refresh_plan_unit_missing_expected_keys_is_retryable_input_changed(tmp_path):
     document = {"catalog_path": str(tmp_path / "ops.sqlite"),
                 "objects_root": str(tmp_path), "table_name": "daily_market"}
     (tmp_path / "refresh_plan.json").write_text(canonical_json({
@@ -499,4 +531,5 @@ def test_refresh_plan_unit_missing_expected_keys_is_contract_mismatch(tmp_path):
                          "partition_key": SESSION_DATE}]}))
     with pytest.raises(DataError) as exc:
         data_incremental._acquire_refresh_units(None, tmp_path, document, None)
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "INPUT_CHANGED"
+    assert exc.value.problem.retryable is True

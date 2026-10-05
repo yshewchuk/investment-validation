@@ -168,6 +168,10 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     # provider response that is neither complete nor a legitimate empty. Same name and
     # semantics as the ``contracts.operations.FAILURE_CODES`` row.
     "TRANSIENT_SOURCE": ("source", True),
+    # A keyed `daily_market` unit (one with expected keys) receiving a
+    # `legitimate_empty` response is refused with this code. Same name and
+    # semantics as the ``contracts.operations.FAILURE_CODES`` row.
+    "SOURCE_NOT_FINAL": ("source", True),
     "INPUT_CHANGED": ("integrity", True),
     "OBJECT_CORRUPT": ("integrity", False),
     "MANIFEST_CORRUPT": ("integrity", False),
