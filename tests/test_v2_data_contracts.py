@@ -305,13 +305,17 @@ def test_table_contract_batch_rows_survives_the_round_trip_positive():
 def test_table_contract_version_boundary_rejects_v1_and_the_removed_rows_cap():
     """E's contract boundary: a newly emitted TableContract document is
     ``table_contract.v2.0``; the retired ``table_contract.v1.0`` wire shape
-    is refused as an unsupported version, and supplying the removed
+    is refused as an unsupported version -- with precedence, since a v1.0
+    document that also carries the removed ``maximum_result_rows`` still
+    fails as ``UNSUPPORTED_VERSION`` before unknown-field validation -- and
+    on the supported v2.0 document, supplying the removed
     ``maximum_result_rows`` field is refused as an unknown field."""
     doc = to_document(SAMPLES["TableContract"])
     assert doc["schema_version"] == "table_contract.v2.0"
 
     doc = to_document(SAMPLES["TableContract"])
     doc["schema_version"] = "table_contract.v1.0"
+    doc["maximum_result_rows"] = 5000
     with pytest.raises(DocumentError) as err:
         decode_document(TableContract, doc)
     assert err.value.code == "UNSUPPORTED_VERSION"
