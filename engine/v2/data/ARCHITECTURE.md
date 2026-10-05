@@ -455,9 +455,11 @@ Root doc §5 invariants this package is responsible for:
   `normalization_id` on a canonical hash of the fetch unit's expected-key set
   folded together with `raw_hash`, `normalizer_id` and `contract_id`; expected
   keys are the canonical set of string ticker keys, so order and duplicates
-  never change the hash. A raw receipt needed for normalization whose saved
-  request carries no expected keys fails closed with the registered retryable
-  `INPUT_CHANGED`, before any identity is derived or normalization written —
+  never change the hash. A raw receipt needed for normalization must carry
+  `request.keys` as a nonempty list of nonempty strings; a missing, empty or
+  malformed saved key list, and an empty canonical expected-key set at the
+  normalization boundary, fail closed with the registered retryable
+  `INPUT_CHANGED` before any normalization identity is derived or written —
   never a silent empty set. The same raw payload and normalizer under different
   expected-key sets therefore produce distinct normalization identities and
   rows; repeated requests with the same set stay idempotent. A payload

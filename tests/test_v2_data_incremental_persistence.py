@@ -685,3 +685,91 @@ def test_unreferenced_keyless_raw_receipt_does_not_abort_refresh(tmp_path):
         "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
     assert conn.execute(
         "SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 1
+
+
+def test_malformed_saved_key_shapes_fail_closed_with_input_changed(tmp_path):
+    """PR #400 CodeRabbit finding (contract: engine/v2/data/ARCHITECTURE.md):
+    a raw receipt needed for normalization must carry ``request["keys"]`` as a
+    nonempty list of nonempty strings. Missing, null, empty, a non-list value
+    or any non-string/empty-string member refuses with the registered
+    retryable ``INPUT_CHANGED`` -- never coercion, never a silent empty set --
+    while a valid list is returned unchanged."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+
+    def receipt(name, request):
+        return data_incremental.cache_raw_receipt(
+            conn, store, data_incremental.RawPayload(
+                payload=json.dumps({"kind": name}).encode(),
+                response_kind="complete", response_meta={}),
+            source="synthetic", endpoint="daily_market",
+            request=request, received_at=clock.now().isoformat())
+
+    malformed = (
+        ("missing", {"ticker": "AAA"}),
+        ("null", {"keys": None}),
+        ("empty", {"keys": []}),
+        ("non-list-string", {"keys": "AAA"}),
+        ("non-list-dict", {"keys": {"ticker": "AAA"}}),
+        ("non-list-int", {"keys": 7}),
+        ("non-list-tuple", {"keys": ("AAA", "BBB")}),
+        ("empty-member", {"keys": ["AAA", ""]}),
+        ("non-string-member", {"keys": ["AAA", 42]}),
+        ("null-member", {"keys": ["AAA", None]}),
+    )
+    revision_row = _obj_daily_market_rows()[0]
+    for name, request in malformed:
+        raw = receipt(name, request)
+        with pytest.raises(DataError) as err:
+            data_incremental._receipt_expected_keys(raw)
+        assert err.value.code == "INPUT_CHANGED", name
+        assert err.value.problem.retryable is True, name
+        referenced = _frozen_revision(revision_row, raw.raw_receipt_id,
+                                      "revision-" + name)
+        with pytest.raises(DataError) as err:
+            data_incremental._incoming_expected_keys(
+                {raw.raw_receipt_id: raw}, (referenced,))
+        assert err.value.code == "INPUT_CHANGED", name
+
+    valid = receipt("valid", {"keys": ["AAA", "BBB"]})
+    assert data_incremental._receipt_expected_keys(valid) == ("AAA", "BBB")
+
+
+def test_empty_expected_key_set_refuses_before_any_normalization_row(tmp_path):
+    """PR #400 CodeRabbit finding: an empty canonical expected-key set refuses
+    with the registered retryable ``INPUT_CHANGED`` before it is hashed into a
+    normalization identity, so no ``data_normalizations`` row is ever inserted
+    under a silently empty set."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    with pytest.raises(DataError) as err:
+        data_incremental._normalization_identity(
+            raw.raw_hash, "daily_market.v3", contract_id, ())
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    with pytest.raises(DataError) as err:
+        data_incremental.cache_normalization(
+            conn, store, raw, (), normalizer_id="daily_market.v3",
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=())
+    assert err.value.code == "INPUT_CHANGED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+
+def test_valid_string_key_lists_keep_the_canonical_identity(tmp_path):
+    """PR #400 CodeRabbit finding guard: nonempty string key lists keep the
+    existing set-based identity formula -- order and duplicates never change
+    it, a genuinely different set (or raw hash) always does."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    normalizer = "daily_market.v3"
+    base = data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ("AAA", "BBB"))
+    assert base.startswith("norm_")
+    assert base == data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ["BBB", "AAA", "AAA"])
+    assert base != data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ("AAA",))
+    assert base != data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ("AAA", "CCC"))
+    assert base != data_incremental._normalization_identity(
+        content_hash({"other": "raw"}), normalizer, contract_id, ("AAA", "BBB"))

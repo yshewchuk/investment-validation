@@ -794,7 +794,11 @@ def _canonical_expected_keys(expected_keys: Sequence[str]) -> tuple[str, ...]:
 def _normalization_identity(raw_hash: str, normalizer_id: str,
                             contract_id: str,
                             expected_keys: Sequence[str]) -> str:
-    expected_keys_hash = content_hash(_canonical_expected_keys(expected_keys))
+    canonical = _canonical_expected_keys(expected_keys)
+    if not canonical:
+        raise errors.fail("INPUT_CHANGED",
+                          "normalization expected-key set is empty")
+    expected_keys_hash = content_hash(canonical)
     return "norm_" + content_hash({
         "raw_hash": raw_hash, "normalizer_id": normalizer_id,
         "contract_id": contract_id,
@@ -1586,13 +1590,17 @@ def _staged_raw_receipt(conn, store, item):
 
 def _receipt_expected_keys(raw: RawReceiptRecord) -> tuple[str, ...]:
     """The fetch unit's expected keys as persisted on the receipt request by
-    ``_fetch_unit``. Fails closed: a production caller is never silently
-    defaulted to an empty set."""
+    ``_fetch_unit``. Fails closed: ``request["keys"]`` must be a nonempty list
+    of nonempty strings (engine/v2/data/ARCHITECTURE.md) -- missing, null,
+    empty, non-list or any malformed member refuses with the registered
+    retryable ``INPUT_CHANGED``, never a coerced value and never a silently
+    defaulted empty set. Valid strings are returned unchanged."""
     keys = raw.request.get("keys")
-    if keys is None:
+    if (not isinstance(keys, list) or not keys
+            or not all(isinstance(key, str) and key for key in keys)):
         raise errors.fail("INPUT_CHANGED",
-                          "daily_market raw receipt request carries no expected keys")
-    return tuple(str(key) for key in keys)
+                          "daily_market raw receipt request expected keys are malformed")
+    return tuple(keys)
 
 
 def _incoming_expected_keys(
