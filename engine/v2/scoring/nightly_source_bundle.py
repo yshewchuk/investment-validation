@@ -495,6 +495,7 @@ def assemble_nightly_source_bundle(
     residual_recipe: Mapping[str, Any] | None = None,
     analog_recipe: Mapping[str, Any] | None = None,
     gate_recipe: Mapping[str, Any] | None = None,
+    quote_max_age_sessions: Any = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> SourceBundle:
     """Assemble one (ticker, event)'s SourceBundle from already-staged rows.
@@ -504,7 +505,9 @@ def assemble_nightly_source_bundle(
     malformed quote, a leaked feature name, a non-finite/non-positive spot,
     a panel_anchor after as_of, or any observation after as_of. model_identity, model_artifact_refs and
     every recipe are caller-supplied pass-through (the {} default means "not
-    yet declared"). No I/O is done.
+    yet declared"). context also carries the caller's quote_max_age_sessions
+    unchanged plus quote_date (the earliest validated quote observed_at date,
+    YYYY-MM-DD) when quote rows exist. No I/O is done.
     """
     feature_names = _validated_feature_names(feature_names)
     _require_staged_inputs_present(calendar_row, panel_row, tier4_row, quote_rows)
@@ -516,6 +519,18 @@ def assemble_nightly_source_bundle(
     _checked_against_as_of(calendar_row, observed, panel_anchor, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
+    context["quote_max_age_sessions"] = quote_max_age_sessions
+    if observed:
+        # Observation provenance for stages._check_stale_quote (issue #169):
+        # the canonical date the staged quotes were observed. Every row's
+        # observed_at has already passed _checked_against_as_of (all <= as_of,
+        # tz-naive); earliest is the conservative source date if rows disagree.
+        # An allowed empty quote domain carries no observation, so it stays
+        # absent there rather than guessed.
+        quote_days = [
+            validated_as_of(value, label=f"quote_rows[{index}].observed_at")
+            for index, value in observed]
+        context["quote_date"] = str(min(quote_days).date())
     feature_vector, feature_missing_mask = _project_features(
         tier4_row, panel_row, feature_names, as_of_ts)
     _reject_answers("context", context)

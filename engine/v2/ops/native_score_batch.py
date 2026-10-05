@@ -67,6 +67,7 @@ class NightlyEventInputs:
     tier4_row: Mapping[str, Any]
     quote_rows: Sequence[Mapping[str, Any]]
     quote_status: Any = None
+    quote_max_age_sessions: Any = None
 
 
 class NativeScoreBatchRowRefusal(ValueError):
@@ -198,7 +199,8 @@ def _matched_decision_clock(
 
 
 def _identity_context(as_of: Any, snapshot_id: str,
-                       calendar_row: Mapping[str, Any]) -> dict[str, Any]:
+                       calendar_row: Mapping[str, Any], *,
+                       quote_max_age_sessions: Any = None) -> dict[str, Any]:
     """The MC-seed identity fields ``stages._model_seed`` needs, merged into
     ``bundle.context`` before ``build_native_score_inputs`` -- see
     ARCHITECTURE.md's MC-seed note for the shadow defaults' provenance."""
@@ -211,7 +213,7 @@ def _identity_context(as_of: Any, snapshot_id: str,
         "fill_alpha": _SHADOW_FILL_ALPHA,
         "variant": None,
         "decision_offset": None,
-        "quote_max_age_sessions": None,
+        "quote_max_age_sessions": quote_max_age_sessions,
         "chain_as_of": _iso(as_of),
     }
 
@@ -287,6 +289,7 @@ def _bundle_or_refusal(
             panel_anchor=event.panel_anchor,
             tier4_row=event.tier4_row, quote_rows=event.quote_rows,
             quote_status=event.quote_status, feature_names=feature_names,
+            quote_max_age_sessions=event.quote_max_age_sessions,
             driver_name=driver_name,
             model_identity={f"driver:{strategy}": to_document(driver_identity),
                             f"gate:{strategy}": to_document(gate_identity)},
@@ -348,7 +351,8 @@ def _assemble_one_event(
             key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
     bundle = replace(
         bundle, context={**bundle.context,
-                         **_identity_context(as_of, snapshot_id, event.calendar_row)},
+                         **_identity_context(as_of, snapshot_id, event.calendar_row,
+                                             quote_max_age_sessions=event.quote_max_age_sessions)},
         model_release=binding.model_release, frozen_inference=binding.frozen_inference,
     )
     try:
@@ -502,7 +506,8 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
         key=key, calendar_row=doc["calendar_row"], panel_row=doc["panel_row"],
         panel_anchor=doc["panel_anchor"],
         tier4_row=doc["tier4_row"], quote_rows=doc["quote_rows"],
-        quote_status=doc.get("quote_status"))
+        quote_status=doc.get("quote_status"),
+        quote_max_age_sessions=doc.get("quote_max_age_sessions"))
 
 
 def _keyed_by_board_request(items: Any) -> dict[str, Any]:

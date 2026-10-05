@@ -699,3 +699,24 @@ def test_historical_row_panel_anchor_equal_event_date_is_allowed():
     )
     bundle = assemble_nightly_source_bundle(**kwargs)
     assert bundle.feature_vector["signal"] == 1.5
+
+
+# --- Issue #169: quote staleness provenance in context ---
+
+def test_quote_max_age_sessions_and_earliest_quote_date_go_to_context():
+    # stages._check_stale_quote needs the caller's session budget and one
+    # canonical observation date (the earliest quote observed_at, so rows
+    # disagreeing on date are treated conservatively) recorded in context --
+    # while raw_quotes stays the bid/ask domain, never gaining provenance
+    # keys of its own.
+    quote_rows = [dict(row) for row in _valid_kwargs()["quote_rows"]]
+    quote_rows[0]["observed_at"] = "2026-01-08"  # row[1] stays "2026-01-09"; both <= as_of
+    bundle = assemble_nightly_source_bundle(**_valid_kwargs(
+        quote_rows=quote_rows, quote_max_age_sessions=1))
+    assert bundle.context["quote_max_age_sessions"] == 1
+    assert bundle.context["quote_date"] == "2026-01-08"
+    assert bundle.raw_quotes == {
+        "C:100.0:2026-01-16": {"bid": 1.0, "ask": 1.2},
+        "P:100.0:2026-01-16": {"bid": 1.1, "ask": 1.3},
+    }
+    assert all(set(quote) == {"bid", "ask"} for quote in bundle.raw_quotes.values())

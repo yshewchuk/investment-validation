@@ -21,6 +21,7 @@ from engine.v2.domain.generation import (
 )
 from engine.v2.domain.valuation import terminal_payoff
 from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation.market_calendar import _rule_sessions
 from engine.v2.scoring import financial
 
 STAGE_NAMES = (
@@ -404,23 +405,69 @@ def _check_projected_calendar(values: Mapping[str, Any], flags: list[str]) -> No
 
 
 def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
-    """STALE_QUOTE -- engine/score.py:1687 (fallback chain substitution).
+    """STALE_QUOTE / NO_CHAIN -- engine/score.py:1687 (fallback chain substitution).
 
-    Legacy sets this when no chain exists for the requested decision date and
-    an older chain, within a caller bound, is substituted instead
+    Legacy sets STALE_QUOTE when no chain exists for the requested decision
+    date and an older chain, within a caller bound, is substituted instead
     (``_fresh_quote_date``, engine/score.py:1802). The source-owned signature
     of that substitution is that the raw quotes actually used were observed
     strictly before the requested entry date: ``quote_date`` (the date the
     supplied raw quotes were observed) and ``entry_date`` (the requested
-    decision date) are both raw facts, never calculated answers. This
-    reproduces the trigger. It does NOT reproduce the session-count age or the
-    caller's max-age bound: those require a calendar object, which a bounded
-    SourceBundle does not carry -- native cannot currently tell an in-bound
-    substitution from an out-of-bound one, only that a substitution occurred.
+    decision date) are both raw facts, never calculated answers.
+
+    Without a policy the trigger stays date-only, as above. The optional
+    ``quote_max_age_sessions`` in the input context (issue #169) carries the
+    caller's bound; when supplied it must be a built-in non-bool ``int >= 0``,
+    both dates must parse via ``_to_day``, the quote must not be future-dated,
+    and the quote's age -- the count of canonical NYSE sessions in
+    ``(quote_date, entry_date]``, ``market_calendar._rule_sessions``, legacy's
+    session convention -- must not exceed the bound. Invalid or absent age
+    evidence, a future-dated quote or an out-of-bound age makes the quote
+    unusable: a non-advisory ``NO_CHAIN``, matching legacy's
+    no-eligible-chain refusal (engine/score.py:2368), which ``flags_refuse``
+    turns into an ordinary refused ``ScoreRecord`` -- never an exception, and
+    nothing is written. An in-bound quote predating entry keeps the advisory
+    ``STALE_QUOTE``.
     """
+    policy = values.get("quote_max_age_sessions")
     quote_day = _to_day(values.get("quote_date"))
     entry_day = _to_day(values.get("entry_date"))
-    if quote_day is None or entry_day is None:
+    if policy is None:
+        if quote_day is None or entry_day is None:
+            return
+        if quote_day < entry_day:
+            _add_flag(flags, "STALE_QUOTE")
+        return
+    if not isinstance(policy, int) or isinstance(policy, bool) or policy < 0:
+        _add_flag(flags, "NO_CHAIN")
+        return
+    if quote_day is None or entry_day is None or quote_day > entry_day:
+        _add_flag(flags, "NO_CHAIN")
+        return
+
+    def to_session_day(day: Any) -> Any:
+        """A Python ``date`` from a day value: ``date``, pandas-like or numpy.
+
+        ``_rule_sessions`` walks ``date`` arithmetic, so the parsed days are
+        converted here without assuming a numpy scalar; anything unconvertible
+        comes back ``None`` and the caller refuses instead of raising.
+        """
+        if day is None:
+            return None
+        try:
+            stamp = np.datetime64(str(day)[:10], "D")
+            return None if np.isnat(stamp) else stamp.item()
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    quote_session_day = to_session_day(quote_day)
+    entry_session_day = to_session_day(entry_day)
+    if quote_session_day is None or entry_session_day is None:
+        _add_flag(flags, "NO_CHAIN")
+        return
+    age = len(_rule_sessions(quote_session_day, entry_session_day))
+    if age > policy:
+        _add_flag(flags, "NO_CHAIN")
         return
     if quote_day < entry_day:
         _add_flag(flags, "STALE_QUOTE")

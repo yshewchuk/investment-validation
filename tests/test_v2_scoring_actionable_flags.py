@@ -8,13 +8,14 @@ it does not, from synthetic source-owned inputs (no corpus needed).
 import math
 
 from engine.v2.contracts import ScoreRequest
-from engine.v2.scoring import application
+from engine.v2.scoring import application, stages
 from engine.v2.scoring.native_analog import source_population_hash
 from engine.v2.scoring.stages import (
     NativeScoreInputs,
     STAGE_NAMES,
     StageReceipt,
     assemble_native_values,
+    flags_refuse,
 )
 
 
@@ -125,6 +126,47 @@ def test_stale_quote_does_not_fire_when_quote_matches_entry():
         "entry_date": "2026-09-16", "quote_date": "2026-09-16",
     }))
     assert "STALE_QUOTE" not in values["flags"]
+
+
+def test_stale_quote_issue_169_out_of_bound_age_refuses_with_no_chain():
+    # Issue #169's exact direct-stage case: a raw quote years older than the
+    # requested entry date under a 1-session caller bound. The age is far out
+    # of bound, so the quote is unusable -- a non-advisory NO_CHAIN, not the
+    # advisory STALE_QUOTE. Before the production fix this path (age bound
+    # unchecked) stamped only the advisory STALE_QUOTE, so all three asserts
+    # below would fail; they pin the refused behaviour, not an annotation.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2026-09-28",
+            "quote_date": "2020-01-01",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "NO_CHAIN" in flags
+    assert "STALE_QUOTE" not in flags
+    assert flags_refuse(flags)
+
+
+def test_stale_quote_in_bound_age_across_weekend_and_holiday_stays_advisory():
+    # The in-bound counterpart of the case above: Friday 2024-05-24 quote used
+    # for a Tuesday 2024-05-28 entry (Memorial Day Monday 2024-05-27 closed).
+    # Canonical NYSE sessions in (quote, entry] is just Tuesday, so age 1 is
+    # in bound under a 1-session caller bound: the advisory STALE_QUOTE, not a
+    # refusing NO_CHAIN.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2024-05-28",
+            "quote_date": "2024-05-24",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "STALE_QUOTE" in flags
+    assert "NO_CHAIN" not in flags
+    assert not flags_refuse(flags)
 
 
 def test_out_of_domain_fires_below_mcap_floor():
