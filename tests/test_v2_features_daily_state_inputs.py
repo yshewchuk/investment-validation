@@ -29,7 +29,7 @@ import pytest
 from engine.v2.contracts.data import DatasetVersionRef, KeyPredicate, SnapshotRef, TimeInterval
 from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.repository import Repository
-from engine.v2.features import panel_math
+from engine.v2.features import daily_state_inputs, panel_math
 from engine.v2.features.daily_state_inputs import DailyStateInputs, scan_daily_state_inputs
 from tests.data_scan_support import (
     catalog_and_store,
@@ -633,12 +633,43 @@ def test_real_published_fragment_matches_independent_expectations(tmp_path, monk
     monkeypatch.setattr(repository, "resolve_pinned", forbidden_head)
     monkeypatch.setattr(repository, "resolve_full_pinned", forbidden_head)
 
+    scans = []
+    real_scan = repository.scan
+
+    def recording_scan(query, *, table_name):
+        """Stream the real scan's batches through untouched, capturing the
+        exact ``DataQuery``, table name and the rows it actually returned."""
+        captured: list[dict] = []
+        for batch in real_scan(query, table_name=table_name):
+            captured.extend(batch.to_pylist())
+            yield batch
+        scans.append((query, table_name, captured))
+
+    monkeypatch.setattr(repository, "scan", recording_scan)
+
     result = _scan(repository, snapshot)
 
     assert result.values == _I10_VALUES
     assert result.source_session == "2024-01-15"
     assert result.snapshot_id == snapshot.snapshot_id
     assert result.dataset_version_id == snapshot.table_versions[_TABLE].dataset_version_id
+
+    # The initial scan's exact selection, replayed through the production
+    # metadata bound: a candidate membership count is a bound, so it may
+    # exceed the filtered rows the scan streamed but never fall below them,
+    # and the query's limits are the contract/module caps lowered by that
+    # same real bound.
+    query, scanned_table, scanned_rows = scans[0]
+    bound = repository.scan_population_bound(
+        query.snapshot_id, table_name=scanned_table,
+        table_contract_ref=query.table_contract_ref,
+        key_filter=query.key_filter, time_interval=query.time_interval)
+    assert bound >= len(scanned_rows)
+    assert query.max_result_rows == min(_DM.maximum_result_rows,
+                                        daily_state_inputs._RESULT_LIMIT, bound)
+    assert query.max_batch_rows == min(_DM.maximum_batch_rows,
+                                       daily_state_inputs._BATCH_LIMIT,
+                                       query.max_result_rows)
 
     again = _scan(repository, snapshot)
     assert again == result
