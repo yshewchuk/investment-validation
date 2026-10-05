@@ -297,9 +297,11 @@ produces the same `ScoreRecord`, `identity.py`). Other typed refusals:
 `entry_date`, measured in market sessions using the canonical NYSE schedule
 in `engine.v2.foundation.market_calendar`.
 An absent or `None` bound means no caller policy was supplied; a supplied
-bound must be a non-negative integer. With a bound, missing or invalid age
-evidence, a quote dated after entry, or an age greater than the bound makes
-the quote unusable and adds non-advisory `NO_CHAIN`. If a nightly bundle has
+bound must be a non-negative integer. With a bound, each required date and
+each supplied latest date must parse in full; a valid date prefix followed by
+invalid text is unusable evidence. Missing or invalid age evidence, a quote
+dated after entry, or an age greater than the bound makes the quote unusable
+and adds non-advisory `NO_CHAIN`. If a nightly bundle has
 multiple quote observation dates, it preserves the earliest date for the
 conservative age check and the latest date as `quote_latest_date`; any latest
 date after entry refuses even when an earlier call observation is on entry.

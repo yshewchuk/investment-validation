@@ -388,6 +388,24 @@ def _to_day(value: Any) -> np.datetime64 | None:
     return None if np.isnat(day) else day
 
 
+def _quote_age_day(value: Any) -> np.datetime64 | None:
+    """Parse a bounded-scoring date completely: no ``[:10]`` prefix tolerance.
+
+    Issue #169's age evidence is raw observation provenance, so the whole
+    ``str(value)`` must be a valid day; ``np.datetime64(str(value), "D")``
+    rejects the malformed suffixes a prefix slice would hide. Missing, ``NaT``,
+    unrepresentable and malformed values all come back ``None`` -- unusable
+    evidence the caller refuses, never a raised error.
+    """
+    if value is None:
+        return None
+    try:
+        day = np.datetime64(str(value), "D")
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return None if np.isnat(day) else day
+
+
 def _check_projected_calendar(values: Mapping[str, Any], flags: list[str]) -> None:
     """PROJECTED_CALENDAR -- engine/score.py:1337 (``calendar.is_projected``).
 
@@ -452,7 +470,8 @@ def _quote_latest_date_unusable(values: Mapping[str, Any], quote_day: Any,
     observation is judged on its own date and not on the earliest one alone.
     A missing or ``None`` value carries no latest evidence and is not a
     problem: direct callers that pass only ``quote_date`` keep working. When
-    present the value must parse via ``_to_day``, sit on or after the earliest
+    present the value must parse via ``_quote_age_day`` -- the bounded path's
+    full-string day parser, no prefix tolerance -- sit on or after the earliest
     observation, and sit on or before ``entry_date`` -- a latest observation
     after entry is future-dated quote evidence, refusing even when the earliest
     date is the entry date itself.
@@ -460,7 +479,7 @@ def _quote_latest_date_unusable(values: Mapping[str, Any], quote_day: Any,
     latest_raw = values.get("quote_latest_date")
     if latest_raw is None:
         return False
-    latest_day = _to_day(latest_raw)
+    latest_day = _quote_age_day(latest_raw)
     return (latest_day is None or latest_day < quote_day
             or latest_day > entry_day)
 
@@ -492,10 +511,14 @@ def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
     supplied raw quotes were observed) and ``entry_date`` (the requested
     decision date) are both raw facts, never calculated answers.
 
-    Without a policy the trigger stays date-only, as above. The optional
+    Without a policy the trigger stays date-only, as above, parsed with the
+    prefix-tolerant ``_to_day`` compatibility behavior. The optional
     ``quote_max_age_sessions`` in the input context (issue #169) carries the
-    caller's bound; under it ``quote_date`` stays the conservative earliest
-    observation for the session age, and a supplied ``quote_latest_date`` is
+    caller's bound; under it ``quote_date`` and ``entry_date`` are parsed with
+    ``_quote_age_day``, which demands the complete string be a valid day -- a
+    malformed suffix is unusable evidence, not a silently truncated one.
+    ``quote_date`` stays the conservative earliest observation for the session
+    age, and a supplied ``quote_latest_date`` is
     checked before any in-bound or advisory result (see
     ``_quote_age_evidence_usable`` and ``_quote_latest_date_unusable``).
     Invalid or absent age evidence, a future-dated quote, a latest observation
@@ -506,14 +529,16 @@ def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
     in-bound quote predating entry keeps the advisory ``STALE_QUOTE``.
     """
     policy = values.get("quote_max_age_sessions")
-    quote_day = _to_day(values.get("quote_date"))
-    entry_day = _to_day(values.get("entry_date"))
     if policy is None:
+        quote_day = _to_day(values.get("quote_date"))
+        entry_day = _to_day(values.get("entry_date"))
         if quote_day is None or entry_day is None:
             return
         if quote_day < entry_day:
             _add_flag(flags, "STALE_QUOTE")
         return
+    quote_day = _quote_age_day(values.get("quote_date"))
+    entry_day = _quote_age_day(values.get("entry_date"))
     if not _quote_age_evidence_usable(values, policy, quote_day, entry_day):
         _add_flag(flags, "NO_CHAIN")
         return

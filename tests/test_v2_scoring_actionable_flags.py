@@ -254,6 +254,34 @@ def test_stale_quote_unrepresentable_date_refuses_no_chain():
     assert flags_refuse(flags)
 
 
+def test_stale_quote_bounded_direct_dates_reject_malformed_full_values():
+    # The bounded path parses every date with the full-string parser
+    # ``_quote_age_day``, so a malformed suffix on any of the three date fields
+    # -- the earliest quote observation, its latest one, or entry -- is unusable
+    # evidence: a deterministic refusing NO_CHAIN, never a raise, a retry or the
+    # silently truncated ten-character prefix the previous parser accepted. A
+    # leaked exception fails the call below outright, which is the "no
+    # exception" half of each case.
+    dates = {
+        "quote_date": "2026-01-08",
+        "quote_latest_date": "2026-01-08",
+        "entry_date": "2026-01-09",
+    }
+    for field, day in dates.items():
+        flags: list[str] = []
+        stages._check_stale_quote(
+            {
+                **dates,
+                field: day + "junk",
+                "quote_max_age_sessions": 1,
+            },
+            flags,
+        )
+        assert "NO_CHAIN" in flags, field
+        assert "STALE_QUOTE" not in flags, field
+        assert flags_refuse(flags), field
+
+
 def test_out_of_domain_fires_below_mcap_floor():
     import math
     gate = {"model": {"intercept": 0.5, "coefficients": {}}, "threshold": 0.0}

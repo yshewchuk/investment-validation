@@ -688,9 +688,7 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6: 4a.2 helpers implemented; 4b producer pending.** `nightly_calendar_inputs.scan_calendar_row_inputs`
-owns pinned spot, listed strategy-specific expiry and session-based planned exit; exit is independent of expiry.
-`nightly_raw_row_producer.build_native_score_batch_events` owns enumeration, shared panel inputs, per-key calendar/quotes and refusal documents; the sidecar stages both before submission. Forward `tier4_row` is `{}`.
+**Cutover PR-6: 4a.2 implemented; 4b producer pending.** `nightly_calendar_inputs.scan_calendar_row_inputs` owns pinned spot, eligible expiry, and independent planned exit; `nightly_raw_row_producer.build_native_score_batch_events` owns enumeration, shared panel rows, per-key calendar/quote composition and refusal documents. The sidecar stages both before submission; forward `tier4_row={}`. No production caller yet.
 Snapshot reads are SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
@@ -1344,14 +1342,10 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 ### `native_score_batch.py`
 
-Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release,
-request-hash collision, invalid worker identity fields, or malformed `events.json`/`producer_refusals.json`.
-Invalid timestamp wire values raise `ValueError` during decoding. Quote bounds are validated during decoding and in
-`_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted.
-Booleans, floats, strings, and negatives raise `ValueError`, mapped to nonretryable `VALIDATION_FAILED` before scoring or output writes; invalid bounds are malformed batch inputs, not row refusals.
+Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release, request-hash collision, invalid worker identity fields, or malformed `events.json`/`producer_refusals.json`. Invalid timestamp wire values raise `ValueError` during decoding.
+Quote bounds are validated during decoding and in `_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted. Booleans, floats, strings, and negatives raise `ValueError`, mapped to nonretryable `VALIDATION_FAILED` before scoring or output writes; invalid bounds are malformed batch inputs, not row refusals.
 This classification does not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and
-maps to retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction. R5: writes
-follow assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
+maps to retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction. R5: writes follow assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
 
 Per row (collected as a refusal, never sinks the batch):
 
@@ -1514,10 +1508,10 @@ through their tick-loop sidecars (`Service._reconcile_computed_moves_refresh` /
 both out of every job-submission stage list by name (see "Outputs").
 `native_score_batch`'s sidecar returns a normal no-op if the selected
 `"score"` job pinned no snapshot (never a JobSpec, never a raise); for a
-new eligible snapshot-pinned job it raises `VALIDATION_FAILED` today
-(the raw-row producer is not built) and will instead reach
-`submission.submit` through that producer once "Cutover PR-6" above is
-implemented — see "Outputs"/"Failure semantics" for both cases.
+new eligible snapshot-pinned job it raises `VALIDATION_FAILED` today because
+the raw-row producer is not built; once "Cutover PR-6" lands it reaches
+`submission.submit` through that producer — see "Outputs"/"Failure
+semantics" for both cases.
 
 **`native_parity`.** The job kind and its worker
 (`run_native_parity_worker`, dispatched from `worker.py`) receive jobs through
