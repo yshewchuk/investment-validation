@@ -485,8 +485,10 @@ def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path
 def _claimed_primary_effect(tmp_path, key="primary-fence", *, receipt_evidence=None):
     """A real claimed attempt + the coordinator's commit closure, plus the
     checkout ledger it appends to. Returns ``(conn, clock, claim, effect, checkout)``.
-    ``receipt_evidence`` becomes the synthetic receipt's otherwise-empty
-    ``evidence`` object."""
+    ``receipt_evidence`` becomes the synthetic receipt's ``evidence`` object: by
+    default the complete variant identity (the resolved spec hash) with exactly
+    one attempt; an explicit value -- even an empty one -- is published verbatim
+    so malformed-evidence refusals stay meaningful."""
     ops_root, checkout = tmp_path / "ops", tmp_path / "checkout"
     _planned_ledger(checkout / "experiments" / "LEDGER.csv")
     ops_root.mkdir()
@@ -498,9 +500,14 @@ def _claimed_primary_effect(tmp_path, key="primary-fence", *, receipt_evidence=N
     assert claim is not None
     store = ArtifactStore(ops_root)
     resolve_and_record(conn, store, claim)
+    if receipt_evidence is None:
+        receipt_evidence = {
+            "variant_id": experiments.experiment_spec_from_document(
+                _spec_document(economic_params={})).spec_hash,
+            "variants_tried": 1}
     receipt_ref = store.publish_bytes(
         json.dumps({"input_hash": "input-" + key,
-                    "evidence": receipt_evidence or {}}).encode(),
+                    "evidence": receipt_evidence}).encode(),
         schema_ref="experiment_receipt.v1.0")
     with transaction(conn):
         register_artifact(conn, receipt_ref, None, clock)
@@ -576,6 +583,42 @@ def test_experiment_effect_rejects_receipt_variant_mismatch_atomically(tmp_path)
         assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_experiment_effect_rejects_missing_or_malformed_receipt_evidence_atomically(tmp_path):
+    """CodeRabbit finding: only a *present and different* ``variant_id`` was
+    refused, so a receipt with no evidence, a non-object evidence, a matching
+    identity with no ``variants_tried``, or a count other than the integer 1
+    was accepted and appended its ran row. Every such shape is a non-retryable
+    ``INVALID_EXPERIMENT_SPEC`` refusal before the append, and the rolled-back
+    transaction leaves the planned ledger bytes untouched and no run or
+    hypothesis row behind."""
+    variant = experiments.experiment_spec_from_document(
+        _spec_document(economic_params={})).spec_hash
+    cases = [("empty-evidence", {}),
+             ("non-object-evidence", []),
+             ("missing-variants-tried", {"variant_id": variant}),
+             ("zero-variants-tried", {"variant_id": variant, "variants_tried": 0})]
+    for name, receipt_evidence in cases:
+        conn, clock, claim, effect, checkout = _claimed_primary_effect(
+            tmp_path / name, key=f"primary-evidence-{name}",
+            receipt_evidence=receipt_evidence)
+        ledger = checkout / "experiments" / "LEDGER.csv"
+        before = ledger.read_bytes()
+        try:
+            with pytest.raises(OpsError) as excinfo:
+                commit_attempt(conn, claim.attempt_id, claim.fence,
+                               Outcome(True, "verified_dead", 0), clock=clock,
+                               effects=lambda txn: effect(txn))
+            assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC", name
+            assert excinfo.value.problem.retryable is False, name
+            assert ledger.read_bytes() == before, name
+            assert conn.execute(
+                "SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0, name
+            assert conn.execute(
+                "SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0, name
+        finally:
+            conn.close()
 
 
 def test_experiment_effect_retry_after_crash_appends_exactly_one_row(tmp_path, monkeypatch):

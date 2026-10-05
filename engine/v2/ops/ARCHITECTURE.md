@@ -1301,7 +1301,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | Deferred holdout behavior | Slice 2a exposes no sweep or holdout reads; typed `HOLDOUT_ACCESS_DENIED` is deferred to the pinned trade-loader slice. |
 | Primary identity, registered vs synthetic (slice 2a) | The report, durable evidence, and primary ledger `spec_hash` use the registered legacy hash for registered specs and `ExperimentSpec.spec_hash` for synthetic specs. |
 | Smoke identity (slice 2a) | The report and durable evidence use `ExperimentSpec.spec_hash`; the runner receives `--no-ledger` and writes no legacy ledger row. |
-| Explicit receipt identity mismatch (slice 2a) | Non-retryable `INVALID_EXPERIMENT_SPEC` before ledger append; transaction rollback preserves durable evidence and ledger. |
+| Explicit receipt identity mismatch (slice 2a) | Missing, malformed, or empty variant evidence, a missing, empty, or mismatched `variant_id` (checked against the resolved identity), or `variants_tried` other than integer 1 is a non-retryable `INVALID_EXPERIMENT_SPEC` before ledger append; transaction rollback leaves no run or hypothesis row and preserves prior ledger bytes. |
 
 ### `board_requests` (`native_board_universe.py`)
 | Condition | Outcome |

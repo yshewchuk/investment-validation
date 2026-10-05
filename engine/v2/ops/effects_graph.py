@@ -811,6 +811,26 @@ def _named_ref(refs, name):
     raise fail("VALIDATION_FAILED", "required effect artifact is missing")
 
 
+def _validate_experiment_receipt_variant(receipt, variant):
+    """Durable variant identity, validated BEFORE registration and the
+    append: malformed, absent or mismatched evidence is a non-retryable
+    refusal that rolls the transaction back, leaving no run or hypothesis
+    row and no ledger byte change; untrusted receipt values never reach the
+    error message.
+    """
+    evidence = receipt.get("evidence") if isinstance(receipt, dict) else None
+    if not isinstance(evidence, dict):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment receipt has no variant evidence object")
+    if (not isinstance(evidence.get("variant_id"), str)
+            or evidence["variant_id"] != variant
+            or type(evidence.get("variants_tried")) is not int
+            or evidence["variants_tried"] != 1):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "experiment receipt variant evidence does not match "
+                   "the checkout's registered identity")
+
+
 def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_root=None):
     """P6 slice 10/11: durably record one experiment attempt after its
     worker receipt validates. Mirrors backup_effect's shape (a coordinator
@@ -866,19 +886,14 @@ def experiment_effect(conn, store, claim, refs, *, clock, code_source, store_roo
                            "primary experiment checkout differs from its "
                            "preregistration root")
             require_preregistration(checkout_root, spec)
+        variant = ((registered_spec_hash(checkout_root, spec) or spec.spec_hash)
+                   if mode == "primary" else spec.spec_hash)
+        _validate_experiment_receipt_variant(receipt, variant)
         run_id, _created = register_hypothesis_in_transaction(
             txn, spec, receipt["input_hash"], mode=mode, run_id=claim.attempt_id)
         # Durable variant identity, persisted BEFORE the append: a receipt
         # reporting another one is a non-retryable refusal that rolls the whole
         # transaction back, so no evidence, report or ledger byte changes.
-        variant = ((registered_spec_hash(checkout_root, spec) or spec.spec_hash)
-                   if mode == "primary" else spec.spec_hash)
-        reported = (receipt.get("evidence") or {}).get("variant_id")
-        if reported is not None and reported != variant:
-            raise fail("INVALID_EXPERIMENT_SPEC",
-                       "experiment receipt variant identity differs from the "
-                       "checkout's registered one",
-                       details={"expected": variant, "reported": reported})
         current = txn.execute("SELECT evidence_json FROM experiment_runs "
                               "WHERE run_id=?", (run_id,)).fetchone()
         if current is not None:  # existing keys (metrics_source) survive
