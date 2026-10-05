@@ -4533,6 +4533,9 @@ _BUILTINS_DUNDER_IMPORT_ALIAS_SOURCES = [
                  id="from-builtins-dunder-import-alias-called"),
     pytest.param("from builtins import __import__ as load\n\nHANDLERS = [load]\n",
                  id="from-builtins-dunder-import-alias-loaded-as-a-value"),
+    pytest.param("def go(name):\n    from builtins import __import__ as imp\n"
+                 "    return imp(name)\n",
+                 id="from-builtins-dunder-import-alias-nested-in-a-function"),
 ]
 
 
@@ -4604,6 +4607,48 @@ def test_select_pr_tests_builtins_dunder_import_alias_loader_selects_its_static_
     selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/a.py"], graph=graph)
     assert selected is not None
     assert "tests/test_loader.py" in selected  # tainted through the aliased __import__
+    assert "tests/test_direct.py" in selected  # reaches a.py by a real import edge
+    assert "tests/test_clean.py" not in selected
+
+
+def test_select_pr_tests_nested_builtins_dunder_import_alias_loader_selects_its_importer(
+        tmp_path, monkeypatch):
+    # CodeRabbit's nested finding, end to end: the alias is bound INSIDE the
+    # loader function (`from builtins import __import__ as imp` then
+    # `imp("engine.a")` in the same body). The function-local binding is the
+    # same unresolved dynamic import as the top-level form above, so the
+    # loader still taints its static importer -- selected via the #155
+    # fail-safe -- while test_clean keeps no edge and stays out.
+    tracked = _write_repo(tmp_path, {
+        "engine/a.py": "VALUE = 2\n",
+        "engine/loader.py": (
+            "def value(name='engine.a'):\n"
+            "    from builtins import __import__ as imp\n"
+            "    return imp(name)\n"),
+        "tests/test_loader.py": (
+            "from engine.loader import value\n"
+            "\n"
+            "def test_value():\n"
+            "    assert value() is not None\n"),
+        "tests/test_direct.py": (
+            "import engine.a\n"
+            "\n"
+            "def test_a():\n"
+            "    assert engine.a.VALUE == 2\n"),
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/loader.py"] == set(tracked) - {"engine/loader.py"}
+    assert "engine/loader.py" in pilot.dynamic_files(graph)
+    assert "engine/loader.py" in pilot.unresolved_import_files(tracked)
+    loader_closure, _ = pilot._closure_from_roots(
+        {"tests/test_loader.py"}, graph, pilot.unresolved_import_files(tracked),
+        taint_exempt={"tests/test_loader.py"})
+    assert "engine/a.py" not in loader_closure  # the taint, not an edge, selects it
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/a.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_loader.py" in selected  # tainted through the nested alias
     assert "tests/test_direct.py" in selected  # reaches a.py by a real import edge
     assert "tests/test_clean.py" not in selected
 

@@ -1418,10 +1418,11 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     `from builtins import eval as dynamic` (or the `exec` alias) is the
     same reference: any LOAD-context use of it -- call, assignment, or
     passed value -- is unresolved, with the same STORE-name exemption as
-    the bare builtins. A top-level, absolute `from builtins import
-    __import__ as load` alias is the same for the dynamic-import builtin:
-    any LOAD-context use of the bound name is an unresolved dynamic import
-    attempt, since this scan never proves the name means something else.
+    the bare builtins. An absolute `from builtins import __import__ as
+    load` alias anywhere in the AST is the same for the dynamic-import
+    builtin: any LOAD-context use of the bound name is an unresolved dynamic
+    import attempt, since this scan never proves the name means something
+    else.
     Deliberately narrower than `_is_dynamic_file`: this function checks
     only for import-statement-shaped dynamic loading (the forms listed
     above). The other runtime-loading mechanisms this scan DOES track are
@@ -1454,15 +1455,16 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     builtins_fn_names = {a.asname for n in ast.walk(tree)
                          if isinstance(n, ast.ImportFrom) and n.module == "builtins"
                          for a in n.names if a.asname and a.name in ("exec", "eval")}
-    # A top-level, absolute `from builtins import __import__ [as load]` binds
-    # the dynamic-import builtin under its own name or a new one. Only the
-    # direct module-level statement is followed (a relative `from .builtins
-    # import ...` names a different module entirely). Every LOAD-context use
-    # of the bound name -- called, assigned, or passed as a value -- is an
-    # unresolved dynamic-import attempt: this scan never proves an alias use
-    # means something else, so an uncertain one is never classified resolved.
+    # An absolute `from builtins import __import__ [as load]`, anywhere in the
+    # AST, binds the dynamic-import builtin under its own name or a new one.
+    # Every such statement is followed, nested scopes included (a relative
+    # `from .builtins import ...` names a different module entirely). Every
+    # LOAD-context use of the bound name -- called, assigned, or passed as a
+    # value -- is an unresolved dynamic-import attempt: this scan never proves
+    # an alias use means something else, so an uncertain one is never
+    # classified resolved.
     builtins_import_names = {
-        a.asname or a.name for n in tree.body
+        a.asname or a.name for n in ast.walk(tree)
         if isinstance(n, ast.ImportFrom) and not n.level and n.module == "builtins"
         for a in n.names if a.name == "__import__"}
     for node in ast.walk(tree):
