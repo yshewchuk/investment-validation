@@ -28,6 +28,19 @@ def _H(label: str) -> str:
     return content_hash({"probe": label})
 
 
+def _catalog_snapshot(conn) -> bytes:
+    """Byte snapshot of the connection's committed catalog state, WAL
+    included: SQLite's backup API copies the live committed pages (including
+    any committed WAL frames) into a temporary in-memory database, whose
+    ``serialize()`` bytes are returned; the destination is always closed."""
+    dest = sqlite3.connect(":memory:")
+    try:
+        conn.backup(dest)
+        return dest.serialize()
+    finally:
+        dest.close()
+
+
 #: An orphaned ``job_dependencies`` row: both sides dangle, so the insert is
 #: only accepted with enforcement off (and only caught by the fk check then).
 _ORPHAN_INSERT = ("INSERT INTO job_dependencies (child_job_id, parent_job_id,"
@@ -117,12 +130,13 @@ def test_recreate_migration_preserves_child_rows_and_fk(tmp_path):
 def test_fk_violation_is_typed_and_rolls_back_everything(tmp_path):
     """(b) A recreate-flagged migration that leaves a dangling FK is refused
     with a non-retryable ``INTEGRITY_FAILED``, no row values in public
-    details, and the catalog file is byte-identical afterwards: no DDL/data
-    and no ``schema_versions`` row survived (R3/R4), and enforcement is back
-    ON (R5)."""
+    details, and the serialized catalog snapshot byte-identical afterwards:
+    each snapshot is a ``backup()`` copy of the connection's committed state
+    into an in-memory database, so committed WAL frames are part of the
+    compared bytes: no DDL/data and no ``schema_versions`` row survived
+    (R3/R4), and enforcement is back ON (R5)."""
     conn, clock, _ = catalog(tmp_path)
-    path = tmp_path / "ops.sqlite"
-    baseline = path.read_bytes()
+    baseline = _catalog_snapshot(conn)
     migration = Migration(1, "orphan_dependency", (_ORPHAN_INSERT,),
                           recreate_tables=True)
     with pytest.raises(OpsError) as err:
@@ -135,7 +149,7 @@ def test_fk_violation_is_typed_and_rolls_back_everything(tmp_path):
                                "violation_count": 1}
     public = problem.message + json.dumps(problem.details) + str(err.value)
     assert "ghost-parent" not in public and "orphan-child" not in public
-    assert path.read_bytes() == baseline
+    assert _catalog_snapshot(conn) == baseline
     assert conn.execute("SELECT COUNT(*) FROM schema_versions"
                         " WHERE owner = 'test'").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM job_dependencies").fetchone()[0] == 0
@@ -145,11 +159,14 @@ def test_fk_violation_is_typed_and_rolls_back_everything(tmp_path):
 def test_failing_first_migration_leaves_fresh_catalog_byte_identical(tmp_path):
     """First-time creation of ``schema_versions`` is rolled back with the
     first failed migration: a failing initial migration on a fresh file
-    leaves the catalog byte-identical, table not even created."""
+    leaves the serialized catalog snapshot byte-identical, each snapshot a
+    ``backup()`` copy of the connection's committed state into an in-memory
+    database so committed WAL frames are part of the compared bytes, table
+    not even created."""
     clock = FakeClock()
     path = tmp_path / "first.sqlite"
     conn = connect(path)
-    baseline = path.read_bytes()
+    baseline = _catalog_snapshot(conn)
     migration = Migration(1, "dangling_child", (
         "CREATE TABLE probe_parent (pid TEXT PRIMARY KEY) STRICT",
         "CREATE TABLE probe_child (cid TEXT PRIMARY KEY, pid TEXT NOT NULL"
@@ -161,7 +178,7 @@ def test_failing_first_migration_leaves_fresh_catalog_byte_identical(tmp_path):
     with pytest.raises(OpsError) as err:
         migrate(conn, "test", [migration], clock=clock)
     assert err.value.code == "INTEGRITY_FAILED"
-    assert path.read_bytes() == baseline
+    assert _catalog_snapshot(conn) == baseline
     assert conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'schema_versions'"
                         " OR name LIKE 'probe_%'").fetchone() is None
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
