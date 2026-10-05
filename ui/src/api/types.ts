@@ -123,16 +123,22 @@ export interface LegacyScoreBridge {
   schema_version: SchemaVersion;
 }
 
-/**
- * Operations health sidecar (`operations_health.v1.0`), separately dated
- * from frozen release data — §6's `GET /api/v1/operations`. Shape matches
- * what `engine/v2/serving/operations.py` already serves at `/health.json`.
- */
-export interface OperationsHealth {
-  schema_version: "operations_health.v1.0";
+/** `EngineeringStatus`, contracts/operations.py. */
+export type EngineeringNightStatus = "pass" | "fail" | "unknown";
+
+/** UI-consumed subset of the `operations_status.v1.0` `/api/v1/operations` sidecar,
+ *  distinct from `operations_health.v1.0` `/health.json`. */
+export interface OperationsStatus {
   generated_at: string;
-  withheld_release: string | null;
-  code_budgets?: { consecutive_nights?: number };
+  release_id: string | null;
+  attempted_release_id: string | null;
+  requested_session: string;
+  resolved_session: string;
+  engineering_history: Array<{ occurrence: string; status: EngineeringNightStatus }>;
+  stale: boolean;
+  withheld: boolean;
+  failed_update: boolean;
+  schema_version: "operations_status.v1.0";
 }
 
 /**
