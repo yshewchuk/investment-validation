@@ -1251,8 +1251,9 @@ per the root doc's §1); `experiments/*` runners submitting plans;
 `tests/test_v2_ops_*.py` suite. No layered `engine/v2/**` package above
 layer 7.0 imports this package, and no legacy `engine/**` module does
 either, except that one documented dashboard caller. The implemented
-slice-4b raw-row producer consumes `board_requests` as a library; it has no
-production caller yet.
+slice-4b raw-row producer consumes `board_requests` as a library and is
+called only by slice 5's `supervisor.Service._reconcile_native_score_batch_shadow`
+in the tick loop; it has no other production caller.
 
 ## External systems and libraries
 
