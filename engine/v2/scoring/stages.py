@@ -5,6 +5,7 @@ import hashlib
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from datetime import date
 from math import isfinite, log
 from typing import Any, Callable, Iterable, Mapping
 
@@ -450,15 +451,23 @@ def _check_stale_quote(values: Mapping[str, Any], flags: list[str]) -> None:
 
         ``_rule_sessions`` walks ``date`` arithmetic, so the parsed days are
         converted here without assuming a numpy scalar; anything unconvertible
-        comes back ``None`` and the caller refuses instead of raising.
+        comes back ``None`` and the caller refuses instead of raising. A result
+        that is not a ``date`` -- the integer numpy returns for a value below
+        ``datetime.min`` (e.g. ``"0000-01-01"``, whose ``.item()`` is a raw day
+        count) -- is likewise unconvertible: returning it would leak a
+        ``TypeError`` from the session walk, so it is refused as missing
+        quote-age evidence instead.
         """
         if day is None:
             return None
         try:
             stamp = np.datetime64(str(day)[:10], "D")
-            return None if np.isnat(stamp) else stamp.item()
+            if np.isnat(stamp):
+                return None
+            value = stamp.item()
         except (TypeError, ValueError, OverflowError):
             return None
+        return value if isinstance(value, date) else None
 
     quote_session_day = to_session_day(quote_day)
     entry_session_day = to_session_day(entry_day)

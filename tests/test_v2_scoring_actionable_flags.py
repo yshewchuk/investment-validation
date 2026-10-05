@@ -169,6 +169,46 @@ def test_stale_quote_in_bound_age_across_weekend_and_holiday_stays_advisory():
     assert not flags_refuse(flags)
 
 
+def test_stale_quote_age_counts_the_january_2025_nyse_closure():
+    # Thursday 2025-01-09 was a full NYSE closure (National Day of Mourning),
+    # so the canonical sessions in (quote, entry] for a 2025-01-08 quote used
+    # on a 2025-01-10 entry is just Friday 2025-01-10: age 1, in bound under a
+    # 1-session caller bound -- the advisory STALE_QUOTE, not a refusing
+    # NO_CHAIN. A naive calendar-day or weekday count would call this 2 (or
+    # worse) and wrongly refuse the row.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2025-01-10",
+            "quote_date": "2025-01-08",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "STALE_QUOTE" in flags
+    assert "NO_CHAIN" not in flags
+    assert not flags_refuse(flags)
+
+
+def test_stale_quote_unrepresentable_date_refuses_no_chain():
+    # A quote date no calendar can convert (year 0 is below datetime.min).
+    # The conversion must not leak an exception out of the stage: the age is
+    # uncomputable, so the quote is unusable -- refusing NO_CHAIN, not the
+    # advisory STALE_QUOTE.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2025-01-02",
+            "quote_date": "0000-01-01",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "NO_CHAIN" in flags
+    assert "STALE_QUOTE" not in flags
+    assert flags_refuse(flags)
+
+
 def test_out_of_domain_fires_below_mcap_floor():
     import math
     gate = {"model": {"intercept": 0.5, "coefficients": {}}, "threshold": 0.0}
