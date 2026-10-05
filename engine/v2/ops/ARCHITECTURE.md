@@ -690,18 +690,18 @@ Quote expiry remains explicit caller input, spot requires its own exact pinned s
 
 **Cutover PR-6: 4a.2 helpers implemented; 4b producer pending.** `nightly_calendar_inputs.scan_calendar_row_inputs`
 owns pinned spot, listed strategy-specific expiry and session-based planned exit; exit is independent of expiry.
-`nightly_raw_row_producer.build_native_score_batch_events` owns enumeration, shared panel inputs,
-per-key calendar/quotes and refusal documents; the sidecar stages both before submission. Forward `tier4_row` is `{}`.
+`nightly_raw_row_producer.build_native_score_batch_events` owns enumeration, shared panel inputs, per-key calendar/quotes and refusal documents; the sidecar stages both before submission. Forward `tier4_row` is `{}`.
 Snapshot reads are SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
 
 | Calendar sourcing condition (R1–R6) | Outcome |
 |---|---|
-| R1: spot/source/row/repository failure; empty eligible expiry or native no-expiry refusal; missing/ambiguous event | Typed source/event/repository errors propagate; only empty domain or native no-expiry maps to `NO_RESOLVABLE_EXPIRY`; unrelated geometry failures propagate |
-| R2/R3: cache or retry | No durable/negative cache, retries or provider fetch; reuse is build- and snapshot-scoped |
-| R4/R5: transaction or interruption | Read-only; no catalog writes or partial result/document return |
-| R6: identity | Preserve exact event identity and earnings revision; content and candidate order are deterministic |
+| R1: missing source table, exact spot or row; source/repository failure | Typed source/event/repository errors propagate; fail the whole build and preserve `CONTRACT_MISMATCH` and other repository codes; only empty domain or native no-expiry maps to `NO_RESOLVABLE_EXPIRY`; unrelated geometry failures propagate |
+| R1: no strategy-eligible listed expiry; missing/ambiguous event; intraday key passed to `nightly_calendar_inputs.scan_calendar_row_inputs` | `NO_RESOLVABLE_EXPIRY` or event refusal; the calendar helper returns `INVALID_REQUEST` for an intraday key and does not issue a row admission refusal |
+| R2/R3: cache or retry | No durable/negative helper cache, retry or provider fetch; reuse is build- and snapshot-scoped; unchanged inputs reproduce the result/refusal |
+| R4/R5: transaction or interruption | Read-only helper; no catalog writes, publication, partial result or document return |
+| R6: identity | Preserve exact event identity and earnings revision; producer successes and refusals are disjoint; content and candidate order are deterministic. The separate `native_score_batch` worker refusal wire/key retains `YYYY-MM-DD` for midnight and canonical naive ISO timestamps for intraday events, including `INTRADAY_EVENT_NOT_ADMITTED` ([#356](https://github.com/yshewchuk/investment-validation/issues/356)) |
 
 ## Inputs
 
@@ -896,22 +896,20 @@ material": `BoardRequest`'s own fields and
 (`native_score_batch.py:56`, `:82-91`). This redo makes that choice:
 
 - **The key.** One canonical string per row,
-  `f"{ticker}|{strategy}|{event_date_iso}|{session}"`, where
-  `event_date_iso = str(pd.Timestamp(event_date).date())` — the IDENTICAL
-  four fields, in the identical ISO-date form,
-  `NativeScoreBatchRowRefusal.as_document()`'s own `"key"` dict already
-  uses (`native_score_batch.py:87`); this redo flattens that dict into one
-  string, rather than inventing a new field set or date format, because a
-  JSON object's own keys must be strings. `BoardRequest` is `frozen`/`slots`
-  (`native_board_universe.py:56`, `:62-65`) and hashable, so `assembled` (a
-  `dict[BoardRequest, ...]`, `native_score_batch.py:332`'s own return
-  type) already carries this exact identity per successful row; no new
-  identity is derived, only re-formatted for JSON.
+  `f"{ticker}|{strategy}|{event_date_identity}|{session}"`. The date
+  component is `YYYY-MM-DD` for a midnight event (preserving existing
+  wire/key identity) and canonical naive ISO datetime for an intraday event.
+  The same strict
+  formatter feeds refusal documents and joined keys; relative dates,
+  timezone-aware values and non-canonical wire forms are rejected. Thus the
+  JSON string key preserves all four `BoardRequest` identity fields without
+  normalizing intraday events onto a calendar day.
   **The join character is validated out of every source field before
   encoding, not merely tolerated after (CodeRabbit round 3, real
-  finding).** `event_date_iso` can never contain `"|"` (a fixed
-  `YYYY-MM-DD` form), but `ticker`/`strategy`/`session` are free-text-shaped
-  inputs this design does not control at the source. A NEW per-row check,
+  finding).** `event_date_identity` can never contain `"|"` (the strict
+  date/datetime formats contain no separator), but
+  `ticker`/`strategy`/`session` are free-text-shaped inputs this design does
+  not control at the source. A NEW per-row check,
   `native_score_batch._board_request_key(key: BoardRequest) -> str`, raises
   a `NativeScoreBatchRowRefusal` (new code `INVALID_KEY_FIELD`, the same
   collected-never-raised per-row mechanism `UNSUPPORTED_STRATEGY` already
@@ -1348,13 +1346,15 @@ stored receipt, rather than raising a permanent refusal.
 
 ### `native_score_batch.py`
 
-Batch-level (raises, no per-row attempt): a malformed `binding`/`events`
-argument, two events sharing one key, an unresolvable release, a
-`request_hash` collision across two different keys, an invalid
-`as_of`/`snapshot_id`/`calendar_revision`, a malformed
-`producer_refusals.json` (bad `schema_version`, non-list `"refusals"`, or a
-missing `key`/`code`/`detail`), or a merged producer refusal keyed to an
-existing record (the same collision check below).
+Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities,
+unresolvable release, request-hash collision, invalid worker identity fields, or malformed
+`events.json`/`producer_refusals.json`. Invalid timestamp wire values are checked before
+conversion: `_event_date_identity` raises `ValueError`, mapped by worker dispatch to nonretryable
+`VALIDATION_FAILED` before scoring or output writes, not a row refusal. This classification does
+not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and maps to
+retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction.
+R5: writes follow assembly, scoring and collision checks. R6: strict timestamp identity for
+duplicate/overlap checks.
 
 Per row (collected as a refusal, never sinks the batch):
 
