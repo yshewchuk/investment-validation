@@ -372,8 +372,13 @@ def _coverage_outcome_order(
              and all(len(by_key[key]) == 1 for key in expected_ids))
     ordered = (tuple(by_key[key][0] for key in expected_ids) if exact
                else tuple(sorted(outcomes, key=lambda item: _coverage_key_sort(item.key))))
-    state = "complete" if exact else "incomplete"
-    if state == "complete" and any(
+    if not exact:
+        state = "incomplete"
+    elif any(outcome.status == "missing" for outcome in ordered):
+        state = "partial"
+    else:
+        state = "complete"
+    if state in ("complete", "partial") and any(
             outcome.status == "present" and outcome.revision_id is None
             for outcome in ordered):
         state = "incomplete"
@@ -429,7 +434,7 @@ def build_completed_coverage(
         covered_tickers=covered_tickers,
         acquisition_receipt_refs=tuple(sorted(set(acquisition_receipt_refs))),
         state=state,
-        completed_at=completed_at if state == "complete" else None,
+        completed_at=completed_at if state in ("complete", "partial") else None,
         prior_coverage_id=prior_coverage_id,
     )
 
@@ -674,9 +679,22 @@ def load_raw_receipt(conn: Any, store: ArtifactStore, receipt_id: str) -> bytes:
 
 def cache_normalization(conn: Any, store: ArtifactStore,
                         raw: RawReceiptRecord, revisions: Sequence[DailyMarketRevision], *,
-                        normalizer_id: str, contract_id: str, created_at: str) -> NormalizationRecord:
+                        normalizer_id: str, contract_id: str, created_at: str,
+                        expected_keys: Sequence[str]) -> NormalizationRecord:
     """Cache one raw receipt's normalized revisions under
-    ``(raw_hash, normalizer_id, contract_id)``.
+    ``(raw_hash, normalizer_id, contract_id, canonical expected_keys)``.
+
+    ``expected_keys`` is the fetch unit's requested key set: canonicalized to
+    unique string tickers in sorted order (``_normalization_identity``), so a
+    request's order and duplicates never change the identity while a genuinely
+    different set under the same raw payload/normalizer/contract produces a
+    distinct id and row. An empty or malformed sequence (a scalar string or
+    bytes, a mapping, a non-string or empty-string member) refuses with the
+    registered retryable ``INPUT_CHANGED`` before any identity is derived or
+    row written -- never a coerced member, never a silent empty set. Rows
+    stored under the old triple-only formula carry no
+    expected-key metadata, keep their ids and references, and are never reused
+    as a cache hit; the scoped row simply coexists (#133 slice 3 policy).
 
     A byte-identical replay of the same raw content is a cache hit even when
     ``normalized_hash`` differs, as long as the stored and incoming revisions
@@ -691,9 +709,8 @@ def cache_normalization(conn: Any, store: ArtifactStore,
                 "normalizer_id": normalizer_id,
                 "revisions": [_revision_document(item) for item in ordered]}
     normalized_hash = content_hash(document)
-    normalization_id = "norm_" + content_hash({
-        "raw_hash": raw.raw_hash, "normalizer_id": normalizer_id, "contract_id": contract_id,
-    }).removeprefix(CONTENT_HASH_PREFIX)[:32]
+    normalization_id = _normalization_identity(
+        raw.raw_hash, normalizer_id, contract_id, expected_keys)
     existing = conn.execute(
         "SELECT * FROM data_normalizations WHERE normalization_id = ?",
         (normalization_id,)).fetchone()
@@ -777,11 +794,59 @@ def _normalized_revisions(encoded: bytes) -> tuple[DailyMarketRevision, ...]:
                           "cached normalization artifact is malformed") from exc
 
 
+def _expected_keys_are_valid(expected_keys: Sequence[str]) -> bool:
+    """The one strict expected-key shape rule shared by every boundary that
+    accepts a fetch unit's expected keys: a nonempty tuple/list of nonempty
+    strings. A scalar ``str``/``bytes`` (which would iterate into characters),
+    a mapping or set, an empty sequence, or a non-string or empty-string
+    member never passes -- and no member is ever coerced."""
+    return (isinstance(expected_keys, (tuple, list)) and bool(expected_keys)
+            and all(isinstance(key, str) and key for key in expected_keys))
+
+
+def _canonical_expected_keys(expected_keys: Sequence[str]) -> tuple[str, ...]:
+    """Validate with the shared shape rule, then canonicalize, the fetch
+    unit's expected keys: unique nonempty string ticker keys in sorted order,
+    so request order and duplicates never change the canonical set, identity
+    is set-based (#133 slice 3), and no member is ever coerced. A malformed or
+    empty sequence refuses with the registered retryable ``INPUT_CHANGED``
+    before any normalization identity is derived."""
+    if not _expected_keys_are_valid(expected_keys):
+        raise errors.fail("INPUT_CHANGED",
+                          "normalization expected keys must be a nonempty sequence "
+                          "of nonempty string ticker keys")
+    return tuple(sorted(set(expected_keys)))
+
+
+def _planned_expected_keys(unit) -> tuple[str, ...]:
+    """Validate one planned fetch unit's expected-key set at the refresh
+    acquisition boundary (engine/v2/data/ARCHITECTURE.md): a caller-supplied
+    plan can bypass plan-document decoding, so the data layer applies the
+    shared strict shape rule itself -- a nonempty tuple/list of nonempty
+    strings -- before the provider is invoked, before any cache work and
+    before any coercion. An absent, malformed or empty planned set refuses
+    with the registered retryable ``INPUT_CHANGED``, never a
+    ``str()``-coerced member,
+    never a silent empty set. Valid keys are returned unchanged (order and
+    duplicates included) for the persisted receipt request; the normalization
+    boundary below canonicalizes them."""
+    keys = unit.get("expected_keys")
+    if not _expected_keys_are_valid(keys):
+        raise errors.fail("INPUT_CHANGED",
+                          "refresh plan fetch unit expected keys must be a nonempty "
+                          "sequence of nonempty string ticker keys")
+    return tuple(keys)
+
+
 def _normalization_identity(raw_hash: str, normalizer_id: str,
-                            contract_id: str) -> str:
+                            contract_id: str,
+                            expected_keys: Sequence[str]) -> str:
+    canonical = _canonical_expected_keys(expected_keys)
+    expected_keys_hash = content_hash(canonical)
     return "norm_" + content_hash({
         "raw_hash": raw_hash, "normalizer_id": normalizer_id,
         "contract_id": contract_id,
+        "expected_keys": expected_keys_hash,
     }).removeprefix(CONTENT_HASH_PREFIX)[:32]
 
 
@@ -938,7 +1003,7 @@ def build_daily_market_candidate(parent: manifests.ResolvedSnapshot, store: Arti
                                  retained_revisions: Sequence[DailyMarketRevision] = (),
                                  parent_snapshot_id: str | None = None,
                                  normalized_payloads: int | None = None) -> DailyMarketCandidate:
-    if coverage.state != "complete":
+    if coverage.state == "incomplete":
         raise errors.fail("INPUT_CHANGED", "incomplete coverage cannot build a candidate")
     contract = next((item for item in parent.contracts if item.table_name == TABLE_NAME), None)
     if contract is None:
@@ -1203,10 +1268,12 @@ def _acquire_refresh_units(parameters, root, document, fetcher):
            for unit in (*units, *tuple(plan.get("units", ())))):
         raise errors.fail("CONTRACT_MISMATCH",
                           "refresh plan table_name does not match the staged refresh identity")
-    if any("expected_keys" not in unit
-           for unit in (*units, *tuple(plan.get("units", ())))):
-        raise errors.fail("CONTRACT_MISMATCH",
-                          "refresh plan fetch unit is missing expected_keys")
+    # Planned-key contract (engine/v2/data/ARCHITECTURE.md): every unit this
+    # acquisition will use -- fetched or replayed from a caller-supplied plan
+    # -- is shape-checked here, before the catalog/store open, before any
+    # provider call and before any coercion.
+    for unit in (*units, *tuple(plan.get("units", ()))):
+        _planned_expected_keys(unit)
     conn = catalog.sqlite3.connect(str(document["catalog_path"]))
     conn.row_factory = catalog.sqlite3.Row
     try:
@@ -1227,11 +1294,21 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
 
     ``plan["cached"]`` holds decoded acquisition outcomes for units whose raw
     receipt already exists; each is matched back to its unit by
-    ``request_id`` (never by list position). The raw bytes are read back,
-    verified and parsed into the exact ``{"summaries": ..., "cores": ...}``
-    shape the ORATS fetcher published, then merged by the provider's own
-    ``_merge_ticker_rows`` -- reached through the injected fetcher closure so
-    the data layer never imports the ops provider.
+    ``request_id`` (never by list position). Each matched unit's planned
+    expected-key set is validated before its receipt is opened or read. The
+    raw bytes are read back, verified and parsed into the exact
+    ``{"summaries": ..., "cores": ...}`` shape the ORATS fetcher published,
+    then merged by the provider's own ``_merge_ticker_rows`` -- reached
+    through the injected fetcher closure so the data layer never imports the
+    ops provider. A cached receipt must be ``complete`` and carry the unit's
+    own key set, checked against the catalog row before ``store.verify`` runs,
+    else the rebuild refuses with ``INPUT_CHANGED`` before any artifact
+    verification or read. A receipt that claims ``complete`` but whose payload
+    no longer reconstructs every expected key refuses with the retryable
+    ``INPUT_CHANGED`` here, before any provider request or new receipt: this
+    function never calls ``_fetch_unit``. Reacquisition belongs to planning,
+    where call reservations are made, which must demote such a receipt to a
+    budgeted fetch.
     """
     merge_rows = getattr(fetcher, "merge_ticker_rows", None)
     if merge_rows is None:
@@ -1244,15 +1321,46 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
         unit = units.get(str(outcome.get("request_id", "")))
         if unit is None:
             raise errors.fail("INPUT_CHANGED", "cached outcome has no matching refresh unit")
+        expected_keys = _planned_expected_keys(unit)
         receipt_id = str(outcome.get("receipt_ref", ""))
+        row = conn.execute(
+            "SELECT request_json, response_kind FROM data_raw_receipts "
+            "WHERE raw_receipt_id = ?", (receipt_id,)).fetchone()
+        if row is None:
+            raise errors.fail("INPUT_CHANGED",
+                              "cached daily_market receipt is missing from the catalog")
+        try:
+            request = json.loads(row["request_json"])
+        except (TypeError, ValueError):
+            request = None
+        saved_keys = request.get("keys") if isinstance(request, dict) else None
+        if (row["response_kind"] != "complete" or not _expected_keys_are_valid(saved_keys)
+                or _normalized_expected_keys(expected_keys)
+                != _normalized_expected_keys(saved_keys)):
+            raise errors.fail("INPUT_CHANGED",
+                              "cached daily_market receipt does not match refresh unit")
         record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})
         raw_bytes = store.read_verified(_artifact_ref(record.object_ref, RAW_SCHEMA_REF))
-        fetched.append(_fetched_unit_rows(
-            contract, unit, _cached_ticker_rows(raw_bytes, merge_rows, unit), record, observed_at))
+        ticker_rows = _cached_ticker_rows(raw_bytes, merge_rows, expected_keys)
+        missing = _expected_keys_without_rows(contract, unit, ticker_rows)
+        if missing:
+            raise errors.fail(
+                "INPUT_CHANGED",
+                "cached daily_market receipt does not reconstruct every expected key; "
+                "native planning must demote this receipt to a budgeted fetch",
+                details={"request_id": str(unit.get("request_id", "")),
+                         "missing_keys": list(missing)})
+        fetched.append(_fetched_unit_rows(contract, unit, ticker_rows, record, observed_at,
+                                          expected_keys))
     return tuple(fetched)
 
 
-def _cached_ticker_rows(raw_bytes, merge_rows, unit):
+def _normalized_expected_keys(keys):
+    """Sorted tuple of strings: a stable key set for receipt/unit comparison."""
+    return tuple(sorted(str(key) for key in keys))
+
+
+def _cached_ticker_rows(raw_bytes, merge_rows, expected_keys):
     try:
         parsed = json.loads(raw_bytes)
         summaries = _cached_data_rows(parsed["summaries"])
@@ -1260,8 +1368,7 @@ def _cached_ticker_rows(raw_bytes, merge_rows, unit):
     except (KeyError, TypeError, ValueError):
         raise errors.fail("MANIFEST_CORRUPT",
                           "cached daily_market payload is malformed") from None
-    expected = [str(key) for key in unit.get("expected_keys", ())]
-    return merge_rows(summaries, cores, expected_keys=expected)
+    return merge_rows(summaries, cores, expected_keys=list(expected_keys))
 
 
 def _cached_data_rows(document):
@@ -1278,14 +1385,25 @@ def _parent_daily_market_contract(conn, parent_snapshot_id):
 
 
 def _fetch_unit(conn, store, contract, unit, fetcher):
+    expected_keys = _planned_expected_keys(unit)
     raw_bytes, response_kind, response_meta, ticker_rows = fetcher(unit)
-    if response_kind not in ("complete", "legitimate_empty"):
+    ticker_rows = tuple(ticker_rows)
+    if response_kind not in ("complete", "legitimate_empty", "partial"):
         raise errors.fail("TRANSIENT_SOURCE", "daily_market provider response was not complete")
+    if response_kind == "legitimate_empty" and _normalized_expected_keys(
+            unit.get("expected_keys", ())):
+        raise errors.fail("SOURCE_NOT_FINAL", "daily_market empty response was not final")
+    if response_kind == "complete" and _expected_keys_without_rows(contract, unit, ticker_rows):
+        raise errors.fail("TRANSIENT_SOURCE",
+                          "daily_market complete response omitted expected keys")
+    if response_kind == "partial" and not ticker_rows:
+        raise errors.fail("TRANSIENT_SOURCE",
+                          "daily_market partial response returned no ticker rows")
     request = {
         "request_id": str(unit["request_id"]),
         "table_name": str(unit["table_name"]),
         "partition_key": str(unit["partition_key"]),
-        "keys": [str(key) for key in unit.get("expected_keys", ())],
+        "keys": list(expected_keys),
     }
     observed_at = format_timestamp(SystemClock().now())
     record = cache_raw_receipt(
@@ -1294,20 +1412,54 @@ def _fetch_unit(conn, store, contract, unit, fetcher):
                    response_meta=dict(response_meta)),
         source=FETCH_SOURCE, endpoint=request["table_name"], request=request,
         received_at=observed_at)
-    return _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at)
+    return _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at,
+                              expected_keys)
 
 
-def _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at):
-    """One ``_FetchedUnit`` from ``(unit, ticker_rows, receipt)`` -- shared by
-    the live-fetch and cache-only branches so both stage identical evidence."""
+def _expected_keys_without_rows(contract, unit, ticker_rows):
+    """Pre-cache validation for the live fetch and cache-replay paths.
+
+    The expected keys (unit ``expected_keys``, matched by logical key against
+    the returned rows) that have no returned row. A ``complete`` response
+    that omits any expected key must be refused before it is cached, so it
+    can never be cached or represented as complete coverage.
+    """
+    session_date = _session_date(unit["partition_key"])
+    expected_item_keys = [daily_market_logical_key(str(key), session_date)
+                          for key in unit.get("expected_keys", ())]
+    returned = set()
+    for row in ticker_rows:
+        canonical = _canonical_row(contract, row)
+        returned.add(daily_market_logical_key(str(canonical["ticker"]),
+                                              _session_date(canonical["date"])))
+    return tuple(item_key for item_key in expected_item_keys if item_key not in returned)
+
+
+def _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at, expected_keys):
+    """One ``_FetchedUnit`` from ``(unit, ticker_rows, receipt)`` plus the
+    acquisition-validated ``expected_keys`` -- shared by the live-fetch and
+    cache-only branches so both stage identical evidence. The keys arrive
+    through ``_planned_expected_keys`` and are used as-is: never re-read from
+    the unit with a silent empty default, never coerced.
+
+    One outcome per expected key: returned revisions stay ``present`` with
+    their revision id, and an expected key with no returned revision is
+    ``missing`` against the same raw receipt -- never a fabricated revision.
+    """
     revisions = tuple(
         _fetched_revision(contract, unit, row, record.raw_receipt_id, observed_at)
         for row in ticker_rows)
     session_date = _session_date(unit["partition_key"])
     expected = tuple(
-        CoverageKey(item_key=daily_market_logical_key(str(key), session_date),
-                   session_date=session_date, ticker=str(key))
-        for key in unit.get("expected_keys", ()))
+        CoverageKey(item_key=daily_market_logical_key(key, session_date),
+                    session_date=session_date, ticker=key)
+        for key in expected_keys)
+    returned_item_keys = {revision.candidate.logical_key for revision in revisions}
+    outcomes = tuple(_coverage_outcome(item, record.raw_receipt_id) for item in revisions)
+    outcomes += tuple(
+        CoverageOutcome(key=key, status="missing", receipt_id=record.raw_receipt_id,
+                        revision_id=None, finality="final")
+        for key in expected if key.item_key not in returned_item_keys)
     return _FetchedUnit(
         raw_payload={"receipt_id": record.raw_receipt_id,
                      "response_kind": record.response_kind,
@@ -1316,7 +1468,7 @@ def _fetched_unit_rows(contract, unit, ticker_rows, record, observed_at):
                      "request": dict(record.request), "received_at": record.received_at},
         revisions=tuple(_revision_document(item) for item in revisions),
         expected=expected,
-        outcomes=tuple(_coverage_outcome(item, record.raw_receipt_id) for item in revisions),
+        outcomes=outcomes,
         receipt_id=record.raw_receipt_id, received_at=record.received_at)
 
 
@@ -1453,7 +1605,8 @@ def run_incremental_refresh(parameters, root):
         incoming = tuple(_revision_from_document(item)
                          for item in document.get("incoming_revisions", ()))
         incoming, normalized_count = _stage_normalizations(
-            conn, store, raw_records, incoming, contract.contract_id, clock)
+            conn, store, raw_records, incoming, contract.contract_id, clock,
+            _incoming_expected_keys(raw_records, incoming))
         retained = _load_retained_revisions(conn, store)
         coverage = from_document(CompletedCoverage, document["coverage"])
         candidate = build_daily_market_candidate(
@@ -1566,7 +1719,41 @@ def _staged_raw_receipt(conn, store, item):
         received_at=row["received_at"], cache_hit=True)
 
 
-def _stage_normalizations(conn, store, raw_records, revisions, contract_id, clock):
+def _receipt_expected_keys(raw: RawReceiptRecord) -> tuple[str, ...]:
+    """The fetch unit's expected keys as persisted on the receipt request by
+    ``_fetch_unit``. Fails closed: ``request["keys"]`` must be a nonempty list
+    of nonempty strings (engine/v2/data/ARCHITECTURE.md) -- missing, null,
+    empty, non-list or any malformed member refuses with the registered
+    retryable ``INPUT_CHANGED``, never a coerced value and never a silently
+    defaulted empty set. Valid strings are returned unchanged."""
+    keys = raw.request.get("keys")
+    if (not isinstance(keys, list) or not keys
+            or not all(isinstance(key, str) and key for key in keys)):
+        raise errors.fail("INPUT_CHANGED",
+                          "daily_market raw receipt request expected keys are malformed")
+    return tuple(keys)
+
+
+def _incoming_expected_keys(
+    raw_records: Mapping[str, RawReceiptRecord],
+    revisions: Sequence[DailyMarketRevision],
+) -> dict[str, tuple[str, ...]]:
+    """Expected keys only for the receipts ``revisions`` actually reference.
+
+    ``_receipt_expected_keys`` fails closed on a receipt whose saved request
+    carries no expected keys, and (engine/v2/data/ARCHITECTURE.md) that is
+    required only of receipts needed for normalization: a staged raw receipt
+    no incoming revision references is never normalized and must not abort
+    the refresh. Unknown references stay unmapped here and keep failing
+    through ``_stage_normalizations``' typed ``INPUT_CHANGED``.
+    """
+    referenced = sorted({item.raw_receipt_id for item in revisions})
+    return {raw_id: _receipt_expected_keys(raw_records[raw_id])
+            for raw_id in referenced if raw_id in raw_records}
+
+
+def _stage_normalizations(conn, store, raw_records, revisions, contract_id, clock,
+                          expected_keys_by_receipt):
     grouped = {}
     for revision in revisions:
         grouped.setdefault(revision.raw_receipt_id, []).append(revision)
@@ -1576,9 +1763,14 @@ def _stage_normalizations(conn, store, raw_records, revisions, contract_id, cloc
         raw = raw_records.get(raw_id)
         if raw is None:
             raise errors.fail("INPUT_CHANGED", "revision references an uncached raw receipt")
+        expected_keys = expected_keys_by_receipt.get(raw_id)
+        if expected_keys is None:
+            raise errors.fail("INPUT_CHANGED",
+                              "fetch unit expected keys are missing for a raw receipt")
         record = cache_normalization(
             conn, store, raw, group, normalizer_id="daily_market.v3",
-            contract_id=contract_id, created_at=format_timestamp(clock.now()))
+            contract_id=contract_id, created_at=format_timestamp(clock.now()),
+            expected_keys=expected_keys)
         cache_hits += int(record.cache_hit)
         normalized.extend(dataclasses.replace(
             item, normalization_id=record.normalization_id) for item in group)

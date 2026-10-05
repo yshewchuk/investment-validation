@@ -248,11 +248,12 @@ def test_each_migration_stays_its_own_transaction_and_a_fix_retries(tmp_path):
 
 def test_data_migration_tuples_pass_the_flag_through_bootstrap():
     """Bootstrap keeps wrapping plain 3-tuples (historical checksums intact,
-    never flagged today) and passes an optional 4th element through for
-    future use."""
+    versions before 13 never flagged) and passes an optional 4th element
+    through for the v13 recreate opt-in."""
     plain = _data_migration((1, "n", ("A",)))
     assert plain.recreate_tables is False
     assert checksum(plain) == checksum(Migration(1, "n", ("A",)))
     assert _data_migration((1, "n", ("A",), True)).recreate_tables is True
     assert _data_migration((1, "n", ("A",), False)).recreate_tables is False
-    assert all(not m.recreate_tables for m in _DATA_MIGRATIONS)
+    assert all(not m.recreate_tables for m in _DATA_MIGRATIONS if m.version < 13)
+    assert [m.version for m in _DATA_MIGRATIONS if m.recreate_tables] == [13]

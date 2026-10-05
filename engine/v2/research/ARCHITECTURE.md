@@ -89,7 +89,11 @@ manifest population bound limits candidate rows, not RSS/process memory — the
 recorded row-count sum of pinned fragments surviving pruning
 ([data scan population rule](../data/ARCHITECTURE.md#invariants)). Explicit
 smaller caller limits remain valid; runtime still enforces the table cap until
-slice E.
+slice E. Each interval scan — month/day split scans independently — may use
+the shared pinned `scan_population_bound` for the same selection to lower its
+`max_result_rows` only when that bound is positive; a zero bound retains the
+positive cap. Retry/split behavior, error codes, frame population and ordering
+are unchanged.
 
 The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
 optional `batch_filter` callback. They invoke it immediately after each Arrow

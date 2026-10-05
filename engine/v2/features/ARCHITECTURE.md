@@ -95,9 +95,11 @@ order, and fixed resource bounds. Those query limits keep the active
 table-contract caps and the fixed caller limits; this caller may lower its
 result limit using a positive recorded membership bound, while a zero bound
 keeps the current active positive limit in this pre-E slice. The separate
-`computed_moves` and `"SPY"` `daily_market` reads do not lower either query
-limit from the selected membership bound; each keeps the minimum of its
-active table-contract cap and fixed caller limit. No head lookup, provider
+`computed_moves` and `"SPY"` `daily_market` reads may each lower
+`max_result_rows` using a positive bound from their exact pinned selection,
+while a zero bound keeps the existing positive limit; each query retains the
+minimum of its active table-contract cap and fixed caller cap, and its batch
+stays within that cap and the effective result limit. No head lookup, provider
 pull, training or legacy path occurs.
 Rows outside that identity/date scope, duplicate dates, and invalid source
 dates refuse before arithmetic. Repository integrity, scan-validation and
@@ -187,10 +189,12 @@ the remaining reads'. Query construction and the
 `PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
 contract — see the PR body.
 
-The `computed_moves` and `"SPY"` `daily_market` reads do not lower either
-query limit from the selected membership bound; each keeps the minimum of its
-active table-contract cap and fixed caller limit. Normal repository scan
-validation and failures propagate.
+Both bounded reads (`computed_moves` for `key.ticker`, `"SPY"`
+`daily_market`) lower `max_result_rows` only from a positive bound on their
+exact pinned selection; a zero bound leaves the existing positive limit. Each
+query still retains the minimum of its active table-contract cap and fixed
+caller cap, and its batches stay within that cap and the effective result
+limit. Normal repository scan validation and failures propagate.
 
 | Condition (R1-R6) | Outcome |
 |---|---|
