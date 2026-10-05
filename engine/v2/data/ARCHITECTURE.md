@@ -47,7 +47,8 @@ interface section; this names only the load-bearing entry points.
   run/build/commit/merge functions and shared merge primitives in
   `incremental_tables.py` (also used by `engine.v2.research`/
   `forward_calendar_store`). See Invariants for revision identity/ordering,
-  `normalizer_id` versioning, coverage completeness, and mcap carry-forward.
+  planned-unit key validation, `normalizer_id` versioning, coverage
+  completeness, and mcap carry-forward.
 - **Snapshot resolution and bounded reads** — `repository.Repository`:
   exact re-verifying `resolve`/`resolve_full` (+ `_pinned`), a bounded
   Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
@@ -275,7 +276,7 @@ and retryability come from that table, never guessed at a call site.
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
-| `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, or expected keys missing/malformed/empty at the normalization boundary (Invariants) |
+| `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, expected keys missing/malformed/empty at the normalization boundary, or a malformed/empty planned unit key set refused at refresh acquisition (Invariants) |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
@@ -450,6 +451,16 @@ Root doc §5 invariants this package is responsible for:
 - **`daily_market` coverage is measured against what was requested**, not
   what came back — a response missing an expected ticker is a genuine,
   detectable `TRANSIENT_SOURCE` gap, never a tautological "complete."
+- **`daily_market` planned refresh units are validated before
+  acquisition.** A planned fetch unit's expected-key set must be a
+  nonempty tuple/list of nonempty strings, checked before the provider is
+  invoked, before any cache work, and before any coercion — for fetched
+  units and for cached units reconstructed from a caller-supplied plan
+  alike. A malformed or empty planned set refuses with the registered
+  retryable `INPUT_CHANGED` before any provider call or receipt/cache
+  write — never a `str()`-coerced member, never a silent empty set. Valid
+  keys are preserved as strings on the way to the receipt request and the
+  normalization boundary below.
 - **`daily_market` normalizer versioning.** `cache_normalization` keys
   `normalization_id` on a canonical hash of the fetch unit's expected-key set
   folded together with `raw_hash`, `normalizer_id` and `contract_id`; expected

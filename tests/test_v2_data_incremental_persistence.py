@@ -823,3 +823,199 @@ def test_malformed_directly_passed_expected_keys_refuse_before_identity(tmp_path
     assert cache(["BBB", "AAA", "AAA"]).normalization_id == tuple_id
     assert cache(("AAA", "BBB")).cache_hit is True
     assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
+
+
+PLANNED_KEYS_MALFORMED = (
+    pytest.param([], id="empty-list"),
+    pytest.param([42], id="int-member-only"),
+    pytest.param(["AAA", 42], id="int-member"),
+    pytest.param(["AAA", None], id="null-member"),
+    pytest.param(["", "AAA"], id="empty-string-member"),
+    pytest.param("AAA", id="scalar-string"),
+    pytest.param({"AAA": "ignored"}, id="mapping"),
+    pytest.param(None, id="null"),
+)
+
+
+def _planned_keys_acquisition(tmp_path):
+    """A real catalog and store with a committed empty-manifest
+    ``daily_market`` parent, plus the staged identity document and job
+    parameters a planned refresh acquisition receives."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    receipt_ref = content_hash({"planned-keys": "parent"})
+    manifest = dataset_manifest(
+        _DAILY_MARKET_REF, (), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent = snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal.v1",
+        source_priority_version="synthetic", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="shadow", request_hash=content_hash({"planned-keys": "base"}),
+        contracts=(_DAILY_MARKET_CONTRACT,), objects=(), records=(),
+        manifests=(manifest,), snapshot=parent, expected_head_snapshot_id=None,
+        expected_head_generation=0, receipt_id="planned-keys-base-receipt",
+        attempt_id="planned-keys-base-attempt", fence=1,
+        fence_check=lambda _c: None, clock=clock, store=store)
+    document = {"catalog_path": str(tmp_path / "ops.sqlite"),
+                "objects_root": str(tmp_path / "objects"), "table_name": "daily_market"}
+    parameters = RefreshParameters(
+        expected_ids=("daily-market-planned-keys",),
+        parent_snapshot_id=parent.snapshot_id, refresh_plan_hash="sha256:" + "9" * 64,
+        provider_calls=0, catalog_path=str(tmp_path / "ops.sqlite"),
+        objects_root=str(tmp_path / "objects"), scope="shadow",
+        expected_head_generation=1, expected_head_snapshot_id=parent.snapshot_id)
+    return conn, clock, store, document, parameters
+
+
+def _spy_acquisition_store(monkeypatch):
+    """Records every ``ArtifactStore`` the data-layer acquisition builds,
+    proving no cache work starts before planned-key validation."""
+    built = []
+    real = data_incremental.ArtifactStore
+
+    def recording(root):
+        built.append(str(root))
+        return real(root)
+
+    monkeypatch.setattr(data_incremental, "ArtifactStore", recording)
+    return built
+
+
+@pytest.mark.parametrize("keys", PLANNED_KEYS_MALFORMED)
+def test_malformed_planned_keys_refuse_before_provider_call_or_cache_write(
+        tmp_path, monkeypatch, keys):
+    """Planned-key contract (engine/v2/data/ARCHITECTURE.md): a
+    malformed planned fetch-unit ``expected_keys`` -- an integer member, an
+    empty or null set, a scalar string, a mapping -- refuses at refresh
+    acquisition with the registered retryable ``INPUT_CHANGED``, before the
+    provider is invoked, before any store or catalog work and before any
+    ``str()`` coercion. The old ``_acquire_refresh_units`` called the fetcher
+    first and persisted coerced keys, so every guard assertion here fails on
+    it."""
+    conn, _clock, _store, document, parameters = _planned_keys_acquisition(tmp_path)
+    (tmp_path / "refresh_plan.json").write_text(canonical_json({
+        "fetch_units": [{"request_id": "u1", "table_name": "daily_market",
+                         "partition_key": "2026-05-01", "expected_keys": keys}]}))
+    built = _spy_acquisition_store(monkeypatch)
+    provider_calls = []
+
+    def fetcher(unit):
+        provider_calls.append(unit)
+        return b'{"kind": "fixture"}', "complete", {"status": 200}, []
+
+    with pytest.raises(DataError) as err:
+        data_incremental._acquire_refresh_units(parameters, tmp_path, document, fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    assert provider_calls == []
+    assert built == []
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+    assert "raw_payloads" not in document and "coverage" not in document
+
+
+@pytest.mark.parametrize("keys", (
+    pytest.param(["AAA", 42], id="int-member"),
+    pytest.param([], id="empty-list"),
+))
+def test_malformed_planned_keys_in_cached_plan_refuse_before_receipt_read(
+        tmp_path, monkeypatch, keys):
+    """The cached/caller-supplied-plan half of the planned-key contract: the
+    malformed set reaches the data layer only through the raw plan document
+    (never through plan decoding), so acquisition must refuse with the
+    registered retryable ``INPUT_CHANGED`` before any receipt is opened or
+    read. The old code constructed the store, opened and verified the
+    receipt, then ``str``-coerced each key into the provider merge -- the
+    merge spy, the store spy and the unchanged receipt row count prove it no
+    longer does."""
+    conn, clock, store, document, parameters = _planned_keys_acquisition(tmp_path)
+    cached_raw = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=json.dumps(
+                {"summaries": {"data": []}, "cores": {"data": []}}).encode(),
+            response_kind="complete", response_meta={}),
+        source="daily_market", endpoint="daily_market",
+        request={"request_id": "u1", "keys": ["AAA"]},
+        received_at=clock.now().isoformat())
+    (tmp_path / "refresh_plan.json").write_text(canonical_json({
+        "units": [{"request_id": "u1", "table_name": "daily_market",
+                   "partition_key": "2026-05-01", "expected_keys": keys}],
+        "cached": [{"request_id": "u1", "receipt_ref": cached_raw.raw_receipt_id}]}))
+    built = _spy_acquisition_store(monkeypatch)
+    merge_calls = []
+
+    def merge(summaries, cores, expected_keys=None):
+        merge_calls.append(list(expected_keys or ()))
+        return []
+
+    def fetcher(unit):
+        raise AssertionError("a cached replay must never call the provider")
+
+    fetcher.merge_ticker_rows = merge
+
+    with pytest.raises(DataError) as err:
+        data_incremental._acquire_refresh_units(parameters, tmp_path, document, fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    assert merge_calls == []
+    assert built == []
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("keys", (
+    pytest.param(("AAA", 42), id="int-member-tuple"),
+    pytest.param((), id="empty-tuple"),
+    pytest.param("AAA", id="scalar-string"),
+    pytest.param({"AAA"}, id="set"),
+    pytest.param(None, id="null"),
+))
+def test_fetch_unit_validates_planned_keys_before_the_injected_fetcher(tmp_path, keys):
+    """The guard sits inside ``_fetch_unit`` itself: the helper can be reached
+    without ``_acquire_refresh_units``, so a direct call with a malformed
+    planned set must refuse with the registered retryable ``INPUT_CHANGED``
+    before the injected fetcher runs and before any receipt is cached. The
+    old ``_fetch_unit`` called the fetcher first and wrote ``str``-coerced
+    keys into the receipt request."""
+    conn, _clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    provider_calls = []
+
+    def fetcher(unit):
+        provider_calls.append(unit)
+        return b'{"kind": "fixture"}', "complete", {"status": 200}, []
+
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01", "expected_keys": keys}
+    with pytest.raises(DataError) as err:
+        data_incremental._fetch_unit(conn, store, _DAILY_MARKET_CONTRACT, unit, fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    assert provider_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+
+
+def test_valid_planned_keys_are_preserved_on_the_receipt_and_coverage(tmp_path):
+    """The positive half of the planned-key contract: a valid set reaches the
+    receipt request and the staged coverage as strings, order and duplicates
+    included -- no coercion, no re-sorting -- and the saved receipt still
+    carries them unchanged for the normalization boundary, which
+    canonicalizes downstream (the identity tests above pin that)."""
+    conn, _clock, store, _document, _parameters = _planned_keys_acquisition(tmp_path)
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01", "expected_keys": ["BBB", "AAA", "AAA"]}
+
+    def fetcher(_unit):
+        return b'{"kind": "fixture"}', "complete", {"status": 200}, []
+
+    fetched = data_incremental._fetch_unit(
+        conn, store, _DAILY_MARKET_CONTRACT, unit, fetcher)
+    assert fetched.raw_payload["request"]["keys"] == ["BBB", "AAA", "AAA"]
+    assert tuple(key.ticker for key in fetched.expected) == ("BBB", "AAA", "AAA")
+    stored = json.loads(conn.execute(
+        "SELECT request_json FROM data_raw_receipts").fetchone()["request_json"])
+    assert stored["keys"] == ["BBB", "AAA", "AAA"]
+    replayed = data_incremental._staged_raw_receipt(
+        conn, store, {"receipt_id": fetched.receipt_id})
+    assert data_incremental._receipt_expected_keys(replayed) == ("BBB", "AAA", "AAA")
