@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from engine.v2.ops.bootstrap import open_catalog
-from engine.v2.ops.cli import _progress_rows
 from engine.v2.ops.diagnostics import process_family_liveness
 from engine.v2.ops.lifecycle import attempt_receipts
 from engine.v2.ops.profiles import DEFAULT_POLICY, MIB
@@ -187,12 +186,22 @@ def job_state(conn, job_id) -> str:
     return conn.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()[0]
 
 
+def _read_progress_rows(conn, job_id):
+    """This job's ``progress_events`` bodies, decoded in the same order as
+    ``engine.v2.ops.cli._progress_rows`` reads them, kept local so this shared
+    test helper never imports the production CLI module graph."""
+    rows = conn.execute("SELECT body_json FROM progress_events WHERE job_id = ? "
+                        "ORDER BY recorded_at, sequence", (job_id,)).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
 def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
     """Deadline diagnostics from the existing ops read helpers (``get_job``,
-    ``attempt_receipts``, ``cli._progress_rows``,
-    ``diagnostics.process_family_liveness``) only, never ad-hoc SQL: every
-    required label always prints, an unavailable one rendering
-    ``unavailable`` alone (catching ``Exception``, never ``BaseException``).
+    ``attempt_receipts``, ``diagnostics.process_family_liveness``) plus the
+    module-local :func:`_read_progress_rows` reading of ``progress_events``,
+    no other ad-hoc SQL: every required label always prints, an unavailable
+    one rendering ``unavailable`` alone (catching ``Exception``, never
+    ``BaseException``).
 
     The two heartbeats never blur: ``attempts.heartbeat_at`` is the fenced
     lease-renewal stamp (``lifecycle.heartbeat``), while a ``progress_events``
@@ -297,7 +306,7 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
         tail = field(lambda: render_progress(job_attr("latest_progress")),
                      missing=job_note or "unavailable (no progress recorded)",
                      label="log tail")
-        step_text = field(lambda: render_step(_progress_rows(conn, job_id)),
+        step_text = field(lambda: render_step(_read_progress_rows(conn, job_id)),
                           missing="unavailable (no non-heartbeat progress event recorded)",
                           label="progress rows")
         try:

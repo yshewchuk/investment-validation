@@ -37,7 +37,6 @@ from tests.ops_support import (
     request,
     run_until,
 )
-from tests.test_v2_ops_executor_faults import _fake_stat_line
 
 REPO = Path(__file__).resolve().parents[1]
 GIB = 1 << 30
@@ -273,6 +272,18 @@ def test_run_until_fails_at_its_deadline_with_catalog_diagnostics(tmp_path, monk
     assert run_until(_NeverAdmits(), conn, job_id, timeout=fake_deadline) == "succeeded"
 
 
+def _controlled_stat_line(pid: int, *, start_ticks: int) -> str:
+    """A syntactically real ``/proc/<pid>/stat`` row for the controlled process
+    table: live state ``S``, this pid, this recorded start time, and a process
+    group / session that match the ``ProcessIdentity`` the test writes (111).
+    Local (not imported from another test module) so this suite adds no
+    cross-test import edge; the field positions mirror what
+    ``executor_watchdog.process_info`` reads after ``rfind(")")``."""
+    fields = ["S", "1", "111", "111", "0", "-1", "0", "0", "0", "0", "0",
+              "0", "0", "0", "0", "0", "0", "1", "0", str(start_ticks), "0", "10"]
+    return f"{pid} (fake) " + " ".join(fields)
+
+
 def _install_controlled_process_table(monkeypatch, tmp_path, pid: int, start_ticks: int):
     """Point the seam ``diagnostics.process_family_liveness`` walks
     (``executor_watchdog.process_table``, the default ``table=`` argument of
@@ -285,7 +296,7 @@ def _install_controlled_process_table(monkeypatch, tmp_path, pid: int, start_tic
     proc = tmp_path / "proc"
     entry = proc / str(pid)
     entry.mkdir(parents=True)
-    (entry / "stat").write_text(_fake_stat_line(pid, start_ticks=start_ticks))
+    (entry / "stat").write_text(_controlled_stat_line(pid, start_ticks=start_ticks))
     real = executor_watchdog.process_table
     monkeypatch.setattr(executor_watchdog, "process_table",
                         lambda boot_id: real(boot_id, proc=proc))
