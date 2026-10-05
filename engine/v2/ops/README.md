@@ -50,6 +50,11 @@ for pinned raw-row calendar inputs. They compose decision-calendar sessions,
 strategy-eligible expiries and calendar-row inputs; this slice adds no
 production caller. See the component architecture contract.
 
+`nightly_raw_row_producer.build_native_score_batch_events` is an internal
+staging API that composes native raw-row event and refusal documents from
+pinned inputs. It has no production caller yet; slice 5 owns the worker/sidecar
+staging and submission wiring. See the component architecture contract.
+
 <!-- public-interface: registered_artifact, verify_eod_availability -->
 
 ## Consumers
