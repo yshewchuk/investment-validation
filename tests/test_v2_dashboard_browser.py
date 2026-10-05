@@ -316,7 +316,10 @@ def _override_fields_by_key(node, _seen: set[int] | None = None) -> None:
     _seen.add(id(node))
     if isinstance(node, dict):
         for key in list(node):
-            if key in _UNIT_FIELD_OVERRIDES:
+            if key == "coverage_summary" and isinstance(node[key], dict):
+                node[key]["compared_population"] = 87
+                _override_fields_by_key(node[key], _seen)
+            elif key in _UNIT_FIELD_OVERRIDES:
                 node[key] = _UNIT_FIELD_OVERRIDES[key]
             else:
                 _override_fields_by_key(node[key], _seen)
@@ -363,6 +366,11 @@ def test_percentage_point_and_count_fields_render_in_their_own_units(
             ".coverage-item", has_text="planned_population")
         expect(population_item).to_have_text("planned_population: 121")
         expect(population_item).not_to_contain_text("%")
+
+        compared_item = coverage.locator(
+            ".coverage-item", has_text="compared_population")
+        expect(compared_item).to_have_text("compared_population: 87")
+        expect(compared_item).not_to_contain_text("%")
 
         row.get_by_test_id("open-event-link").click()
         expect(page.get_by_test_id("event-detail")).to_be_visible()
