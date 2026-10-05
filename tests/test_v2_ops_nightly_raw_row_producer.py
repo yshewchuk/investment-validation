@@ -554,8 +554,7 @@ def test_projected_decision_session_is_not_observed_history(tmp_path, monkeypatc
     assert _AS_OF in projected.days
     assert len([day for day in projected.days if day <= _AS_OF]) \
         == _PANEL_HISTORY_SESSIONS + 1
-    assert len([day for day in projected.days if day <= previous_observed]) \
-        == _PANEL_HISTORY_SESSIONS
+    assert len([day for day in projected.days if day <= previous_observed]) == _PANEL_HISTORY_SESSIONS
 
     def projected_calendar(decision_session, event_through):
         return projected
@@ -580,3 +579,90 @@ def test_projected_decision_session_is_not_observed_history(tmp_path, monkeypatc
     assert rig.calendar_row_calls == []
     assert rig.panel_calls == []
     assert rig.quote_calls == []
+
+
+def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
+    """The real panel reader keeps available moves older than the regime window."""
+    import tests.test_v2_features_panel_row_inputs as fixture
+
+    history = pd.bdate_range(end=fixture._DECISION, periods=300)
+    old_day = history[20].date().isoformat()
+    assert old_day < history[-253].date().isoformat()
+    batches = fixture._default_batches()
+    batches[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] = \
+        fixture._computed_rows([(old_day, 4.0, False)])
+    snapshot = fixture._snapshot()
+    repository = fixture._FakeRepository(snapshot, fixture._contracts(), batches)
+
+    def enumerate_one(repo, snap, *, as_of, horizon_days, tickers=None):
+        from engine.v2.ops.native_board_universe import BoardRequest
+        return [BoardRequest(ticker="AAA", strategy="BFLY-P",
+                             event_date=fixture._EVENT, session="AMC")]
+
+    def decision_calendar(repo, snap, *, decision_session, event_through):
+        days = tuple(day.date().isoformat() for day in history) + _PROJECTED_DAYS
+        return CalendarSessions(days=days,
+                                observed_through=fixture._DECISION.date().isoformat())
+
+    def calendar_row(repo, snap, key, *, decision_session, calendar):
+        day = key.event_date.date().isoformat()
+        observed = fixture._DECISION.date().isoformat()
+        return CalendarRowInputs(calendar_revision="ev-rev-1", calendar_row={
+            "event_id": f"{key.ticker}-{key.strategy}", "ticker": key.ticker,
+            "event_date": day, "session": key.session, "entry_date": observed,
+            "exit_date": day, "expiry": day, "spot": 10.0,
+            "calendar_observed_through": observed})
+
+    def quote_rows(repo, snap, key, *, expiry, decision_session):
+        observed = fixture._DECISION.date().isoformat()
+        return QuoteRowInputs(quote_rows=({
+            "ticker": key.ticker, "right": "C", "strike": 100.0,
+            "expiry": expiry, "bid": 1.0, "ask": 1.2,
+            "observed_at": observed},), quote_status="recorded")
+
+    _patch_reader(monkeypatch, nightly_raw_rows,
+                  "scan_forward_board_requests", enumerate_one)
+    _patch_reader(monkeypatch, nightly_calendar_inputs,
+                  "scan_decision_calendar", decision_calendar)
+    _patch_reader(monkeypatch, nightly_calendar_inputs,
+                  "scan_calendar_row_inputs", calendar_row)
+    _patch_reader(monkeypatch, nightly_quote_rows, "scan_quote_rows", quote_rows)
+
+    events, refusals = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
+        horizon_days=_HORIZON_DAYS)
+    assert len(events) == 1
+    assert refusals["refusals"] == []
+    assert events[0]["panel_row"]["n_prior"] == 1
+    assert events[0]["panel_row"]["mean_prior_move"] == 4.0
+
+
+def test_exact_mixed_refusal_order(tmp_path, monkeypatch):
+    """Refusals preserve request order across calendar and intraday categories."""
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("MIXED", _MIDNIGHT, "BMO", event_id="mixed-midnight"),
+        _event_row("MIXED", _INTRADAY, "BMO", event_id="mixed-intraday"),
+    ])
+    rig = _ReaderRig(monkeypatch)
+
+    def calendar_row(key):
+        if key.event_date == _MIDNIGHT:
+            raise data_fail("EVENT_NOT_FOUND",
+                            "no exact calendar event for the board request in the snapshot")
+        return _calendar_inputs(key)
+
+    rig.calendar_row_hook = calendar_row
+    events, refusal_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+    direct = rig.direct(repository, snapshot)
+    assert events == []
+    refusals = refusal_document["refusals"]
+    actual = [(_identity(item["key"]), item["code"]) for item in refusals]
+    expected = [
+        (_identity(_event_keylike(key)),
+         "EVENT_NOT_FOUND" if key.event_date == _MIDNIGHT
+         else "INTRADAY_EVENT_NOT_ADMITTED")
+        for key in direct
+    ]
+    assert actual == expected
+    assert len(refusals) == len(direct)

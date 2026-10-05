@@ -151,15 +151,21 @@ def build_native_score_batch_events(
     """
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
-    refusal_documents: list[dict[str, Any]] = []
+    refusals: dict[int, dict[str, Any]] = {}
     admitted: list[BoardRequest] = []
-    for key in requests:
+    positions: list[int] = []
+
+    def ordered() -> list[dict[str, Any]]:
+        return [refusals[position] for position in sorted(refusals)]
+
+    for position, key in enumerate(requests):
         if _is_intraday(key):
-            refusal_documents.append(_refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL))
+            refusals[position] = _refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL)
         else:
             admitted.append(key)
+            positions.append(position)
     if not admitted:
-        return [], _refusals_document(refusal_documents)
+        return [], _refusals_document(ordered())
 
     decision_session = validated_as_of(as_of).normalize().date().isoformat()
     calendar = scan_decision_calendar(
@@ -168,16 +174,14 @@ def build_native_score_batch_events(
     observed_sessions = tuple(day for day in calendar.days if day <= calendar.observed_through)
     if calendar.observed_through != decision_session or len(observed_sessions) < 253:
         history_detail = "the pinned snapshot lacks required earlier panel sessions"
-        return [], _refusals_document([
-            _refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL) if _is_intraday(key)
-            else _refusal(key, "PANEL_HISTORY_NOT_AVAILABLE", history_detail)
-            for key in requests])
+        for position, key in zip(positions, admitted):
+            refusals[position] = _refusal(key, "PANEL_HISTORY_NOT_AVAILABLE", history_detail)
+        return [], _refusals_document(ordered())
     panels = _shared_panel_rows(repository, snapshot, admitted,
                                 decision_session=decision_session,
-                                history_start=observed_sessions[-253])
-
+                                history_start=observed_sessions[0])
     events: list[dict[str, Any]] = []
-    for key in admitted:
+    for position, key in zip(positions, admitted):
         try:
             calendar_row = scan_calendar_row_inputs(
                 repository, snapshot, key, decision_session=decision_session,
@@ -189,12 +193,12 @@ def build_native_score_batch_events(
             detail = _ROW_REFUSAL_DETAILS.get(refusal.code)
             if detail is None:
                 raise
-            refusal_documents.append(_refusal(key, refusal.code, detail))
+            refusals[position] = _refusal(key, refusal.code, detail)
             continue
         except (OpsError, DataError) as error:
             if error.code not in _EVENT_ERROR_CODES:
                 raise
-            refusal_documents.append(_refusal(key, error.code, _ROW_REFUSAL_DETAILS[error.code]))
+            refusals[position] = _refusal(key, error.code, _ROW_REFUSAL_DETAILS[error.code])
             continue
         panel = panels[_panel_marker(key)]
         events.append(_document({
@@ -204,4 +208,4 @@ def build_native_score_batch_events(
             "panel_anchor": panel.panel_anchor, "tier4_row": {},
             "quote_rows": quotes.quote_rows, "quote_status": quotes.quote_status,
         }))
-    return events, _refusals_document(refusal_documents)
+    return events, _refusals_document(ordered())
