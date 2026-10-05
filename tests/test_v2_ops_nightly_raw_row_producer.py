@@ -135,7 +135,8 @@ def _calendar_inputs(key) -> CalendarRowInputs:
 def _panel_inputs(key) -> PanelRowInputs:
     return PanelRowInputs(panel_row={
         "date": key.event_date.date().isoformat(),
-        "event_tag": f"{key.ticker}|{key.session}"},
+        "event_tag": f"{key.ticker}|{key.session}",
+        "spy_ret252": 0.0},
         panel_anchor=pd.Timestamp(key.event_date).normalize())
 
 
@@ -402,6 +403,7 @@ def test_producer_recursively_converts_missing_and_numpy_panel_values(
                 "missing_nat": pd.NaT,
                 "count": np.int64(7),
                 "asof": np.datetime64("2024-01-16"),
+                "spy_ret252": 0.0,
             },
             panel_anchor=pd.Timestamp("2024-01-16"))
 
@@ -590,6 +592,7 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
     old_day = history[20].date().isoformat()
     assert old_day < history[-253].date().isoformat()
     batches = fixture._default_batches()
+    batches[("daily_market", "SPY")] = fixture._spy_rows(periods=300)
     batches[(fixture.COMPUTED_MOVES_TABLE_NAME, "AAA")] = \
         fixture._computed_rows([(old_day, 4.0, False)])
     snapshot = fixture._snapshot()
@@ -622,7 +625,10 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
         return CalendarSessions(days=days,
                                 observed_through=fixture._DECISION.date().isoformat())
 
+    calendar_row_calls: list = []
+
     def calendar_row(repo, snap, key, *, decision_session, calendar):
+        calendar_row_calls.append(key)
         day = key.event_date.date().isoformat()
         observed = fixture._DECISION.date().isoformat()
         return CalendarRowInputs(calendar_revision="ev-rev-1", calendar_row={
@@ -688,6 +694,31 @@ def test_real_panel_reader_preserving_full_history(tmp_path, monkeypatch):
             assert events_negative[0]["panel_row"]["n_prior"] == 1
         with pytest.raises(AssertionError):
             assert events_negative[0]["panel_row"]["mean_prior_move"] == 4.0
+
+    # Regression: sufficient decision-calendar history must not admit a row
+    # whose real panel read cannot produce the longest regime value. Same
+    # calendar history and price-history coverage, a thin SPY daily_market
+    # batch, and the real scan_panel_row path -- never a mocked
+    # _shared_panel_rows or panel reader.
+    thin_batches = dict(batches)
+    thin_batches[("daily_market", "SPY")] = fixture._spy_rows(periods=22)
+    thin_repository = IntervalAwareRepository(snapshot, fixture._contracts(),
+                                              thin_batches)
+    calendar_calls_before_thin = len(calendar_row_calls)
+
+    thin_events, thin_refusals_document = nrp.build_native_score_batch_events(
+        thin_repository, snapshot, as_of=fixture._DECISION.date().isoformat(),
+        horizon_days=_HORIZON_DAYS)
+
+    assert thin_events == []
+    thin_refusals = thin_refusals_document["refusals"]
+    assert len(thin_refusals) == 1
+    assert thin_refusals[0]["key"] == {
+        "ticker": "AAA", "strategy": "BFLY-P",
+        "event_date": fixture._EVENT.date().isoformat(), "session": "AMC"}
+    assert thin_refusals[0]["code"] == "PANEL_HISTORY_NOT_AVAILABLE"
+    assert thin_refusals[0]["detail"] == _PANEL_HISTORY_DETAIL
+    assert len(calendar_row_calls) == calendar_calls_before_thin
 
 
 def test_exact_mixed_refusal_order(tmp_path, monkeypatch):

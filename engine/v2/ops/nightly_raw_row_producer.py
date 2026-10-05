@@ -47,6 +47,7 @@ _REFUSAL_SCHEMA_VERSION = "native_score_batch_producer_refusals.v1.0"
 _INTRADAY_CODE = "INTRADAY_EVENT_NOT_ADMITTED"
 #: Fixed public-safe detail text (CWE-209): never exception text or a key value.
 _INTRADAY_DETAIL = "the board request carries an intraday event timestamp"
+_PANEL_HISTORY_DETAIL = "the pinned snapshot lacks required earlier panel sessions"
 _ROW_REFUSAL_DETAILS = {
     "NO_RESOLVABLE_EXPIRY": "no strategy-eligible listed expiry for the board request",
     "EVENT_NOT_FOUND": "no exact calendar event for the board request in the snapshot",
@@ -115,6 +116,20 @@ def _refusals_document(refusal_documents: list[dict[str, Any]]) -> dict[str, Any
     return _document({"schema_version": _REFUSAL_SCHEMA_VERSION, "refusals": refusal_documents})
 
 
+def _panel_history_start(calendar: Any, decision_session: str) -> str | None:
+    """The panel history floor, or ``None`` when calendar history is not admitted.
+
+    Pure predicate over the build-scoped decision calendar: the observed sessions
+    are its days no later than ``observed_through``; history is admitted only
+    when that through-day is the decision session itself and at least 253
+    observed sessions exist, and the floor is then the first observed session.
+    """
+    observed_sessions = tuple(day for day in calendar.days if day <= calendar.observed_through)
+    if calendar.observed_through != decision_session or len(observed_sessions) < 253:
+        return None
+    return observed_sessions[0]
+
+
 def _shared_panel_rows(repository: Repository, snapshot: SnapshotRef,
                        keys: Sequence[BoardRequest], *, decision_session: str,
                        history_start: Any) -> dict[tuple[str, str, str], PanelRowInputs]:
@@ -127,6 +142,14 @@ def _shared_panel_rows(repository: Repository, snapshot: SnapshotRef,
                 repository, snapshot, key, decision_session=decision_session,
                 history_start=history_start)
     return panels
+
+
+def _regime_history_available(panel: PanelRowInputs) -> bool:
+    """Whether the shared panel row carries a usable pinned SPY ``daily_market`` regime value."""
+    try:
+        return math.isfinite(float(panel.panel_row.get("spy_ret252")))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def build_native_score_batch_events(
@@ -152,8 +175,7 @@ def build_native_score_batch_events(
     requests = tuple(scan_forward_board_requests(
         repository, snapshot, as_of=as_of, horizon_days=horizon_days, tickers=tickers))
     refusals: dict[int, dict[str, Any]] = {}
-    admitted: list[BoardRequest] = []
-    positions: list[int] = []
+    admitted: list[tuple[int, BoardRequest]] = []
 
     def ordered() -> list[dict[str, Any]]:
         return [refusals[position] for position in sorted(refusals)]
@@ -162,26 +184,28 @@ def build_native_score_batch_events(
         if _is_intraday(key):
             refusals[position] = _refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL)
         else:
-            admitted.append(key)
-            positions.append(position)
+            admitted.append((position, key))
     if not admitted:
         return [], _refusals_document(ordered())
 
     decision_session = validated_as_of(as_of).normalize().date().isoformat()
     calendar = scan_decision_calendar(
         repository, snapshot, decision_session=decision_session,
-        event_through=max(_event_day(key.event_date) for key in admitted))
-    observed_sessions = tuple(day for day in calendar.days if day <= calendar.observed_through)
-    if calendar.observed_through != decision_session or len(observed_sessions) < 253:
-        history_detail = "the pinned snapshot lacks required earlier panel sessions"
-        for position, key in zip(positions, admitted):
-            refusals[position] = _refusal(key, "PANEL_HISTORY_NOT_AVAILABLE", history_detail)
+        event_through=max(_event_day(key.event_date) for _, key in admitted))
+    history_start = _panel_history_start(calendar, decision_session)
+    if history_start is None:
+        for position, key in admitted:
+            refusals[position] = _refusal(key, "PANEL_HISTORY_NOT_AVAILABLE", _PANEL_HISTORY_DETAIL)
         return [], _refusals_document(ordered())
-    panels = _shared_panel_rows(repository, snapshot, admitted,
+    panels = _shared_panel_rows(repository, snapshot, [key for _, key in admitted],
                                 decision_session=decision_session,
-                                history_start=observed_sessions[0])
+                                history_start=history_start)
     events: list[dict[str, Any]] = []
-    for position, key in zip(positions, admitted):
+    for position, key in admitted:
+        panel = panels[_panel_marker(key)]
+        if not _regime_history_available(panel):
+            refusals[position] = _refusal(key, "PANEL_HISTORY_NOT_AVAILABLE", _PANEL_HISTORY_DETAIL)
+            continue
         try:
             calendar_row = scan_calendar_row_inputs(
                 repository, snapshot, key, decision_session=decision_session,
@@ -200,7 +224,6 @@ def build_native_score_batch_events(
                 raise
             refusals[position] = _refusal(key, error.code, _ROW_REFUSAL_DETAILS[error.code])
             continue
-        panel = panels[_panel_marker(key)]
         events.append(_document({
             "key": {"ticker": key.ticker, "strategy": key.strategy,
                     "event_date": _event_day(key.event_date), "session": key.session},
