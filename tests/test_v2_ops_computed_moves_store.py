@@ -306,11 +306,17 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     repository = Repository(conn, store)
     snapshot = repository.resolve(result.candidate_snapshot_id)
     dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=("AAAA",)),)
+    bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=COMPUTED_MOVES_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter,
+        time_interval=None)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
         columns=("event_date", "realized_move_pct", "skipped"),
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAAA",)),),
-        order_by=("ticker", "event_date"), max_batch_rows=100, max_result_rows=100)
+        key_filter=key_filter,
+        order_by=("ticker", "event_date"),
+        max_batch_rows=min(100, bound), max_result_rows=min(100, bound))
     committed_rows = [r for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
                       for r in batch.to_pylist()]
 
@@ -1025,10 +1031,13 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
                                                                              monkeypatch):
     repository, snapshot = _scan_fixture(tmp_path)
     columns = ("event_id", "ticker", "event_date", "year", "src_orats")
+    bound = _actual_population_bound(repository, snapshot, "earnings_events")
+    assert bound > 0
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", bound)
     baseline = computed_moves_store._scan_rows(repository, snapshot,
                                                "earnings_events", columns)
-    expected = min(_EVENTS.maximum_result_rows, computed_moves_store.MAX_SCAN_ROWS)
-    assert expected >= min(_EVENTS.maximum_batch_rows, 50_000)
+    expected = computed_moves_store.MAX_SCAN_ROWS
+    assert expected == bound
     captured = _capture_population_scan(monkeypatch, repository, expected)
 
     result = computed_moves_store._scan_rows(repository, snapshot,
@@ -1039,7 +1048,8 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
     assert all(r["ticker"] == "AAAA" for r in result)
     assert {r["event_id"] for r in result} == {f"AAAA_{day.date()}" for day in _EVENT_DAYS}
     assert captured[0].max_result_rows == expected
-    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000)
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, expected)
+    assert captured[0].max_batch_rows <= captured[0].max_result_rows
 
 
 def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch):
@@ -1053,7 +1063,7 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     baseline = computed_moves_store._scan_rows(repository, snapshot,
                                                "earnings_events", columns)
     bound = _actual_population_bound(repository, snapshot, "earnings_events")
-    existing_limit = min(_EVENTS.maximum_result_rows, computed_moves_store.MAX_SCAN_ROWS)
+    existing_limit = computed_moves_store.MAX_SCAN_ROWS
     assert 0 < bound < existing_limit
     captured = _capture_scans(monkeypatch, repository)
 
