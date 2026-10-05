@@ -1,5 +1,6 @@
 import type { ApiError } from "../api/client";
 import type { PreviewRelease } from "../api/types";
+import { fmtCoverageEntry } from "../format";
 
 interface Props {
   /** The pinned release id — always known, even when `release` metadata is
@@ -72,7 +73,7 @@ export function ReleaseBanner({
         <div className="release-coverage" data-testid="release-coverage">
           {Object.entries(release.coverage_summary).map(([key, value]) => (
             <span key={key} className="coverage-item">
-              {key}: {(value * 100).toFixed(1)}%
+              {key}: {fmtCoverageEntry(key, value)}
             </span>
           ))}
         </div>

@@ -523,7 +523,7 @@ def test_refresh_plan_table_name_mismatch_is_contract_mismatch(tmp_path):
     assert exc.value.code == "CONTRACT_MISMATCH"
 
 
-def test_refresh_plan_unit_missing_expected_keys_is_contract_mismatch(tmp_path):
+def test_refresh_plan_unit_missing_expected_keys_is_retryable_input_changed(tmp_path):
     document = {"catalog_path": str(tmp_path / "ops.sqlite"),
                 "objects_root": str(tmp_path), "table_name": "daily_market"}
     (tmp_path / "refresh_plan.json").write_text(canonical_json({
@@ -531,4 +531,5 @@ def test_refresh_plan_unit_missing_expected_keys_is_contract_mismatch(tmp_path):
                          "partition_key": SESSION_DATE}]}))
     with pytest.raises(DataError) as exc:
         data_incremental._acquire_refresh_units(None, tmp_path, document, None)
-    assert exc.value.code == "CONTRACT_MISMATCH"
+    assert exc.value.code == "INPUT_CHANGED"
+    assert exc.value.problem.retryable is True

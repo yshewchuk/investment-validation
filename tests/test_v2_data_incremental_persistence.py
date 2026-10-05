@@ -17,7 +17,7 @@ from engine.v2.data.catalog import commit_snapshot
 from engine.v2.data.manifests import dataset_manifest, snapshot_ref
 from engine.v2.data.objects import inspect_fragment
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, content_hash, to_document
+from engine.v2.foundation import ArtifactStore, canonical_json, content_hash, to_document
 from engine.v2.ops.incremental_data import RefreshParameters
 from tests.ops_support import catalog
 from tests.test_v2_data_manifests import _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF
@@ -309,7 +309,7 @@ def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path)
     revision = _frozen_revision(append_row, append_raw.raw_receipt_id, "revision-1")
     (revision,), _ = data_incremental._stage_normalizations(
         conn, store, {append_raw.raw_receipt_id: append_raw}, (revision,),
-        contract.contract_id, clock)
+        contract.contract_id, clock, {append_raw.raw_receipt_id: ("ZZZ",)})
     coverage = _coverage(revision, append_raw.raw_receipt_id)
     candidate = data_incremental.build_daily_market_candidate(
         parent, store, (revision,), coverage=coverage,
@@ -340,7 +340,7 @@ def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path)
     revision2 = _frozen_revision(append_row2, append_raw2.raw_receipt_id, "revision-2")
     (revision2,), _ = data_incremental._stage_normalizations(
         conn, store, {append_raw2.raw_receipt_id: append_raw2}, (revision2,),
-        contract.contract_id, clock)
+        contract.contract_id, clock, {append_raw2.raw_receipt_id: ("YYY",)})
     coverage2 = _coverage(revision2, append_raw2.raw_receipt_id)
     candidate2 = data_incremental.build_daily_market_candidate(
         parent, store, (revision2,), coverage=coverage2,
@@ -398,7 +398,7 @@ def test_retry_of_the_same_effect_after_a_crash_before_attempt_commit_succeeds(t
     revision = _frozen_revision(append_row, append_raw.raw_receipt_id, "revision-1")
     (revision,), _ = data_incremental._stage_normalizations(
         conn, store, {append_raw.raw_receipt_id: append_raw}, (revision,),
-        contract.contract_id, clock)
+        contract.contract_id, clock, {append_raw.raw_receipt_id: ("ZZZ",)})
     coverage = _coverage(revision, append_raw.raw_receipt_id)
     candidate = data_incremental.build_daily_market_candidate(
         parent, store, (revision,), coverage=coverage,
@@ -451,10 +451,10 @@ def test_normalizer_id_bump_changes_cache_identity(tmp_path):
         request={"keys": ["AAA"]}, received_at=clock.now().isoformat())
     record_v1 = data_incremental.cache_normalization(
         conn, store, raw, (), normalizer_id="daily_market.v1", contract_id=contract_id,
-        created_at=clock.now().isoformat())
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
     record_v2 = data_incremental.cache_normalization(
         conn, store, raw, (), normalizer_id="daily_market.v2", contract_id=contract_id,
-        created_at=clock.now().isoformat())
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
     assert record_v1.normalization_id != record_v2.normalization_id
 
 
@@ -589,20 +589,603 @@ def test_keyed_legitimate_empty_refuses_source_not_final_before_caching(tmp_path
         "SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
 
 
-def test_unkeyed_legitimate_empty_still_caches_one_receipt(tmp_path):
-    """#142 preserved behavior: with NO expected keys a ``legitimate_empty``
-    response is a complete final answer -- it succeeds and caches exactly one
-    raw receipt, as before the guard."""
+def test_empty_planned_keys_refuse_before_the_fetcher(tmp_path):
+    """#142 planned-key contract supersedes the old unkeyed behavior: an
+    empty planned ``expected_keys`` is malformed at the ``_fetch_unit``
+    boundary, so it refuses with the registered retryable ``INPUT_CHANGED``
+    BEFORE the fetcher is invoked -- even a fetcher that would answer
+    ``legitimate_empty``. No unkeyed planned response is ever cached."""
+    conn, _clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    calls = []
+
+    def fetcher(unit):
+        calls.append(unit)
+        return _legitimate_empty_fetcher(unit)
+
+    with pytest.raises(DataError) as err:
+        data_incremental._fetch_unit(
+            conn, store, _DAILY_MARKET_CONTRACT,
+            _empty_keyed_unit(expected_keys=()), fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert calls == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+
+
+def _normalize_cache_setup(tmp_path):
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path / "objects")
+    data_incremental.catalog._insert_contract(
+        conn, _DAILY_MARKET_CONTRACT, clock.now().isoformat())
+    raw = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"ticker":"AAA"}', response_kind="complete", response_meta={}),
+        source="fixture", endpoint="daily_market",
+        request={"keys": ["AAA", "BBB"]}, received_at=clock.now().isoformat())
+    return conn, clock, store, raw, _DAILY_MARKET_CONTRACT.contract_id
+
+
+def test_expected_key_sets_are_folded_into_normalization_identity(tmp_path):
+    """#133 slice 3: the same raw payload/normalizer/contract/revisions under
+    two distinct expected-key sets produce distinct normalization ids and two
+    persisted rows (never a raw sqlite3.IntegrityError -- v13 dropped the
+    tuple UNIQUE), while reordering or duplicating keys within an otherwise
+    identical set stays the same identity."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    revision = _frozen_revision(_obj_daily_market_rows()[0], raw.raw_receipt_id,
+                                "revision-1")
+
+    def cache(keys):
+        return data_incremental.cache_normalization(
+            conn, store, raw, (revision,), normalizer_id="daily_market.v3",
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=keys)
+
+    aaa = cache(("AAA",))
+    assert aaa.cache_hit is False
+    aaa_dupe = cache(("AAA", "AAA"))
+    assert aaa_dupe.normalization_id == aaa.normalization_id
+    assert aaa_dupe.cache_hit is True
+    bbb = cache(("BBB",))
+    assert bbb.normalization_id != aaa.normalization_id
+    assert bbb.cache_hit is False
+    bbb_dupe = cache(("BBB", "BBB", "BBB"))
+    assert bbb_dupe.normalization_id == bbb.normalization_id
+    assert bbb_dupe.cache_hit is True
+    both = cache(("AAA", "BBB"))
+    assert both.normalization_id not in {aaa.normalization_id, bbb.normalization_id}
+    assert both.cache_hit is False
+    reordered = cache(("BBB", "AAA"))
+    assert reordered.normalization_id == both.normalization_id
+    assert reordered.cache_hit is True
+    grouped = conn.execute(
+        "SELECT normalization_id, COUNT(*) FROM data_normalizations"
+        " GROUP BY normalization_id").fetchall()
+    assert len(grouped) == 3
+    assert all(row[1] == 1 for row in grouped)
+
+
+def test_changed_payload_under_same_expected_key_set_refuses_identity_conflict(tmp_path):
+    """#133 slice 3: a changed normalized payload under the same raw hash,
+    normalizer, contract and SAME canonical expected-key set is a genuine
+    conflict -- typed IDENTITY_CONFLICT, no row overwrite."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    row = _obj_daily_market_rows()[0]
+    first = data_incremental.cache_normalization(
+        conn, store, raw,
+        (_frozen_revision(row, raw.raw_receipt_id, "revision-1"),),
+        normalizer_id="daily_market.v3", contract_id=contract_id,
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
+    assert first.cache_hit is False
+    changed = _frozen_revision(row, raw.raw_receipt_id, "revision-1",
+                               spot=row["spot"] + 0.05)
+    with pytest.raises(DataError) as err:
+        data_incremental.cache_normalization(
+            conn, store, raw, (changed,), normalizer_id="daily_market.v3",
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=("AAA", "AAA"))
+    assert err.value.code == "IDENTITY_CONFLICT"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
+
+
+def test_legacy_triple_only_row_stays_addressable_but_is_never_a_cache_hit(tmp_path):
+    """#133 slice 3 legacy policy (engine/v2/data/ARCHITECTURE.md): a row
+    keyed by the old triple-only formula carries no expected-key metadata, so
+    it stays unchanged and addressable by its legacy id but is never reused as
+    a cache hit; the next request writes/uses the expected-set-scoped id and
+    both rows coexist. The legacy row is seeded through the real catalog,
+    store and canonical hashes at the old formula's id (incremental.py's
+    pre-#133 ``norm_`` identity), not through a mock."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    normalizer_id = "daily_market.v3"
+    legacy_document = {"schema_version": data_incremental.NORMALIZED_SCHEMA_REF,
+                       "raw_hash": raw.raw_hash, "normalizer_id": normalizer_id,
+                       "revisions": []}
+    published = store.publish_bytes(canonical_json(legacy_document).encode("utf-8"),
+                                    schema_ref=data_incremental.NORMALIZED_SCHEMA_REF)
+    object_ref = data_incremental.ObjectRef(
+        kind="normalized_daily_market", object_id=published.artifact_id,
+        content_hash=published.content_hash, byte_size=published.byte_size)
+    legacy_id = "norm_" + content_hash({
+        "raw_hash": raw.raw_hash, "normalizer_id": normalizer_id,
+        "contract_id": contract_id}).removeprefix("sha256:")[:32]
+    conn.execute(
+        "INSERT INTO data_normalizations (normalization_id, raw_hash, normalizer_id, "
+        "contract_id, normalized_hash, artifact_ref_json, row_count, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (legacy_id, raw.raw_hash, normalizer_id, contract_id,
+         content_hash(legacy_document), canonical_json(to_document(object_ref)),
+         0, clock.now().isoformat()))
+    legacy_before = conn.execute(
+        "SELECT * FROM data_normalizations WHERE normalization_id = ?",
+        (legacy_id,)).fetchone()
+    assert legacy_before is not None
+    assert "expected_keys" not in json.loads(store.read_verified(published))
+
+    fresh = data_incremental.cache_normalization(
+        conn, store, raw, (), normalizer_id=normalizer_id, contract_id=contract_id,
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
+    assert fresh.normalization_id != legacy_id
+    assert fresh.cache_hit is False
+    replay = data_incremental.cache_normalization(
+        conn, store, raw, (), normalizer_id=normalizer_id, contract_id=contract_id,
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
+    assert replay.normalization_id == fresh.normalization_id
+    assert replay.cache_hit is True
+
+    legacy_after = conn.execute(
+        "SELECT * FROM data_normalizations WHERE normalization_id = ?",
+        (legacy_id,)).fetchone()
+    assert tuple(legacy_after) == tuple(legacy_before)
+    ids = sorted(row[0] for row in conn.execute(
+        "SELECT normalization_id FROM data_normalizations"))
+    assert ids == sorted([legacy_id, fresh.normalization_id])
+
+
+def test_expected_keys_derive_only_for_referenced_receipts(tmp_path):
+    """#133 slice 3 edge case (contract: engine/v2/data/ARCHITECTURE.md): the
+    refresh derives its expected-key map only for receipts incoming revisions
+    reference. A staged raw receipt with no saved ``request["keys"]`` that
+    nothing references is never inspected and cannot abort the derivation; a
+    referenced receipt still returns its saved keys and still fails closed
+    with typed ``INPUT_CHANGED`` when they are missing; an unknown reference
+    stays unmapped and keeps failing through ``_stage_normalizations``."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+
+    def cache(payload, request):
+        return data_incremental.cache_raw_receipt(
+            conn, store, data_incremental.RawPayload(
+                payload=payload, response_kind="complete", response_meta={}),
+            source="synthetic", endpoint="daily_market",
+            request=request, received_at=clock.now().isoformat())
+
+    rows = _obj_daily_market_rows()
+    referenced = cache(b'{"kind":"referenced"}', {"ticker": "AAA", "keys": ["AAA", "BBB"]})
+    unused = cache(b'{"kind":"unused"}', {"ticker": "CCC"})
+    broken = cache(b'{"kind":"broken"}', {"ticker": "DDD"})
+    raw_records = {item.raw_receipt_id: item for item in (referenced, unused, broken)}
+    revision = _frozen_revision(rows[0], referenced.raw_receipt_id, "revision-1")
+    broken_revision = _frozen_revision(rows[1], broken.raw_receipt_id, "revision-2")
+    orphan = _frozen_revision(rows[2], "raw-unknown", "revision-3")
+
+    assert data_incremental._incoming_expected_keys(raw_records, ()) == {}
+    assert data_incremental._incoming_expected_keys(raw_records, (orphan,)) == {}
+    assert data_incremental._incoming_expected_keys(raw_records, (revision,)) == {
+        referenced.raw_receipt_id: ("AAA", "BBB")}
+
+    with pytest.raises(DataError) as err:
+        data_incremental._incoming_expected_keys(raw_records, (broken_revision,))
+    assert err.value.code == "INPUT_CHANGED"
+
+    with pytest.raises(DataError) as err:
+        data_incremental._stage_normalizations(
+            conn, store, raw_records, (orphan,),
+            _DAILY_MARKET_CONTRACT.contract_id, clock,
+            data_incremental._incoming_expected_keys(raw_records, (orphan,)))
+    assert err.value.code == "INPUT_CHANGED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+
+def test_unreferenced_keyless_raw_receipt_does_not_abort_refresh(tmp_path):
+    """#133 slice 3 edge case through ``run_incremental_refresh``: a staged
+    raw receipt no incoming revision references, whose saved request carries
+    no expected keys, must not abort a refresh it will never be normalized
+    for; the referenced receipt's saved keys still drive the normalization
+    identity and the refresh commits."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    receipt_ref = content_hash({"keyless-sidecar": "parent"})
+    manifest = dataset_manifest(
+        _DAILY_MARKET_REF, (), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent = snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal.v1",
+        source_priority_version="synthetic", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="shadow", request_hash=content_hash({"keyless-sidecar": "base"}),
+        contracts=(_DAILY_MARKET_CONTRACT,), objects=(), records=(), manifests=(manifest,),
+        snapshot=parent, expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="base-receipt", attempt_id="base-attempt", fence=1,
+        fence_check=lambda _c: None, clock=clock, store=store)
+
+    append_row = dict(_obj_daily_market_rows()[0], ticker="ZZZ")
+    referenced = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"kind":"keyless-sidecar-append"}', response_kind="complete",
+            response_meta={}),
+        source="synthetic", endpoint="daily_market",
+        request={"ticker": "ZZZ", "keys": ["ZZZ"]}, received_at=clock.now().isoformat())
+    unused = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"kind":"keyless-sidecar-unused"}', response_kind="complete",
+            response_meta={}),
+        source="synthetic", endpoint="daily_market",
+        request={"ticker": "YYY"}, received_at=clock.now().isoformat())
+    revision = _frozen_revision(append_row, referenced.raw_receipt_id,
+                               "revision-sidecar")
+    root, params = _refresh_input(
+        tmp_path, parent.snapshot_id, 1, "sha256:" + "4" * 64, (revision,),
+        ({"receipt_id": referenced.raw_receipt_id},
+         {"receipt_id": unused.raw_receipt_id}),
+        _coverage(revision, referenced.raw_receipt_id))
+
+    result = data_incremental.run_incremental_refresh(params, root)
+
+    assert result["status"] == "complete"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 1
+
+
+def test_malformed_saved_key_shapes_fail_closed_with_input_changed(tmp_path):
+    """PR #400 CodeRabbit finding (contract: engine/v2/data/ARCHITECTURE.md):
+    a raw receipt needed for normalization must carry ``request["keys"]`` as a
+    nonempty list of nonempty strings. Missing, null, empty, a non-list value
+    or any non-string/empty-string member refuses with the registered
+    retryable ``INPUT_CHANGED`` -- never coercion, never a silent empty set --
+    while a valid list is returned unchanged."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+
+    def receipt(name, request):
+        return data_incremental.cache_raw_receipt(
+            conn, store, data_incremental.RawPayload(
+                payload=json.dumps({"kind": name}).encode(),
+                response_kind="complete", response_meta={}),
+            source="synthetic", endpoint="daily_market",
+            request=request, received_at=clock.now().isoformat())
+
+    malformed = (
+        ("missing", {"ticker": "AAA"}),
+        ("null", {"keys": None}),
+        ("empty", {"keys": []}),
+        ("non-list-string", {"keys": "AAA"}),
+        ("non-list-dict", {"keys": {"ticker": "AAA"}}),
+        ("non-list-int", {"keys": 7}),
+        ("non-list-tuple", {"keys": ("AAA", "BBB")}),
+        ("empty-member", {"keys": ["AAA", ""]}),
+        ("non-string-member", {"keys": ["AAA", 42]}),
+        ("null-member", {"keys": ["AAA", None]}),
+    )
+    revision_row = _obj_daily_market_rows()[0]
+    for name, request in malformed:
+        raw = receipt(name, request)
+        with pytest.raises(DataError) as err:
+            data_incremental._receipt_expected_keys(raw)
+        assert err.value.code == "INPUT_CHANGED", name
+        assert err.value.problem.retryable is True, name
+        referenced = _frozen_revision(revision_row, raw.raw_receipt_id,
+                                      "revision-" + name)
+        with pytest.raises(DataError) as err:
+            data_incremental._incoming_expected_keys(
+                {raw.raw_receipt_id: raw}, (referenced,))
+        assert err.value.code == "INPUT_CHANGED", name
+
+    valid = receipt("valid", {"keys": ["AAA", "BBB"]})
+    assert data_incremental._receipt_expected_keys(valid) == ("AAA", "BBB")
+
+
+def test_empty_expected_key_set_refuses_before_any_normalization_row(tmp_path):
+    """PR #400 CodeRabbit finding: an empty canonical expected-key set refuses
+    with the registered retryable ``INPUT_CHANGED`` before it is hashed into a
+    normalization identity, so no ``data_normalizations`` row is ever inserted
+    under a silently empty set."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    with pytest.raises(DataError) as err:
+        data_incremental._normalization_identity(
+            raw.raw_hash, "daily_market.v3", contract_id, ())
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    with pytest.raises(DataError) as err:
+        data_incremental.cache_normalization(
+            conn, store, raw, (), normalizer_id="daily_market.v3",
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=())
+    assert err.value.code == "INPUT_CHANGED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+
+def test_valid_string_key_lists_keep_the_canonical_identity(tmp_path):
+    """PR #400 CodeRabbit finding guard: nonempty string key lists keep the
+    existing set-based identity formula -- order and duplicates never change
+    it, a genuinely different set (or raw hash) always does."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    normalizer = "daily_market.v3"
+    base = data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ("AAA", "BBB"))
+    assert base.startswith("norm_")
+    assert base == data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ["BBB", "AAA", "AAA"])
+    assert base != data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ("AAA",))
+    assert base != data_incremental._normalization_identity(
+        raw.raw_hash, normalizer, contract_id, ("AAA", "CCC"))
+    assert base != data_incremental._normalization_identity(
+        content_hash({"other": "raw"}), normalizer, contract_id, ("AAA", "BBB"))
+
+
+def test_malformed_directly_passed_expected_keys_refuse_before_identity(tmp_path):
+    """PR #400 gate finding (contract: engine/v2/data/ARCHITECTURE.md): the
+    normalization boundary validates, it never coerces. An empty sequence, a
+    scalar string/bytes, a mapping/set, or any non-string/empty-string member
+    refuses with the registered retryable ``INPUT_CHANGED`` through both
+    ``cache_normalization`` and ``_normalization_identity`` before any identity
+    is derived, so no ``data_normalizations`` row exists afterwards -- while a
+    valid tuple/list keeps the set-based identity, order- and duplicate-wise."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    normalizer = "daily_market.v3"
+
+    def cache(keys):
+        return data_incremental.cache_normalization(
+            conn, store, raw, (), normalizer_id=normalizer,
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=keys)
+
+    malformed = (
+        ("empty-tuple", ()),
+        ("empty-list", []),
+        ("scalar-string", "AAA"),
+        ("scalar-bytes", b"AAA"),
+        ("mapping", {"AAA": "ignored"}),
+        ("set", {"AAA"}),
+        ("non-string-member", (7,)),
+        ("mixed-member", ["AAA", 42]),
+        ("null-member", ("AAA", None)),
+        ("empty-string-member", ("AAA", "")),
+        ("only-empty-string-member", ("",)),
+    )
+    for name, keys in malformed:
+        with pytest.raises(DataError) as err:
+            cache(keys)
+        assert err.value.code == "INPUT_CHANGED", name
+        assert err.value.problem.retryable is True, name
+        with pytest.raises(DataError) as err:
+            data_incremental._normalization_identity(
+                raw.raw_hash, normalizer, contract_id, keys)
+        assert err.value.code == "INPUT_CHANGED", name
+        assert err.value.problem.retryable is True, name
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+    tuple_id = cache(("AAA", "BBB")).normalization_id
+    assert tuple_id.startswith("norm_")
+    assert cache(["BBB", "AAA", "AAA"]).normalization_id == tuple_id
+    assert cache(("AAA", "BBB")).cache_hit is True
+    assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
+
+
+_ABSENT_PLANNED_KEYS = object()
+
+PLANNED_KEYS_MALFORMED = (
+    pytest.param([], id="empty-list"),
+    pytest.param([42], id="int-member-only"),
+    pytest.param(["AAA", 42], id="int-member"),
+    pytest.param(["AAA", None], id="null-member"),
+    pytest.param(["", "AAA"], id="empty-string-member"),
+    pytest.param("AAA", id="scalar-string"),
+    pytest.param({"AAA": "ignored"}, id="mapping"),
+    pytest.param(None, id="null"),
+    pytest.param(_ABSENT_PLANNED_KEYS, id="absent-field"),
+)
+
+
+def _planned_keys_acquisition(tmp_path):
+    """A real catalog and store with a committed empty-manifest
+    ``daily_market`` parent, plus the staged identity document and job
+    parameters a planned refresh acquisition receives."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    receipt_ref = content_hash({"planned-keys": "parent"})
+    manifest = dataset_manifest(
+        _DAILY_MARKET_REF, (), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent = snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal.v1",
+        source_priority_version="synthetic", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="shadow", request_hash=content_hash({"planned-keys": "base"}),
+        contracts=(_DAILY_MARKET_CONTRACT,), objects=(), records=(),
+        manifests=(manifest,), snapshot=parent, expected_head_snapshot_id=None,
+        expected_head_generation=0, receipt_id="planned-keys-base-receipt",
+        attempt_id="planned-keys-base-attempt", fence=1,
+        fence_check=lambda _c: None, clock=clock, store=store)
+    document = {"catalog_path": str(tmp_path / "ops.sqlite"),
+                "objects_root": str(tmp_path / "objects"), "table_name": "daily_market"}
+    parameters = RefreshParameters(
+        expected_ids=("daily-market-planned-keys",),
+        parent_snapshot_id=parent.snapshot_id, refresh_plan_hash="sha256:" + "9" * 64,
+        provider_calls=0, catalog_path=str(tmp_path / "ops.sqlite"),
+        objects_root=str(tmp_path / "objects"), scope="shadow",
+        expected_head_generation=1, expected_head_snapshot_id=parent.snapshot_id)
+    return conn, clock, store, document, parameters
+
+
+def _spy_acquisition_store(monkeypatch):
+    """Records every ``ArtifactStore`` the data-layer acquisition builds,
+    proving no cache work starts before planned-key validation."""
+    built = []
+    real = data_incremental.ArtifactStore
+
+    def recording(root):
+        built.append(str(root))
+        return real(root)
+
+    monkeypatch.setattr(data_incremental, "ArtifactStore", recording)
+    return built
+
+
+@pytest.mark.parametrize("keys", PLANNED_KEYS_MALFORMED)
+def test_malformed_planned_keys_refuse_before_provider_call_or_cache_write(
+        tmp_path, monkeypatch, keys):
+    """Planned-key contract (engine/v2/data/ARCHITECTURE.md): a
+    malformed planned fetch-unit ``expected_keys`` -- an integer member, an
+    empty or null set, a scalar string, a mapping -- and an absent
+    ``expected_keys`` field alike refuse at refresh acquisition with the
+    registered retryable ``INPUT_CHANGED``, before the provider is invoked,
+    before any store or catalog work and before any ``str()`` coercion. The
+    old ``_acquire_refresh_units`` called the fetcher first and persisted
+    coerced keys, and its earlier presence-only guard raised a non-retryable
+    ``CONTRACT_MISMATCH`` for the absent field, so every guard assertion here
+    fails on it."""
+    conn, _clock, _store, document, parameters = _planned_keys_acquisition(tmp_path)
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01"}
+    if keys is not _ABSENT_PLANNED_KEYS:
+        unit["expected_keys"] = keys
+    (tmp_path / "refresh_plan.json").write_text(
+        canonical_json({"fetch_units": [unit]}))
+    built = _spy_acquisition_store(monkeypatch)
+    provider_calls = []
+
+    def fetcher(unit):
+        provider_calls.append(unit)
+        return b'{"kind": "fixture"}', "complete", {"status": 200}, []
+
+    with pytest.raises(DataError) as err:
+        data_incremental._acquire_refresh_units(parameters, tmp_path, document, fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    assert provider_calls == []
+    assert built == []
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+    assert "raw_payloads" not in document and "coverage" not in document
+
+
+@pytest.mark.parametrize("keys", (
+    pytest.param(["AAA", 42], id="int-member"),
+    pytest.param([], id="empty-list"),
+    pytest.param(_ABSENT_PLANNED_KEYS, id="absent-field"),
+))
+def test_malformed_planned_keys_in_cached_plan_refuse_before_receipt_read(
+        tmp_path, monkeypatch, keys):
+    """The cached/caller-supplied-plan half of the planned-key contract: the
+    malformed or absent set reaches the data layer only through the raw plan
+    document (never through plan decoding), so acquisition must refuse with
+    the registered retryable ``INPUT_CHANGED`` before any receipt is opened
+    or read. The old code constructed the store, opened and verified the
+    receipt, then ``str``-coerced each key into the provider merge -- the
+    merge spy, the store spy and the unchanged receipt row count prove it no
+    longer does."""
+    conn, clock, store, document, parameters = _planned_keys_acquisition(tmp_path)
+    cached_raw = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=json.dumps(
+                {"summaries": {"data": []}, "cores": {"data": []}}).encode(),
+            response_kind="complete", response_meta={}),
+        source="daily_market", endpoint="daily_market",
+        request={"request_id": "u1", "keys": ["AAA"]},
+        received_at=clock.now().isoformat())
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01"}
+    if keys is not _ABSENT_PLANNED_KEYS:
+        unit["expected_keys"] = keys
+    (tmp_path / "refresh_plan.json").write_text(canonical_json({
+        "units": [unit],
+        "cached": [{"request_id": "u1", "receipt_ref": cached_raw.raw_receipt_id}]}))
+    built = _spy_acquisition_store(monkeypatch)
+    merge_calls = []
+
+    def merge(summaries, cores, expected_keys=None):
+        merge_calls.append(list(expected_keys or ()))
+        return []
+
+    def fetcher(unit):
+        raise AssertionError("a cached replay must never call the provider")
+
+    fetcher.merge_ticker_rows = merge
+
+    with pytest.raises(DataError) as err:
+        data_incremental._acquire_refresh_units(parameters, tmp_path, document, fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    assert merge_calls == []
+    assert built == []
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("keys", (
+    pytest.param(("AAA", 42), id="int-member-tuple"),
+    pytest.param((), id="empty-tuple"),
+    pytest.param("AAA", id="scalar-string"),
+    pytest.param({"AAA"}, id="set"),
+    pytest.param(None, id="null"),
+))
+def test_fetch_unit_validates_planned_keys_before_the_injected_fetcher(tmp_path, keys):
+    """The guard sits inside ``_fetch_unit`` itself: the helper can be reached
+    without ``_acquire_refresh_units``, so a direct call with a malformed
+    planned set must refuse with the registered retryable ``INPUT_CHANGED``
+    before the injected fetcher runs and before any receipt is cached. The
+    old ``_fetch_unit`` called the fetcher first and wrote ``str``-coerced
+    keys into the receipt request."""
+    conn, _clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    provider_calls = []
+
+    def fetcher(unit):
+        provider_calls.append(unit)
+        return b'{"kind": "fixture"}', "complete", {"status": 200}, []
+
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01", "expected_keys": keys}
+    with pytest.raises(DataError) as err:
+        data_incremental._fetch_unit(conn, store, _DAILY_MARKET_CONTRACT, unit, fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert err.value.problem.retryable is True
+    assert provider_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+
+
+def test_valid_planned_keys_are_preserved_on_the_receipt_and_coverage(tmp_path):
+    """The positive half of the planned-key contract: a valid set reaches the
+    receipt request and the staged coverage as strings, order and duplicates
+    included -- no coercion, no re-sorting -- and the saved receipt still
+    carries them unchanged for the normalization boundary, which
+    canonicalizes downstream (the identity tests above pin that)."""
+    conn, _clock, store, _document, _parameters = _planned_keys_acquisition(tmp_path)
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01", "expected_keys": ["BBB", "AAA", "AAA"]}
+    base_row = _obj_daily_market_rows()[0]
+    ticker_rows = [dict(base_row, ticker="BBB", date="2026-05-01", year=2026),
+                   dict(base_row, ticker="AAA", date="2026-05-01", year=2026)]
+
+    def fetcher(_unit):
+        return b'{"kind": "fixture"}', "complete", {"status": 200}, ticker_rows
+
     fetched = data_incremental._fetch_unit(
-        conn, store, _DAILY_MARKET_CONTRACT,
-        _empty_keyed_unit(expected_keys=()), _legitimate_empty_fetcher)
-    assert fetched.raw_payload["response_kind"] == "legitimate_empty"
-    assert fetched.expected == ()
-    assert fetched.outcomes == ()
-    rows = conn.execute(
-        "SELECT raw_receipt_id, response_kind FROM data_raw_receipts").fetchall()
-    assert len(rows) == 1
-    assert rows[0]["response_kind"] == "legitimate_empty"
-    assert fetched.receipt_id == rows[0]["raw_receipt_id"]
+        conn, store, _DAILY_MARKET_CONTRACT, unit, fetcher)
+    assert fetched.raw_payload["request"]["keys"] == ["BBB", "AAA", "AAA"]
+    assert tuple(key.ticker for key in fetched.expected) == ("BBB", "AAA", "AAA")
+    stored = json.loads(conn.execute(
+        "SELECT request_json FROM data_raw_receipts").fetchone()["request_json"])
+    assert stored["keys"] == ["BBB", "AAA", "AAA"]
+    replayed = data_incremental._staged_raw_receipt(
+        conn, store, {"receipt_id": fetched.receipt_id})
+    assert data_incremental._receipt_expected_keys(replayed) == ("BBB", "AAA", "AAA")
