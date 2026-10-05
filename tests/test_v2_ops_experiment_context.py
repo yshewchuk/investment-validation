@@ -11,6 +11,7 @@ from __future__ import annotations
 import decimal
 import math
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -87,6 +88,19 @@ def test_one_microsecond_past_entry_refuses_as_lookahead():
     leaking = _context(eligible, _row("gap", ENTRY_AT + timedelta(microseconds=1), 0.99))
     with pytest.raises(OpsError) as excinfo:
         leaking.feature("gap")
+    assert excinfo.value.code == "FEATURE_LOOKAHEAD"
+    assert not excinfo.value.problem.retryable
+
+
+def test_dst_rollback_repeated_wall_clock_fold_refuses_as_lookahead():
+    zone = ZoneInfo("America/New_York")
+    entry = datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=0)
+    rolled_back = datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=1)
+    assert entry == rolled_back  # same-zone naive equality: the bug being pinned
+    assert entry.astimezone(timezone.utc) < rolled_back.astimezone(timezone.utc)
+    context = _context(_row("gap", rolled_back, 0.99), entry_at=entry)
+    with pytest.raises(OpsError) as excinfo:
+        context.feature("gap")
     assert excinfo.value.code == "FEATURE_LOOKAHEAD"
     assert not excinfo.value.problem.retryable
 

@@ -7,7 +7,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Callable
@@ -806,6 +806,21 @@ def _aware_instant(value, *, field_name: str) -> datetime:
     return instant
 
 
+def _utc_instant(instant: datetime) -> datetime:
+    """One aware instant re-expressed in UTC: the only basis for comparing instants.
+
+    Aware datetimes sharing the same ``tzinfo`` object compare on their naive
+    wall-clock fields, so through a DST rollback the second occurrence
+    (``fold=1``) of a repeated local time compares equal to -- never after --
+    the first (``fold=0``), hiding a post-entry observation inside the
+    ambiguous hour. Converting before comparing resolves ``fold`` into one
+    true instant, so every ordering and tie decision in
+    :meth:`ExperimentFeatureContext.feature` compares instants, not wall-clock
+    labels; the stored datetimes themselves are untouched.
+    """
+    return instant.astimezone(timezone.utc)
+
+
 def _tied_values_agree(value, other) -> bool:
     """Whether two observations tied at the latest instant agree.
 
@@ -910,7 +925,9 @@ class ExperimentFeatureContext:
         several eligible rows tie at the latest ``observed_at``, their value is
         returned only if every tied value agrees (NaN with NaN included);
         conflicting ties are the typed ``INVALID_EXPERIMENT_SPEC`` refusal,
-        never a silent pick by row order.
+        never a silent pick by row order. Every ordering and equality decision
+        below is made on UTC-normalized instants, so a same-zone wall-clock
+        tie across a DST fold is never mistaken for the same instant.
         """
         if observed_at != ENTRY:
             raise fail("INVALID_EXPERIMENT_SPEC",
@@ -920,20 +937,21 @@ class ExperimentFeatureContext:
             raise fail("INVALID_EXPERIMENT_SPEC",
                        "feature request must be a non-empty string",
                        details={"type": type(name).__name__})
-        rows = [row for row in self.observations
-                if row["event_id"] == self.event_id and row["feature"] == name]
-        if any(row["observed_at"] > self.entry_at for row in rows):
+        matching = [(row, _utc_instant(row["observed_at"])) for row in self.observations
+                    if row["event_id"] == self.event_id and row["feature"] == name]
+        entry = _utc_instant(self.entry_at)
+        if any(instant > entry for _, instant in matching):
             raise fail("FEATURE_LOOKAHEAD",
                        "a snapshot observation postdates the event entry instant",
                        details={"event_id": self.event_id, "feature": name})
-        eligible = [row for row in rows if row["observed_at"] <= self.entry_at]
+        eligible = [(row, instant) for row, instant in matching if instant <= entry]
         if not eligible:
             raise fail("FEATURES_MISSING",
                        "no pinned observation of the requested feature at or before entry",
                        details={"snapshot_id": self.snapshot_id, "event_id": self.event_id,
-                                "feature": name})
-        latest = max(row["observed_at"] for row in eligible)
-        tied = [row["value"] for row in eligible if row["observed_at"] == latest]
+                               "feature": name})
+        latest = max(instant for _, instant in eligible)
+        tied = [row["value"] for row, instant in eligible if instant == latest]
         value = tied[0]
         if not all(_tied_values_agree(value, other) for other in tied[1:]):
             raise fail("INVALID_EXPERIMENT_SPEC",
