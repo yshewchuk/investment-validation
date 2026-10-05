@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DataClient } from "./api/client";
-import type { EventQuery, EventPageItem } from "./api/types";
+import type { EventQuery, EventPageItem, OperationsStatus } from "./api/types";
 import { EMPTY_FILTERS, EventFilters, type FilterValues } from "./components/EventFilters";
 import { EventDetail, type EventMeta } from "./components/EventDetail";
 import { EventTable } from "./components/EventTable";
@@ -8,7 +8,12 @@ import { NativeParity } from "./components/NativeParity";
 import { Pagination } from "./components/Pagination";
 import { ReleaseBanner, reloadToCurrent } from "./components/ReleaseBanner";
 import { ScoreDetail } from "./components/ScoreDetail";
-import { pollIntervalMs, useResolvedRelease, useEventPage, useHashRoute } from "./hooks";
+import {
+  pollIntervalMs,
+  useResolvedRelease,
+  useEventPage,
+  useHashRoute,
+} from "./hooks";
 import { boardHash } from "./routes";
 
 const DEFAULT_POLL_MS = 4000;
@@ -42,6 +47,7 @@ interface Props {
 
 export function App({ client }: Props) {
   const pollMs = useMemo(() => pollIntervalMs(DEFAULT_POLL_MS), []);
+  const operationsPollMs = useMemo(() => pollIntervalMs(30_000), []);
   const route = useHashRoute();
   // The route's release segment is only ever consulted for the FIRST pin
   // resolution (guide §9 L02: "R1 readers retain R1") -- capture it once so
@@ -52,6 +58,29 @@ export function App({ client }: Props) {
     pollMs,
     routeReleaseIdRef.current,
   );
+  const [ops, setOps] = useState<{
+    status: OperationsStatus | null;
+    loading: boolean;
+    unavailable: boolean;
+  }>({ status: null, loading: true, unavailable: false });
+
+  useEffect(() => {
+    let cancelled = false;
+    let inFlight = false;
+    const controller = new AbortController();
+    function load(): void {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      client.getOperations(controller.signal)
+        .then((status) => { if (!cancelled) setOps({ status, loading: false, unavailable: false }); })
+        .catch(() => { if (!cancelled) setOps({ status: null, loading: false, unavailable: true }); })
+        .finally(() => { inFlight = false; });
+    }
+    load();
+    const timer = window.setInterval(load, operationsPollMs);
+    return () => { cancelled = true; controller.abort(); window.clearInterval(timer); };
+  }, [client, operationsPollMs]);
+
   const pinnedReleaseId = releaseState.status === "ready" ? releaseState.releaseId : null;
 
   const [filters, setFilters] = useState<FilterValues>(EMPTY_FILTERS);
@@ -190,6 +219,9 @@ export function App({ client }: Props) {
         currentReleaseId={currentReleaseId}
         currentError={currentError}
         changedReleaseId={changedReleaseId}
+        operationsStatus={ops.status}
+        operationsLoading={ops.loading}
+        operationsUnavailable={ops.unavailable}
       />
 
       {route.name === "event" && (
