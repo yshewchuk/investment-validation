@@ -456,3 +456,100 @@ def test_normalizer_id_bump_changes_cache_identity(tmp_path):
         conn, store, raw, (), normalizer_id="daily_market.v2", contract_id=contract_id,
         created_at=clock.now().isoformat())
     assert record_v1.normalization_id != record_v2.normalization_id
+
+
+def _cache_scope_plan(receipt_id):
+    return {
+        "units": [{"request_id": "req-1", "table_name": "daily_market",
+                   "partition_key": "2026-09-15", "expected_keys": ["AAA"]}],
+        "cached": [{"request_id": "req-1", "receipt_ref": receipt_id}],
+        "fetch_units": [],
+    }
+
+
+def test_cached_fetched_units_refuses_scope_mismatch_before_store_verify(tmp_path,
+                                                                         monkeypatch):
+    """#142: a cached receipt whose request keys do not match the unit's
+    expected keys must refuse ``INPUT_CHANGED`` from the catalog row alone --
+    before any ``store.verify``/read and before the provider merge, so an
+    out-of-scope receipt is never trusted or rebuilt into evidence."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    raw = data_incremental.cache_raw_receipt(
+        conn, store,
+        data_incremental.RawPayload(
+            payload=json.dumps({"summaries": {"data": []},
+                                "cores": {"data": []}}).encode(),
+            response_kind="complete", response_meta={}),
+        source=data_incremental.FETCH_SOURCE, endpoint="daily_market",
+        request={"request_id": "req-1", "table_name": "daily_market",
+                 "partition_key": "2026-09-15", "keys": ["OLD"]},
+        received_at=clock.now().isoformat())
+    verified = []
+
+    def _watch_verify(ref):
+        verified.append(ref)
+        raise AssertionError("out-of-scope cached receipt must not be verified")
+
+    monkeypatch.setattr(store, "verify", _watch_verify)
+
+    def fetcher(unit):
+        raise AssertionError("cached rebuild must not call the provider")
+
+    def merge_ticker_rows(summaries, cores, expected_keys=None):
+        raise AssertionError("out-of-scope cached receipt must not be merged")
+
+    fetcher.merge_ticker_rows = merge_ticker_rows
+    with pytest.raises(DataError) as err:
+        data_incremental._cached_fetched_units(
+            conn, store, _DAILY_MARKET_CONTRACT,
+            _cache_scope_plan(raw.raw_receipt_id), fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert verified == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_snapshot_heads").fetchone()[0] == 0
+
+
+def _empty_keyed_unit(*, expected_keys):
+    return {"request_id": "req-1", "table_name": "daily_market",
+            "partition_key": "2026-09-15", "expected_keys": list(expected_keys)}
+
+
+def _legitimate_empty_fetcher(unit):
+    return b"{}", "legitimate_empty", {}, ()
+
+
+def test_keyed_legitimate_empty_refuses_source_not_final_before_caching(tmp_path):
+    """#142: a ``legitimate_empty`` response for a unit WITH expected keys is
+    not a final answer for those keys -- refuse ``SOURCE_NOT_FINAL`` before
+    ``cache_raw_receipt``, so the empty response leaves no receipt behind."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    with pytest.raises(DataError) as err:
+        data_incremental._fetch_unit(
+            conn, store, _DAILY_MARKET_CONTRACT,
+            _empty_keyed_unit(expected_keys=("AAA",)), _legitimate_empty_fetcher)
+    assert err.value.code == "SOURCE_NOT_FINAL"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_raw_receipts").fetchone()[0] == 0
+
+
+def test_unkeyed_legitimate_empty_still_caches_one_receipt(tmp_path):
+    """#142 preserved behavior: with NO expected keys a ``legitimate_empty``
+    response is a complete final answer -- it succeeds and caches exactly one
+    raw receipt, as before the guard."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    fetched = data_incremental._fetch_unit(
+        conn, store, _DAILY_MARKET_CONTRACT,
+        _empty_keyed_unit(expected_keys=()), _legitimate_empty_fetcher)
+    assert fetched.raw_payload["response_kind"] == "legitimate_empty"
+    assert fetched.expected == ()
+    assert fetched.outcomes == ()
+    rows = conn.execute(
+        "SELECT raw_receipt_id, response_kind FROM data_raw_receipts").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["response_kind"] == "legitimate_empty"
+    assert fetched.receipt_id == rows[0]["raw_receipt_id"]

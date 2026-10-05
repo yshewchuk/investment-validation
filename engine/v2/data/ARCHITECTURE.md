@@ -275,6 +275,7 @@ and retryability come from that table, never guessed at a call site.
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty; `daily_market` missing tickers after the provider's bounded retry are committed as typed partial coverage instead |
+| `SOURCE_NOT_FINAL` | source | yes | a `daily_market` refresh unit has expected keys but the response is a `legitimate_empty`; the data layer refuses before caching the response, leaving no receipt, coverage, or snapshot write |
 | `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
@@ -302,6 +303,15 @@ revision or mark the response complete.
 | R4 — transaction | Returned ticker revisions and the partial coverage record enter the same snapshot candidate and head-CAS commit. A commit refusal leaves the head unchanged. |
 | R5 — visible residue | A successful commit contains all returned rows, no fabricated row for a missing ticker, and a queryable gap with session date and raw receipt identity. Empty/not-final responses still refuse under normal source retry semantics. |
 | R6 — idempotency/downstream | Replaying the same receipt reconstructs the same outcomes and coverage identity. New response evidence gets a new receipt identity; downstream consumers read the coverage state and gap outcomes instead of inferring completeness from rows. |
+
+A cache-only receipt is reusable only when `complete` and its recorded requested `keys`
+exactly match the refresh unit's `expected_keys` after string normalization and sorting; a
+mismatch or non-complete cached receipt refuses retryable integrity `INPUT_CHANGED` before
+reading/staging ticker rows, leaving no coverage or snapshot write; re-running with the
+matching receipt/unit is idempotent. `legitimate_empty` is accepted only for a unit with no
+expected keys; with expected keys present it refuses retryable source `SOURCE_NOT_FINAL`
+before caching the response, leaving no receipt, coverage, or snapshot write; the caller's
+source retry policy owns retry; an empty response without expected keys retains existing handling.
 
 **Target contract: pinned scans and registration (R1–R6).**
 

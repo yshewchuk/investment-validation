@@ -1236,7 +1236,10 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
     verified and parsed into the exact ``{"summaries": ..., "cores": ...}``
     shape the ORATS fetcher published, then merged by the provider's own
     ``_merge_ticker_rows`` -- reached through the injected fetcher closure so
-    the data layer never imports the ops provider.
+    the data layer never imports the ops provider. A cached receipt must be
+    ``complete`` and carry the unit's own key set, checked against the
+    catalog row before ``store.verify`` runs, else the rebuild refuses with
+    ``INPUT_CHANGED`` before any artifact verification or read.
     """
     merge_rows = getattr(fetcher, "merge_ticker_rows", None)
     if merge_rows is None:
@@ -1250,11 +1253,31 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
         if unit is None:
             raise errors.fail("INPUT_CHANGED", "cached outcome has no matching refresh unit")
         receipt_id = str(outcome.get("receipt_ref", ""))
+        row = conn.execute(
+            "SELECT request_json, response_kind FROM data_raw_receipts "
+            "WHERE raw_receipt_id = ?", (receipt_id,)).fetchone()
+        if row is None:
+            raise errors.fail("INPUT_CHANGED",
+                              "cached daily_market receipt is missing from the catalog")
+        try:
+            request = json.loads(row["request_json"])
+        except (TypeError, ValueError):
+            request = None
+        if (row["response_kind"] != "complete" or not isinstance(request, dict)
+                or _normalized_expected_keys(unit.get("expected_keys", ()))
+                != _normalized_expected_keys(request.get("keys", ()))):
+            raise errors.fail("INPUT_CHANGED",
+                              "cached daily_market receipt does not match refresh unit")
         record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})
         raw_bytes = store.read_verified(_artifact_ref(record.object_ref, RAW_SCHEMA_REF))
         fetched.append(_fetched_unit_rows(
             contract, unit, _cached_ticker_rows(raw_bytes, merge_rows, unit), record, observed_at))
     return tuple(fetched)
+
+
+def _normalized_expected_keys(keys):
+    """Sorted tuple of strings: a stable key set for receipt/unit comparison."""
+    return tuple(sorted(str(key) for key in keys))
 
 
 def _cached_ticker_rows(raw_bytes, merge_rows, unit):
@@ -1287,6 +1310,9 @@ def _fetch_unit(conn, store, contract, unit, fetcher):
     ticker_rows = tuple(ticker_rows)
     if response_kind not in ("complete", "legitimate_empty", "partial"):
         raise errors.fail("TRANSIENT_SOURCE", "daily_market provider response was not complete")
+    if response_kind == "legitimate_empty" and _normalized_expected_keys(
+            unit.get("expected_keys", ())):
+        raise errors.fail("SOURCE_NOT_FINAL", "daily_market empty response was not final")
     if response_kind == "complete" and _expected_keys_without_rows(contract, unit, ticker_rows):
         raise errors.fail("TRANSIENT_SOURCE",
                           "daily_market complete response omitted expected keys")

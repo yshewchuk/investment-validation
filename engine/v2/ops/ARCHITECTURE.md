@@ -1042,8 +1042,8 @@ starts working with no change of its own.
   normal-path behavior, not a failure (see "Failure semantics" for what
   does raise). The paired `summaries`/`cores` fetch is retried once when a
   non-empty 2xx result omits expected tickers. At exhaustion, the fetcher
-  returns available rows and a `partial` response with the session date and
-  attempt evidence in its raw payload; the data layer commits those rows and
+  returns available rows and a `partial` response whose response metadata carries
+  the session date and attempt evidence; the data layer commits those rows and
   records typed missing-ticker coverage against that raw receipt. It never
   labels that receipt or coverage `complete`. An empty or literal-404
   response remains `not_final` and follows the normal source retry policy.
