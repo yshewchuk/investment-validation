@@ -1,8 +1,10 @@
 """Native ORATS market-wide fetcher for the ``daily_market`` refresh slice.
 
 One ``incremental_refresh`` fetch unit denominates one ORATS ``tradeDate``, and
-one unit costs TWO provider calls -- ``hist/summaries`` and ``hist/cores`` --
-because the daily_market row the merge consumes needs fields from both. This
+one unit may use up to FOUR provider calls -- ``hist/summaries`` and
+``hist/cores``, an initial paired attempt plus one paired retry -- because the
+daily_market row the merge consumes needs fields from both; nightly planning
+reserves that four-call upper bound. This
 module is the only v2 network edge for daily_market acquisition: the closure it
 returns is the ``fetcher(unit)`` seam ``run_daily_market_refresh`` documents,
 and ``http_get`` is its sole test seam.
@@ -122,23 +124,15 @@ def orats_daily_market_fetcher(*, http_get: Callable[..., tuple] | None = None,
             raise fail("CREDENTIAL_INVALID", "ORATS_API_KEY is unset")
         request = http_get or _requests_get
         session_date = str(unit["partition_key"])
-        summaries_status, _, summaries_body = _fetch_endpoint(
-            request, SUMMARIES_ENDPOINT, session_date, token)
-        cores_status, _, cores_body = _fetch_endpoint(
-            request, CORES_ENDPOINT, session_date, token)
-        summaries_kind = _classify(unit, summaries_status, summaries_body).kind
-        cores_kind = _classify(unit, cores_status, cores_body).kind
-        response_kind = _overall_kind(summaries_kind, cores_kind, session_date)
-        raw_bytes = canonical_json({
-            "summaries": _json_document(summaries_body),
-            "cores": _json_document(cores_body),
-        }).encode()
-        response_meta = {"summaries_status": int(summaries_status),
-                         "cores_status": int(cores_status), "trade_date": session_date}
-        ticker_rows = _merge_ticker_rows(
-            _data_rows(summaries_body), _data_rows(cores_body),
-            expected_keys=tuple(str(key) for key in unit.get("expected_keys", ())))
-        return raw_bytes, response_kind, response_meta, ticker_rows
+        expected = tuple(str(key) for key in unit.get("expected_keys", ()))
+        attempts = _fetch_attempts(request, unit, session_date, token, expected)
+        last = attempts[-1]
+        response_kind = _overall_kind(
+            last["summaries_kind"], last["cores_kind"], session_date,
+            missing=_missing_tickers(expected, attempts))
+        return (_raw_payload(attempts), response_kind,
+                _response_meta(attempts, session_date),
+                _attempt_ticker_rows(attempts, expected))
 
     fetcher.lookback_days = lookback_days
     # S4B2: the cache-only completion path in the data layer rebuilds
@@ -178,7 +172,10 @@ def _json_document(body: Any) -> Any:
 
 
 def _data_rows(body: Any) -> list[dict]:
-    document = _json_document(body)
+    return _document_rows(_json_document(body))
+
+
+def _document_rows(document: Any) -> list[dict]:
     data = document.get("data") if isinstance(document, dict) else None
     if not isinstance(data, list):
         return []
@@ -186,7 +183,93 @@ def _data_rows(body: Any) -> list[dict]:
 
 
 def _provider_tickers(body: Any) -> tuple[str, ...]:
-    return tuple(str(row["ticker"]) for row in _data_rows(body) if row.get("ticker"))
+    return _document_tickers(_json_document(body))
+
+
+def _document_tickers(document: Any) -> tuple[str, ...]:
+    return tuple(str(row["ticker"]) for row in _document_rows(document) if row.get("ticker"))
+
+
+def _combined_document(documents: Sequence[Any]) -> Any:
+    if len(documents) == 1:
+        return documents[0]
+    combined = dict(documents[-1]) if isinstance(documents[-1], dict) else {}
+    rows: list[Any] = []
+    for document in documents:
+        data = document.get("data") if isinstance(document, dict) else None
+        if isinstance(data, list):
+            rows.extend(data)
+    combined["data"] = rows
+    return combined
+
+
+def _should_retry(expected: Sequence[str], attempt: Mapping[str, Any]) -> bool:
+    if attempt["summaries_kind"] not in ("complete", "partial") \
+            or attempt["cores_kind"] not in ("complete", "partial"):
+        return False
+    observed = set(_document_tickers(attempt["summaries_document"])) \
+        | set(_document_tickers(attempt["cores_document"]))
+    return any(key not in observed for key in expected)
+
+
+def _fetch_attempts(request: Callable[..., tuple], unit: dict, session_date: str,
+                    token: str, expected: Sequence[str]) -> list[dict]:
+    attempts = []
+    for attempt_number in range(2):
+        summaries_status, _, summaries_body = _fetch_endpoint(
+            request, SUMMARIES_ENDPOINT, session_date, token)
+        cores_status, _, cores_body = _fetch_endpoint(
+            request, CORES_ENDPOINT, session_date, token)
+        attempt = {
+            "summaries_status": int(summaries_status),
+            "cores_status": int(cores_status),
+            "summaries_kind": _classify(unit, summaries_status, summaries_body).kind,
+            "cores_kind": _classify(unit, cores_status, cores_body).kind,
+            "summaries_document": _json_document(summaries_body),
+            "cores_document": _json_document(cores_body),
+        }
+        attempts.append(attempt)
+        if attempt_number or not _should_retry(expected, attempt):
+            break
+    return attempts
+
+
+def _missing_tickers(expected: Sequence[str], attempts: Sequence[Mapping[str, Any]]) \
+        -> tuple[str, ...]:
+    observed = set()
+    for attempt in attempts:
+        observed.update(_document_tickers(attempt["summaries_document"]))
+        observed.update(_document_tickers(attempt["cores_document"]))
+    return tuple(key for key in expected if key not in observed)
+
+
+def _raw_payload(attempts: Sequence[Mapping[str, Any]]) -> bytes:
+    return canonical_json({
+        "summaries": _combined_document(
+            [attempt["summaries_document"] for attempt in attempts]),
+        "cores": _combined_document(
+            [attempt["cores_document"] for attempt in attempts]),
+    }).encode()
+
+
+def _response_meta(attempts: Sequence[Mapping[str, Any]], session_date: str) -> dict:
+    last = attempts[-1]
+    return {"summaries_status": last["summaries_status"],
+            "cores_status": last["cores_status"], "trade_date": session_date,
+            "attempts": len(attempts),
+            "attempt_statuses": [
+                {"summaries_status": attempt["summaries_status"],
+                 "cores_status": attempt["cores_status"]} for attempt in attempts]}
+
+
+def _attempt_ticker_rows(attempts: Sequence[Mapping[str, Any]],
+                         expected: Sequence[str]) -> list[dict]:
+    return _merge_ticker_rows(
+        [row for attempt in attempts
+         for row in _document_rows(attempt["summaries_document"])],
+        [row for attempt in attempts
+         for row in _document_rows(attempt["cores_document"])],
+        expected_keys=expected)
 
 
 def _classify(unit: dict, status: int, body: Any):
@@ -204,9 +287,11 @@ def _classify(unit: dict, status: int, body: Any):
                              final=True, request_id=request_id)
 
 
-def _overall_kind(summaries_kind: str, cores_kind: str, trade_date: str) -> str:
-    if summaries_kind == cores_kind == "complete":
-        return "complete"
+def _overall_kind(summaries_kind: str, cores_kind: str, trade_date: str,
+                  *, missing: Sequence[str] = ()) -> str:
+    if summaries_kind in ("complete", "partial") \
+            and cores_kind in ("complete", "partial"):
+        return "partial" if missing else "complete"
     if summaries_kind == cores_kind == "empty":
         return "legitimate_empty"
     if summaries_kind == cores_kind == "not_final":
@@ -247,7 +332,9 @@ def _rows_by_ticker(rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str,
     indexed: dict[str, Mapping[str, Any]] = {}
     for row in rows:
         if isinstance(row, dict) and row.get("ticker"):
-            indexed[str(row["ticker"])] = row
+            ticker = str(row["ticker"])
+            previous = indexed.get(ticker)
+            indexed[ticker] = row if previous is None else {**previous, **row}
     return indexed
 
 

@@ -1047,7 +1047,7 @@ starts working with no change of its own.
   evidence, while returned rows and typed missing-ticker coverage commit
   against the raw receipt, never as complete. Empty or literal-404 stays
   not_final under the normal retry policy; endpoint outcomes classify
-  independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
+    independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
