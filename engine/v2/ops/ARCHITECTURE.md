@@ -1346,14 +1346,15 @@ stored receipt, rather than raising a permanent refusal.
 
 ### `native_score_batch.py`
 
-Batch-level (raises, no per-row attempt): malformed binding/events, duplicate
-event identities, unresolvable release, request-hash collision, invalid
-worker identity fields, or malformed `events.json`/`producer_refusals.json`
-(including invalid timestamp wire values, checked before date parsing).
-These input failures are deterministic and not retryable; they leave no
-`records.json` or `refusals.json` from this attempt. R1: invalid
-date wire is `ValueError`, not a row refusal. R2: no cache.
-R3: no internal retry. R4: no catalog transaction. R5: publish after assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
+Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities,
+unresolvable release, request-hash collision, invalid worker identity fields, or malformed
+`events.json`/`producer_refusals.json`. Invalid timestamp wire values are checked before
+conversion: `_event_date_identity` raises `ValueError`, mapped by worker dispatch to nonretryable
+`VALIDATION_FAILED` before scoring or output writes, not a row refusal. This classification does
+not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and maps to
+retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction.
+R5: writes follow assembly, scoring and collision checks. R6: strict timestamp identity for
+duplicate/overlap checks.
 
 Per row (collected as a refusal, never sinks the batch):
 
