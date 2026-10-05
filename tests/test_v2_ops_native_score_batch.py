@@ -816,17 +816,30 @@ def test_top_level_quote_max_age_sessions_survives_to_native_inputs_context(tmp_
 
 @pytest.mark.parametrize("bad_max_age", [-1, True, 2.0, "2"])
 def test_event_inputs_from_document_rejects_invalid_quote_max_age_sessions(bad_max_age):
-    """Issue #169: a top-level ``quote_max_age_sessions`` that is neither
-    ``null`` nor a non-negative int (negative int, bool, float, numeric
-    string) must raise ``ValueError`` during event decoding, before scoring
-    or output writes -- never flow into NightlyEventInputs as-is. Fails
-    against current production code, which passes the raw value straight
-    through; ARCHITECTURE.md's ``quote_max_age_sessions`` rule already
-    documents the required validation."""
+    """Issue #169: before the decoder validation, an invalid top-level
+    ``quote_max_age_sessions`` (negative int, bool, float, numeric string)
+    was not rejected at event decoding; ARCHITECTURE.md's
+    ``quote_max_age_sessions`` contract requires rejection there."""
     doc = _event_doc()
     doc["quote_max_age_sessions"] = bad_max_age
     with pytest.raises(ValueError):
         _event_inputs_from_document(doc)
+
+
+@pytest.mark.parametrize("bad_max_age", [-1, True, 2.0, "2"])
+def test_assemble_score_batch_inputs_rejects_invalid_quote_max_age_sessions(
+        tmp_path, bad_max_age):
+    """Issue #169: exported ``assemble_score_batch_inputs`` must apply the
+    same batch-level guard to directly constructed ``NightlyEventInputs``
+    (never routed through the decoder): a ``quote_max_age_sessions`` that is
+    neither ``null`` nor a non-negative int raises, before any per-row
+    assembly is attempted."""
+    binding = _stage_release(tmp_path)
+    event = _event_inputs(quote_max_age_sessions=bad_max_age)
+    with pytest.raises(
+            ValueError,
+            match="quote_max_age_sessions must be null or a non-negative integer"):
+        _assemble(binding, [event])
 
 
 def test_event_inputs_from_document_keeps_midnight_and_intraday_success_events():

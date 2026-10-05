@@ -507,7 +507,9 @@ def assemble_nightly_source_bundle(
     every recipe are caller-supplied pass-through (the {} default means "not
     yet declared"). context also carries the caller's quote_max_age_sessions
     unchanged plus quote_date (the earliest validated quote observed_at date,
-    YYYY-MM-DD) when quote rows exist. No I/O is done.
+    YYYY-MM-DD) when quote rows exist. The quote_max_age_sessions context key
+    is included only when supplied (including zero); when it is None the key
+    is omitted entirely. No I/O is done.
     """
     feature_names = _validated_feature_names(feature_names)
     _require_staged_inputs_present(calendar_row, panel_row, tier4_row, quote_rows)
@@ -519,7 +521,8 @@ def assemble_nightly_source_bundle(
     _checked_against_as_of(calendar_row, observed, panel_anchor, as_of_ts)
     raw_quotes = quote_domain_map(list(quote_rows), quote_status)
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
-    context["quote_max_age_sessions"] = quote_max_age_sessions
+    if quote_max_age_sessions is not None:
+        context["quote_max_age_sessions"] = quote_max_age_sessions
     if observed:
         # Observation provenance for stages._check_stale_quote (issue #169):
         # the canonical date the staged quotes were observed. Every row's

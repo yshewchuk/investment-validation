@@ -375,6 +375,26 @@ def _assemble_one_event(
     return (request, native_inputs)
 
 
+def _checked_event_input(event: Any) -> NightlyEventInputs:
+    """Validate one batch event item, or raise -- the per-event half of
+    :func:`_checked_batch_arguments`'s batch-level checks, split out purely to
+    keep that function under its complexity budget. A valid item is returned
+    unchanged (never copied or re-wrapped). ``quote_max_age_sessions`` accepts
+    ``None`` or a non-negative ``int`` (a ``bool`` is rejected despite its
+    ``int`` subclassing), exactly mirroring :func:`_event_inputs_from_document`'s
+    own decode guard; every other bound raises, never becoming a per-row
+    refusal."""
+    if not isinstance(event, NightlyEventInputs):
+        raise TypeError("events must be a sequence of NightlyEventInputs")
+    bound = event.quote_max_age_sessions
+    if bound is not None and (
+            isinstance(bound, bool)
+            or not isinstance(bound, int)
+            or bound < 0):
+        raise ValueError("quote_max_age_sessions must be null or a non-negative integer")
+    return event
+
+
 def _checked_batch_arguments(
     *,
     binding: Any,
@@ -403,6 +423,7 @@ def _checked_batch_arguments(
     events = tuple(events)
     if any(not isinstance(event, NightlyEventInputs) for event in events):
         raise TypeError("events must be a sequence of NightlyEventInputs")
+    events = tuple(_checked_event_input(event) for event in events)
     keys = [event.key for event in events]
     if len(keys) != len(set(keys)):
         raise ValueError("duplicate BoardRequest key in events")

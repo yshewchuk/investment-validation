@@ -307,11 +307,12 @@ deterministic and not retried internally; a caller can retry a later score
 with a refreshed source quote. Scoring writes nothing, and a refusal leaves
 no selected score values as a ready result.
 
-The nightly source-bundle path preserves the caller's bound in scoring
-context through `native_score_batch`; it never inserts an implicit default
-age policy. Its quote rows retain their source date and feed the same
-scoring check. This policy is independent of the assembler's `as_of`
-upper-bound check, which only prevents future observations.
+The nightly source bundle preserves a supplied bound in its context and omits
+that optional key when unset. `native_score_batch` carries the caller policy
+into scoring; `None` continues to mean no policy and no numeric age default is
+invented. Quote rows retain their source date and feed the same scoring check.
+This policy is independent of the assembler's `as_of` upper-bound check, which
+only prevents future observations.
 
 **Planned-exit simulation values each leg by its own right.** The
 `planned_exit` simulation (`stages._planned_exit_simulation`) prices a call
