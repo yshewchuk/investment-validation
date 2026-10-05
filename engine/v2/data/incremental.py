@@ -1333,9 +1333,10 @@ def _cached_fetched_units(conn, store, contract, plan, fetcher):
             request = json.loads(row["request_json"])
         except (TypeError, ValueError):
             request = None
-        if (row["response_kind"] != "complete" or not isinstance(request, dict)
-                or _normalized_expected_keys(unit.get("expected_keys", ()))
-                != _normalized_expected_keys(request.get("keys", ()))):
+        saved_keys = request.get("keys") if isinstance(request, dict) else None
+        if (row["response_kind"] != "complete" or not _expected_keys_are_valid(saved_keys)
+                or _normalized_expected_keys(expected_keys)
+                != _normalized_expected_keys(saved_keys)):
             raise errors.fail("INPUT_CHANGED",
                               "cached daily_market receipt does not match refresh unit")
         record = _staged_raw_receipt(conn, store, {"receipt_id": receipt_id})

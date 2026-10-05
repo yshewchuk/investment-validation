@@ -513,6 +513,53 @@ def test_cached_fetched_units_refuses_scope_mismatch_before_store_verify(tmp_pat
         "SELECT COUNT(*) FROM data_snapshot_heads").fetchone()[0] == 0
 
 
+def test_cached_fetched_units_refuses_malformed_saved_keys_before_store_verify(tmp_path,
+                                                                               monkeypatch):
+    """#142: a cached receipt whose request carries malformed saved keys
+    (``keys: None``) refuses ``INPUT_CHANGED`` from the saved-key shape guard
+    alone -- the malformed set is never normalized, so no raw ``TypeError``
+    leaks from ``_normalized_expected_keys``, and ``store.verify``, the
+    provider fetch and the row merge all remain untouched."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    raw = data_incremental.cache_raw_receipt(
+        conn, store,
+        data_incremental.RawPayload(
+            payload=json.dumps({"summaries": {"data": []},
+                                "cores": {"data": []}}).encode(),
+            response_kind="complete", response_meta={}),
+        source=data_incremental.FETCH_SOURCE, endpoint="daily_market",
+        request={"request_id": "req-1", "table_name": "daily_market",
+                 "partition_key": "2026-09-15", "keys": None},
+        received_at=clock.now().isoformat())
+    verified = []
+
+    def _watch_verify(ref):
+        verified.append(ref)
+        raise AssertionError("malformed saved keys must not reach store.verify")
+
+    monkeypatch.setattr(store, "verify", _watch_verify)
+
+    def fetcher(unit):
+        raise AssertionError("cache-only replay must not call the provider")
+
+    def merge_ticker_rows(summaries, cores, expected_keys=None):
+        raise AssertionError("malformed saved keys must not reach the merge")
+
+    fetcher.merge_ticker_rows = merge_ticker_rows
+    with pytest.raises(DataError) as err:
+        data_incremental._cached_fetched_units(
+            conn, store, _DAILY_MARKET_CONTRACT,
+            _cache_scope_plan(raw.raw_receipt_id), fetcher)
+    assert err.value.code == "INPUT_CHANGED"
+    assert verified == []
+    rows = conn.execute(
+        "SELECT raw_receipt_id FROM data_raw_receipts").fetchall()
+    assert [row["raw_receipt_id"] for row in rows] == [raw.raw_receipt_id]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_snapshot_heads").fetchone()[0] == 0
+
+
 def test_cached_fetched_units_reacquires_when_complete_receipt_loses_a_key(tmp_path):
     """#142: a cached receipt that claims ``complete`` and carries the unit's own
     key set but no longer reconstructs every expected key is refused with
