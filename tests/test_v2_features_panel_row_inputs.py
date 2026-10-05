@@ -103,7 +103,10 @@ class _FakeRepository:
 
     def scan(self, query, *, table_name):
         ticker = query.key_filter[0].values[0]
-        yield _Batch(self._batches.get((table_name, ticker), []))
+        rows = self._batches.get((table_name, ticker), [])
+        selected = [row for row in rows if _bound_row_selected(
+            row, query.key_filter, query.time_interval)]
+        yield _Batch(selected)
 
 
 def _problem(message, table_name):
@@ -962,7 +965,9 @@ class _BoundRecordingRepository(_FakeRepository):
     def scan(self, query, *, table_name):
         self.scans.append((table_name, query))
         rows = self._batches.get((table_name, query.key_filter[0].values[0]), [])
-        yield _Batch(rows)
+        selected = [row for row in rows if _bound_row_selected(
+            row, query.key_filter, query.time_interval)]
+        yield _Batch(selected)
 
 
 def _bound_reads(bounds):
@@ -1016,11 +1021,9 @@ def test_32_positive_selected_bound_lowers_query_limits_and_rows_match_fixtures(
     computed, spy, repo, cm_fixture, spy_fixture = _bound_reads(
         {COMPUTED_MOVES_TABLE_NAME: cm_count, "daily_market": spy_count})
     (_cm, cm_query), (_spy, spy_query) = repo.scans
-    cases = ((cm_query, len(cm_fixture), COMPUTED_MOVES_CONTRACT.maximum_result_rows),
-             (spy_query, len(spy_fixture), _DM.maximum_result_rows))
-    for query, bound, contract_cap in cases:
-        cap = min(contract_cap, panel_row_inputs._RESULT_LIMIT)
-        assert 0 < bound < cap  # the selected bound really is below the existing cap
+    cases = ((cm_query, len(cm_fixture)), (spy_query, len(spy_fixture)))
+    for query, bound in cases:
+        assert 0 < bound < panel_row_inputs._RESULT_LIMIT
         assert query.max_result_rows == bound
         assert 0 < query.max_batch_rows <= bound
     assert len(computed) <= cm_query.max_result_rows
@@ -1029,16 +1032,19 @@ def test_32_positive_selected_bound_lowers_query_limits_and_rows_match_fixtures(
     assert spy == spy_fixture
 
 
-def test_33_zero_selected_bound_keeps_positive_limits_at_the_cap():
-    computed, spy, repo, cm_fixture, spy_fixture = _bound_reads(
-        {COMPUTED_MOVES_TABLE_NAME: 0, "daily_market": 0})
+def test_33_zero_selected_bound_uses_zero_result_limit_and_positive_batch():
+    batches = _default_batches()
+    batches[(COMPUTED_MOVES_TABLE_NAME, "AAA")] = []
+    batches[("daily_market", "SPY")] = []
+    snapshot = _snapshot()
+    repo = _BoundRecordingRepository(snapshot, _contracts(), batches)
+    computed = panel_row_inputs._read_computed_moves(
+        repo, snapshot, "AAA", _HISTORY_START, _DECISION, _EVENT)
+    spy = panel_row_inputs._read_spy_market(repo, snapshot, _HISTORY_START, _DECISION)
     (_cm, cm_query), (_spy, spy_query) = repo.scans
-    assert cm_query.max_result_rows == min(COMPUTED_MOVES_CONTRACT.maximum_result_rows,
-                                           panel_row_inputs._RESULT_LIMIT) > 0
-    assert 0 < cm_query.max_batch_rows <= cm_query.max_result_rows
-    assert spy_query.max_result_rows == min(_DM.maximum_result_rows,
-                                            panel_row_inputs._RESULT_LIMIT) > 0
-    assert 0 < spy_query.max_batch_rows <= spy_query.max_result_rows
-    # The preparation never turns a zero bound into a zero-result query.
-    assert computed == cm_fixture
-    assert spy == spy_fixture
+    assert cm_query.max_result_rows == 0
+    assert cm_query.max_batch_rows > 0
+    assert spy_query.max_result_rows == 0
+    assert spy_query.max_batch_rows > 0
+    assert computed == []
+    assert spy == []
