@@ -21,12 +21,18 @@ from pathlib import Path
 
 import pytest
 
+from engine.v2.contracts import JobReceipt
 from engine.v2.foundation import ArtifactStore
 from engine.v2.models import deployment
 from engine.v2.ops import nightly
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.stages import registry
-from engine.v2.ops.submission import NamespacePolicy, job_id_for, submit_graph
+from engine.v2.ops.submission import (
+    NamespacePolicy,
+    job_id_for,
+    request_digest,
+    submit_graph,
+)
 from engine.v2.ops.supervisor import Service
 from tests.ops_support import catalog
 
@@ -118,7 +124,7 @@ def test_identity_finds_latest_session_and_reports_no_snapshot_pinned(tmp_path):
     score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
     session, scope_hash = nightly._session_scope_from_score_key(score_key)
 
-    assert nightly._native_score_batch_identity(conn) == (session, scope_hash, False)
+    assert nightly._native_score_batch_identity(conn) == (session, scope_hash, None)
 
     before = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
     assert nightly.submit_native_score_batch_shadow_if_ready(
@@ -280,6 +286,95 @@ def test_submit_raises_when_snapshot_pinned_and_producer_missing(tmp_path, monke
             conn, registry(), _POLICY, store, "irrelevant-root",
             catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
             code_source=ROOT, clock=clock)
+
+
+def test_submit_builds_one_shadow_batch_request_from_the_slice5_refs(tmp_path, monkeypatch):
+    """Slice 5 regression: the valid snapshot-pinned path now BUILDS and
+    submits instead of raising -- and it builds only from the three
+    caller-supplied refs. ``submission.submit`` is intercepted, so this pins
+    the ONE request the builder hands that boundary (ARCHITECTURE.md "The
+    builder only builds"), never what admission does with it: the staged
+    ``events.json``/``producer_refusals.json`` artifact ids bind both worker
+    files AND ride ``JobSpec.input_refs`` (a direct artifact binding is only
+    admitted through ``spec.input_refs``, ``input_bindings.py:66``), and the
+    supplied ``calendar_revision`` is serialized verbatim into
+    ``NativeScoreBatchParameters``. The PR-6 producer is patched to a
+    tripwire -- the builder must never call it (importing the producer here
+    to patch it is the test's own import, never nightly.py's)."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    score_key = _mark_score_succeeded(conn, clock, session="2026-01-01")
+    session, scope_hash = nightly._session_scope_from_score_key(score_key)
+    monkeypatch.setattr(nightly, "_native_score_batch_identity",
+                        lambda conn: (session, scope_hash, True))
+
+    events_ref = store.publish_bytes(
+        b"[]", schema_ref="native_score_batch_events.v1.0").artifact_id
+    producer_refusals_ref = store.publish_bytes(
+        b'{"schema_version": "native_score_batch_producer_refusals.v1.0", "refusals": []}',
+        schema_ref="native_score_batch_producer_refusals.v1.0").artifact_id
+    calendar_revision = "earnings-events-dataset-rev-42"
+    snapshot_id = "snapshot-2026-01-01-abc123"
+    assert len({events_ref, producer_refusals_ref, calendar_revision}) == 3
+    assert snapshot_id != scope_hash
+
+    captured = []
+
+    def _capture_submit(conn, registry, policy, request, *, clock):
+        captured.append(request)
+        return JobReceipt(
+            job_id=job_id_for(request.namespace, request.idempotency_key),
+            namespace=request.namespace, idempotency_key=request.idempotency_key,
+            request_digest=request_digest(request), kind=request.job.kind,
+            spec_hash=None, state="queued", priority=request.job.priority,
+            created_at=clock.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            fence=1, attempt_count=0)
+
+    monkeypatch.setattr("engine.v2.ops.submission.submit", _capture_submit)
+    producer_calls = []
+
+    def _producer_tripwire(*args, **kwargs):
+        producer_calls.append((args, kwargs))
+        raise AssertionError("the builder must not call the PR-6 producer")
+
+    monkeypatch.setattr(
+        "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
+        _producer_tripwire)
+
+    release_root = str(tmp_path / "verified-release-root")
+    receipt = nightly.submit_native_score_batch_shadow_if_ready(
+        conn, registry(), _POLICY, store, release_root,
+        catalog_path=str(tmp_path / "ops.sqlite"), objects_root=str(tmp_path),
+        code_source=ROOT, clock=clock, events_ref=events_ref,
+        producer_refusals_ref=producer_refusals_ref, calendar_revision=calendar_revision,
+        snapshot_id=snapshot_id)
+
+    assert len(captured) == 1
+    request = captured[0]
+    assert request.namespace == "shadow"
+    assert request.principal == "operator"
+    assert request.job.kind == "native_score_batch"
+    assert request.job.output_namespace == "shadow"
+    # key/identity behavior is unchanged: the batch key is still THIS score
+    # job's own session+scope_hash, and the existing parser round-trips it.
+    key = nightly._native_score_batch_key(session, scope_hash)
+    assert request.idempotency_key == key
+    assert nightly._scope_from_native_score_batch_key(key) == (session, scope_hash)
+
+    parameters = request.job.parameters
+    assert parameters["input_bindings"] == {
+        "events.json": events_ref, "producer_refusals.json": producer_refusals_ref}
+    assert request.job.input_refs == (events_ref, producer_refusals_ref)
+    assert parameters["calendar_revision"] == calendar_revision
+    assert parameters["as_of"] == session
+    assert parameters["snapshot_id"] == snapshot_id
+    assert parameters["release_root"] == release_root
+    assert parameters["expected_ids"] == [session + "|" + scope_hash]
+
+    assert receipt is not None and receipt.idempotency_key == key
+    assert producer_calls == []
+    # intercepted at the boundary: the builder wrote nothing to the catalog.
+    assert _native_score_batch_job_count(conn) == 0
 
 
 def test_service_backs_off_one_attempt_when_snapshot_pinned_and_producer_missing(tmp_path, monkeypatch):
