@@ -15,19 +15,24 @@ class TrainFoldRule:
         import numpy as np
 
         fraction = self.top_fraction
-        if isinstance(fraction, bool) or not isinstance(fraction, numbers.Real) \
-                or not math.isfinite(float(fraction)) or not 0.0 < float(fraction) <= 1.0:
+        if isinstance(fraction, bool) or not isinstance(fraction, numbers.Real):
+            raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
+        try:
+            fraction = float(fraction)
+        except (OverflowError, TypeError, ValueError):
+            raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]") from None
+        if not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
             raise fail("INVALID_EXPERIMENT_SPEC", "threshold fraction must be finite in (0, 1]")
         try:
             values = np.asarray(scores, dtype=float)
             targets = np.asarray(labels, dtype=float)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             raise fail("INVALID_EXPERIMENT_SPEC", "fold scores and labels must be numeric") from None
         if values.ndim != 1 or targets.ndim != 1 or not values.size or values.size != targets.size \
                 or not np.all(np.isfinite(values)) or not np.all(np.isfinite(targets)) \
                 or not np.all(np.isin(targets, (0.0, 1.0))):
             raise fail("INVALID_EXPERIMENT_SPEC", "fold scores and binary labels must be finite and aligned")
-        return float(np.quantile(values, 1.0 - float(fraction)))
+        return float(np.quantile(values, 1.0 - fraction))
 
 
 @dataclass(frozen=True)
@@ -43,7 +48,7 @@ def _training_arrays(train_features, train_labels):
     try:
         matrix = np.asarray(train_features, dtype=float)
         labels = np.asarray(train_labels, dtype=float)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         raise fail("INVALID_EXPERIMENT_SPEC", "training fold must be numeric") from None
     if matrix.ndim != 2 or not matrix.shape[0] or not matrix.shape[1] \
             or labels.ndim != 1 or labels.size != matrix.shape[0] \
@@ -53,12 +58,26 @@ def _training_arrays(train_features, train_labels):
     return matrix, labels.astype(int)
 
 
+def _validate_feature_columns(train_features, test_features) -> None:
+    try:
+        train_columns = getattr(train_features, "columns", None)
+        test_columns = getattr(test_features, "columns", None)
+        if (train_columns is None) != (test_columns is None):
+            raise fail("INVALID_EXPERIMENT_SPEC", "training and test features must both be named or positional")
+        if train_columns is not None and tuple(train_columns) != tuple(test_columns):
+            raise fail("INVALID_EXPERIMENT_SPEC", "training and test feature columns must match in order")
+    except OpsError:
+        raise
+    except Exception:
+        raise fail("INVALID_EXPERIMENT_SPEC", "feature column names are invalid") from None
+
+
 def _feature_matrix(features):
     import numpy as np
 
     try:
         matrix = np.asarray(features, dtype=float)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         raise fail("INVALID_EXPERIMENT_SPEC", "feature rows must be numeric") from None
     if matrix.ndim != 2 or not matrix.shape[0] or not matrix.shape[1] \
             or not np.all(np.isfinite(matrix)):
@@ -84,6 +103,7 @@ def fit_walk_forward_fold(estimator, train_features, train_labels, test_features
                           threshold_rule: TrainFoldRule) -> WalkForwardFoldFit:
     if not isinstance(threshold_rule, TrainFoldRule):
         raise fail("INVALID_EXPERIMENT_SPEC", "fold threshold rule has an unsupported type")
+    _validate_feature_columns(train_features, test_features)
     matrix, labels = _training_arrays(train_features, train_labels)
     test_matrix = _feature_matrix(test_features)
     if test_matrix.shape[1] != matrix.shape[1]:
