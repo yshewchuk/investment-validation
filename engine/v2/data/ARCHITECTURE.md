@@ -275,7 +275,7 @@ and retryability come from that table, never guessed at a call site.
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
-| `INPUT_CHANGED` | integrity | yes | coverage incomplete, or a candidate built from a now-stale input |
+| `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, or expected keys missing/malformed/empty at the normalization boundary (Invariants) |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
@@ -454,12 +454,14 @@ Root doc §5 invariants this package is responsible for:
 - **`daily_market` normalizer versioning.** `cache_normalization` keys
   `normalization_id` on a canonical hash of the fetch unit's expected-key set
   folded together with `raw_hash`, `normalizer_id` and `contract_id`; expected
-  keys are the canonical set of string ticker keys, so order and duplicates
-  never change the hash. A raw receipt needed for normalization must carry
-  `request.keys` as a nonempty list of nonempty strings; a missing, empty or
-  malformed saved key list, and an empty canonical expected-key set at the
-  normalization boundary, fail closed with the registered retryable
-  `INPUT_CHANGED` before any normalization identity is derived or written —
+  keys are the canonical set of nonempty string ticker keys: order and
+  duplicates never change the hash. At the normalization boundary the
+  expected-key sequence must be nonempty and every member must be a nonempty
+  string ticker key; a raw receipt needed for normalization carries that
+  sequence specifically as a nonempty `request.keys` list. A missing, null,
+  non-list or malformed saved list, or an empty or malformed sequence passed
+  directly, fails closed with the registered retryable `INPUT_CHANGED` before
+  any normalization identity is derived or written — never a coerced member,
   never a silent empty set. The same raw payload and normalizer under different
   expected-key sets therefore produce distinct normalization identities and
   rows; repeated requests with the same set stay idempotent. A payload

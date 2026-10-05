@@ -773,3 +773,53 @@ def test_valid_string_key_lists_keep_the_canonical_identity(tmp_path):
         raw.raw_hash, normalizer, contract_id, ("AAA", "CCC"))
     assert base != data_incremental._normalization_identity(
         content_hash({"other": "raw"}), normalizer, contract_id, ("AAA", "BBB"))
+
+
+def test_malformed_directly_passed_expected_keys_refuse_before_identity(tmp_path):
+    """PR #400 gate finding (contract: engine/v2/data/ARCHITECTURE.md): the
+    normalization boundary validates, it never coerces. An empty sequence, a
+    scalar string/bytes, a mapping/set, or any non-string/empty-string member
+    refuses with the registered retryable ``INPUT_CHANGED`` through both
+    ``cache_normalization`` and ``_normalization_identity`` before any identity
+    is derived, so no ``data_normalizations`` row exists afterwards -- while a
+    valid tuple/list keeps the set-based identity, order- and duplicate-wise."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    normalizer = "daily_market.v3"
+
+    def cache(keys):
+        return data_incremental.cache_normalization(
+            conn, store, raw, (), normalizer_id=normalizer,
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=keys)
+
+    malformed = (
+        ("empty-tuple", ()),
+        ("empty-list", []),
+        ("scalar-string", "AAA"),
+        ("scalar-bytes", b"AAA"),
+        ("mapping", {"AAA": "ignored"}),
+        ("set", {"AAA"}),
+        ("non-string-member", (7,)),
+        ("mixed-member", ["AAA", 42]),
+        ("null-member", ("AAA", None)),
+        ("empty-string-member", ("AAA", "")),
+        ("only-empty-string-member", ("",)),
+    )
+    for name, keys in malformed:
+        with pytest.raises(DataError) as err:
+            cache(keys)
+        assert err.value.code == "INPUT_CHANGED", name
+        assert err.value.problem.retryable is True, name
+        with pytest.raises(DataError) as err:
+            data_incremental._normalization_identity(
+                raw.raw_hash, normalizer, contract_id, keys)
+        assert err.value.code == "INPUT_CHANGED", name
+        assert err.value.problem.retryable is True, name
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+    tuple_id = cache(("AAA", "BBB")).normalization_id
+    assert tuple_id.startswith("norm_")
+    assert cache(["BBB", "AAA", "AAA"]).normalization_id == tuple_id
+    assert cache(("AAA", "BBB")).cache_hit is True
+    assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1

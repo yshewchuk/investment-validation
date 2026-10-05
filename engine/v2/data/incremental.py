@@ -683,7 +683,11 @@ def cache_normalization(conn: Any, store: ArtifactStore,
     unique string tickers in sorted order (``_normalization_identity``), so a
     request's order and duplicates never change the identity while a genuinely
     different set under the same raw payload/normalizer/contract produces a
-    distinct id and row. Rows stored under the old triple-only formula carry no
+    distinct id and row. An empty or malformed sequence (a scalar string or
+    bytes, a mapping, a non-string or empty-string member) refuses with the
+    registered retryable ``INPUT_CHANGED`` before any identity is derived or
+    row written -- never a coerced member, never a silent empty set. Rows
+    stored under the old triple-only formula carry no
     expected-key metadata, keep their ids and references, and are never reused
     as a cache hit; the scoped row simply coexists (#133 slice 3 policy).
 
@@ -786,18 +790,26 @@ def _normalized_revisions(encoded: bytes) -> tuple[DailyMarketRevision, ...]:
 
 
 def _canonical_expected_keys(expected_keys: Sequence[str]) -> tuple[str, ...]:
-    """Unique string ticker keys in sorted order: request order and duplicates
-    never change the canonical set, so identity is set-based (#133 slice 3)."""
-    return tuple(sorted({str(key) for key in expected_keys}))
+    """Validate, then canonicalize, the fetch unit's expected keys: unique
+    nonempty string ticker keys in sorted order, so request order and
+    duplicates never change the canonical set, identity is set-based
+    (#133 slice 3), and no member is ever coerced. Only tuple/list sequences
+    are accepted -- a scalar ``str``/``bytes`` (which would iterate into
+    characters), a mapping or set, an empty sequence, or a non-string or
+    empty-string member refuses with the registered retryable
+    ``INPUT_CHANGED`` before any normalization identity is derived."""
+    if (not isinstance(expected_keys, (tuple, list)) or not expected_keys
+            or any(not isinstance(key, str) or not key for key in expected_keys)):
+        raise errors.fail("INPUT_CHANGED",
+                          "normalization expected keys must be a nonempty sequence "
+                          "of nonempty string ticker keys")
+    return tuple(sorted(set(expected_keys)))
 
 
 def _normalization_identity(raw_hash: str, normalizer_id: str,
                             contract_id: str,
                             expected_keys: Sequence[str]) -> str:
     canonical = _canonical_expected_keys(expected_keys)
-    if not canonical:
-        raise errors.fail("INPUT_CHANGED",
-                          "normalization expected-key set is empty")
     expected_keys_hash = content_hash(canonical)
     return "norm_" + content_hash({
         "raw_hash": raw_hash, "normalizer_id": normalizer_id,
