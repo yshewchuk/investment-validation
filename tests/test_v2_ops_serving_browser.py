@@ -164,7 +164,10 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
     same without moving the frame pin, and an aborted current-release poll
     must fall
     back to the existing "published current unavailable" unknown reason while
-    the frame keeps its r1 pin.
+    the frame keeps its r1 pin. A held health poll that completes only after a
+    newer fetch failure is likewise superseded: it cannot replace the latest
+    unavailable observation, and only a later scheduled success restores
+    current.
     """
     static = Path("engine/dashboard/static")
     now_iso = "2026-10-04T00:00:00Z"
@@ -248,6 +251,91 @@ def test_shell_requires_session_and_published_identity_for_current(tmp_path):
             health.write_text(json.dumps({**health_document,
                                           "requested_session": "2026-10-04",
                                           "resolved_session": "2026-10-02"}))
+            page.wait_for_function(
+                '() => document.querySelector("#state").textContent === "current"',
+                timeout=2000,
+            )
+
+            # Superseded health responses must not replace a newer fetch
+            # failure: hold poll 1, answer poll 2 with 503, keep holding every
+            # later poll, then complete the older held request only once the
+            # shell already reports unknown for the failed fetch. The page
+            # keeps its own record so the test can prove the older response
+            # completed, not merely that time passed.
+            page.evaluate(
+                '() => {'
+                ' window.__healthResponses = [];'
+                ' window.__healthFetches = 0;'
+                ' var _fetch = window.fetch;'
+                ' window.fetch = function (input, init) {'
+                ' var url = typeof input === "string" ? input : ((input && input.url) || "");'
+                ' var pending = _fetch.call(window, input, init);'
+                ' if (url.indexOf("/health.json") >= 0) {'
+                ' window.__healthFetches += 1;'
+                ' pending.then(function (r) {'
+                ' r.clone().text().then(function (t) {'
+                ' window.__healthResponses.push(r.status + ":" + t);'
+                ' });'
+                ' }, function () { window.__healthResponses.push("rejected"); });'
+                ' }'
+                ' return pending;'
+                ' };'
+                '}'
+            )
+            held_health_routes = []
+            health_attempts = [0]
+
+            def intercept_health(route):
+                health_attempts[0] += 1
+                if health_attempts[0] == 2:
+                    route.fulfill(status=503, body="unavailable",
+                                  content_type="text/plain")
+                else:
+                    held_health_routes.append(route)
+
+            valid_health_body = json.dumps({**health_document,
+                                            "requested_session": "2026-10-04",
+                                            "resolved_session": "2026-10-02"})
+            page.route("**/health.json", intercept_health)
+            page.wait_for_function(
+                '() => { const st = document.querySelector("#state").textContent; '
+                'return st.indexOf("health fetch failed: unavailable") >= 0 '
+                '&& st.indexOf("unknown") === 0; }',
+                timeout=2000,
+            )
+
+            # The newer 503 is the shell's latest observation. Fulfilling the
+            # older held poll with the SAME valid document must be discarded:
+            # the response completes (a missing sequence guard would flip the
+            # shell back to current within the next few poll cycles), while
+            # unknown + the fetch-failure note and the r1 frame pin persist.
+            held_health_routes.pop(0).fulfill(status=200, body=valid_health_body,
+                                              content_type="application/json")
+            page.wait_for_function(
+                '() => window.__healthResponses.some(function (entry) {'
+                ' return entry.indexOf("200:") === 0; })',
+                timeout=2000,
+            )
+            latest_fetches = page.evaluate('() => window.__healthFetches')
+            page.wait_for_function(
+                '() => window.__healthFetches >= ' + str(latest_fetches + 3),
+                timeout=2000,
+            )
+            state = page.locator("#state").inner_text()
+            assert state.startswith("unknown")
+            assert "health fetch failed: unavailable" in state
+            assert "current" not in state
+            assert page.locator("#published").inner_text() == "published release: r1"
+            assert page.locator("#release").inner_text() == "pinned release: r1"
+            assert "/release/r1/" in (page.locator("#legacy").get_attribute("src") or "")
+
+            # Drain the held polls, drop the intercept, and let a normal
+            # scheduled poll restore current before the publication checks.
+            for held_route in list(held_health_routes):
+                held_health_routes.remove(held_route)
+                held_route.fulfill(status=200, body=valid_health_body,
+                                   content_type="application/json")
+            page.unroute("**/health.json", intercept_health)
             page.wait_for_function(
                 '() => document.querySelector("#state").textContent === "current"',
                 timeout=2000,
