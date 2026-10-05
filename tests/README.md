@@ -184,11 +184,12 @@ a changed file. Supported literal dynamic imports and tracked Python subprocess
 targets add precise edges too. Other runtime loading or process-launch patterns
 may not be discoverable by this static analysis, so a test that depends on a
 changed file only through such a pattern may be omitted from a narrowed PR run;
-the full suite on pushes to `main` is the backstop. An unknown changed path,
-graph construction or scan failure, or any selector error means run the full
-suite; it must never produce a narrower selection.
-If the selector command exits nonzero, the workflow writes the `__ALL__`
-sentinel and continues to pytest with the full suite.
+the selector returns the `__ALL__` sentinel for unresolved dynamic constructs
+it recognizes, and the full suite on pushes to `main` is the final backstop.
+Unknown changed paths, graph construction or scan failures also return
+`__ALL__`. If the selector command itself errors, the CLI exits nonzero
+without printing a selection and the workflow job fails before pytest; it does
+not continue with a narrowed selection.
 
 ## Known thin spots
 

@@ -177,11 +177,12 @@ evidence. See the models and data component contracts.
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
     catch-all graph edges apply only to a file with a genuinely unresolved dynamic target;
     recognized constructs with resolvable targets create specific edges. `full_suite` paths, an
-    unrecognized path, a deleted test file, a graph or scan failure, or any selector error still
-    select everything -- an error must never become a silent narrow selection. If the selector
-    command exits nonzero, the workflow writes the `__ALL__` sentinel and continues to pytest
-    with the full suite. The full-suite
-    allowlist includes the operator-tool namespace. The selection rule (leaf, taint, `full_suite`,
+    unrecognized path, a deleted test file, a graph or scan failure, or a genuinely unresolved
+    dynamic target that the selector can classify returns the `__ALL__` sentinel and runs the
+    full suite. If the selector command itself errors, the CLI exits nonzero without printing a
+    selection; the workflow job fails before pytest rather than proceeding with a narrowed run.
+    The full-suite allowlist includes the operator-tool namespace. The selection rule (leaf,
+    taint, `full_suite`,
     conftest ancestors) is documented in `select_pr_tests`'s and
     `_has_unresolved_import_attempt`'s docstrings, not here.
 

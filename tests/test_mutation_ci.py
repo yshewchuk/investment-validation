@@ -3025,6 +3025,38 @@ def test_select_pr_tests_unresolved_scan_failure_selects_none_sentinel(monkeypat
     assert pilot.select_pr_tests(_SELECT_CFG, ["anything.py"]) is None
 
 
+def test_select_tests_cli_uncaught_selector_error_exits_nonzero_with_no_output(tmp_path):
+    """A selector error that escapes select_pr_tests's handled graph-build and
+    unresolved-scan fallbacks must kill the CLI: nonzero exit, stdout exactly
+    empty. An empty list, a narrowed list or `__ALL__` would each be read by
+    the `test` job as a verdict; nothing-on-stdout plus a failed select step is
+    the only shape that stops the run instead of silently deciding for it.
+    Fresh subprocess so the real CLI dispatch and process exit are what's
+    asserted, independent of any workflow YAML. The graph is stubbed only to
+    keep the child fast -- the injected raise is the point, not graph content.
+    """
+    changed = tmp_path / "changed.txt"
+    changed.write_bytes(b"engine/v2/ops/computed_moves_store.py\0")
+    code = (
+        "import sys\n"
+        "sys.path.insert(0, 'tools')\n"
+        "import mutation_pilot as pilot\n"
+        "GRAPH = {'engine/v2/ops/computed_moves_store.py': set(),\n"
+        "         'tests/test_v2_ops_computed_moves_store.py':\n"
+        "             {'engine/v2/ops/computed_moves_store.py'}}\n"
+        "pilot.build_import_graph = lambda *a, **k: GRAPH\n"
+        "def boom(graph):\n"
+        "    raise RuntimeError('selector graph boom')\n"
+        "pilot.dynamic_files = boom\n"
+        "sys.exit(pilot.main(['select-tests', '--changed-files', sys.argv[1]]))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code, str(changed)],
+                          cwd=ROOT, capture_output=True, text=True)
+    assert "selector graph boom" in proc.stderr, proc.stderr
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+
+
 def test_select_pr_tests_real_pr156_diff_selects_its_own_test_and_reports_dynamic_leaf_count():
     changed = [
         "engine/v2/ops/ARCHITECTURE.md",
