@@ -83,9 +83,9 @@ caller yet; adding this arithmetic alone does not change a nightly or board.
 `scan_daily_state_inputs(repository, snapshot, *, ticker, history_start,
 decision_session)` binds the existing `panel_math.daily_state_lookup` to a
 bounded read of one ticker from `daily_market` in the supplied `SnapshotRef`.
-This contract is implemented in `daily_state_inputs.py`. No production raw-row
-assembler calls it yet, and it does not establish a complete forward panel or
-qualified board.
+This contract is implemented in `daily_state_inputs.py` and feeds
+`scan_panel_row`, which the native raw-row producer uses; it does not alone
+establish a complete forward panel or qualified board.
 
 The caller supplies explicit naive calendar dates, with `history_start <=
 decision_session`; intraday and timezone-aware values refuse. The read uses
@@ -127,9 +127,9 @@ before `NightlyEventInputs` assembly.
 ### Panel-row staging boundary (implemented)
 
 `scan_panel_row(repository, snapshot, key, *, decision_session,
-history_start)` is implemented in `panel_row_inputs.py`. No production
-raw-row producer calls it yet (`engine/v2/ops/ARCHITECTURE.md` "Cutover
-PR-6"); it is the raw-row producer's one call for one
+history_start)` is implemented in `panel_row_inputs.py`. The native raw-row
+producer calls it once per distinct `(ticker, event_date, session)` triple
+(`engine/v2/ops/ARCHITECTURE.md` "Cutover PR-6"); it is its one call for one
 `native_board_universe.BoardRequest` key's `panel_row`/`panel_anchor`
 pair. `panel_row.date` is the scored event's ISO calendar date, required by
 the scoring source-bundle consumer; it is never the decision or source-anchor
