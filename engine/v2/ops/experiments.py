@@ -717,33 +717,54 @@ def _annotate_variant_identity(report_path: Path, variant_id: str) -> dict:
     ``Variants tried: 1``, and a rerun replaces its prior section between the
     markers rather than duplicating it, so annotation is idempotent.
 
-    The directory entry is inspected with ``lstat()`` before any read or
-    write: a symlink, a non-regular entry, or a hardlink (``st_nlink > 1``)
-    is refused before any write with a generic, public-safe
-    ``VALIDATION_FAILED`` -- registered non-retryable -- leaving the staged
-    report's link and target bytes unchanged. ``run_experiment`` captures
-    that refusal as the typed failure receipt the worker re-raises, so no
-    successful report artifact, durable run, or ledger row is committed.
+    The report is opened once, read/write with ``O_NOFOLLOW`` -- failing
+    closed when no-follow is unavailable or the open fails -- and the opened
+    descriptor itself is validated with ``os.fstat``: a non-regular file or a
+    hardlink (``st_nlink > 1``) is refused before any write with a generic,
+    public-safe ``VALIDATION_FAILED`` -- registered non-retryable -- leaving
+    the staged report's link and target bytes unchanged, because the pathname
+    is never followed or reopened after the one open. ``run_experiment``
+    captures that refusal as the typed failure receipt the worker re-raises,
+    so no successful report artifact, durable run, or ledger row is committed.
     """
+    import os
     import stat
 
-    entry = report_path.lstat()
-    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink > 1:
+    if not hasattr(os, "O_NOFOLLOW"):
         raise fail("VALIDATION_FAILED", "experiment report is not a regular file")
-    start = "<!-- variant-identity:start -->"
-    end = "<!-- variant-identity:end -->"
-    text = report_path.read_text()
-    section = (f"{start}\n## Variant identity\n\n"
-               f"Variant ID: {variant_id}\nVariants tried: 1\n{end}")
-    if start in text and end in text:
-        head, _, rest = text.partition(start)
-        _, _, tail = rest.partition(end)
-        text = head + section + tail
-    else:
-        text = text.rstrip("\n") + "\n\n" + section + "\n"
-    report_path.write_text(text)
-    return {"report_hash": file_hash(report_path),
-            "report_bytes": report_path.stat().st_size}
+    try:
+        fd = os.open(report_path, os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        raise fail("VALIDATION_FAILED",
+                   "experiment report is not a regular file") from None
+    pinned = False
+    try:
+        entry = os.fstat(fd)
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+            raise fail("VALIDATION_FAILED", "experiment report is not a regular file")
+        with os.fdopen(fd, "r+b") as handle:
+            pinned = True
+            text = handle.read().decode("utf-8")
+            start = "<!-- variant-identity:start -->"
+            end = "<!-- variant-identity:end -->"
+            section = (f"{start}\n## Variant identity\n\n"
+                       f"Variant ID: {variant_id}\nVariants tried: 1\n{end}")
+            if start in text and end in text:
+                head, _, rest = text.partition(start)
+                _, _, tail = rest.partition(end)
+                text = head + section + tail
+            else:
+                text = text.rstrip("\n") + "\n\n" + section + "\n"
+            annotated = text.encode("utf-8")
+            handle.seek(0)
+            handle.write(annotated)
+            handle.truncate()
+            handle.flush()
+    finally:
+        if not pinned:
+            os.close(fd)
+    return {"report_hash": "sha256:" + hashlib.sha256(annotated).hexdigest(),
+            "report_bytes": len(annotated)}
 
 
 def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
