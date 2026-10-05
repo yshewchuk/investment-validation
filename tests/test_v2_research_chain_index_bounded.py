@@ -216,58 +216,7 @@ class _BatchProbe:
         return kept
 
 
-def test_overflow_rollback_discards_rejected_and_retained_batches(tmp_path, monkeypatch):
-    conn, store, snap = _commit_chains(
-        tmp_path,
-        {"2024": _rows(2024, [
-            ("TEST", "2024-01-10", 100), ("TEST", "2024-01-10", 101),
-            ("TEST", "2024-01-10", 102),
-            ("TEST", "2024-01-20", 200), ("TEST", "2024-01-20", 201),
-            ("TEST", "2024-01-20", 202),
-        ])},
-        maximum_batch_rows=1,
-    )
-    repository = Repository(conn, store)
-    probe = _BatchProbe("2024-01-10")
-    monkeypatch.setattr(_chains, "_chain_batch_filter", lambda tickers, wanted: probe)
-    intervals = []
-    original_scan = repository.scan
-
-    def record_scan(query, *, table_name):
-        intervals.append(query.time_interval)
-        return original_scan(query, table_name=table_name)
-
-    monkeypatch.setattr(repository, "scan", record_scan)
-
-    index = _chains.load_chain_index(
-        repository, snap, {("TEST", pd.Timestamp("2024-01-10")),
-                           ("TEST", pd.Timestamp("2024-01-20"))})
-
-    group = index.get("TEST", "2024-01-10")
-    assert group["strike"].tolist() == [100.0, 101.0, 102.0]
-    assert group["strike"].is_unique
-    # Requesting both dates makes the key_filter (ticker=TEST, obs_date in
-    # {01-10, 01-20}) admit every row in this single-ticker partition, so the
-    # key-filtered full-partition attempt (tried first, issue #271) overflows
-    # just like the old raw-row-count check would have; the month attempt
-    # (both dates share January) overflows too, and only the day-by-day retry
-    # succeeds. Every attempt's batches reach the filter before any attempt is
-    # known to fail or succeed.
-    assert intervals and intervals[0] is None  # the key_filter-narrowed full-partition attempt
-    assert all(interval is not None for interval in intervals[1:])
-    # Failed full-partition attempt: 4 batches (3 kept + 1 rejected). Failed
-    # month attempt: the same 4 batches again. Day retry: day 10 kept (3),
-    # days 11-19 empty, day 20 rejected (3, one empty-match batch each). Every
-    # failed attempt's kept rows are discarded — otherwise the final group
-    # would hold more than 3 rows.
-    assert (probe.raw_rows, probe.kept_rows, probe.rejected_rows) == (6, 3, 3)
-    assert probe.empty_matches == 3
-    gc.collect()
-    assert all(ref() is None for ref in probe.raw_refs)
-    conn.close()
-
-
-def test_terminal_day_overflow_still_refuses_with_a_batch_filter(tmp_path):
+def test_batch_filter_preserves_complete_partition_rows(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _rows(2024, [("TEST", "2024-01-15", i) for i in range(5)])},

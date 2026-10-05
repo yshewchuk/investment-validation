@@ -1,19 +1,17 @@
 """Issue #107: ``engine.v2.research._snapshot.read_table`` reads complete
 manifest-bounded partition populations and preserves nullable observation
-rows. It delegates to ``_scan.read_table`` for pinned selections and supports
-calendar month/day retries when a scan reports ``RESULT_LIMIT_EXCEEDED``.
+rows. It delegates to ``_scan.read_table`` for pinned selections and
+propagates typed limit refusals without automatic retry.
 
 Tests commit real ``option_chains``, ``trades`` and ``earnings_events``
 snapshots with ``tests/data_scan_support.py`` and exercise direct reads plus
 the issue #107 callers ``_chains.read_chain_keys`` and
-``_chains.load_chain_index``. Fault-injected overflow cases keep retry,
-frame-cleanup and batch-filter coverage.
+``_chains.load_chain_index``. Fault-injected overflow verifies that batches
+remain provisional until scan exhaustion.
 """
 from __future__ import annotations
 
-import gc
 import sys
-import weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -343,39 +341,13 @@ def test_read_table_keeps_non_midnight_event_rows_in_complete_read(tmp_path):
 
 # --------------------------------------------------------------------------
 # batch_filter: an optional per-batch predicate applied between to_pandas()
-# and accumulation, forwarded through every split path; omitted and explicit
+# and accumulation, applied before frame accumulation; omitted and explicit
 # None must behave exactly like no argument at all
 # --------------------------------------------------------------------------
 
 
 def _keep_only(frame: pd.DataFrame, obs_date: str) -> pd.DataFrame:
     return frame[pd.to_datetime(frame["obs_date"]) == pd.Timestamp(obs_date)]
-
-
-def _overflow_first_timed_scan_once(repository):
-    from engine.v2.data import errors
-
-    original_scan = repository.scan
-    partition_overflowed = False
-    timed_overflowed = False
-
-    def scan(query, *, table_name):
-        nonlocal partition_overflowed, timed_overflowed
-        if not partition_overflowed and query.time_interval is None:
-            partition_overflowed = True
-            raise errors.fail("RESULT_LIMIT_EXCEEDED", "injected partition overflow")
-        if partition_overflowed and not timed_overflowed and query.time_interval is not None:
-            batches = iter(original_scan(query, table_name=table_name))
-            try:
-                first = next(batches)
-            except StopIteration:
-                return
-            yield first
-            timed_overflowed = True
-            raise errors.fail("RESULT_LIMIT_EXCEEDED", "injected late timed-scan overflow")
-        yield from original_scan(query, table_name=table_name)
-
-    repository.scan = scan
 
 
 def test_read_table_batch_filter_none_behaves_like_omitted(tmp_path):
@@ -393,59 +365,44 @@ def test_read_table_batch_filter_none_behaves_like_omitted(tmp_path):
     conn.close()
 
 
-def test_batch_filter_discards_failed_month_frames_before_day_retry(tmp_path):
-    """An injected late month overflow must discard yielded frames before day retry."""
+def _overflow_after_first_batch_once(repository, attempts):
+    from engine.v2.data import errors
+
+    original_scan = repository.scan
+
+    def scan(query, *, table_name):
+        attempts.append(query)
+        batches = iter(original_scan(query, table_name=table_name))
+        try:
+            first = next(batches)
+        except StopIteration:
+            raise AssertionError("the synthetic partition must have a batch") from None
+        yield first
+        raise errors.fail("RESULT_LIMIT_EXCEEDED", "injected late scan overflow")
+
+    repository.scan = scan
+
+
+def test_batch_filter_rows_stay_provisional_on_limit_refusal(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
     )
     repository = Repository(conn, store)
-    _overflow_first_timed_scan_once(repository)
-
+    attempts = []
+    _overflow_after_first_batch_once(repository, attempts)
     seen: list[int] = []
 
     def keep_first_day(frame: pd.DataFrame) -> pd.DataFrame:
         seen.append(len(frame))
         return _keep_only(frame, "2024-01-10")
 
-    frame = read_table(repository, snap, "option_chains", _COLUMNS + ("strike",),
-                       partition_keys=["2024"], batch_filter=keep_first_day)
-    assert len(frame) == 3  # each 2024-01-10 row exactly once
-    assert frame["strike"].is_unique
-    assert seen and min(seen) > 0  # the filter saw (and discarded from) batches
-    conn.close()
-
-
-def test_failed_month_scan_frames_are_freed_before_the_first_day_retry(tmp_path):
-    """Frames from an injected failed month scan are freed before day retry."""
-    conn, store, snap = _commit_chains(
-        tmp_path,
-        {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
-    )
-    repository = Repository(conn, store)
-    _overflow_first_timed_scan_once(repository)
-
-    retained: list[weakref.ref] = []
-    seen: set[tuple] = set()
-    checked = False
-
-    def keep_first_day(frame: pd.DataFrame) -> pd.DataFrame:
-        nonlocal checked
-        keys = set(zip(frame["obs_date"], frame["strike"]))
-        if not checked and keys & seen:  # the day retry re-reads a seen row
-            gc.collect()
-            assert retained and all(ref() is None for ref in retained)
-            checked = True
-        seen.update(keys)
-        narrowed = _keep_only(frame, "2024-01-10")
-        retained.append(weakref.ref(narrowed))
-        return narrowed
-
-    frame = read_table(repository, snap, "option_chains", _COLUMNS + ("strike",),
-                       partition_keys=["2024"], batch_filter=keep_first_day)
-    assert checked
-    assert len(frame) == 3
-    assert frame["strike"].is_unique
+    with pytest.raises(DataError) as err:
+        read_table(repository, snap, "option_chains", _COLUMNS + ("strike",),
+                   partition_keys=["2024"], batch_filter=keep_first_day)
+    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert len(attempts) == 1 and attempts[0].time_interval is None
+    assert seen and min(seen) > 0
     conn.close()
 
 

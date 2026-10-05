@@ -83,22 +83,18 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 
 ## Inputs
 
-Target research reads cover each full pinned partition, including null
-observation times, subject to caller predicates and batch filtering. The
-manifest population bound limits candidate rows, not RSS/process memory — the
-recorded row-count sum of pinned fragments surviving pruning
-([data scan population rule](../data/ARCHITECTURE.md#invariants)). Each
-research query interval is bound by that same pinned-manifest
-membership/population bound — the one `scan_population_bound` result the data
-query explain and scan paths use for the same snapshot, contract ref,
-predicate set and interval — so research adds no second, research-side result
-limit. No smaller caller-side research request limit is
-threaded through the visible research scan API: research scans request the
-shared population bound, not a research-side result limit. Each interval scan —
-month/day split scans independently — carries its own bound, and an empty
-selected membership may query with zero result rows and a positive batch size.
-Retry/split behavior, error codes, frame population and ordering are
-unchanged.
+Target research reads cover each full pinned partition, including null and
+non-midnight observation times, subject to caller predicates and batch
+filtering. The manifest population bound limits candidate rows, not RSS or
+process memory — the recorded row-count sum of pinned fragments surviving
+pruning ([data scan population rule](../data/ARCHITECTURE.md#invariants)).
+Each scan uses that same bound for its snapshot, contract, predicates and
+interval; research adds no second result limit. Empty selected membership
+allows zero result rows with a positive batch size. Month/day retries and
+null-overflow refusals are not part of this contract: a complete read either
+returns its population or raises its typed refusal. Predicates, exact-pair
+filtering, batch filtering, successful row ordering and deduplication remain
+part of the read contract.
 
 The internal `_scan.read_table` and `_snapshot.read_table` readers accept an
 optional `batch_filter` callback. They invoke it immediately after each Arrow
@@ -346,12 +342,11 @@ uncaught traceback instead.
   `ChainIndex` contains only available plan keys. An explicit `index=`
   bypasses chain reads. `_build_run.run` creates an independent replay
   for each strategy.
-- **R3, retry.** None automatic. `SNAPSHOT_NOT_READY` and `SNAPSHOT_CONFLICT`
-  are the only two retryable codes this package can raise; a retry is an
-  operator re-running the same command (a scope head may have since
-  appeared, or the conflicting writer may have finished). Every other code
-  above is not retryable — re-running with the same arguments reproduces
-  the same refusal.
+- **R3, retry.** No scan automatically retries. `SNAPSHOT_NOT_READY` and
+  `SNAPSHOT_CONFLICT` are the only two retryable codes this package can raise;
+  an operator may rerun after the missing head appears or a conflicting
+  writer finishes. Limit and integrity refusals, including
+  `RESULT_LIMIT_EXCEEDED` and `MANIFEST_CORRUPT`, are not retried.
 - **R4, transaction.** Build-trades and reconcile-trades are the only
   writers here; both go through the one shared path,
   `_trades_publish.publish` → `engine.v2.data.generic_incremental.
@@ -363,16 +358,15 @@ uncaught traceback instead.
   silently overwriting or merging. `--dry-run` builds the same candidate
   and stops before the commit call, so the changeset can be inspected with
   no write at all.
-- **R5, partial write.** None observable: `commit_generic_table_candidate`
-  is the one write call, and it is the same atomic snapshot-commit
-  mechanism every other v2 writer uses (`engine.v2.data.generic_incremental`
-  — see `engine/v2/data`'s own doc for the commit protocol). A crash before
-  that call leaves the parent snapshot untouched; a crash during or after
-  it is the generic incremental writer's own atomicity guarantee, not
-  something this package adds to or weakens.
-- **R6, idempotency.** Read-only tools (fill quality, polygon fills, signal
-  screen, replay by itself) are naturally idempotent: the same resolved
-  snapshot and the same arguments always read the same rows and produce a
+- **R5, partial result/write.** Read batches stay provisional until scan
+  exhaustion; a later failure returns no partial frame. A smaller explicit
+  caller limit raises `RESULT_LIMIT_EXCEEDED`. Writes use the atomic
+  `commit_generic_table_candidate`: a pre-call crash leaves the parent
+  untouched, and commit atomicity is guaranteed by `generic_incremental`.
+- **R6, idempotency.** A byte-identical read of the same pinned snapshot and
+  request returns identical rows. Read-only tools (fill quality, polygon
+  fills, signal screen, replay by itself) are naturally idempotent: the same
+  resolved snapshot and arguments always read the same rows and produce a
   byte-identical report. Build-trades and reconcile-trades are NOT
   idempotent in the sense of "running twice changes nothing": each
   successful commit publishes a new `trades` version pinned to the

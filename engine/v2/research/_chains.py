@@ -174,9 +174,9 @@ def load_chain_index(repository, snapshot_ref, keys) -> ChainIndex:
     (:func:`_chain_batch_filter`) before it accumulates, so unmatched rows
     live no longer than the batch carrying them; the required groups stay
     resident (no cache, no resumability). The wanted ticker and obs_date sets
-    are also pushed down as a ``key_filter`` (:func:`_chain_key_filter`), so a
-    narrow request scans a year once instead of always calendar-splitting it;
-    the exact-pair membership still comes from ``batch_filter``. Years are visited in the manifest's
+    are also pushed down as a ``key_filter`` (:func:`_chain_key_filter`), so each
+    selected year is scanned once with a narrower candidate population; exact-pair
+    membership still comes from ``batch_filter``. Years are visited in the manifest's
     first-seen partition order — the order ``_scan.read_table`` traverses in
     the previous whole read, where ``partition_keys`` only filtered membership
     — and each already-filtered frame is kept, then they are concatenated once

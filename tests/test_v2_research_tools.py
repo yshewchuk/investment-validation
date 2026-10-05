@@ -24,7 +24,7 @@ import json
 import sqlite3
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -436,183 +436,29 @@ def test_polygon_fills_refuses_a_corrupt_manifest(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# _scan.read_table: year partitions split by month, months by day
-# --------------------------------------------------------------------------
+def test_read_table_passes_a_key_filter_into_every_partition_scan(tmp_path, monkeypatch):
+    rows = _option_chains_rows()
+    other = dict(rows[0], ticker="BBB")
+    conn, clock, store = _catalog(tmp_path)
+    _receipt, snapshot = _commit(conn, clock, store, {"option_chains": {2024: rows + [other]}},
+                                 receipt_id="research-key-filter")
+    repository = Repository(conn, store)
+    predicate = KeyPredicate(column="ticker", operator="in", values=("AAA",))
+    filters = []
+    original_scan = repository.scan
 
+    def record_scan(query, *, table_name):
+        filters.append(query.key_filter)
+        yield from original_scan(query, table_name=table_name)
 
-def _bound_row_selected(row, key_filter, time_interval) -> bool:
-    """Fake selection for ``scan_population_bound``: False only when an eq/in
-    key predicate or the half-open interval proves this row cannot match. An
-    uninspectable row stays a candidate — the real bound sums candidate
-    fragment membership from metadata and never a proven miss it cannot show."""
-    if not isinstance(row, dict):
-        return True
-    for predicate in key_filter:
-        if predicate.operator not in ("eq", "in") or predicate.column not in row:
-            continue
-        if row[predicate.column] not in predicate.values:
-            return False
-    if time_interval is None or time_interval.column not in row:
-        return True
-    try:
-        moment = pd.Timestamp(row[time_interval.column])
-        if pd.isna(moment):
-            return True
-        if (time_interval.start_inclusive is not None
-                and moment < pd.Timestamp(time_interval.start_inclusive)):
-            return False
-        if (time_interval.end_exclusive is not None
-                and moment >= pd.Timestamp(time_interval.end_exclusive)):
-            return False
-    except (TypeError, ValueError, OverflowError):
-        return True
-    return True
-
-
-class _CappedScanRepository:
-    """The ``Repository.scan`` surface, refusing any interval above ``cap`` rows."""
-
-    def __init__(self, rows: list[dict], *, cap: int, table_name: str = "option_chains"):
-        self.cap = cap
-        self.rows = rows
-        self.calls: list[object] = []
-        self.bound_calls: list[object] = []
-        self.snapshot = types.SimpleNamespace(
-            snapshot_id="snap-scale",
-            table_versions={table_name: types.SimpleNamespace(table_contract_ref="ref")})
-        self.contract = types.SimpleNamespace(
-            primary_key=("ticker", "obs_date"), observation_time_column="obs_date",
-            maximum_batch_rows=8)
-
-    def table_contract(self, snapshot_ref, table_name):
-        return self.contract
-
-    def fragment_records(self, snapshot_ref, table_name):
-        records = []
-        for year in sorted({row["obs_date"].year for row in self.rows}):
-            in_year = [row for row in self.rows if row["obs_date"].year == year]
-            records.append(types.SimpleNamespace(
-                partition_key=str(year), row_count=len(in_year),
-                time_min=min(row["obs_date"] for row in in_year).strftime("%Y-%m-%d"),
-                time_max=max(row["obs_date"] for row in in_year).strftime("%Y-%m-%d")))
-        return records
-
-    def scan_population_bound(self, snapshot_id, *, table_name, table_contract_ref,
-                              key_filter=(), time_interval=None) -> int:
-        """The real method's metadata-only bound, faked over ``self.rows``: the
-        same pinned-snapshot/table/contract-ref identity ``resolve`` and
-        ``_table_records`` check, then exactly the rows the eq/in predicates
-        and half-open interval leave as candidates. Planning only — never a
-        ``scan`` call and never a ``calls`` entry, so a bound cannot consume
-        the split/retry history an interval scan records; the exact arguments
-        and returned bound land in ``bound_calls``, paired with the scan
-        query they planned."""
-        if snapshot_id != self.snapshot.snapshot_id:
-            raise fail("SNAPSHOT_NOT_FOUND", "unknown snapshot id",
-                       details={"snapshot_id": snapshot_id})
-        version = self.snapshot.table_versions.get(table_name)
-        if version is None:
-            raise fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
-                       details={"table_name": table_name})
-        if table_contract_ref != version.table_contract_ref:
-            raise fail("CONTRACT_MISMATCH",
-                       "table_contract_ref does not match the version pinned under this table name",
-                       details={"table_name": table_name})
-        bound = sum(1 for row in self.rows if _bound_row_selected(
-            row, key_filter, time_interval))
-        self.bound_calls.append(types.SimpleNamespace(
-            snapshot_id=snapshot_id, table_name=table_name,
-            table_contract_ref=table_contract_ref, key_filter=tuple(key_filter),
-            time_interval=time_interval, bound=bound))
-        return bound
-
-    def scan(self, query, *, table_name):
-        self.calls.append(query)
-        start = datetime.fromisoformat(query.time_interval.start_inclusive)
-        end = datetime.fromisoformat(query.time_interval.end_exclusive)
-        selected = [row for row in self.rows
-                    if start <= row["obs_date"] < end
-                    and all(row.get(p.column) in p.values for p in query.key_filter)]
-        if len(selected) > self.cap:
-            raise fail("RESULT_LIMIT_EXCEEDED", "interval exceeds the fake cap")
-        if selected:
-            yield pa.RecordBatch.from_pylist(selected)
-
-
-def _scale_rows() -> list[dict]:
-    """Twelve rows in the first two days of January, six rows on March 9."""
-    rows = [{"ticker": f"T{day}{i:02d}", "obs_date": datetime(2024, 1, day)}
-            for day, count in ((5, 6), (6, 6)) for i in range(count)]
-    rows.extend({"ticker": f"M{i}", "obs_date": datetime(2024, 3, 9)} for i in range(6))
-    return rows
-
-
-def _call_intervals(repository) -> list[tuple[datetime, datetime]]:
-    return [(datetime.fromisoformat(call.time_interval.start_inclusive),
-             datetime.fromisoformat(call.time_interval.end_exclusive))
-            for call in repository.calls]
-
-
-def _interval_population_count(rows: list[dict], interval) -> int:
-    """An expectation independent of the fake: how many of ``rows`` fall in the
-    interval's half-open ``obs_date`` span, counted straight from the original
-    population records the repository was built with."""
-    start = (None if interval is None or interval.start_inclusive is None
-             else datetime.fromisoformat(interval.start_inclusive))
-    end = (None if interval is None or interval.end_exclusive is None
-           else datetime.fromisoformat(interval.end_exclusive))
-    return sum(1 for row in rows
-               if (start is None or start <= row["obs_date"])
-               and (end is None or row["obs_date"] < end))
-
-
-def test_read_table_splits_a_partition_by_month_then_day():
-    population = _scale_rows()
-    repository = _CappedScanRepository(population, cap=8)
-    frame = read_table(repository, repository.snapshot, "option_chains",
-                       ("ticker", "obs_date"))
-
-    assert len(frame) == 18
-    assert set(frame["ticker"]) == {row["ticker"] for row in repository.rows}
-    assert all(call.snapshot_id == "snap-scale" for call in repository.calls)
-
-    intervals = _call_intervals(repository)
-    assert intervals[0] == (datetime(2024, 1, 5), datetime(2024, 2, 1))
-    day_calls = [span for span in intervals if span[1] - span[0] == timedelta(days=1)]
-    assert [span[0] for span in day_calls[:2]] == [datetime(2024, 1, 5), datetime(2024, 1, 6)]
-    assert (datetime(2024, 3, 1), datetime(2024, 3, 10)) in intervals
-
-    assert len(repository.bound_calls) == len(repository.calls)
-    for bound_call, query in zip(repository.bound_calls, repository.calls):
-        assert bound_call.snapshot_id == query.snapshot_id == "snap-scale"
-        assert bound_call.table_name == "option_chains"
-        assert bound_call.table_contract_ref == query.table_contract_ref == "ref"
-        assert bound_call.key_filter == query.key_filter == ()
-        assert bound_call.time_interval == query.time_interval
-        assert bound_call.bound == _interval_population_count(
-            population, query.time_interval)
-        assert query.max_result_rows == bound_call.bound
-        assert 0 < query.max_batch_rows <= repository.contract.maximum_batch_rows
-
-
-def test_read_table_surfaces_the_error_when_a_day_still_exceeds_the_cap():
-    repository = _CappedScanRepository(_scale_rows(), cap=5)
-    with pytest.raises(DataError) as err:
-        read_table(repository, repository.snapshot, "option_chains", ("ticker", "obs_date"))
-
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
-    intervals = _call_intervals(repository)
-    assert any(span[1] - span[0] <= timedelta(days=1) for span in intervals)
-
-
-def test_read_table_passes_a_key_filter_into_every_scan():
-    predicate = KeyPredicate(column="ticker", operator="in", values=("T501",))
-    repository = _CappedScanRepository(_scale_rows(), cap=64)
-    frame = read_table(repository, repository.snapshot, "option_chains",
-                       ("ticker", "obs_date"), key_filter=(predicate,))
-
-    assert list(frame["ticker"]) == ["T501"]
-    assert all(call.key_filter == (predicate,) for call in repository.calls)
+    monkeypatch.setattr(repository, "scan", record_scan)
+    frame = read_table(repository, snapshot, "option_chains",
+                       ("ticker", "obs_date"), partition_keys=["2024"],
+                       key_filter=(predicate,))
+    assert frame["ticker"].tolist() == ["AAA"]
+    assert filters
+    assert all(predicate in recorded for recorded in filters)
+    conn.close()
 
 
 def test_scan_module_never_builds_rows_with_to_pylist():
