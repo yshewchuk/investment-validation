@@ -367,10 +367,9 @@ precisely what the enforcement-off procedure is for. This is a new numbered
 step, never an edit of v10: applied steps stay checksum-protected and the
 recreate flag itself joins the new step's checksum. This step removes only
 that schema-level uniqueness rule, computes no cache identity and rekeys no
-stored row. Slice 3 of
-[#133](https://github.com/yshewchuk/investment-validation/issues/133) is
-implemented: the current identity contract (Invariants) now folds the fetch
-unit's expected-key set into the writer's `normalization_id`.
+stored row. The current identity contract
+(Invariants) folds the fetch unit's expected-key set into the writer's
+`normalization_id`.
 
 The refusal is the migration framework's typed `OpsError`/`INTEGRITY_FAILED`
 integrity failure, not a `DATA_FAILURE_CODES` entry, and the concurrency and
