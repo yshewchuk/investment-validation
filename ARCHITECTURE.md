@@ -175,9 +175,10 @@ evidence. See the models and data component contracts.
     closure file also matches, conservatively); a collected
     test file is a leaf (selects itself and its static importers, never the whole suite); the
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
-    resolved dependencies produce precise edges; recognized unresolved dependencies produce
-    catch-all edges and may widen selection through the #155 fail-safe test set, without
-    necessarily selecting every test. `full_suite` paths, an unrecognized
+    resolved dependencies produce precise edges; a literal script launch to a non-root path is
+    unresolved (root-level script launches and `-m` retain precise behavior); recognized
+    unresolved dependencies produce catch-all edges and may widen selection through the #155
+    fail-safe test set, without necessarily selecting every test. `full_suite` paths, an unrecognized
     path, a deleted test file, or a graph or scan failure returns the `__ALL__` sentinel and runs
     the full suite. If the selector command itself errors, the CLI exits nonzero without printing a
     selection; the workflow job fails before pytest rather than proceeding with a narrowed run.

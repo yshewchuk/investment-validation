@@ -742,51 +742,6 @@ def _module_run_targets(dotted: str, tracked_set: set[str],
     return edges | {target, main}
 
 
-def _literal_script_imports_tracked_sibling(target: str, tracked_set: set[str]) -> bool:
-    """True if a tracked script target's own non-root directory holds a module
-    named by the first component of one of its absolute imports.
-
-    This is deliberately narrow: only `import name` or `from name import ...`,
-    where `name` has no leading dot, is checked -- against
-    `<script-dir>/head.py` and against ANY tracked Python file beneath
-    `<script-dir>/head/`, where `head` is `name.split(".", 1)[0]`. A dotted
-    import resolves the same way at runtime (`import helpers.util` runs
-    `<script-dir>/helpers/util.py` before anything else whether or not that
-    directory is a regular package -- a namespace package with no
-    `__init__.py`, and a module nested deeper under it, are both loaded out of
-    the script's own directory), and a dotted name whose head shadows a tracked
-    sibling package (e.g. `import engine.v2` with a sibling `engine` package)
-    can be answered out of the script's own directory rather than the repo
-    root. Such a launch can load a sibling module that repo-root import
-    resolution would never name, so the process target stays unresolved instead
-    of keeping only the precise script edge. Read or parse failures are
-    unresolved too."""
-    script_dir = os.path.dirname(target)
-    if not script_dir:
-        return False
-    try:
-        tree = ast.parse((REPO / target).read_text(encoding="utf-8"), filename=target)
-    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
-        return True
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names = [node.module]
-        else:
-            continue
-        for name in names:
-            head = name.split(".", 1)[0]
-            if not head:
-                continue
-            sibling_dir = f"{script_dir}/{head}/"
-            if (f"{script_dir}/{head}.py" in tracked_set
-                    or any(p.startswith(sibling_dir) and p.endswith(".py")
-                           for p in tracked_set)):
-                return True
-    return False
-
-
 def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
                          roots: set[str], sys_aliases: set[str]) -> tuple[set[str], bool]:
     """(precise edges, unresolved) for one subprocess argv expression.
@@ -798,12 +753,16 @@ def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
     unresolved, including an unknown literal command and a shell
     interpreter (`sh`, `bash`) whose own command line is never analyzed. A
     proved-Python first element (`python`/`python3`/versioned basename or
-    `<sys alias>.executable`) resolves exactly one literal script, or one
-    literal `-m dotted.name` target through `_module_run_targets` (a
+    `<sys alias>.executable`) keeps precise edges for a root-level literal
+    script and for one literal `-m dotted.name` target through
+    `_module_run_targets` (a
     regular module file, or a package's `__init__.py` plus `__main__.py`,
     each plus tracked ancestor package `__init__.py` files), through the
     interpreter's supported flags (`-u`, `-X utf8`, `-W ignore`, `--`,
-    ...). Everything else is unresolved: a non-literal argv or first
+    ...). Any literal script path below the repository root
+    (`os.path.dirname(target)` nonempty) is unresolved conservatively; no
+    script source or import inspection is done. Everything else is
+    unresolved: a non-literal argv or first
     element, `-c`, `-m` of an untracked module or a package without a
     tracked `__main__.py`, a script that is not tracked, or an interpreter
     flag this scan does not support. An unresolved launch keeps the
@@ -858,7 +817,7 @@ def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
         target = _resolve_script_target(text, tracked_set)
         if target is None:
             return set(), True
-        if _literal_script_imports_tracked_sibling(target, tracked_set):
+        if os.path.dirname(target):
             return set(), True
         return {target}, False
     if i < len(elts):
@@ -866,8 +825,7 @@ def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
         if text is None:
             return set(), True
         target = _resolve_script_target(text, tracked_set)
-        if target is not None and not _literal_script_imports_tracked_sibling(
-                target, tracked_set):
+        if target is not None and not os.path.dirname(target):
             return {target}, False
     return set(), True
 

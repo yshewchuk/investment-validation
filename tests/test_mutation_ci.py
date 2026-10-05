@@ -3535,24 +3535,23 @@ def test_build_import_graph_an_env_var_sys_path_insert_still_fails_safe(tmp_path
 
 
 def test_build_import_graph_a_python_subprocess_literal_script_adds_only_that_edge(tmp_path, monkeypatch):
-    # A literal Python launch of a TRACKED script keeps the precise edge it
-    # resolved to -- `[sys.executable, '-u', 'tools/worker.py']` depends on
-    # tools/worker.py, and on nothing else: an inert `-u` does not stop the
-    # scan, and because the target WAS resolved there is no whole-file
-    # catch-all (compare the `-c`, variable-argv and unresolved-target tests
-    # above and below, which must still fail safe).
-    (tmp_path / "tools").mkdir()
-    (tmp_path / "tools" / "runner.py").write_text(
+    # A literal Python launch of a tracked ROOT-LEVEL script keeps the precise
+    # edge it resolved to -- `[sys.executable, '-u', 'worker.py']` depends on
+    # worker.py, and on nothing else: an inert `-u` does not stop the scan, and
+    # because the target was a resolvable root-level script there is no
+    # whole-file catch-all (compare the `-c`, variable-argv, non-root script,
+    # and unresolved-target tests above and below, which must still fail safe).
+    (tmp_path / "runner.py").write_text(
         "import subprocess, sys\n"
-        "subprocess.run([sys.executable, '-u', 'tools/worker.py'])\n")
-    (tmp_path / "tools" / "worker.py").write_text("W = 1\n")
+        "subprocess.run([sys.executable, '-u', 'worker.py'])\n")
+    (tmp_path / "worker.py").write_text("W = 1\n")
     (tmp_path / "engine").mkdir()
     (tmp_path / "engine" / "unrelated.py").write_text("Z = 1\n")
-    tracked = ["tools/runner.py", "tools/worker.py", "engine/unrelated.py"]
+    tracked = ["runner.py", "worker.py", "engine/unrelated.py"]
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    assert graph["tools/runner.py"] == {"tools/worker.py"}
-    assert "tools/runner.py" not in pilot.dynamic_files(graph)
+    assert graph["runner.py"] == {"worker.py"}
+    assert "runner.py" not in pilot.dynamic_files(graph)
 
 
 def test_build_import_graph_a_python_subprocess_dash_m_adds_only_that_module(tmp_path, monkeypatch):
@@ -3577,137 +3576,147 @@ def test_build_import_graph_a_python_subprocess_dash_m_adds_only_that_module(tmp
     assert "tools/runner.py" not in pilot.dynamic_files(graph)
 
 
-def test_build_import_graph_a_literal_python_script_sibling_import_fails_safe(tmp_path, monkeypatch):
-    # #413: launching `tools/worker.py` literally can still run through the
-    # child script's own directory, so a bare `import sibling` that names a
-    # tracked sibling module is not proven by the precise script edge alone.
-    # The launcher becomes unresolved and its static importer is selected by
-    # the #155 fail-safe when another test's real edge triggers the changed
-    # non-test source; a clean unrelated test stays out.
+_COARSE_SCRIPT_SCENARIOS = [
+    pytest.param(
+        {
+            "launcher": "engine/launcher.py",
+            "script": "engine/worker.py",
+            "worker": "import sibling\n",
+            "changed": "engine/sibling.py",
+            "changed_body": "SIBLING = 1\n",
+            "direct": "import engine.sibling\n",
+            "forbidden_init": None,
+        },
+        id="plain-sibling-import"),
+    pytest.param(
+        {
+            "launcher": "engine/launcher.py",
+            "script": "engine/worker.py",
+            "worker": "import helpers.util\nfrom helpers.util import thing\n",
+            "changed": "engine/helpers/util.py",
+            "changed_body": "thing = 2\n",
+            "direct": "import engine.helpers.util\n",
+            "forbidden_init": "engine/helpers/__init__.py",
+        },
+        id="dotted-sibling-import"),
+    pytest.param(
+        {
+            "launcher": "checks/launcher.py",
+            "script": "checks/worker.py",
+            "worker": "import helpers.util\n",
+            "changed": "checks/helpers/util.py",
+            "changed_body": "thing = 2\n",
+            "direct": "import checks.helpers.util\n",
+            "forbidden_init": "checks/helpers/__init__.py",
+        },
+        id="namespace-package-sibling-import"),
+    pytest.param(
+        {
+            "launcher": "engine/launcher.py",
+            "script": "engine/worker.py",
+            "worker": "import importlib\nimportlib.import_module('sibling')\n",
+            "changed": "engine/sibling.py",
+            "changed_body": "SIBLING = 1\n",
+            "direct": "import engine.sibling\n",
+            "forbidden_init": None,
+        },
+        id="literal-import-module-sibling-import"),
+]
+
+
+@pytest.mark.parametrize("case", _COARSE_SCRIPT_SCENARIOS)
+def test_select_pr_tests_a_launched_non_root_script_selects_its_importer_and_a_real_dependent(
+        case, tmp_path, monkeypatch):
+    # The coarse rule: a literal launch of a tracked Python script BELOW the
+    # repository root is unresolved even when the script imports a sibling
+    # module through its own directory, so the launcher test is selected by the
+    # #155 fail-safe while a separate static importer of the changed sibling is
+    # selected by its ordinary edge -- and an unrelated clean test is not.
+    launcher = case["launcher"]
+    script = case["script"]
+    changed = case["changed"]
     tracked = _write_repo(tmp_path, {
-        "tools/launcher.py": (
+        launcher: (
             "import subprocess, sys\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
+            f"subprocess.run([sys.executable, {script!r}])\n"
             "VALUE = 1\n"),
-        "tools/worker.py": "import sibling\n",
-        "tools/sibling.py": "SIBLING = 1\n",
+        script: case["worker"],
+        changed: case["changed_body"],
         "engine/unrelated.py": "Z = 1\n",
-        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
+        "tests/test_launcher.py": (
+            f"from {launcher[:-3].replace('/', '.')} import VALUE\n"),
+        "tests/test_direct.py": case["direct"],
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph[launcher] == set(tracked) - {launcher}
+    assert launcher in pilot.dynamic_files(graph)
+    assert launcher in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, [changed], graph=graph)
+    assert selected is not None
+    assert "tests/test_launcher.py" in selected
+    assert "tests/test_direct.py" in selected
+    assert "tests/test_clean.py" not in selected
+    if case["forbidden_init"] is not None:
+        assert case["forbidden_init"] not in graph
+
+
+def test_select_pr_tests_a_root_level_python_script_launch_stays_precise(tmp_path, monkeypatch):
+    # The precision contrast under the coarse rule: a root-level script target
+    # has no directory to hide a sibling import behind, so `[sys.executable,
+    # 'worker.py']` remains exactly as precise as an ordinary import edge. An
+    # unrelated change must not drag the launcher's test into selection; a
+    # change to the launched root-level script itself still must.
+    tracked = _write_repo(tmp_path, {
+        "launcher.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'worker.py'])\n"
+            "VALUE = 1\n"),
+        "worker.py": "W = 1\n",
+        "engine/unrelated.py": "Z = 1\n",
+        "tests/test_launcher.py": "from launcher import VALUE\n",
         "tests/test_direct.py": "import engine.unrelated\n",
         "tests/test_clean.py": "X = 1\n",
     })
     monkeypatch.setattr(pilot, "REPO", tmp_path)
     graph = pilot.build_import_graph(tracked)
-    launcher = "tools/launcher.py"
-    assert graph[launcher] == set(tracked) - {launcher}
-    assert launcher in pilot.dynamic_files(graph)
-    assert launcher in pilot.unresolved_import_files(tracked)
-    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/unrelated.py"], graph=graph)
-    assert selected is not None
-    assert "tests/test_launcher.py" in selected
-    assert "tests/test_direct.py" in selected
-    assert "tests/test_clean.py" not in selected
-
-
-def test_build_import_graph_a_literal_python_script_dotted_sibling_import_fails_safe(
-        tmp_path, monkeypatch):
-    # The dotted sibling gap: `import helpers.util` in a launched script runs
-    # `<script-dir>/helpers/__init__.py` first when that package is tracked, so
-    # the precise script edge alone still under-approximates. The launcher must
-    # fail safe exactly as it does for a bare `import sibling` above.
-    tracked = _write_repo(tmp_path, {
-        "tools/launcher.py": (
-            "import subprocess, sys\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
-            "VALUE = 1\n"),
-        "tools/worker.py": "import helpers.util\nfrom helpers.util import thing\n",
-        "tools/helpers/__init__.py": "H = 1\n",
-        "tools/helpers/util.py": "thing = 2\n",
-        "engine/unrelated.py": "Z = 1\n",
-        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
-        "tests/test_direct.py": "import engine.unrelated\n",
-        "tests/test_clean.py": "X = 1\n",
-    })
-    monkeypatch.setattr(pilot, "REPO", tmp_path)
-    graph = pilot.build_import_graph(tracked)
-    launcher = "tools/launcher.py"
-    assert graph[launcher] == set(tracked) - {launcher}
-    assert launcher in pilot.dynamic_files(graph)
-    assert launcher in pilot.unresolved_import_files(tracked)
-    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/unrelated.py"], graph=graph)
-    assert selected is not None
-    assert "tests/test_launcher.py" in selected
-    assert "tests/test_direct.py" in selected
-    assert "tests/test_clean.py" not in selected
-
-
-def test_build_import_graph_a_literal_python_script_namespace_package_sibling_import_fails_safe(
-        tmp_path, monkeypatch):
-    # The namespace-package gap: `import helpers.util` in a launched script
-    # loads `<script-dir>/helpers/util.py` at runtime even with no
-    # `helpers/__init__.py` anywhere, and a module nested deeper under that
-    # directory behaves the same -- a tracked Python file BENEATH the matching
-    # sibling directory fails the launch safe too, not only a tracked sibling
-    # `__init__.py`. Changing tools/helpers/util.py then reaches the launcher's
-    # static importer through the #155 fail-safe (the launcher is unresolved),
-    # the test importing it directly through the precise edge, and never the
-    # clean test. `_SELECT_CFG`'s `tools/*` would force the full-suite sentinel
-    # for the changed path asserted here, so this cfg keeps only the conftest.
-    cfg = {"pr_selection": {"inert": ["*.md"], "inert_skip": [],
-                           "full_suite": ["tests/conftest.py"]}}
-    tracked = _write_repo(tmp_path, {
-        "tools/launcher.py": (
-            "import subprocess, sys\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
-            "VALUE = 1\n"),
-        "tools/worker.py": "import helpers.util\n",
-        "tools/helpers/util.py": "thing = 2\n",
-        "engine/unrelated.py": "Z = 1\n",
-        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
-        "tests/test_direct.py": "import tools.helpers.util\n",
-        "tests/test_clean.py": "X = 1\n",
-    })
-    monkeypatch.setattr(pilot, "REPO", tmp_path)
-    graph = pilot.build_import_graph(tracked)
-    launcher = "tools/launcher.py"
-    assert graph[launcher] == set(tracked) - {launcher}
-    assert launcher in pilot.dynamic_files(graph)
-    assert launcher in pilot.unresolved_import_files(tracked)
-    selected = pilot.select_pr_tests(cfg, ["tools/helpers/util.py"], graph=graph)
-    assert selected is not None
-    assert "tests/test_launcher.py" in selected
-    assert "tests/test_direct.py" in selected
-    assert "tests/test_clean.py" not in selected
-
-
-def test_build_import_graph_a_literal_python_script_without_sibling_import_stays_precise(
-        tmp_path, monkeypatch):
-    # The contrast that keeps #413 from widening every script launch: a dotted
-    # repository-root import in the target script resolves through the normal
-    # roots, not as a sibling, so the literal script edge remains precise and
-    # its test importer is not pulled into selection by an unrelated change
-    # reached only through another test's direct import.
-    tracked = _write_repo(tmp_path, {
-        "tools/launcher.py": (
-            "import subprocess, sys\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
-            "VALUE = 1\n"),
-        "tools/worker.py": "import engine.control\n",
-        "engine/control.py": "C = 1\n",
-        "engine/changed.py": "Y = 1\n",
-        "tools/sibling.py": "SIBLING = 1\n",
-        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
-        "tests/test_direct.py": "import engine.changed\n",
-        "tests/test_clean.py": "X = 1\n",
-    })
-    monkeypatch.setattr(pilot, "REPO", tmp_path)
-    graph = pilot.build_import_graph(tracked)
-    launcher = "tools/launcher.py"
-    assert graph[launcher] == {"tools/worker.py"}
+    launcher = "launcher.py"
+    assert graph[launcher] == {"worker.py"}
     assert launcher not in pilot.dynamic_files(graph)
     assert launcher not in pilot.unresolved_import_files(tracked)
-    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/changed.py"], graph=graph)
-    assert selected == ["tests/test_direct.py"]
+    assert pilot.select_pr_tests(_SELECT_CFG, ["engine/unrelated.py"], graph=graph) == [
+        "tests/test_direct.py"]
+    assert pilot.select_pr_tests(_SELECT_CFG, ["worker.py"], graph=graph) == [
+        "tests/test_launcher.py"]
+
+
+def test_select_pr_tests_a_python_dash_m_launch_stays_precise(tmp_path, monkeypatch):
+    # The `-m` branch keeps its resolved-module precision independently of the
+    # coarse script-path rule: `python -m engine.worker` is the same edge as an
+    # ordinary import of `engine.worker`, so changing the resolved target
+    # selects the launcher's test while changing a sibling module does not.
+    tracked = _write_repo(tmp_path, {
+        "launcher.py": (
+            "import subprocess\n"
+            "subprocess.run(['python3', '-m', 'engine.worker'])\n"
+            "VALUE = 1\n"),
+        "engine/worker.py": "W = 1\n",
+        "engine/other.py": "Z = 1\n",
+        "tests/test_launcher.py": "from launcher import VALUE\n",
+        "tests/test_direct.py": "import engine.other\n",
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    launcher = "launcher.py"
+    assert graph[launcher] == {"engine/worker.py"}
+    assert launcher not in pilot.dynamic_files(graph)
+    assert launcher not in pilot.unresolved_import_files(tracked)
+    assert pilot.select_pr_tests(_SELECT_CFG, ["engine/other.py"], graph=graph) == [
+        "tests/test_direct.py"]
+    assert pilot.select_pr_tests(_SELECT_CFG, ["engine/worker.py"], graph=graph) == [
+        "tests/test_launcher.py"]
 
 
 def test_build_import_graph_a_subprocess_dash_m_pytest_always_fails_safe(tmp_path, monkeypatch):
@@ -4842,20 +4851,20 @@ def test_build_import_graph_shell_and_executable_keywords_control_precision(tail
 
 
 def test_build_import_graph_a_python_subprocess_script_launch_with_a_non_none_cwd_fails_safe(tmp_path, monkeypatch):
-    # `[sys.executable, 'tools/worker.py']` alone keeps the precise edge (the
-    # literal-script test above); a non-None `cwd=` takes it away. The
-    # relative script resolves against the CHILD's working directory, which
-    # this scan cannot see -- literal (`cwd='engine'`) or not (`cwd=root`),
-    # any non-None spelling could redirect the launch to a different tracked
-    # file than the edge it would have named, so the whole file fails safe.
+    # `[sys.executable, 'worker.py']` alone keeps the precise root-level script
+    # edge; a non-None `cwd=` takes it away. The relative script resolves
+    # against the CHILD's working directory, which this scan cannot see --
+    # literal (`cwd='engine'`) or not (`cwd=root`), any non-None spelling could
+    # redirect the launch to a different tracked file than the edge it would
+    # have named, so the whole file fails safe.
     tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
-        "tools/runner.py": (
+        "runner.py": (
             "import subprocess, sys\n"
             "root = 'somewhere'\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'], cwd=root)\n"),
-        "tools/worker.py": "W = 1\n",
+            "subprocess.run([sys.executable, 'worker.py'], cwd=root)\n"),
+        "worker.py": "W = 1\n",
     })
-    rel = "tools/runner.py"
+    rel = "runner.py"
     assert graph[rel] == set(tracked) - {rel}
     assert rel in pilot.dynamic_files(graph)
     assert rel in pilot.unresolved_import_files(tracked)
@@ -4881,16 +4890,17 @@ def test_build_import_graph_a_python_subprocess_dash_m_launch_with_a_non_none_cw
 
 def test_build_import_graph_a_python_subprocess_launch_with_literal_cwd_none_stays_precise(tmp_path, monkeypatch):
     # The explicit, literal `cwd=None` is exactly the directory modelled by
-    # the precise script edge above (the child inherits the parent's cwd),
-    # so precision is unchanged: one resolved edge, no catch-all, no taint.
+    # the precise root-level script edge above (the child inherits the parent's
+    # cwd), so precision is unchanged: one resolved edge, no catch-all, no
+    # taint.
     tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
-        "tools/runner.py": (
+        "runner.py": (
             "import subprocess, sys\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'], cwd=None)\n"),
-        "tools/worker.py": "W = 1\n",
+            "subprocess.run([sys.executable, 'worker.py'], cwd=None)\n"),
+        "worker.py": "W = 1\n",
     })
-    rel = "tools/runner.py"
-    assert graph[rel] == {"tools/worker.py"}
+    rel = "runner.py"
+    assert graph[rel] == {"worker.py"}
     assert rel not in pilot.dynamic_files(graph)
     assert rel not in pilot.unresolved_import_files(tracked)
 
@@ -4934,18 +4944,18 @@ def test_subprocess_env_keyword_controls_launch_resolution(tail, expected_unreso
 
 
 def test_build_import_graph_a_python_launch_with_a_literal_env_mapping_fails_safe(tmp_path, monkeypatch):
-    # `[sys.executable, 'tools/worker.py']` alone keeps the precise edge; any
-    # non-None `env=` takes it away. The mapping can set PYTHONPATH, so the
-    # same script path may resolve to a different tracked file -- or none --
-    # inside the child, and the whole file fails safe.
+    # `[sys.executable, 'worker.py']` alone keeps the precise root-level script
+    # edge; any non-None `env=` takes it away. The mapping can set PYTHONPATH,
+    # so the same script path may resolve to a different tracked file -- or
+    # none -- inside the child, and the whole file fails safe.
     tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
-        "tools/runner.py": (
+        "runner.py": (
             "import subprocess, sys\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'],\n"
+            "subprocess.run([sys.executable, 'worker.py'],\n"
             "               env={'PYTHONPATH': 'elsewhere'})\n"),
-        "tools/worker.py": "W = 1\n",
+        "worker.py": "W = 1\n",
     })
-    rel = "tools/runner.py"
+    rel = "runner.py"
     assert graph[rel] == set(tracked) - {rel}
     assert rel in pilot.dynamic_files(graph)
     assert rel in pilot.unresolved_import_files(tracked)
@@ -4954,15 +4964,16 @@ def test_build_import_graph_a_python_launch_with_a_literal_env_mapping_fails_saf
 def test_build_import_graph_a_python_launch_with_a_dynamic_env_fails_safe(tmp_path, monkeypatch):
     # A non-literal mapping (os.environ, a variable, a call result) is never
     # proven not to rewrite PATH/PYTHONPATH: exactly the same rule as a
-    # literal non-None mapping.
+    # literal non-None mapping, even for a root-level script that would
+    # otherwise stay precise.
     tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
-        "tools/runner.py": (
+        "runner.py": (
             "import os, subprocess, sys\n"
             "child_env = dict(os.environ)\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'], env=child_env)\n"),
-        "tools/worker.py": "W = 1\n",
+            "subprocess.run([sys.executable, 'worker.py'], env=child_env)\n"),
+        "worker.py": "W = 1\n",
     })
-    rel = "tools/runner.py"
+    rel = "runner.py"
     assert graph[rel] == set(tracked) - {rel}
     assert rel in pilot.dynamic_files(graph)
     assert rel in pilot.unresolved_import_files(tracked)
@@ -4985,16 +4996,16 @@ def test_build_import_graph_an_allowlisted_command_with_a_non_none_env_fails_saf
 
 def test_build_import_graph_a_python_subprocess_launch_with_literal_env_none_stays_precise(tmp_path, monkeypatch):
     # Negative control: the accepted literal `env=None` changes nothing (the
-    # child inherits the parent's environment), so the precise script edge
-    # survives with no catch-all and no taint -- mirroring cwd=None.
+    # child inherits the parent's environment), so the precise root-level script
+    # edge survives with no catch-all and no taint -- mirroring cwd=None.
     tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
-        "tools/runner.py": (
+        "runner.py": (
             "import subprocess, sys\n"
-            "subprocess.run([sys.executable, 'tools/worker.py'], env=None)\n"),
-        "tools/worker.py": "W = 1\n",
+            "subprocess.run([sys.executable, 'worker.py'], env=None)\n"),
+        "worker.py": "W = 1\n",
     })
-    rel = "tools/runner.py"
-    assert graph[rel] == {"tools/worker.py"}
+    rel = "runner.py"
+    assert graph[rel] == {"worker.py"}
     assert rel not in pilot.dynamic_files(graph)
     assert rel not in pilot.unresolved_import_files(tracked)
 
@@ -5011,9 +5022,9 @@ def test_select_pr_tests_helper_with_env_redirected_launch_taints_its_importer(t
             "import subprocess, sys\n"
             "\n"
             "def go():\n"
-            "    subprocess.run([sys.executable, 'tools/worker.py'],\n"
+            "    subprocess.run([sys.executable, 'worker.py'],\n"
             "                   env={'PYTHONPATH': 'elsewhere'})\n"),
-        "tools/worker.py": "W = 1\n",
+        "worker.py": "W = 1\n",
         "tests/test_a.py": "from tests.helper import go\n\ndef test_go():\n    go()\n",
         "tests/test_direct.py": "import engine.b\n\ndef test_b():\n    assert engine.b.VALUE == 2\n",
         "tests/test_clean.py": "X = 1\n",
