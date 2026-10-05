@@ -1057,9 +1057,9 @@ waits without submitting until its paired succeeded inputs are ready.
   successfully with an empty `records` object — refusing every row is a
   valid, reportable outcome, not a worker failure. Exception: the job fails
   if two refusals, or a record and a refusal, collide on canonical key
-  (two `BoardRequest`s that differ only by time-of-day within the same
-  `event_date` truncate to the same key) — the worker raises before either
-  output file is written, rather than silently dropping one row.
+  (the full event-date instant is in the key, so distinct instants remain distinct),
+  the worker raises before either output file is written, rather than silently
+  dropping one row.
 - `computed_moves_store.py` commits a new snapshot generation only when the
   `computed_moves` table's content actually changes, carrying every other
   table forward unchanged alongside the fresh `computed_moves` table version
