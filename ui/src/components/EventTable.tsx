@@ -1,5 +1,12 @@
 import type { EventPageItem, EventScoreSummary } from "../api/types";
-import { compatibilityLink, fmtNumber, fmtPercent, fmtText, headlineExpectedReturn } from "../format";
+import {
+  compatibilityLink,
+  fmtNumber,
+  fmtPercent,
+  fmtPercentagePoint,
+  fmtText,
+  headlineExpectedReturn,
+} from "../format";
 import { eventHash } from "../routes";
 
 interface Props {
@@ -47,8 +54,8 @@ function ScoreRow({
           <span data-testid="raw-verdict">gate_pass: {fmtText(score.verdict)}</span>
         )}
       </td>
-      <td data-testid="driver-forecast-cell">{fmtPercent(score.driver_forecast)}</td>
-      <td>{fmtPercent(score.market_implied_move)}</td>
+      <td data-testid="driver-forecast-cell">{fmtPercentagePoint(score.driver_forecast)}</td>
+      <td>{fmtPercentagePoint(score.market_implied_move)}</td>
       <td data-testid="entry-premium-cell">{fmtNumber(score.entry_premium)}</td>
       <td data-testid="expected-return-cell">
         {fmtPercent(headline.value)}

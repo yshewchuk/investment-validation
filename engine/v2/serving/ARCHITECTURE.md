@@ -32,6 +32,26 @@ projection bindings. Operations transport can return queued command job identiti
 The existing operations HTML/JavaScript shells and pinned legacy bundle hosting
 remain a compatibility exception; their presentation still requires React migration.
 
+### Financial display units
+Serving preserves producer values; `legacy_via_v2` and native projections do not
+rescale them. These units are part of the JSON contract and apply to board and
+detail projections from either producer:
+
+| Fields | Unit on the wire |
+|---|---|
+| `driver_forecast`, `market_implied_move`, `forecast_p10`, `forecast_p90`, `driver_p10`, `driver_p90` | Percentage points; `5.0` means `5.0%` of spot. |
+| `entry_premium` | USD per position. |
+| `headline_expected_return` and `exp_pnl_model`, `exp_pnl_analog`, `exp_pnl_sim` | Fraction of entry cost; `0.05` means `5.0%`. |
+| `win_model`, `win_analog`, `win_sim` | Probability fraction in `[0, 1]`. |
+| `coverage_summary` keys `planned_population`, `compared_population` | Whole-number counts, serialized as JSON numbers. |
+| Other `coverage_summary` ratios | Fraction in `[0, 1]`. |
+
+Null remains unavailable, never zero. Producers and serving projections preserve
+these units. The React presentation layer formats by field unit exactly once:
+percentage points receive a percent sign without scaling; fractions are multiplied
+by 100 for percent display; counts use integer formatting. No consumer may infer
+units from a generic number type or apply a second conversion.
+
 ## Dependencies
 Imports `contracts`, `foundation`, `data.repository` (`projections`), `models.deployment`
 (`operations`), `registry.strategies` (`derivation_projection`) and `parity`
