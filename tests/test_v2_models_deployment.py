@@ -401,6 +401,53 @@ def test_promote_after_crash_between_pointer_write_and_history_repairs_history(t
     assert current_pointer(tmp_path).release_id == "r1"
 
 
+def test_rollback_refuses_failed_target_without_repairing_crash_window_history(
+        tmp_path, monkeypatch):
+    """A rollback whose target's staging completion says failed refuses
+    StagingNotSuccessful (non-retryable) despite the pending crash repair:
+    DEPLOYED and every recorded history entry keep their exact bytes, the
+    missing history entry for the crash-window pointer is never appended,
+    and the pointer still names r2 -- the refusal leaves both pointer and
+    history untouched."""
+    r1, inv1, pay1 = _fixture("r1", intercept=1.0, coefficient=2.0)
+    r2, inv2, pay2 = _fixture("r2", intercept=10.0, coefficient=20.0)
+    staged_r1 = stage_release(tmp_path, r1, inv1, pay1)
+    stage_release(tmp_path, r2, inv2, pay2)
+    deployment_module.mark_staging_succeeded(tmp_path, "r1")
+    deployment_module.mark_staging_succeeded(tmp_path, "r2")
+    promote(tmp_path, "r1")
+
+    real_append = deployment_module._append_history
+
+    def _crash(root, state):
+        raise RuntimeError("simulated crash between pointer write and history append")
+
+    monkeypatch.setattr(deployment_module, "_append_history", _crash)
+    with pytest.raises(RuntimeError):
+        promote(tmp_path, "r2")
+    monkeypatch.setattr(deployment_module, "_append_history", real_append)
+
+    status_path = tmp_path / "releases" / "r1" / "staging-status.json"
+    status_path.write_text(json.dumps({
+        "release_id": "r1",
+        "release_hash": staged_r1.release_hash,
+        "state": "failed",
+    }))
+
+    deployed_bytes = (tmp_path / "DEPLOYED").read_bytes()
+    first_entry_bytes = (tmp_path / "history" / "000000.json").read_bytes()
+
+    with pytest.raises(deployment_module.StagingNotSuccessful) as error:
+        rollback(tmp_path)
+    assert error.value.retryable is False
+
+    assert (tmp_path / "DEPLOYED").read_bytes() == deployed_bytes
+    assert (tmp_path / "history" / "000000.json").read_bytes() == first_entry_bytes
+    assert not (tmp_path / "history" / "000001.json").exists()
+    assert current_pointer(tmp_path).release_id == "r2"
+    assert [item.release_id for item in pointer_history(tmp_path)] == ["r1"]
+
+
 def test_rollback_refuses_a_pointer_that_is_its_own_predecessor(tmp_path):
     state = deployment_module.PointerState(
         sequence=0, release_id="r1", previous_release_id="r1",

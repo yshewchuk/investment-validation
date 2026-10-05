@@ -763,17 +763,7 @@ def _require_staging_success(
         raise StagingNotSuccessful(release_id)
 
 
-def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> PointerState:
-    """Validate a staged release, then move ``DEPLOYED`` to it.
-
-    Shared by both :func:`promote` and :func:`rollback`. Refuses
-    :class:`ReleaseNotStaged`, :class:`StaleReleaseHash`,
-    :class:`CorruptManifest`, :class:`StagingRefused` (``MANIFEST_UNREADABLE``
-    when the target manifest cannot be read or parsed, duplicate bindings) and
-    :class:`StagingNotSuccessful` (no staging-completion record bound to this
-    exact ``release_id`` and ``release_hash``) before the pointer ever moves;
-    a no-op if ``release_id`` is already live.
-    """
+def _validate_staged_target(root: Path, release_id: str) -> StagedManifest:
     try:
         manifest = _read_manifest(root, release_id)
     except (OSError, ValueError) as exc:
@@ -793,6 +783,30 @@ def _swap_pointer(root: Path, release_id: str, action: str, clock: Clock) -> Poi
     # Last gate before anything is written: a refusal here touches no pointer,
     # no history entry and no temp file, and leaves the staged store intact.
     _require_staging_success(root, release_id, manifest)
+    return manifest
+
+
+def _swap_pointer(
+    root: Path, release_id: str, action: str, clock: Clock,
+    *, validated_manifest: StagedManifest | None = None,
+) -> PointerState:
+    """Validate a staged release, then move ``DEPLOYED`` to it.
+
+    Shared by both :func:`promote` and :func:`rollback`. Refuses
+    :class:`ReleaseNotStaged`, :class:`StaleReleaseHash`,
+    :class:`CorruptManifest`, :class:`StagingRefused` (``MANIFEST_UNREADABLE``
+    when the target manifest cannot be read or parsed, duplicate bindings) and
+    :class:`StagingNotSuccessful` (no staging-completion record bound to this
+    exact ``release_id`` and ``release_hash``) before the pointer ever moves;
+    a no-op if ``release_id`` is already live.
+
+    ``validated_manifest`` lets a caller that already ran
+    :func:`_validate_staged_target` on this exact target (rollback validates
+    before repairing history) supply the verified result and skip only the
+    re-validation; the repair/no-op/write order is unchanged either way.
+    """
+    if validated_manifest is None:
+        _validate_staged_target(root, release_id)
     _repair_history(root)
     previous = current_pointer(root)
     if previous is not None and previous.release_id == release_id:
@@ -833,7 +847,14 @@ def _rollback_target(root: Path) -> str:
     second-from-top id after the replay -- the release that was live
     immediately before the most recent forward move -- so N chained
     ``rollback()`` calls undo N chained promotions and never revisit a
-    release a prior rollback already left. Refuses :class:`NoPriorRelease`
+    release a prior rollback already left. Resolves exactly what a rollback
+    after :func:`_repair_history` would resolve, without writing: when the
+    live pointer's own sequence file is absent (the same condition
+    :func:`_repair_history` repairs on -- a crash between the pointer write
+    and the history append left DEPLOYED one ahead of history), that
+    pointer is appended to the in-memory history tuple before the checks
+    below run, so the crash window is replayed, not refused around.
+    Refuses :class:`NoPriorRelease`
     when fewer than two ids remain on the replayed stack,
     :class:`StagingRefused` (``HISTORY_UNREADABLE``) when a recorded
     history entry can't be read, :class:`StagingRefused`
@@ -852,6 +873,10 @@ def _rollback_target(root: Path) -> str:
             path="$.history", code="HISTORY_UNREADABLE",
             detail="a recorded pointer-history entry could not be read",
         ),)) from exc
+    pointer = current_pointer(root)
+    if pointer is not None and not (
+            _history_dir(root) / f"{pointer.sequence:06d}.json").exists():
+        history = history + (pointer,)
     sequences = [state.sequence for state in history]
     if sequences != list(range(len(history))):
         raise StagingRefused((ReleaseIssue(
@@ -867,7 +892,6 @@ def _rollback_target(root: Path) -> str:
             stack.append(state.release_id)
     if len(stack) < 2:
         raise NoPriorRelease("no prior release to roll back to")
-    pointer = current_pointer(root)
     live_release_id = None if pointer is None else pointer.release_id
     if stack[-1] != live_release_id:
         raise StagingRefused((ReleaseIssue(
@@ -890,11 +914,19 @@ def rollback(root: Path, *, clock: Clock = SystemClock()) -> PointerState:
     aren't exactly contiguous (``HISTORY_SEQUENCE_GAP``), or the top of the
     replayed history disagrees with the release ``DEPLOYED`` actually names
     (``HISTORY_INCONSISTENT``).
+    Target resolution and target validation both precede the crash-history
+    repair, so a refusal above leaves ``DEPLOYED`` and ``history/`` exactly
+    as they are -- even when a crash had left ``DEPLOYED`` one entry ahead
+    of history -- while a successful rollback still repairs that crash
+    window before appending its own entry.
     """
     root = Path(root)
-    _repair_history(root)
     target = _rollback_target(root)
-    return _swap_pointer(root, target, "rollback", clock)
+    validated_manifest = _validate_staged_target(root, target)
+    _repair_history(root)
+    return _swap_pointer(
+        root, target, "rollback", clock, validated_manifest=validated_manifest,
+    )
 
 
 def current_release(root: Path) -> ModelRelease | None:
