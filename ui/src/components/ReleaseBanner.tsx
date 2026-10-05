@@ -53,6 +53,17 @@ export function reloadToCurrent(): void {
   window.location.href = window.location.pathname + window.location.search;
 }
 
+function sessionDate(value: string): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value) ?? /^.+-(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const year = match?.[1];
+  const month = match?.[2];
+  const day = match?.[3];
+  if (year === undefined || month === undefined || day === undefined) return null;
+  const canonical = `${year}-${month}-${day}`;
+  const at = Date.parse(canonical);
+  return Number.isNaN(at) || new Date(at).toISOString().slice(0, 10) !== canonical ? null : canonical;
+}
+
 export function ReleaseBanner({
   releaseId,
   release,
@@ -112,6 +123,11 @@ export function ReleaseBanner({
     if (status.stale === true) addKnownReason("operations status flagged stale");
     if (typeof status.withheld !== "boolean" || typeof status.stale !== "boolean" || typeof status.failed_update !== "boolean") addUnknownReason("operations status flags are absent or non-boolean");
     if (requested === "unavailable" || resolved === "unavailable" || attempted === "unavailable") addUnknownReason("operations status attempt/session identifiers unavailable");
+    const requestedDate = requested === "unavailable" ? null : sessionDate(requested);
+    const resolvedDate = resolved === "unavailable" ? null : sessionDate(resolved);
+    if (requested !== "unavailable" && requestedDate === null) addUnknownReason("requested session identity is malformed");
+    if (resolved !== "unavailable" && resolvedDate === null) addUnknownReason("resolved session identity is malformed");
+    if (requestedDate !== null && resolvedDate !== null && resolvedDate > requestedDate) addUnknownReason("resolved session is later than requested session");
     if (malformed) addUnknownReason("scheduled observations missing or malformed");
     if (unknownDates.length > 0) addUnknownReason(`scheduled observations missing: ${unknownDates.join(", ")}`);
     if (failDates.length > 0) addKnownReason(`scheduled observations failed: ${failDates.join(", ")}`);

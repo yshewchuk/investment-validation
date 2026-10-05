@@ -166,6 +166,204 @@ def test_operations_status_marks_old_pinned_board_and_missing_scheduled_session(
 
 
 # --------------------------------------------------------------------------
+# issue #161 regressions: a failed current poll must not keep presenting the
+# last-known identity as authoritative; a rollback to the pin clears the drift
+# hint; malformed or future-resolved session evidence renders unknown
+# --------------------------------------------------------------------------
+
+
+def test_current_release_poll_failure_makes_operations_unknown(browser, server, state):
+    """The r2-pinned board with valid operations evidence agreeing with r2
+    renders operations current; a later `/api/v1/releases/current` POLL
+    FAILURE must make operations unknown -- publication identity is only ever
+    the latest SUCCESSFUL discovery, so the old "r2" is never kept on being
+    presented as the authoritative latest published release. The pin and the
+    loaded board survive, nothing repins or swaps, and the next scheduled
+    poll recovers on its own (no immediate browser-invented retry)."""
+    state.set_current("r2")
+    status = {
+        "schema_version": "operations_status.v1.0",
+        "generated_at": "2026-10-03T23:31:00Z",
+        "release_id": "r2",
+        "attempted_release_id": "r2",
+        "requested_session": "eng-night-2026-10-03",
+        "resolved_session": "eng-night-2026-10-03",
+        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
+        "stale": False,
+        "withheld": False,
+        "failed_update": False,
+    }
+    problem = {
+        "code": "SIMULATED_ERROR", "category": "internal", "retryable": True,
+        "message": "simulated current-release poll failure", "stage": None,
+        "trace_id": None, "dependency_refs": [], "retry_after_seconds": None,
+        "diagnostic_ref": None, "details": {}, "schema_version": "problem.v1.0",
+    }
+
+    def _fail_current(route):
+        route.fulfill(status=503, content_type="application/json", body=json.dumps(problem))
+
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    page.route(
+        "**/api/v1/operations",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(status)))
+    page.add_init_script(
+        'Date.now = function () { return Date.parse("2026-10-04T00:00:00Z"); };')
+    try:
+        page.goto(base + "/?pollMs=100")
+
+        # Initial current discovery succeeded: r2 pinned, and with status,
+        # published and pin all naming r2, operations renders current.
+        expect(page.get_by_test_id("release-id")).to_contain_text("r2")
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: current")
+        expect(page.get_by_test_id("operations-identities")).to_contain_text("latest published r2")
+
+        # A later /api/v1/releases/current poll now fails outright.
+        page.route("**/api/v1/releases/current", handler=_fail_current)
+
+        # The pin and the loaded board survive the failed poll...
+        expect(page.get_by_test_id("release-id")).to_contain_text("r2")
+        expect(page.get_by_test_id("event-table")).to_be_visible()
+        expect(page.get_by_test_id("release-changed-notice")).to_have_count(0)
+        # ...but operations is no longer current: a failed read never turns
+        # into an authoritative published identity, so latest published is
+        # unavailable and the stale "r2" is not presented as authoritative.
+        identities = page.get_by_test_id("operations-identities")
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: unknown")
+        expect(page.get_by_test_id("operations-status")).not_to_contain_text("operations: current")
+        expect(identities).to_contain_text("latest published unavailable")
+        expect(identities).not_to_contain_text("latest published r2")
+        expect(page.get_by_test_id("operations-board-stale")).to_have_count(0)
+
+        # The next scheduled poll (still 100ms away, no reload, no extra
+        # retry) recovers: the latest successful discovery is r2 again.
+        page.unroute("**/api/v1/releases/current", handler=_fail_current)
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: current")
+        expect(identities).to_contain_text("latest published r2")
+    finally:
+        context.close()
+
+
+def test_current_release_rollback_to_pin_clears_drift_hint(browser, server, state):
+    """Deep link pins r1 while `current` initially reports r2, so the r2 drift
+    hint (stale-board notice + "latest published r2") is up and operations is
+    unknown. When the next current poll reports r1 again -- a rollback to the
+    pin -- the latest SUCCESSFUL identity replaces the stale r2: the drift
+    hint clears, latest published shows r1, and only now, with pin, published
+    and status all agreeing on r1, may operations be labelled current."""
+    state.set_current("r2")
+    status = {
+        "schema_version": "operations_status.v1.0",
+        "generated_at": "2026-10-03T23:31:00Z",
+        "release_id": "r1",
+        "attempted_release_id": "r1",
+        "requested_session": "eng-night-2026-10-03",
+        "resolved_session": "eng-night-2026-10-03",
+        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
+        "stale": False,
+        "withheld": False,
+        "failed_update": False,
+    }
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    page.route(
+        "**/api/v1/operations",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(status)))
+    page.add_init_script(
+        'Date.now = function () { return Date.parse("2026-10-04T00:00:00Z"); };')
+    try:
+        page.goto(base + "/?pollMs=100#/release/r1")
+
+        # Load-time drift: pin r1, published r2, status describing r1 -- the
+        # identities do not all agree, so the hint is up and operations is
+        # unknown.
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        drift = page.get_by_test_id("operations-board-stale")
+        expect(drift).to_be_visible()
+        expect(drift).to_contain_text("r2")
+        expect(page.get_by_test_id("operations-identities")).to_contain_text("latest published r2")
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: unknown")
+
+        # `current` rolls back to the pinned release; the next scheduled poll
+        # sees it and the old r2 hint must go away.
+        state.set_current("r1")
+        expect(drift).to_have_count(0)
+        identities = page.get_by_test_id("operations-identities")
+        expect(identities).to_contain_text("latest published r1")
+        expect(identities).not_to_contain_text("latest published r2")
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: current")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+    finally:
+        context.close()
+
+
+def test_malformed_or_future_resolved_session_is_unknown(browser, server, state):
+    """Operations session evidence the board cannot stand behind renders
+    unknown, never current, on an otherwise fully valid r1 status: nonempty
+    but malformed requested/resolved identifiers, and ISO date-suffixed
+    identifiers whose resolved date is later than the requested date. Neither
+    may crash the page or disturb the pinned r1 board."""
+    base_status = {
+        "schema_version": "operations_status.v1.0",
+        "generated_at": "2026-10-03T23:31:00Z",
+        "release_id": "r1",
+        "attempted_release_id": "r1",
+        "requested_session": "eng-night-2026-10-03",
+        "resolved_session": "eng-night-2026-10-03",
+        "engineering_history": [{"occurrence": "2026-10-03", "status": "pass"}],
+        "stale": False,
+        "withheld": False,
+        "failed_update": False,
+    }
+    # The route reads this holder at fulfill time, so each 100ms operations
+    # poll picks up the swapped session evidence without a reload.
+    served = {"status": base_status}
+    errors: list[str] = []
+    base = f"http://127.0.0.1:{server.server_port}"
+    context, page = _authed_page(browser, server, base)
+    page.on("pageerror", lambda exc: errors.append(str(exc)))
+    page.route(
+        "**/api/v1/operations",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(served["status"])))
+    page.add_init_script(
+        'Date.now = function () { return Date.parse("2026-10-04T00:00:00Z"); };')
+    try:
+        page.goto(base + "/?pollMs=100")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        # Baseline: with well-formed, agreeing session evidence the fully
+        # valid status renders current -- the unknowns below are caused by
+        # the session evidence alone.
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: current")
+
+        # Nonempty malformed requested/resolved session identifiers.
+        served["status"] = {**base_status,
+                            "requested_session": "!!!not-a-session!!!",
+                            "resolved_session": "????"}
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: unknown")
+        expect(page.get_by_test_id("operations-status")).not_to_contain_text("operations: current")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        expect(page.get_by_test_id("event-table")).to_be_visible()
+
+        # ISO date-suffixed identifiers whose resolved date is LATER than the
+        # requested date -- evidence no real walk-back can produce.
+        served["status"] = {**base_status,
+                            "requested_session": "eng-night-2026-10-03",
+                            "resolved_session": "eng-night-2026-10-04"}
+        expect(page.get_by_test_id("operations-status")).to_contain_text("operations: unknown")
+        expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+        expect(page.get_by_test_id("event-table")).to_be_visible()
+
+        # Neither bad payload reached the browser as an exception.
+        assert errors == []
+    finally:
+        context.close()
+
+
+# --------------------------------------------------------------------------
 # pagination: walks all pages, no duplicates
 # --------------------------------------------------------------------------
 
