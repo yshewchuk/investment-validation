@@ -482,7 +482,7 @@ class _CappedScanRepository:
             table_versions={table_name: types.SimpleNamespace(table_contract_ref="ref")})
         self.contract = types.SimpleNamespace(
             primary_key=("ticker", "obs_date"), observation_time_column="obs_date",
-            maximum_batch_rows=8, maximum_result_rows=64)
+            maximum_batch_rows=8)
 
     def table_contract(self, snapshot_ref, table_name):
         return self.contract
@@ -591,11 +591,8 @@ def test_read_table_splits_a_partition_by_month_then_day():
         assert bound_call.time_interval == query.time_interval
         assert bound_call.bound == _interval_population_count(
             population, query.time_interval)
-        if bound_call.bound > 0:
-            assert query.max_result_rows == min(
-                repository.contract.maximum_result_rows, bound_call.bound)
+        assert query.max_result_rows == bound_call.bound
         assert 0 < query.max_batch_rows <= repository.contract.maximum_batch_rows
-        assert query.max_batch_rows <= query.max_result_rows
 
 
 def test_read_table_surfaces_the_error_when_a_day_still_exceeds_the_cap():

@@ -65,7 +65,7 @@ __all__ = [
     "SNAPSHOT_IMPORT_REQUEST_V1",
     "SNAPSHOT_REF_V1",
     "TABLE_CONTRACT_REF_V1",
-    "TABLE_CONTRACT_V1",
+    "TABLE_CONTRACT_V2",
     "TIME_INTERVAL_V1",
     "ChainMember",
     "ChainQuery",
@@ -97,7 +97,15 @@ __all__ = [
 ]
 
 COLUMN_CONTRACT_V1 = "column_contract.v1.0"
-TABLE_CONTRACT_V1 = "table_contract.v1.0"
+#: v2.0 (slice E atomic removal): the serialized ``TableContract`` shape drops a
+#: retired field. Removing a required field is a breaking shape
+#: change, not the additive/nullable kind ``foundation.typed`` lets a *minor*
+#: bump absorb (a reader at v1.1 would still accept a v1.0 doc carrying the
+#: field, then refuse it as ``UNKNOWN_FIELD``). So this is a MAJOR bump under the
+#: package's own ``major_on_meaning_change`` evolution policy -- old v1.x docs
+#: fail cleanly as ``UNSUPPORTED_VERSION``, with no deprecated field, ignored
+#: decoder key, or mixed-schema shim to bridge them.
+TABLE_CONTRACT_V2 = "table_contract.v2.0"
 TABLE_CONTRACT_REF_V1 = "table_contract_ref.v1.0"
 OBJECT_REF_V1 = "object_ref.v1.0"
 FRAGMENT_REF_V1 = "fragment_ref.v1.0"
@@ -252,9 +260,8 @@ class TableContract:
     coverage_semantics: str
     schema_evolution_policy: str
     maximum_batch_rows: int
-    maximum_result_rows: int
     legacy_mapping_ref: str | None = None
-    schema_version: str = TABLE_CONTRACT_V1
+    schema_version: str = TABLE_CONTRACT_V2
 
 
 @dataclass(frozen=True, kw_only=True)

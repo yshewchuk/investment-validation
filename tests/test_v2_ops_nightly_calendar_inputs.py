@@ -287,8 +287,8 @@ def test_candidate_expiries_straddle_domain_requires_common_strike_and_one_bound
     assert [(p.column, p.operator, p.values) for p in query.key_filter] == [
         ("ticker", "eq", ("AAA",)), ("obs_date", "eq", (_SESSION,))]
     assert query.order_by == tuple(_CHAINS.primary_key)
-    assert query.max_batch_rows == min(_CHAINS.maximum_batch_rows, 50_000)
-    assert query.max_result_rows == min(_CHAINS.maximum_result_rows, 2_000_000)
+    assert query.max_batch_rows == min(_CHAINS.maximum_batch_rows, 50_000, query.max_result_rows)
+    assert query.max_result_rows == query.max_batch_rows
 
 
 @pytest.mark.parametrize("strategy", ["DYN-SV", "TWIN-P"])

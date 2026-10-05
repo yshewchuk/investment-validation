@@ -3,7 +3,8 @@
 D05 drives the query validator's refusals; D06 drives real synthetic scans
 (real Parquet, real catalog, real ``ArtifactStore``) for exact-match rows in
 deterministic key order, typed-null synthesis for a declared-missing nullable
-column, batch/result-row bounding, and fragment pruning.
+column, the batch cap on the table contract, the pinned manifest population
+bound on ``max_result_rows``, and fragment pruning.
 """
 from __future__ import annotations
 
@@ -88,9 +89,12 @@ def _daily_market_row(ticker: str, year: int, day: int, *, omit_iv30: bool = Fal
 
 
 def _basic_query(**overrides) -> dict:
+    # Limits default to the securities fixture's pinned manifest population
+    # (two 2-row fragments survive the ``AAA`` predicate): the shared
+    # population-bound rule admits a limit at or below it and nothing above.
     base = dict(table_contract_ref=_SEC_REF, columns=("ticker", "year"),
                key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
-               order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+               order_by=("ticker", "year"), max_batch_rows=4, max_result_rows=4)
     base.update(overrides)
     return base
 
@@ -173,7 +177,9 @@ def test_missing_bounds_is_query_not_bounded(tmp_path):
     assert err.value.code == "QUERY_NOT_BOUNDED"
 
 
-def test_limits_above_contract_cap_is_query_not_bounded(tmp_path):
+def test_batch_limit_above_contract_batch_cap_is_query_not_bounded(tmp_path):
+    # The stored table contract caps only the batch limit now; the result
+    # limit is bounded by the pinned manifest population instead (below).
     _conn, store, snap = _securities_snapshot(tmp_path)
     repo = Repository(_conn, store)
     query = DataQuery(snapshot_id=snap.snapshot_id,
@@ -248,7 +254,7 @@ def test_time_interval_across_fragments_with_ticker_pinned(tmp_path):
         key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
         time_interval=TimeInterval(column="date", start_inclusive="2024-01-01",
                                    end_exclusive="2026-01-01"),
-        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+        order_by=("ticker", "date"), max_batch_rows=4, max_result_rows=4)
     rows = [row for batch in repo.scan(query, table_name="daily_market") for row in batch.to_pylist()]
     dates = [r["date"] for r in rows]
     assert dates == sorted(dates)
@@ -301,9 +307,9 @@ def test_narrow_projection_with_hidden_filter_columns_matches_full_projection(tm
         time_interval=TimeInterval(column="event_date", start_inclusive="2024-01-01",
                                    end_exclusive="2025-01-01"))
     narrow = DataQuery(snapshot_id=snap.snapshot_id, table_contract_ref=_EE_REF, columns=("event_id",),
-                       order_by=("event_id",), max_batch_rows=10, max_result_rows=10, **filters)
+                       order_by=("event_id",), max_batch_rows=3, max_result_rows=3, **filters)
     full = DataQuery(snapshot_id=snap.snapshot_id, table_contract_ref=_EE_REF, columns=full_columns,
-                     order_by=("event_id",), max_batch_rows=10, max_result_rows=10, **filters)
+                     order_by=("event_id",), max_batch_rows=3, max_result_rows=3, **filters)
     narrow_ids = [r["event_id"] for b in repo.scan(narrow, table_name="earnings_events")
                  for r in b.to_pylist()]
     full_ids = [r["event_id"] for b in repo.scan(full, table_name="earnings_events")
@@ -321,7 +327,7 @@ def test_nullable_column_absent_from_an_old_fragment_is_typed_null(tmp_path):
     query = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date", "iv30"),
         key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
-        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+        order_by=("ticker", "date"), max_batch_rows=2, max_result_rows=2)
     rows = [row for batch in repo.scan(query, table_name="daily_market") for row in batch.to_pylist()]
     assert rows[0]["iv30"] is None
     assert rows[1]["iv30"] == 32.0
@@ -345,7 +351,7 @@ def test_required_column_missing_from_a_fragment_is_contract_mismatch(tmp_path):
         columns=("ticker", "obs_date", "expiry", "strike", "right", "dte"),
         key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
         order_by=("ticker", "obs_date", "expiry", "strike", "right"),
-        max_batch_rows=10, max_result_rows=10)
+        max_batch_rows=1, max_result_rows=1)
     with pytest.raises(DataError) as err:
         list(repo.scan(query, table_name="option_chains"))
     assert err.value.code == "CONTRACT_MISMATCH"
@@ -360,7 +366,7 @@ def test_batches_never_exceed_max_batch_rows(tmp_path):
     query = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=("ticker", "year"),
         key_filter=(KeyPredicate(column="year", operator="eq", values=(2024,)),),
-        order_by=("ticker", "year"), max_batch_rows=2, max_result_rows=100)
+        order_by=("ticker", "year"), max_batch_rows=2, max_result_rows=5)
     sizes = [batch.num_rows for batch in repo.scan(query, table_name="securities")]
     assert sizes == [2, 2, 1]
 
@@ -397,7 +403,7 @@ def test_fragment_pruning_shown_by_object_open_counter(tmp_path, monkeypatch):
     query = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=("ticker", "year"),
         key_filter=(KeyPredicate(column="year", operator="eq", values=(2024,)),),
-        order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+        order_by=("ticker", "year"), max_batch_rows=2, max_result_rows=2)
     rows = [row for batch in repo.scan(query, table_name="securities") for row in batch.to_pylist()]
     assert {r["year"] for r in rows} == {2024}
     assert len(calls) == 1  # only the 2024 fragment's object was opened
@@ -410,16 +416,6 @@ def test_unknown_projected_column_is_contract_mismatch(tmp_path):
     with pytest.raises(DataError) as err:
         list(repo.scan(query, table_name="securities"))
     assert err.value.code == "CONTRACT_MISMATCH"
-
-
-def test_max_result_rows_above_contract_cap_is_query_not_bounded(tmp_path):
-    _conn, store, snap = _securities_snapshot(tmp_path)
-    repo = Repository(_conn, store)
-    query = DataQuery(snapshot_id=snap.snapshot_id,
-                      **_basic_query(max_batch_rows=10, max_result_rows=3_000_000))
-    with pytest.raises(DataError) as err:
-        list(repo.scan(query, table_name="securities"))
-    assert err.value.code == "QUERY_NOT_BOUNDED"
 
 
 def test_deadline_already_passed_is_deadline_exceeded(tmp_path):
@@ -462,7 +458,7 @@ def test_boundary_duplicate_key_across_fragments_raises_manifest_corrupt(tmp_pat
         snapshot_id=snap.snapshot_id, table_contract_ref=events_ref,
         columns=("event_id", "ticker"),
         key_filter=(KeyPredicate(column="ticker", operator="in", values=("AAA", "MID", "ZZZ")),),
-        order_by=("event_id",), max_batch_rows=10, max_result_rows=10)
+        order_by=("event_id",), max_batch_rows=4, max_result_rows=4)
     with pytest.raises(DataError) as err:
         list(repo.scan(query, table_name="earnings_events"))
     assert err.value.code == "MANIFEST_CORRUPT"
@@ -510,7 +506,7 @@ def _scan_dates(repo, snap, *, start=None, end=None):
         snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
         key_filter=(),
         time_interval=TimeInterval(column="date", start_inclusive=start, end_exclusive=end),
-        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+        order_by=("ticker", "date"), max_batch_rows=2, max_result_rows=2)
     rows = [row for batch in repo.scan(query, table_name="daily_market") for row in batch.to_pylist()]
     return [r["date"] for r in rows]
 
@@ -575,7 +571,7 @@ def test_key_predicate_timestamp_equality_matches_z_form(tmp_path):
     query = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
         key_filter=(KeyPredicate(column="date", operator="eq", values=("2026-09-10T00:00:00Z",)),),
-        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+        order_by=("ticker", "date"), max_batch_rows=2, max_result_rows=2)
     rows = [row for batch in repo.scan(query, table_name="daily_market") for row in batch.to_pylist()]
     assert [r["date"] for r in rows] == [datetime(2026, 9, 10)]
 
@@ -651,7 +647,7 @@ def _synthetic_contract() -> TableContract:
         orderable_columns=("ticker", "obs_date"), observation_time_column="obs_date",
         finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
         coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=1000, maximum_result_rows=1000)
+        maximum_batch_rows=1000)
 
 
 def _synthetic_query(contract: TableContract, **overrides) -> DataQuery:
@@ -859,7 +855,7 @@ def _timestamp_ns_contract() -> TableContract:
         orderable_columns=("ticker", "obs_date"), observation_time_column="obs_date",
         finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
         coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=1000, maximum_result_rows=1000)
+        maximum_batch_rows=1000)
 
 
 def test_compile_batch_matcher_refuses_timestamp_interval_bounds_and_agrees_with_row_path():
@@ -983,7 +979,7 @@ def _string_time_contract() -> TableContract:
         orderable_columns=("ticker", "retrieved_at"), observation_time_column="retrieved_at",
         finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
         coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=1000, maximum_result_rows=1000)
+        maximum_batch_rows=1000)
 
 
 def test_compile_batch_matcher_refuses_interval_on_string_typed_time_column():
@@ -1049,7 +1045,7 @@ def _mixed_types_contract() -> TableContract:
         orderable_columns=("ticker", "obs_date"), observation_time_column="obs_date",
         finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
         coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=1000, maximum_result_rows=1000)
+        maximum_batch_rows=1000)
 
 
 def test_compile_batch_matcher_refuses_values_unrepresentable_in_column_type():
@@ -1119,7 +1115,8 @@ def test_explain_dependencies_names_surviving_fragments(tmp_path):
     _conn, store, snap = _securities_snapshot(tmp_path)
     repo = Repository(_conn, store)
     query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query(
-        key_filter=(KeyPredicate(column="year", operator="eq", values=(2024,)),)))
+        key_filter=(KeyPredicate(column="year", operator="eq", values=(2024,)),),
+        max_batch_rows=2, max_result_rows=2))
     plan = repo.explain_dependencies(query, table_name="securities")
     assert isinstance(plan, DependencyPlan)
     assert plan.snapshot_ref == snap
@@ -1181,7 +1178,8 @@ def test_scan_population_bound_of_empty_table_membership_is_zero(tmp_path):
 def test_scan_population_bound_of_fully_pruned_selection_is_zero(tmp_path):
     conn, store, snap = _securities_snapshot(tmp_path)
     query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query(
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("ZZZ",)),)))
+        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("ZZZ",)),),
+        max_batch_rows=1, max_result_rows=0))
     assert Repository(conn).scan_population_bound(
         snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
         key_filter=query.key_filter) == 0
@@ -1205,7 +1203,8 @@ def test_zero_row_fragment_metadata_has_zero_bound_and_scans_empty(tmp_path):
         store, _SEC, _SEC_REF, table_from_rows(_SEC, []), partition_key="2024", row_count=0,
         primary_key_min=("AAA", 2024), primary_key_max=("ZZZ", 2024))
     snap = commit_tables(conn, clock, {"securities": [record]}, {"securities": _SEC})
-    query = DataQuery(snapshot_id=snap.snapshot_id, **_basic_query())
+    query = DataQuery(snapshot_id=snap.snapshot_id,
+                      **_basic_query(max_batch_rows=1, max_result_rows=0))
     assert Repository(conn).scan_population_bound(
         snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
         key_filter=query.key_filter) == 0
@@ -1229,7 +1228,7 @@ def _pruning_case(case, tmp_path):
             columns=("ticker", "year"),
             key_filter=(KeyPredicate(column="year", operator="eq", values=(2024,)),
                         KeyPredicate(column="ticker", operator="eq", values=("BBB",))),
-            order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+            order_by=("ticker", "year"), max_batch_rows=2, max_result_rows=2)
         expected = (2, [{"ticker": "BBB", "year": 2024}], [records[0].fragment_id])
         return conn, store, snap, "securities", _SEC_REF, query, expected
     if case == "leading_key":
@@ -1244,7 +1243,7 @@ def _pruning_case(case, tmp_path):
             snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF,
             columns=("ticker", "year"),
             key_filter=(KeyPredicate(column="ticker", operator="eq", values=("CCC",)),),
-            order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+            order_by=("ticker", "year"), max_batch_rows=2, max_result_rows=2)
         expected = (2, [{"ticker": "CCC", "year": 2025}], [records[1].fragment_id])
         return conn, store, snap, "securities", _SEC_REF, query, expected
     records = [
@@ -1259,7 +1258,7 @@ def _pruning_case(case, tmp_path):
         key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAA",)),),
         time_interval=TimeInterval(column="date", start_inclusive="2025-01-03",
                                    end_exclusive="2026-01-01"),
-        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+        order_by=("ticker", "date"), max_batch_rows=2, max_result_rows=2)
     expected = (2, [{"ticker": "AAA", "date": datetime(2025, 1, 3)}], [records[1].fragment_id])
     return conn, store, snap, "daily_market", _DM_REF, query, expected
 
@@ -1335,7 +1334,9 @@ def test_footer_row_count_mismatch_refuses_before_iter_batches(
         tmp_path, monkeypatch, physical_rows, recorded_count):
     """Recorded below (a predicate hides one real row) and recorded above both
     refuse on the raw footer count, before ``_iter_batches`` -- so the below
-    case cannot pass merely because filtering leaves fewer matches."""
+    case cannot pass merely because filtering leaves fewer matches. The query's
+    limits sit at the recorded count so the pinned-population rule admits the
+    selection and the footer check is what refuses."""
     conn, clock, store = catalog_and_store(tmp_path)
     rows = [_daily_market_row("AAA", 2024, day) for day in range(2, 2 + physical_rows)]
     record = hand_built_record(
@@ -1354,14 +1355,22 @@ def test_footer_row_count_mismatch_refuses_before_iter_batches(
         snapshot_id=snap.snapshot_id, table_contract_ref=_DM_REF, columns=("ticker", "date"),
         key_filter=(KeyPredicate(column="date", operator="eq",
                                  values=("2024-01-02T00:00:00.000000",)),),
-        order_by=("ticker", "date"), max_batch_rows=10, max_result_rows=10)
+        order_by=("ticker", "date"),
+        max_batch_rows=recorded_count, max_result_rows=recorded_count)
     with pytest.raises(DataError) as err:
         next(repo.scan(query, table_name="daily_market"))
     assert err.value.code == "MANIFEST_CORRUPT"
     assert err.value.problem.retryable is False
 
 
-def test_result_limit_above_candidate_bound_succeeds_smaller_limit_fails(tmp_path):
+def test_result_limit_equal_to_bound_passes_above_population_refuses_before_open(
+        tmp_path, monkeypatch):
+    """The pinned-population rule end to end: (1) a result limit equal to the
+    manifest bound passes and a smaller caller limit passes unchanged (never
+    raised to the bound — enforced exactly as written, down to
+    ``RESULT_LIMIT_EXCEEDED``); (2) a limit above the bound is a nonretryable
+    ``QUERY_NOT_BOUNDED`` in both ``scan`` and ``explain_dependencies``,
+    decided before ``_fragment_rows`` ever opens a fragment stream."""
     from engine.v2.foundation import content_hash, to_document
 
     conn, store, snap = _securities_snapshot(tmp_path)
@@ -1370,7 +1379,7 @@ def test_result_limit_above_candidate_bound_succeeds_smaller_limit_fails(tmp_pat
     bound = repo.scan_population_bound(
         snap.snapshot_id, table_name="securities", table_contract_ref=_SEC_REF,
         key_filter=query.key_filter)
-    assert bound == 4 and query.max_result_rows == 10 > bound
+    assert bound == 4 and query.max_result_rows == bound
     plan = repo.explain_dependencies(query, table_name="securities")
     assert plan.request_hash == content_hash(to_document(query))
     assert {e.maximum_rows for e in plan.dependencies} == {query.max_result_rows}
@@ -1378,22 +1387,37 @@ def test_result_limit_above_candidate_bound_succeeds_smaller_limit_fails(tmp_pat
     assert rows == [{"ticker": "AAA", "year": 2024}, {"ticker": "AAA", "year": 2025}]
 
     smaller = DataQuery(snapshot_id=snap.snapshot_id,
-                        **_basic_query(max_batch_rows=1, max_result_rows=1))
+                        **_basic_query(max_batch_rows=2, max_result_rows=2))
+    smaller_plan = repo.explain_dependencies(smaller, table_name="securities")
+    assert {e.maximum_rows for e in smaller_plan.dependencies} == {2}
+    smaller_rows = [row for batch in repo.scan(smaller, table_name="securities")
+                    for row in batch.to_pylist()]
+    assert smaller_rows == rows
+
+    enforced = DataQuery(snapshot_id=snap.snapshot_id,
+                         **_basic_query(max_batch_rows=1, max_result_rows=1))
     with pytest.raises(DataError) as err:
-        list(repo.scan(smaller, table_name="securities"))
+        list(repo.scan(enforced, table_name="securities"))
     assert err.value.code == "RESULT_LIMIT_EXCEEDED"
-    above_cap = DataQuery(snapshot_id=snap.snapshot_id,
-                          **_basic_query(max_result_rows=3_000_000))
+
+    monkeypatch.setattr(Repository, "_fragment_rows",
+                        lambda *args, **kwargs: pytest.fail("fragment stream opened"))
+    above_bound = DataQuery(snapshot_id=snap.snapshot_id,
+                            **_basic_query(max_result_rows=bound + 1))
     with pytest.raises(DataError) as err:
-        list(repo.scan(above_cap, table_name="securities"))
-    assert err.value.code == "QUERY_NOT_BOUNDED"
+        list(repo.scan(above_bound, table_name="securities"))
+    assert err.value.code == "QUERY_NOT_BOUNDED" and err.value.problem.retryable is False
     with pytest.raises(DataError) as err:
-        repo.explain_dependencies(above_cap, table_name="securities")
-    assert err.value.code == "QUERY_NOT_BOUNDED"
+        repo.explain_dependencies(above_bound, table_name="securities")
+    assert err.value.code == "QUERY_NOT_BOUNDED" and err.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("case", ["empty_membership", "fully_pruned"])
-def test_zero_population_bound_does_not_admit_zero_result_limit(tmp_path, case):
+def test_zero_population_bound_admits_zero_result_limit_with_positive_batch(tmp_path, case):
+    """A zero-row membership — empty selection or fully pruned — admits a
+    zero result limit while the batch limit stays positive: ``scan`` yields
+    no batches (and opens no fragment) and ``explain`` plans no
+    dependencies, for both spellings of the zero bound."""
     if case == "empty_membership":
         conn, clock, store = catalog_and_store(tmp_path)
         snap = commit_tables(conn, clock, {"securities": []}, {"securities": _SEC})
@@ -1409,12 +1433,8 @@ def test_zero_population_bound_does_not_admit_zero_result_limit(tmp_path, case):
         snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF,
         columns=("ticker", "year"), key_filter=key_filter,
         order_by=("ticker", "year"), max_batch_rows=1, max_result_rows=0)
-    with pytest.raises(DataError) as err:
-        list(repo.scan(query, table_name="securities"))
-    assert err.value.code == "QUERY_NOT_BOUNDED" and err.value.problem.retryable is False
-    with pytest.raises(DataError) as err:
-        repo.explain_dependencies(query, table_name="securities")
-    assert err.value.code == "QUERY_NOT_BOUNDED" and err.value.problem.retryable is False
+    assert list(repo.scan(query, table_name="securities")) == []
+    assert repo.explain_dependencies(query, table_name="securities").dependencies == ()
 
 
 @pytest.mark.parametrize("key_filter", [
@@ -1561,7 +1581,7 @@ def _timestamp_leading_fixture(tmp_path):
         orderable_columns=("timestamp",), observation_time_column="timestamp",
         finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
         coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=1000, maximum_result_rows=1000)
+        maximum_batch_rows=1000)
     placeholder = TableContract(definition_hash=_H, **fields)
     contract = dataclasses.replace(placeholder,
                                    definition_hash=manifests.table_contract_hash(placeholder))
@@ -1660,7 +1680,7 @@ def _timestamp_nonleading_fixture(tmp_path):
         orderable_columns=("ticker", "ts"), observation_time_column="ts",
         finality_semantics="legacy_daily_close.v1", provenance_semantics="legacy_import.v1",
         coverage_semantics="legacy_full.v1", schema_evolution_policy="major_on_meaning_change.v1",
-        maximum_batch_rows=1000, maximum_result_rows=1000)
+        maximum_batch_rows=1000)
     placeholder = TableContract(definition_hash=_H, **fields)
     contract = dataclasses.replace(placeholder,
                                    definition_hash=manifests.table_contract_hash(placeholder))

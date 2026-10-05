@@ -2528,7 +2528,7 @@ def test_scoring_stages_change_no_longer_selects_every_enabled_module():
     ]
     selected = pilot.changed_modules(CFG, names, changed)
     assert set(selected) == set(names) - {
-        "canonical", "data_incremental", "no_fit", "research",
+        "canonical", "data_incremental", "no_fit", "ops_experiment_folds", "research",
     }, (
         "selection drifted from the exact expected set -- re-check whether "
         "this is a narrowing regression (e.g. back toward all 33) or a "

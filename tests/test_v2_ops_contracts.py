@@ -81,7 +81,7 @@ def test_every_versioned_contract_has_a_unique_well_formed_family():
         if "schema_version" not in fields:
             continue
         family, major, _ = parse_schema_version(fields["schema_version"].default)
-        assert major == 1
+        assert major in (1, 2)
         assert family not in families, (cls, families.get(family))
         families[family] = cls
     assert {"job_spec", "attempt_receipt", "checkpoint_receipt", "stage_result",

@@ -9,8 +9,13 @@ Both functions here do one bounded ``price_history`` scan for ``query.ticker``
 reconstruction needs), then hand the fetched rows to the pure
 ``price_history.as_of_view``/``_provenance_by_date`` logic unchanged. No
 ``QUERY_NOT_BOUNDED``/``RESULT_LIMIT_EXCEEDED`` escape hatch beyond what
-``Repository.scan`` itself already enforces (``max_batch_rows``/
-``max_result_rows``, sized for one ticker's full history).
+``Repository.scan`` itself already enforces: the scan's result limit is this
+caller's explicit ``_RESULT_CAP`` lowered to the selected pinned membership
+bound ``Repository.scan_population_bound`` reports for the SAME ticker predicate --
+``scan`` refuses any limit above that bound before opening a fragment -- and
+``_BATCH_CAP`` follows that limit down, staying positive when the bound is
+zero (the query contract requires a positive batch limit; a zero bound is a
+zero-row membership, not an unbounded query).
 
 One read rule, no policy choice (user decision 2026-09-14, replacing an
 earlier two-policy design): the latest retrieval of any source at or before
@@ -175,11 +180,17 @@ def tickers_with_price_history(repository, snapshot_ref: SnapshotRef, tickers=No
 
 def _fetch_rows(repository, snapshot_ref: SnapshotRef, ticker: str) -> pd.DataFrame:
     dvr = snapshot_ref.table_versions[PRICE_HISTORY_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
+    population_bound = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=PRICE_HISTORY_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+    max_result_rows = min(_RESULT_CAP, population_bound)
+    max_batch_rows = min(_BATCH_CAP, max_result_rows) if max_result_rows > 0 else _BATCH_CAP
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=dvr.table_contract_ref,
-        columns=_COLUMNS, key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),),
-        order_by=("ticker", "date", "retrieved_at"), max_batch_rows=_BATCH_CAP,
-        max_result_rows=_RESULT_CAP)
+        columns=_COLUMNS, key_filter=key_filter,
+        order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
+        max_result_rows=max_result_rows)
     rows: list[dict] = []
     for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME):
         rows.extend(batch.to_pylist())

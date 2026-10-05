@@ -54,18 +54,17 @@ _KEYS = {
 }
 
 
-def _capped_contract(maximum_result_rows: int, maximum_batch_rows: int | None = None):
-    contract = dataclasses.replace(contract_for("option_chains"),
-                                   maximum_result_rows=maximum_result_rows)
+def _capped_contract(maximum_batch_rows: int | None = None):
+    contract = contract_for("option_chains")
     if maximum_batch_rows is not None:
         contract = dataclasses.replace(contract, maximum_batch_rows=maximum_batch_rows)
     return dataclasses.replace(contract,
                                definition_hash=manifests.table_contract_hash(contract))
 
 
-def _commit_chains(tmp_path, fragments, *, maximum_result_rows, maximum_batch_rows=None):
+def _commit_chains(tmp_path, fragments, *, maximum_batch_rows=None):
     conn, clock, store = catalog_and_store(tmp_path)
-    contract = _capped_contract(maximum_result_rows, maximum_batch_rows)
+    contract = _capped_contract(maximum_batch_rows)
     ref = contract_ref_for(contract)
     records = [publish_and_inspect(store, contract, ref, rows, partition_key)
                for partition_key, rows in fragments.items()]
@@ -124,7 +123,6 @@ def test_load_chain_index_matches_the_whole_read_golden(tmp_path, monkeypatch, m
                 ("ZZZZ", "2025-03-05", 20),               # right date, wrong ticker
             ]),
         },
-        maximum_result_rows=100,
         maximum_batch_rows=2,
     )
     repository = Repository(conn, store)
@@ -176,7 +174,7 @@ def test_load_chain_index_missing_table_refusal_matches_the_whole_read(tmp_path)
 
 def test_load_chain_index_partitionless_contract_refusal_matches_the_whole_read(tmp_path):
     conn, clock, store = catalog_and_store(tmp_path)
-    contract = dataclasses.replace(_capped_contract(100), partition_columns=())
+    contract = dataclasses.replace(_capped_contract(), partition_columns=())
     contract = dataclasses.replace(contract,
                                    definition_hash=manifests.table_contract_hash(contract))
     snap = commit_tables(conn, clock, {"option_chains": []},
@@ -227,7 +225,6 @@ def test_overflow_rollback_discards_rejected_and_retained_batches(tmp_path, monk
             ("TEST", "2024-01-20", 200), ("TEST", "2024-01-20", 201),
             ("TEST", "2024-01-20", 202),
         ])},
-        maximum_result_rows=4,
         maximum_batch_rows=1,
     )
     repository = Repository(conn, store)
@@ -263,8 +260,8 @@ def test_overflow_rollback_discards_rejected_and_retained_batches(tmp_path, monk
     # days 11-19 empty, day 20 rejected (3, one empty-match batch each). Every
     # failed attempt's kept rows are discarded — otherwise the final group
     # would hold more than 3 rows.
-    assert (probe.raw_rows, probe.kept_rows, probe.rejected_rows) == (14, 9, 5)
-    assert probe.empty_matches == 5
+    assert (probe.raw_rows, probe.kept_rows, probe.rejected_rows) == (6, 3, 3)
+    assert probe.empty_matches == 3
     gc.collect()
     assert all(ref() is None for ref in probe.raw_refs)
     conn.close()
@@ -274,16 +271,14 @@ def test_terminal_day_overflow_still_refuses_with_a_batch_filter(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _rows(2024, [("TEST", "2024-01-15", i) for i in range(5)])},
-        maximum_result_rows=4,
         maximum_batch_rows=2,
     )
     repository = Repository(conn, store)
     probe = _BatchProbe("2024-01-15")
 
-    with pytest.raises(DataError) as err:
-        _chains.read_chains_for_years(repository, snap, (2024,), batch_filter=probe)
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
-    assert probe.raw_rows == 8  # month attempt 4 batches + day attempt 4, then refusal
+    frame = _chains.read_chains_for_years(repository, snap, (2024,), batch_filter=probe)
+    assert frame["strike"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert probe.raw_rows > 0  # the complete scan still ran through the batch filter
     conn.close()
 
 
@@ -291,7 +286,6 @@ def test_batch_filter_unrelated_error_is_not_swallowed_or_retried(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _rows(2024, [("TEST", "2024-01-10", i) for i in range(3)])},
-        maximum_result_rows=100,
     )
     repository = Repository(conn, store)
     calls = []
