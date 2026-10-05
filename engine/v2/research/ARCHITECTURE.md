@@ -88,8 +88,8 @@ non-midnight observation times, subject to caller predicates and batch
 filtering. The manifest population bound limits candidate rows, not RSS or
 process memory — the recorded row-count sum of pinned fragments surviving
 pruning ([data scan population rule](../data/ARCHITECTURE.md#invariants)).
-Each scan uses that same bound for its snapshot, contract, predicates and
-interval; research adds no second result limit. Empty selected membership
+Each scan uses that same bound for its snapshot, contract and predicates;
+research adds no second result limit. Empty selected membership
 allows zero result rows with a positive batch size. Month/day retries and
 null-overflow refusals are not part of this contract: a complete read either
 returns its population or raises its typed refusal. Predicates, exact-pair
