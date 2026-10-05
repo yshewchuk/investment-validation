@@ -1372,16 +1372,21 @@ def _render_attempt_text(attempt):
             f"  memory: peak {_human_bytes(mem['peak_bytes'])} / "
             f"reserved {_human_bytes(mem['reserved_bytes'])}"]
     lease = attempt["lease"]
-    lines.append(f"  lease: heartbeat {lease['heartbeat_at'] or 'never renewed'} / "
-                 f"expires {lease['lease_expires_at']}")
+    heartbeat = (lease["heartbeat_at"] if lease["heartbeat_at"] is not None
+                 else "unavailable (no recorded lease heartbeat)")
+    expiry = (lease["lease_expires_at"] if lease["lease_expires_at"] is not None
+              else "unavailable (no recorded lease expiry)")
+    lines.append(f"  lease: heartbeat {heartbeat} / expires {expiry}")
     event = attempt.get("latest_progress_event")
     if event is None:
-        lines.append("  latest progress event: none recorded")
+        lines.append("  latest progress event: unavailable (no progress event recorded)")
     else:
         observation = (" (throttled supervisor observation, not a lease signal)"
                        if event["kind"] == "heartbeat" else "")
+        when = (event["recorded_at"] if event["recorded_at"] is not None
+                else "unavailable (no recorded progress timestamp)")
         lines.append(f"  latest progress event: {event['kind']} at "
-                     f"{event['recorded_at']}{observation}")
+                     f"{when}{observation}")
     lines.extend(_render_steps_text(attempt["steps"]) if attempt["steps"]
                 else ["  steps: no step events recorded"])
     lines.extend(_render_failure_text(attempt["failure"], attempt["stderr_tail"]))

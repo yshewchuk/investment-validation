@@ -231,7 +231,9 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
     def render_latest_progress(progress):
         if progress is None:
             return None
-        stamp = f"{progress.kind} at {progress.recorded_at}"
+        when = (progress.recorded_at if progress.recorded_at is not None
+                else "unavailable (no recorded progress timestamp)")
+        stamp = f"{progress.kind} at {when}"
         if progress.kind == "heartbeat":
             stamp += " (progress/observation event, not a lease signal)"
         return stamp
@@ -240,9 +242,12 @@ def _run_until_deadline_message(conn, job_id, state, states, timeout) -> str:
         if attempts is None or not len(attempts) or attempts[-1] is None:
             return None
         last = attempts[-1]
+        heartbeat = (last.heartbeat_at if last.heartbeat_at is not None
+                     else "unavailable (no recorded lease heartbeat)")
+        expiry = (last.lease_expires_at if last.lease_expires_at is not None
+                  else "unavailable (no recorded lease expiry)")
         return (f"attempt {last.attempt_number} ({last.state}): heartbeat at "
-                f"{last.heartbeat_at or 'never renewed'}, lease expires at "
-                f"{last.lease_expires_at}")
+                f"{heartbeat}, lease expires at {expiry}")
 
     def render_step(events):
         steps = [event for event in events if event.get("kind") != "heartbeat"]

@@ -332,6 +332,14 @@ def test_run_until_deadline_distinguishes_the_two_heartbeats(tmp_path):
     assert "queue/admission reason: DEPENDENCY_PENDING" in message
     assert "log tail: heartbeat at 2026-09-12T00:00:12+00:00: still running" in message
     assert "cgroup" not in message
+    assert "command line" not in message
+    # the documented family output is only the live/tracked counts: that one
+    # rendered field carries nothing beyond them -- no pid or boot identity
+    family_fields = [part for part in message.split("; ")
+                     if part.startswith("process family liveness:")]
+    assert family_fields == ["process family liveness: 0 live / 1 tracked "
+                             "(diagnostic only)"]
+    assert str(identity.pid) not in message and boot_id not in message
 
 
 @pytest.mark.parametrize("workers", [["-p", "no:xdist"], ["-n", "2"]], ids=["serial", "xdist"])
