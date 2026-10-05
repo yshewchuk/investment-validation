@@ -843,11 +843,14 @@ def main(argv=None) -> int:
         print(f"refusing to write report: {exc}", file=sys.stderr)
         return 2
     out = args.artifact_root / "evidence.json"
-    out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    evidence_json = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
     if evidence["release_ok"] is True:
-        # The last release-store side effect, only once the evidence file and
-        # the report (+ completeness check) are done: publish the success
-        # record that makes the accepted release promotable in the real store.
+        # The last release-store side effect: publish the success record that
+        # makes the accepted release promotable in the real store. Any prior
+        # evidence.json goes first and the file is rewritten only once the
+        # status call succeeds, so a DeploymentError refusal leaves nothing
+        # on disk claiming release_ok: true.
+        out.unlink(missing_ok=True)
         try:
             deployment.mark_staging_succeeded(deployment_root(args.release_root),
                                                evidence["release_id"])
@@ -855,6 +858,7 @@ def main(argv=None) -> int:
             print("refusing to publish the staging success record for this release",
                   file=sys.stderr)
             return 2
+    out.write_text(evidence_json)
     print(json.dumps({"status": evidence["status"], "evidence": str(out),
                       "report": evidence.get("report"),
                       "finding_codes": evidence["finding_codes"]}, indent=2))

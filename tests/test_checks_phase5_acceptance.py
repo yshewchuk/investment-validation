@@ -764,3 +764,35 @@ def test_acceptance_refuses_legacy_incumbent_without_status(tmp_path, monkeypatc
     assert deployed.read_bytes() == pointer_before
     assert {p.name: p.read_bytes() for p in sorted((store / "history").glob("*.json"))} \
         == history_before
+
+
+def test_main_does_not_leave_success_evidence_when_status_publish_fails(tmp_path, monkeypatch,
+                                                                        capsys):
+    """A refused success marker leaves no passing evidence.json on disk."""
+    root = tmp_path / "release"
+    root.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    stale = artifacts / "evidence.json"
+    stale.write_text(json.dumps({"release_ok": True, "status": "RELEASE_PASS"}))
+
+    def stub_build(release_root, **kwargs):
+        return {"release_ok": True, "status": "RELEASE_PASS", "release_id": "rel-candidate",
+                "finding_codes": [], "report": None}
+
+    calls = []
+
+    def refused_marker(store, release_id):
+        calls.append((store, release_id))
+        raise gate.deployment.DeploymentError("staging status refused")
+
+    monkeypatch.setattr(gate, "build_evidence", stub_build)
+    monkeypatch.setattr(gate.deployment, "mark_staging_succeeded", refused_marker)
+
+    assert gate.main(["--release-root", str(root),
+                      "--artifact-root", str(artifacts)]) == 2
+
+    assert calls == [(layout.deployment_root(root), "rel-candidate")]
+    assert "refusing to publish the staging success record for this release" \
+        in capsys.readouterr().err
+    assert not stale.exists()

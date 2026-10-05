@@ -319,32 +319,14 @@ yet implemented — see #192, #137.
 
 #### `mark_staging_succeeded`
 
-This record is separate from the immutable model manifest. `stage_release`
-may leave a manifest behind when later Phase 5 work fails, so staging alone
-never writes a success record. `checks/phase5_acceptance.py` publishes the
-record only after its evidence and report are complete and every release
-subject passes (`RELEASE_PASS` without a Phase 4 corpus, or `PASS` with one).
-The rollback rehearsal copies any incumbent record with the durable release
-store and never invents incumbent success in scratch. If a live legacy
-incumbent has no record, rollback refuses `P5_ROLLBACK_REFUSED`; acceptance
-returns `FAIL` (exit 1) non-retryably for that run and leaves the candidate
-unmarked, the live pointer and history unchanged, and the incumbent without a
-record. Retrying with the same store state repeats the refusal; a separate
-evidence-backed migration is required (follow-up #416). An existing failed,
-malformed, or stale record is also refused and never overwritten.
-Prior pointer/history entries or a manifest hash alone cannot prove staging
-success, so no success status is inferred from them. Candidate success is
-published only after its complete evidence and report pass. The candidate's
-temporary success record in its rollback probe stays in the scratch copy.
-Re-preparing a candidate through `tools/phase5_prepare_release.py` invalidates
-its prior status before replacing its manifest or Phase 5 state catalog, even
-when the model hash is unchanged. Prepare success does not restore eligibility;
-only fresh passing acceptance does. Invalidation failure raises
-`StagingRefused(STATUS_INVALIDATION_FAILED)` before candidate content changes;
-retry after correcting the filesystem error. A later prepare/acceptance failure
-may leave staged files or catalog data, but leaves no success record and never
-changes `DEPLOYED` or history. Promotion/rollback refuse non-retryable
-`StagingNotSuccessful` until passing acceptance publishes a matching record.
+This record is separate from the immutable model manifest. Staging alone never
+writes it. `checks/phase5_acceptance.py` publishes it only after all release
+subjects pass (`RELEASE_PASS` without a Phase 4 corpus, or `PASS` with one),
+then writes successful evidence. A publication refusal leaves no evidence for
+that attempt that claims acceptance succeeded. Preparation invalidates the
+candidate record before replacing its content. An invalid, failed, or stale
+record is never inferred from pointer/history entries or a manifest hash alone;
+promotion and rollback refuse without matching staging success.
 
 | Condition | Outcome |
 |---|---|
