@@ -4084,3 +4084,370 @@ def test_every_test_with_an_independent_ast_import_chain_to_a_changed_source_is_
     assert not missing, (
         f"selector returned a {mode} that dropped {len(missing)} test(s) "
         f"with an independent static import chain to the changed set: {detail}")
+
+
+# -- PR #390 regressions: narrow unresolved-import, subprocess, process-launch,
+#    and import-path-mutation classification (build_import_graph's three catch-
+#    all triggers + unresolved_import_files' taint set) ---------------------
+
+_PR390_OTHER = "engine/other.py"
+
+
+def _pr390_graph(tmp_path, monkeypatch, files):
+    """Write `files` (rel -> source) into `tmp_path`, add the always-present
+    inert `_PR390_OTHER` target, point pilot.REPO there, and return
+    (tracked, graph). The extra file gives every unresolved construct a
+    concrete catch-all edge to assert against."""
+    files = dict(files)
+    files.setdefault(_PR390_OTHER, "OTHER = 1\n")
+    tracked = _write_repo(tmp_path, files)
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    return tracked, pilot.build_import_graph(tracked)
+
+
+# (a) narrow unresolved-import: eval/exec/dataclass-field and importlib shapes
+
+def test_build_import_graph_an_eval_named_dataclass_field_is_not_unresolved(tmp_path, monkeypatch):
+    # A dataclass field literally named `eval` (the real shape some config
+    # classes use) is a STORE TARGET / ANNAssign name, not a CALL of the
+    # builtin -- the narrow scanner must NOT mistake it for a dynamic-load
+    # attempt. (The old broad `_is_dynamic_file` still trips on the bare name;
+    # build_import_graph no longer consults it.)
+    source = (
+        "from dataclasses import dataclass, field\n"
+        "\n"
+        "@dataclass\n"
+        "class Config:\n"
+        "    eval: dict = field(default_factory=dict)\n")
+    rel = "engine/cfg.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is False
+    assert graph[rel] == set()
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+@pytest.mark.parametrize("construct", [
+    pytest.param('eval("1 + 1")', id="bare-eval-call"),
+    pytest.param('exec("x = 1")', id="bare-exec-call"),
+    pytest.param("__import__('os')", id="dunder-import-call"),
+])
+def test_build_import_graph_a_direct_dynamic_call_is_unresolved(construct, tmp_path, monkeypatch):
+    # The DIRECT call form of each is the genuine risk, and IS unresolved --
+    # the dataclass-field case above is the contrast that makes it mean
+    # something: only a Call whose func is the bare name counts.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "engine/dyn.py": f"def go():\n    return {construct}\n",
+    })
+    rel = "engine/dyn.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+@pytest.mark.parametrize("snippet", [
+    pytest.param('importlib.metadata.version("somepkg")', id="version-call"),
+    pytest.param('importlib.metadata.PackageNotFoundError', id="not-found-attr"),
+    pytest.param('importlib.metadata.distributions()', id="distributions-call"),
+])
+def test_build_import_graph_importlib_metadata_is_not_unresolved(snippet, tmp_path, monkeypatch):
+    # `importlib.metadata` (and any attribute beneath it) is the one non-
+    # loading `importlib` spelling: version/entry-point queries cannot reach a
+    # repo module, so they must NOT be caught by the "any other importlib.*"
+    # rule. This file keeps only its real (empty) edges -- no catch-all.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "engine/meta.py": (
+            "import importlib.metadata\n"
+            "\n"
+            "def go():\n"
+            f"    return {snippet}\n"),
+    })
+    rel = "engine/meta.py"
+    assert graph[rel] == set()
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_importlib_import_module_of_a_variable_is_unresolved(tmp_path, monkeypatch):
+    # The flip side: the SAME attribute spelled `import_module` with a
+    # non-literal argument cannot be resolved, so it fails safe -- the
+    # `metadata` allowance above is specifically about the non-loading forms.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "engine/dyn.py": (
+            "import importlib\n"
+            "name = 'some.module'\n"
+            "importlib.import_module(name)\n"),
+    })
+    rel = "engine/dyn.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_the_real_chooser_spec_from_file_location_file_is_unresolved():
+    # `checks/phase4_checks.py` is the actual repo file that loads a
+    # per-experiment run.py via importlib.util.spec_from_file_location -- the
+    # exact loader shape whose target this scan can never prove. It must stay
+    # unresolved (catch-all) so any change that only it reaches keeps its tests
+    # in the #155 failsafe.
+    graph = pilot.build_import_graph()
+    tracked = sorted(graph)
+    rel = "checks/phase4_checks.py"
+    assert rel in graph
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+# (b) subprocess: `-m` module/package targets, the non-Python allowlist, and
+#     the shell=/executable= escape hatches
+
+def test_build_import_graph_python_dash_m_regular_module_adds_ancestor_inits(tmp_path, monkeypatch):
+    # `python -m pkg.sub.mod` runs mod.py AND every strict ancestor package
+    # __init__.py (Python executes each parent's __init__ before the submodule),
+    # exactly like a plain `import pkg.sub.mod` -- a precise multi-edge result,
+    # never a catch-all.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "pkg/__init__.py": "PKG = 1\n",
+        "pkg/sub/__init__.py": "SUB = 1\n",
+        "pkg/sub/mod.py": "MOD = 1\n",
+        "tools/runner.py": "import subprocess\nsubprocess.run(['python', '-m', 'pkg.sub.mod'])\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == {"pkg/__init__.py", "pkg/sub/__init__.py", "pkg/sub/mod.py"}
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_python_dash_m_package_adds_init_and_main(tmp_path, monkeypatch):
+    # `python -m pkg` executes pkg/__init__.py THEN pkg/__main__.py -- both are
+    # edges when both are tracked (with tracked ancestor inits, here none for a
+    # single-part name).
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "pkg/__init__.py": "PKG = 1\n",
+        "pkg/__main__.py": "print('hi')\n",
+        "tools/runner.py": "import subprocess\nsubprocess.run(['python3', '-m', 'pkg'])\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == {"pkg/__init__.py", "pkg/__main__.py"}
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_python_dash_m_package_without_tracked_main_fails_safe(tmp_path, monkeypatch):
+    # A package with a tracked __init__.py but NO tracked __main__.py: `python
+    # -m pkg` would find no __main__ to run, so the launch cannot be resolved to
+    # a specific file -- it fails the whole file safe rather than silently
+    # dropping whatever __main__ would have run.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "pkg/__init__.py": "PKG = 1\n",
+        "tools/runner.py": "import subprocess\nsubprocess.run(['python3', '-m', 'pkg'])\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+_NONPYTHON_ALLOWLIST = pytest.mark.parametrize("argv", [
+    pytest.param("['git', 'status']", id="git"),
+    pytest.param("['npm', 'run', 'build']", id="npm"),
+    pytest.param("['curl', 'https://example.invalid']", id="curl"),
+    pytest.param("['free', '-m']", id="free"),
+])
+
+
+@_NONPYTHON_ALLOWLIST
+def test_build_import_graph_an_allowlisted_non_python_command_adds_nothing(argv, tmp_path, monkeypatch):
+    # The four non-Python commands this repo actually shells out to are
+    # recognized: no edge (they cannot load a tracked module) and no catch-all.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": f"import subprocess\nsubprocess.run({argv})\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set()
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+@_NONPYTHON_ALLOWLIST
+def test_python_argv_targets_recognizes_the_non_python_allowlist(argv):
+    tree = pilot.ast.parse("import subprocess\nsubprocess.run(" + argv + ")\n")
+    edges, unresolved = pilot._python_argv_targets(
+        tree.body[1].value.args[0], {"tools/runner.py", _PR390_OTHER}, {"tools", "engine"}, {"sys"})
+    assert edges == set()
+    assert unresolved is False
+
+
+_UNKNOWN_COMMAND = pytest.mark.parametrize("argv", [
+    pytest.param("['sh', 'run.sh']", id="sh-shell"),
+    pytest.param("['bash', '-x', 'run.sh']", id="bash-shell"),
+    pytest.param("['some_untracked_tool', '--flag']", id="arbitrary-tool"),
+])
+
+
+@_UNKNOWN_COMMAND
+def test_build_import_graph_an_unrecognized_non_python_command_fails_safe(argv, tmp_path, monkeypatch):
+    # A literal command the allowlist does not name -- including a `sh`/`bash`
+    # interpreter whose own script this scan never parses -- cannot be proven
+    # not to load repo code, so it fails safe.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": f"import subprocess\nsubprocess.run({argv})\n",
+    })
+    rel = "tools/runner.py"
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+_SUBPROCESS_ESCAPE = pytest.mark.parametrize("tail, expected_unresolved", [
+    pytest.param(", shell=True)", True, id="shell-true"),
+    pytest.param(", shell=enabled)", True, id="shell-non-literal"),
+    pytest.param(", executable='/bin/sh')", True, id="executable-override"),
+    pytest.param(", **opts)", True, id="kwargs-expansion"),
+    pytest.param(", shell=False)", False, id="shell-false-stays-precise"),
+])
+
+
+@_SUBPROCESS_ESCAPE
+def test_build_import_graph_shell_and_executable_keywords_control_precision(tail, expected_unresolved, tmp_path, monkeypatch):
+    # shell=/executable= (and any **kwargs that could carry them) hand the
+    # launch off to a shell or a different program, so argv no longer proves
+    # what runs -- unresolved even when the argv names a non-Python command.
+    # The one accepted shell spelling is the literal `shell=False`.
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {
+        "tools/runner.py": f"import subprocess\nenabled = False\nopts = {{}}\nsubprocess.run(['git', 'status']{tail}\n",
+    })
+    rel = "tools/runner.py"
+    if expected_unresolved:
+        assert graph[rel] == set(tracked) - {rel}
+        assert rel in pilot.dynamic_files(graph)
+        assert rel in pilot.unresolved_import_files(tracked)
+    else:
+        assert graph[rel] == set()
+        assert rel not in pilot.dynamic_files(graph)
+        assert rel not in pilot.unresolved_import_files(tracked)
+
+
+# (c) process-launch: the shape-only classifier, direct and by-reference
+
+_PROCESS_LAUNCH_UNRESOLVED = [
+    pytest.param("import os\nos.system('ls')\n", id="os.system-direct"),
+    pytest.param("import os\nos.popen('ls')\n", id="os.popen-direct"),
+    pytest.param("import os\nos.execv('/bin/ls', ['ls'])\n", id="os.execv-direct"),
+    pytest.param("import os\nos.spawnl(os.P_NOWAIT, 'a', 'b')\n", id="os.spawnl-direct"),
+    pytest.param("import os\nos.execlp('ls', 'ls')\n", id="os.execlp-direct"),
+    pytest.param("import subprocess\nsubprocess.getoutput('ls')\n", id="subprocess.getoutput"),
+    pytest.param("import subprocess\nsubprocess.getstatusoutput('ls')\n", id="subprocess.getstatusoutput"),
+    pytest.param("import os\nlauncher = os.system\n", id="os.system-referenced"),
+    pytest.param("import os\nhandlers = [os.execv]\n", id="os.execv-in-list"),
+    pytest.param("import os\ndef f():\n    return os.popen\n", id="os.popen-returned"),
+    pytest.param("import os as o\no.system('ls')\n", id="aliased-os-direct"),
+    pytest.param("from os import system as run\nrun('ls')\n", id="from-os-alias-direct"),
+    pytest.param("import subprocess\nlaunch = subprocess.run\nlaunch(['git'])\n", id="subprocess-run-by-value"),
+    pytest.param("import subprocess\nfns = [subprocess.check_output]\n", id="subprocess-fn-in-list"),
+    pytest.param("from os import *\n", id="wildcard-os"),
+    pytest.param("from subprocess import *\n", id="wildcard-subprocess"),
+]
+
+
+@pytest.mark.parametrize("source", _PROCESS_LAUNCH_UNRESOLVED)
+def test_has_unresolved_process_launch_flags_the_dynamic_launch_shapes(source):
+    assert pilot._has_unresolved_process_launch(pilot.ast.parse(source)) is True
+
+
+_PROCESS_LAUNCH_PRECISE = [
+    pytest.param("import subprocess\nsubprocess.run(['git', 'status'])\n", id="subprocess-run-direct"),
+    pytest.param("import subprocess\nout = subprocess.check_output(['npm', 'x'])\n", id="check_output-direct"),
+    pytest.param("import subprocess as sp\nsp.call(['curl', 'x'])\n", id="aliased-subprocess-direct"),
+    pytest.param("from subprocess import run\nrun(['free', '-m'])\n", id="from-subprocess-run-direct"),
+    pytest.param(
+        "class App:\n    def run(self):\n        return 1\n\na = App()\na.run()\n",
+        id="unrelated-app-run"),
+    pytest.param("thing = object()\nthing.system()\n", id="unrelated-thing-system"),
+    pytest.param("system('x')\n", id="bare-name-not-os"),
+    pytest.param("import os\nprint(os.getcwd())\n", id="os-nondynamic-attr"),
+    pytest.param("import subprocess\nprint(subprocess.PIPE)\n", id="subprocess-non-launch-attr"),
+]
+
+
+@pytest.mark.parametrize("source", _PROCESS_LAUNCH_PRECISE)
+def test_has_unresolved_process_launch_leaves_direct_or_unrelated_calls_resolved(source):
+    # A DIRECT call to one of the five exec functions is judged by
+    # `_subprocess_targets` from its argv, not here; a bare `compile` name in a
+    # non-call position, an unrelated `.run`/`.system`, and a non-launch
+    # attribute are never flagged.
+    assert pilot._has_unresolved_process_launch(pilot.ast.parse(source)) is False
+
+
+def test_select_pr_tests_helper_with_unresolved_process_launch_taints_its_importer(tmp_path, monkeypatch):
+    # Selector-level proof that the process-launch catch-all EXERCISES taint,
+    # not merely "has a catch-all edge": `tests/test_a.py` reaches the changed
+    # `engine/b.py` ONLY through a helper that launches it via `os.system` --
+    # no static import edge exists, so its real closure never names b.py. It is
+    # selected solely because the #155 fail-safe (taint) fans it out, while an
+    # unrelated clean test sharing neither edge nor helper stays out.
+    tracked = _write_repo(tmp_path, {
+        "engine/b.py": "VALUE = 2\n",
+        "tests/helper.py": "import os\n\ndef go(cmd):\n    os.system(cmd)\n",
+        "tests/test_a.py": "from tests.helper import go\n\ndef test_go():\n    assert go('true')\n",
+        "tests/test_direct.py": "import engine.b\n\ndef test_b():\n    assert engine.b.VALUE == 2\n",
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    # helper's real closure genuinely cannot see b.py -- the taint (not a
+    # static edge) is what selects test_a.
+    helper_closure, _ = pilot._closure_from_roots(
+        {"tests/test_a.py"}, graph, pilot.unresolved_import_files(tracked), taint_exempt={"tests/test_a.py"})
+    assert "engine/b.py" not in helper_closure
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/b.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_a.py" in selected       # tainted through the os.system helper
+    assert "tests/test_direct.py" in selected  # reaches b.py by a real import edge
+    assert "tests/test_clean.py" not in selected  # clean: no edge, no taint
+
+
+# (d) import-path mutations: extend / rebinding / subscript / augmented writes
+
+_SYS_PATH_WRITE = [
+    pytest.param("import sys\nsys.path.extend(['somewhere'])\n", id="extend"),
+    pytest.param("import sys\nsys.path = ['somewhere']\n", id="rebind-assign"),
+    pytest.param("import sys\nsys.path: list = []\n", id="rebind-annotated"),
+    pytest.param("import sys\nsys.path[0] = 'somewhere'\n", id="subscript-assign"),
+    pytest.param("import sys\nsys.path += ['somewhere']\n", id="augmented-list"),
+    pytest.param("import sys\nsys.path[0] += 'somewhere'\n", id="augmented-subscript"),
+    pytest.param("import sys as s\ns.path.extend(['somewhere'])\n", id="aliased-extend"),
+]
+
+
+@pytest.mark.parametrize("source", _SYS_PATH_WRITE)
+def test_has_unresolved_sys_path_write_flags_every_unproven_mutation(source, tmp_path, monkeypatch):
+    # Every import-path WRITE whose effect the scan cannot prove safe --
+    # extend (an iterable, never a single provable target), a rebinding of the
+    # list, a subscript assignment, an augmented assignment to the list or one
+    # of its elements -- is unresolved and adds the whole-file catch-all.
+    rel = "engine/hack.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_sys_path_mutation(pilot.ast.parse(source), rel) is True
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_the_real_tests_conftest_proven_root_insert_never_taints_every_test():
+    # The positive side of the same contract: the real tests/conftest.py's
+    # `REPO_ROOT = Path(__file__).resolve().parents[1]` +
+    # `sys.path.insert(0, str(REPO_ROOT))` is a PROVEN repository-root
+    # insertion, so conftest.py is not in the narrow taint set and a normal
+    # source change still narrows the selection instead of fanning out to every
+    # collected test through an inherited catch-all.
+    graph = pilot.build_import_graph()
+    tracked = sorted(graph)
+    rel = "tests/conftest.py"
+    assert rel not in pilot.unresolved_import_files(tracked)
+    assert rel not in pilot.dynamic_files(graph)
+    tests = pilot.pytest_test_files(set(graph))
+    selected = pilot.select_pr_tests(pilot.load_config(), ["engine/v2/ops/computed_moves_store.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_v2_ops_computed_moves_store.py" in selected
+    assert len(selected) < len(tests)

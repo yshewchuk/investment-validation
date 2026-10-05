@@ -131,10 +131,10 @@ evidence. See the models and data component contracts.
     selection. `module_dependency_closure` walks ONLY
     `build_import_graph`'s real, statically-resolved edges
     (`_ImportGraph.precise`), never a DYNAMIC file's catch-all edge
-    (`build_import_graph` gives a file it cannot parse precisely — e.g. one
-    referencing `sys.path`, `subprocess`, or a non-literal
-    `importlib.import_module` — an edge to every other tracked file, never a
-    narrower guess): reaching a DYNAMIC file adds it to that module's own
+    (`build_import_graph` adds an edge to every other tracked file only when
+    an import, import-path mutation, or subprocess target remains unresolved;
+    recognized literal imports, paths, scripts, and modules add edges only to
+    their resolved targets): reaching a DYNAMIC file adds it to that module's own
     closure via its real edges only, and a DYNAMIC file changing directly
     selects every module whose closure reaches it -- narrow for most DYNAMIC
     files (just their own owners/reachers, e.g. `tests/dynamic.py` selecting

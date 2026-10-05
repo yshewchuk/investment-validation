@@ -179,9 +179,14 @@ the selector's backstop for such unresolved dependencies. Conftest ancestors
 remain part of each test's roots, and the existing #155 fail-safe for
 dynamic or tainted selections remains in force.
 
-Selection must preserve every test with a real dependency on a changed file.
-An unknown changed path, graph construction or scan failure, or any selector
-error means run the full suite; it must never produce a narrower selection.
+Selection preserves every test with a statically discoverable import chain to
+a changed file. Supported literal dynamic imports and tracked Python subprocess
+targets add precise edges too. Other runtime loading or process-launch patterns
+may not be discoverable by this static analysis, so a test that depends on a
+changed file only through such a pattern may be omitted from a narrowed PR run;
+the full suite on pushes to `main` is the backstop. An unknown changed path,
+graph construction or scan failure, or any selector error means run the full
+suite; it must never produce a narrower selection.
 
 ## Known thin spots
 
