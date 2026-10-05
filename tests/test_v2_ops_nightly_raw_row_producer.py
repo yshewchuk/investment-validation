@@ -47,6 +47,11 @@ _INTRADAY = pd.Timestamp("2024-01-16 13:30:00")
 _MIDNIGHT_WIRE = "2024-01-16"
 _INTRADAY_WIRE = "2024-01-16T13:30:00"
 _REFUSAL_SCHEMA = "native_score_batch_producer_refusals.v1.0"
+_PANEL_HISTORY_SESSIONS = 253
+_PANEL_HISTORY_DETAIL = "the pinned snapshot lacks required earlier panel sessions"
+_INTRADAY_DETAIL = "the board request carries an intraday event timestamp"
+_PROJECTED_DAYS = ("2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11",
+                   "2024-01-12", "2024-01-16", "2024-01-17")
 
 
 def _event_row(ticker: str, event_date, session: str, *, event_id: str) -> dict:
@@ -107,10 +112,14 @@ def _distinct_events(requests) -> list[tuple]:
     return ordered
 
 
-def _calendar() -> CalendarSessions:
+def _calendar(*, sessions: int = _PANEL_HISTORY_SESSIONS) -> CalendarSessions:
+    """The build-scoped calendar: ``sessions`` observed weekday sessions at or
+    before ``_AS_OF`` -- the producer counts them for its panel-history floor --
+    plus the projected tail its callers' event dates sit on. The real calendar
+    reader is faked, so only the as-of-side count is load-bearing here."""
+    history = pd.bdate_range(end=_AS_OF, periods=sessions)
     return CalendarSessions(
-        days=("2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08", "2024-01-09",
-              "2024-01-10", "2024-01-11", "2024-01-12", "2024-01-16", "2024-01-17"),
+        days=tuple(day.date().isoformat() for day in history) + _PROJECTED_DAYS,
         observed_through=_AS_OF)
 
 
@@ -154,6 +163,7 @@ class _ReaderRig:
         self.panel_calls: list = []
         self.quote_calls: list = []
         self.calendar_row_hook = None
+        self.calendar_hook = None
         self.real_enumerate = nightly_raw_rows.scan_forward_board_requests
 
         def enumerator(repository, snapshot, *, as_of, horizon_days, tickers=None):
@@ -165,6 +175,8 @@ class _ReaderRig:
 
         def decision_calendar(repository, snapshot, *, decision_session, event_through):
             self.calendar_calls.append((decision_session, event_through))
+            if self.calendar_hook is not None:
+                return self.calendar_hook(decision_session, event_through)
             return _calendar()
 
         def calendar_row(repository, snapshot, key, *, decision_session, calendar):
@@ -457,3 +469,65 @@ def test_typed_calendar_error_codes_become_per_key_refusals(tmp_path, monkeypatc
     assert "SENSITIVE_EVENT_ERROR" not in serialized
     assert "SENSITIVE_CONFLICT_ERROR" not in serialized
     assert refusals_document["schema_version"] == _REFUSAL_SCHEMA
+
+
+def test_insufficient_panel_history_refuses_every_request_before_context_reads(
+        tmp_path, monkeypatch):
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
+        _event_row("AAA", _INTRADAY, "BMO", event_id="aaa-intraday"),
+    ])
+    rig = _ReaderRig(monkeypatch)
+    direct = rig.direct(repository, snapshot)
+    midnight = [key for key in direct if key.event_date == _MIDNIGHT]
+    intraday = [key for key in direct if key.event_date == _INTRADAY]
+    assert midnight and intraday
+    assert list(direct) == midnight + intraday
+
+    short = _calendar(sessions=_PANEL_HISTORY_SESSIONS - 1)
+    assert len([day for day in short.days if day <= _AS_OF]) == _PANEL_HISTORY_SESSIONS - 1
+
+    def short_calendar(decision_session, event_through):
+        return short
+
+    rig.calendar_hook = short_calendar
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert events_document == []
+    assert refusals_document["schema_version"] == _REFUSAL_SCHEMA
+    refusals = refusals_document["refusals"]
+    assert len(rig.enum_calls) == 1
+    assert rig.calendar_calls == [(_AS_OF, _MIDNIGHT_WIRE)]
+    assert [refusal["key"] for refusal in refusals] == [_event_keylike(key) for key in direct]
+    assert [refusal["code"] for refusal in refusals] == [
+        "PANEL_HISTORY_NOT_AVAILABLE" if key.event_date == _MIDNIGHT
+        else "INTRADAY_EVENT_NOT_ADMITTED" for key in direct]
+
+    refused_midnight = [refusal for refusal in refusals
+                        if refusal["code"] == "PANEL_HISTORY_NOT_AVAILABLE"]
+    refused_intraday = [refusal for refusal in refusals
+                        if refusal["code"] == "INTRADAY_EVENT_NOT_ADMITTED"]
+    assert [refusal["key"] for refusal in refused_midnight] \
+        == [_event_keylike(key) for key in midnight]
+    assert [refusal["key"] for refusal in refused_intraday] \
+        == [_event_keylike(key) for key in intraday]
+    assert all(refusal["key"]["event_date"] == _INTRADAY_WIRE for refusal in refused_intraday)
+    assert all(pd.Timestamp(refusal["key"]["event_date"]) == _INTRADAY
+               for refusal in refused_intraday)
+
+    fixed_details = {"PANEL_HISTORY_NOT_AVAILABLE": _PANEL_HISTORY_DETAIL,
+                     "INTRADAY_EVENT_NOT_ADMITTED": _INTRADAY_DETAIL}
+    for refusal in refusals:
+        detail = refusal["detail"]
+        assert detail == fixed_details[refusal["code"]]
+        assert isinstance(detail, str) and detail.strip()
+        assert "Traceback" not in detail
+        assert "BoardRequest(" not in detail
+        assert refusal["key"]["ticker"] not in detail
+        assert _INTRADAY_WIRE not in detail
+    assert json.dumps(refusals_document)
+
+    assert rig.calendar_row_calls == []
+    assert rig.panel_calls == []
+    assert rig.quote_calls == []
