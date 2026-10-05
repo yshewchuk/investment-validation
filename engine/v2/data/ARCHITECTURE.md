@@ -438,8 +438,10 @@ Root doc §5 invariants this package is responsible for:
   `IDENTITY_CONFLICT` — an unresolvable ordering ambiguity, never silently
   picked either way.
 - **`daily_market` coverage is measured against what was requested**, not
-  what came back — a response missing an expected ticker is a genuine,
-  detectable `TRANSIENT_SOURCE` gap, never a tautological "complete."
+  what came back — after the provider's bounded retry, a `partial` response
+  records expected keys without returned rows as typed `missing` outcomes and
+  coverage is `partial`; a response labeled `complete` that omits an expected
+  key is refused with `TRANSIENT_SOURCE` before it is cached.
 - **`daily_market` normalizer versioning.** `cache_normalization` keys on
   `(raw_hash, normalizer_id, contract_id)`; `normalizer_id` must be bumped
   in the same PR as any change to what a normalized document contains for
