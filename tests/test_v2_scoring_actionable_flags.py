@@ -212,6 +212,29 @@ def test_stale_quote_age_counts_the_december_2018_nyse_closure():
     assert not flags_refuse(flags)
 
 
+def test_stale_quote_age_counts_the_october_2012_sandy_closures():
+    # Monday 2012-10-29 and Tuesday 2012-10-30 were full NYSE closures
+    # (Hurricane Sandy), so the canonical sessions in (quote, entry] for a
+    # 2012-10-26 quote used on a 2012-10-31 entry is just Wednesday
+    # 2012-10-31: age 1, in bound under a 1-session caller bound -- the
+    # advisory STALE_QUOTE, not a refusing NO_CHAIN. Before the fix the
+    # production calendar still counted both closure dates as sessions,
+    # making the age 3 and refusing the row; this test is written to catch
+    # that pre-fix behavior.
+    flags: list[str] = []
+    stages._check_stale_quote(
+        {
+            "entry_date": "2012-10-31",
+            "quote_date": "2012-10-26",
+            "quote_max_age_sessions": 1,
+        },
+        flags,
+    )
+    assert "STALE_QUOTE" in flags
+    assert "NO_CHAIN" not in flags
+    assert not flags_refuse(flags)
+
+
 def test_stale_quote_unrepresentable_date_refuses_no_chain():
     # A quote date no calendar can convert (year 0 is below datetime.min).
     # The conversion must not leak an exception out of the stage: the age is

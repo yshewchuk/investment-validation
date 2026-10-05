@@ -1347,10 +1347,9 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release,
 request-hash collision, invalid worker identity fields, or malformed `events.json`/`producer_refusals.json`.
-Invalid timestamp wire values raise `ValueError` during decoding. Quote bounds are checked during decoding and
-`_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted
-(booleans, floats, strings, and negatives fail). Invalid bounds raise `ValueError`, mapped by worker dispatch to
-nonretryable `VALIDATION_FAILED` before scoring or output writes; they are malformed batch inputs, not row refusals.
+Invalid timestamp wire values raise `ValueError` during decoding. Quote bounds are validated during decoding and in
+`_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted.
+Booleans, floats, strings, and negatives raise `ValueError`, mapped to nonretryable `VALIDATION_FAILED` before scoring or output writes; invalid bounds are malformed batch inputs, not row refusals.
 This classification does not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and
 maps to retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction. R5: writes
 follow assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
