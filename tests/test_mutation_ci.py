@@ -3609,6 +3609,38 @@ def test_build_import_graph_a_literal_python_script_sibling_import_fails_safe(tm
     assert "tests/test_clean.py" not in selected
 
 
+def test_build_import_graph_a_literal_python_script_dotted_sibling_import_fails_safe(
+        tmp_path, monkeypatch):
+    # The dotted sibling gap: `import helpers.util` in a launched script runs
+    # `<script-dir>/helpers/__init__.py` first when that package is tracked, so
+    # the precise script edge alone still under-approximates. The launcher must
+    # fail safe exactly as it does for a bare `import sibling` above.
+    tracked = _write_repo(tmp_path, {
+        "tools/launcher.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
+            "VALUE = 1\n"),
+        "tools/worker.py": "import helpers.util\nfrom helpers.util import thing\n",
+        "tools/helpers/__init__.py": "H = 1\n",
+        "tools/helpers/util.py": "thing = 2\n",
+        "engine/unrelated.py": "Z = 1\n",
+        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
+        "tests/test_direct.py": "import engine.unrelated\n",
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    launcher = "tools/launcher.py"
+    assert graph[launcher] == set(tracked) - {launcher}
+    assert launcher in pilot.dynamic_files(graph)
+    assert launcher in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/unrelated.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_launcher.py" in selected
+    assert "tests/test_direct.py" in selected
+    assert "tests/test_clean.py" not in selected
+
+
 def test_build_import_graph_a_literal_python_script_without_sibling_import_stays_precise(
         tmp_path, monkeypatch):
     # The contrast that keeps #413 from widening every script launch: a dotted

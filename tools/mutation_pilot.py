@@ -744,14 +744,19 @@ def _module_run_targets(dotted: str, tracked_set: set[str],
 
 def _literal_script_imports_tracked_sibling(target: str, tracked_set: set[str]) -> bool:
     """True if a tracked script target's own non-root directory holds a module
-    named by one of its bare absolute imports.
+    named by the first component of one of its absolute imports.
 
     This is deliberately narrow: only `import name` or `from name import ...`,
-    where `name` has no dots and no leading dot, is checked against
-    `<script-dir>/name.py` and `<script-dir>/name/__init__.py`. Such a launch
-    can load a sibling module that repo-root import resolution would never name,
-    so the process target stays unresolved instead of keeping only the precise
-    script edge. Read or parse failures are unresolved too."""
+    where `name` has no leading dot, is checked -- against
+    `<script-dir>/head.py` and `<script-dir>/head/__init__.py`, where `head` is
+    `name.split(".", 1)[0]`. A dotted import resolves the same way at runtime
+    (`import helpers.util` runs `<script-dir>/helpers/__init__.py` before
+    anything else), and a dotted name whose head shadows a tracked sibling
+    package (e.g. `import engine.v2` with a sibling `engine` package) can be
+    answered out of the script's own directory rather than the repo root. Such
+    a launch can load a sibling module that repo-root import resolution would
+    never name, so the process target stays unresolved instead of keeping only
+    the precise script edge. Read or parse failures are unresolved too."""
     script_dir = os.path.dirname(target)
     if not script_dir:
         return False
@@ -767,10 +772,11 @@ def _literal_script_imports_tracked_sibling(target: str, tracked_set: set[str]) 
         else:
             continue
         for name in names:
-            if not name or "." in name:
+            head = name.split(".", 1)[0]
+            if not head:
                 continue
-            if (f"{script_dir}/{name}.py" in tracked_set
-                    or f"{script_dir}/{name}/__init__.py" in tracked_set):
+            if (f"{script_dir}/{head}.py" in tracked_set
+                    or f"{script_dir}/{head}/__init__.py" in tracked_set):
                 return True
     return False
 
