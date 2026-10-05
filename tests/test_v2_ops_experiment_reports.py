@@ -19,7 +19,7 @@ import pytest
 from engine import paths
 from engine.v2.ops import cli, effects_graph, experiments, worker
 from engine.v2.ops.catalog import transaction
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from tests.ops_support import catalog
 
@@ -305,4 +305,25 @@ def test_no_ledger_smoke_binds_report_identity_to_consumed_economics(tmp_path):
     assert not refused_dir.exists(), "the refusal precedes any report or ledger effect"
 
     assert not (tmp_path / "experiments" / "LEDGER.csv").exists()
+    assert not list(tmp_path.rglob("LEDGER.csv"))
+
+
+def test_failed_runner_receipt_retains_attempted_variant_identity_and_count(tmp_path):
+    """A runner that raises before writing REPORT.md still leaves the
+    attempted variant identity and its count on the failed receipt."""
+    spec = experiment_spec_from_document(_experiment_document())
+
+    def failing_runner(*, run_dir, no_ledger, execution_plan):
+        raise fail("VALIDATION_FAILED", "runner aborted before writing a report")
+
+    run_dir = tmp_path / "run-failed"
+    receipt = experiments.run_experiment(spec, tmp_path, run_dir,
+                                         runner=failing_runner, mode="smoke")
+    assert receipt["status"] == "failed"
+    assert receipt["evidence"]["failure_code"] == "VALIDATION_FAILED"
+    assert receipt["evidence"]["error_code"] == "OpsError"
+    assert receipt["evidence"]["variant_id"] == spec.spec_hash
+    assert receipt["evidence"]["variants_tried"] == 1
+    assert (run_dir / "CAPABILITIES.json").is_file()
+    assert not (run_dir / "REPORT.md").exists()
     assert not list(tmp_path.rglob("LEDGER.csv"))

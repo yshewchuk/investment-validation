@@ -770,15 +770,17 @@ def run_experiment(spec: ExperimentSpec, root: Path | str, run_dir: Path | str,
                                 mode=mode, evidence={"capabilities": capabilities})
     (destination / "CAPABILITIES.json").write_text(json.dumps(capabilities, indent=2,
                                                                 sort_keys=True))
+    # The attempted variant is recorded before the runner is invoked, so a
+    # failed receipt still names the variant identity and its count.
+    variant = spec.spec_hash if variant_id is None else variant_id
+    receipt.evidence["variant_id"] = variant
+    receipt.evidence["variants_tried"] = 1
     try:
         result = _call_runner(runner, destination, no_ledger=(mode == "smoke" or synthetic),
                               execution_plan=plan)
         report = _report_evidence(destination)
-        variant = spec.spec_hash if variant_id is None else variant_id
         report.update(_annotate_variant_identity(Path(report["report"]), variant))
         receipt.evidence.update(report)
-        receipt.evidence["variant_id"] = variant
-        receipt.evidence["variants_tried"] = 1
         receipt.evidence["runner_result"] = result if isinstance(result, dict) else str(result)
         receipt.evidence["synthetic"] = bool(synthetic)
         receipt.status = "succeeded"
