@@ -15,8 +15,6 @@ from engine.v2.ops.experiment_folds import TrainFoldRule, fit_walk_forward_fold
 def test_future_poison_in_test_fold_cannot_change_training_fit_or_threshold():
     from engine.v2.ops.errors import OpsError
 
-    from dataclasses import replace
-
     import pytest
     from sklearn.base import clone
 
@@ -31,10 +29,15 @@ def test_future_poison_in_test_fold_cannot_change_training_fit_or_threshold():
     expected_model = clone(estimator).fit(train_x, train_y)
     expected_scores = expected_model.predict_proba(train_x)[:, 1]
     expected_threshold = float(np.quantile(expected_scores, 0.5))
-    assert baseline.threshold == expected_threshold
-    corrupted = replace(baseline, threshold=expected_threshold + 1.0)
+    np.testing.assert_allclose(baseline.threshold, expected_threshold)
     with pytest.raises(AssertionError):
-        assert corrupted.threshold == expected_threshold
+        np.testing.assert_allclose(baseline.threshold, expected_threshold + 1.0)
+    expected_test_scores = expected_model.predict_proba(clean_test)[:, 1]
+    np.testing.assert_allclose(baseline.test_scores, expected_test_scores)
+    corrupted_test_scores = expected_test_scores.copy()
+    corrupted_test_scores[0] += 1.0
+    with pytest.raises(AssertionError):
+        np.testing.assert_allclose(baseline.test_scores, corrupted_test_scores)
     np.testing.assert_array_equal(baseline.estimator.coef_, poisoned.estimator.coef_)
     np.testing.assert_array_equal(baseline.estimator.intercept_, poisoned.estimator.intercept_)
     assert baseline.threshold == poisoned.threshold
@@ -106,3 +109,25 @@ def test_nonfinite_fold_quantile_is_a_typed_variant_failure():
     with pytest.raises(OpsError) as raised:
         TrainFoldRule(top_fraction=0.5).fit_threshold([-1e308, 1e308], [0, 1])
     assert raised.value.code == "EXPERIMENT_VARIANT_FAILED"
+
+
+def test_estimator_mutation_cannot_change_reused_fold_rows():
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    train_x = np.array([[-2.0, 0.0], [-1.0, 1.0], [1.0, 0.0], [2.0, 1.0]])
+    train_y = np.array([0, 0, 1, 1])
+    test_x = np.array([[0.0, 0.2], [0.5, 0.2]])
+    train_snapshot = train_x.copy()
+    test_snapshot = test_x.copy()
+    estimator = Pipeline([("scale", StandardScaler(copy=False)),
+                          ("model", LogisticRegression(random_state=0))])
+    rule = TrainFoldRule(top_fraction=0.5)
+    first_fold = fit_walk_forward_fold(estimator, train_x, train_y, test_x, rule)
+    assert np.asarray(first_fold.test_scores).shape == (test_x.shape[0],)
+    np.testing.assert_array_equal(train_x, train_snapshot)
+    np.testing.assert_array_equal(test_x, test_snapshot)
+    second_fold = fit_walk_forward_fold(estimator, train_x, train_y, test_x, rule)
+    assert second_fold.threshold == first_fold.threshold
+    np.testing.assert_array_equal(train_x, train_snapshot)
+    np.testing.assert_array_equal(test_x, test_snapshot)

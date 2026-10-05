@@ -49,7 +49,7 @@ def _training_arrays(train_features, train_labels):
     import numpy as np
 
     try:
-        matrix = np.asarray(train_features, dtype=float)
+        matrix = np.array(train_features, dtype=float, copy=True)
         labels = np.asarray(train_labels, dtype=float)
     except (OverflowError, TypeError, ValueError):
         raise fail("INVALID_EXPERIMENT_SPEC", "training fold must be numeric") from None
@@ -79,7 +79,7 @@ def _feature_matrix(features):
     import numpy as np
 
     try:
-        matrix = np.asarray(features, dtype=float)
+        matrix = np.array(features, dtype=float, copy=True)
     except (OverflowError, TypeError, ValueError):
         raise fail("INVALID_EXPERIMENT_SPEC", "feature rows must be numeric") from None
     if matrix.ndim != 2 or not matrix.shape[0] or not matrix.shape[1] \
