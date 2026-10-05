@@ -46,7 +46,7 @@ cookie. Build output is static assets; serving those bytes is transport.
 | Loading, empty, 401 or unknown identity | Explicit loading/empty/auth/refusal state; detail failure preserves board. |
 | Current release changes | Announce only; reload opts in. Cache keys retain explicit release pin. |
 | Operations status | Show its observation age, requested/resolved sessions, engineering history (including scheduled `unknown` occurrences), latest attempt outcome, its described release, the board pin, and current published release separately. More than 24 hours old is stale; a scheduled `unknown` or `fail` observation is never current. Never label the board current unless its pin equals current discovery. |
-| Missing, malformed, stale-session, or wrong-release operations status | Show unknown/stale with the observation age and reason; do not turn a failed or absent read into current. A status release mismatch never repins the board. |
+| Missing, malformed, stale-session, or wrong-release operations status | Show unknown/stale with the observation age and reason; absent or mismatched requested/resolved sessions and unavailable publication identity are unknown. Do not turn a failed read into current. A status release mismatch never repins the board. |
 | Parity loading, 401 or `no_report` | Explicit loading/auth/no-report state, independent of release resolution; no-report rendering reads status only. |
 | Parity `stale` | Banner with saved identity, counts and refusal reasons still shown. |
 | Parity `unavailable` | Explicit error; failed data is withheld, never presented as an empty comparison. |

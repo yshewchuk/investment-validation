@@ -76,7 +76,7 @@ export function ReleaseBanner({
   const at = status === null ? Number.NaN : Date.parse(status.generated_at);
   const timed = !Number.isNaN(at) && at <= now;
   const hours = Math.floor((now - at) / 3_600_000);
-  const age = !timed ? "age unavailable" : hours >= 24 ? `${Math.floor(hours / 24)}d ${hours % 24}h ago` : now === at ? "0h ago" : hours > 0 ? `${hours}h ago` : "1h ago";
+  const age = !timed ? "age unavailable" : hours >= 24 ? `${Math.floor(hours / 24)}d ${hours % 24}h ago` : hours >= 1 ? `${hours}h ago` : `${Math.floor((now - at) / 60_000)}m ago`;
   const rows = status !== null && Array.isArray(status.engineering_history) ? status.engineering_history : [];
   const unknownDates: string[] = [], failDates: string[] = [];
   let malformed = status === null || rows.length === 0;
@@ -94,26 +94,27 @@ export function ReleaseBanner({
   const attempt = missing || status === null ? "no observation available" : status.failed_update === true ? `failed for release ${attempted}` : `no failed update recorded (attempted release ${attempted})`;
   const reasons: string[] = [];
   let unknownClass = false;
+  const addUnknownReason = (reason: string): void => { unknownClass = true; reasons.push(reason); };
+  const addKnownReason = (reason: string): void => { reasons.push(reason); };
   let label = operationsLoading ? "loading" : "unknown / unavailable";
   let observed = "observation unavailable";
   if (status !== null && !operationsLoading && !operationsUnavailable) {
     observed = timed ? `observed ${age}` : "observation time unknown";
-    if (status.schema_version !== "operations_status.v1.0") reasons.push("unexpected operations status schema");
-    if (!timed) reasons.push("observation time is invalid or in the future");
-    else if (now - at > 86_400_000) reasons.push(`observation is older than 24 hours (${age})`);
-    if (described === "unavailable") reasons.push("health/status-described release identity unavailable");
-    if (published === "unavailable") reasons.push("latest published release identity unavailable");
+    if (status.schema_version !== "operations_status.v1.0") addUnknownReason("unexpected operations status schema");
+    if (!timed) addUnknownReason("observation time is invalid or in the future");
+    else if (now - at > 86_400_000) addKnownReason(`observation is older than 24 hours (${age})`);
+    if (described === "unavailable") addUnknownReason("health/status-described release identity unavailable");
+    if (published === "unavailable") addUnknownReason("latest published release identity unavailable");
     const agree = described !== "unavailable" && published !== "unavailable" && described === published && published === releaseId;
-    if (!agree && described !== "unavailable" && published !== "unavailable") reasons.push(`release identity mismatch: board ${releaseId}, status ${described}, published ${published}`);
-    if (status.withheld === true) reasons.push("release withheld");
-    if (status.failed_update === true) reasons.push("latest update attempt failed");
-    if (status.stale === true) reasons.push("operations status flagged stale");
-    if (typeof status.withheld !== "boolean" || typeof status.stale !== "boolean" || typeof status.failed_update !== "boolean") reasons.push("operations status flags are absent or non-boolean");
-    if (requested === "unavailable" || resolved === "unavailable" || attempted === "unavailable") reasons.push("operations status attempt/session identifiers unavailable");
-    if (malformed) reasons.push("scheduled observations missing or malformed");
-    if (unknownDates.length > 0) reasons.push(`scheduled observations missing: ${unknownDates.join(", ")}`);
-    if (failDates.length > 0) reasons.push(`scheduled observations failed: ${failDates.join(", ")}`);
-    unknownClass = status.schema_version !== "operations_status.v1.0" || !timed || malformed || described === "unavailable" || published === "unavailable" || !agree || status.withheld === true || status.failed_update === true || unknownDates.length > 0 || typeof status.withheld !== "boolean" || typeof status.stale !== "boolean" || typeof status.failed_update !== "boolean" || requested === "unavailable" || resolved === "unavailable" || attempted === "unavailable";
+    if (!agree && described !== "unavailable" && published !== "unavailable") addUnknownReason(`release identity mismatch: board ${releaseId}, status ${described}, published ${published}`);
+    if (status.withheld === true) addUnknownReason("release withheld");
+    if (status.failed_update === true) addUnknownReason("latest update attempt failed");
+    if (status.stale === true) addKnownReason("operations status flagged stale");
+    if (typeof status.withheld !== "boolean" || typeof status.stale !== "boolean" || typeof status.failed_update !== "boolean") addUnknownReason("operations status flags are absent or non-boolean");
+    if (requested === "unavailable" || resolved === "unavailable" || attempted === "unavailable") addUnknownReason("operations status attempt/session identifiers unavailable");
+    if (malformed) addUnknownReason("scheduled observations missing or malformed");
+    if (unknownDates.length > 0) addUnknownReason(`scheduled observations missing: ${unknownDates.join(", ")}`);
+    if (failDates.length > 0) addKnownReason(`scheduled observations failed: ${failDates.join(", ")}`);
     label = reasons.length === 0 ? "current" : unknownClass ? "unknown" : failDates.length > 0 ? "failed" : "stale";
   }
   const boardStale = publishedId !== null && publishedId !== releaseId;
@@ -188,7 +189,7 @@ export function ReleaseBanner({
       {boardStale && (
         <div className="release-changed-notice" data-testid="operations-board-stale">
           The displayed board is stale: this page shows release <code>{releaseId}</code> while the latest published release is{" "}
-          <code>{published}</code> ({age}). The board is never swapped automatically.{" "}
+          <code>{published}</code> (operations status observed {age}). The board is never swapped automatically.{" "}
           <button type="button" onClick={reloadToCurrent}>Reload to see {published}</button>
         </div>
       )}

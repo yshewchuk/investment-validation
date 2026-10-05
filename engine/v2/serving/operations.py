@@ -174,17 +174,20 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
 <script>
 const FROZEN='{frozen}',DAY=86400000;
 const state=document.querySelector('#state'),stamp=document.querySelector('#stamp'),banner=document.querySelector('#ops'),releaseEl=document.querySelector('#release'),publishedEl=document.querySelector('#published'),driftEl=document.querySelector('#drift'),optin=document.querySelector('#optin'),frame=document.querySelector('#legacy');
-let pinned=null,published,health=null,healthNote='health not fetched yet';
+let pinned=null,published,health=null,healthNote='health not fetched yet',currentSeq=0;
 function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}
 function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||j.schema_version!=='operations_health.v1.0')return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
 async function pollHealth(){{try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{health=null;healthNote='health fetch failed: unavailable';}}render();}}
-async function pollCurrent(){{try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();published=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;}}catch(e){{published=null;}}render();}}
+async function pollCurrent(){{const seq=++currentSeq;let ok=false,id=null;try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;ok=true;}}catch(e){{}}if(seq!==currentSeq)return;published=ok?id:null;render();}}
+function sessionDate(s){{if(typeof s!=='string'||!s)return null;const tail=s.slice(-10);if(!/^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$/.test(tail))return null;const at=Date.parse(tail);if(Number.isNaN(at))return null;return new Date(at).toISOString().slice(0,10)===tail?at:null;}}
 function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false;
 if(health.withheld_release)reasons.push('release withheld: '+(typeof health.withheld_release==='string'?health.withheld_release:'(details omitted)'));
 const cr=(health.current_release&&typeof health.current_release==='object'&&typeof health.current_release.release_id==='string'&&health.current_release.release_id)?health.current_release.release_id:null;
 if(cr===null){{unknown=true;reasons.push('health names no current release identity');}}
 else{{if(pinned===null)reasons.push('release mismatch: health says '+cr+', frame pin unavailable');else if(cr!==pinned)reasons.push('release mismatch: health says '+cr+', frame pinned to '+pinned);
-if(published===undefined)reasons.push('release mismatch: health says '+cr+', published current not yet observed');else if(published===null)reasons.push('release mismatch: health says '+cr+', published current unavailable');else if(cr!==published)reasons.push('release mismatch: health says '+cr+', published current is '+published);}}
+if(published===undefined){{unknown=true;reasons.push('release mismatch: health says '+cr+', published current not yet observed');}}else if(published===null){{unknown=true;reasons.push('release mismatch: health says '+cr+', published current unavailable');}}else if(cr!==published)reasons.push('release mismatch: health says '+cr+', published current is '+published);}}
+const rq=sessionDate(health.requested_session),rs=sessionDate(health.resolved_session);
+if(rq===null||rs===null){{unknown=true;reasons.push('session identity evidence missing or malformed');}}else if(rs>rq){{unknown=true;reasons.push('resolved session is later than requested session');}}
 const cb=health.code_budgets;
 if(!cb||typeof cb!=='object'||typeof cb.consecutive_nights!=='number'||!Array.isArray(cb.unknown_occurrences)){{unknown=true;reasons.push('engineering schedule evidence missing or malformed');}}
 else{{if(cb.consecutive_nights!==0)reasons.push('failed engineering nights: '+cb.consecutive_nights+' consecutive');if(cb.unknown_occurrences.length>0)reasons.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}}
@@ -200,7 +203,7 @@ else{{driftEl.textContent='';optin.hidden=true;}}
 if(!health){{state.textContent='unknown / stale: '+healthNote;stamp.textContent='offline frozen at '+FROZEN;banner.className='unknown';return;}}
 evaluate();}}
 function route(){{if(!pinned)return;frame.src='/release/'+pinned+'/index.html'+(location.hash||'#/trades/board');}}
-async function init(){{try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();if(j&&typeof j.release_id==='string'&&j.release_id){{pinned=j.release_id;published=pinned;}}else published=null;}}catch(e){{published=null;}}render();route();}}
+async function init(){{const seq=++currentSeq;let ok=false,id=null;try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();id=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;ok=true;}}catch(e){{}}if(ok&&id&&!pinned)pinned=id;if(seq!==currentSeq){{if(pinned){{route();render();}}return;}}published=ok?id:null;render();route();}}
 optin.addEventListener('click',function(){{location.reload();}});
 window.addEventListener('hashchange',function(){{try{{route();}}catch(e){{}}}});
 init();pollHealth();setInterval(pollHealth,30000);setInterval(pollCurrent,30000);

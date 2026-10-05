@@ -111,13 +111,16 @@ def test_operations_status_marks_old_pinned_board_and_missing_scheduled_session(
         "withheld": False,
         "failed_update": False,
     }
+    # The route reads this holder at fulfill time, so the payload can be
+    # swapped mid-test and the next 100ms operations poll picks it up.
+    served = {"status": operations_status}
     base = f"http://127.0.0.1:{server.server_port}"
     context, page = _authed_page(browser, server, base)
     page.route(
         "**/api/v1/operations",
         lambda route: route.fulfill(
             status=200, content_type="application/json",
-            body=json.dumps(operations_status)))
+            body=json.dumps(served["status"])))
     # Freeze only the browser wall clock (not setInterval -- the release poll
     # still ticks in real time); `?pollMs=100` accelerates the polls instead.
     page.add_init_script(
@@ -148,6 +151,16 @@ def test_operations_status_marks_old_pinned_board_and_missing_scheduled_session(
         expect(stale).to_contain_text("24d")  # still shows the observation age
         expect(stale.get_by_role("button")).to_be_visible()
         expect(page.get_by_test_id("release-id")).to_contain_text("r1")
+
+        # A fresh status write lands while the clock stays frozen at
+        # 2026-10-04T00:00:00Z: generated_at is now 29m old. The sub-hour
+        # age must render in minutes on the status row, and the stale-board
+        # notice must label it explicitly as the operations-status
+        # observation age, adjacent to the latest published id -- not leave
+        # it unqualified and not round it to "an hour".
+        served["status"] = {**operations_status, "generated_at": "2026-10-03T23:31:00Z"}
+        expect(status).to_contain_text("observed 29m ago")
+        expect(stale).to_contain_text("r2 (operations status observed 29m ago)")
     finally:
         context.close()
 
