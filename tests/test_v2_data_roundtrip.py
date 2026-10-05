@@ -88,10 +88,15 @@ def _published(tmp_path):
 
 
 def _scan_all(repo, snap, columns):
+    key_filter = (KeyPredicate(column="year", operator="eq", values=(2024,)),)
+    bound = repo.scan_population_bound(snap.snapshot_id, table_name="securities",
+                                      table_contract_ref=_SEC_REF, key_filter=key_filter)
+    max_result_rows = min(10, bound)
+    max_batch_rows = min(10, max_result_rows) if max_result_rows > 0 else 10
     query = DataQuery(
         snapshot_id=snap.snapshot_id, table_contract_ref=_SEC_REF, columns=columns,
-        key_filter=(KeyPredicate(column="year", operator="eq", values=(2024,)),),
-        order_by=("ticker", "year"), max_batch_rows=10, max_result_rows=10)
+        key_filter=key_filter,
+        order_by=("ticker", "year"), max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
     return [row for batch in repo.scan(query, table_name="securities") for row in batch.to_pylist()]
 
 

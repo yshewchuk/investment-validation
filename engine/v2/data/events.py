@@ -114,11 +114,17 @@ def map_row(row: dict, *, event_ref: EventRef, conflict: bool) -> EarningsEvent:
 
 
 def _rows_by_event_id(repository, snapshot_ref: SnapshotRef, contract_ref, event_id: str) -> list[dict]:
+    key_filter = (KeyPredicate(column="event_id", operator="eq", values=(event_id,)),)
+    population_bound = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=TABLE_NAME,
+        table_contract_ref=contract_ref, key_filter=key_filter)
+    max_result_rows = min(_RESULT_CAP, population_bound)
+    max_batch_rows = min(_BATCH_CAP, max(1, max_result_rows))
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=contract_ref,
         columns=_EVENT_COLUMNS,
-        key_filter=(KeyPredicate(column="event_id", operator="eq", values=(event_id,)),),
-        order_by=("event_id",), max_batch_rows=_BATCH_CAP, max_result_rows=_RESULT_CAP)
+        key_filter=key_filter,
+        order_by=("event_id",), max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
     return _collect(repository, query)
 
 
@@ -128,11 +134,17 @@ def _has_cluster_conflict(repository, snapshot_ref: SnapshotRef, contract_ref, r
     cluster_id = row.get("event_cluster_id")
     if cluster_id is None:
         return False
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(row["ticker"],)),)
+    population_bound = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=TABLE_NAME,
+        table_contract_ref=contract_ref, key_filter=key_filter)
+    max_result_rows = min(_RESULT_CAP, population_bound)
+    max_batch_rows = min(_BATCH_CAP, max(1, max_result_rows))
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=contract_ref,
         columns=("event_id", "ticker", "event_cluster_id"),
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(row["ticker"],)),),
-        order_by=("event_id",), max_batch_rows=_BATCH_CAP, max_result_rows=_RESULT_CAP)
+        key_filter=key_filter,
+        order_by=("event_id",), max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
     for sibling in _collect(repository, query):
         if sibling["event_cluster_id"] == cluster_id and sibling["event_id"] != row["event_id"]:
             return True

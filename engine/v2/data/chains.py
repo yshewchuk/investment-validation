@@ -192,11 +192,17 @@ def _ticker_from_securities(repository, chain_query: ChainQuery, snapshot_ref: S
         raise fail("CONTRACT_MISMATCH", "snapshot has no securities table")
     dvr = snapshot_ref.table_versions[SECURITIES_TABLE_NAME]
     year = date.fromisoformat(chain_query.session_date).year
+    key_filter = (KeyPredicate(column="year", operator="eq", values=(year,)),)
+    selected_population_bound = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=SECURITIES_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+    max_result_rows = min(_RESULT_CAP, selected_population_bound)
+    max_batch_rows = min(_BATCH_CAP, max_result_rows) if max_result_rows > 0 else _BATCH_CAP
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=dvr.table_contract_ref,
         columns=("ticker", "year"),
-        key_filter=(KeyPredicate(column="year", operator="eq", values=(year,)),),
-        order_by=("ticker", "year"), max_batch_rows=_BATCH_CAP, max_result_rows=_RESULT_CAP)
+        key_filter=key_filter,
+        order_by=("ticker", "year"), max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
     tickers = set()
     for batch in repository.scan(query, table_name=SECURITIES_TABLE_NAME):
         for row in batch.to_pylist():
@@ -228,12 +234,18 @@ def _build_members(rows, chain_query: ChainQuery, ticker: str, security_id: str,
 
 def _fetch_rows(repository, snapshot_ref: SnapshotRef, contract_ref, ticker: str,
                 session_date: str) -> list[dict]:
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
+                  KeyPredicate(column="obs_date", operator="eq", values=(session_date,)))
+    selected_population_bound = repository.scan_population_bound(
+        snapshot_ref.snapshot_id, table_name=TABLE_NAME,
+        table_contract_ref=contract_ref, key_filter=key_filter)
+    max_result_rows = min(_RESULT_CAP, selected_population_bound)
+    max_batch_rows = min(_BATCH_CAP, max_result_rows) if max_result_rows > 0 else _BATCH_CAP
     query = DataQuery(
         snapshot_id=snapshot_ref.snapshot_id, table_contract_ref=contract_ref, columns=_CHAIN_COLUMNS,
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
-                    KeyPredicate(column="obs_date", operator="eq", values=(session_date,))),
+        key_filter=key_filter,
         order_by=("ticker", "obs_date", "expiry", "strike", "right"),
-        max_batch_rows=_BATCH_CAP, max_result_rows=_RESULT_CAP)
+        max_batch_rows=max_batch_rows, max_result_rows=max_result_rows)
     rows: list[dict] = []
     for batch in repository.scan(query, table_name=TABLE_NAME):
         rows.extend(batch.to_pylist())

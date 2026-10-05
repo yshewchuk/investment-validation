@@ -97,27 +97,21 @@ def _daily_version(snapshot: SnapshotRef) -> DatasetVersionRef:
 def _build_query(data_repository: repository.Repository, snapshot: SnapshotRef,
                  version: DatasetVersionRef, contract: TableContract,
                  ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> DataQuery:
-    """The one bounded single-ticker read this module ever issues."""
+    """The one bounded single-ticker read this module ever issues, its limits
+    prepared against exactly the pinned membership bound the scan enforces."""
     key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
     time_interval = TimeInterval(
         column="date",
         start_inclusive=start.date().isoformat(),
         end_exclusive=end.date().isoformat(),
     )
-    max_batch_rows = min(contract.maximum_batch_rows, _BATCH_LIMIT)
-    max_result_rows = min(contract.maximum_result_rows, _RESULT_LIMIT)
-    population_bound = data_repository.scan_population_bound(
+    bound = data_repository.scan_population_bound(
         snapshot.snapshot_id, table_name=_TABLE,
         table_contract_ref=version.table_contract_ref,
         key_filter=key_filter, time_interval=time_interval)
-    if population_bound > 0:
-        # Only a positive selected bound lowers the active result limit; a
-        # zero bound keeps it positive (zero-result queries arrive with slice E).
-        max_result_rows = min(max_result_rows, population_bound)
-    if max_result_rows > 0:
-        # A lowered positive result limit may not leave the batch limit above it
-        # (BATCH_EXCEEDS_RESULT is refused at decode): lower only as needed.
-        max_batch_rows = min(max_batch_rows, max_result_rows)
+    max_result_rows = min(_RESULT_LIMIT, bound)
+    max_batch_rows = (min(contract.maximum_batch_rows, _BATCH_LIMIT, max_result_rows)
+                      if max_result_rows > 0 else min(contract.maximum_batch_rows, _BATCH_LIMIT))
     return DataQuery(
         snapshot_id=snapshot.snapshot_id,
         table_contract_ref=version.table_contract_ref,

@@ -239,11 +239,13 @@ def _quote_rows():
 
 def test_scan_quote_rows_keeps_limit_when_population_bound_is_at_or_above_current(
         tmp_path, monkeypatch):
-    repository, snapshot = _chain_snapshot(tmp_path, _quote_rows())
+    rows = _quote_rows()
+    repository, snapshot = _chain_snapshot(tmp_path, rows)
+    expected = len(rows)
+    monkeypatch.setitem(scan_quote_rows.__globals__, "_RESULT_CAP", expected)
     baseline = scan_quote_rows(repository, snapshot, _KEY, expiry=_EXPIRY,
                                decision_session=_SESSION)
-    expected = min(_CHAINS.maximum_result_rows, _RESULT_CAP)
-    captured = _capture_population_scan(monkeypatch, repository, expected)
+    captured = _capture_scan(monkeypatch, repository)
 
     result = scan_quote_rows(repository, snapshot, _KEY, expiry=_EXPIRY,
                              decision_session=_SESSION)
@@ -257,7 +259,8 @@ def test_scan_quote_rows_keeps_limit_when_population_bound_is_at_or_above_curren
          "bid": 2.0, "ask": 2.4, "observed_at": _SESSION},
     )
     assert captured[0].max_result_rows == expected
-    assert captured[0].max_batch_rows == min(_CHAINS.maximum_batch_rows, 50_000)
+    assert captured[0].max_batch_rows == min(
+        _CHAINS.maximum_batch_rows, _BATCH_CAP, expected)
 
 
 def test_scan_quote_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch):
@@ -276,7 +279,7 @@ def test_scan_quote_rows_uses_smaller_selected_population_bound(tmp_path, monkey
     result = scan_quote_rows(repository, snapshot, _KEY, expiry=_EXPIRY,
                              decision_session=_SESSION)
 
-    existing_limit = min(_CHAINS.maximum_result_rows, _RESULT_CAP)
+    existing_limit = _RESULT_CAP
     assert result == baseline
     assert result.quote_status == "recorded"
     assert result.quote_rows == (

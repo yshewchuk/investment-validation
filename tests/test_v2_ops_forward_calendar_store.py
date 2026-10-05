@@ -489,16 +489,30 @@ def _scan_fixture(tmp_path):
 
 def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp_path,
                                                                              monkeypatch):
+    """A population bound at or above the current scan limit keeps that limit.
+    With ``TableContract.maximum_result_rows`` gone, the request limit is the
+    module's own ``MAX_SCAN_ROWS``, so it is pinned at the shared fixture's
+    real recorded row count: a bound above the repository's own pinned
+    population is not a bound and is refused ``QUERY_NOT_BOUNDED``."""
     repository, snapshot = _scan_fixture(tmp_path)
+    table_name = "earnings_events"
     columns = ("ticker", "event_date", "year", "src_orats")
+    years = tuple(sorted({int(record.partition_key)
+                          for record in repository.fragment_records(snapshot, table_name)}))
+    pinned = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=table_name,
+        table_contract_ref=snapshot.table_versions[table_name].table_contract_ref,
+        key_filter=(KeyPredicate(column="year", operator="in", values=years),),
+        time_interval=None)
+    monkeypatch.setattr(forward_calendar_store, "MAX_SCAN_ROWS", pinned)
     baseline = forward_calendar_store._scan_rows(
-        repository, snapshot, "earnings_events", columns)
-    contract = repository.table_contract(snapshot, "earnings_events")
-    expected = min(contract.maximum_result_rows, forward_calendar_store.MAX_SCAN_ROWS)
+        repository, snapshot, table_name, columns)
+    contract = repository.table_contract(snapshot, table_name)
+    expected = forward_calendar_store.MAX_SCAN_ROWS
     captured = _capture_population_scan(monkeypatch, repository, expected)
 
     result = forward_calendar_store._scan_rows(
-        repository, snapshot, "earnings_events", columns)
+        repository, snapshot, table_name, columns)
 
     assert result == baseline
     assert result == [{"ticker": "AAA", "event_date": datetime(2025, 1, 15),
@@ -517,7 +531,7 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     table_name = "earnings_events"
     columns = ("ticker", "event_date", "year", "src_orats")
     contract = repository.table_contract(snapshot, table_name)
-    existing = min(contract.maximum_result_rows, forward_calendar_store.MAX_SCAN_ROWS)
+    existing = forward_calendar_store.MAX_SCAN_ROWS
     years = tuple(sorted({int(record.partition_key)
                           for record in repository.fragment_records(snapshot, table_name)}))
     bound = repository.scan_population_bound(

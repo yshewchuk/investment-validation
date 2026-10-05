@@ -17,7 +17,9 @@ from engine.v2.ops.catalog import transaction
 from engine.v2.ops.computed_moves_store import _capture_id_for, _fence_check_for
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.incremental_data import RefreshParameters, RefreshUnit
-from tests.data_scan_support import commit_tables, contract_for, contract_ref_for, publish_and_inspect
+from tests.data_scan_support import (
+    commit_tables, contract_for, contract_ref_for, hand_built_record, publish_and_inspect,
+    table_from_rows)
 from tests.ops_support import FakeClock, catalog, enqueue_claim
 
 
@@ -306,11 +308,17 @@ def test_run_computed_moves_refresh_never_commits_a_row_for_an_event_or_exit_aft
     repository = Repository(conn, store)
     snapshot = repository.resolve(result.candidate_snapshot_id)
     dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=("AAAA",)),)
+    bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=COMPUTED_MOVES_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter,
+        time_interval=None)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
         columns=("event_date", "realized_move_pct", "skipped"),
-        key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAAA",)),),
-        order_by=("ticker", "event_date"), max_batch_rows=100, max_result_rows=100)
+        key_filter=key_filter,
+        order_by=("ticker", "event_date"),
+        max_batch_rows=min(100, bound), max_result_rows=min(100, bound))
     committed_rows = [r for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
                       for r in batch.to_pylist()]
 
@@ -1025,10 +1033,13 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
                                                                              monkeypatch):
     repository, snapshot = _scan_fixture(tmp_path)
     columns = ("event_id", "ticker", "event_date", "year", "src_orats")
+    bound = _actual_population_bound(repository, snapshot, "earnings_events")
+    assert bound > 0
+    monkeypatch.setattr(computed_moves_store, "MAX_SCAN_ROWS", bound)
     baseline = computed_moves_store._scan_rows(repository, snapshot,
                                                "earnings_events", columns)
-    expected = min(_EVENTS.maximum_result_rows, computed_moves_store.MAX_SCAN_ROWS)
-    assert expected >= min(_EVENTS.maximum_batch_rows, 50_000)
+    expected = computed_moves_store.MAX_SCAN_ROWS
+    assert expected == bound
     captured = _capture_population_scan(monkeypatch, repository, expected)
 
     result = computed_moves_store._scan_rows(repository, snapshot,
@@ -1039,7 +1050,8 @@ def test__scan_rows_keeps_limit_when_population_bound_is_at_or_above_current(tmp
     assert all(r["ticker"] == "AAAA" for r in result)
     assert {r["event_id"] for r in result} == {f"AAAA_{day.date()}" for day in _EVENT_DAYS}
     assert captured[0].max_result_rows == expected
-    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000)
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, expected)
+    assert captured[0].max_batch_rows <= captured[0].max_result_rows
 
 
 def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch):
@@ -1053,7 +1065,7 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     baseline = computed_moves_store._scan_rows(repository, snapshot,
                                                "earnings_events", columns)
     bound = _actual_population_bound(repository, snapshot, "earnings_events")
-    existing_limit = min(_EVENTS.maximum_result_rows, computed_moves_store.MAX_SCAN_ROWS)
+    existing_limit = computed_moves_store.MAX_SCAN_ROWS
     assert 0 < bound < existing_limit
     captured = _capture_scans(monkeypatch, repository)
 
@@ -1067,6 +1079,49 @@ def test__scan_rows_uses_smaller_selected_population_bound(tmp_path, monkeypatch
     assert captured[0].max_result_rows == min(existing_limit, bound)
     assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000, bound)
     assert captured[0].max_batch_rows <= captured[0].max_result_rows
+
+
+def test__scan_rows_committed_zero_row_year_fragment_is_a_valid_empty_result(tmp_path,
+                                                                              monkeypatch):
+    """Gate finding (#407): a partition that exists but holds zero rows is a
+    valid EMPTY selected population, not a refusal and not a zero batch
+    ceiling. A real committed ``earnings_events`` fragment with
+    ``row_count == 0`` (the established hand-built shape of
+    ``tests/test_v2_data_query.py::test_zero_row_fragment_metadata_has_zero_bound_and_scans_empty``
+    -- ``publish_and_inspect`` itself refuses an empty partition, since a
+    ``fragment_record`` needs non-empty primary-key bounds) keeps the year
+    partition present, so ``_scan_rows`` does NOT take its no-fragments
+    short-circuit: the real ``scan_population_bound`` for its exact year
+    selection is 0, ``max_result_rows`` correctly lowers to 0, and the batch
+    ceiling must stay positive. No refusal is swallowed: the real scan runs
+    and simply yields no rows."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path)
+    zero_record = hand_built_record(
+        store, _EVENTS, _EVENTS_REF, table_from_rows(_EVENTS, []),
+        partition_key="2024", row_count=0,
+        primary_key_min=("AAAA_2024-01-01",), primary_key_max=("ZZZZ_2024-12-31",))
+    commit_tables(conn, clock, {"earnings_events": [zero_record]}, {"earnings_events": _EVENTS})
+
+    repository = Repository(conn, store)
+    snapshot = repository.resolve(_head_row(conn)["snapshot_id"])
+
+    records = repository.fragment_records(snapshot, "earnings_events")
+    assert len(records) == 1
+    assert records[0].row_count == 0
+    assert int(records[0].partition_key) == 2024  # the year partition really exists
+    assert _actual_population_bound(repository, snapshot, "earnings_events") == 0
+
+    captured = _capture_scans(monkeypatch, repository)
+    columns = ("event_id", "ticker", "event_date", "year", "src_orats")
+
+    result = computed_moves_store._scan_rows(repository, snapshot,
+                                             "earnings_events", columns)
+
+    assert result == []
+    assert len(captured) == 1
+    assert captured[0].max_result_rows == 0
+    assert captured[0].max_batch_rows == min(_EVENTS.maximum_batch_rows, 50_000) > 0
 
 
 # --------------------------------------------------------------------------
@@ -1118,11 +1173,18 @@ def test_earlier_as_of_refuses_inherited_future_dated_fragment(tmp_path):
         repository = Repository(conn, store)
         snapshot = repository.resolve(committed_parent["snapshot_id"])
         dvr = snapshot.table_versions[COMPUTED_MOVES_TABLE_NAME]
+        key_filter = (KeyPredicate(column="ticker", operator="eq", values=("BBBB",)),)
+        bound = repository.scan_population_bound(
+            snapshot.snapshot_id, table_name=COMPUTED_MOVES_TABLE_NAME,
+            table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+        result_limit = min(100, bound)
+        batch_limit = min(100, result_limit) if result_limit > 0 else 100
         query = DataQuery(
             snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
             columns=("event_date",),
-            key_filter=(KeyPredicate(column="ticker", operator="eq", values=("BBBB",)),),
-            order_by=("ticker", "event_date"), max_batch_rows=100, max_result_rows=100)
+            key_filter=key_filter,
+            order_by=("ticker", "event_date"),
+            max_batch_rows=batch_limit, max_result_rows=result_limit)
         bbbb_dates = [str(r["event_date"])
                       for batch in repository.scan(query, table_name=COMPUTED_MOVES_TABLE_NAME)
                       for r in batch.to_pylist()]

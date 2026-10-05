@@ -136,16 +136,12 @@ def _scan_rows(repository: Repository, snapshot, table_name: str, columns) -> li
     if not years:
         return []
     key_filter = (KeyPredicate(column="year", operator="in", values=years),)
-    max_batch_rows = min(contract.maximum_batch_rows, 50_000)
-    max_result_rows = min(contract.maximum_result_rows, MAX_SCAN_ROWS)
     population_bound = repository.scan_population_bound(
         snapshot.snapshot_id, table_name=table_name, table_contract_ref=contract_ref,
         key_filter=key_filter, time_interval=None)
-    if population_bound > 0:
-        max_result_rows = min(max_result_rows, population_bound)
-        # A lowered positive result limit may not leave the batch limit above
-        # it (BATCH_EXCEEDS_RESULT is refused at query validation, before E):
-        # lower the batch limit only as needed, never increase it.
+    max_result_rows = min(MAX_SCAN_ROWS, population_bound)
+    max_batch_rows = min(contract.maximum_batch_rows, 50_000)
+    if max_result_rows > 0:
         max_batch_rows = min(max_batch_rows, max_result_rows)
     query = DataQuery(
         snapshot_id=snapshot.snapshot_id, table_contract_ref=contract_ref,
