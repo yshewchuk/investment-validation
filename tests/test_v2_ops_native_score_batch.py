@@ -114,6 +114,7 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
         evidence_refs=("evidence://r",))
     dep_root = tmp_path / "deployment"
     deployment.stage_release(dep_root, release, inventory, payloads)
+    deployment.mark_staging_succeeded(dep_root, release_id)
     deployment.promote(dep_root, release_id)
     _write_empty_catalog(tmp_path, release_id)
     return resolve_release_binding(tmp_path)

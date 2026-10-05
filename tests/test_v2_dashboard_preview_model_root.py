@@ -24,6 +24,7 @@ from engine.v2.models import (
     ModelReleaseInventory,
     ReleaseBinding,
     ReleaseRequirement,
+    deployment,
     promote,
     stage_release,
 )
@@ -69,6 +70,7 @@ def _stage_and_promote(models_root: Path, release_id: str) -> Path:
         artifact_manifest_ref="manifest://r", evidence_refs=("evidence://r",),
     )
     stage_release(models_root, release, inventory, {member_hash: payload})
+    deployment.mark_staging_succeeded(models_root, release_id)
     promote(models_root, release_id)
     return models_root
 
