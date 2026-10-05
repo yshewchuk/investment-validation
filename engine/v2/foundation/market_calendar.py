@@ -87,7 +87,8 @@ def _easter(year: int) -> date:
 
 
 def _holidays(year: int) -> set[date]:
-    """Scheduled NYSE rules with observations, plus the one-off full 2025-01-09 closure."""
+    """Scheduled NYSE rules with observations, plus the documented one-off full
+    closures 2018-12-05 and 2025-01-09 (National Days of Mourning)."""
     out = {_nth_weekday(year, 1, 0, 3), _nth_weekday(year, 2, 0, 3),
            _easter(year) - timedelta(days=2), _last_weekday(year, 5, 0),
            _observed(date(year, 7, 4)), _nth_weekday(year, 9, 0, 1),
@@ -96,7 +97,7 @@ def _holidays(year: int) -> set[date]:
         out.add(_observed(date(year, 1, 1)))
     if year >= 2022:  # Juneteenth became a market holiday in 2022
         out.add(_observed(date(year, 6, 19)))
-    return out | ({date(2025, 1, 9)} if year == 2025 else set())  # National Day of Mourning
+    return out | {d for d in (date(2018, 12, 5), date(2025, 1, 9)) if d.year == year}
 
 
 def _rule_sessions(start: date, end: date) -> list[date]:

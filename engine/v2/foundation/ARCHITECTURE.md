@@ -30,7 +30,7 @@ Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strateg
 
 ## Invariants
 
-Observed-through is the source maximum and never the projected endpoint. Projection uses weekdays excluding computed annual US market holidays and explicit one-off NYSE full-closure dates (currently 2025-01-09), and includes the first post-print session. STR-THRU/put-menu/DYN-SV exit first post-print; STR-RUNUP exits last pre-print.
+Observed-through is the source maximum and never the projected endpoint. Projection uses weekdays excluding computed annual US market holidays and documented one-off NYSE full-closure dates (2018-12-05 and 2025-01-09), and includes the first post-print session. STR-THRU/put-menu/DYN-SV exit first post-print; STR-RUNUP exits last pre-print.
 
 ## Diagrams
 
