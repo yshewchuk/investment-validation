@@ -52,8 +52,11 @@ production caller. See the component architecture contract.
 
 `nightly_raw_row_producer.build_native_score_batch_events` is an internal
 staging API that composes native raw-row event and refusal documents from
-pinned inputs. It has no production caller yet; slice 5 owns the worker/sidecar
-staging and submission wiring. See the component architecture contract.
+pinned inputs. `Service._reconcile_native_score_batch_shadow` is its production
+caller: for an eligible pinned-snapshot identity it stages/registers both
+producer documents before calling
+`submit_native_score_batch_shadow_if_ready`. See the component architecture
+contract.
 
 <!-- public-interface: registered_artifact, verify_eod_availability -->
 
