@@ -170,11 +170,11 @@ def test_native_nightly_refresh_plan_is_built_and_commits_end_to_end(tmp_path, m
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
     _plan, requests = _build_requests(conn, store, clock, tmp_path)
     request = requests[0]
-    assert request.job.parameters["provider_calls"] == 6
+    assert request.job.parameters["provider_calls"] == 12
     assert request.job.provider_budget_ref == NATIVE_DAILY_MARKET_ACCOUNT
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
@@ -194,7 +194,7 @@ def test_missing_staged_refresh_identity_fails_the_job(tmp_path, monkeypatch):
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
     _plan, requests = _build_requests(conn, store, clock, tmp_path)
     receipt = submit(conn, registry(), POLICY, requests[0], clock=clock)
 
@@ -237,12 +237,12 @@ def test_extra_market_rows_are_dropped_and_missing_universe_rows_stay_empty(
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
     extra = "ZZZ"
     _plan, requests = _build_requests(conn, store, clock, tmp_path)
     request = requests[0]
-    assert request.job.parameters["provider_calls"] == 6
+    assert request.job.parameters["provider_calls"] == 12
     receipt = submit(conn, registry(), POLICY, request, clock=clock)
 
     _run_native(conn, clock, tmp_path, receipt, monkeypatch, explode=False,
@@ -268,7 +268,7 @@ def test_a_missing_expected_ticker_commits_rows_and_records_a_coverage_gap(
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
     head = _head(conn)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
     missing = "BBB"
     _plan, requests = _build_requests(conn, store, clock, tmp_path,
@@ -335,10 +335,10 @@ def test_second_native_refresh_for_the_same_session_is_cache_only(tmp_path, monk
     conn, clock, _ = catalog(tmp_path)
     store = ArtifactStore(tmp_path)
     _commit_parent(conn, store, clock)
-    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=10, live_reserve=1)
+    configure_account(conn, NATIVE_DAILY_MARKET_ACCOUNT, 1, remaining=13, live_reserve=1)
 
     _first_plan, first_requests = _build_requests(conn, store, clock, tmp_path)
-    assert first_requests[0].job.parameters["provider_calls"] == 6
+    assert first_requests[0].job.parameters["provider_calls"] == 12
     first_receipt = submit(conn, registry(), POLICY, first_requests[0], clock=clock)
     _run_native(conn, clock, tmp_path, first_receipt, monkeypatch, explode=False)
     head_after_first = _head(conn)
@@ -451,7 +451,7 @@ def test_cached_outcome_reverifies_a_legitimate_empty_pull(tmp_path):
     refresh_plan = _pinned_native_plan(conn, store, clock, tmp_path)
     assert [unit.request_id for unit in refresh_plan.fetch_units] == [_cached_request_id()]
     assert refresh_plan.cached == ()
-    assert refresh_plan.provider_calls == 6
+    assert refresh_plan.provider_calls == 12
 
 
 def test_cached_outcome_selects_the_later_complete_receipt(tmp_path):

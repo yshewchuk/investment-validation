@@ -104,8 +104,9 @@ def test_plan_refresh_reserves_calls_per_unit_for_multi_call_providers():
     plan = incremental_data.plan_refresh(
         _snapshot(), (_unit("fetch", "MSFT"),), cached_outcomes={},
         provider_account="orats-daily-market", max_attempts=3,
-        expected_head_generation=1, calls_per_unit=2)
-    assert plan.provider_calls == 6
+        expected_head_generation=1, calls_per_unit=4)
+    assert len(plan.fetch_units) == 1
+    assert plan.provider_calls == 12
 
 
 def test_failed_or_partial_outcomes_cannot_admit_watermark_advancing_commit():

@@ -63,9 +63,10 @@ command (`engine/v2/ops/cli.py::provider_account_command`):
 
 - The account name for the native `daily_market` refresh is
   `engine/v2/ops/nightly.py::NATIVE_DAILY_MARKET_ACCOUNT`
-  (`"orats-daily-market"`); one fetch unit costs two ORATS calls
-  (`hist/summaries` + `hist/cores`, `ORATS_CALLS_PER_DAILY_MARKET_UNIT`), so
-  size `--remaining` in calls, not sessions.
+  (`"orats-daily-market"`); one uncached fetch unit can use up to four ORATS
+  calls (`hist/summaries` + `hist/cores` across an initial paired attempt and
+  one paired retry, `ORATS_CALLS_PER_DAILY_MARKET_UNIT`), and the planner
+  reserves four; size `--remaining` in calls, not sessions.
 - Absent row: created at generation 1. Present row: `remaining` and
   `live_reserve` are replaced and the generation increments in one
   transaction; operator/backoff state (`blocked_code`, `next_eligible_at`) is

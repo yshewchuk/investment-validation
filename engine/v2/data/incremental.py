@@ -378,7 +378,7 @@ def _coverage_outcome_order(
         state = "partial"
     else:
         state = "complete"
-    if state == "complete" and any(
+    if state in ("complete", "partial") and any(
             outcome.status == "present" and outcome.revision_id is None
             for outcome in ordered):
         state = "incomplete"

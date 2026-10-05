@@ -1040,15 +1040,14 @@ starts working with no change of its own.
   `engine.v2.data.incremental.merge_daily_market`'s job, documented in that
   package's own `ARCHITECTURE.md`). None of this raises — masking is
   normal-path behavior, not a failure (see "Failure semantics" for what
-  does raise). The paired `summaries`/`cores` fetch is retried once when a
-  non-empty 2xx result omits expected tickers. At exhaustion, the fetcher
-  returns available rows and a `partial` response whose response metadata carries
-  the session date and attempt evidence; the data layer commits those rows and
-  records typed missing-ticker coverage against that raw receipt. It never
-  labels that receipt or coverage `complete`. An empty or literal-404
-  response remains `not_final` and follows the normal source retry policy.
-  Endpoint outcomes are classified independently; credential, rate-limit and
-  not-final outcomes retain their existing refusal precedence over `partial`.
+  does raise). The paired summaries/cores fetch calls both endpoints per
+  attempt and retries once when non-empty 2xx results omit expected tickers:
+  four HTTP calls max per unit, all reserved. At exhaustion, available rows
+  return as partial; response metadata carries session date and attempt
+  evidence, while returned rows and typed missing-ticker coverage commit
+  against the raw receipt, never as complete. Empty or literal-404 stays
+  not_final under the normal retry policy; endpoint outcomes classify
+   independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).

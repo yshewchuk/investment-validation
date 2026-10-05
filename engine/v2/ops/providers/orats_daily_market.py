@@ -1,8 +1,10 @@
 """Native ORATS market-wide fetcher for the ``daily_market`` refresh slice.
 
 One ``incremental_refresh`` fetch unit denominates one ORATS ``tradeDate``, and
-one unit costs TWO provider calls -- ``hist/summaries`` and ``hist/cores`` --
-because the daily_market row the merge consumes needs fields from both. This
+one unit may use up to FOUR provider calls -- ``hist/summaries`` and
+``hist/cores``, an initial paired attempt plus one paired retry -- because the
+daily_market row the merge consumes needs fields from both; nightly planning
+reserves that four-call upper bound. This
 module is the only v2 network edge for daily_market acquisition: the closure it
 returns is the ``fetcher(unit)`` seam ``run_daily_market_refresh`` documents,
 and ``http_get`` is its sole test seam.

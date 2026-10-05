@@ -30,9 +30,11 @@ from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 #: (``ops provider-account``); planning never creates one.
 NATIVE_DAILY_MARKET_ACCOUNT = "orats-daily-market"
 
-#: One daily_market fetch unit costs two ORATS calls (``hist/summaries`` and
-#: ``hist/cores``), so the reserved provider budget must count both.
-ORATS_CALLS_PER_DAILY_MARKET_UNIT = 2
+#: One daily_market fetch unit reserves up to four ORATS calls: each of the two
+#: endpoints (``hist/summaries`` and ``hist/cores``) is called once per attempt
+#: and the provider may make two paired attempts, so the reserved provider
+#: budget must count the maximum.
+ORATS_CALLS_PER_DAILY_MARKET_UNIT = 4
 
 
 def legacy_parity_rows(score_document: Mapping[str, Any]) -> dict[str, dict]:

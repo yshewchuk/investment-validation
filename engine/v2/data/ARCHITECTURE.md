@@ -297,7 +297,7 @@ revision or mark the response complete.
 
 | Requirement | Outcome |
 |---|---|
-| R1 — typed result | Every expected ticker has a `CoverageOutcome`: observed tickers are `present`; omitted tickers are `missing`, keyed by ticker and session date and linked to the response's raw receipt id. |
+| R1 — typed result | Every expected ticker has a `CoverageOutcome`: observed tickers are `present`, each carrying a non-null `revision_id` under both `complete` and `partial` coverage; a `present` outcome without a revision makes coverage `incomplete`, so it cannot advance the snapshot. Omitted tickers are `missing`, keyed by ticker and session date and linked to the response's raw receipt id. |
 | R2 — storage and query | The existing `data_snapshot_coverage.coverage_json` stores the typed outcomes and expected denominator. Consumers query by snapshot/table coverage, then select `missing` outcomes; no DDL or new migration is required. |
 | R3 — retry/cache | The provider retries the summaries/cores pair once for missing keys. A remaining gap is stored with response kind `partial`, never reused as a `complete` cache hit; a later refresh can retry it with a fresh response. |
 | R4 — transaction | Returned ticker revisions and the partial coverage record enter the same snapshot candidate and head-CAS commit. A commit refusal leaves the head unchanged. |
