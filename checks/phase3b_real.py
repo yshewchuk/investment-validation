@@ -563,10 +563,12 @@ def _cache_metrics(conn, store, snapshot, base_rows, clock, run_root):
         completed_at=received_at)
     first_normalization = daily_data.cache_normalization(
         conn, store, cached_raw, (revision,), normalizer_id="daily_market.v1",
-        contract_id=contract_ref.contract_id, created_at=received_at)
+        contract_id=contract_ref.contract_id, created_at=received_at,
+        expected_keys=(ticker,))
     replay_normalization = daily_data.cache_normalization(
         conn, store, cached_raw, (revision,), normalizer_id="daily_market.v1",
-        contract_id=contract_ref.contract_id, created_at=received_at)
+        contract_id=contract_ref.contract_id, created_at=received_at,
+        expected_keys=(ticker,))
     generation_row = conn.execute(
         "SELECT generation FROM data_snapshot_heads WHERE scope = ?", ("real",)
     ).fetchone()

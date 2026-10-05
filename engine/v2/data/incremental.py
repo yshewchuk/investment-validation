@@ -674,9 +674,18 @@ def load_raw_receipt(conn: Any, store: ArtifactStore, receipt_id: str) -> bytes:
 
 def cache_normalization(conn: Any, store: ArtifactStore,
                         raw: RawReceiptRecord, revisions: Sequence[DailyMarketRevision], *,
-                        normalizer_id: str, contract_id: str, created_at: str) -> NormalizationRecord:
+                        normalizer_id: str, contract_id: str, created_at: str,
+                        expected_keys: Sequence[str]) -> NormalizationRecord:
     """Cache one raw receipt's normalized revisions under
-    ``(raw_hash, normalizer_id, contract_id)``.
+    ``(raw_hash, normalizer_id, contract_id, canonical expected_keys)``.
+
+    ``expected_keys`` is the fetch unit's requested key set: canonicalized to
+    unique string tickers in sorted order (``_normalization_identity``), so a
+    request's order and duplicates never change the identity while a genuinely
+    different set under the same raw payload/normalizer/contract produces a
+    distinct id and row. Rows stored under the old triple-only formula carry no
+    expected-key metadata, keep their ids and references, and are never reused
+    as a cache hit; the scoped row simply coexists (#133 slice 3 policy).
 
     A byte-identical replay of the same raw content is a cache hit even when
     ``normalized_hash`` differs, as long as the stored and incoming revisions
@@ -691,9 +700,8 @@ def cache_normalization(conn: Any, store: ArtifactStore,
                 "normalizer_id": normalizer_id,
                 "revisions": [_revision_document(item) for item in ordered]}
     normalized_hash = content_hash(document)
-    normalization_id = "norm_" + content_hash({
-        "raw_hash": raw.raw_hash, "normalizer_id": normalizer_id, "contract_id": contract_id,
-    }).removeprefix(CONTENT_HASH_PREFIX)[:32]
+    normalization_id = _normalization_identity(
+        raw.raw_hash, normalizer_id, contract_id, expected_keys)
     existing = conn.execute(
         "SELECT * FROM data_normalizations WHERE normalization_id = ?",
         (normalization_id,)).fetchone()
@@ -777,11 +785,20 @@ def _normalized_revisions(encoded: bytes) -> tuple[DailyMarketRevision, ...]:
                           "cached normalization artifact is malformed") from exc
 
 
+def _canonical_expected_keys(expected_keys: Sequence[str]) -> tuple[str, ...]:
+    """Unique string ticker keys in sorted order: request order and duplicates
+    never change the canonical set, so identity is set-based (#133 slice 3)."""
+    return tuple(sorted({str(key) for key in expected_keys}))
+
+
 def _normalization_identity(raw_hash: str, normalizer_id: str,
-                            contract_id: str) -> str:
+                            contract_id: str,
+                            expected_keys: Sequence[str]) -> str:
+    expected_keys_hash = content_hash(_canonical_expected_keys(expected_keys))
     return "norm_" + content_hash({
         "raw_hash": raw_hash, "normalizer_id": normalizer_id,
         "contract_id": contract_id,
+        "expected_keys": expected_keys_hash,
     }).removeprefix(CONTENT_HASH_PREFIX)[:32]
 
 
@@ -1453,7 +1470,8 @@ def run_incremental_refresh(parameters, root):
         incoming = tuple(_revision_from_document(item)
                          for item in document.get("incoming_revisions", ()))
         incoming, normalized_count = _stage_normalizations(
-            conn, store, raw_records, incoming, contract.contract_id, clock)
+            conn, store, raw_records, incoming, contract.contract_id, clock,
+            _incoming_expected_keys(raw_records, incoming))
         retained = _load_retained_revisions(conn, store)
         coverage = from_document(CompletedCoverage, document["coverage"])
         candidate = build_daily_market_candidate(
@@ -1566,7 +1584,37 @@ def _staged_raw_receipt(conn, store, item):
         received_at=row["received_at"], cache_hit=True)
 
 
-def _stage_normalizations(conn, store, raw_records, revisions, contract_id, clock):
+def _receipt_expected_keys(raw: RawReceiptRecord) -> tuple[str, ...]:
+    """The fetch unit's expected keys as persisted on the receipt request by
+    ``_fetch_unit``. Fails closed: a production caller is never silently
+    defaulted to an empty set."""
+    keys = raw.request.get("keys")
+    if keys is None:
+        raise errors.fail("INPUT_CHANGED",
+                          "daily_market raw receipt request carries no expected keys")
+    return tuple(str(key) for key in keys)
+
+
+def _incoming_expected_keys(
+    raw_records: Mapping[str, RawReceiptRecord],
+    revisions: Sequence[DailyMarketRevision],
+) -> dict[str, tuple[str, ...]]:
+    """Expected keys only for the receipts ``revisions`` actually reference.
+
+    ``_receipt_expected_keys`` fails closed on a receipt whose saved request
+    carries no expected keys, and (engine/v2/data/ARCHITECTURE.md) that is
+    required only of receipts needed for normalization: a staged raw receipt
+    no incoming revision references is never normalized and must not abort
+    the refresh. Unknown references stay unmapped here and keep failing
+    through ``_stage_normalizations``' typed ``INPUT_CHANGED``.
+    """
+    referenced = sorted({item.raw_receipt_id for item in revisions})
+    return {raw_id: _receipt_expected_keys(raw_records[raw_id])
+            for raw_id in referenced if raw_id in raw_records}
+
+
+def _stage_normalizations(conn, store, raw_records, revisions, contract_id, clock,
+                          expected_keys_by_receipt):
     grouped = {}
     for revision in revisions:
         grouped.setdefault(revision.raw_receipt_id, []).append(revision)
@@ -1576,9 +1624,14 @@ def _stage_normalizations(conn, store, raw_records, revisions, contract_id, cloc
         raw = raw_records.get(raw_id)
         if raw is None:
             raise errors.fail("INPUT_CHANGED", "revision references an uncached raw receipt")
+        expected_keys = expected_keys_by_receipt.get(raw_id)
+        if expected_keys is None:
+            raise errors.fail("INPUT_CHANGED",
+                              "fetch unit expected keys are missing for a raw receipt")
         record = cache_normalization(
             conn, store, raw, group, normalizer_id="daily_market.v3",
-            contract_id=contract_id, created_at=format_timestamp(clock.now()))
+            contract_id=contract_id, created_at=format_timestamp(clock.now()),
+            expected_keys=expected_keys)
         cache_hits += int(record.cache_hit)
         normalized.extend(dataclasses.replace(
             item, normalization_id=record.normalization_id) for item in group)

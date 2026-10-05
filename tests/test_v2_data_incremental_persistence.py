@@ -17,7 +17,7 @@ from engine.v2.data.catalog import commit_snapshot
 from engine.v2.data.manifests import dataset_manifest, snapshot_ref
 from engine.v2.data.objects import inspect_fragment
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, content_hash, to_document
+from engine.v2.foundation import ArtifactStore, canonical_json, content_hash, to_document
 from engine.v2.ops.incremental_data import RefreshParameters
 from tests.ops_support import catalog
 from tests.test_v2_data_manifests import _DAILY_MARKET_CONTRACT, _DAILY_MARKET_REF
@@ -309,7 +309,7 @@ def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path)
     revision = _frozen_revision(append_row, append_raw.raw_receipt_id, "revision-1")
     (revision,), _ = data_incremental._stage_normalizations(
         conn, store, {append_raw.raw_receipt_id: append_raw}, (revision,),
-        contract.contract_id, clock)
+        contract.contract_id, clock, {append_raw.raw_receipt_id: ("ZZZ",)})
     coverage = _coverage(revision, append_raw.raw_receipt_id)
     candidate = data_incremental.build_daily_market_candidate(
         parent, store, (revision,), coverage=coverage,
@@ -340,7 +340,7 @@ def test_supplied_fence_check_composes_with_head_fence_not_replaces_it(tmp_path)
     revision2 = _frozen_revision(append_row2, append_raw2.raw_receipt_id, "revision-2")
     (revision2,), _ = data_incremental._stage_normalizations(
         conn, store, {append_raw2.raw_receipt_id: append_raw2}, (revision2,),
-        contract.contract_id, clock)
+        contract.contract_id, clock, {append_raw2.raw_receipt_id: ("YYY",)})
     coverage2 = _coverage(revision2, append_raw2.raw_receipt_id)
     candidate2 = data_incremental.build_daily_market_candidate(
         parent, store, (revision2,), coverage=coverage2,
@@ -398,7 +398,7 @@ def test_retry_of_the_same_effect_after_a_crash_before_attempt_commit_succeeds(t
     revision = _frozen_revision(append_row, append_raw.raw_receipt_id, "revision-1")
     (revision,), _ = data_incremental._stage_normalizations(
         conn, store, {append_raw.raw_receipt_id: append_raw}, (revision,),
-        contract.contract_id, clock)
+        contract.contract_id, clock, {append_raw.raw_receipt_id: ("ZZZ",)})
     coverage = _coverage(revision, append_raw.raw_receipt_id)
     candidate = data_incremental.build_daily_market_candidate(
         parent, store, (revision,), coverage=coverage,
@@ -451,8 +451,237 @@ def test_normalizer_id_bump_changes_cache_identity(tmp_path):
         request={"keys": ["AAA"]}, received_at=clock.now().isoformat())
     record_v1 = data_incremental.cache_normalization(
         conn, store, raw, (), normalizer_id="daily_market.v1", contract_id=contract_id,
-        created_at=clock.now().isoformat())
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
     record_v2 = data_incremental.cache_normalization(
         conn, store, raw, (), normalizer_id="daily_market.v2", contract_id=contract_id,
-        created_at=clock.now().isoformat())
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
     assert record_v1.normalization_id != record_v2.normalization_id
+
+
+def _normalize_cache_setup(tmp_path):
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    data_incremental.catalog._insert_contract(
+        conn, _DAILY_MARKET_CONTRACT, clock.now().isoformat())
+    raw = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"ticker":"AAA"}', response_kind="complete", response_meta={}),
+        source="fixture", endpoint="daily_market",
+        request={"keys": ["AAA", "BBB"]}, received_at=clock.now().isoformat())
+    return conn, clock, store, raw, _DAILY_MARKET_CONTRACT.contract_id
+
+
+def test_expected_key_sets_are_folded_into_normalization_identity(tmp_path):
+    """#133 slice 3: the same raw payload/normalizer/contract/revisions under
+    two distinct expected-key sets produce distinct normalization ids and two
+    persisted rows (never a raw sqlite3.IntegrityError -- v13 dropped the
+    tuple UNIQUE), while reordering or duplicating keys within an otherwise
+    identical set stays the same identity."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    revision = _frozen_revision(_obj_daily_market_rows()[0], raw.raw_receipt_id,
+                                "revision-1")
+
+    def cache(keys):
+        return data_incremental.cache_normalization(
+            conn, store, raw, (revision,), normalizer_id="daily_market.v3",
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=keys)
+
+    aaa = cache(("AAA",))
+    assert aaa.cache_hit is False
+    aaa_dupe = cache(("AAA", "AAA"))
+    assert aaa_dupe.normalization_id == aaa.normalization_id
+    assert aaa_dupe.cache_hit is True
+    bbb = cache(("BBB",))
+    assert bbb.normalization_id != aaa.normalization_id
+    assert bbb.cache_hit is False
+    bbb_dupe = cache(("BBB", "BBB", "BBB"))
+    assert bbb_dupe.normalization_id == bbb.normalization_id
+    assert bbb_dupe.cache_hit is True
+    both = cache(("AAA", "BBB"))
+    assert both.normalization_id not in {aaa.normalization_id, bbb.normalization_id}
+    assert both.cache_hit is False
+    reordered = cache(("BBB", "AAA"))
+    assert reordered.normalization_id == both.normalization_id
+    assert reordered.cache_hit is True
+    grouped = conn.execute(
+        "SELECT normalization_id, COUNT(*) FROM data_normalizations"
+        " GROUP BY normalization_id").fetchall()
+    assert len(grouped) == 3
+    assert all(row[1] == 1 for row in grouped)
+
+
+def test_changed_payload_under_same_expected_key_set_refuses_identity_conflict(tmp_path):
+    """#133 slice 3: a changed normalized payload under the same raw hash,
+    normalizer, contract and SAME canonical expected-key set is a genuine
+    conflict -- typed IDENTITY_CONFLICT, no row overwrite."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    row = _obj_daily_market_rows()[0]
+    first = data_incremental.cache_normalization(
+        conn, store, raw,
+        (_frozen_revision(row, raw.raw_receipt_id, "revision-1"),),
+        normalizer_id="daily_market.v3", contract_id=contract_id,
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
+    assert first.cache_hit is False
+    changed = _frozen_revision(row, raw.raw_receipt_id, "revision-1",
+                               spot=row["spot"] + 0.05)
+    with pytest.raises(DataError) as err:
+        data_incremental.cache_normalization(
+            conn, store, raw, (changed,), normalizer_id="daily_market.v3",
+            contract_id=contract_id, created_at=clock.now().isoformat(),
+            expected_keys=("AAA", "AAA"))
+    assert err.value.code == "IDENTITY_CONFLICT"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
+
+
+def test_legacy_triple_only_row_stays_addressable_but_is_never_a_cache_hit(tmp_path):
+    """#133 slice 3 legacy policy (engine/v2/data/ARCHITECTURE.md): a row
+    keyed by the old triple-only formula carries no expected-key metadata, so
+    it stays unchanged and addressable by its legacy id but is never reused as
+    a cache hit; the next request writes/uses the expected-set-scoped id and
+    both rows coexist. The legacy row is seeded through the real catalog,
+    store and canonical hashes at the old formula's id (incremental.py's
+    pre-#133 ``norm_`` identity), not through a mock."""
+    conn, clock, store, raw, contract_id = _normalize_cache_setup(tmp_path)
+    normalizer_id = "daily_market.v3"
+    legacy_document = {"schema_version": data_incremental.NORMALIZED_SCHEMA_REF,
+                       "raw_hash": raw.raw_hash, "normalizer_id": normalizer_id,
+                       "revisions": []}
+    published = store.publish_bytes(canonical_json(legacy_document).encode("utf-8"),
+                                    schema_ref=data_incremental.NORMALIZED_SCHEMA_REF)
+    object_ref = data_incremental.ObjectRef(
+        kind="normalized_daily_market", object_id=published.artifact_id,
+        content_hash=published.content_hash, byte_size=published.byte_size)
+    legacy_id = "norm_" + content_hash({
+        "raw_hash": raw.raw_hash, "normalizer_id": normalizer_id,
+        "contract_id": contract_id}).removeprefix("sha256:")[:32]
+    conn.execute(
+        "INSERT INTO data_normalizations (normalization_id, raw_hash, normalizer_id, "
+        "contract_id, normalized_hash, artifact_ref_json, row_count, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (legacy_id, raw.raw_hash, normalizer_id, contract_id,
+         content_hash(legacy_document), canonical_json(to_document(object_ref)),
+         0, clock.now().isoformat()))
+    legacy_before = conn.execute(
+        "SELECT * FROM data_normalizations WHERE normalization_id = ?",
+        (legacy_id,)).fetchone()
+    assert legacy_before is not None
+    assert "expected_keys" not in json.loads(store.read_verified(published))
+
+    fresh = data_incremental.cache_normalization(
+        conn, store, raw, (), normalizer_id=normalizer_id, contract_id=contract_id,
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
+    assert fresh.normalization_id != legacy_id
+    assert fresh.cache_hit is False
+    replay = data_incremental.cache_normalization(
+        conn, store, raw, (), normalizer_id=normalizer_id, contract_id=contract_id,
+        created_at=clock.now().isoformat(), expected_keys=("AAA",))
+    assert replay.normalization_id == fresh.normalization_id
+    assert replay.cache_hit is True
+
+    legacy_after = conn.execute(
+        "SELECT * FROM data_normalizations WHERE normalization_id = ?",
+        (legacy_id,)).fetchone()
+    assert tuple(legacy_after) == tuple(legacy_before)
+    ids = sorted(row[0] for row in conn.execute(
+        "SELECT normalization_id FROM data_normalizations"))
+    assert ids == sorted([legacy_id, fresh.normalization_id])
+
+
+def test_expected_keys_derive_only_for_referenced_receipts(tmp_path):
+    """#133 slice 3 edge case (contract: engine/v2/data/ARCHITECTURE.md): the
+    refresh derives its expected-key map only for receipts incoming revisions
+    reference. A staged raw receipt with no saved ``request["keys"]`` that
+    nothing references is never inspected and cannot abort the derivation; a
+    referenced receipt still returns its saved keys and still fails closed
+    with typed ``INPUT_CHANGED`` when they are missing; an unknown reference
+    stays unmapped and keeps failing through ``_stage_normalizations``."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+
+    def cache(payload, request):
+        return data_incremental.cache_raw_receipt(
+            conn, store, data_incremental.RawPayload(
+                payload=payload, response_kind="complete", response_meta={}),
+            source="synthetic", endpoint="daily_market",
+            request=request, received_at=clock.now().isoformat())
+
+    rows = _obj_daily_market_rows()
+    referenced = cache(b'{"kind":"referenced"}', {"ticker": "AAA", "keys": ["AAA", "BBB"]})
+    unused = cache(b'{"kind":"unused"}', {"ticker": "CCC"})
+    broken = cache(b'{"kind":"broken"}', {"ticker": "DDD"})
+    raw_records = {item.raw_receipt_id: item for item in (referenced, unused, broken)}
+    revision = _frozen_revision(rows[0], referenced.raw_receipt_id, "revision-1")
+    broken_revision = _frozen_revision(rows[1], broken.raw_receipt_id, "revision-2")
+    orphan = _frozen_revision(rows[2], "raw-unknown", "revision-3")
+
+    assert data_incremental._incoming_expected_keys(raw_records, ()) == {}
+    assert data_incremental._incoming_expected_keys(raw_records, (orphan,)) == {}
+    assert data_incremental._incoming_expected_keys(raw_records, (revision,)) == {
+        referenced.raw_receipt_id: ("AAA", "BBB")}
+
+    with pytest.raises(DataError) as err:
+        data_incremental._incoming_expected_keys(raw_records, (broken_revision,))
+    assert err.value.code == "INPUT_CHANGED"
+
+    with pytest.raises(DataError) as err:
+        data_incremental._stage_normalizations(
+            conn, store, raw_records, (orphan,),
+            _DAILY_MARKET_CONTRACT.contract_id, clock,
+            data_incremental._incoming_expected_keys(raw_records, (orphan,)))
+    assert err.value.code == "INPUT_CHANGED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 0
+
+
+def test_unreferenced_keyless_raw_receipt_does_not_abort_refresh(tmp_path):
+    """#133 slice 3 edge case through ``run_incremental_refresh``: a staged
+    raw receipt no incoming revision references, whose saved request carries
+    no expected keys, must not abort a refresh it will never be normalized
+    for; the referenced receipt's saved keys still drive the normalization
+    identity and the refresh commits."""
+    conn, clock, _ = catalog(tmp_path)
+    store = ArtifactStore(tmp_path / "objects")
+    receipt_ref = content_hash({"keyless-sidecar": "parent"})
+    manifest = dataset_manifest(
+        _DAILY_MARKET_REF, (), knowledge_mode="reconstructed",
+        coverage_receipt_refs=(receipt_ref,), availability_evidence_refs=())
+    parent = snapshot_ref(
+        {"daily_market": manifest}, calendar_version="cal.v1",
+        source_priority_version="synthetic", finality_receipt_refs=(receipt_ref,))
+    commit_snapshot(
+        conn, scope="shadow", request_hash=content_hash({"keyless-sidecar": "base"}),
+        contracts=(_DAILY_MARKET_CONTRACT,), objects=(), records=(), manifests=(manifest,),
+        snapshot=parent, expected_head_snapshot_id=None, expected_head_generation=0,
+        receipt_id="base-receipt", attempt_id="base-attempt", fence=1,
+        fence_check=lambda _c: None, clock=clock, store=store)
+
+    append_row = dict(_obj_daily_market_rows()[0], ticker="ZZZ")
+    referenced = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"kind":"keyless-sidecar-append"}', response_kind="complete",
+            response_meta={}),
+        source="synthetic", endpoint="daily_market",
+        request={"ticker": "ZZZ", "keys": ["ZZZ"]}, received_at=clock.now().isoformat())
+    unused = data_incremental.cache_raw_receipt(
+        conn, store, data_incremental.RawPayload(
+            payload=b'{"kind":"keyless-sidecar-unused"}', response_kind="complete",
+            response_meta={}),
+        source="synthetic", endpoint="daily_market",
+        request={"ticker": "YYY"}, received_at=clock.now().isoformat())
+    revision = _frozen_revision(append_row, referenced.raw_receipt_id,
+                               "revision-sidecar")
+    root, params = _refresh_input(
+        tmp_path, parent.snapshot_id, 1, "sha256:" + "4" * 64, (revision,),
+        ({"receipt_id": referenced.raw_receipt_id},
+         {"receipt_id": unused.raw_receipt_id}),
+        _coverage(revision, referenced.raw_receipt_id))
+
+    result = data_incremental.run_incremental_refresh(params, root)
+
+    assert result["status"] == "complete"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM data_daily_market_revisions").fetchone()[0] == 1

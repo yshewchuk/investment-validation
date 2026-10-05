@@ -788,8 +788,12 @@ _V12 = (
 # ``BEGIN IMMEDIATE``, ``PRAGMA foreign_key_check`` before commit, so a rebuild
 # that dangled a reference rolls back whole as the framework's
 # ``INTEGRITY_FAILED`` instead of publishing a half-rebuilt parent. Cache
-# identity is untouched — ``cache_normalization`` still keys on that triple in
-# Python; folding ``unit.expected_keys`` in is #133's follow-up identity slice.
+# identity: ``cache_normalization`` now keys ``normalization_id`` on
+# ``(raw_hash, normalizer_id, contract_id, canonical expected_keys)`` — the
+# fetch unit's expected-key set folded in (#133's identity slice), which is
+# what this dropped ``UNIQUE`` lets coexist as distinct rows; a row stored
+# under the old triple-only formula keeps its id and references, carries no
+# expected-key metadata, and is never reused as a cache hit.
 _V13 = (
     f"""CREATE TABLE data_normalizations_rebuild (
         normalization_id TEXT PRIMARY KEY,
