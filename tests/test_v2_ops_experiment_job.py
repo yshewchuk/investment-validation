@@ -117,8 +117,9 @@ REGISTERED_RUNNER = "experiments/EXP-182_d_1_gated_execution_parity_registered/r
 
 
 def _registered_checkout(tmp_path, experiment_id="EXP-182"):
-    """A tmp checkout with a registered runner, its legacy spec.yaml and a
-    PLANNED ledger row whose spec_hash is the legacy ``experiments.lib`` hash."""
+    """A tmp checkout with a registered runner, its legacy spec.yaml, the
+    inventory's declared runtime source, and a PLANNED ledger row whose
+    spec_hash is the legacy ``experiments.lib`` hash."""
     from experiments import lib
 
     checkout = tmp_path / "checkout"
@@ -127,6 +128,11 @@ def _registered_checkout(tmp_path, experiment_id="EXP-182"):
     runner.write_text("if __name__ == '__main__':\n    pass\n")
     legacy_spec = runner.parent / "spec.yaml"
     legacy_spec.write_text("id: EXP-182\nprimary_spec:\n  x: 1\n")
+    for source_rel in experiments.RUNNER_INVENTORY[REGISTERED_RUNNER][
+            "declared_runtime_sources"]:
+        declared_source = checkout / source_rel
+        declared_source.parent.mkdir(parents=True, exist_ok=True)
+        declared_source.write_text("if __name__ == '__main__':\n    pass\n")
     lib.ledger_append([{"id": experiment_id,
                         "spec_hash": lib.spec_hash(lib.load_spec(legacy_spec)),
                         "date": "2026-01-01", "stage": "planned",
@@ -212,6 +218,10 @@ def test_worker_dispatch_primary_mode_never_grants_runner_ledger_writes(tmp_path
     runner_path.write_text("if __name__ == '__main__':\n    pass\n")
     legacy_spec = runner_path.parent / "spec.yaml"
     legacy_spec.write_text("id: EXP-182\n")
+    declared_source = checkout / experiments.RUNNER_INVENTORY[runner_id][
+        "declared_runtime_sources"][0]
+    declared_source.parent.mkdir(parents=True, exist_ok=True)
+    declared_source.write_text("if __name__ == '__main__':\n    pass\n")
     (tmp_path / "spec.json").write_text(
         json.dumps(_spec_document(runner=runner_id, economic_params={})))
 
@@ -262,6 +272,10 @@ def test_worker_refuses_a_legacy_runner_that_exits_nonzero_after_the_report(tmp_
         "print('runner exploded', file=sys.stderr)\n"
         "sys.exit(1)\n")
     (runner_path.parent / "spec.yaml").write_text("id: EXP-182\n")
+    declared_source = tmp_path / experiments.RUNNER_INVENTORY[runner_id][
+        "declared_runtime_sources"][0]
+    declared_source.parent.mkdir(parents=True, exist_ok=True)
+    declared_source.write_text("if __name__ == '__main__':\n    pass\n")
     (tmp_path / "spec.json").write_text(
         json.dumps(_spec_document(runner=runner_id, economic_params={})))
 
@@ -292,6 +306,10 @@ def test_worker_refuses_staging_directory_swap_before_report_annotation(tmp_path
     runner_id = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
     (stage / runner_id).parent.mkdir(parents=True)
     (stage / runner_id).write_text("if __name__ == '__main__':\n    pass\n")
+    declared_source = stage / experiments.RUNNER_INVENTORY[runner_id][
+        "declared_runtime_sources"][0]
+    declared_source.parent.mkdir(parents=True, exist_ok=True)
+    declared_source.write_text("if __name__ == '__main__':\n    pass\n")
     (stage / "spec.json").write_text(
         json.dumps(_spec_document(runner=runner_id, economic_params={})))
     external.mkdir()
@@ -299,9 +317,10 @@ def test_worker_refuses_staging_directory_swap_before_report_annotation(tmp_path
     (external / "REPORT.md").write_bytes(sentinel)
 
     def fake_run(command, **kwargs):
-        assert len(kwargs["pass_fds"]) == 1
-        assert kwargs["cwd"] == f"/proc/self/fd/{kwargs['pass_fds'][0]}"
-        assert command[2].startswith(kwargs["cwd"] + "/")
+        stage_fd, script_fd, source_fd = kwargs["pass_fds"]
+        assert kwargs["cwd"] == f"/proc/self/fd/{stage_fd}"
+        assert command[2] == f"/proc/self/fd/{script_fd}"
+        assert kwargs["env"]["INVESTING_PLAN_PINNED_SOURCE"] == f"/proc/self/fd/{source_fd}"
         stage.rename(original)
         os.symlink(external, stage)
         (Path(kwargs["cwd"]) / "REPORT.md").write_text(
@@ -416,6 +435,115 @@ def test_variant_annotation_pins_open_inode_after_path_swap(tmp_path, monkeypatc
     assert report_path.is_symlink()
     assert Path(os.readlink(report_path)) == external
     assert external.read_bytes() == external_before
+
+
+def test_run_legacy_script_refuses_symlinked_registered_executable_before_subprocess(
+        tmp_path, monkeypatch):
+    """A registered runner that is a SYMLINK out of the pinned staging root is
+    a replaced executable, not the audited script: ``run_legacy_script`` must
+    refuse it as a generic, public-safe, non-retryable ``VALIDATION_FAILED``
+    before any subprocess is started. The external target's bytes stay
+    exactly as they were, the subprocess spy is never called, and the
+    test-owned pinned descriptor is always closed. Before the executable was
+    validated through the pinned descriptor this call followed the link and
+    handed the external script to ``subprocess.run``."""
+    from engine.v2.ops import legacy_adapter
+
+    registered_path = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+    stage = tmp_path / "stage"
+    external = tmp_path / "external-runner.py"
+    external.write_bytes(b"print('external runner executed')\n")
+    external_before = external.read_bytes()
+    linked = stage / registered_path
+    linked.parent.mkdir(parents=True)
+    os.symlink(external, linked)
+    fd = experiments._open_staging_directory(stage)
+
+    invocations = []
+
+    def spy_run(command, **kwargs):
+        invocations.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+    try:
+        with pytest.raises(OpsError) as excinfo:
+            legacy_adapter.run_legacy_script(stage, registered_path, staging_dir_fd=fd)
+        assert excinfo.value.code == "VALIDATION_FAILED"
+        assert excinfo.value.problem.retryable is False
+        assert invocations == [], "the symlinked registered executable reached a subprocess"
+        assert external.read_bytes() == external_before
+    finally:
+        os.close(fd)
+
+
+def test_registered_wrapper_staging_swap_keeps_outputs_under_pinned_root(tmp_path, monkeypatch):
+    """A TOCTOU swap of the STAGING ROOT, performed while the real registered
+    EXP-182 wrapper is importing, cannot redirect the wrapper's output. The
+    audited ``run.py`` is copied from the checkout into a pinned stage at its
+    registered relative path; its declared runtime source is a tiny stub that,
+    during import, renames the lexical stage aside, replaces that path with a
+    symlink to an external directory, and exposes the entrypoint the wrapper
+    calls, which writes a marker under the wrapper-provided ``HERE``. The real
+    subprocess must exit 0, the pre-created external marker must keep its
+    sentinel bytes, and the marker must appear under the RENAMED pinned stage.
+    On current code ``Path(__file__).resolve()`` freezes ``HERE`` to the
+    lexical stage path, so the import-time swap sends the write through the
+    external symlink and this test fails red by mutating those sentinel bytes;
+    after the wrapper is rooted at the passed descriptor every path stays
+    under it. This is distinct from the executable-symlink refusal above,
+    which never reaches a subprocess: here the wrapper legitimately starts
+    and the swap races it mid-import."""
+    from engine.v2.ops import legacy_adapter
+
+    registered_path = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
+    runtime_source_path = "experiments/EXP-181_d_1_gated_execution_parity/run.py"
+    marker_rel = Path(registered_path).parent / "results" / "marker.txt"
+    marker = b"pinned-root-marker"
+    sentinel = b"external sentinel bytes that the swap must never rewrite\n"
+
+    stage = tmp_path / "stage"
+    backup = tmp_path / "backup-stage"
+    external = tmp_path / "external"
+    (stage / registered_path).parent.mkdir(parents=True)
+    (stage / registered_path).write_bytes((REPO / registered_path).read_bytes())
+    (stage / runtime_source_path).parent.mkdir(parents=True)
+    (stage / runtime_source_path).write_text(f'''"""Stub for the declared runtime source: during import it renames the
+lexical stage aside, replaces that path with a symlink to the external
+directory, and exposes the entrypoint the copied wrapper calls."""
+import os
+
+os.rename(os.environ["EXP182_SWAP_STAGE"], os.environ["EXP182_SWAP_BACKUP"])
+os.symlink(os.environ["EXP182_SWAP_EXTERNAL"], os.environ["EXP182_SWAP_STAGE"])
+
+MARKER = {marker!r}
+
+
+def main():
+    results = HERE / "results"  # HERE is set by the wrapper after this import
+    results.mkdir(parents=True, exist_ok=True)
+    (results / "marker.txt").write_bytes(MARKER)
+''')
+    external_marker = external / marker_rel
+    external_marker.parent.mkdir(parents=True)
+    external_marker.write_bytes(sentinel)
+    monkeypatch.setenv("EXP182_SWAP_STAGE", str(stage))
+    monkeypatch.setenv("EXP182_SWAP_BACKUP", str(backup))
+    monkeypatch.setenv("EXP182_SWAP_EXTERNAL", str(external))
+    fd = experiments._open_staging_directory(stage)
+    try:
+        result = legacy_adapter.run_legacy_script(stage, registered_path,
+                                                  staging_dir_fd=fd)
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert external_marker.read_bytes() == sentinel, (
+            "the import-time staging swap redirected the wrapper-provided HERE "
+            "into the external directory and rewrote its marker")
+        pinned_marker = backup / marker_rel
+        assert pinned_marker.is_file(), (
+            "the wrapper never wrote its marker under the renamed pinned stage")
+        assert pinned_marker.read_bytes() == marker
+    finally:
+        os.close(fd)
 
 
 def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path,

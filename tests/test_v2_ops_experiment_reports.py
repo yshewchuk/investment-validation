@@ -115,14 +115,19 @@ TINY_RUNNER_NO_METRICS = TINY_RUNNER.split("results = root")[0]
 
 
 def _tiny_checkout(tmp_path, *, with_metrics=True):
-    """A tmp checkout with the registered runner, its legacy spec.yaml and a
-    PLANNED ledger row; returns ``(checkout, spec_path, ledger, planned_hash)``."""
+    """A tmp checkout with the registered runner, its inventory-declared runtime
+    source, its legacy spec.yaml and a PLANNED ledger row; returns
+    ``(checkout, spec_path, ledger, planned_hash)``."""
     from experiments import lib
 
     checkout = tmp_path / "checkout"
     runner = checkout / REGISTERED_RUNNER
     runner.parent.mkdir(parents=True)
     runner.write_text(TINY_RUNNER if with_metrics else TINY_RUNNER_NO_METRICS)
+    declared_source = checkout / experiments.RUNNER_INVENTORY[REGISTERED_RUNNER][
+        "declared_runtime_sources"][0]
+    declared_source.parent.mkdir(parents=True, exist_ok=True)
+    declared_source.write_text("if __name__ == '__main__':\n    pass\n")
     legacy_spec = runner.parent / "spec.yaml"
     legacy_spec.write_text("id: EXP-182\nprimary_spec:\n  x: 1\n")
     planned_hash = lib.spec_hash(lib.load_spec(legacy_spec))

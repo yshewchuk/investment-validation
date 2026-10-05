@@ -366,28 +366,45 @@ def _experiment_failure(receipt):
                 "experiment run did not succeed", details=details)
 
 
+def _declared_experiment_sources(runner_id: str) -> tuple[str, ...]:
+    """The registered runner's ``declared_runtime_sources``, read only from its
+    :data:`RUNNER_INVENTORY` entry -- the single authoritative record, never
+    duplicated, never silently defaulted: a missing or malformed entry, or a
+    malformed or empty source list, is the non-retryable
+    ``INVALID_EXPERIMENT_SPEC``, raised before any runner subprocess starts or
+    any report exists."""
+    from engine.v2.ops.experiments import RUNNER_INVENTORY
+
+    entry = RUNNER_INVENTORY.get(runner_id)
+    sources = entry.get("declared_runtime_sources") if isinstance(entry, dict) else None
+    if (not isinstance(sources, (list, tuple))
+            or not sources
+            or not all(isinstance(relative, str) and relative for relative in sources)):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "registered runner has no valid inventory source record",
+                   details={"runner": runner_id})
+    return tuple(sources)
+
+
 def _dispatch_experiment(parameters, root):
-    """P6 slice 10: run one experiment under admission. Pure function of
-    ``parameters`` and staging, like ``_dispatch_adhoc_rescore`` — the runner
-    subprocess writes only inside ``root``, never the shared legacy tree, so
-    this carries no ``store_domains`` lease. The staging directory is pinned
-    once, before any read or write, and every path here -- ``spec.json``, the
-    plan, the receipt -- travels through the pinned ``/proc/self/fd`` alias,
-    so a lexical root swapped for a symlink mid-run is the non-retryable
-    ``VALIDATION_FAILED``, nothing published, no durable row.
+    """P6 slice 10: run one experiment under admission. Pure function of ``parameters`` and
+    staging, like ``_dispatch_adhoc_rescore`` — the runner subprocess writes only inside
+    ``root``, never the shared legacy tree, so this carries no ``store_domains`` lease. The
+    staging directory is pinned once, before any read or write, and every path here --
+    ``spec.json``, the plan, the receipt -- travels through the pinned ``/proc/self/fd`` alias,
+    so a lexical root swapped for a symlink mid-run is the non-retryable ``VALIDATION_FAILED``,
+    nothing published, no durable row.
 
-    ``no_ledger=False`` (P6 slice 11) selects ``mode="primary"`` for the
-    coordinator's durable registration and ledger append. The runner
-    subprocess itself is ALWAYS invoked through
-    :func:`run_legacy_script`, which hardcodes ``--no-ledger``: a killed and
-    retried attempt must never be able to double-append a CSV, and the one
-    real ledger row is appended by the coordinator effect instead.
+    ``no_ledger=False`` (P6 slice 11) selects ``mode="primary"`` for the coordinator's durable
+    registration and ledger append. The runner subprocess itself is ALWAYS invoked through
+    :func:`run_legacy_script`, which hardcodes ``--no-ledger``: a killed and retried attempt
+    must never be able to double-append a CSV, and the one real ledger row is appended by the
+    coordinator effect instead.
 
-    A registered legacy runner that exits nonzero is a typed failure, never
-    a success with whatever REPORT.md it happened to write first; its stderr
-    tail travels in the problem's details. ``resolve_experiment_plan`` runs
-    before any artifact is written and its canonical ``json_bytes`` are
-    persisted beside the receipt; a non-empty economic stance is refused."""
+    A registered legacy runner that exits nonzero is a typed failure, never a success with
+    whatever REPORT.md it happened to write first; its stderr tail travels in the problem's
+    details. ``resolve_experiment_plan`` runs before any artifact is written and its canonical
+    ``json_bytes`` are persisted beside the receipt; a non-empty economic stance is refused."""
     from engine.v2.ops.experiments import (
         _open_staging_directory,
         experiment_spec_from_document,
@@ -413,8 +430,10 @@ def _dispatch_experiment(parameters, root):
         if runner_id == "synthetic":
             runner, synthetic = synthetic_fixture_runner, True
         else:
+            sources = _declared_experiment_sources(runner_id)
             def runner(*, run_dir, no_ledger, staging_dir_fd):
-                completed = run_legacy_script(run_dir, runner_id, staging_dir_fd=staging_dir_fd)
+                completed = run_legacy_script(run_dir, runner_id, staging_dir_fd=staging_dir_fd,
+                                              declared_runtime_sources=sources)
                 if completed.returncode != 0:
                     raise fail("VALIDATION_FAILED", "legacy experiment runner failed",
                                details={"returncode": completed.returncode,

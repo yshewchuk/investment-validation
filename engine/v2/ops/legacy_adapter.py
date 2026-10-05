@@ -1119,24 +1119,20 @@ REGISTERED_RUNNERS = frozenset({
 LEGACY_RUNNER_TIMEOUT_S = 3600
 
 
-def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = None):
+def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = None,
+                      declared_runtime_sources: tuple[str, ...] = ()):
     """Run a registered legacy runner in a private root with smoke protection.
 
-    ``staging_dir_fd`` (pinned-staging handoff): when the caller has pinned
-    the staging directory, the child's working directory, its staging-root
-    environment value AND its executable are all ``/proc/self/fd/<fd>``-rooted
-    -- the script path is ``/proc/self/fd/<fd>/<registered-relative-script>``,
-    never derived from ``Path(root).resolve()`` or the lexical root -- with
-    that descriptor passed through ``pass_fds``, so neither the staging root
-    nor the child's own executable is resolved through the mutable lexical
-    path: after a path swap the child still runs and writes the SAME pinned
-    stage. The descriptor stays caller-owned and open; this function never
-    closes it. A subprocess that cannot start refuses with a generic,
-    public-safe, non-retryable ``VALIDATION_FAILED`` (no report is published
-    and no ledger row is committed), while a nonzero exit stays the caller's
-    existing typed ``VALIDATION_FAILED``. The registered-runner-name and
-    no-args refusals are unchanged, and with no fd every path, cwd,
-    environment and subprocess detail is exactly as before.
+    ``staging_dir_fd``: open the registered script and each declared runtime
+    source beneath the pinned descriptor -- every component with ``dir_fd``
+    and ``O_NOFOLLOW`` (``O_DIRECTORY`` for parents), the final file regular
+    with ``st_nlink == 1`` -- and map any unsafe/missing path to a generic,
+    public-safe, non-retryable ``VALIDATION_FAILED`` before
+    ``subprocess.run``. Run the child as ``/proc/self/fd/<script_fd>``, pass
+    the root, script and source fds in ``pass_fds``, close them in
+    ``finally``; exactly one declared source sets
+    ``INVESTING_PLAN_PINNED_SOURCE``, more is refused. Without the fd, every
+    path, cwd, environment and subprocess detail is exactly as before.
     """
     relative = str(Path(script))
     if relative not in REGISTERED_RUNNERS:
@@ -1154,17 +1150,55 @@ def run_legacy_script(root, script, args=(), *, staging_dir_fd: int | None = Non
         return subprocess.run(command, cwd=base, check=False,
                               capture_output=True, text=True,
                               timeout=LEGACY_RUNNER_TIMEOUT_S)
+    import stat
+    unsafe = "pinned legacy runner source path is not safe"
+    if len(declared_runtime_sources) > 1:
+        raise fail("VALIDATION_FAILED", unsafe)
+
+    def open_under(relative_path: str) -> int:
+        lexical = Path(relative_path)
+        if lexical.is_absolute() or not lexical.parts or any(
+                part in ("", ".", "..") for part in lexical.parts):
+            raise fail("VALIDATION_FAILED", unsafe)
+        walk: list[int] = []
+        try:
+            parent = staging_dir_fd
+            for component in lexical.parts[:-1]:
+                parent = os.open(component, os.O_RDONLY | os.O_DIRECTORY |
+                                 os.O_NOFOLLOW, dir_fd=parent)
+                walk.append(parent)
+            handle = os.open(lexical.parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            info = os.fstat(handle)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                os.close(handle)
+                raise fail("VALIDATION_FAILED", unsafe)
+            return handle
+        except OSError:
+            raise fail("VALIDATION_FAILED", unsafe) from None
+        finally:
+            for directory in walk:
+                os.close(directory)
+
     pinned = f"/proc/self/fd/{staging_dir_fd}"
-    command = [sys.executable, "-u", f"{pinned}/{relative}", "--no-ledger"]
+    opened: list[int] = []
     try:
-        return subprocess.run(command, cwd=pinned,
-                              env=dict(os.environ, INVESTING_PLAN_ROOT=pinned),
-                              check=False, capture_output=True, text=True,
-                              timeout=LEGACY_RUNNER_TIMEOUT_S,
-                              pass_fds=(staging_dir_fd,))
-    except (OSError, ValueError) as exc:
-        raise fail("VALIDATION_FAILED",
-                   "pinned legacy runner subprocess did not start") from exc
+        opened.extend(open_under(p) for p in (relative, *declared_runtime_sources))
+        script_fd, source_fds = opened[0], opened[1:]
+        env = dict(os.environ, INVESTING_PLAN_ROOT=pinned)
+        if source_fds:
+            env["INVESTING_PLAN_PINNED_SOURCE"] = f"/proc/self/fd/{source_fds[0]}"
+        command = [sys.executable, "-u", f"/proc/self/fd/{script_fd}", "--no-ledger"]
+        try:
+            return subprocess.run(command, cwd=pinned, env=env, check=False,
+                                  capture_output=True, text=True,
+                                  timeout=LEGACY_RUNNER_TIMEOUT_S,
+                                  pass_fds=(staging_dir_fd, script_fd, *source_fds))
+        except (OSError, ValueError) as exc:
+            raise fail("VALIDATION_FAILED",
+                       "pinned legacy runner subprocess did not start") from exc
+    finally:
+        for handle in opened:
+            os.close(handle)
 
 
 # --------------------------------------------------------------------------
