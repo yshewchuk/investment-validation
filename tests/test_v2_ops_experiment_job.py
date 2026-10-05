@@ -338,9 +338,11 @@ def test_experiment_effect_appends_ledger_row_once_in_the_checkout_only(tmp_path
         conn.close()
 
 
-def _claimed_primary_effect(tmp_path, key="primary-fence"):
+def _claimed_primary_effect(tmp_path, key="primary-fence", *, receipt_evidence=None):
     """A real claimed attempt + the coordinator's commit closure, plus the
-    checkout ledger it appends to. Returns ``(conn, clock, claim, effect, checkout)``."""
+    checkout ledger it appends to. Returns ``(conn, clock, claim, effect, checkout)``.
+    ``receipt_evidence`` becomes the synthetic receipt's otherwise-empty
+    ``evidence`` object."""
     ops_root, checkout = tmp_path / "ops", tmp_path / "checkout"
     _planned_ledger(checkout / "experiments" / "LEDGER.csv")
     ops_root.mkdir()
@@ -353,7 +355,8 @@ def _claimed_primary_effect(tmp_path, key="primary-fence"):
     store = ArtifactStore(ops_root)
     resolve_and_record(conn, store, claim)
     receipt_ref = store.publish_bytes(
-        json.dumps({"input_hash": "input-" + key, "evidence": {}}).encode(),
+        json.dumps({"input_hash": "input-" + key,
+                    "evidence": receipt_evidence or {}}).encode(),
         schema_ref="experiment_receipt.v1.0")
     with transaction(conn):
         register_artifact(conn, receipt_ref, None, clock)
@@ -377,6 +380,30 @@ def test_experiment_effect_lost_fence_appends_no_ran_row(tmp_path):
         assert _ledger_rows(checkout / "experiments" / "LEDGER.csv") == [
             {"id": "x", "stage": "planned"}]
         assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_experiment_effect_rejects_receipt_variant_mismatch_atomically(tmp_path):
+    """A receipt reporting a variant identity other than the checkout's
+    registered one is a typed ``INVALID_EXPERIMENT_SPEC`` refusal before the
+    ledger append, and the ``commit_attempt`` transaction rolls back the
+    run/hypothesis/evidence registration with it: the planned ledger bytes
+    are untouched and no durable run or hypothesis row survives."""
+    conn, clock, claim, effect, checkout = _claimed_primary_effect(
+        tmp_path, key="primary-variant-mismatch",
+        receipt_evidence={"variant_id": "not-the-registered-identity"})
+    ledger = checkout / "experiments" / "LEDGER.csv"
+    before = ledger.read_bytes()
+    try:
+        with pytest.raises(OpsError) as excinfo:
+            commit_attempt(conn, claim.attempt_id, claim.fence,
+                           Outcome(True, "verified_dead", 0), clock=clock,
+                           effects=lambda txn: effect(txn))
+        assert excinfo.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert ledger.read_bytes() == before
+        assert conn.execute("SELECT COUNT(*) FROM experiment_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM hypotheses").fetchone()[0] == 0
     finally:
         conn.close()
 
