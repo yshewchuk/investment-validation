@@ -742,6 +742,39 @@ def _module_run_targets(dotted: str, tracked_set: set[str],
     return edges | {target, main}
 
 
+def _literal_script_imports_tracked_sibling(target: str, tracked_set: set[str]) -> bool:
+    """True if a tracked script target's own non-root directory holds a module
+    named by one of its bare absolute imports.
+
+    This is deliberately narrow: only `import name` or `from name import ...`,
+    where `name` has no dots and no leading dot, is checked against
+    `<script-dir>/name.py` and `<script-dir>/name/__init__.py`. Such a launch
+    can load a sibling module that repo-root import resolution would never name,
+    so the process target stays unresolved instead of keeping only the precise
+    script edge. Read or parse failures are unresolved too."""
+    script_dir = os.path.dirname(target)
+    if not script_dir:
+        return False
+    try:
+        tree = ast.parse((REPO / target).read_text(encoding="utf-8"), filename=target)
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module]
+        else:
+            continue
+        for name in names:
+            if not name or "." in name:
+                continue
+            if (f"{script_dir}/{name}.py" in tracked_set
+                    or f"{script_dir}/{name}/__init__.py" in tracked_set):
+                return True
+    return False
+
+
 def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
                          roots: set[str], sys_aliases: set[str]) -> tuple[set[str], bool]:
     """(precise edges, unresolved) for one subprocess argv expression.
@@ -813,13 +846,16 @@ def _python_argv_targets(argv: ast.expr | None, tracked_set: set[str],
         target = _resolve_script_target(text, tracked_set)
         if target is None:
             return set(), True
+        if _literal_script_imports_tracked_sibling(target, tracked_set):
+            return set(), True
         return {target}, False
     if i < len(elts):
         text = _literal_str(elts[i])
         if text is None:
             return set(), True
         target = _resolve_script_target(text, tracked_set)
-        if target is not None:
+        if target is not None and not _literal_script_imports_tracked_sibling(
+                target, tracked_set):
             return {target}, False
     return set(), True
 
@@ -1412,7 +1448,10 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     `from builtins import eval as dynamic` (or the `exec` alias) is the
     same reference: any LOAD-context use of it -- call, assignment, or
     passed value -- is unresolved, with the same STORE-name exemption as
-    the bare builtins.
+    the bare builtins. A top-level, absolute `from builtins import
+    __import__ as load` alias is the same for the dynamic-import builtin:
+    any LOAD-context use of the bound name is an unresolved dynamic import
+    attempt, since this scan never proves the name means something else.
     Deliberately narrower than `_is_dynamic_file`: this function checks
     only for import-statement-shaped dynamic loading (the forms listed
     above). The other runtime-loading mechanisms this scan DOES track are
@@ -1445,6 +1484,17 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
     builtins_fn_names = {a.asname for n in ast.walk(tree)
                          if isinstance(n, ast.ImportFrom) and n.module == "builtins"
                          for a in n.names if a.asname and a.name in ("exec", "eval")}
+    # A top-level, absolute `from builtins import __import__ [as load]` binds
+    # the dynamic-import builtin under its own name or a new one. Only the
+    # direct module-level statement is followed (a relative `from .builtins
+    # import ...` names a different module entirely). Every LOAD-context use
+    # of the bound name -- called, assigned, or passed as a value -- is an
+    # unresolved dynamic-import attempt: this scan never proves an alias use
+    # means something else, so an uncertain one is never classified resolved.
+    builtins_import_names = {
+        a.asname or a.name for n in tree.body
+        if isinstance(n, ast.ImportFrom) and not n.level and n.module == "builtins"
+        for a in n.names if a.name == "__import__"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -1481,7 +1531,8 @@ def _has_unresolved_import_attempt(tree: ast.Module, is_conftest: bool) -> bool:
                            "SourceFileLoader"):
                 return True
             if isinstance(node.ctx, ast.Load) and (
-                    node.id in ("exec", "eval") or node.id in builtins_fn_names):
+                    node.id in ("exec", "eval") or node.id in builtins_fn_names
+                    or node.id in builtins_import_names):
                 return True  # a reference to the builtin, or a proven `from builtins import` alias, not only its direct call
         elif isinstance(node, ast.Call):
             if _looks_like_import_module_call(node.func) and _allowed_import_module_call(node) is None:

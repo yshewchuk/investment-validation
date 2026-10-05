@@ -3577,6 +3577,68 @@ def test_build_import_graph_a_python_subprocess_dash_m_adds_only_that_module(tmp
     assert "tools/runner.py" not in pilot.dynamic_files(graph)
 
 
+def test_build_import_graph_a_literal_python_script_sibling_import_fails_safe(tmp_path, monkeypatch):
+    # #413: launching `tools/worker.py` literally can still run through the
+    # child script's own directory, so a bare `import sibling` that names a
+    # tracked sibling module is not proven by the precise script edge alone.
+    # The launcher becomes unresolved and its static importer is selected by
+    # the #155 fail-safe when another test's real edge triggers the changed
+    # non-test source; a clean unrelated test stays out.
+    tracked = _write_repo(tmp_path, {
+        "tools/launcher.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
+            "VALUE = 1\n"),
+        "tools/worker.py": "import sibling\n",
+        "tools/sibling.py": "SIBLING = 1\n",
+        "engine/unrelated.py": "Z = 1\n",
+        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
+        "tests/test_direct.py": "import engine.unrelated\n",
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    launcher = "tools/launcher.py"
+    assert graph[launcher] == set(tracked) - {launcher}
+    assert launcher in pilot.dynamic_files(graph)
+    assert launcher in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/unrelated.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_launcher.py" in selected
+    assert "tests/test_direct.py" in selected
+    assert "tests/test_clean.py" not in selected
+
+
+def test_build_import_graph_a_literal_python_script_without_sibling_import_stays_precise(
+        tmp_path, monkeypatch):
+    # The contrast that keeps #413 from widening every script launch: a dotted
+    # repository-root import in the target script resolves through the normal
+    # roots, not as a sibling, so the literal script edge remains precise and
+    # its test importer is not pulled into selection by an unrelated change
+    # reached only through another test's direct import.
+    tracked = _write_repo(tmp_path, {
+        "tools/launcher.py": (
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, 'tools/worker.py'])\n"
+            "VALUE = 1\n"),
+        "tools/worker.py": "import engine.control\n",
+        "engine/control.py": "C = 1\n",
+        "engine/changed.py": "Y = 1\n",
+        "tools/sibling.py": "SIBLING = 1\n",
+        "tests/test_launcher.py": "from tools.launcher import VALUE\n",
+        "tests/test_direct.py": "import engine.changed\n",
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    launcher = "tools/launcher.py"
+    assert graph[launcher] == {"tools/worker.py"}
+    assert launcher not in pilot.dynamic_files(graph)
+    assert launcher not in pilot.unresolved_import_files(tracked)
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/changed.py"], graph=graph)
+    assert selected == ["tests/test_direct.py"]
+
+
 def test_build_import_graph_a_subprocess_dash_m_pytest_always_fails_safe(tmp_path, monkeypatch):
     # `-m pytest` (a THIRD-PARTY module, not a tracked one): the old
     # resolution would have tried `_resolve_dotted("pytest", ...)`, found no
@@ -4383,6 +4445,87 @@ def test_build_import_graph_an_unrelated_eval_or_exec_method_stays_resolved(
     assert graph[rel] == set()
     assert rel not in pilot.dynamic_files(graph)
     assert rel not in pilot.unresolved_import_files(tracked)
+
+
+_BUILTINS_DUNDER_IMPORT_ALIAS_SOURCES = [
+    pytest.param("from builtins import __import__ as load\n\ndef go(name):\n"
+                 "    return load(name)\n",
+                 id="from-builtins-dunder-import-alias-called"),
+    pytest.param("from builtins import __import__ as load\n\nHANDLERS = [load]\n",
+                 id="from-builtins-dunder-import-alias-loaded-as-a-value"),
+]
+
+
+@pytest.mark.parametrize("source", _BUILTINS_DUNDER_IMPORT_ALIAS_SOURCES)
+def test_build_import_graph_a_builtins_dunder_import_alias_is_unresolved(
+        source, tmp_path, monkeypatch):
+    # The gate's finding: `from builtins import __import__ as load` binds the
+    # dynamic-import builtin under a new name, exactly like the eval/exec
+    # aliases above. Every LOAD-context use of that top-level alias -- a call
+    # or a value -- is a dynamic import attempt this scan cannot resolve.
+    rel = "engine/dyn.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is True
+    assert graph[rel] == set(tracked) - {rel}
+    assert rel in pilot.dynamic_files(graph)
+    assert rel in pilot.unresolved_import_files(tracked)
+
+
+def test_build_import_graph_an_unrelated_load_method_stays_resolved(tmp_path, monkeypatch):
+    # Clean negative: a method merely NAMED `load` on an unrelated object is
+    # not the aliased builtin -- no dynamic import, no catch-all, no taint.
+    source = ("class Loader:\n    def load(self, name):\n        return name\n\n"
+              "loader = Loader()\nloader.load('engine.a')\n")
+    rel = "engine/clean.py"
+    tracked, graph = _pr390_graph(tmp_path, monkeypatch, {rel: source})
+    assert pilot._has_unresolved_import_attempt(pilot.ast.parse(source), False) is False
+    assert graph[rel] == set()
+    assert rel not in pilot.dynamic_files(graph)
+    assert rel not in pilot.unresolved_import_files(tracked)
+
+
+def test_select_pr_tests_builtins_dunder_import_alias_loader_selects_its_static_importer(
+        tmp_path, monkeypatch):
+    # The gate's exact reproduction, end to end: engine/loader.py loads
+    # engine.a through `load('engine.a')`, where `load` is `from builtins
+    # import __import__ as load`. A test that statically imports engine.loader
+    # has NO real edge to engine.a, so before the narrow scanner recognized
+    # the alias it was omitted from the narrowed selection when engine/a.py
+    # changed. It must be selected through the #155 fail-safe (taint), while
+    # test_clean -- sharing neither edge nor helper -- stays out.
+    tracked = _write_repo(tmp_path, {
+        "engine/a.py": "VALUE = 2\n",
+        "engine/loader.py": (
+            "from builtins import __import__ as load\n"
+            "\n"
+            "def value(name='engine.a'):\n"
+            "    return load(name)\n"),
+        "tests/test_loader.py": (
+            "from engine.loader import value\n"
+            "\n"
+            "def test_value():\n"
+            "    assert value() is not None\n"),
+        "tests/test_direct.py": (
+            "import engine.a\n"
+            "\n"
+            "def test_a():\n"
+            "    assert engine.a.VALUE == 2\n"),
+        "tests/test_clean.py": "X = 1\n",
+    })
+    monkeypatch.setattr(pilot, "REPO", tmp_path)
+    graph = pilot.build_import_graph(tracked)
+    assert graph["engine/loader.py"] == set(tracked) - {"engine/loader.py"}
+    assert "engine/loader.py" in pilot.dynamic_files(graph)
+    assert "engine/loader.py" in pilot.unresolved_import_files(tracked)
+    loader_closure, _ = pilot._closure_from_roots(
+        {"tests/test_loader.py"}, graph, pilot.unresolved_import_files(tracked),
+        taint_exempt={"tests/test_loader.py"})
+    assert "engine/a.py" not in loader_closure  # the taint, not an edge, selects it
+    selected = pilot.select_pr_tests(_SELECT_CFG, ["engine/a.py"], graph=graph)
+    assert selected is not None
+    assert "tests/test_loader.py" in selected  # tainted through the aliased __import__
+    assert "tests/test_direct.py" in selected  # reaches a.py by a real import edge
+    assert "tests/test_clean.py" not in selected
 
 
 _METADATA_SAFE_SOURCES = [

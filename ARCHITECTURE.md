@@ -177,7 +177,9 @@ evidence. See the models and data component contracts.
     dynamic-import fail-safe set is added only when the diff touches a non-test Python file;
     catch-all graph edges apply only where a dynamic target's resolution stays uncertain -- a
     non-`None` subprocess `env=` override, a path mutation through a shadowed or reassigned root
-    alias -- and recognized constructs with resolvable targets create specific edges. Recognized
+    alias, or a literal Python script launch whose target script's non-root directory holds a
+    tracked sibling module named by one of that script's bare imports -- and recognized constructs
+    with resolvable targets create specific edges. Recognized
     unresolved targets add catch-all graph edges and can widen selection through the #155 fail-safe
     test set; this does not always mean every test is selected. `full_suite` paths, an unrecognized
     path, a deleted test file, or a graph or scan failure returns the `__ALL__` sentinel and runs
