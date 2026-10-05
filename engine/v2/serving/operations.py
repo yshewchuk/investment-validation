@@ -146,24 +146,64 @@ def shell_document(*, frozen_at: str | None = None) -> bytes:
     different release. ``/release/current/...`` keeps working for direct,
     non-shell requests (back-compat), but the shell itself never builds a
     frame URL from it.
+
+    Status presentation (client-side only, ``textContent`` for all dynamic
+    text, no writes): ``/release/current.json`` is ALSO polled every 30s and
+    its latest published id kept only for COMPARISON against the pin; when
+    they differ the shell says the displayed board is stale, shows the health
+    observation's age, and offers a reload button to opt into current -- the
+    frame is never re-pointed automatically. ``/health.json`` polls every 30s
+    and is usable only as an ``operations_health.v1.0`` object with a
+    parseable, non-future ``generated_at``; age shows in whole days/hours
+    (minimum one hour when nonzero, more than 24h stale). "current" requires
+    age <=24h, a health ``current_release.release_id`` matching BOTH the pin
+    and the latest published id, no withheld release, zero consecutive failed
+    nights and no missing scheduled observations -- each failed gate names
+    its own explicit reason (missing/malformed identity or schedule evidence
+    is unknown, never current). Any fetch/parse failure shows
+    unknown/unavailable without erasing the pin or throwing out of the shell.
     """
     frozen = frozen_at or "unknown"
     routes = ("/#/trades/board", "/#/trades/explorer", "/#/trades/book", "/#/models/modelx",
               "/derivation", "/analogs", "/#/models/health")
     views = "".join(f'<a href="{route}">{view}</a> ' for view, route in zip(_VIEWS, routes))
     html = f'''<!doctype html><meta charset="utf-8"><title>Operations shell</title>
-<style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
-<div id="ops">health: <span id="state">unknown</span> <small id="stamp">offline frozen at {frozen}</small> <small id="release">release: resolving...</small></div>
+<style>body{{margin:0;font:14px sans-serif}}#ops{{padding:8px;background:#20252b;color:#eee}}#ops.unknown{{background:#634}}#ops.degraded{{background:#642}}nav a{{margin-right:12px}}main{{min-height:90vh}}</style>
+<div id="ops" class="unknown">health: <span id="state">unknown</span> <small id="stamp">offline frozen at {frozen}</small><br><small id="release">pinned release: resolving</small> <small id="published">published release: resolving</small><br><span id="drift"></span> <button id="optin" type="button" hidden>reload to opt into current</button></div>
 <nav>{views}</nav><main><iframe id="legacy" title="legacy dashboard" src="about:blank" style="width:100%;height:90vh;border:0"></iframe></main>
 <script>
-const state=document.querySelector('#state'), stamp=document.querySelector('#stamp'), banner=document.querySelector('#ops'), releaseEl=document.querySelector('#release'), frame=document.querySelector('#legacy');
-let pinned=null;
-async function health(){{try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(!r.ok)throw Error();const h=await r.json();const b=h.code_budgets||{{}};state.textContent=h.withheld_release?'withheld':(b.consecutive_nights?'degraded':'current');stamp.textContent='updated '+h.generated_at+'; failures '+(b.consecutive_nights||0);banner.className='';}}catch(e){{state.textContent='unknown / stale';stamp.textContent='offline frozen at {frozen}';banner.className='unknown';}}}}
-health(); setInterval(health,30000);
-async function resolveRelease(){{try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error();const j=await r.json();return j.release_id;}}catch(e){{return null;}}}}
+const FROZEN='{frozen}',DAY=86400000;
+const state=document.querySelector('#state'),stamp=document.querySelector('#stamp'),banner=document.querySelector('#ops'),releaseEl=document.querySelector('#release'),publishedEl=document.querySelector('#published'),driftEl=document.querySelector('#drift'),optin=document.querySelector('#optin'),frame=document.querySelector('#legacy');
+let pinned=null,published,health=null,healthNote='health not fetched yet';
+function age(ms){{let h=Math.floor(ms/3600000);if(ms>0&&h<1)h=1;const d=Math.floor(h/24);return d?d+'d '+(h%24)+'h':h+'h';}}
+function usable(j){{if(!j||typeof j!=='object'||Array.isArray(j)||j.schema_version!=='operations_health.v1.0')return false;const at=Date.parse(j.generated_at);return !Number.isNaN(at)&&at<=Date.now();}}
+async function pollHealth(){{try{{const r=await fetch('/health.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();if(usable(j)){{health=j;healthNote='';}}else{{health=null;healthNote='health artifact unusable: schema or generated_at';}}}}catch(e){{health=null;healthNote='health fetch failed: unavailable';}}render();}}
+async function pollCurrent(){{try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();published=(j&&typeof j.release_id==='string'&&j.release_id)?j.release_id:null;}}catch(e){{published=null;}}render();}}
+function evaluate(){{const ms=Date.now()-Date.parse(health.generated_at),text=age(ms),reasons=[];let unknown=false;
+if(health.withheld_release)reasons.push('release withheld: '+(typeof health.withheld_release==='string'?health.withheld_release:'(details omitted)'));
+const cr=(health.current_release&&typeof health.current_release==='object'&&typeof health.current_release.release_id==='string'&&health.current_release.release_id)?health.current_release.release_id:null;
+if(cr===null){{unknown=true;reasons.push('health names no current release identity');}}
+else{{if(pinned===null)reasons.push('release mismatch: health says '+cr+', frame pin unavailable');else if(cr!==pinned)reasons.push('release mismatch: health says '+cr+', frame pinned to '+pinned);
+if(published===undefined)reasons.push('release mismatch: health says '+cr+', published current not yet observed');else if(published===null)reasons.push('release mismatch: health says '+cr+', published current unavailable');else if(cr!==published)reasons.push('release mismatch: health says '+cr+', published current is '+published);}}
+const cb=health.code_budgets;
+if(!cb||typeof cb!=='object'||typeof cb.consecutive_nights!=='number'||!Array.isArray(cb.unknown_occurrences)){{unknown=true;reasons.push('engineering schedule evidence missing or malformed');}}
+else{{if(cb.consecutive_nights!==0)reasons.push('failed engineering nights: '+cb.consecutive_nights+' consecutive');if(cb.unknown_occurrences.length>0)reasons.push('scheduled observations missing: '+cb.unknown_occurrences.join(', '));}}
+if(ms>DAY)reasons.push('observation older than 24 hours');
+stamp.textContent='updated '+text+' ago';
+if(reasons.length===0){{state.textContent='current';banner.className='';return;}}
+state.textContent=(unknown?'unknown: ':'degraded: ')+reasons.join('; ')+' (observation '+text+' old)';
+banner.className=unknown?'unknown':'degraded';}}
+function render(){{releaseEl.textContent='pinned release: '+(pinned||'unavailable');
+publishedEl.textContent='published release: '+(published===undefined?'resolving':(published||'unavailable'));
+if(pinned&&published&&published!==pinned){{driftEl.textContent='the displayed board is stale: pinned to '+pinned+' while the published current is '+published+(health?', health observation '+age(Date.now()-Date.parse(health.generated_at))+' old':'');optin.hidden=false;}}
+else{{driftEl.textContent='';optin.hidden=true;}}
+if(!health){{state.textContent='unknown / stale: '+healthNote;stamp.textContent='offline frozen at '+FROZEN;banner.className='unknown';return;}}
+evaluate();}}
 function route(){{if(!pinned)return;frame.src='/release/'+pinned+'/index.html'+(location.hash||'#/trades/board');}}
-async function init(){{pinned=await resolveRelease();releaseEl.textContent=pinned?('release: '+pinned):'release: unavailable';route();}}
-window.addEventListener('hashchange',route); init();
+async function init(){{try{{const r=await fetch('/release/current.json',{{credentials:'same-origin'}});if(!r.ok)throw Error('http');const j=await r.json();if(j&&typeof j.release_id==='string'&&j.release_id){{pinned=j.release_id;published=pinned;}}else published=null;}}catch(e){{published=null;}}render();route();}}
+optin.addEventListener('click',function(){{location.reload();}});
+window.addEventListener('hashchange',function(){{try{{route();}}catch(e){{}}}});
+init();pollHealth();setInterval(pollHealth,30000);setInterval(pollCurrent,30000);
 </script>'''
     return html.encode()
 
