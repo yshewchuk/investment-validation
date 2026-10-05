@@ -204,3 +204,37 @@ def test_positive_scores_follow_classes_order_and_reject_malformed_classes():
         fit_walk_forward_fold(_ClassesOrderEstimator(has_classes=False),
                               train_x, train_labels, test_x, rule)
     assert raised.value.code == "EXPERIMENT_VARIANT_FAILED"
+
+
+def test_fit_walk_forward_fold_maps_estimator_ops_error_to_variant_failure():
+    import pytest
+    from sklearn.base import BaseEstimator
+
+    from engine.v2.ops.errors import OpsError, fail
+
+    class _FitRaisingEstimator(BaseEstimator):
+        """Cloneable estimator whose ``fit`` refuses with an ops code."""
+
+        def __init__(self, offset=0.0):
+            self.offset = offset
+
+        def fit(self, features, labels):
+            raise fail("INVALID_EXPERIMENT_SPEC", "synthetic estimator failure")
+
+        def predict_proba(self, features):
+            rows = np.asarray(features, dtype=float)
+            positive = 1.0 / (1.0 + np.exp(-rows[:, 0]))
+            return np.column_stack([1.0 - positive, positive])
+
+    train_x = np.array([[-2.0, 0.0], [-1.0, 1.0], [1.0, 0.0], [2.0, 1.0]])
+    train_y = np.array([0, 0, 1, 1])
+    test_x = np.array([[0.0, 0.2], [0.5, 0.2]])
+    estimator = _FitRaisingEstimator()
+
+    with pytest.raises(OpsError) as raised:
+        fit_walk_forward_fold(estimator, train_x, train_y, test_x, TrainFoldRule())
+    assert raised.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert raised.value.problem.retryable is False
+    assert not hasattr(estimator, "classes_")
+    assert not hasattr(estimator, "coef_")
+    assert not hasattr(estimator, "is_fitted_")

@@ -136,8 +136,6 @@ def fit_walk_forward_fold(estimator, train_features, train_labels, test_features
         train_scores = _positive_scores(fitted, matrix)
         threshold = threshold_rule.fit_threshold(train_scores, labels)
         test_scores = _positive_scores(fitted, test_matrix)
-    except OpsError:
-        raise
     except Exception:
         raise fail("EXPERIMENT_VARIANT_FAILED", "walk-forward fold fitting failed") from None
     return WalkForwardFoldFit(fitted, threshold, test_scores)
