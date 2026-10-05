@@ -292,6 +292,35 @@ produces the same `ScoreRecord`, `identity.py`). Other typed refusals:
 (`application.py`, below), `NightlySourceBundleRefusal`
 (`nightly_source_bundle.py`, below).
 
+**Quote age policy (issue #169).** When native input context supplies
+`quote_max_age_sessions`, it is the permitted age of the raw quote at
+`entry_date`, measured in market sessions using the canonical NYSE schedule
+in `engine.v2.foundation.market_calendar`.
+An absent or `None` bound means no caller policy was supplied; a supplied
+bound must be a non-negative integer. With a bound, each required date and
+each supplied latest date must parse in full; a valid date prefix followed by
+invalid text is unusable evidence. Missing or invalid age evidence, a quote
+dated after entry, or an age greater than the bound makes the quote unusable
+and adds non-advisory `NO_CHAIN`. If a nightly bundle has
+multiple quote observation dates, it preserves the earliest date for the
+conservative age check and the latest date as `quote_latest_date`; any latest
+date after entry refuses even when an earlier call observation is on entry.
+Scoring returns its ordinary refused `ScoreRecord` (`readiness="refused"`),
+not an exception; parity therefore agrees with legacy's no-eligible-chain
+refusal. An in-bound older quote may still carry advisory `STALE_QUOTE`. The
+refusal is deterministic and not retried internally; a caller can retry a
+later score with refreshed source quotes. Scoring writes nothing, and a
+refusal leaves no selected score values as a ready result.
+
+The nightly source bundle preserves a supplied bound in its context and omits
+that optional key when unset. When quote rows exist, `quote_date` is their
+earliest validated `observed_at` date and `quote_latest_date` is their latest;
+both dates have passed the assembler's `as_of` upper-bound check. An allowed
+empty quote domain carries neither date. `native_score_batch` carries the
+caller policy into scoring; `None` continues to mean no policy and no numeric
+age default is invented. This policy is independent of the assembler's
+`as_of` upper-bound check, which only prevents future observations.
+
 **Planned-exit simulation values each leg by its own right.** The
 `planned_exit` simulation (`stages._planned_exit_simulation`) prices a call
 leg as a call and a put leg as a put (`C`/`CALL`, `P`/`PUT`, case-insensitive),

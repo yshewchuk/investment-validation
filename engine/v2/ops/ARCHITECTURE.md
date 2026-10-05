@@ -688,8 +688,7 @@ No match → `EVENT_NOT_FOUND`; multiple → `IDENTITY_CONFLICT`; invalid staged
 Affirmative EOD admission still requires manifest-bound source/finality proof, producer/attempt/fence and exact object/domain checks, with genuine completion/publication at or before cutoff; reconstructed/import clocks do not qualify.
 Quote expiry remains explicit caller input, spot requires its own exact pinned source, and no quote/raw-row assembler is implied by source admission alone. `nightly_quote_rows.scan_quote_rows(repository, snapshot, key, *, expiry, decision_session) -> QuoteRowInputs(quote_rows, quote_status)` is that reader for `quote_rows`: exact `(ticker, decision_session)` match, never a lookback (mirrors `chains.get_chain`), `expiry`-filtered in Python, null bid/ask pass through as `None`; no match → `quote_status="empty"`; malformed key/dates → `INVALID_REQUEST`; `decision_session` after `expiry` → `QUERY_NOT_BOUNDED`; missing `option_chains` table → `CONTRACT_MISMATCH`; repository failures propagate.
 
-**Cutover PR-6: 4a.2 helpers and 4b producer.** `nightly_calendar_inputs.scan_calendar_row_inputs` owns pinned spot, listed strategy-specific expiry and session-based planned exit (independent of expiry). `nightly_raw_row_producer.build_native_score_batch_events(repository, snapshot, *, as_of, horizon_days, tickers=None) -> tuple[list[dict[str, Any]], dict[str, Any]]` exists and enumerates `scan_forward_board_requests` in order, preserves original timestamps, and returns empty JSON-ready documents before context reads when there are no requests. `Service._reconcile_native_score_batch_shadow` (slice 5) is the only production caller of `build_native_score_batch_events`; no other production path calls it.
-The producer refuses intraday keys as `INTRADAY_EVENT_NOT_ADMITTED` before context reads or identity normalization; `scan_calendar_row_inputs` itself raises `INVALID_REQUEST` for such keys, making the producer the admission boundary in [#243](https://github.com/yshewchuk/investment-validation/issues/243). For admitted keys it requires the decision session and the full earlier observed-session history needed by the panel's longest regime window. Calendar coverage comes from pinned SPY `price_history`, but that alone does not establish regime-input coverage: after reading each shared panel row, the producer verifies that the `spy_ret252` result from pinned SPY `daily_market` is usable. If the decision session or required observed history is absent, or the actual `daily_market` inputs do not produce that regime value, each affected admitted key gets a fixed-detail `PANEL_HISTORY_NOT_AVAILABLE` typed refusal; no calendar-row or quote composition is attempted for it. The separate runup-history query remains governed by the panel reader. Otherwise it shares panel rows/anchors per `(ticker, event_date, session)`, and composes calendar/quotes per request; only complete compositions yield JSON-ready events (`key`, `calendar_row`, `panel_row`, `panel_anchor`, `tier4_row={}`, `quote_rows`, `quote_status`). Fixed public-safe `{key, code, detail}` refusals and successes are disjoint; any build failure returns no partial tuple. Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
+**Cutover PR-6: 4a.2 helpers and 4b producer, with slice 5's production caller.** `nightly_calendar_inputs.scan_calendar_row_inputs` owns pinned spot, listed strategy-specific expiry and independent planned exit. `nightly_raw_row_producer.build_native_score_batch_events(repository, snapshot, *, as_of, horizon_days, tickers=None) -> tuple[list[dict[str, Any]], dict[str, Any]]` is implemented and enumerates `scan_forward_board_requests` in order, preserves original timestamps, and returns empty JSON-ready documents before context reads when there are no requests. `Service._reconcile_native_score_batch_shadow` (slice 5) is the only production caller of `build_native_score_batch_events`; it stages/registers the complete `events.json` and `producer_refusals.json` pair before submission and no other production path calls it. The producer refuses intraday keys as `INTRADAY_EVENT_NOT_ADMITTED` before context reads or identity normalization; `scan_calendar_row_inputs` itself raises `INVALID_REQUEST` for such keys, making the producer the admission boundary in [#243](https://github.com/yshewchuk/investment-validation/issues/243). For admitted keys it requires the decision session and the full earlier observed-session history needed by the panel's longest regime window. Calendar coverage comes from pinned SPY `price_history`, but that alone does not establish regime-input coverage: after reading each shared panel row, the producer verifies that the `spy_ret252` result from pinned SPY `daily_market` is usable. If the decision session or required observed history is absent, or the actual `daily_market` inputs do not produce that regime value, each affected admitted key gets a fixed-detail `PANEL_HISTORY_NOT_AVAILABLE` typed refusal; no calendar-row or quote composition is attempted for it. The separate runup-history query remains governed by the panel reader. Otherwise it shares panel rows/anchors per `(ticker, event_date, session)`, and composes calendar/quotes per request; only complete compositions yield JSON-ready events (`key`, `calendar_row`, `panel_row`, `panel_anchor`, `tier4_row={}`, `quote_rows`, `quote_status`). Fixed public-safe `{key, code, detail}` refusals are disjoint from successful event keys and any build failure returns no partial tuple; the sidecar stages/registers both documents before submission, a producer-wide or staging failure submits nothing, `submit_native_score_batch_shadow_if_ready` consumes only the refs passed to it, an absent or late prerequisite is a no-op under existing backoff, and a missing optional `producer_refusals.json` stays compatible (R1–R6 below). Snapshot reads remain SHADOW-only, un-admitted pending [#260](https://github.com/yshewchuk/investment-validation/issues/260).
 
 `nightly_calendar_inputs.py` exposes `scan_decision_calendar(repository, snapshot, *, decision_session, event_through) -> CalendarSessions`, `scan_candidate_expiries(repository, snapshot, key, *, decision_session) -> tuple[str, ...]`, and `scan_calendar_row_inputs(repository, snapshot, key, *, decision_session, calendar) -> CalendarRowInputs`. The calendar source is the pinned SPY price series through the decision session; its observed maximum stays distinct from projected sessions. Candidate scans use one exact option-chain session, and `generation.resolve_expiry` applies the native strategy policy. Spot is the finite positive raw close on the exact decision session. The helper passes the independent planned exit and resolved expiry into `scan_calendar_row`; the returned calendar revision is the matched pinned earnings-events dataset revision.
 
@@ -1033,7 +1032,7 @@ starts working with no change of its own.
   evidence, while returned rows and typed missing-ticker coverage commit
   against the raw receipt, never as complete. Empty or literal-404 stays
   not_final under the normal retry policy; endpoint outcomes classify
-   independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
+    independently, with credential, rate-limit, and not-final retaining refusal precedence over partial.
 - `StageReceipt`/`NightlyReceipt` documents recording each stage's status,
   input/output hash and (for a failure) an error code.
 - Job records in the catalog (leases, attempts, outbox rows).
@@ -1287,7 +1286,7 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | Plan write or later runner failure | Typed attempt failure; candidate stays unpublished. A failed plan write may leave partial bytes in the failed attempt root. |
 | Feature read: snapshot mismatch; no match; any post-entry match; conflicting tie at latest eligible instant | `SNAPSHOT_UNRESOLVED`; `FEATURES_MISSING`; non-retryable `FEATURE_LOOKAHEAD` (no clipping, shifting, or dropping); `INVALID_EXPERIMENT_SPEC`, respectively. Refusal returns no feature value and writes no artifact or report. |
 
-Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect.
+Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row supplies the retry receipt and short-circuits the effect. Two distinct heartbeats govern a live attempt: `attempts.heartbeat_at` is the fenced lease-renewal stamp (`lifecycle.heartbeat`), while a `progress_events` row of `kind="heartbeat"` is only a throttled supervisor observation event (`HEARTBEAT_EVENT_SECONDS` or a state change) and never a lease signal; failure diagnostics expose the lease heartbeat stamp and the worker process-family liveness (recorded launch `ProcessIdentity`, ownership proof) separately from the latest progress event/step.
 
 ### `board_requests` (`native_board_universe.py`)
 
@@ -1330,15 +1329,10 @@ Worker exit status determines `WORKER_FAILED`; an already-delivered outbox row s
 
 ### `native_score_batch.py`
 
-Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities,
-unresolvable release, request-hash collision, invalid worker identity fields, or malformed
-`events.json`/`producer_refusals.json`. Invalid timestamp wire values are checked before
-conversion: `_event_date_identity` raises `ValueError`, mapped by worker dispatch to nonretryable
-`VALIDATION_FAILED` before scoring or output writes, not a row refusal. This classification does
-not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and maps to
-retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction.
-R5: writes follow assembly, scoring and collision checks. R6: strict timestamp identity for
-duplicate/overlap checks.
+Batch-level (raises, no per-row attempt): malformed binding/events, duplicate event identities, unresolvable release, request-hash collision, invalid worker identity fields, or malformed `events.json`/`producer_refusals.json`. Invalid timestamp wire values raise `ValueError` during decoding.
+Quote bounds are validated during decoding and in `_checked_batch_arguments`, including direct assembly callers: only `null` or non-negative integers are accepted. Booleans, floats, strings, and negatives raise `ValueError`, mapped to nonretryable `VALIDATION_FAILED` before scoring or output writes; invalid bounds are malformed batch inputs, not row refusals.
+This classification does not apply to every shape error: a missing `events.json` item `key` raises `KeyError` and
+maps to retryable `WORKER_FAILED`. R2: no cache. R3: no internal retry. R4: no catalog transaction. R5: writes follow assembly, scoring and collision checks. R6: strict timestamp identity for duplicate/overlap checks.
 
 Per row (collected as a refusal, never sinks the batch):
 
@@ -1405,14 +1399,14 @@ job.
 | the scoring context years | derived from `as_of` on every call, mirroring legacy's own formula — never a fixed window that ages past its end |
 | crash after `plan_fn` returns but before the `"submitting"` receipt is durable (issue #186) | accepted risk: a retry may produce the same or a different plan; only the plan named by the durable receipt is submitted or scored. If the rebuilt plan differs, the first artifact is orphaned. Fresh retries recheck the window and probe; resume retries skip the window check and may submit after it closes. |
 
-### `computed_moves_store.py`: capture never sees data from after `as_of`
+### `computed_moves_store.py`: capture and inherited fragments respect `as_of`
 
 | Condition | Outcome |
 |---|---|
 | a fetched price series | truncated to on-or-before `as_of` before hashing; an event outside the as-of-bounded window is filtered, both before rows are built |
-| truncation empties the series | degrades to the existing "too few" outcome, never a raise |
-| an event survives the filter but its exit price still falls past the truncated series | the existing out-of-range guard returns nothing; folded into an ordinary skipped row |
+| truncation empties the series, or an event's exit price falls past the truncated series | the existing "too few" outcome or out-of-range guard returns an ordinary skipped row; neither raises |
 | a same-`as_of` rerun with an unchanged provider fetch | truncates identically both times — same hash, same no-op/re-resolve behavior |
+| any commit candidate would inherit a fragment whose `primary_key_max` event date is on or after its basis `as_of` | `_commit_generation` refuses the whole generation with non-retryable `VALIDATION_FAILED`, before catalog commit. Rewritten tickers use the capture-time truncation above. Refusal leaves the parent, head and capture-log rows unchanged; already-published fragment objects and completed raw-unit receipts may remain. Retrying with the same parent and `as_of` cannot succeed while that fragment remains inherited; use a parent whose inherited rows precede `as_of` or request a later `as_of`. |
 
 ## Invariants
 
