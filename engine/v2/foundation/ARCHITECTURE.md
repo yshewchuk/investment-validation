@@ -28,6 +28,8 @@ None. This module does not access repositories, providers, loaders, models, legs
 
 Invalid/empty sessions, malformed/missing dates (`None`, `NaT`), unknown strategy/session, or insufficient pre-print or post-print anchor coverage raise `CalendarInputError(code="INVALID_REQUEST")`. The bounded search for the first future session stops at Python's maximum representable date: if a session remains in range it is returned, and if none remains the function raises the same typed refusal rather than leaking date-arithmetic overflow. R1–R6: source failures propagate at the adapter; no cache or retries; deterministic for the same inputs; read-only; no partial result or writes; stable output for the same request.
 
+The shared typed-document decoder reports `UNSUPPORTED_VERSION` before `UNKNOWN_FIELD` when a document has both an unsupported schema version and undeclared fields. Supported versions still report `UNKNOWN_FIELD` for undeclared fields.
+
 ## Invariants
 
 Observed-through is the source maximum and never the projected endpoint. Projection uses weekdays excluding computed annual US market holidays and documented one-off NYSE full-closure dates (2012-10-29, 2012-10-30, 2018-12-05, and 2025-01-09), and includes the first post-print session. STR-THRU/put-menu/DYN-SV exit first post-print; STR-RUNUP exits last pre-print.

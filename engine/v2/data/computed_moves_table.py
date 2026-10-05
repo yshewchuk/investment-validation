@@ -45,7 +45,7 @@ _SCHEMA_EVOLUTION_POLICY = (
     "alone) raises IDENTITY_CONFLICT on any second, differently-shaped definition "
     "under that id regardless of nullability, so a nullable addition to an "
     "already-committed contract_id needs a new major contract_id/semantic_version too "
-    "(computed_moves.v2/2.0.0 is this table's own example)."
+    "(computed_moves.v3/3.0.0 is this table's own example)."
 )
 
 _COLUMNS = (
@@ -93,9 +93,9 @@ _COLUMNS = (
 
 def _build() -> TableContract:
     fields = dict(
-        contract_id="computed_moves.v2",
+        contract_id="computed_moves.v3",
         table_name=COMPUTED_MOVES_TABLE_NAME,
-        semantic_version="2.0.0",
+        semantic_version="3.0.0",
         columns=_COLUMNS,
         primary_key=("ticker", "event_date"),
         duplicate_policy="none_by_construction -- one row per (ticker, event_date)",
@@ -117,7 +117,6 @@ def _build() -> TableContract:
                            "fragment was never observed by a capture.",
         schema_evolution_policy=_SCHEMA_EVOLUTION_POLICY,
         maximum_batch_rows=65536,
-        maximum_result_rows=500_000,
         legacy_mapping_ref=None,
     )
     placeholder = TableContract(definition_hash="sha256:" + "0" * 64, **fields)

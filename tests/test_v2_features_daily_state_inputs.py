@@ -161,11 +161,12 @@ def _bound_row_selected(row, key_filter, time_interval) -> bool:
 class _FakeRepository:
     """The ``Repository`` surface this module needs, with call counters."""
 
-    def __init__(self, snapshot: SnapshotRef, *, contract=_DM, batches=(), failure=None) -> None:
+    def __init__(self, snapshot: SnapshotRef, *, batches=(), failure=None,
+                 bound: int | None = None) -> None:
         self._snapshot = snapshot
-        self._contract = contract
         self._batches = list(batches)
         self._failure = failure
+        self._stated_bound = bound
         self.resolve_calls = 0
         self.head_lookups = 0
         self.table_contract_calls = 0
@@ -192,13 +193,16 @@ class _FakeRepository:
         if table_name not in snapshot_ref.table_versions:
             raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
                             details={"table_name": table_name})
-        return self._contract
+        return _DM
 
     def scan_population_bound(self, snapshot_id: str, *, table_name: str,
                               table_contract_ref, key_filter=(), time_interval=None) -> int:
         """Count the fake's ``daily_market`` membership rows the supplied
         snapshot, pinned contract identity, key predicates and half-open
-        interval select — the same selection ``scan`` below will stream."""
+        interval select — the same selection ``scan`` below will stream. A
+        ``bound=`` fake reports that stated count instead: a candidate bound
+        legitimately exceeds the filtered rows a scan streams, and a stated
+        count below them injects an overrun past the caller's own guard."""
         self.population_bound_calls += 1
         self.bounds.append((snapshot_id, table_name, table_contract_ref,
                             tuple(key_filter), time_interval))
@@ -213,8 +217,9 @@ class _FakeRepository:
             raise data_fail("CONTRACT_MISMATCH",
                             "table_contract_ref does not match the pinned version",
                             details={"table_name": table_name})
-        return sum(1 for batch in self._batches for row in batch.to_pylist()
-                   if _bound_row_selected(row, key_filter, time_interval))
+        count = sum(1 for batch in self._batches for row in batch.to_pylist()
+                    if _bound_row_selected(row, key_filter, time_interval))
+        return count if self._stated_bound is None else self._stated_bound
 
     def scan(self, query, *, table_name: str):
         self.scan_calls += 1
@@ -293,11 +298,12 @@ def test_exact_query_mapping_parity_and_immutability():
     assert query.time_interval == TimeInterval(column="date", start_inclusive="2024-01-02",
                                                end_exclusive="2024-01-17")
     assert query.order_by == _DM.primary_key
-    # Positive manifest bound: all 13 fake rows (11 eligible + 2 mcap-only,
-    # ticker AAA) are selected inside [2024-01-02, 2024-01-17), so the bound
-    # lowers the result limit and the batch limit follows it down.
-    assert query.max_result_rows == min(_DM.maximum_result_rows, 10000, 13)
-    assert query.max_batch_rows == min(_DM.maximum_batch_rows, 1000, 13)
+    # The shared bound selects all 13 fake rows inside [2024-01-02,
+    # 2024-01-17), so each query limit is the feature's own retained guard
+    # lowered by that bound, and the batch limit follows the result limit down.
+    assert query.max_result_rows == min(daily_state_inputs._RESULT_LIMIT, 13)
+    assert query.max_batch_rows == min(
+        daily_state_inputs._BATCH_LIMIT, query.max_result_rows)
     (bound_selection,) = repo.bounds
     assert bound_selection == (snapshot.snapshot_id, _TABLE,
                                snapshot.table_versions[_TABLE].table_contract_ref,
@@ -311,6 +317,21 @@ def test_exact_query_mapping_parity_and_immutability():
     assert isinstance(result.values, MappingProxyType)
     with pytest.raises(TypeError):
         result.values["im"] = 0.0
+
+
+def test_caller_guards_stay_smaller_than_a_larger_bound():
+    snapshot = _snapshot()
+    repo = _FakeRepository(snapshot, bound=20_000, batches=[_Batch(_fake_scan_rows())])
+
+    result = _scan(repo, snapshot)
+
+    assert result.values == _I10_VALUES
+    assert result.source_session == "2024-01-15"
+    ((query, _),) = repo.queries
+    # A candidate bound above the retained guards lowers nothing: the caller's
+    # own guards stay the smaller, controlling limits.
+    assert query.max_result_rows == daily_state_inputs._RESULT_LIMIT < 20_000
+    assert query.max_batch_rows == daily_state_inputs._BATCH_LIMIT < query.max_result_rows
 
 
 def test_inclusive_cutoff_and_insufficient_history():
@@ -419,10 +440,10 @@ def test_no_rows_or_no_eligible_rows_return_empty_without_session():
 
     assert empty.population_bound_calls == 1
     ((query, _),) = empty.queries
-    # A zero selected bound keeps the existing positive limits; zero-result
-    # queries arrive with slice E.
-    assert query.max_result_rows == min(_DM.maximum_result_rows, 10000)
-    assert query.max_batch_rows == min(_DM.maximum_batch_rows, 1000)
+    # A zero selected bound proves no row can arrive: the result limit is
+    # zero while the batch limit stays positive at the retained guard.
+    assert query.max_result_rows == 0
+    assert query.max_batch_rows == daily_state_inputs._BATCH_LIMIT > 0
 
     mcap_only = _FakeRepository(snapshot, batches=[_Batch([_mcap_only_row("AAA", "2024-01-03")])])
     result = _scan(mcap_only, snapshot, decision_session="2024-01-05")
@@ -598,15 +619,16 @@ def test_malformed_numeric_conversion_refuses_without_leaking():
     assert "not-a-number" not in str(exc.value)
 
 
-def test_own_result_cap_refuses_an_injected_overrun():
-    contract = replace(_DM, maximum_result_rows=3)
+def test_shared_bound_below_scanned_rows_refuses_an_injected_overrun():
     snapshot = _snapshot()
-    repo = _FakeRepository(snapshot, contract=contract, batches=[_Batch(_eligible_rows()[:4])])
+    repo = _FakeRepository(snapshot, bound=3, batches=[_Batch(_eligible_rows()[:4])])
     with pytest.raises(DataError) as exc:
         _scan(repo, snapshot, decision_session="2024-01-15")
     assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
     ((query, _),) = repo.queries
-    assert query.max_result_rows == 3
+    assert query.max_result_rows == min(daily_state_inputs._RESULT_LIMIT, 3)
+    assert query.max_batch_rows == min(
+        daily_state_inputs._BATCH_LIMIT, query.max_result_rows)
 
 
 def test_late_repository_failure_never_yields_partial_success():
@@ -657,19 +679,17 @@ def test_real_published_fragment_matches_independent_expectations(tmp_path, monk
     # The initial scan's exact selection, replayed through the production
     # metadata bound: a candidate membership count is a bound, so it may
     # exceed the filtered rows the scan streamed but never fall below them,
-    # and the query's limits are the contract/module caps lowered by that
-    # same real bound.
+    # and the query's limits are the feature's retained guards lowered by
+    # that same real bound.
     query, scanned_table, scanned_rows = scans[0]
     bound = repository.scan_population_bound(
         query.snapshot_id, table_name=scanned_table,
         table_contract_ref=query.table_contract_ref,
         key_filter=query.key_filter, time_interval=query.time_interval)
     assert bound >= len(scanned_rows)
-    assert query.max_result_rows == min(_DM.maximum_result_rows,
-                                        daily_state_inputs._RESULT_LIMIT, bound)
-    assert query.max_batch_rows == min(_DM.maximum_batch_rows,
-                                       daily_state_inputs._BATCH_LIMIT,
-                                       query.max_result_rows)
+    assert query.max_result_rows == min(daily_state_inputs._RESULT_LIMIT, bound)
+    assert query.max_batch_rows == min(
+        daily_state_inputs._BATCH_LIMIT, query.max_result_rows)
 
     again = _scan(repository, snapshot)
     assert again == result

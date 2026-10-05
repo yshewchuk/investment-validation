@@ -1,17 +1,16 @@
-"""Issue #107: ``engine.v2.research._snapshot.read_table`` delegates its scan
-to ``_scan.read_table`` so each requested partition is bounded and split into
-calendar months (then days) on ``RESULT_LIMIT_EXCEEDED``.
+"""Issue #107: ``engine.v2.research._snapshot.read_table`` reads complete
+manifest-bounded partition populations and preserves nullable observation
+rows. It delegates to ``_scan.read_table`` for pinned selections and supports
+calendar month/day retries when a scan reports ``RESULT_LIMIT_EXCEEDED``.
 
-Every case commits a real ``option_chains``- or ``trades``-shaped snapshot
-through ``tests/data_scan_support.py``'s helpers (the same pattern
-``tests/test_v2_research_replay.py`` uses) with a SMALL test
-``maximum_result_rows`` override, then reads through
-``_snapshot.read_table`` — directly, and through the two callers issue #107
-names (``_chains.read_chain_keys`` / ``_chains.load_chain_index``).
+Tests commit real ``option_chains``, ``trades`` and ``earnings_events``
+snapshots with ``tests/data_scan_support.py`` and exercise direct reads plus
+the issue #107 callers ``_chains.read_chain_keys`` and
+``_chains.load_chain_index``. Fault-injected overflow cases keep retry,
+frame-cleanup and batch-filter coverage.
 """
 from __future__ import annotations
 
-import dataclasses
 import gc
 import sys
 import weakref
@@ -25,7 +24,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from engine.v2.data import manifests  # noqa: E402
 from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.research import _chains  # noqa: E402
@@ -39,45 +37,6 @@ from tests.data_scan_support import (  # noqa: E402
 )
 
 _COLUMNS = ("ticker", "obs_date", "year")
-
-
-def _capped_contract(maximum_result_rows: int):
-    """The real option_chains contract with a small test result cap.
-
-    ``maximum_result_rows`` is covered by ``definition_hash``, so the hash is
-    recomputed after the override — otherwise ``commit_snapshot`` would refuse
-    the contract as MANIFEST_CORRUPT before any read could run.
-    """
-    contract = dataclasses.replace(contract_for("option_chains"),
-                                   maximum_result_rows=maximum_result_rows)
-    return dataclasses.replace(contract,
-                               definition_hash=manifests.table_contract_hash(contract))
-
-
-def _capped_trades_contract(maximum_result_rows: int):
-    """The real trades contract with a small test result cap.
-
-    Same hash-recompute reason as :func:`_capped_contract`: ``trades`` declares
-    a nullable observation column (``entry_date``), which is exactly what the
-    three cases below exercise.
-    """
-    contract = dataclasses.replace(contract_for("trades"),
-                                   maximum_result_rows=maximum_result_rows)
-    return dataclasses.replace(contract,
-                               definition_hash=manifests.table_contract_hash(contract))
-
-
-def _capped_events_contract(maximum_result_rows: int):
-    """The real earnings_events contract with a small test result cap.
-
-    Same hash-recompute reason as :func:`_capped_contract`: ``event_date`` is
-    a ``timestamp[ns]`` observation column that is not restricted to midnight,
-    which is exactly what the case below exercises.
-    """
-    contract = dataclasses.replace(contract_for("earnings_events"),
-                                   maximum_result_rows=maximum_result_rows)
-    return dataclasses.replace(contract,
-                               definition_hash=manifests.table_contract_hash(contract))
 
 
 def _chain_rows(ticker: str, counts_by_date: dict[str, int], year: int) -> list[dict]:
@@ -140,9 +99,9 @@ def _event_rows(year: int, entries: dict[str, datetime]) -> list[dict]:
     return rows
 
 
-def _commit_trades(tmp_path, fragments: dict[str, list[dict]], *, maximum_result_rows: int):
+def _commit_trades(tmp_path, fragments: dict[str, list[dict]]):
     conn, clock, store = catalog_and_store(tmp_path)
-    contract = _capped_trades_contract(maximum_result_rows)
+    contract = contract_for("trades")
     ref = contract_ref_for(contract)
     records = [publish_and_inspect(store, contract, ref, rows, partition_key)
                for partition_key, rows in fragments.items()]
@@ -151,9 +110,9 @@ def _commit_trades(tmp_path, fragments: dict[str, list[dict]], *, maximum_result
     return conn, store, snap
 
 
-def _commit_chains(tmp_path, fragments: dict[str, list[dict]], *, maximum_result_rows: int):
+def _commit_chains(tmp_path, fragments: dict[str, list[dict]]):
     conn, clock, store = catalog_and_store(tmp_path)
-    contract = _capped_contract(maximum_result_rows)
+    contract = contract_for("option_chains")
     ref = contract_ref_for(contract)
     records = [publish_and_inspect(store, contract, ref, rows, partition_key)
                for partition_key, rows in fragments.items()]
@@ -162,9 +121,9 @@ def _commit_chains(tmp_path, fragments: dict[str, list[dict]], *, maximum_result
     return conn, store, snap
 
 
-def _commit_events(tmp_path, fragments: dict[str, list[dict]], *, maximum_result_rows: int):
+def _commit_events(tmp_path, fragments: dict[str, list[dict]]):
     conn, clock, store = catalog_and_store(tmp_path)
-    contract = _capped_events_contract(maximum_result_rows)
+    contract = contract_for("earnings_events")
     ref = contract_ref_for(contract)
     records = [publish_and_inspect(store, contract, ref, rows, partition_key)
                for partition_key, rows in fragments.items()]
@@ -173,11 +132,10 @@ def _commit_events(tmp_path, fragments: dict[str, list[dict]], *, maximum_result
     return conn, store, snap
 
 
-def test_read_table_splits_a_partition_over_the_cap(tmp_path):
+def test_read_table_reads_complete_partition_population(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 2, "2024-02-12": 3}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
@@ -197,14 +155,11 @@ def test_read_table_splits_a_partition_over_the_cap(tmp_path):
     conn.close()
 
 
-def test_read_table_splits_a_month_over_the_cap_by_day(tmp_path):
-    """Two days in the SAME month, each under the cap, whose combined month
-    total exceeds it: the month-level scan overflows and is re-scanned one
-    day at a time (``_scan.py``'s day-level split), never refusing."""
+def test_read_table_keeps_complete_month_population(tmp_path):
+    """A complete selected partition returns rows from both dates in one month."""
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
@@ -224,7 +179,6 @@ def test_read_table_without_partition_keys_scans_every_year(tmp_path):
             "2024": _chain_rows("TEST", {"2024-01-10": 2, "2024-02-12": 3}, 2024),
             "2025": _chain_rows("TEST", {"2025-03-11": 2, "2025-04-15": 3}, 2025),
         },
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
@@ -238,18 +192,17 @@ def test_read_table_without_partition_keys_scans_every_year(tmp_path):
     conn.close()
 
 
-def test_read_table_still_refuses_a_day_over_the_cap(tmp_path):
+def test_read_table_reads_complete_day_population(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-15": 5}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
-    with pytest.raises(DataError) as err:
-        read_table(repository, snap, "option_chains", ("ticker", "obs_date"),
-                   partition_keys=["2024"])
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    frame = read_table(repository, snap, "option_chains", ("ticker", "obs_date", "strike"),
+                       partition_keys=["2024"])
+    assert len(frame) == 5
+    assert frame["strike"].is_unique
     conn.close()
 
 
@@ -257,7 +210,6 @@ def test_read_table_empty_result_keeps_object_dtypes(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 2}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
@@ -273,7 +225,6 @@ def test_read_table_normalizes_a_non_canonical_int_partition_key(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 2}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
@@ -285,7 +236,7 @@ def test_read_table_normalizes_a_non_canonical_int_partition_key(tmp_path):
 
 def test_read_table_with_no_fragments_still_refuses_a_bare_value_error(tmp_path):
     conn, clock, store = catalog_and_store(tmp_path)
-    contract = _capped_contract(4)
+    contract = contract_for("option_chains")
     snap = commit_tables(conn, clock, {"option_chains": []},
                          {"option_chains": contract}, store=store)
     repository = Repository(conn, store)
@@ -314,7 +265,6 @@ def test_read_table_scopes_each_partition_and_returns_no_duplicate_rows(tmp_path
             "2024": _trades_rows(2024, {"T1": "2025-01-02", "T2": "2024-03-01"}),
             "2025": _trades_rows(2025, {"T3": "2024-12-30", "T4": "2025-05-01"}),
         },
-        maximum_result_rows=2,
     )
     repository = Repository(conn, store)
 
@@ -326,15 +276,12 @@ def test_read_table_scopes_each_partition_and_returns_no_duplicate_rows(tmp_path
     conn.close()
 
 
-def test_read_table_keeps_a_null_entry_date_row_under_the_cap(tmp_path):
-    """Null observation-column rows (#107): a partition comfortably under the
-    cap is scanned whole, so the row with ``entry_date=None`` comes back too
-    (checked by ``trade_id``: a bare count could hide it behind another)."""
+def test_read_table_keeps_a_null_entry_date_row(tmp_path):
+    """A whole-partition scan retains rows whose nullable observation is NULL."""
     conn, store, snap = _commit_trades(
         tmp_path,
         {"2024": _trades_rows(2024, {"T1": "2024-01-10", "T2": None,
                                      "T3": "2024-02-12"})},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
@@ -347,24 +294,23 @@ def test_read_table_keeps_a_null_entry_date_row_under_the_cap(tmp_path):
     conn.close()
 
 
-def test_read_table_refuses_to_split_a_partition_with_a_nullable_observation(tmp_path):
-    """A nullable-observation partition over the cap (#107): the month/day
-    split can never place a null ``entry_date`` row in an interval, so the read
-    refuses with ``RESULT_LIMIT_EXCEEDED`` rather than silently returning a
-    frame missing that row (which the pre-fix code did)."""
+def test_read_table_keeps_nullable_observation_in_complete_population(tmp_path):
+    """A full manifest-bounded read preserves nullable observation rows."""
     conn, store, snap = _commit_trades(
         tmp_path,
         {"2024": _trades_rows(2024, {"T1": "2024-01-10", "T2": "2024-02-12",
                                      "T3": None, "T4": "2024-01-20",
                                      "T5": "2024-02-22"})},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
-    with pytest.raises(DataError) as err:
-        read_table(repository, snap, "trades", ("trade_id", "entry_date"),
-                   partition_keys=["2024"])
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
+    frame = read_table(repository, snap, "trades", ("trade_id", "entry_date"),
+                       partition_keys=["2024"])
+    assert set(frame["trade_id"]) == {"T1", "T2", "T3", "T4", "T5"}
+    assert len(frame) == 5
+    null_row = frame.loc[frame["trade_id"] == "T3"]
+    assert len(null_row) == 1
+    assert pd.isna(null_row["entry_date"]).all()
     conn.close()
 
 
@@ -375,7 +321,7 @@ def test_read_table_refuses_to_split_a_partition_with_a_nullable_observation(tmp
 # --------------------------------------------------------------------------
 
 
-def test_read_table_day_split_does_not_falsely_refuse_across_a_non_midnight_boundary(tmp_path):
+def test_read_table_keeps_non_midnight_event_rows_in_complete_read(tmp_path):
     from datetime import datetime
     conn, store, snap = _commit_events(
         tmp_path,
@@ -384,7 +330,6 @@ def test_read_table_day_split_does_not_falsely_refuse_across_a_non_midnight_boun
             "E2": datetime(2024, 1, 11, 8, 0),
             "E3": datetime(2024, 1, 11, 20, 0),
         })},
-        maximum_result_rows=2,
     )
     repository = Repository(conn, store)
 
@@ -407,11 +352,36 @@ def _keep_only(frame: pd.DataFrame, obs_date: str) -> pd.DataFrame:
     return frame[pd.to_datetime(frame["obs_date"]) == pd.Timestamp(obs_date)]
 
 
+def _overflow_first_timed_scan_once(repository):
+    from engine.v2.data import errors
+
+    original_scan = repository.scan
+    partition_overflowed = False
+    timed_overflowed = False
+
+    def scan(query, *, table_name):
+        nonlocal partition_overflowed, timed_overflowed
+        if not partition_overflowed and query.time_interval is None:
+            partition_overflowed = True
+            raise errors.fail("RESULT_LIMIT_EXCEEDED", "injected partition overflow")
+        if partition_overflowed and not timed_overflowed and query.time_interval is not None:
+            batches = iter(original_scan(query, table_name=table_name))
+            try:
+                first = next(batches)
+            except StopIteration:
+                return
+            yield first
+            timed_overflowed = True
+            raise errors.fail("RESULT_LIMIT_EXCEEDED", "injected late timed-scan overflow")
+        yield from original_scan(query, table_name=table_name)
+
+    repository.scan = scan
+
+
 def test_read_table_batch_filter_none_behaves_like_omitted(tmp_path):
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 2, "2024-02-12": 3}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
 
@@ -423,17 +393,14 @@ def test_read_table_batch_filter_none_behaves_like_omitted(tmp_path):
     conn.close()
 
 
-def test_batch_filter_survives_a_late_month_overflow_without_duplicates(tmp_path):
-    """One month over the cap: the real scan yields batches, then raises. A
-    batch that matched and accumulated in that failed month attempt must be
-    discarded before the day retry — otherwise the retried day re-reads the
-    same rows and the result duplicates them."""
+def test_batch_filter_discards_failed_month_frames_before_day_retry(tmp_path):
+    """An injected late month overflow must discard yielded frames before day retry."""
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
+    _overflow_first_timed_scan_once(repository)
 
     seen: list[int] = []
 
@@ -450,16 +417,13 @@ def test_batch_filter_survives_a_late_month_overflow_without_duplicates(tmp_path
 
 
 def test_failed_month_scan_frames_are_freed_before_the_first_day_retry(tmp_path):
-    """A late month overflow must not pin the frames its failed scan retained
-    through the day retries: once the ``except`` variable is released, the
-    failed scan's traceback cannot keep those frames alive, so the first
-    re-read of an already-seen row observes every filtered frame collected."""
+    """Frames from an injected failed month scan are freed before day retry."""
     conn, store, snap = _commit_chains(
         tmp_path,
         {"2024": _chain_rows("TEST", {"2024-01-10": 3, "2024-01-20": 3}, 2024)},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
+    _overflow_first_timed_scan_once(repository)
 
     retained: list[weakref.ref] = []
     seen: set[tuple] = set()
@@ -485,25 +449,25 @@ def test_failed_month_scan_frames_are_freed_before_the_first_day_retry(tmp_path)
     conn.close()
 
 
-def test_batch_filter_forwarded_through_the_nullable_overflow_refusal(tmp_path):
-    """The nullable-observation refusal keeps its original contract even with
-    a batch filter attached: the filter runs on the yielded batches, and the
-    scan still refuses rather than splitting null-observation rows away."""
+def test_batch_filter_is_applied_to_complete_nullable_population(tmp_path):
+    """A full-partition batch filter sees and preserves nullable observation rows."""
     conn, store, snap = _commit_trades(
         tmp_path,
         {"2024": _trades_rows(2024, {"T1": "2024-01-10", "T2": "2024-02-12",
                                      "T3": None, "T4": "2024-01-20",
                                      "T5": "2024-02-22"})},
-        maximum_result_rows=4,
     )
     repository = Repository(conn, store)
+    seen: list[int] = []
 
-    def drop_nothing(frame: pd.DataFrame) -> pd.DataFrame:
+    def keep_everything(frame: pd.DataFrame) -> pd.DataFrame:
+        seen.append(len(frame))
         return frame
 
-    with pytest.raises(DataError) as err:
-        read_table(repository, snap, "trades", ("trade_id", "entry_date"),
-                   partition_keys=["2024"], batch_filter=drop_nothing)
-    assert err.value.code == "RESULT_LIMIT_EXCEEDED"
-    assert "nullable" in str(err.value)
+    frame = read_table(repository, snap, "trades", ("trade_id", "entry_date"),
+                       partition_keys=["2024"], batch_filter=keep_everything)
+    assert set(frame["trade_id"]) == {"T1", "T2", "T3", "T4", "T5"}
+    assert frame["trade_id"].is_unique
+    assert seen and sum(seen) == 5
+    assert pd.isna(frame.loc[frame["trade_id"] == "T3", "entry_date"]).all()
     conn.close()

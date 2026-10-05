@@ -98,7 +98,7 @@ def save_import_plan(conn, store, plan: ImportPlan, *, clock):
     request_ref = _publish_and_register(store, conn, to_document(plan.snapshot_import_request),
                                         "snapshot_import_request.v1.0", clock=clock)
     mapping_ref = _publish_and_register(store, conn, data_legacy_mapping.build_legacy_mapping(),
-                                        "legacy_table_mapping.v1.0", clock=clock)
+                                         "legacy_table_mapping.v2.0", clock=clock)
     document = {
         "schema_version": "snapshot_import_plan.v1.0", "scope": plan.snapshot_import_request.scope,
         "manifest_ref": manifest_ref.artifact_id, "request_ref": request_ref.artifact_id,

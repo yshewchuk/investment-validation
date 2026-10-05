@@ -54,10 +54,16 @@ interface section; this names only the load-bearing entry points.
   Arrow `scan`, typed `get_event`/`get_chain`/`get_price_series`/
   `get_close`, and `explain_dependencies`.
   Metadata-only `scan_population_bound` sums recorded counts of surviving
-  fragments of the supplied snapshot, with no head fallback or object reads;
-  caller preparation may lower an existing request limit to this bound while
-  preserving the active contract check; slice E enables zero limits and makes
-  manifest-bound validation apply to all requests.
+  fragments of the supplied snapshot, with no head fallback or object reads,
+  through the same membership-bound planner behind `scan` and
+  `explain_dependencies`. That summed manifest-footer count is the
+  authoritative selected-population bound: both paths check a request's
+  `max_result_rows` against it before row streaming. A query-level limit
+  stays explicit caller intent — legal below the bound, refused
+  `QUERY_NOT_BOUNDED` above it. Retained caller guards must be prepared as
+  `min(caller_guard, selected_population_bound)` before constructing a scan
+  query; this preserves caller-side ceilings without weakening the direct-query
+  refusal. Do not clamp a caller-supplied `DataQuery` inside the validator.
 - **Pure primitives, no I/O** — `query.py` and `documents.py` (`manifests.py`
   and `objects.py` are identity builders, not pure: `manifests.
   verify_partition_hashes` calls `objects.partition_logical_hash`, which
@@ -217,7 +223,7 @@ committed by `engine.v2.ops.computed_moves_store.py`/
 `DATA_FAILURE_CODES`, intended to carry no local path or row value — not
 fully enforced today (Invariants).
 
-**`computed_moves.v2` — point-in-time availability.** `available_as_of_date`
+**`computed_moves.v3` — point-in-time availability.** `available_as_of_date`
 is the calendar day following the close that made `realized_move_pct`
 knowable. It is null exactly when `realized_move_pct` is null; null means
 unavailable to any decision. Readers must require
@@ -273,7 +279,7 @@ and retryability come from that table, never guessed at a call site.
 | `SNAPSHOT_CONFLICT` | dependency | yes | head-fence or compare-and-swap mismatch |
 | `CONTRACT_MISMATCH` | validation | no | a table, pin or selection violates the snapshot's contract, including malformed timestamp key-predicate strings, non-string timestamp predicate values, or predicate scalars incompatible with fragment key bounds |
 | `QUERY_NOT_BOUNDED` | validation | no | a malformed planning selection or an unbounded `DataQuery`/`ChainQuery` |
-| `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
+| `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds the query's `max_result_rows` |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty; in `daily_market` a response labeled `complete` that omits an expected key is refused before it is cached, while omissions on a `partial` response after the provider's bounded retry are committed as typed `missing` coverage outcomes |
 | `SOURCE_NOT_FINAL` | source | yes | a `daily_market` refresh unit has expected keys but the response is a `legitimate_empty`; the data layer refuses before caching the response, leaving no receipt, coverage, or snapshot write |
@@ -417,17 +423,21 @@ and is not restated in full here.
 
 Root doc §5 invariants this package is responsible for:
 
-- **Scan population bound (target contract).** Every scan states a finite nonnegative `max_result_rows`,
-  never above the sum of recorded row counts of the pinned fragments surviving
-  its pruning predicates. The running counter raises `RESULT_LIMIT_EXCEEDED`
-  before yielding a batch that would exceed that limit. Zero is valid for an
-  empty population; batch sizes remain positive and contract-bounded. The query
-  retains its explicit limit so a caller can refuse a smaller population for
-  its own retained-memory or cardinality requirement; exceeding the manifest
-  bound is `QUERY_NOT_BOUNDED`. Fragment counts bound candidate rows, not the
-  exact predicate-matching population or total process memory.
-  Slice A supplies shared membership-bound planning and footer-count integrity;
-  slice E enables zero queries and enforces the manifest bound on request limits.
+- **Scan population bound.** A stored `TableContract` carries no generic
+  result-row cap; the query's `max_result_rows` is the scan's only result
+  limit — explicit caller intent, enforced by a running counter that raises
+  `RESULT_LIMIT_EXCEEDED` before yielding a batch that would exceed it, and
+  legal below the selected-population bound so a caller can refuse a larger
+  population for its own retained-memory or cardinality requirement. The
+  manifest footer — the recorded row counts of the pinned fragments surviving
+  the pruning predicates, summed by the one shared membership-bound planner —
+  is the authoritative selected-population bound, checked before row
+  streaming consistently by `scan` and `explain_dependencies`; a request
+  limit above it is `QUERY_NOT_BOUNDED`. An empty selected population may
+  produce a zero-row query with a positive, contract-bounded batch size.
+  Invalid surviving fragment counts are `MANIFEST_CORRUPT` before any stream
+  opens; fragment counts bound candidate rows, not the exact
+  predicate-matching population or total process memory.
 - **Missing input → typed refusal, never a silent default** — every failure
   path raises a `DataError`/`Problem` from the table above.
 - **Snapshot/root isolation** — every store path resolves through

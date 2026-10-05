@@ -70,11 +70,11 @@ def from_document(cls: type, doc: Any, *, path: str = "$") -> Any:
     if not isinstance(doc, dict):
         raise DocumentError("BAD_TYPE", path, f"expected an object for {cls.__name__}")
     fields = {f.name: f for f in dataclasses.fields(cls)}
+    _check_version(fields, doc, path)
     unknown = sorted(set(doc) - set(fields))
     if unknown:
         raise DocumentError("UNKNOWN_FIELD", f"{path}.{unknown[0]}",
                             f"{cls.__name__} declares no such field")
-    _check_version(fields, doc, path)
     hints = get_type_hints(cls)
     kwargs: dict[str, Any] = {}
     for name, spec in fields.items():

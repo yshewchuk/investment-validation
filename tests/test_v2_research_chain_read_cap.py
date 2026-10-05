@@ -1,22 +1,13 @@
-"""Bounded ``load_chain_index`` reads with a pushed-down ``key_filter`` (issue
-#271): the wanted ticker/obs_date sets narrow every scan so the
-``maximum_result_rows`` cap is checked against the key-filtered rows, not the
-raw partition -- a narrow request scans a year once instead of always
-calendar-splitting it. The exact-pair ``batch_filter`` still decides membership
-after decoding, so results are unchanged.
+"""Bounded ``load_chain_index`` reads push ticker/obs_date predicates into
+shared manifest-bounded scans (issue #271). The exact-pair ``batch_filter``
+continues to decide membership after decoding, so key-filter distractors never
+appear in results.
 
-Synthetic pinned snapshots only, in the fixture style of
-``tests/test_v2_research_chain_index_bounded.py`` (the three helpers below are
-local copies, as every test file keeps its own). This file pins down:
-
-* ``_chain_key_filter`` builds sorted, unique ``in`` predicates over the ticker
-  and obs_date sets, and returns ``()`` for empty inputs;
-* a narrow key set takes exactly one scan per year, and the rows it returns are
-  identical to the (still calendar-split) no-key_filter path -- cross-pair
-  distractors that pass the coarser key filter but fail the exact-pair batch
-  filter are still excluded;
-* a key-filtered row set that still overflows the cap refuses
-  ``RESULT_LIMIT_EXCEEDED`` (the memory guarantee is unchanged).
+Synthetic pinned snapshots exercise:
+* sorted, unique ``in`` predicates and empty-input behavior;
+* one scan per selected year, with results matching a complete-read golden
+  population and excluding cross-pair distractors;
+* strict primary-key ordering and complete selected-population reads.
 """
 from __future__ import annotations
 
@@ -25,14 +16,12 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.contracts.data import KeyPredicate  # noqa: E402
 from engine.v2.data import manifests  # noqa: E402
-from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.data.repository import Repository  # noqa: E402
 from engine.v2.research import _chains  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
@@ -44,18 +33,17 @@ from tests.data_scan_support import (  # noqa: E402
 )
 
 
-def _capped_contract(maximum_result_rows: int, maximum_batch_rows: int | None = None):
-    contract = dataclasses.replace(contract_for("option_chains"),
-                                   maximum_result_rows=maximum_result_rows)
+def _batch_limited_contract(maximum_batch_rows: int | None = None):
+    contract = contract_for("option_chains")
     if maximum_batch_rows is not None:
         contract = dataclasses.replace(contract, maximum_batch_rows=maximum_batch_rows)
     return dataclasses.replace(contract,
                                definition_hash=manifests.table_contract_hash(contract))
 
 
-def _commit_chains(tmp_path, fragments, *, maximum_result_rows, maximum_batch_rows=None):
+def _commit_chains(tmp_path, fragments, *, maximum_batch_rows=None):
     conn, clock, store = catalog_and_store(tmp_path)
-    contract = _capped_contract(maximum_result_rows, maximum_batch_rows)
+    contract = _batch_limited_contract(maximum_batch_rows)
     ref = contract_ref_for(contract)
     records = [publish_and_inspect(store, contract, ref, rows, partition_key)
                for partition_key, rows in fragments.items()]
@@ -98,7 +86,7 @@ def test_chain_key_filter_builds_sorted_unique_predicates():
     assert _chains._chain_key_filter({"TEST"}, set()) == ()
 
 
-def test_load_chain_index_narrow_filter_scans_once_and_matches_split_path(
+def test_load_chain_index_narrow_filter_scans_once_and_matches_complete_read(
         tmp_path, monkeypatch):
     wanted = {("TEST", pd.Timestamp("2024-06-15")),
               ("ZEBRA", pd.Timestamp("2024-09-01"))}
@@ -111,7 +99,7 @@ def test_load_chain_index_narrow_filter_scans_once_and_matches_split_path(
     ] + [(f"AAA{i}", f"2024-{i:02d}-10", 100 + i) for i in range(1, 13)]
     conn, store, snap = _commit_chains(
         tmp_path, {"2024": _rows(2024, entries)},
-        maximum_result_rows=6, maximum_batch_rows=2,
+        maximum_batch_rows=2,
     )
     repository = Repository(conn, store)
 
@@ -128,8 +116,8 @@ def test_load_chain_index_narrow_filter_scans_once_and_matches_split_path(
     narrow_calls = len(calls)
     assert narrow_calls == 1  # one partition, scanned once -- the acceptance criterion
 
-    # The no-key_filter reference path (still calendar-split) reproduces
-    # _whole_read_groups' exact-pair filter, so both sides must agree.
+    # The complete no-key_filter reference read reproduces _whole_read_groups'
+    # exact-pair filter, so both sides must agree.
     calls.clear()
     tickers = {t for t, _ in wanted}
     ref = _chains.read_chains_for_years(
@@ -141,7 +129,7 @@ def test_load_chain_index_narrow_filter_scans_once_and_matches_split_path(
     ref = ref[key_index.isin(wanted)]
     golden = {(str(k[0]), pd.Timestamp(k[1])): g.reset_index(drop=True)
               for k, g in ref.groupby(["ticker", "obs_date"], sort=False)}
-    assert len(calls) > 1  # the no-key_filter path really did split into >1 scan
+    assert len(calls) == 1  # the complete pinned partition is read once
 
     test_group = index.get("TEST", pd.Timestamp("2024-06-15"))
     zebra_group = index.get("ZEBRA", pd.Timestamp("2024-09-01"))
@@ -156,7 +144,7 @@ def test_load_chain_index_narrow_filter_scans_once_and_matches_split_path(
     conn.close()
 
 
-def test_load_chain_index_overflow_still_refuses(tmp_path):
+def test_load_chain_index_returns_requested_keys_from_complete_population(tmp_path):
     wanted = {("TEST", pd.Timestamp("2024-06-15")),
               ("ZEBRA", pd.Timestamp("2024-06-15"))}
     entries = [
@@ -164,12 +152,10 @@ def test_load_chain_index_overflow_still_refuses(tmp_path):
         ("ZEBRA", "2024-06-15", 11),
     ] + [(f"AAA{i}", f"2024-{i:02d}-10", 100 + i) for i in range(1, 13)]
     conn, store, snap = _commit_chains(
-        tmp_path, {"2024": _rows(2024, entries)},
-        maximum_result_rows=1, maximum_batch_rows=1,
-    )
+        tmp_path, {"2024": _rows(2024, entries)}, maximum_batch_rows=1)
     repository = Repository(conn, store)
 
-    with pytest.raises(DataError) as exc:
-        _chains.load_chain_index(repository, snap, wanted)
-    assert exc.value.code == "RESULT_LIMIT_EXCEEDED"
+    index = _chains.load_chain_index(repository, snap, wanted)
+    assert index.get("TEST", pd.Timestamp("2024-06-15"))["strike"].tolist() == [10.0]
+    assert index.get("ZEBRA", pd.Timestamp("2024-06-15"))["strike"].tolist() == [11.0]
     conn.close()

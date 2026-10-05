@@ -241,10 +241,10 @@ def _check_data_query(dq: Any, path: str) -> None:
     if dq.max_batch_rows <= 0:
         raise DocumentError("INVALID_LIMIT", f"{path}.max_batch_rows",
                             "must be a positive integer")
-    if dq.max_result_rows <= 0:
+    if dq.max_result_rows < 0:
         raise DocumentError("INVALID_LIMIT", f"{path}.max_result_rows",
-                            "must be a positive integer")
-    if dq.max_batch_rows > dq.max_result_rows:
+                            "must be a nonnegative integer")
+    if dq.max_result_rows > 0 and dq.max_batch_rows > dq.max_result_rows:
         raise DocumentError("BATCH_EXCEEDS_RESULT", f"{path}.max_batch_rows",
                             "batch limit exceeds the result limit")
     if not dq.columns:

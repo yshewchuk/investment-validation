@@ -205,7 +205,7 @@ def test_calendar_row_exact_fields_revision_and_event_lookup(calendar_source, mo
         ("ticker", "eq", ("ACI",)), ("year", "eq", (2026,))]
     assert query.order_by == _EVENTS.primary_key
     assert 0 < query.max_batch_rows <= _EVENTS.maximum_batch_rows
-    assert 0 < query.max_result_rows <= _EVENTS.maximum_result_rows
+    assert query.max_result_rows > 0
     repeat = scan_calendar_row(repository, snapshot, _KEY, **_CONTEXT)
     assert repeat == result and repeat.calendar_row is not result.calendar_row
     event = repository.get_event(EventRef(

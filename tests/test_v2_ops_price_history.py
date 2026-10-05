@@ -225,10 +225,17 @@ def test_capture_merges_px_and_every_tier1_retrieval_for_the_same_ticker(tmp_pat
     snapshot = repository.resolve(report["result_snapshot_id"])
     from engine.v2.contracts import DataQuery, KeyPredicate
     dvr = snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),)
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=PRICE_HISTORY_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+    max_result_rows = min(100, population_bound)
+    max_batch_rows = min(100, max_result_rows) if max_result_rows > 0 else 100
     query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
                       columns=("close_adj", "retrieved_at", "source_kind"),
-                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),),
-                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+                      key_filter=key_filter,
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
+                      max_result_rows=max_result_rows)
     rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
            for r in batch.to_pylist()]
     assert [r["retrieved_at"][:10] for r in rows] == \
@@ -287,10 +294,17 @@ def test_capture_multiple_dated_tier1_retrievals_captured_in_fetched_at_order_wh
     snapshot = repository.resolve(report["result_snapshot_id"])
     from engine.v2.contracts import DataQuery, KeyPredicate
     dvr = snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),)
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=PRICE_HISTORY_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+    max_result_rows = min(100, population_bound)
+    max_batch_rows = min(100, max_result_rows) if max_result_rows > 0 else 100
     query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
                       columns=("close_adj", "retrieved_at"),
-                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),),
-                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+                      key_filter=key_filter,
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
+                      max_result_rows=max_result_rows)
     rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
            for r in batch.to_pylist()]
     # Three versions of the SAME date, in ascending retrieved_at (fetched_at) order.
@@ -326,11 +340,18 @@ def _scan_price_history(conn, store, snapshot_id, ticker="AAPL"):
     repository = Repository(conn, store)
     snapshot = repository.resolve(snapshot_id)
     dvr = snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=(ticker,)),)
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=PRICE_HISTORY_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+    max_result_rows = min(100, population_bound)
+    max_batch_rows = min(100, max_result_rows) if max_result_rows > 0 else 100
     query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
                       columns=("date", "close_adj", "close_raw", "high_raw", "retrieved_at",
                               "deleted", "source_kind", "source_hash", "capture_id"),
-                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=(ticker,)),),
-                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+                      key_filter=key_filter,
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
+                      max_result_rows=max_result_rows)
     rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
            for r in batch.to_pylist()]
     return pd.DataFrame(rows)
@@ -508,10 +529,17 @@ def test_capture_stores_exactly_the_changed_close_adj_row_when_raw_and_high_matc
     from engine.v2.contracts import DataQuery, KeyPredicate
     snapshot = repository.resolve(second["result_snapshot_id"])
     dvr = snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),)
+    population_bound = repository.scan_population_bound(
+        snapshot.snapshot_id, table_name=PRICE_HISTORY_TABLE_NAME,
+        table_contract_ref=dvr.table_contract_ref, key_filter=key_filter)
+    max_result_rows = min(100, population_bound)
+    max_batch_rows = min(100, max_result_rows) if max_result_rows > 0 else 100
     query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=dvr.table_contract_ref,
                       columns=("date", "close_adj", "retrieved_at"),
-                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),),
-                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+                      key_filter=key_filter,
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
+                      max_result_rows=max_result_rows)
     rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
            for r in batch.to_pylist()]
     changed = [r for r in rows if r["retrieved_at"][:10] == "2024-02-01"]
@@ -607,10 +635,17 @@ def test_capture_contract_bump_recaptures_cleanly_and_old_snapshot_is_unchanged(
     new_dvr = new_snapshot.table_versions[PRICE_HISTORY_TABLE_NAME]
     assert new_dvr.table_contract_ref.contract_id == PRICE_HISTORY_CONTRACT.contract_id
 
+    key_filter = (KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),)
+    population_bound = repository.scan_population_bound(
+        new_snapshot.snapshot_id, table_name=PRICE_HISTORY_TABLE_NAME,
+        table_contract_ref=new_dvr.table_contract_ref, key_filter=key_filter)
+    max_result_rows = min(100, population_bound)
+    max_batch_rows = min(100, max_result_rows) if max_result_rows > 0 else 100
     query = DataQuery(snapshot_id=new_snapshot.snapshot_id, table_contract_ref=new_dvr.table_contract_ref,
                       columns=("close_adj", "close_raw", "high_raw"),
-                      key_filter=(KeyPredicate(column="ticker", operator="eq", values=("AAPL",)),),
-                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=100, max_result_rows=100)
+                      key_filter=key_filter,
+                      order_by=("ticker", "date", "retrieved_at"), max_batch_rows=max_batch_rows,
+                      max_result_rows=max_result_rows)
     rows = [r for batch in repository.scan(query, table_name=PRICE_HISTORY_TABLE_NAME)
            for r in batch.to_pylist()]
     assert rows == [{"close_adj": 99.5, "close_raw": 100.0, "high_raw": 100.0}]
