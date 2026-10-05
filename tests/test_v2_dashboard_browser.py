@@ -294,7 +294,7 @@ def test_no_token_in_url_or_local_storage(browser, server):
 _UNIT_FIELD_OVERRIDES = {
     "driver_forecast": 5.0,        # already percentage points -> "5.0%"
     "market_implied_move": 5.0,    # already percentage points -> "5.0%"
-    "exp_pnl_model": 0.05,         # fraction -> "5.0%"
+    "expected_return_model": 0.05, # fraction -> "5.0%"
     "planned_population": 121,     # count -> "121", never a %
     "entry_premium": None,         # null -> "—"
 }
@@ -342,8 +342,8 @@ def _override_fields_by_key(node, _seen: set[int] | None = None) -> None:
 def test_percentage_point_and_count_fields_render_in_their_own_units(
         browser, server, state):
     """driver_forecast / market_implied_move are percentage points: 5.0 must
-    render as "5.0%", never the re-scaled "500.0%"; exp_pnl_model is a
-    fraction: 0.05 -> "5.0%"; null entry_premium -> "—"; coverage
+    render as "5.0%", never the re-scaled "500.0%"; expected_return_model is
+    a fraction: 0.05 -> "5.0%"; null entry_premium -> "—"; coverage
     planned_population is a count: its .coverage-item has exact text
     "planned_population: 121" with no "%" (other fractional coverage items
     legitimately render "%"). Asserted on the board row and again on the
