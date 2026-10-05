@@ -819,8 +819,9 @@ def _planned_expected_keys(unit) -> tuple[str, ...]:
     plan can bypass plan-document decoding, so the data layer applies the
     shared strict shape rule itself -- a nonempty tuple/list of nonempty
     strings -- before the provider is invoked, before any cache work and
-    before any coercion. A malformed or empty planned set refuses with the
-    registered retryable ``INPUT_CHANGED``, never a ``str()``-coerced member,
+    before any coercion. An absent, malformed or empty planned set refuses
+    with the registered retryable ``INPUT_CHANGED``, never a
+    ``str()``-coerced member,
     never a silent empty set. Valid keys are returned unchanged (order and
     duplicates included) for the persisted receipt request; the normalization
     boundary below canonicalizes them."""
@@ -1262,10 +1263,6 @@ def _acquire_refresh_units(parameters, root, document, fetcher):
            for unit in (*units, *tuple(plan.get("units", ())))):
         raise errors.fail("CONTRACT_MISMATCH",
                           "refresh plan table_name does not match the staged refresh identity")
-    if any("expected_keys" not in unit
-           for unit in (*units, *tuple(plan.get("units", ())))):
-        raise errors.fail("CONTRACT_MISMATCH",
-                          "refresh plan fetch unit is missing expected_keys")
     # Planned-key contract (engine/v2/data/ARCHITECTURE.md): every unit this
     # acquisition will use -- fetched or replayed from a caller-supplied plan
     # -- is shape-checked here, before the catalog/store open, before any

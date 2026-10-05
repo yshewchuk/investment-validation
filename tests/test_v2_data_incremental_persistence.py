@@ -825,6 +825,8 @@ def test_malformed_directly_passed_expected_keys_refuse_before_identity(tmp_path
     assert conn.execute("SELECT COUNT(*) FROM data_normalizations").fetchone()[0] == 1
 
 
+_ABSENT_PLANNED_KEYS = object()
+
 PLANNED_KEYS_MALFORMED = (
     pytest.param([], id="empty-list"),
     pytest.param([42], id="int-member-only"),
@@ -834,6 +836,7 @@ PLANNED_KEYS_MALFORMED = (
     pytest.param("AAA", id="scalar-string"),
     pytest.param({"AAA": "ignored"}, id="mapping"),
     pytest.param(None, id="null"),
+    pytest.param(_ABSENT_PLANNED_KEYS, id="absent-field"),
 )
 
 
@@ -887,16 +890,21 @@ def test_malformed_planned_keys_refuse_before_provider_call_or_cache_write(
         tmp_path, monkeypatch, keys):
     """Planned-key contract (engine/v2/data/ARCHITECTURE.md): a
     malformed planned fetch-unit ``expected_keys`` -- an integer member, an
-    empty or null set, a scalar string, a mapping -- refuses at refresh
-    acquisition with the registered retryable ``INPUT_CHANGED``, before the
-    provider is invoked, before any store or catalog work and before any
-    ``str()`` coercion. The old ``_acquire_refresh_units`` called the fetcher
-    first and persisted coerced keys, so every guard assertion here fails on
-    it."""
+    empty or null set, a scalar string, a mapping -- and an absent
+    ``expected_keys`` field alike refuse at refresh acquisition with the
+    registered retryable ``INPUT_CHANGED``, before the provider is invoked,
+    before any store or catalog work and before any ``str()`` coercion. The
+    old ``_acquire_refresh_units`` called the fetcher first and persisted
+    coerced keys, and its earlier presence-only guard raised a non-retryable
+    ``CONTRACT_MISMATCH`` for the absent field, so every guard assertion here
+    fails on it."""
     conn, _clock, _store, document, parameters = _planned_keys_acquisition(tmp_path)
-    (tmp_path / "refresh_plan.json").write_text(canonical_json({
-        "fetch_units": [{"request_id": "u1", "table_name": "daily_market",
-                         "partition_key": "2026-05-01", "expected_keys": keys}]}))
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01"}
+    if keys is not _ABSENT_PLANNED_KEYS:
+        unit["expected_keys"] = keys
+    (tmp_path / "refresh_plan.json").write_text(
+        canonical_json({"fetch_units": [unit]}))
     built = _spy_acquisition_store(monkeypatch)
     provider_calls = []
 
@@ -918,14 +926,15 @@ def test_malformed_planned_keys_refuse_before_provider_call_or_cache_write(
 @pytest.mark.parametrize("keys", (
     pytest.param(["AAA", 42], id="int-member"),
     pytest.param([], id="empty-list"),
+    pytest.param(_ABSENT_PLANNED_KEYS, id="absent-field"),
 ))
 def test_malformed_planned_keys_in_cached_plan_refuse_before_receipt_read(
         tmp_path, monkeypatch, keys):
     """The cached/caller-supplied-plan half of the planned-key contract: the
-    malformed set reaches the data layer only through the raw plan document
-    (never through plan decoding), so acquisition must refuse with the
-    registered retryable ``INPUT_CHANGED`` before any receipt is opened or
-    read. The old code constructed the store, opened and verified the
+    malformed or absent set reaches the data layer only through the raw plan
+    document (never through plan decoding), so acquisition must refuse with
+    the registered retryable ``INPUT_CHANGED`` before any receipt is opened
+    or read. The old code constructed the store, opened and verified the
     receipt, then ``str``-coerced each key into the provider merge -- the
     merge spy, the store spy and the unchanged receipt row count prove it no
     longer does."""
@@ -938,9 +947,12 @@ def test_malformed_planned_keys_in_cached_plan_refuse_before_receipt_read(
         source="daily_market", endpoint="daily_market",
         request={"request_id": "u1", "keys": ["AAA"]},
         received_at=clock.now().isoformat())
+    unit = {"request_id": "u1", "table_name": "daily_market",
+            "partition_key": "2026-05-01"}
+    if keys is not _ABSENT_PLANNED_KEYS:
+        unit["expected_keys"] = keys
     (tmp_path / "refresh_plan.json").write_text(canonical_json({
-        "units": [{"request_id": "u1", "table_name": "daily_market",
-                   "partition_key": "2026-05-01", "expected_keys": keys}],
+        "units": [unit],
         "cached": [{"request_id": "u1", "receipt_ref": cached_raw.raw_receipt_id}]}))
     built = _spy_acquisition_store(monkeypatch)
     merge_calls = []

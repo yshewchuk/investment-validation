@@ -276,7 +276,7 @@ and retryability come from that table, never guessed at a call site.
 | `RESULT_LIMIT_EXCEEDED` | resource | no | a scan/materialization exceeds its row limit |
 | `RESOURCE_UNAVAILABLE` | resource | yes | no fetcher configured for a refresh |
 | `TRANSIENT_SOURCE` | source | yes | provider response neither complete nor a legitimate empty (a `daily_market` response missing an expected ticker counts as partial) |
-| `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, expected keys missing/malformed/empty at the normalization boundary, or a malformed/empty planned unit key set refused at refresh acquisition (Invariants) |
+| `INPUT_CHANGED` | integrity | yes | coverage incomplete, a candidate built from a now-stale input, expected keys missing/malformed/empty at the normalization boundary, or a planned unit whose `expected_keys` field is missing, malformed or empty refused at refresh acquisition (Invariants) |
 | `OBJECT_CORRUPT` | integrity | no | a re-hashed object's bytes disagree with its recorded hash, or the file keeps changing while it is verified |
 | `MANIFEST_CORRUPT` | integrity | no | a recomputed manifest/fragment id disagrees with the stored catalog row, or a fragment count is invalid or differs from its footer |
 | `IDENTITY_CONFLICT` | validation | no | an existing row's payload disagrees with a new one under the same id; also a `daily_market` revision tie (Invariants) |
@@ -456,9 +456,11 @@ Root doc §5 invariants this package is responsible for:
   nonempty tuple/list of nonempty strings, checked before the provider is
   invoked, before any cache work, and before any coercion — for fetched
   units and for cached units reconstructed from a caller-supplied plan
-  alike. A malformed or empty planned set refuses with the registered
-  retryable `INPUT_CHANGED` before any provider call or receipt/cache
-  write — never a `str()`-coerced member, never a silent empty set. Valid
+  alike. A planned unit with an absent `expected_keys` field is invalid, and a
+  missing, malformed or empty planned set refuses with the registered
+  retryable `INPUT_CHANGED` before any provider call, cache/store work,
+  receipt/cache write or key coercion — never a `str()`-coerced member, never a
+  silent empty set. Valid
   keys are preserved as strings on the way to the receipt request and the
   normalization boundary below.
 - **`daily_market` normalizer versioning.** `cache_normalization` keys
