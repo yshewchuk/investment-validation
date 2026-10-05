@@ -13,9 +13,8 @@ caller yet -- see ``engine/v2/ops/ARCHITECTURE.md``'s
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -86,7 +85,7 @@ class NativeScoreBatchRowRefusal(ValueError):
             "key": {
                 "ticker": self.key.ticker,
                 "strategy": self.key.strategy,
-                "event_date": pd.Timestamp(self.key.event_date).date().isoformat(),
+                "event_date": _event_date_identity(self.key.event_date),
                 "session": self.key.session,
             },
             "code": self.code,
@@ -96,15 +95,17 @@ class NativeScoreBatchRowRefusal(ValueError):
 
 def _board_request_key(key: BoardRequest) -> str:
     """The canonical, JSON-object-key-safe string identity for one row:
-    ``f"{ticker}|{strategy}|{event_date_iso}|{session}"``. ``event_date_iso``
-    (a fixed ``YYYY-MM-DD`` form) can never contain the ``"|"`` join
-    delimiter, but ``ticker``/``strategy``/``session`` are free-text-shaped
-    inputs this module does not control at the source. Raises a
-    :class:`NativeScoreBatchRowRefusal` (code ``INVALID_KEY_FIELD``) the
-    moment ``"|"`` appears in any of those three fields, BEFORE the row is
-    ever encoded into ``records.json``'s/``refusals.json``'s own keys --
-    this makes the encoding a true bijection for every row that does get a
-    canonical key.
+    ``f"{ticker}|{strategy}|{event_date_identity}|{session}"``. The
+    ``event_date_identity`` component (the strict :func:`
+    _event_date_identity` form -- ``YYYY-MM-DD`` for a midnight/day event,
+    canonical naive ISO datetime for an intraday one) can never contain the
+    ``"|"`` join delimiter, but ``ticker``/``strategy``/``session`` are
+    free-text-shaped inputs this module does not control at the source.
+    Raises a :class:`NativeScoreBatchRowRefusal` (code
+    ``INVALID_KEY_FIELD``) the moment ``"|"`` appears in any of those three
+    fields, BEFORE the row is ever encoded into ``records.json``'s/
+    ``refusals.json``'s own keys -- this makes the encoding a true
+    bijection for every row that does get a canonical key.
     """
     for field_name, value in (
         ("ticker", key.ticker), ("strategy", key.strategy), ("session", key.session),
@@ -113,7 +114,7 @@ def _board_request_key(key: BoardRequest) -> str:
             raise NativeScoreBatchRowRefusal(
                 key, "INVALID_KEY_FIELD",
                 f"{field_name} contains the canonical key delimiter")
-    return f"{key.ticker}|{key.strategy}|{_iso(key.event_date)}|{key.session}"
+    return f"{key.ticker}|{key.strategy}|{_event_date_identity(key.event_date)}|{key.session}"
 
 
 def _iso(value: Any) -> str | None:
@@ -121,6 +122,53 @@ def _iso(value: Any) -> str | None:
     if value is None:
         return None
     return str(pd.Timestamp(value).date())
+
+
+#: The one fixed message every strict event-date identity rejection carries
+#: -- never an echo of the rejected value (``refusals.json`` and
+#: ``producer_refusals.json`` decode errors surface on published-output
+#: paths; CWE-209 discipline, as everywhere else in this module).
+_EVENT_DATE_IDENTITY_ERROR = (
+    "event_date must be a naive calendar date/day value or a naive "
+    "datetime, encoded as YYYY-MM-DD (midnight) or a canonical ISO datetime")
+
+
+def _event_date_identity(value: Any) -> str:
+    """One ``BoardRequest.event_date`` as its canonical identity component.
+
+    Issue #356: a midnight/day value keeps the legacy ``YYYY-MM-DD`` form
+    (every existing wire/key identity is byte-identical), while a non-
+    midnight naive datetime encodes as its full canonical ISO datetime
+    (``YYYY-MM-DDTHH:MM:SS``, microseconds appended only when set) -- the
+    instant's stated naive wall-clock fields are preserved, never
+    normalized to UTC or truncated to a calendar day, so midnight and
+    intraday events on the same day keep DISTINCT identities and equal
+    instants keep ONE identity. Strings must already be in canonical form
+    (parse, then re-encode, then round-trip against the input), which
+    rejects relative strings like ``"today"``/``"now"`` (they would resolve
+    to wall-clock time at gate-run time instead of from the document's
+    content), offset/Z values, and every malformed or non-canonical shape.
+    Timezone-aware values and non-date-shaped values raise a fixed
+    ``ValueError``.
+    """
+    if isinstance(value, str):
+        canonical_input: str | None = value
+    else:
+        if not isinstance(value, (date, datetime)) \
+                or getattr(value, "tzinfo", None) is not None:
+            raise ValueError(_EVENT_DATE_IDENTITY_ERROR)
+        canonical_input = None
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        raise ValueError(_EVENT_DATE_IDENTITY_ERROR) from None
+    if pd.isna(timestamp) or getattr(timestamp, "tz", None) is not None:
+        raise ValueError(_EVENT_DATE_IDENTITY_ERROR)
+    encoded = (timestamp.date().isoformat()
+               if timestamp.normalize() == timestamp else timestamp.isoformat())
+    if canonical_input is not None and encoded != canonical_input:
+        raise ValueError(_EVENT_DATE_IDENTITY_ERROR)
+    return encoded
 
 
 def _matched_decision_clock(
@@ -444,9 +492,11 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
     ``assemble_nightly_source_bundle`` already accepts them (exactly as
     ``tests/test_v2_scoring_nightly_source_bundle.py``'s own fixtures do).
     """
+    raw_event_date = doc["key"]["event_date"]
+    _event_date_identity(raw_event_date)
     key = BoardRequest(
         ticker=str(doc["key"]["ticker"]), strategy=str(doc["key"]["strategy"]),
-        event_date=pd.Timestamp(doc["key"]["event_date"]),
+        event_date=pd.Timestamp(raw_event_date),
         session=str(doc["key"]["session"]))
     return NightlyEventInputs(
         key=key, calendar_row=doc["calendar_row"], panel_row=doc["panel_row"],
@@ -457,19 +507,18 @@ def _event_inputs_from_document(doc: Mapping[str, Any]) -> NightlyEventInputs:
 
 def _keyed_by_board_request(items: Any) -> dict[str, Any]:
     """Key an iterable of ``(BoardRequest, value)`` pairs by
-    :func:`_board_request_key`, raising ``ValueError`` on a canonical-key
-    collision instead of silently letting the later pair overwrite the
-    earlier one.
+    :func:`_board_request_key`, raising ``ValueError`` on a duplicate
+    canonical identity instead of silently letting the later pair overwrite
+    the earlier one.
 
-    Two DISTINCT ``BoardRequest``s that differ only by time of day within
-    ``event_date`` both pass ``_checked_batch_arguments``'s own duplicate
-    check (full ``BoardRequest`` equality), but ``_board_request_key``'s
-    ``_iso(event_date)`` collapses both to the SAME calendar-date string --
-    if ``ticker``/``strategy``/``session`` also match, this guard is what
-    actually catches it. This is a batch-level failure (a plain
-    ``ValueError``, matching this module's existing ``duplicate
-    request_hash`` batch-level check in
-    :func:`assemble_score_batch_inputs`), never a per-row refusal: nothing
+    ``_event_date_identity`` preserves the instant's naive wall-clock
+    fields (midnight/day keeps the legacy ``YYYY-MM-DD`` form, intraday
+    keeps its full datetime form, issue #356), so two rows that differ only
+    by time of day have DISTINCT identities here; what this guard still
+    catches is two rows sharing ONE identity (equal instants, however
+    expressed) -- a plain ``ValueError`` batch-level failure, matching this
+    module's existing ``duplicate request_hash`` batch-level check in
+    :func:`assemble_score_batch_inputs`, never a per-row refusal: nothing
     here can say which of the two colliding rows is "the bad one".
     """
     keyed: dict[str, Any] = {}
@@ -487,12 +536,16 @@ def _keyed_by_board_request(items: Any) -> dict[str, Any]:
 #: malformed producer detail can never dump an unbounded blob into it.
 _MAX_PRODUCER_DETAIL_LENGTH = 500
 
-#: The only ``event_date`` wire shape ``producer_refusals.json`` may carry --
-#: exactly what this module's own ``as_document()``/``_iso`` write. Relative
-#: strings like "now"/"today" parse fine under ``pd.Timestamp`` but resolve
-#: to wall-clock time, which would make a merged refusal's identity depend
-#: on when the gate runs instead of on the document's content.
-_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: The only ``event_date`` wire shapes ``producer_refusals.json`` may carry
+#: -- exactly what this module's own ``as_document()``/``_board_request_key``
+#: write through :func:`_event_date_identity`: the legacy ``YYYY-MM-DD`` day
+#: form for a midnight/day event, and the full canonical naive ISO datetime
+#: form for an intraday one. Relative strings like "now"/"today" parse fine
+#: under ``pd.Timestamp`` but resolve to wall-clock time, which would make a
+#: merged refusal's identity depend on when the gate runs instead of on the
+#: document's content; offset/Z strings would normalize an instant onto a
+#: different naive wall clock. Both are rejected (issue #356) -- a decoder
+#: identity must equal the producer's own, never a truncation of it.
 
 
 def _validated_producer_refusal_fields(index: int, item: Any) -> tuple[Mapping[str, Any], str, str]:
@@ -536,13 +589,15 @@ def _validated_producer_refusal_fields(index: int, item: Any) -> tuple[Mapping[s
             f"must be a string")
     event_date_error = (
         f"producer_refusals.json refusal at index {index} key "
-        f"\"event_date\" must be a canonical YYYY-MM-DD date string")
-    if not _ISO_DATE_PATTERN.match(raw_key["event_date"]):
-        raise ValueError(event_date_error)
+        f"\"event_date\" must be a canonical YYYY-MM-DD date or canonical "
+        f"naive ISO datetime string")
     try:
-        date.fromisoformat(raw_key["event_date"])
+        # Strict round trip through the SAME formatter this module's own
+        # keys/documents encode with: only strings that are already their
+        # own canonical identity survive (issue #356).
+        _event_date_identity(raw_key["event_date"])
     except ValueError:
-        raise ValueError(event_date_error)
+        raise ValueError(event_date_error) from None
     return raw_key, str(item["code"]), str(item["detail"])
 
 
@@ -625,11 +680,11 @@ def _native_score_batch_documents(
     )
     overlap = set(records_by_key) & set(keyed_refusals)
     if overlap:
-        # The same time-of-day collision _keyed_by_board_request already
-        # catches WITHIN one dict can also happen ACROSS the two: one
-        # colliding BoardRequest succeeded (a record) while the other
-        # failed (a refusal), and neither dict's own internal check can
-        # see the other dict at all.
+        # The same duplicate-identity collision _keyed_by_board_request
+        # already catches WITHIN one dict can also happen ACROSS the two:
+        # one row with one identity succeeded (a record) while another row
+        # with that SAME identity failed (a refusal), and neither dict's own
+        # internal check can see the other dict at all.
         raise ValueError(
             "canonical BoardRequest key used by both a record and a "
             f"refusal: {sorted(overlap)!r}")
@@ -678,12 +733,12 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     if producer_refusals_path.exists():
         producer_doc = json.loads(producer_refusals_path.read_text(encoding="utf-8"))
         refusals = refusals + _decode_producer_refusals(producer_doc)
-    seen_unkeyable_identities: set[tuple[str, str, str | None, str]] = set()
+    seen_unkeyable_identities: set[tuple[str, str, str, str]] = set()
     for refusal in refusals:
         if refusal.code != "INVALID_KEY_FIELD":
             continue
         identity = (refusal.key.ticker, refusal.key.strategy,
-                    _iso(refusal.key.event_date), refusal.key.session)
+                    _event_date_identity(refusal.key.event_date), refusal.key.session)
         if identity in seen_unkeyable_identities:
             raise ValueError(
                 f"duplicate unkeyable refusal identity: {identity!r}")
