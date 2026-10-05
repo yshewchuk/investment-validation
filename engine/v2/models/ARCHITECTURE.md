@@ -321,8 +321,18 @@ may leave a manifest behind when later Phase 5 work fails, so staging alone
 never writes a success record. `checks/phase5_acceptance.py` publishes the
 record only after its evidence and report are complete and every release
 subject passes (`RELEASE_PASS` without a Phase 4 corpus, or `PASS` with one).
-Its rollback probe writes temporary success records only into its scratch
-copy, never into the real release store.
+The rollback rehearsal copies any incumbent record with the durable release
+store and never invents incumbent success in scratch. If a live legacy
+incumbent has no record, rollback refuses `P5_ROLLBACK_REFUSED`; acceptance
+returns `FAIL` (exit 1) non-retryably for that run and leaves the candidate
+unmarked, the live pointer and history unchanged, and the incumbent without a
+record. Retrying with the same store state repeats the refusal; a separate
+evidence-backed migration is required (follow-up #416). An existing failed,
+malformed, or stale record is also refused and never overwritten.
+Prior pointer/history entries or a manifest hash alone cannot prove staging
+success, so no success status is inferred from them. Candidate success is
+published only after its complete evidence and report pass. The candidate's
+temporary success record in its rollback probe stays in the scratch copy.
 
 | Condition | Outcome |
 |---|---|
@@ -332,7 +342,8 @@ copy, never into the real release store.
 | Valid manifest and atomic status write succeeds | Writes exactly `release_id`, `release_hash`, and `state: succeeded` to `staging-status.json` beside that manifest |
 | Same manifest marked again | Idempotent: writes the same record |
 | Manifest hash changes after marking, including `restage_semantic_hash` | Existing record is stale; complete acceptance again and record the new hash before promotion or rollback |
-| Release staged before status records existed | Remains ineligible until it passes the same Phase 5 acceptance gate; no automatic backfill from a prior pointer/history entry or manifest hash alone, because neither proves that post-stage checks passed |
+| Live incumbent staged before status records existed | Rollback refuses `P5_ROLLBACK_REFUSED`; acceptance leaves the candidate unmarked and deployment pointer/history unchanged |
+| Release staged before status records existed, or incumbent with an existing invalid/failed/stale record | Remains ineligible; no automatic backfill or overwrite from a pointer/history entry or manifest hash alone, because neither proves successful staging |
 
 ### 7.3 `resolve_release` / `current_release` (read-only)
 

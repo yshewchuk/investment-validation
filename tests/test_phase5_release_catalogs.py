@@ -51,6 +51,7 @@ def _stage(root, rid="A", alpha=0.55, incumbent=None):
     release, inventory, models = _models(rid, keys=(("gate", "STR-THRU"),))
     states = [s for s in prep.build_states(payloads) if s.spec.member_id in payloads]
     path = prep.write_release(root, release, inventory, models, states, incumbent=incumbent)
+    deployment.mark_staging_succeeded(layout.deployment_root(root), rid)
     return path, (payoff.content_hash, recal.content_hash, analog.content_hash)
 
 

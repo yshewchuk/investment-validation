@@ -731,3 +731,36 @@ def test_acceptance_main_does_not_mark_release_when_gate_fails(tmp_path, monkeyp
     assert json.loads((artifacts / "evidence.json").read_text())["status"] == "FAIL"
     assert not (layout.deployment_root(root) / "releases" / "rel-candidate"
                 / "staging-status.json").exists()
+
+
+def test_acceptance_refuses_legacy_incumbent_without_status(tmp_path, monkeypatch):
+    """A live incumbent staged before status records existed fails closed.
+
+    The rehearsal copies the incumbent's durable record with the pointer
+    state and invents none, so a missing record makes rollback refuse
+    (P5_ROLLBACK_REFUSED) and the gate leaves the candidate unmarked and
+    the real DEPLOYED pointer and history untouched."""
+    root = _release(tmp_path)
+    store = layout.deployment_root(root)
+    incumbent_sidecar = store / "releases" / "rel-incumbent" / "staging-status.json"
+    assert incumbent_sidecar.exists()
+    incumbent_sidecar.unlink()  # pre-records staging; its live pointer stays
+
+    deployed = store / "DEPLOYED"
+    pointer_before = deployed.read_bytes()
+    history_before = {p.name: p.read_bytes() for p in sorted((store / "history").glob("*.json"))}
+    _cli_build_evidence(tmp_path, monkeypatch)
+    artifacts = tmp_path / "artifacts"
+
+    assert gate.main(["--release-root", str(root),
+                      "--artifact-root", str(artifacts)]) == 1
+
+    evidence = json.loads((artifacts / "evidence.json").read_text())
+    assert evidence["release_ok"] is False
+    assert evidence["status"] == "FAIL"
+    assert evidence["rollback"]["status"] == gate.ROLLBACK_REFUSED
+    assert not (store / "releases" / "rel-candidate" / "staging-status.json").exists()
+    assert not incumbent_sidecar.exists()  # the refusal invents no record for it either
+    assert deployed.read_bytes() == pointer_before
+    assert {p.name: p.read_bytes() for p in sorted((store / "history").glob("*.json"))} \
+        == history_before
