@@ -89,13 +89,21 @@ qualified board.
 
 The caller supplies explicit naive calendar dates, with `history_start <=
 decision_session`; intraday and timezone-aware values refuse. The read uses
-the supplied snapshot/table-contract identity, one ticker predicate, an
-inclusive start and exclusive next-day end, primary-key order, and fixed
-resource bounds. No head lookup, provider pull, training or legacy path occurs.
+the supplied snapshot/table-contract identity, one ticker predicate, a
+half-open interval (inclusive start, exclusive next-day end), primary-key
+order, and fixed resource bounds. Those query limits keep the active
+table-contract caps and the fixed caller limits; this caller may lower its
+result limit using a positive recorded membership bound, while a zero bound
+keeps the current active positive limit in this pre-E slice. The separate
+`computed_moves` and `"SPY"` `daily_market` reads do not lower either query
+limit from the selected membership bound; each keeps the minimum of its
+active table-contract cap and fixed caller limit. No head lookup, provider
+pull, training or legacy path occurs.
 Rows outside that identity/date scope, duplicate dates, and invalid source
-dates refuse before arithmetic. Repository integrity and limit refusals
-propagate. Missing tables refuse; no eligible IV-surface row is an explicit
-empty result with no source session, rather than a fabricated feature row.
+dates refuse before arithmetic. Repository integrity, scan-validation and
+limit failures propagate. Missing tables refuse; no eligible IV-surface row
+is an explicit empty result with no source session, rather than a fabricated
+feature row.
 
 The result carries immutable raw market values, the actual selected EOD
 `source_session`, and snapshot/dataset identities. The existing lookup owns
@@ -178,6 +186,11 @@ resolves, `runup_asof` stays unset and `panel_anchor` is the latest of
 the remaining reads'. Query construction and the
 `PriceSeriesRow`-to-DataFrame conversion are implementation detail, not
 contract — see the PR body.
+
+The `computed_moves` and `"SPY"` `daily_market` reads do not lower either
+query limit from the selected membership bound; each keeps the minimum of its
+active table-contract cap and fixed caller limit. Normal repository scan
+validation and failures propagate.
 
 | Condition (R1-R6) | Outcome |
 |---|---|

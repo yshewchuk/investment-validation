@@ -23,6 +23,7 @@ from engine.v2.features import panel_math
 from engine.v2.features.panel_row_inputs import PanelRowInputs, scan_panel_row
 from engine.v2.ops.native_board_universe import BoardRequest
 from tests.data_scan_support import contract_for, contract_ref_for, fake_hash
+from tests.test_v2_features_daily_state_inputs import _bound_row_selected
 
 _DM = contract_for("daily_market")
 _DM_REF = contract_ref_for(_DM)
@@ -76,6 +77,23 @@ class _FakeRepository:
         if table_name not in snapshot_ref.table_versions:
             raise DataError(_problem("table is not part of this snapshot", table_name))
         return self._contracts[table_name]
+
+    def scan_population_bound(self, snapshot_id, *, table_name, table_contract_ref,
+                              key_filter=(), time_interval=None):
+        """The real method's metadata-only bound, faked over stored rows: the same
+        pinned-snapshot/contract identity checks ``resolve``/``table_contract``
+        make, then exactly the rows the eq/in predicates and half-open interval
+        select -- the selection ``scan`` below streams for that table."""
+        snapshot = self.resolve(snapshot_id)
+        version = snapshot.table_versions.get(table_name)
+        if version is None:
+            raise DataError(_problem("table is not part of this snapshot", table_name))
+        if table_contract_ref != version.table_contract_ref:
+            raise DataError(_problem("table_contract_ref does not match the pinned version",
+                                     table_name))
+        return sum(1 for (stored_table, _ticker), rows in self._batches.items()
+                   if stored_table == table_name
+                   for row in rows if _bound_row_selected(row, key_filter, time_interval))
 
     def scan(self, query, *, table_name):
         ticker = query.key_filter[0].values[0]
@@ -690,6 +708,10 @@ class _NoReadRepository(_FakeRepository):
 
     def table_contract(self, snapshot_ref, table_name):
         raise AssertionError(f"event_date refusal must precede the {table_name} contract lookup")
+
+    def scan_population_bound(self, snapshot_id, *, table_name, table_contract_ref,
+                              key_filter=(), time_interval=None):
+        raise AssertionError(f"event_date refusal must precede the {table_name} population bound")
 
     def scan(self, query, *, table_name):
         raise AssertionError(f"event_date refusal must precede the {table_name} scan")
