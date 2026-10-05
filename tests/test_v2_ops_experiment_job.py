@@ -477,44 +477,63 @@ def test_run_legacy_script_refuses_symlinked_registered_executable_before_subpro
         os.close(fd)
 
 
-def test_registered_wrapper_staging_swap_keeps_outputs_under_pinned_root(tmp_path, monkeypatch):
-    """A TOCTOU swap of the STAGING ROOT, performed while the real registered
-    EXP-182 wrapper is importing, cannot redirect the wrapper's output. The
-    audited ``run.py`` is copied from the checkout into a pinned stage at its
-    registered relative path; its declared runtime source is a tiny stub that,
-    during import, renames the lexical stage aside, replaces that path with a
-    symlink to an external directory, and exposes the entrypoint the wrapper
-    calls, which writes a marker under the wrapper-provided ``HERE``. The real
+STAGING_SWAP_RUNNERS = (
+    REGISTERED_RUNNER,
+    "experiments/EXP-184_str_thru_gate_promotion_confirmatory_val_registered" "/run.py",
+    "experiments/EXP-185_str_runup_t14_corrected_calendar_gate_rebaseline_registered" "/run.py",
+)
+
+
+@pytest.mark.parametrize("runner_id", STAGING_SWAP_RUNNERS,
+                         ids=("EXP-182", "EXP-184", "EXP-185"))
+def test_registered_wrapper_staging_swap_keeps_outputs_under_pinned_root(runner_id, tmp_path,
+                                                                         monkeypatch):
+    """A TOCTOU swap of the STAGING ROOT, performed while a real registered
+    wrapper (EXP-182, EXP-184 or EXP-185) is importing its declared runtime
+    source through the extensionless ``/proc/self/fd/N`` handoff, cannot
+    redirect the wrapper's output. The audited ``run.py`` is copied from the
+    checkout into a pinned stage at its registered relative path; the FIRST
+    declared runtime source of the inventory entry is a tiny stub that,
+    during import, renames the lexical stage aside, replaces that path with
+    a symlink to an external directory, and exposes the entrypoint the
+    wrapper calls, which writes a marker under the wrapper-provided ``HERE``
+    (any remaining declared sources are valid inert stubs). Immediately
+    before exec the patched subprocess seam swaps that stub's PATHNAME for a
+    decoy whose ``main()`` writes nothing, never touching the already-open
+    pinned descriptor, so the marker assertions additionally PROVE the
+    wrapper imported through ``INVESTING_PLAN_PINNED_SOURCE``: a pathname
+    reload execs the decoy and the marker never appears. The real
     subprocess must exit 0, the pre-created external marker must keep its
-    sentinel bytes, and the marker must appear under the RENAMED pinned stage.
-    On current code ``Path(__file__).resolve()`` freezes ``HERE`` to the
-    lexical stage path, so the import-time swap sends the write through the
-    external symlink and this test fails red by mutating those sentinel bytes;
-    after the wrapper is rooted at the passed descriptor every path stays
-    under it. This is distinct from the executable-symlink refusal above,
-    which never reaches a subprocess: here the wrapper legitimately starts
-    and the swap races it mid-import."""
+    sentinel bytes, and the marker must appear under the RENAMED pinned
+    stage. A source import failure instead exits the child nonzero with no
+    successful report: the adapter writes no report or ledger row, the
+    attempt stays private, and the sentinel is untouched -- so the marker
+    assertions below are unconditional, never guarded. This is distinct from
+    the executable-symlink refusal above, which never reaches a subprocess:
+    here the wrapper legitimately starts and the swap races it mid-import."""
     from engine.v2.ops import legacy_adapter
 
-    registered_path = "experiments/EXP-182_d_1_gated_execution_parity_registered/run.py"
-    runtime_source_path = "experiments/EXP-181_d_1_gated_execution_parity/run.py"
-    marker_rel = Path(registered_path).parent / "results" / "marker.txt"
+    entry = experiments.RUNNER_INVENTORY[runner_id]
+    declared_runtime_sources = entry["declared_runtime_sources"]
+    marker_rel = Path(runner_id).parent / "results" / "marker.txt"
     marker = b"pinned-root-marker"
     sentinel = b"external sentinel bytes that the swap must never rewrite\n"
 
     stage = tmp_path / "stage"
     backup = tmp_path / "backup-stage"
     external = tmp_path / "external"
-    (stage / registered_path).parent.mkdir(parents=True)
-    (stage / registered_path).write_bytes((REPO / registered_path).read_bytes())
-    (stage / runtime_source_path).parent.mkdir(parents=True)
-    (stage / runtime_source_path).write_text(f'''"""Stub for the declared runtime source: during import it renames the
-lexical stage aside, replaces that path with a symlink to the external
-directory, and exposes the entrypoint the copied wrapper calls."""
+    (stage / runner_id).parent.mkdir(parents=True)
+    (stage / runner_id).write_bytes((REPO / runner_id).read_bytes())
+    swap_source = stage / declared_runtime_sources[0]
+    swap_source.parent.mkdir(parents=True, exist_ok=True)
+    swap_source.write_text(f'''"""Import-time swap stub for a registered wrapper's declared
+runtime source: during import it renames the lexical stage aside, replaces
+that path with a symlink to the external directory, and exposes the
+entrypoint the copied wrapper calls."""
 import os
 
-os.rename(os.environ["EXP182_SWAP_STAGE"], os.environ["EXP182_SWAP_BACKUP"])
-os.symlink(os.environ["EXP182_SWAP_EXTERNAL"], os.environ["EXP182_SWAP_STAGE"])
+os.rename(os.environ["STAGING_SWAP_STAGE"], os.environ["STAGING_SWAP_BACKUP"])
+os.symlink(os.environ["STAGING_SWAP_EXTERNAL"], os.environ["STAGING_SWAP_STAGE"])
 
 MARKER = {marker!r}
 
@@ -524,16 +543,34 @@ def main():
     results.mkdir(parents=True, exist_ok=True)
     (results / "marker.txt").write_bytes(MARKER)
 ''')
+    for inert_rel in declared_runtime_sources[1:]:
+        inert_source = stage / inert_rel
+        inert_source.parent.mkdir(parents=True, exist_ok=True)
+        inert_source.write_text("if __name__ == '__main__':\n    pass\n")
     external_marker = external / marker_rel
     external_marker.parent.mkdir(parents=True)
     external_marker.write_bytes(sentinel)
-    monkeypatch.setenv("EXP182_SWAP_STAGE", str(stage))
-    monkeypatch.setenv("EXP182_SWAP_BACKUP", str(backup))
-    monkeypatch.setenv("EXP182_SWAP_EXTERNAL", str(external))
+    monkeypatch.setenv("STAGING_SWAP_STAGE", str(stage))
+    monkeypatch.setenv("STAGING_SWAP_BACKUP", str(backup))
+    monkeypatch.setenv("STAGING_SWAP_EXTERNAL", str(external))
+    # run_legacy_script binds subprocess at call time, so this module's run
+    # attribute is the legacy_adapter.subprocess.run seam it executes.
+    real_run = subprocess.run
+
+    def decoy_before_exec(*args, **kwargs):
+        # The swap lands after the pinned descriptor is open but before exec:
+        # unlink+rewrite leaves the fd on the original stub inode and gives
+        # any pathname-based reload the marker-less decoy.
+        swap_source.unlink()
+        swap_source.write_text("def main():\n    return  # decoy: never writes the marker\n")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", decoy_before_exec)
     fd = experiments._open_staging_directory(stage)
     try:
-        result = legacy_adapter.run_legacy_script(stage, registered_path,
-                                                  staging_dir_fd=fd)
+        result = legacy_adapter.run_legacy_script(
+            stage, runner_id, staging_dir_fd=fd,
+            declared_runtime_sources=declared_runtime_sources)
         assert result.returncode == 0, result.stderr[-2000:]
         assert external_marker.read_bytes() == sentinel, (
             "the import-time staging swap redirected the wrapper-provided HERE "
