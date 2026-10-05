@@ -192,6 +192,7 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
         ("data", 10, "incremental_eod_controls"),
         ("data", 11, "generic_incremental_revisions"),
         ("data", 12, "computed_moves_captures"),
+        ("data", 13, "normalizations_unique_triple_removed"),
     ]
     ops_versions = {r[0] for r in conn.execute(
         "SELECT version FROM schema_versions WHERE owner = 'ops'")}
@@ -209,6 +210,13 @@ def test_bootstrap_applies_once_and_is_separate_from_ops_and_ledger(tmp_path):
     conn2.close()
 
 
+def _as_migration(entry):
+    """Wrap a plain data-schema tuple as ``Migration``, passing the documented
+    optional fourth ``recreate_tables`` element through when present."""
+    version, name, statements, *rest = entry
+    return Migration(version, name, statements, bool(rest[0]) if rest else False)
+
+
 def test_edited_migration_is_a_checksum_mismatch(tmp_path):
     conn, clock = catalog(tmp_path)
     conn.close()
@@ -219,9 +227,10 @@ def test_edited_migration_is_a_checksum_mismatch(tmp_path):
     # applied version is passed through unedited, or `migrate` would report
     # the later real version as "newer than this code supports" before ever
     # reaching the version-1 checksum comparison this test is about.
-    version, name, statements = data_schema.MIGRATIONS[0]
-    edited = (Migration(version, name, statements + ("SELECT 1",)),
-             *(Migration(v, n, s) for v, n, s in data_schema.MIGRATIONS[1:]))
+    original = _as_migration(data_schema.MIGRATIONS[0])
+    edited = (Migration(original.version, original.name,
+                        original.statements + ("SELECT 1",), original.recreate_tables),
+             *(_as_migration(entry) for entry in data_schema.MIGRATIONS[1:]))
     conn2 = sqlite3.connect(str(tmp_path / "catalog.sqlite"), isolation_level=None)
     conn2.execute("PRAGMA foreign_keys = ON")
     try:
