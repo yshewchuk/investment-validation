@@ -318,9 +318,9 @@ def test_worker_refuses_staging_directory_swap_before_report_annotation(tmp_path
     assert not (stage / "experiments" / "LEDGER.csv").exists()
     assert not (original / "experiments" / "LEDGER.csv").exists()
     failure_receipt = original / "experiment_receipt.json"
-    if failure_receipt.exists():
-        document = json.loads(failure_receipt.read_text())
-        assert document["evidence"]["failure_code"] == "VALIDATION_FAILED"
+    assert failure_receipt.is_file()
+    document = json.loads(failure_receipt.read_text())
+    assert document["evidence"]["failure_code"] == "VALIDATION_FAILED"
 
 
 @pytest.mark.parametrize("link_kind", ("symlink", "hardlink"))
