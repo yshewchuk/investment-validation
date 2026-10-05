@@ -531,3 +531,52 @@ def test_insufficient_panel_history_refuses_every_request_before_context_reads(
     assert rig.calendar_row_calls == []
     assert rig.panel_calls == []
     assert rig.quote_calls == []
+
+
+def test_projected_decision_session_is_not_observed_history(tmp_path, monkeypatch):
+    """``_AS_OF`` is in ``days`` only as a projected session because
+    ``observed_through`` is the previous observed day: the as-of-side count clears
+    the pinned floor while the decision date itself is unobserved history."""
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight"),
+    ])
+    rig = _ReaderRig(monkeypatch)
+    direct = rig.direct(repository, snapshot)
+    midnight = [key for key in direct if key.event_date == _MIDNIGHT]
+    assert midnight and len(midnight) == len(direct)
+
+    history = pd.bdate_range(end=_AS_OF, periods=_PANEL_HISTORY_SESSIONS + 1)
+    previous_observed = history[-2].date().isoformat()
+    projected = CalendarSessions(
+        days=tuple(day.date().isoformat() for day in history) + _PROJECTED_DAYS,
+        observed_through=previous_observed)
+    assert projected.observed_through == previous_observed < _AS_OF
+    assert _AS_OF in projected.days
+    assert len([day for day in projected.days if day <= _AS_OF]) \
+        == _PANEL_HISTORY_SESSIONS + 1
+    assert len([day for day in projected.days if day <= previous_observed]) \
+        == _PANEL_HISTORY_SESSIONS
+
+    def projected_calendar(decision_session, event_through):
+        return projected
+
+    rig.calendar_hook = projected_calendar
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert events_document == []
+    assert refusals_document["schema_version"] == _REFUSAL_SCHEMA
+    refusals = refusals_document["refusals"]
+    assert len(rig.enum_calls) == 1
+    assert rig.calendar_calls == [(_AS_OF, _MIDNIGHT_WIRE)]
+    assert [refusal["key"] for refusal in refusals] == [
+        _event_keylike(key) for key in midnight]
+    assert [refusal["code"] for refusal in refusals] == [
+        "PANEL_HISTORY_NOT_AVAILABLE"] * len(midnight)
+    assert [refusal["detail"] for refusal in refusals] == [
+        _PANEL_HISTORY_DETAIL] * len(midnight)
+    assert json.dumps(refusals_document)
+
+    assert rig.calendar_row_calls == []
+    assert rig.panel_calls == []
+    assert rig.quote_calls == []

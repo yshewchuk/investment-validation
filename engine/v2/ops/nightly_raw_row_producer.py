@@ -165,8 +165,8 @@ def build_native_score_batch_events(
     calendar = scan_decision_calendar(
         repository, snapshot, decision_session=decision_session,
         event_through=max(_event_day(key.event_date) for key in admitted))
-    included_sessions = tuple(day for day in calendar.days if day <= decision_session)
-    if len(included_sessions) < 253:
+    observed_sessions = tuple(day for day in calendar.days if day <= calendar.observed_through)
+    if calendar.observed_through != decision_session or len(observed_sessions) < 253:
         history_detail = "the pinned snapshot lacks required earlier panel sessions"
         return [], _refusals_document([
             _refusal(key, _INTRADAY_CODE, _INTRADAY_DETAIL) if _is_intraday(key)
@@ -174,7 +174,7 @@ def build_native_score_batch_events(
             for key in requests])
     panels = _shared_panel_rows(repository, snapshot, admitted,
                                 decision_session=decision_session,
-                                history_start=included_sessions[-253])
+                                history_start=observed_sessions[-253])
 
     events: list[dict[str, Any]] = []
     for key in admitted:
