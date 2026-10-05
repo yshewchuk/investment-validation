@@ -1297,15 +1297,17 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 
 | Condition | Outcome |
 |---|---|
-| General operation outcomes | Malformed specs and unsafe feature reads are refused before candidate publication; failed candidates and reports stay unpublished; retries reuse existing durable outcomes; clean worker exits reap live stragglers. Slice 2a exposes no sweep or holdout reads; typed `HOLDOUT_ACCESS_DENIED` is deferred to the pinned trade-loader slice. |
+| Input refusal | Malformed specs and unsafe feature reads receive typed refusals before candidate publication. |
+| Candidate/report publication | Failed attempts keep candidates unpublished; failed reports remain staged. Successful variant reports publish as `experiment_variant_report` and carry the variant identity/count; every receipt records one attempted variant, including failures. |
+| Retry reuse | A matching delivered backup outbox row supplies the stored receipt; identical primary replay reuses its run without a duplicate ledger row, while changed input conflicts. Retryable experiment attempts may relaunch the worker and invoke the runner. |
+| Worker cleanup | Exit status determines `WORKER_FAILED`; a clean exit with a live straggler reaps it without that failure. |
+| Deferred holdout behavior | Slice 2a exposes no sweep or holdout reads; typed `HOLDOUT_ACCESS_DENIED` is deferred to the pinned trade-loader slice. |
 | Registered primary identity (slice 2a) | The report, durable evidence, and primary ledger `spec_hash` use the registered legacy hash. |
 | Synthetic primary identity (slice 2a) | The report, durable evidence, and primary ledger `spec_hash` use `ExperimentSpec.spec_hash`. |
 | Smoke identity (slice 2a) | The report and durable evidence use `ExperimentSpec.spec_hash`; the runner receives `--no-ledger` and writes no legacy ledger row. |
 | Explicit receipt identity mismatch (slice 2a) | Non-retryable `INVALID_EXPERIMENT_SPEC` before ledger append; transaction rollback preserves durable evidence and ledger. |
-| Successful variant report (slice 2a) | The worker publishes `REPORT.md` as `experiment_variant_report`; every receipt records one attempted variant, including failure, and a published report carries its variant identity and count. |
 
 ### `board_requests` (`native_board_universe.py`)
-
 | Condition | Outcome |
 |---|---|
 | `events_table` missing/duplicated `ticker`/`event_date`/`session`, or `event_date` numeric/unparseable/`NaT`/timezone-aware | `INVALID_REQUEST`, before any row is read |
@@ -1313,7 +1315,6 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | valid input | pure, deterministic `tuple[BoardRequest]` — same input always returns the same tuple in the same order; no cache, no job identity of its own |
 
 ### `forward_calendar_store.py` / `calendar_moves_jobs.py`
-
 | Condition | Outcome |
 |---|---|
 | any submit-time argument malformed (`catalog_path`, snapshot/plan-hash shape, `as_of`, `tickers`, `horizon_days`, `scope`, head expectations) | `INVALID_REQUEST` before the catalog opens or any provider call |
@@ -1327,7 +1328,6 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | merged rows equal the parent's | `status=noop`, head unmoved |
 
 ### `nightly.submit_computed_moves_refresh_if_ready` (`computed_moves_refresh`)
-
 | Condition | Outcome |
 |---|---|
 | no succeeded native `"refresh"` job yet, no shadow head, or a resolved target list that comes back empty | returns without submitting anything — not a failure, since `computed_moves_refresh` has no receipt to degrade until an attempt exists |
