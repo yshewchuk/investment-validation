@@ -70,6 +70,9 @@ The full list is `README.md`'s `<!-- public-interface: ... -->` directive
 - `deployment.mark_staging_succeeded(root, release_id) -> None`
   — after the Phase 5 acceptance gate passes, atomically record success for
   the exact staged `release_id` and `release_hash`; see §7.2.
+- `deployment.invalidate_staging_success(root, release_id) -> None`
+  — remove any prior candidate success record before Phase 5 re-preparation
+  can replace that candidate's manifest or state catalog; see §7.2.
 - `release_bindings.resolve_release_binding(release_root) -> ScoringReleaseBinding`
   and `release_bindings.resolve_production_release_binding() -> ScoringReleaseBinding`
   live in `engine/v2/scoring/` (layer 5.0, below `models` — this package
@@ -333,6 +336,15 @@ Prior pointer/history entries or a manifest hash alone cannot prove staging
 success, so no success status is inferred from them. Candidate success is
 published only after its complete evidence and report pass. The candidate's
 temporary success record in its rollback probe stays in the scratch copy.
+Re-preparing a candidate through `tools/phase5_prepare_release.py` invalidates
+its prior status before replacing its manifest or Phase 5 state catalog, even
+when the model hash is unchanged. Prepare success does not restore eligibility;
+only fresh passing acceptance does. Invalidation failure raises
+`StagingRefused(STATUS_INVALIDATION_FAILED)` before candidate content changes;
+retry after correcting the filesystem error. A later prepare/acceptance failure
+may leave staged files or catalog data, but leaves no success record and never
+changes `DEPLOYED` or history. Promotion/rollback refuse non-retryable
+`StagingNotSuccessful` until passing acceptance publishes a matching record.
 
 | Condition | Outcome |
 |---|---|

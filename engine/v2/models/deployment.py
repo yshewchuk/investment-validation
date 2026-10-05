@@ -77,6 +77,7 @@ __all__ = [
     "StaleReleaseHash",
     "current_pointer",
     "current_release",
+    "invalidate_staging_success",
     "mark_staging_succeeded",
     "pointer_history",
     "production_deployment_root",
@@ -651,6 +652,32 @@ def mark_staging_succeeded(root: Path, release_id: str) -> None:
         raise StagingRefused((ReleaseIssue(
             path=f"$.releases[{release_id}].staging-status", code="STATUS_UNWRITABLE",
             detail="the staging completion record could not be written",
+        ),)) from exc
+
+
+def invalidate_staging_success(root: Path, release_id: str) -> None:
+    """Withdraw ``release_id``'s staging-completion record, if one exists.
+
+    The inverse of :func:`mark_staging_succeeded`: removes
+    ``releases/<release_id>/staging-status.json`` so a later
+    :func:`promote`/:func:`rollback` refuses :class:`StagingNotSuccessful`
+    again. A missing sidecar is an idempotent no-op. The staged manifest,
+    every content-addressed object, ``DEPLOYED`` and ``history/`` are never
+    touched.
+
+    Raises:
+        StagingRefused: STATUS_INVALIDATION_FAILED -- an ``OSError`` from the
+            unlink; the previous staging success record could not be removed.
+    """
+    root = Path(root)
+    path = _staging_status_path(root, release_id)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise StagingRefused((ReleaseIssue(
+            path=f"$.releases[{release_id}].staging-status",
+            code="STATUS_INVALIDATION_FAILED",
+            detail="the previous staging success record could not be invalidated",
         ),)) from exc
 
 
